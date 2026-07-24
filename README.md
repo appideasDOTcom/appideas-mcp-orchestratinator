@@ -11,6 +11,32 @@ shared **contracts** (the agreed interface between two plugins), and a lightweig
 
 ---
 
+## Simplest use case
+- On the Pro plugin chat window
+```
+/loop 60s Poll the orchestratinator: list_tasks status=open, and poll_messages.
+Claim and handle anything for pro per CLAUDE.md, then complete_task.
+If nothing is pending, report idle and do nothing else.
+```
+- Chat from the Free window. Try to be clear about Pro implementation vs. Free
+- Stop the loop when done
+
+## Some useful commands
+In a terminal:
+```
+docker compose up -d                       // start (add --build after code changes)
+docker compose down                        // stop; data kept in the volume
+docker compose logs -f orchestratinator    // tail
+curl -s localhost:8787/health              // is it up?
+```
+In a chat window:
+```
+whoami                                     // confirm channel/agent wiring
+list_tasks status=open                     // what's pending for me
+list_tasks status=claimed                  // in-progress claims (stale ones auto-reopen)
+get_contract                               // read the whole agreed interface
+```
+
 ## The one concept that shapes everything: it's pull, not push
 
 MCP is client-initiated. This server can **hold** shared state and messages, but
@@ -73,7 +99,8 @@ npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
 ```
 
 Environment variables (see `.env.example`): `PORT` (default `8787`),
-`DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker).
+`DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker),
+`CLAIM_TTL_MINUTES` (default `15`; how long a claim can sit before it auto-reopens).
 
 ---
 
@@ -136,7 +163,7 @@ structured objects.
 | `set_contract`   | Create/update a shared interface entry by `key`. Bumps version, records history. |
 | `get_contract`   | Read one entry by `key`, or all entries if `key` is omitted. |
 | `open_task`      | Open a task, optionally `assignee`d to an agent. |
-| `list_tasks`     | List tasks; filter by `status` (`open`/`claimed`/`done`) and/or `mine`. |
+| `list_tasks`     | List tasks; filter by `status` (`open`/`claimed`/`done`) and/or `mine`. Listing open tasks auto-reopens stale claims. |
 | `claim_task`     | Claim an open task so the other agent knows you've got it. |
 | `complete_task`  | Mark a task done, with an optional `note`. |
 
@@ -181,6 +208,10 @@ each agent talks to when *you* (or a poll loop) prompt it to.
   serialize naturally — no cross-process locking. Data lives in a Docker volume.
 - **Schema:** `messages`, `contracts` (+ `contract_history`), `tasks`, `agents`
   (presence) — all keyed by `channel`. See [`src/db.js`](src/db.js).
+- **Self-heal:** a claim with no completion after `CLAIM_TTL_MINUTES` (default 15)
+  reverts to `open` on the next open-poll, so an abandoned claim (agent claimed a
+  task, then its turn died) can't sit invisibly in `claimed`. `status=claimed`
+  inspections never trigger this — only actionable open-task listings do.
 
 ```
 src/

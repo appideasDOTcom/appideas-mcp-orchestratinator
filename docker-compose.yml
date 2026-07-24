@@ -8,6 +8,7 @@ services:
     environment:
       - PORT=8787
       - DB_PATH=/data/orchestratinator.db
+      - CLAIM_TTL_MINUTES=15
     volumes:
       - orchestratinator-data:/data
     healthcheck:

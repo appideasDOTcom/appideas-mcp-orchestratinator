@@ -139,7 +139,7 @@ export function registerTools(server, { store, context }) {
 
   server.tool(
     'list_tasks',
-    'List tasks on the channel. Filter by status ("open" | "claimed" | "done") and/or mine=true (assigned to or claimed by you).',
+    'List tasks on the channel. Filter by status ("open" | "claimed" | "done") and/or mine=true (assigned to or claimed by you). Stale claims (older than CLAIM_TTL_MINUTES) auto-reopen when you list open/actionable tasks.',
     {
       status: z.enum(['open', 'claimed', 'done']).optional(),
       mine: z.boolean().optional(),
@@ -149,8 +149,13 @@ export function registerTools(server, { store, context }) {
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent);
-      const tasks = store.listTasks(channel, args.status ?? null, args.mine ? agent : null);
-      return ok({ channel, count: tasks.length, tasks });
+      const status = args.status ?? null;
+      // Self-heal: revert abandoned claims to `open` so they can't sit invisibly
+      // in `claimed`. Only on actionable queries — never mutate a `status=claimed`
+      // inspection, which is meant to show claims as-is.
+      const reopened = status && status !== 'open' ? 0 : store.reapStaleClaims(channel);
+      const tasks = store.listTasks(channel, status, args.mine ? agent : null);
+      return ok({ channel, count: tasks.length, ...(reopened ? { reopened_stale_claims: reopened } : {}), tasks });
     }
   );
 

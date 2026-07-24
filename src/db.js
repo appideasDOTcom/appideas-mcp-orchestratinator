@@ -79,6 +79,11 @@ const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
  * calls serialize all writes for us — no cross-process locking to manage.
  */
 export function makeStore(db) {
+  // A claim older than this reverts to `open` so an abandoned task (agent
+  // claimed it, then its turn died before complete_task) can't sit invisibly
+  // in `claimed`. Should comfortably exceed your longest expected task.
+  const CLAIM_TTL = `-${Math.max(0, Number(process.env.CLAIM_TTL_MINUTES ?? 15))} minutes`;
+
   const q = {
     insertMessage: db.prepare(
       `INSERT INTO messages (channel, from_agent, to_agent, body)
@@ -124,6 +129,11 @@ export function makeStore(db) {
       `UPDATE tasks SET status = 'claimed', claimed_by = @by, updated_at = datetime('now')
        WHERE channel = @channel AND id = @id AND status = 'open'`
     ),
+    reapStaleClaims: db.prepare(
+      `UPDATE tasks
+       SET status = 'open', claimed_by = NULL, note = 'claim expired — auto-reopened', updated_at = datetime('now')
+       WHERE channel = @channel AND status = 'claimed' AND updated_at <= datetime('now', @ttl)`
+    ),
     completeTask: db.prepare(
       `UPDATE tasks
        SET status = 'done', note = @note, claimed_by = COALESCE(claimed_by, @by), updated_at = datetime('now')
@@ -167,6 +177,7 @@ export function makeStore(db) {
     },
     claimTask: (channel, id, by) => q.claimTask.run({ channel, id, by }).changes,
     completeTask: (channel, id, note, by) => q.completeTask.run({ channel, id, note, by }).changes,
+    reapStaleClaims: (channel) => q.reapStaleClaims.run({ channel, ttl: CLAIM_TTL }).changes,
 
     touchAgent: (channel, agent) => q.touchAgent.run({ channel, agent }),
     listAgents: (channel) => q.listAgents.all({ channel }),
