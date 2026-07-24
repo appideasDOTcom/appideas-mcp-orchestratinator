@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "orchestratinator": {
+      "type": "http",
+      "url": "http://localhost:8787/mcp",
+      "headers": {
+        "X-Channel": "appideas-site-syncinator",
+        "X-Agent": "pro"
+      }
+    }
+  }
+}
