@@ -28,6 +28,7 @@ docker compose up -d                       // start (add --build after code chan
 docker compose down                        // stop; data kept in the volume
 docker compose logs -f orchestratinator    // tail
 curl -s localhost:8787/health              // is it up?
+open http://localhost:8787/                // the dashboard — who's connected, what they're doing
 ```
 In a chat window:
 ```
@@ -74,6 +75,41 @@ Because identity rides on the connection, the agent almost never has to pass
 
 ---
 
+## The dashboard
+
+Open **`http://localhost:8787/`** in a browser. It's a read-only view of the
+same SQLite database the tools write to — nothing on this page can change
+coordination state, it only reflects it. It refreshes itself every couple of
+seconds; no reload needed.
+
+You get three things:
+
+**Channels & agents.** One card per channel, one row per agent, with a presence
+dot: green = a VS Code window has an open MCP session right now, amber = no live
+session but it called something in the last 5 minutes, red = gone. Presence comes
+from live connections, not from database timestamps, so a window you closed drops
+off honestly.
+
+**Approximate last-known state.** Each agent gets a state chip. If the agent has
+called `set_status` in the last 30 minutes, that text is shown verbatim
+(`task 3/7 — rewriting call sites`) and tagged *self-reported*. Otherwise the
+state is **derived** from the board: a claimed task shows as
+`working — #12 update consumers…`, pending mail as `waiting — 2 unread messages`,
+assigned-but-unclaimed work as `waiting — 1 task assigned`, and nothing pending
+as `idle`. It's an approximation by design — the server can't see inside the
+agent's turn, only what it last told the board (see *it's pull, not push* above).
+
+**Activity log.** Every interesting write — messages, task opened/claimed/done,
+contract versions — merged into one newest-first list, filterable by channel,
+by kind, and by free text. Click any row to expand the full stored value
+(message body, task note, contract JSON).
+
+To make the state chips exact rather than inferred, have the agent call
+`set_status` as it works — e.g. add "call `set_status` when you start and finish
+a step" to the repo's `CLAUDE.md`.
+
+---
+
 ## Run the server (Docker)
 
 ```bash
@@ -81,8 +117,9 @@ cd appideas-mcp-orchestratinator
 docker compose up -d --build
 ```
 
-It listens on `http://localhost:8787/mcp`. The SQLite database persists in the
-named volume `orchestratinator-data` (survives rebuilds).
+MCP clients connect to `http://localhost:8787/mcp`; the dashboard is at
+`http://localhost:8787/`. The SQLite database persists in the named volume
+`orchestratinator-data` (survives rebuilds).
 
 ```bash
 curl -s http://localhost:8787/health        # {"ok":true,...}
@@ -94,11 +131,13 @@ docker compose down                          # stop (data is kept in the volume)
 
 ```bash
 npm install
-npm start            # http://localhost:8787/mcp, db at ./data/orchestratinator.db
+npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
 ```
 
 Environment variables (see `.env.example`): `PORT` (default `8787`),
+`HOST` (default `0.0.0.0` — must stay that inside Docker; compose publishes the
+port on `127.0.0.1` only. Set `HOST=127.0.0.1` when running bare),
 `DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker),
 `CLAIM_TTL_MINUTES` (default `15`; how long a claim can sit before it auto-reopens).
 
@@ -158,6 +197,7 @@ structured objects.
 | Tool             | Purpose |
 |------------------|---------|
 | `whoami`         | Show the bound channel/agent and who's present. Call first to confirm wiring. |
+| `set_status`     | Report what you're doing in a few words (`"task 3/7"`). Shows on the dashboard; nothing reads it back. |
 | `send_message`   | Post to the channel. Omit `to` to broadcast; set `to` (e.g. `"pro"`) to DM. |
 | `poll_messages`  | Fetch messages for you newer than `since`; returns a `cursor` to pass next time. |
 | `set_contract`   | Create/update a shared interface entry by `key`. Bumps version, records history. |
@@ -208,6 +248,12 @@ each agent talks to when *you* (or a poll loop) prompt it to.
   serialize naturally — no cross-process locking. Data lives in a Docker volume.
 - **Schema:** `messages`, `contracts` (+ `contract_history`), `tasks`, `agents`
   (presence) — all keyed by `channel`. See [`src/db.js`](src/db.js).
+- **Dashboard:** a separate Express router on the same port. `GET /api/state`
+  builds the channel/agent view; `GET /api/activity` is a `UNION ALL` over
+  messages, task transitions and contract history ordered newest-first. The page
+  polls both every 2.5s, so it stays current without a reload. Live presence
+  comes from an in-memory registry of open MCP sessions, which is why closing a
+  VS Code window shows up immediately rather than aging out of the database.
 - **Self-heal:** a claim with no completion after `CLAIM_TTL_MINUTES` (default 15)
   reverts to `open` on the next open-poll, so an abandoned claim (agent claimed a
   task, then its turn died) can't sit invisibly in `claimed`. `status=claimed`
@@ -218,6 +264,8 @@ src/
   server.js   Express + Streamable HTTP wiring, per-session header binding
   db.js       SQLite schema + channel-scoped data operations
   tools.js    The MCP tool definitions
+  web.js      Dashboard router: /api/state, /api/activity, static UI
+  ui/         The dashboard page (no build step, no external assets)
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 test/
   smoke.mjs   End-to-end self-test (npm run smoke)
@@ -227,9 +275,10 @@ test/
 
 ## Notes & limits
 
-- **Localhost only.** No auth; it binds to `localhost` and is meant for your dev
-  machine. Don't expose the port. If you ever need to, put it behind a proxy
-  that requires a token and check it in `server.js`.
+- **Localhost only.** No auth on the MCP endpoint *or* the dashboard, and the
+  dashboard renders every message body on the channel. Compose publishes the
+  port on `127.0.0.1` only; keep it that way. If you ever need it remote, put it
+  behind a proxy that requires a token and check it in `server.js`.
 - **`X-Agent` is honor-system identity**, not a security boundary — fine for
   coordinating your own agents.
 - The paired agents must agree on channel/role names; the `.mcp.json` files here

@@ -87,6 +87,34 @@ try {
   const done = await call(pro, 'complete_task', { id: tid, note: 'done in PR #42' });
   assert(done.completed === true, 'pro completes the task');
 
+  console.log('dashboard');
+  await call(pro, 'set_status', { status: 'task 3/7' });
+  const state = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+  const chan = state.channels.find((c) => c.channel === CHANNEL);
+  assert(!!chan, 'dashboard state lists the channel');
+  assert(state.sessions.length === 2, 'both live MCP sessions are reported as connected');
+  assert(chan.agents.every((a) => a.presence === 'connected'), 'free + pro show as connected');
+  const proAgent = chan.agents.find((a) => a.agent === 'pro');
+  assert(proAgent?.state.label === 'task 3/7', 'self-reported status wins for pro');
+  const freeAgent = chan.agents.find((a) => a.agent === 'free');
+  assert(freeAgent?.state.source === 'derived', 'free state is derived, not reported');
+  assert(chan.tasks.done === 1 && chan.contracts === 1, 'channel task/contract counts');
+
+  const feed = await (await fetch(`http://localhost:${PORT}/api/activity?limit=50`)).json();
+  const kinds = feed.rows.map((r) => r.kind);
+  assert(kinds.includes('message') && kinds.includes('task.opened') && kinds.includes('contract.set'),
+    'activity feed spans messages, tasks and contracts');
+  assert(kinds.includes('task.done'), 'task completion appears in the feed');
+  const times = feed.rows.map((r) => Date.parse(r.ts));
+  assert(times.every((t, i) => i === 0 || times[i - 1] >= t), 'feed is ordered newest-first');
+  assert(feed.rows.every((r) => r.channel === CHANNEL), 'feed rows carry their channel');
+  const scoped = await (await fetch(`http://localhost:${PORT}/api/activity?channel=nope`)).json();
+  assert(scoped.count === 0, 'channel filter scopes the feed');
+
+  const page = await fetch(`http://localhost:${PORT}/`);
+  const html = await page.text();
+  assert(page.ok && html.includes('<title>orchestratinator</title>'), 'dashboard html is served at /');
+
   await freeT.close();
   await proT.close();
 } catch (err) {

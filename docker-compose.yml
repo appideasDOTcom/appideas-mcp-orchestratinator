@@ -4,7 +4,9 @@ services:
     container_name: appideas-orchestratinator
     restart: unless-stopped
     ports:
-      - "8787:8787"
+      # Published on the loopback interface only — there's no auth on either the
+      # MCP endpoint or the dashboard. Drop the 127.0.0.1 prefix at your own risk.
+      - "127.0.0.1:8787:8787"
     environment:
       - PORT=8787
       - DB_PATH=/data/orchestratinator.db

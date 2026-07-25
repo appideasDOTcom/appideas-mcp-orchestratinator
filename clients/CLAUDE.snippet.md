@@ -22,6 +22,10 @@ Use it when a change here affects, or depends on, the paired plugin:
   to pick up anything the other side left for you. `claim_task` what you take.
 - **Read `get_contract`** before assuming the shape of anything the other
   plugin owns.
+- **Call `set_status`** when you start a multi-step job, when you move between
+  steps, and when you finish — a few words is enough (`"task 3/7"`,
+  `"waiting on pro"`, `"idle"`). It's write-only: nothing reads it back, it just
+  shows on the human's dashboard so they can see where you are without asking.
 - `whoami` confirms which channel/agent this connection is bound to.
 
 Keep messages small and factual (what changed, which symbol, which version).

@@ -25,7 +25,11 @@ function resolve(args, context) {
  * `context` carries the channel/agent this connection is bound to.
  */
 export function registerTools(server, { store, context }) {
-  const touch = (channel, agent) => { try { store.touchAgent(channel, agent); } catch { /* presence is best-effort */ } };
+  // Presence is best-effort: recording who called what powers the dashboard's
+  // "last-known state", but must never fail a real tool call.
+  const touch = (channel, agent, action) => {
+    try { store.touchAgent(channel, agent, action ?? null); } catch { /* ignore */ }
+  };
 
   server.tool(
     'whoami',
@@ -36,13 +40,30 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'whoami');
       return ok({
         channel,
         agent,
         boundViaHeader: { channel: context.channel ?? null, agent: context.agent ?? null },
         present: store.listAgents(channel),
       });
+    }
+  );
+
+  server.tool(
+    'set_status',
+    'Report what you are currently doing, in a few words ("task 3/7", "waiting on pro", "idle"). Purely informational — it shows up on the dashboard at the server root so a human can see at a glance what each agent is up to. Nothing reads it back; call it whenever your state changes meaningfully.',
+    {
+      status: z.string().max(200).describe('Short human-readable state, e.g. "task 3/7" or "waiting on contract review".'),
+      channel: z.string().optional(),
+      agent: z.string().optional(),
+    },
+    async (args) => {
+      const { channel, agent } = resolve(args, context);
+      touch(channel, agent, 'set_status');
+      const status = args.status.trim();
+      store.setAgentStatus(channel, agent, status || null);
+      return ok({ set: true, channel, agent, status });
     }
   );
 
@@ -57,7 +78,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'send_message');
       const id = store.insertMessage(channel, agent, args.to ?? null, JSON.stringify(args.body ?? null));
       return ok({ sent: true, id, channel, from: agent, to: args.to ?? null });
     }
@@ -74,10 +95,13 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'poll_messages');
       const rows = store.pollMessages(channel, agent, args.since ?? 0, args.limit ?? 100);
       const messages = rows.map((r) => ({ ...r, body: safeParse(r.body) }));
       const cursor = messages.length ? messages[messages.length - 1].id : (args.since ?? 0);
+      // Remember how far this agent has read so the dashboard can show a
+      // meaningful unread count. Best-effort — never fail the poll over it.
+      try { store.advancePollCursor(channel, agent, cursor); } catch { /* ignore */ }
       return ok({ channel, agent, count: messages.length, cursor, messages });
     }
   );
@@ -93,7 +117,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'set_contract');
       const { version } = store.setContract(channel, args.key, JSON.stringify(args.value ?? null), agent);
       return ok({ set: true, channel, key: args.key, version, updated_by: agent });
     }
@@ -109,7 +133,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'get_contract');
       if (args.key) {
         const row = store.getContract(channel, args.key);
         return ok({ channel, entry: row ? { ...row, value: safeParse(row.value) } : null });
@@ -131,7 +155,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'open_task');
       const id = store.openTask(channel, args.title, args.body ?? null, args.assignee ?? null, agent);
       return ok({ opened: true, id, channel, title: args.title, assignee: args.assignee ?? null, created_by: agent });
     }
@@ -148,7 +172,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'list_tasks');
       const status = args.status ?? null;
       // Self-heal: revert abandoned claims to `open` so they can't sit invisibly
       // in `claimed`. Only on actionable queries — never mutate a `status=claimed`
@@ -169,7 +193,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'claim_task');
       const changed = store.claimTask(channel, args.id, agent);
       return ok({ claimed: changed > 0, id: args.id, by: agent, ...(changed ? {} : { note: 'Task not found or not open.' }) });
     }
@@ -186,7 +210,7 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
-      touch(channel, agent);
+      touch(channel, agent, 'complete_task');
       const changed = store.completeTask(channel, args.id, args.note ?? null, agent);
       return ok({ completed: changed > 0, id: args.id, by: agent, ...(changed ? {} : { note: 'Task not found or already done.' }) });
     }

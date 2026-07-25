@@ -68,7 +68,22 @@ export function openDb(path) {
       PRIMARY KEY (channel, agent)
     );
   `);
+
+  // Presence detail added after v0.1 — the dashboard reads these to show an
+  // approximate last-known state per agent. Added by migration so an existing
+  // volume keeps its data.
+  addColumn(db, 'agents', 'status', 'TEXT');                        // self-reported, e.g. "task 3/7"
+  addColumn(db, 'agents', 'status_at', 'TEXT');
+  addColumn(db, 'agents', 'last_action', 'TEXT');                   // last tool called
+  addColumn(db, 'agents', 'last_action_at', 'TEXT');
+  addColumn(db, 'agents', 'poll_cursor', 'INTEGER NOT NULL DEFAULT 0'); // highest message id read
+
   return db;
+}
+
+function addColumn(db, table, column, decl) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }
 
 const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
@@ -140,12 +155,105 @@ export function makeStore(db) {
        WHERE channel = @channel AND id = @id AND status != 'done'`
     ),
     touchAgent: db.prepare(
-      `INSERT INTO agents (channel, agent, last_seen)
-       VALUES (@channel, @agent, datetime('now'))
-       ON CONFLICT(channel, agent) DO UPDATE SET last_seen = datetime('now')`
+      `INSERT INTO agents (channel, agent, last_seen, last_action, last_action_at)
+       VALUES (@channel, @agent, datetime('now'), @action, datetime('now'))
+       ON CONFLICT(channel, agent) DO UPDATE SET
+         last_seen      = datetime('now'),
+         last_action    = COALESCE(@action, last_action),
+         last_action_at = CASE WHEN @action IS NULL THEN last_action_at ELSE datetime('now') END`
+    ),
+    setAgentStatus: db.prepare(
+      `INSERT INTO agents (channel, agent, last_seen, status, status_at)
+       VALUES (@channel, @agent, datetime('now'), @status, datetime('now'))
+       ON CONFLICT(channel, agent) DO UPDATE SET
+         last_seen = datetime('now'), status = @status, status_at = datetime('now')`
+    ),
+    advancePollCursor: db.prepare(
+      `UPDATE agents SET poll_cursor = MAX(poll_cursor, @cursor)
+       WHERE channel = @channel AND agent = @agent`
     ),
     listAgents: db.prepare(
-      `SELECT agent, last_seen FROM agents WHERE channel = @channel ORDER BY agent`
+      `SELECT agent, last_seen, status, status_at, last_action, last_action_at
+       FROM agents WHERE channel = @channel ORDER BY agent`
+    ),
+
+    // --- dashboard reads (see src/web.js) -----------------------------------
+    listAllAgents: db.prepare(
+      `SELECT channel, agent, last_seen, status, status_at, last_action, last_action_at, poll_cursor
+       FROM agents ORDER BY channel, agent`
+    ),
+    listAllChannels: db.prepare(
+      `SELECT channel FROM (
+         SELECT channel FROM agents    UNION SELECT channel FROM messages
+         UNION SELECT channel FROM tasks UNION SELECT channel FROM contracts
+       ) WHERE channel IS NOT NULL ORDER BY channel`
+    ),
+    countTasksByStatus: db.prepare(
+      `SELECT channel, status, COUNT(*) AS n FROM tasks GROUP BY channel, status`
+    ),
+    countMessages: db.prepare(
+      `SELECT channel, COUNT(*) AS n FROM messages GROUP BY channel`
+    ),
+    countContracts: db.prepare(
+      `SELECT channel, COUNT(*) AS n FROM contracts GROUP BY channel`
+    ),
+    // Open work each agent is on the hook for: claimed by them, or assigned and
+    // still open. Unassigned open tasks are counted per-channel instead.
+    agentTaskLoad: db.prepare(
+      `SELECT channel, claimed_by AS agent, 'claimed' AS bucket, COUNT(*) AS n
+         FROM tasks WHERE status = 'claimed' AND claimed_by IS NOT NULL
+        GROUP BY channel, claimed_by
+       UNION ALL
+       SELECT channel, assignee, 'assigned', COUNT(*)
+         FROM tasks WHERE status = 'open' AND assignee IS NOT NULL
+        GROUP BY channel, assignee
+       UNION ALL
+       SELECT channel, NULL, 'unassigned', COUNT(*)
+         FROM tasks WHERE status = 'open' AND assignee IS NULL
+        GROUP BY channel`
+    ),
+    claimedTasks: db.prepare(
+      `SELECT id, channel, title, claimed_by, updated_at FROM tasks
+       WHERE status = 'claimed' ORDER BY updated_at DESC`
+    ),
+    // Messages an agent would receive on its next poll_messages call.
+    unreadCounts: db.prepare(
+      `SELECT a.channel, a.agent, COUNT(m.id) AS unread
+         FROM agents a
+         LEFT JOIN messages m
+           ON m.channel = a.channel AND m.id > a.poll_cursor
+          AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent))
+        GROUP BY a.channel, a.agent`
+    ),
+    activity: db.prepare(
+      // One row per interesting database write, newest first. `detail` is capped
+      // so a huge contract value can't blow up the response.
+      // `seq` breaks ties: datetime('now') has one-second resolution, so a task
+      // opened and completed in the same second would otherwise sort randomly.
+      `WITH feed AS (
+         SELECT 'message' AS kind, id AS ref_id, channel, created_at AS ts, 0 AS seq,
+                from_agent AS actor, to_agent AS target, NULL AS title,
+                substr(body, 1, 2000) AS detail, NULL AS status, NULL AS version
+           FROM messages
+         UNION ALL
+         SELECT 'task.opened', id, channel, created_at, 0,
+                created_by, assignee, title, substr(body, 1, 2000), 'open', NULL
+           FROM tasks
+         UNION ALL
+         -- The task's latest transition. A still-open task only earns a row here
+         -- if it was touched after creation (i.e. a stale claim auto-reopened).
+         SELECT 'task.' || status, id, channel, updated_at, 1,
+                COALESCE(claimed_by, created_by), assignee, title, substr(note, 1, 2000), status, NULL
+           FROM tasks WHERE status != 'open' OR updated_at > created_at
+         UNION ALL
+         SELECT 'contract.set', id, channel, updated_at, 0,
+                updated_by, NULL, key, substr(value, 1, 2000), NULL, version
+           FROM contract_history
+       )
+       SELECT * FROM feed
+        WHERE (@channel IS NULL OR channel = @channel)
+        ORDER BY ts DESC, seq DESC, ref_id DESC
+        LIMIT @limit OFFSET @offset`
     ),
   };
 
@@ -179,7 +287,23 @@ export function makeStore(db) {
     completeTask: (channel, id, note, by) => q.completeTask.run({ channel, id, note, by }).changes,
     reapStaleClaims: (channel) => q.reapStaleClaims.run({ channel, ttl: CLAIM_TTL }).changes,
 
-    touchAgent: (channel, agent) => q.touchAgent.run({ channel, agent }),
+    touchAgent: (channel, agent, action = null) => q.touchAgent.run({ channel, agent, action }),
+    setAgentStatus: (channel, agent, status) => q.setAgentStatus.run({ channel, agent, status }),
+    advancePollCursor: (channel, agent, cursor) => q.advancePollCursor.run({ channel, agent, cursor }),
     listAgents: (channel) => q.listAgents.all({ channel }),
+
+    // --- dashboard reads ------------------------------------------------------
+    listAllAgents: () => q.listAllAgents.all(),
+    listAllChannels: () => q.listAllChannels.all().map((r) => r.channel),
+    channelStats: () => ({
+      tasks: q.countTasksByStatus.all(),
+      messages: q.countMessages.all(),
+      contracts: q.countContracts.all(),
+    }),
+    agentTaskLoad: () => q.agentTaskLoad.all(),
+    claimedTasks: () => q.claimedTasks.all(),
+    unreadCounts: () => q.unreadCounts.all(),
+    activity: ({ channel = null, limit = 200, offset = 0 } = {}) =>
+      q.activity.all({ channel, limit, offset }),
   };
 }

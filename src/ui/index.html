@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>orchestratinator</title>
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span id="live-dot" class="dot" title="connection to the server"></span>
+      <h1>orchestratinator</h1>
+      <span id="version" class="muted mono"></span>
+    </div>
+    <div class="topbar-meta muted mono" id="server-meta"></div>
+    <div class="topbar-actions">
+      <label class="switch">
+        <input type="checkbox" id="autorefresh" checked>
+        <span>auto-refresh</span>
+      </label>
+      <button id="refresh-now" class="btn" title="Refresh now">↻</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Channels &amp; agents</h2>
+        <div id="totals" class="muted mono"></div>
+      </div>
+      <div id="channels" class="channel-grid"></div>
+    </section>
+
+    <section class="panel panel-log">
+      <div class="panel-head">
+        <h2>Activity log</h2>
+        <div class="log-controls">
+          <select id="filter-channel" class="input" title="Filter by channel">
+            <option value="">all channels</option>
+          </select>
+          <div class="chips" id="filter-kinds">
+            <button class="chip on" data-kind="message">messages</button>
+            <button class="chip on" data-kind="task">tasks</button>
+            <button class="chip on" data-kind="contract">contracts</button>
+          </div>
+          <input id="filter-text" class="input" type="search" placeholder="search…" autocomplete="off">
+          <span id="log-count" class="muted mono"></span>
+        </div>
+      </div>
+      <div class="log-scroll" id="log-scroll">
+        <table class="log">
+          <thead>
+            <tr><th class="c-when">when</th><th class="c-chan">channel</th><th class="c-kind">event</th><th class="c-who">who</th><th class="c-what">what</th></tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+        <div class="log-foot">
+          <button id="load-more" class="btn">load more</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
