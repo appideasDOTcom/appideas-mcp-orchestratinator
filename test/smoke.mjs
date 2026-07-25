@@ -42,6 +42,29 @@ async function makeClient(agent, base) {
   await client.connect(transport);
   return { client, transport };
 }
+/**
+ * Hand-rolled initialize: no notification stream, no DELETE — i.e. what a client
+ * that opens a throwaway session per turn leaves behind on the server.
+ */
+async function rawInitialize(port, agent) {
+  const res = await fetch(`http://localhost:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      'X-Channel': CHANNEL,
+      'X-Agent': agent,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke-raw', version: '0.0.0' } },
+    }),
+  });
+  await res.text(); // drain so the response stream doesn't stay open
+  return res.headers.get('mcp-session-id');
+}
 const rmDb = (p) => { for (const ext of ['', '-wal', '-shm']) { try { rmSync(p + ext); } catch { /* ignore */ } } };
 
 const server = startServer(PORT, DB_PATH);
@@ -88,17 +111,40 @@ try {
   assert(done.completed === true, 'pro completes the task');
 
   console.log('dashboard');
-  await call(pro, 'set_status', { status: 'task 3/7' });
+  await call(pro, 'set_status', { status: 'waiting', detail: 'e2e public tier, ~8m', ttl_seconds: 600 });
   const state = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
   const chan = state.channels.find((c) => c.channel === CHANNEL);
   assert(!!chan, 'dashboard state lists the channel');
   assert(state.sessions.length === 2, 'both live MCP sessions are reported as connected');
   assert(chan.agents.every((a) => a.presence === 'connected'), 'free + pro show as connected');
   const proAgent = chan.agents.find((a) => a.agent === 'pro');
-  assert(proAgent?.state.label === 'task 3/7', 'self-reported status wins for pro');
-  const freeAgent = chan.agents.find((a) => a.agent === 'free');
-  assert(freeAgent?.state.source === 'derived', 'free state is derived, not reported');
+  assert(proAgent?.state.source === 'reported', 'self-reported status wins for pro');
+  assert(proAgent?.state.label === 'waiting', 'reported state is the enum, not a guess');
+  assert(proAgent?.state.detail === 'e2e public tier, ~8m', 'the human-readable detail survives to the dashboard');
+  // The age display free asked for is only honest if the timestamp is exposed.
+  assert(!!proAgent?.reported_at && !!proAgent?.reported_expires_at, 'reported status carries its timestamp and expiry');
+  assert(Date.parse(proAgent.reported_expires_at) > Date.parse(proAgent.reported_at), 'expiry is after the report');
+
+  // The tone must come from the declared state, not from keywords in prose —
+  // "reviewing the design" is work, and the old regex called it waiting.
+  await call(free, 'set_status', { status: 'working', detail: 'reviewing pending blocked design' });
+  const toned = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+  const freeToned = toned.channels.find((c) => c.channel === CHANNEL).agents.find((a) => a.agent === 'free');
+  assert(freeToned?.state.tone === 'busy', 'tone follows the declared state, not words in the detail');
   assert(chan.tasks.done === 1 && chan.contracts === 1, 'channel task/contract counts');
+
+  // `blocked` must be distinguishable from `waiting` — one needs a human, the
+  // other resolves on its own, and a single "waiting" tone hides the difference.
+  await call(pro, 'set_status', { status: 'blocked', detail: 'needs a decision on AISS_Otp' });
+  const blockedState = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+  const proBlocked = blockedState.channels.find((c) => c.channel === CHANNEL).agents.find((a) => a.agent === 'pro');
+  assert(proBlocked.state.tone === 'blocked', 'blocked gets its own tone, distinct from waiting');
+
+  // A free-form status has to be refused: accepting it silently would put the
+  // tone back on keyword-guessing, which is the thing the enum replaced.
+  const loose = await pro.callTool({ name: 'set_status', arguments: { status: 'waiting on e2e' } })
+    .then((r) => ({ rejected: r?.isError === true }), () => ({ rejected: true }));
+  assert(loose.rejected, 'a free-form status is refused rather than silently guessed at');
 
   const feed = await (await fetch(`http://localhost:${PORT}/api/activity?limit=50`)).json();
   const kinds = feed.rows.map((r) => r.kind);
@@ -115,6 +161,40 @@ try {
   const html = await page.text();
   assert(page.ok && html.includes('<title>orchestratinator</title>'), 'dashboard html is served at /');
 
+  console.log('session lifecycle');
+  const bogus = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': 'no-such-session' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  assert(bogus.status === 404, 'an unknown session id gets 404 (the spec cue to re-initialize)');
+
+  // Model the client that opens a fresh session per turn and never tears the old
+  // one down (no held-open SSE stream, no DELETE). Sessions like these must not
+  // pile up: the newer one retires the older one for the same identity.
+  const ghost1 = await rawInitialize(PORT, 'ghost');
+  const ghost2 = await rawInitialize(PORT, 'ghost');
+  assert(!!ghost1 && !!ghost2 && ghost1 !== ghost2, 'two throwaway sessions really are distinct');
+
+  const health = await (await fetch(`http://localhost:${PORT}/health`)).json();
+  assert(health.session_stats.superseded >= 1, 'the abandoned session is superseded, not leaked');
+  assert(health.sessions === 3, `only the live sessions remain (${health.sessions}: free, pro, ghost)`);
+
+  const retired = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': ghost1 },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  assert(retired.status === 404, 'the superseded session answers 404 so the client re-initializes');
+
+  const after = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+  const agents = after.channels.find((c) => c.channel === CHANNEL).agents;
+  const ghostAfter = agents.find((a) => a.agent === 'ghost');
+  assert(ghostAfter.presence === 'connected' && ghostAfter.sessions === 1, 'the churning agent reads as connected, once');
+  // The safety property: a client holding an open notification stream is really
+  // there, so a reconnect must never yank it.
+  assert(agents.find((a) => a.agent === 'pro').sessions === 1, 'a streaming session is left alone');
+
   await freeT.close();
   await proT.close();
 } catch (err) {
@@ -125,13 +205,14 @@ try {
   rmDb(DB_PATH);
 }
 
-// --- self-heal: a stale claim auto-reopens on the next open-poll -------------
-// Run against a second server with CLAIM_TTL_MINUTES=0 so any claim is stale.
+// --- self-heal: stale claims and stale statuses ------------------------------
+// Run against a second server with both TTLs at 0, so anything written is
+// already expired and the fallback paths are the ones under test.
 {
   const PORT2 = PORT + 1;
   const DB2 = `./data/smoke-heal-${process.pid}.db`;
   const BASE2 = `http://localhost:${PORT2}/mcp`;
-  const server2 = startServer(PORT2, DB2, { CLAIM_TTL_MINUTES: '0' });
+  const server2 = startServer(PORT2, DB2, { CLAIM_TTL_MINUTES: '0', STATUS_TTL_SECONDS: '0' });
   try {
     console.log('\nself-heal (stale claims)');
     if (!(await waitHealthy(PORT2))) throw new Error('heal server did not become healthy');
@@ -147,6 +228,20 @@ try {
     const openView = await call(pro2, 'list_tasks', { status: 'open' });
     assert(openView.tasks.some((x) => x.id === t.id), 'stale claim auto-reopened on open-poll');
     assert((openView.reopened_stale_claims ?? 0) >= 1, 'reopened_stale_claims reported');
+
+    // The property that matters for status: an expired one is treated as absent
+    // and the board falls back to inference. A crashed agent must not be able to
+    // strand "waiting" on the dashboard forever — that is a confident wrong
+    // answer, which is worse than admitting we don't know.
+    console.log('\nself-heal (stale status)');
+    const written = await call(free2, 'set_status', { status: 'waiting', detail: 'run that never finished' });
+    assert(written.set === true, 'the status was accepted and stored');
+    const heal = await (await fetch(`http://localhost:${PORT2}/api/state`)).json();
+    const freeHealed = heal.channels.find((c) => c.channel === CHANNEL).agents.find((a) => a.agent === 'free');
+    assert(freeHealed.reported_status === 'waiting', 'the stored status is still on record');
+    assert(freeHealed.reported_expired === true, 'and is reported as expired');
+    assert(freeHealed.state.source === 'derived', 'an expired status falls back to a derived state');
+    assert(freeHealed.state.label !== 'waiting', 'the stale label is not what the human is shown');
 
     await free2T.close();
     await pro2T.close();

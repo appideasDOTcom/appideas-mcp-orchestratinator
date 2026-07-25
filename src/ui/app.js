@@ -81,21 +81,49 @@ const clip = (s, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 /* ---------- channels & agents ---------- */
 
-const TONE_CLASS = { busy: 'busy', waiting: 'waiting', idle: 'idle' };
+const TONE_CLASS = { busy: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
 const PRESENCE_DOT = { connected: '', recent: 'stale', offline: 'down' };
+
+/** A timestamp that re-renders itself on every tick, so an age can never go stale on screen. */
+const age = (iso) => `<span class="age" data-age-ts="${esc(iso ?? '')}">${relTime(iso)}</span>`;
+
+/** Rewrite every live age in place — the cheap half of a render, safe to run on every tick. */
+function refreshAges(root) {
+  for (const node of root.querySelectorAll('[data-age-ts]')) node.textContent = relTime(node.dataset.ageTs);
+}
 
 function agentSub(a) {
   const bits = [];
-  if (a.last_action) bits.push(`${a.last_action} · ${relTime(a.last_action_at)}`);
-  else bits.push(`seen ${relTime(a.last_seen)}`);
+  // The detail line is the whole point of a self-reported status — lead with it.
+  if (a.state.detail) bits.push(`<span class="state-detail">${esc(a.state.detail)}</span>`);
+  if (a.last_action) bits.push(`${esc(a.last_action)} · ${age(a.last_action_at)}`);
+  else bits.push(`seen ${age(a.last_seen)}`);
   if (a.unread) bits.push(`${a.unread} unread`);
   if (a.assigned_open) bits.push(`${a.assigned_open} assigned`);
   return bits.join('  ·  ');
 }
 
+/**
+ * The state chip. A self-reported state carries its age so a wrong one is
+ * self-evident: "waiting · 40m ago" reads as suspect in a way "waiting" cannot.
+ */
+function stateChip(a) {
+  const tone = a.presence === 'offline' ? 'off' : (TONE_CLASS[a.state.tone] ?? 'idle');
+  if (a.state.source !== 'reported') {
+    return `<span class="state ${tone}" title="derived from the task board — ${esc(a.agent)} has not reported a status">${esc(a.state.label)}</span>`;
+  }
+  const title = `self-reported at ${absTime(a.reported_at)}` +
+    (a.reported_expires_at ? ` · believed until ${absTime(a.reported_expires_at)}` : '');
+  return `<span class="state ${tone}" title="${esc(title)}">${esc(a.state.label)} · ${age(a.reported_at)}</span>`;
+}
+
 function renderChannels(state) {
   const sig = JSON.stringify(state.channels) + JSON.stringify(state.totals);
-  if (sig === ui.lastChannelSig) return;
+  if (sig === ui.lastChannelSig) {
+    // Same data — but the ages still have to keep counting up.
+    refreshAges(el.channels);
+    return;
+  }
   ui.lastChannelSig = sig;
 
   const t = state.totals;
@@ -110,23 +138,18 @@ function renderChannels(state) {
 
   el.channels.innerHTML = state.channels.map((c) => {
     const agents = c.agents.length
-      ? c.agents.map((a) => {
-          // Presence decides whether the state is current or merely last-known.
-          const tone = a.presence === 'offline' ? 'off' : (TONE_CLASS[a.state.tone] ?? 'idle');
-          const src = a.state.source === 'reported' ? '<span class="src">self-reported</span>' : '';
-          return `
+      ? c.agents.map((a) => `
             <div class="agent">
               <span class="dot ${PRESENCE_DOT[a.presence]}" title="${esc(a.presence)} · last seen ${esc(absTime(a.last_seen))}"></span>
               <div>
                 <div class="agent-line">
                   <span class="agent-name">${esc(a.agent)}</span>
-                  <span class="presence">${esc(a.presence)}${a.sessions > 1 ? ` ×${a.sessions}` : ''}</span>
-                  <span class="state ${tone}" title="${esc(a.state.label)}">${esc(a.state.label)}${src}</span>
+                  <span class="presence" title="${a.sessions} live MCP session${a.sessions === 1 ? '' : 's'}">${esc(a.presence)}${a.sessions > 1 ? ` ×${a.sessions}` : ''}</span>
+                  ${stateChip(a)}
                 </div>
-                <div class="agent-sub">${esc(agentSub(a))}</div>
+                <div class="agent-sub">${agentSub(a)}</div>
               </div>
-            </div>`;
-        }).join('')
+            </div>`).join('')
       : '<div class="empty">no agents seen yet</div>';
 
     return `
@@ -147,6 +170,12 @@ function renderServer(state) {
   const s = state.server;
   el.version.textContent = `v${s.version}`;
   el.meta.textContent = `up ${duration(s.uptime_seconds)} · port ${s.port} · db ${s.db_path} · claim ttl ${s.claim_ttl_minutes}m · ${s.now.replace('T', ' ').slice(0, 19)}Z`;
+  // Connection churn is a client trait, not a coordination fact — keep it out of
+  // the way, but reachable when a session count looks surprising.
+  const st = s.session_stats ?? {};
+  el.meta.title =
+    `${state.totals.live_sessions} live session(s) · session ttl ${s.session_ttl_minutes}m\n` +
+    `since start: ${st.opened ?? 0} opened, ${st.superseded ?? 0} superseded, ${st.expired ?? 0} expired`;
 }
 
 function syncChannelFilter(state) {

@@ -85,19 +85,43 @@ seconds; no reload needed.
 You get three things:
 
 **Channels & agents.** One card per channel, one row per agent, with a presence
-dot: green = a VS Code window has an open MCP session right now, amber = no live
-session but it called something in the last 5 minutes, red = gone. Presence comes
-from live connections, not from database timestamps, so a window you closed drops
-off honestly.
+dot: green = a live MCP session, amber = no live session but it called something
+in the last 5 minutes, red = gone.
+
+A caveat worth knowing, because it's an MCP fact rather than a bug here: a
+session ends when the client says so, and clients vary. Some reuse one session
+for the life of the window; others (Claude Code driving a `/loop`, for instance)
+open a fresh session per turn and never tear the old one down. The server
+therefore prunes for them — a new session for a given channel+agent supersedes
+that pair's older idle sessions, and anything untouched for `SESSION_TTL_MINUTES`
+(default 15) is closed. Clients recover silently, since an unknown session id
+answers `404`, which is the spec's cue to re-initialize. The practical
+consequence: green means "we heard from this window recently", and a window you
+closed goes red within the TTL rather than instantly.
 
 **Approximate last-known state.** Each agent gets a state chip. If the agent has
-called `set_status` in the last 30 minutes, that text is shown verbatim
-(`task 3/7 — rewriting call sites`) and tagged *self-reported*. Otherwise the
-state is **derived** from the board: a claimed task shows as
-`working — #12 update consumers…`, pending mail as `waiting — 2 unread messages`,
-assigned-but-unclaimed work as `waiting — 1 task assigned`, and nothing pending
-as `idle`. It's an approximation by design — the server can't see inside the
-agent's turn, only what it last told the board (see *it's pull, not push* above).
+called `set_status` and that status hasn't expired, its declared state wins and
+is shown with its age — `waiting · 3m ago` — with the detail line beneath
+(`e2e public tier, ~8m`). The four states are `working`, `waiting`, `blocked`
+and `idle`; the chip's colour comes from the state the agent declared, never
+from guessing at its words. Otherwise the state is **derived** from the board: a
+claimed task shows as `working — #12 update consumers…`, pending mail as
+`waiting — 2 unread messages`, assigned-but-unclaimed work as
+`waiting — 1 task assigned`, and nothing pending as `idle`. It's an
+approximation by design — the server can't see inside the agent's turn, only
+what it last told the board (see *it's pull, not push* above).
+
+**A status expires.** Every `set_status` carries a TTL (`ttl_seconds`, default
+900, override with `STATUS_TTL_SECONDS`). Past it the status is treated as
+absent and the chip falls back to a derived state. This is the load-bearing
+part: without it an agent that crashes mid-run leaves `waiting` on the board
+forever and the human keeps trusting it. The displayed age exists for the same
+reason — `waiting · 40m ago` reads as suspect in a way a bare `waiting` cannot.
+
+Note what is deliberately **not** inferred: a long gap since an agent's last
+tool call is never read as "waiting". That gap looks identical whether the agent
+is blocked, crashed, or simply finished and quiet, so only the agent can say —
+which is what `set_status` is for.
 
 **Activity log.** Every interesting write — messages, task opened/claimed/done,
 contract versions — merged into one newest-first list, filterable by channel,
@@ -106,7 +130,9 @@ by kind, and by free text. Click any row to expand the full stored value
 
 To make the state chips exact rather than inferred, have the agent call
 `set_status` as it works — e.g. add "call `set_status` when you start and finish
-a step" to the repo's `CLAUDE.md`.
+a step, and always before anything long-running" to the repo's `CLAUDE.md`.
+Setting `ttl_seconds` to roughly how long the work should take is what makes a
+`waiting` chip self-correcting when the agent never comes back.
 
 ---
 
@@ -139,7 +165,12 @@ Environment variables (see `.env.example`): `PORT` (default `8787`),
 `HOST` (default `0.0.0.0` — must stay that inside Docker; compose publishes the
 port on `127.0.0.1` only. Set `HOST=127.0.0.1` when running bare),
 `DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker),
-`CLAIM_TTL_MINUTES` (default `15`; how long a claim can sit before it auto-reopens).
+`CLAIM_TTL_MINUTES` (default `15`; how long a claim can sit before it auto-reopens),
+`SESSION_TTL_MINUTES` (default `15`; how long an untouched MCP session is kept).
+
+`curl -s localhost:8787/health` reports the live session count and lifetime
+connection churn (`opened` / `superseded` / `expired`) — a large `superseded` just
+means a client opens a session per turn, which is normal and handled.
 
 ---
 
@@ -197,7 +228,7 @@ structured objects.
 | Tool             | Purpose |
 |------------------|---------|
 | `whoami`         | Show the bound channel/agent and who's present. Call first to confirm wiring. |
-| `set_status`     | Report what you're doing in a few words (`"task 3/7"`). Shows on the dashboard; nothing reads it back. |
+| `set_status`     | Declare your state — `working`/`waiting`/`blocked`/`idle` — plus a `detail` line and optional `ttl_seconds`. Shows on the dashboard with its age; nothing reads it back. |
 | `send_message`   | Post to the channel. Omit `to` to broadcast; set `to` (e.g. `"pro"`) to DM. |
 | `poll_messages`  | Fetch messages for you newer than `since`; returns a `cursor` to pass next time. |
 | `set_contract`   | Create/update a shared interface entry by `key`. Bumps version, records history. |
@@ -243,7 +274,10 @@ each agent talks to when *you* (or a poll loop) prompt it to.
   server per window with no shared state — which defeats the purpose.)
 - **Session binding:** on `initialize`, the server reads `X-Channel`/`X-Agent`
   from the request headers and binds them to that MCP session; a fresh
-  per-session `McpServer` closes over that context.
+  per-session `McpServer` closes over that context. Sessions are pruned by
+  supersession (a new one for the same channel+agent closes that pair's older
+  idle ones) and by an idle sweep, so a client that never sends `DELETE` can't
+  leak `McpServer` instances. In-flight requests and open SSE streams are exempt.
 - **Storage:** SQLite via `better-sqlite3`. One Node process means writes
   serialize naturally — no cross-process locking. Data lives in a Docker volume.
 - **Schema:** `messages`, `contracts` (+ `contract_history`), `tasks`, `agents`

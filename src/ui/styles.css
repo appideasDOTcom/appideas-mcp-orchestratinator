@@ -15,6 +15,8 @@
   --busy-bg:   #fdf3dd;
   --wait:      #7a5af0;
   --wait-bg:   #efeafe;
+  --block:     #c4453d;
+  --block-bg:  #fbeae9;
   --idle:      #4a8f5c;
   --idle-bg:   #e6f3ea;
   --off:       #8a929c;
@@ -38,6 +40,8 @@
     --busy-bg:   #37301c;
     --wait:      #b39bfa;
     --wait-bg:   #2c2740;
+    --block:     #f08a80;
+    --block-bg:  #3a2321;
     --idle:      #6cc48a;
     --idle-bg:   #1d2f24;
     --off:       #7b848f;
@@ -198,9 +202,14 @@ main {
 }
 .state.busy  { color: var(--busy); background: var(--busy-bg); border-color: color-mix(in srgb, var(--busy) 30%, transparent); }
 .state.waiting { color: var(--wait); background: var(--wait-bg); border-color: color-mix(in srgb, var(--wait) 30%, transparent); }
+/* Blocked needs a human; waiting resolves on its own. Worth its own colour. */
+.state.blocked { color: var(--block); background: var(--block-bg); border-color: color-mix(in srgb, var(--block) 30%, transparent); }
 .state.idle  { color: var(--idle); background: var(--idle-bg); border-color: color-mix(in srgb, var(--idle) 30%, transparent); }
 .state.off   { color: var(--off);  background: var(--off-bg);  border-color: var(--border); }
-.state .src  { opacity: .6; font-size: 10px; margin-left: 4px; }
+/* The age of a self-reported state — dimmer than the label, but always present,
+   so a status nobody has refreshed announces itself as old. */
+.state .age  { opacity: .65; font-weight: 400; }
+.agent-sub .state-detail { color: var(--text); opacity: .8; }
 
 .empty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
 

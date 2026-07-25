@@ -11,6 +11,8 @@ services:
       - PORT=8787
       - DB_PATH=/data/orchestratinator.db
       - CLAIM_TTL_MINUTES=15
+      - SESSION_TTL_MINUTES=15
+      - STATUS_TTL_SECONDS=900
     volumes:
       - orchestratinator-data:/data
     healthcheck:

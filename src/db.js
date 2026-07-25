@@ -72,11 +72,18 @@ export function openDb(path) {
   // Presence detail added after v0.1 — the dashboard reads these to show an
   // approximate last-known state per agent. Added by migration so an existing
   // volume keeps its data.
-  addColumn(db, 'agents', 'status', 'TEXT');                        // self-reported, e.g. "task 3/7"
+  addColumn(db, 'agents', 'status', 'TEXT');                        // self-reported state: working|waiting|blocked|idle
   addColumn(db, 'agents', 'status_at', 'TEXT');
   addColumn(db, 'agents', 'last_action', 'TEXT');                   // last tool called
   addColumn(db, 'agents', 'last_action_at', 'TEXT');
   addColumn(db, 'agents', 'poll_cursor', 'INTEGER NOT NULL DEFAULT 0'); // highest message id read
+
+  // A status carries its own expiry so a crashed agent can't leave "waiting" on
+  // the board forever — past it the dashboard falls back to inference. Rows
+  // written before this column existed have NULL and are aged off the old
+  // server-wide default instead (see STATUS_TTL_MINUTES in web.js).
+  addColumn(db, 'agents', 'status_detail', 'TEXT');                 // the human-readable line
+  addColumn(db, 'agents', 'status_expires_at', 'TEXT');
 
   return db;
 }
@@ -87,6 +94,15 @@ function addColumn(db, table, column, decl) {
 }
 
 const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
+
+/**
+ * How long a self-reported status stays believable when the caller doesn't say.
+ * Deliberately short: an expired status is treated as absent and the dashboard
+ * falls back to inference, so the failure mode of a crashed agent is "we stop
+ * claiming to know" rather than a stale label the human keeps trusting.
+ * Settable to 0 so a test can prove the fallback actually fires.
+ */
+export const STATUS_TTL_SECONDS = Math.max(0, Number(process.env.STATUS_TTL_SECONDS ?? 900));
 
 /**
  * Wrap a database handle in a small set of channel-scoped data operations.
@@ -163,23 +179,29 @@ export function makeStore(db) {
          last_action_at = CASE WHEN @action IS NULL THEN last_action_at ELSE datetime('now') END`
     ),
     setAgentStatus: db.prepare(
-      `INSERT INTO agents (channel, agent, last_seen, status, status_at)
-       VALUES (@channel, @agent, datetime('now'), @status, datetime('now'))
+      `INSERT INTO agents (channel, agent, last_seen, status, status_detail, status_at, status_expires_at)
+       VALUES (@channel, @agent, datetime('now'), @status, @detail, datetime('now'), datetime('now', @ttl))
        ON CONFLICT(channel, agent) DO UPDATE SET
-         last_seen = datetime('now'), status = @status, status_at = datetime('now')`
+         last_seen         = datetime('now'),
+         status            = @status,
+         status_detail     = @detail,
+         status_at         = datetime('now'),
+         status_expires_at = datetime('now', @ttl)`
     ),
     advancePollCursor: db.prepare(
       `UPDATE agents SET poll_cursor = MAX(poll_cursor, @cursor)
        WHERE channel = @channel AND agent = @agent`
     ),
     listAgents: db.prepare(
-      `SELECT agent, last_seen, status, status_at, last_action, last_action_at
+      `SELECT agent, last_seen, status, status_detail, status_at, status_expires_at,
+              last_action, last_action_at
        FROM agents WHERE channel = @channel ORDER BY agent`
     ),
 
     // --- dashboard reads (see src/web.js) -----------------------------------
     listAllAgents: db.prepare(
-      `SELECT channel, agent, last_seen, status, status_at, last_action, last_action_at, poll_cursor
+      `SELECT channel, agent, last_seen, status, status_detail, status_at, status_expires_at,
+              last_action, last_action_at, poll_cursor
        FROM agents ORDER BY channel, agent`
     ),
     listAllChannels: db.prepare(
@@ -288,7 +310,8 @@ export function makeStore(db) {
     reapStaleClaims: (channel) => q.reapStaleClaims.run({ channel, ttl: CLAIM_TTL }).changes,
 
     touchAgent: (channel, agent, action = null) => q.touchAgent.run({ channel, agent, action }),
-    setAgentStatus: (channel, agent, status) => q.setAgentStatus.run({ channel, agent, status }),
+    setAgentStatus: (channel, agent, status, detail = null, ttlSeconds = STATUS_TTL_SECONDS) =>
+      q.setAgentStatus.run({ channel, agent, status, detail, ttl: `+${Math.max(0, Math.floor(ttlSeconds))} seconds` }),
     advancePollCursor: (channel, agent, cursor) => q.advancePollCursor.run({ channel, agent, cursor }),
     listAgents: (channel) => q.listAgents.all({ channel }),
 

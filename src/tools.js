@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { STATUS_TTL_SECONDS } from './db.js';
 
 const ok = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
 const safeParse = (s) => { try { return JSON.parse(s); } catch { return s; } };
@@ -52,18 +53,24 @@ export function registerTools(server, { store, context }) {
 
   server.tool(
     'set_status',
-    'Report what you are currently doing, in a few words ("task 3/7", "waiting on pro", "idle"). Purely informational — it shows up on the dashboard at the server root so a human can see at a glance what each agent is up to. Nothing reads it back; call it whenever your state changes meaningfully.',
+    'Report what you are currently doing. Shows on the dashboard at the server root so a human can see at a glance whether you are working, waiting or stuck — the one thing nothing else can tell them, because a gap between tool calls looks identical whether you are blocked, crashed, or just finished. Nothing reads it back. Call it whenever your state changes meaningfully, and especially before anything long-running.',
     {
-      status: z.string().max(200).describe('Short human-readable state, e.g. "task 3/7" or "waiting on contract review".'),
+      status: z.enum(['working', 'waiting', 'blocked', 'idle'])
+        .describe('working = making progress; waiting = expecting something that should arrive on its own (a test run, another agent); blocked = cannot proceed without intervention; idle = nothing in hand.'),
+      detail: z.string().max(200).optional()
+        .describe('One short line a human will actually read, e.g. "e2e public tier, ~8m". This is the part that makes the status useful — include it.'),
+      ttl_seconds: z.number().int().min(30).max(3600).optional()
+        .describe(`How long this status stays believable (default ${STATUS_TTL_SECONDS}s). Past it the dashboard shows a derived state instead, so a crash cannot strand a stale label. Set it to roughly how long you expect the work to take.`),
       channel: z.string().optional(),
       agent: z.string().optional(),
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent, 'set_status');
-      const status = args.status.trim();
-      store.setAgentStatus(channel, agent, status || null);
-      return ok({ set: true, channel, agent, status });
+      const detail = args.detail?.trim() || null;
+      const ttl = args.ttl_seconds ?? STATUS_TTL_SECONDS;
+      store.setAgentStatus(channel, agent, args.status, detail, ttl);
+      return ok({ set: true, channel, agent, status: args.status, detail, ttl_seconds: ttl });
     }
   );
 
