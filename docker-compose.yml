@@ -4,10 +4,21 @@ services:
     container_name: appideas-orchestratinator
     restart: unless-stopped
     ports:
-      # Published on the loopback interface only — there's no auth on either the
-      # MCP endpoint or the dashboard. Drop the 127.0.0.1 prefix at your own risk.
+      # Published on the loopback interface only. The shared-secret header below
+      # is a second lock, not a replacement for this one: it's one static key for
+      # every agent and the dashboard is open by default. Drop the 127.0.0.1
+      # prefix at your own risk.
       - "127.0.0.1:8787:8787"
     environment:
+      # Shared secret clients present as X-Orchestratinator-Key. Substituted
+      # from ./.env, which is gitignored; compose fails loudly rather than
+      # quietly starting an unlocked server if it's missing.
+      - ORCH_AUTH_TOKEN=${ORCH_AUTH_TOKEN:?set ORCH_AUTH_TOKEN in .env (see .env.example)}
+      # off | warn | enforce — see .env.example. `warn` logs bad keys and lets
+      # them through, which is how you roll this out without cutting off an
+      # agent that's still on an old .mcp.json.
+      - ORCH_AUTH_MODE=${ORCH_AUTH_MODE:-enforce}
+      - ORCH_AUTH_PROTECT_UI=${ORCH_AUTH_PROTECT_UI:-false}
       - PORT=8787
       - DB_PATH=/data/orchestratinator.db
       - CLAIM_TTL_MINUTES=15

@@ -1,6 +1,10 @@
 // End-to-end smoke test: spawns the server, connects two clients (free + pro)
-// with header-bound identities, and exercises contracts, messages, tasks, and
-// the stale-claim self-heal.
+// with header-bound identities, and exercises auth, contracts, messages, tasks,
+// and the stale-claim self-heal.
+//
+// Every server started here passes ORCH_AUTH_TOKEN explicitly, so the test says
+// which auth mode it means instead of inheriting whatever is in your .env
+// (which the server now loads for bare runs).
 //   npm run smoke
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -12,6 +16,8 @@ const PORT = Number(process.env.SMOKE_PORT ?? 8899);
 const DB_PATH = `./data/smoke-${process.pid}.db`;
 const BASE = `http://localhost:${PORT}/mcp`;
 const CHANNEL = 'smoke-pair';
+const KEY = 'smoke-shared-secret';
+const AUTH_HEADER = 'X-Orchestratinator-Key';
 
 let failures = 0;
 const assert = (cond, msg) => {
@@ -34,10 +40,10 @@ async function waitHealthy(port) {
   }
   return false;
 }
-async function makeClient(agent, base) {
-  const transport = new StreamableHTTPClientTransport(new URL(base), {
-    requestInit: { headers: { 'X-Channel': CHANNEL, 'X-Agent': agent } },
-  });
+async function makeClient(agent, base, key = KEY) {
+  const headers = { 'X-Channel': CHANNEL, 'X-Agent': agent };
+  if (key) headers[AUTH_HEADER] = key;
+  const transport = new StreamableHTTPClientTransport(new URL(base), { requestInit: { headers } });
   const client = new Client({ name: `smoke-${agent}`, version: '0.0.0' });
   await client.connect(transport);
   return { client, transport };
@@ -54,6 +60,7 @@ async function rawInitialize(port, agent) {
       accept: 'application/json, text/event-stream',
       'X-Channel': CHANNEL,
       'X-Agent': agent,
+      [AUTH_HEADER]: KEY,
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -67,11 +74,46 @@ async function rawInitialize(port, agent) {
 }
 const rmDb = (p) => { for (const ext of ['', '-wal', '-shm']) { try { rmSync(p + ext); } catch { /* ignore */ } } };
 
-const server = startServer(PORT, DB_PATH);
+const server = startServer(PORT, DB_PATH, { ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce' });
 
 try {
   if (!(await waitHealthy(PORT))) throw new Error('server did not become healthy');
   console.log('server healthy\n');
+
+  console.log('auth (enforce)');
+  // The whole point of the shared secret: a client that doesn't hold it can't
+  // open a session, so it never reaches a tool. Both the missing and the wrong
+  // key must fail — a truncated/pasted-wrong token is the likelier mistake.
+  for (const [label, headers] of [
+    ['no key at all', {}],
+    ['a wrong key', { [AUTH_HEADER]: `${KEY}-nope` }],
+    ['a bearer token that does not match', { authorization: 'Bearer definitely-not-it' }],
+  ]) {
+    const res = await fetch(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': CHANNEL, 'X-Agent': 'intruder', ...headers },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'intruder', version: '0.0.0' } } }),
+    });
+    await res.text();
+    assert(res.status === 401, `initialize with ${label} is rejected 401`);
+  }
+  // ...and the rejection happens before a session exists, so a locked-out client
+  // can't show up on the board.
+  const beforeAuthState = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+  assert(!beforeAuthState.sessions.some((s) => s.agent === 'intruder'), 'a rejected client leaves no session behind');
+  // The healthcheck runs inside the container and holds no key, so it stays open.
+  assert((await fetch(`http://localhost:${PORT}/health`)).ok, '/health stays reachable without a key');
+  // Authorization: Bearer is accepted as an alternative to the custom header.
+  // Probing with a sessionless non-initialize call keeps this from leaving an
+  // extra session and agent row behind to skew the counts asserted further down:
+  // 400 means the guard passed it through and the MCP layer answered.
+  const bearer = await fetch(BASE, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${KEY}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  await bearer.text();
+  assert(bearer.status === 400, 'Authorization: Bearer <token> is accepted too (reaches MCP, which wants a session)');
 
   const { client: free, transport: freeT } = await makeClient('free', BASE);
   const { client: pro, transport: proT } = await makeClient('pro', BASE);
@@ -164,7 +206,7 @@ try {
   console.log('session lifecycle');
   const bogus = await fetch(`http://localhost:${PORT}/mcp`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': 'no-such-session' },
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': 'no-such-session', [AUTH_HEADER]: KEY },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
   });
   assert(bogus.status === 404, 'an unknown session id gets 404 (the spec cue to re-initialize)');
@@ -182,7 +224,7 @@ try {
 
   const retired = await fetch(`http://localhost:${PORT}/mcp`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': ghost1 },
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': ghost1, [AUTH_HEADER]: KEY },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
   });
   assert(retired.status === 404, 'the superseded session answers 404 so the client re-initializes');
@@ -212,12 +254,16 @@ try {
   const PORT2 = PORT + 1;
   const DB2 = `./data/smoke-heal-${process.pid}.db`;
   const BASE2 = `http://localhost:${PORT2}/mcp`;
-  const server2 = startServer(PORT2, DB2, { CLAIM_TTL_MINUTES: '0', STATUS_TTL_SECONDS: '0' });
+  // No token here, which is also the coverage for "auth off": an empty value set
+  // explicitly beats whatever .env holds, so this server accepts keyless clients.
+  const server2 = startServer(PORT2, DB2, { CLAIM_TTL_MINUTES: '0', STATUS_TTL_SECONDS: '0', ORCH_AUTH_TOKEN: '' });
   try {
     console.log('\nself-heal (stale claims)');
     if (!(await waitHealthy(PORT2))) throw new Error('heal server did not become healthy');
-    const { client: free2, transport: free2T } = await makeClient('free', BASE2);
-    const { client: pro2, transport: pro2T } = await makeClient('pro', BASE2);
+    const { client: free2, transport: free2T } = await makeClient('free', BASE2, null);
+    const { client: pro2, transport: pro2T } = await makeClient('pro', BASE2, null);
+    const who2 = await call(free2, 'whoami');
+    assert(who2.agent === 'free', 'a keyless client works when no token is configured');
 
     const t = await call(free2, 'open_task', { title: 'abandoned task', assignee: 'pro' });
     await call(pro2, 'claim_task', { id: t.id });
@@ -251,6 +297,39 @@ try {
   } finally {
     server2.kill('SIGKILL');
     rmDb(DB2);
+  }
+}
+
+// --- auth rollout: warn mode -------------------------------------------------
+// The mode that makes turning auth on safe. A key is configured, but a client
+// that doesn't send one is logged and let through, so the window between
+// restarting the server and updating every agent's .mcp.json can't cut anyone
+// off mid-task. This is the property that would quietly rot if it went untested.
+{
+  const PORT3 = PORT + 2;
+  const DB3 = `./data/smoke-warn-${process.pid}.db`;
+  const BASE3 = `http://localhost:${PORT3}/mcp`;
+  const server3 = startServer(PORT3, DB3, { ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'warn' });
+  try {
+    console.log('\nauth (warn — rollout mode)');
+    if (!(await waitHealthy(PORT3))) throw new Error('warn server did not become healthy');
+
+    const { client: old, transport: oldT } = await makeClient('not-yet-updated', BASE3, null);
+    const whoOld = await call(old, 'whoami');
+    assert(whoOld.agent === 'not-yet-updated', 'a client with no key still works in warn mode');
+
+    const { client: updated, transport: updatedT } = await makeClient('updated', BASE3);
+    const whoNew = await call(updated, 'whoami');
+    assert(whoNew.agent === 'updated', 'a client with the key works in warn mode too');
+
+    await oldT.close();
+    await updatedT.close();
+  } catch (err) {
+    console.error('warn-mode smoke error:', err);
+    failures++;
+  } finally {
+    server3.kill('SIGKILL');
+    rmDb(DB3);
   }
 }
 

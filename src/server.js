@@ -6,6 +6,12 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
+import { createAuth } from './auth.js';
+
+// Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
+// through compose's `environment:` block instead, so a missing file is normal.
+// Real environment variables win over the file either way.
+try { process.loadEnvFile(); } catch { /* no .env — environment only */ }
 
 const NAME = 'appideas-orchestratinator';
 const VERSION = '0.2.0';
@@ -24,8 +30,12 @@ const STARTED_AT = new Date().toISOString();
 
 const db = openDb(DB_PATH);
 const store = makeStore(db);
+const auth = createAuth();
 
 const app = express();
+// Ahead of the body parser: an unauthorized caller shouldn't get 4mb of parsing
+// done on its behalf. /health stays open — the container healthcheck uses it.
+app.use('/mcp', auth.mcpGuard);
 app.use(express.json({ limit: '4mb' }));
 
 // One transport per MCP session (keyed by the mcp-session-id header).
@@ -205,7 +215,9 @@ app.get('/mcp', handleSessionRequest);
 app.delete('/mcp', handleSessionRequest);
 
 // Read-only dashboard at `/` (+ its /api/* endpoints). Mounted last so it can
-// never shadow an MCP route.
+// never shadow an MCP route. Its guard is a no-op unless ORCH_AUTH_PROTECT_UI
+// is set, so turning auth on doesn't silently lock the human out of the board.
+app.use(auth.uiGuard);
 app.use(createWebRouter({
   store,
   sessions,
@@ -224,4 +236,5 @@ app.use(createWebRouter({
 app.listen(PORT, HOST, () => {
   console.log(`[orchestratinator] MCP       http://localhost:${PORT}/mcp`);
   console.log(`[orchestratinator] dashboard http://localhost:${PORT}/   (db: ${DB_PATH})`);
+  console.log(`[orchestratinator] ${auth.describeStartup()}`);
 });

@@ -69,6 +69,8 @@ in each repo's `.mcp.json`:
 
 - `X-Channel` — which coordination space this repo belongs to.
 - `X-Agent` — this repo's role on that channel (`free` / `pro`).
+- `X-Orchestratinator-Key` — the shared secret, same for every client. See
+  [The shared secret](#the-shared-secret).
 
 Because identity rides on the connection, the agent almost never has to pass
 `channel`/`agent` to a tool — but every tool accepts them as an override.
@@ -140,8 +142,12 @@ Setting `ttl_seconds` to roughly how long the work should take is what makes a
 
 ```bash
 cd appideas-mcp-orchestratinator
+cp .env.example .env                 # then set ORCH_AUTH_TOKEN — see "The shared secret"
 docker compose up -d --build
 ```
+
+Compose reads `.env` (gitignored) and refuses to start without `ORCH_AUTH_TOKEN`,
+rather than quietly bringing up an unlocked server.
 
 MCP clients connect to `http://localhost:8787/mcp`; the dashboard is at
 `http://localhost:8787/`. The SQLite database persists in the named volume
@@ -161,7 +167,11 @@ npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinato
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
 ```
 
-Environment variables (see `.env.example`): `PORT` (default `8787`),
+Environment variables (see `.env.example`):
+`ORCH_AUTH_TOKEN` (the shared secret; empty disables auth),
+`ORCH_AUTH_MODE` (`off` / `warn` / `enforce`, default `enforce` when a token is set),
+`ORCH_AUTH_PROTECT_UI` (default `false`),
+`PORT` (default `8787`),
 `HOST` (default `0.0.0.0` — must stay that inside Docker; compose publishes the
 port on `127.0.0.1` only. Set `HOST=127.0.0.1` when running bare),
 `DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker),
@@ -171,6 +181,58 @@ port on `127.0.0.1` only. Set `HOST=127.0.0.1` when running bare),
 `curl -s localhost:8787/health` reports the live session count and lifetime
 connection churn (`opened` / `superseded` / `expired`) — a large `superseded` just
 means a client opens a session per turn, which is normal and handled.
+
+---
+
+## The shared secret
+
+Every MCP client presents one shared key. It's a doorlock, not a security model:
+one static token for all agents, no rotation, and `X-Agent` is still
+self-asserted — anyone holding the key can claim to be anyone. It exists so
+something that stumbles onto the port can't read and write the board. The
+compose file still publishes on `127.0.0.1` only; this is the second lock, not
+a reason to remove the first.
+
+Generate one and put it in `.env` (gitignored, and read by both `docker compose`
+and `npm start`):
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+```ini
+# .env
+ORCH_AUTH_TOKEN=<the generated value>
+ORCH_AUTH_MODE=enforce
+```
+
+Clients send it as `X-Orchestratinator-Key: <token>` (or
+`Authorization: Bearer <token>`). `/health` stays open so the container
+healthcheck keeps working.
+
+### Turning it on without interrupting anyone
+
+Restarting straight into `enforce` cuts off every agent whose `.mcp.json` hasn't
+been updated yet — including one that's mid-task. `ORCH_AUTH_MODE=warn` exists
+for that window: a missing or wrong key is logged and **allowed through**.
+
+1. Set `ORCH_AUTH_TOKEN` and `ORCH_AUTH_MODE=warn` in `.env`, then
+   `docker compose up -d`.
+2. Add the header to each repo's `.mcp.json` (below) and reload those windows.
+3. Watch `docker compose logs -f orchestratinator` until no `auth WARN` lines
+   appear — that means every live client is sending the key.
+4. Flip to `ORCH_AUTH_MODE=enforce`, `docker compose up -d`.
+
+A rejected client gets `401` with a JSON-RPC error explaining which header to
+set — it never reaches a tool and never appears on the dashboard.
+
+### The dashboard
+
+`/` and `/api/*` are **not** protected by default, because a browser can't send
+a custom header and locking yourself out of the board is the worse failure. Set
+`ORCH_AUTH_PROTECT_UI=true` to guard them too; then open
+`http://localhost:8787/?key=<token>` once — the server sets an `HttpOnly` cookie
+and redirects to a clean URL, so the secret doesn't sit in the address bar.
 
 ---
 
@@ -190,7 +252,11 @@ parent folder required):
     "orchestratinator": {
       "type": "http",
       "url": "http://localhost:8787/mcp",
-      "headers": { "X-Channel": "appideas-site-syncinator", "X-Agent": "free" }
+      "headers": {
+        "X-Channel": "appideas-site-syncinator",
+        "X-Agent": "free",
+        "X-Orchestratinator-Key": "<the ORCH_AUTH_TOKEN from .env>"
+      }
     }
   }
 }
@@ -200,9 +266,13 @@ The pro repo is identical except `"X-Agent": "pro"`. Reload each VS Code window
 (or restart the Claude Code session) so it picks up the new server, then ask the
 agent to run `whoami` to confirm it's bound to the right channel/agent.
 
+The files in `clients/` carry a `PASTE_ORCH_AUTH_TOKEN_HERE` placeholder —
+they're committed, so the real token never goes in them. Each repo's `.mcp.json`
+holds a copy of the secret, so gitignore it there unless the repo is private.
+
 > If your Claude Code version predates inline `.mcp.json` header support, add it
 > from the CLI instead:
-> `claude mcp add --transport http orchestratinator http://localhost:8787/mcp --header "X-Channel: appideas-site-syncinator" --header "X-Agent: free"`
+> `claude mcp add --transport http orchestratinator http://localhost:8787/mcp --header "X-Channel: appideas-site-syncinator" --header "X-Agent: free" --header "X-Orchestratinator-Key: <token>"`
 
 Also drop [`clients/CLAUDE.snippet.md`](clients/CLAUDE.snippet.md) into each
 repo's `CLAUDE.md` so the agent knows when to reach for these tools.
@@ -213,7 +283,8 @@ repo's `CLAUDE.md` so the agent knows when to reach for these tools.
 
 1. Start the server (it's already running — nothing to change).
 2. In the two new repos, add a `.mcp.json` like above with a **new** `X-Channel`
-   (e.g. `my-other-plugin`) and `X-Agent` of `free` / `pro`.
+   (e.g. `my-other-plugin`), `X-Agent` of `free` / `pro`, and the same
+   `X-Orchestratinator-Key` — the key is per-server, not per-channel.
 
 That's it. The channels are isolated; the same container serves them all.
 
@@ -309,11 +380,14 @@ test/
 
 ## Notes & limits
 
-- **Localhost only.** No auth on the MCP endpoint *or* the dashboard, and the
-  dashboard renders every message body on the channel. Compose publishes the
-  port on `127.0.0.1` only; keep it that way. If you ever need it remote, put it
-  behind a proxy that requires a token and check it in `server.js`.
-- **`X-Agent` is honor-system identity**, not a security boundary — fine for
+- **Localhost only.** The shared secret keeps a casual port-scan off the MCP
+  endpoint, but it's one static key for every agent, the dashboard is open
+  unless you set `ORCH_AUTH_PROTECT_UI`, and that dashboard renders every message
+  body on the channel. Compose publishes the port on `127.0.0.1` only; keep it
+  that way. If you ever need it remote, put it behind a proxy that does real
+  auth — don't promote this key to the thing standing between you and the world.
+- **`X-Agent` is honor-system identity**, not a security boundary — everyone
+  shares one key, so holding it lets you claim to be any agent. Fine for
   coordinating your own agents.
 - The paired agents must agree on channel/role names; the `.mcp.json` files here
   are the source of truth for the syncinator pair.

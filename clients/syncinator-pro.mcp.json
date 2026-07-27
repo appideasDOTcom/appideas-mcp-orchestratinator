@@ -5,7 +5,8 @@
       "url": "http://localhost:8787/mcp",
       "headers": {
         "X-Channel": "appideas-site-syncinator",
-        "X-Agent": "pro"
+        "X-Agent": "pro",
+        "X-Orchestratinator-Key": "PASTE_ORCH_AUTH_TOKEN_HERE"
       }
     }
   }
