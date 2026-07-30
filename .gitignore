@@ -6,3 +6,4 @@ data/
 .env
 npm-debug.log*
 .DS_Store
+.mcp.json

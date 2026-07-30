@@ -177,7 +177,9 @@ main {
 
 .agent {
   display: grid;
-  grid-template-columns: 9px 1fr;
+  /* Third column holds the operator affordance; it collapses to nothing when the
+     board is read-only, so the row is unchanged for a browser that can't write. */
+  grid-template-columns: 9px 1fr auto;
   gap: 9px;
   padding: 9px 12px;
   border-top: 1px solid var(--border);
@@ -297,3 +299,146 @@ pre.raw {
 
 .log-foot { padding: 10px; text-align: center; }
 .log-foot.hidden { display: none; }
+
+/* ---------- operator actions ---------- */
+
+.hidden { display: none !important; }
+
+/* Why a button might be missing, stated rather than left to be discovered. */
+.admin-locked { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.admin-locked.err { color: var(--block); }
+
+/* A count that is also a control. Deliberately not styled as a button until
+   hovered: the row is primarily something you read, and a row full of buttons
+   reads as a form. */
+.mini {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 0 4px;
+  margin: 0 -4px;
+  cursor: pointer;
+}
+.mini:hover, .mini:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  outline: none;
+}
+.channel-stats .mini b { color: inherit; }
+
+/* The hover-revealed trash can. Kept at opacity 0 rather than display:none so it
+   never reflows the row, and always visible on keyboard focus. */
+.row-act {
+  align-self: center;
+  opacity: 0;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity .12s ease;
+}
+.agent:hover .row-act,
+.channel-head:hover .row-act,
+.row-act:focus-visible { opacity: 1; }
+.row-act:hover { border-color: var(--block); background: var(--block-bg); }
+/* Wrapper, so a row with two affordances keeps them in the one `auto` column
+   instead of spilling into an implicit grid column of its own. */
+.row-acts { align-self: center; display: flex; gap: 4px; }
+.row-acts:hover .row-act { opacity: 1; }
+/* Nudging is the routine one — it shouldn't borrow the destructive hover tone. */
+.row-act[data-act="nudge"]:hover { border-color: var(--accent); background: transparent; }
+
+.chip.tiny { font-size: 10px; padding: 1px 6px; }
+.reveal-bar { grid-column: 1 / -1; display: flex; gap: 6px; }
+.channel.archived { opacity: .72; }
+.agent.retired { opacity: .6; }
+
+/* ---------- dialogs ---------- */
+
+.dlg {
+  width: min(560px, calc(100vw - 32px));
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--sans);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .28);
+}
+.dlg::backdrop { background: rgba(8, 10, 13, .48); }
+.dlg h3 { font-size: 15px; }
+.dlg h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--block); }
+.dlg p { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.dlg-sub { margin-top: 2px; font-size: 11.5px; }
+.dlg-note { margin-top: 12px; font-size: 11.5px; }
+
+/* An action and the sentence explaining what it will actually do, side by side —
+   the explanation is the point, so it sits with the button and not in a tooltip. */
+.dlg-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.dlg-choice p { margin: 2px 0 0; }
+/* The free-text nudge. Full width and directly under its explanation, so it reads
+   as part of the Nudge choice rather than a field floating in the dialog. */
+.dlg-say { display: block; width: 100%; margin-top: 8px; }
+.dlg-list { margin: 10px 0 0 18px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+.dlg-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+.dlg-danger {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--block) 40%, var(--border));
+  border-radius: 8px;
+  background: var(--block-bg);
+}
+.dlg-danger p { margin-top: 4px; color: var(--text); opacity: .8; }
+.dlg-confirm { display: flex; gap: 8px; margin-top: 10px; }
+.dlg-confirm .input { flex: 1; }
+
+.btn.primary { border-color: var(--accent); color: var(--accent); }
+.btn.danger { border-color: var(--block); color: var(--block); }
+.btn.danger:hover { background: var(--block); color: #fff; }
+.btn:disabled, .mini:disabled, .row-act:disabled, .input:disabled { opacity: .5; cursor: default; }
+
+.dlg-err {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--block);
+  border-radius: 6px;
+  background: var(--block-bg);
+  color: var(--block);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.task-list { max-height: 320px; overflow: auto; margin-top: 12px; }
+.task-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.task-row:first-child { border-top: none; }
+.task-acts { display: flex; gap: 6px; flex-shrink: 0; }
+.task-acts .input { font-size: 11px; padding: 3px 6px; }
+.muted.tiny { font-size: 10.5px; margin-top: 3px; }
+
+.badge.admin {
+  color: var(--wait);
+  border-color: color-mix(in srgb, var(--wait) 45%, transparent);
+  background: var(--wait-bg);
+}

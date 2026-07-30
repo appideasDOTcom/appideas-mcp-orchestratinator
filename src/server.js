@@ -82,6 +82,27 @@ function supersede(sid, channel, agent) {
   }
 }
 
+/**
+ * Close every live session bound to a channel, or to one agent on it.
+ *
+ * The dashboard's retire and delete actions need this: the session registry is a
+ * second source of presence (buildState synthesises a row for any live session),
+ * so a database-only change would be undone by the next tick. An unknown session
+ * id answers 404, which is the spec's "re-initialise" signal, so a client that is
+ * still alive reconnects and reappears — which is the intended behaviour, not a
+ * leak. Returns how many it closed.
+ */
+function closeSessionsFor({ channel, agent = null }) {
+  let closed = 0;
+  for (const [sid, s] of Object.entries(sessions)) {
+    if (s.channel !== channel) continue;
+    if (agent && s.agent !== agent) continue;
+    closeSession(sid);
+    closed++;
+  }
+  return closed;
+}
+
 /** Backstop for sessions no successor ever supersedes (unbound or last of their kind). */
 function sweepIdleSessions() {
   const cutoff = Date.now() - SESSION_TTL_MINUTES * 60_000;
@@ -214,14 +235,17 @@ async function handleSessionRequest(req, res) {
 app.get('/mcp', handleSessionRequest);
 app.delete('/mcp', handleSessionRequest);
 
-// Read-only dashboard at `/` (+ its /api/* endpoints). Mounted last so it can
-// never shadow an MCP route. Its guard is a no-op unless ORCH_AUTH_PROTECT_UI
-// is set, so turning auth on doesn't silently lock the human out of the board.
+// Dashboard at `/` (+ its /api/* endpoints). Mounted last so it can never shadow
+// an MCP route. The uiGuard is a no-op unless ORCH_AUTH_PROTECT_UI is set, so
+// turning auth on doesn't silently lock the human out of the board; the operator
+// endpoints under /api/admin carry their own guard, which is never optional.
 app.use(auth.uiGuard);
 app.use(createWebRouter({
   store,
   sessions,
   sessionStats,
+  auth,
+  closeSessionsFor,
   meta: {
     name: NAME,
     version: VERSION,

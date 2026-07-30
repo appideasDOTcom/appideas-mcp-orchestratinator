@@ -29,6 +29,8 @@ docker compose down                        // stop; data kept in the volume
 docker compose logs -f orchestratinator    // tail
 curl -s localhost:8787/health              // is it up?
 open http://localhost:8787/                // the dashboard — who's connected, what they're doing
+open "http://localhost:8787/?key=$KEY"     // ...same, with operator actions unlocked
+npm test                                   // both suites: coordination + operator actions
 ```
 In a chat window:
 ```
@@ -47,12 +49,15 @@ cooperative protocol, not remote control. In practice you bridge that gap one of
 three ways:
 
 1. **Nudge** — tell the other window's agent "check the orchestratinator." Simplest.
+   The dashboard can send that nudge for you (the 👋 on any agent row), so you don't
+   have to have that window in front of you — see *Operator actions*.
 2. **Poll on a loop** — have the consuming agent run `poll_messages` / `list_tasks`
    every N minutes (e.g. Claude Code's `/loop`).
 3. **Poll at boundaries** — a Stop/PostToolUse hook that checks the board when the
    agent finishes a step.
 
-Start with #1; reach for #2/#3 only if the manual nudge gets tedious.
+Start with #1. #1 and #2 together are the useful combination: the loop is what
+makes a nudge from the dashboard land without you touching that window at all.
 
 ---
 
@@ -79,10 +84,11 @@ Because identity rides on the connection, the agent almost never has to pass
 
 ## The dashboard
 
-Open **`http://localhost:8787/`** in a browser. It's a read-only view of the
-same SQLite database the tools write to — nothing on this page can change
-coordination state, it only reflects it. It refreshes itself every couple of
-seconds; no reload needed.
+Open **`http://localhost:8787/`** in a browser. It's a view of the same SQLite
+database the tools write to, refreshing itself every couple of seconds; no
+reload needed. Reading it changes nothing. It can also take a small set of
+deliberate **operator actions** — see *Operator actions* below — which are off
+until the browser presents the shared secret.
 
 You get three things:
 
@@ -126,15 +132,111 @@ is blocked, crashed, or simply finished and quiet, so only the agent can say —
 which is what `set_status` is for.
 
 **Activity log.** Every interesting write — messages, task opened/claimed/done,
-contract versions — merged into one newest-first list, filterable by channel,
-by kind, and by free text. Click any row to expand the full stored value
-(message body, task note, contract JSON).
+contract versions, and operator actions — merged into one newest-first list,
+filterable by channel, by kind, and by free text. Click any row to expand the
+full stored value (message body, task note, contract JSON).
 
 To make the state chips exact rather than inferred, have the agent call
 `set_status` as it works — e.g. add "call `set_status` when you start and finish
 a step, and always before anything long-running" to the repo's `CLAUDE.md`.
 Setting `ttl_seconds` to roughly how long the work should take is what makes a
 `waiting` chip self-correcting when the agent never comes back.
+
+---
+
+## Operator actions
+
+Sooner or later the board shows something only a human can resolve: an agent
+whose window you closed days ago, still holding 139 unread; a task nobody will
+ever claim; a channel you created by typo. Or, most often, an agent that just
+needs a poke. Hover a row and you get the small set of actions for that: unread
+counts and task counts become clickable, and a 👋 and a trash can appear on each
+agent row (the channel header gets its own trash can).
+
+The 👋 is the one you'll reach for daily — it's a nudge you send from the board
+instead of from that agent's own window, which is the difference between watching
+one screen and watching six.
+
+Nothing here is a new power. `complete_task` has never had an ownership check and
+`poll_messages` has always taken an `agent` override, so any connected agent
+could already close anyone's task and advance anyone's cursor. These buttons make
+that deliberate, attribute it to `operator`, and write it where the log can show
+it.
+
+| Action | What it does |
+| --- | --- |
+| **Nudge** | Queues the message you'd otherwise have typed into that agent's window: poll your messages, look at the board, handle what's yours, respond normally. Works on an agent with an empty mailbox, which is the usual reason to nudge one. Type in the box (Enter sends) to send your own words instead. |
+| **Catch up quietly** | The same delivery with the opposite instruction: skim the backlog, act only on what's urgent or addressed directly to it, reply only if a reply is genuinely needed. For draining 139 unread without inviting 139 answers. Only offered when there *is* a backlog. |
+| **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
+| **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
+| **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
+| **Archive a channel** | Hides it from the board. Nothing is deleted, and agents on it keep working — archiving is a statement about your attention, not about their work. |
+| **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
+
+Three behaviours worth knowing before you use them:
+
+**A nudge is a queued message, not a wake-up.** It's the same pull-only limit as
+everything else here: the server has no way to make another window take a turn.
+An agent on a poll loop picks a nudge up within one loop interval, which is what
+makes the button a real replacement for typing into that window — so if you plan
+to drive agents from the board, put them on `/loop` (see *it's pull, not push*).
+An agent idling at a prompt will not see it until someone talks to it. The dialog
+tells you where in the queue the nudge landed for exactly this reason: a nudge
+behind 40 unread messages is not the prompt reply you were expecting.
+
+**A removed agent comes back by itself.** Retiring closes its sessions, and an
+unknown session id answers `404` — the spec's cue to re-initialize — so a window
+that is genuinely still alive reconnects and un-retires itself within a turn.
+Only one that is really gone stays gone. This is deliberate: an agent that is
+working while invisible on the board is a worse failure than a cluttered board.
+The flip side is that "remove" is not how you stop an agent; close its window.
+
+**Retired agents and archived channels are hidden, never dropped.** Both keep a
+count on screen (`1 retired`, `2 archived channels`) that reveals them again.
+Silently omitting a row would make the board lie, which is the one thing it must
+not do.
+
+Deleting a channel removes it from the board but **not** from the activity log:
+`admin_events` is deliberately not swept, because an audit trail you can erase by
+deleting the thing it describes isn't one. The log goes on saying you deleted it,
+and what it contained.
+
+### Unlocking them
+
+Mutating endpoints are enforced regardless of how open the read side is, so
+`ORCH_AUTH_PROTECT_UI=false` (the default) gets you an open board and locked
+buttons. Until the browser proves it holds the secret, every affordance renders
+as plain text and the top bar says `read-only`.
+
+Open the dashboard once as **`http://localhost:8787/?key=<shared secret>`**. That
+drops an httpOnly cookie and redirects to a clean URL, so the secret doesn't stay
+in the address bar or leak through a `Referer`. The page then exchanges the cookie
+for a short-lived admin token (`GET /api/admin/token`) and sends it as a custom
+header on every write.
+
+The custom header is the point: a cross-origin `POST` carrying one requires a
+CORS preflight, which this server never answers, so a random page you visit can't
+drive your dashboard even though it's on localhost. Requests are also refused
+outright if they arrive with a foreign `Origin` or `Sec-Fetch-Site: cross-site`.
+A cookie on its own would not be enough here — cookies are exactly what CSRF
+rides on. If the server has no secret configured at all (`ORCH_AUTH_MODE=off`),
+the token is handed out freely and that CSRF lock is all that's left.
+
+For scripting, the endpoints under `/api/admin/*` also accept the shared secret
+directly:
+
+```bash
+curl -s -X POST http://localhost:8787/api/admin/agent/advance \
+  -H 'content-type: application/json' \
+  -H "X-Orchestratinator-Key: $ORCH_AUTH_TOKEN" \
+  -d '{"channel":"my-channel","agent":"pro","up_to_id":560}'
+
+# nudge: `style` is "normal" (the default) or "quiet"; any `text` is sent verbatim
+curl -s -X POST http://localhost:8787/api/admin/agent/nudge \
+  -H 'content-type: application/json' \
+  -H "X-Orchestratinator-Key: $ORCH_AUTH_TOKEN" \
+  -d '{"channel":"my-channel","agent":"pro","text":"the interface contract changed — re-read iface.v1"}'
+```
 
 ---
 
@@ -228,11 +330,16 @@ set — it never reaches a tool and never appears on the dashboard.
 
 ### The dashboard
 
-`/` and `/api/*` are **not** protected by default, because a browser can't send
-a custom header and locking yourself out of the board is the worse failure. Set
-`ORCH_AUTH_PROTECT_UI=true` to guard them too; then open
+*Reading* `/` and `/api/*` is **not** protected by default, because a browser
+can't send a custom header and locking yourself out of the board is the worse
+failure. Set `ORCH_AUTH_PROTECT_UI=true` to guard them too; then open
 `http://localhost:8787/?key=<token>` once — the server sets an `HttpOnly` cookie
 and redirects to a clean URL, so the secret doesn't sit in the address bar.
+
+*Writing* is a different matter. `/api/admin/*` always demands a credential and
+ignores `warn` mode, in both settings of `ORCH_AUTH_PROTECT_UI` — an open board is
+a reasonable choice, "anyone who reaches the port may delete a channel" is not.
+The same `?key=` visit above is what unlocks the buttons; see *Operator actions*.
 
 ---
 
@@ -298,7 +405,7 @@ structured objects.
 
 | Tool             | Purpose |
 |------------------|---------|
-| `whoami`         | Show the bound channel/agent and who's present. Call first to confirm wiring. |
+| `whoami`         | Show the bound channel/agent and who's present. Call first to confirm wiring. An agent the operator has retired is not listed as present — removal is honest towards agents too, not just the board — and it reappears as soon as it calls anything. |
 | `set_status`     | Declare your state — `working`/`waiting`/`blocked`/`idle` — plus a `detail` line and optional `ttl_seconds`. Shows on the dashboard with its age; nothing reads it back. |
 | `send_message`   | Post to the channel. Omit `to` to broadcast; set `to` (e.g. `"pro"`) to DM. |
 | `poll_messages`  | Fetch messages for you newer than `since`; returns a `cursor` to pass next time. |
@@ -352,13 +459,24 @@ each agent talks to when *you* (or a poll loop) prompt it to.
 - **Storage:** SQLite via `better-sqlite3`. One Node process means writes
   serialize naturally — no cross-process locking. Data lives in a Docker volume.
 - **Schema:** `messages`, `contracts` (+ `contract_history`), `tasks`, `agents`
-  (presence) — all keyed by `channel`. See [`src/db.js`](src/db.js).
+  (presence), `channel_flags` (archive), `admin_events` (operator audit) — all
+  keyed by `channel`. See [`src/db.js`](src/db.js). A channel is never a row of
+  its own; it's a key shared across those tables, which is why archiving needs a
+  flag table and deleting has to sweep all of them in one transaction.
 - **Dashboard:** a separate Express router on the same port. `GET /api/state`
   builds the channel/agent view; `GET /api/activity` is a `UNION ALL` over
-  messages, task transitions and contract history ordered newest-first. The page
-  polls both every 2.5s, so it stays current without a reload. Live presence
-  comes from an in-memory registry of open MCP sessions, which is why closing a
-  VS Code window shows up immediately rather than aging out of the database.
+  messages, task transitions, contract history and operator actions, ordered
+  newest-first. The page polls both every 2.5s, so it stays current without a
+  reload. Live presence comes from an in-memory registry of open MCP sessions,
+  which is why closing a VS Code window shows up immediately rather than aging out
+  of the database.
+- **Operator actions:** `POST /api/admin/*`, guarded independently of the read
+  side (custom-header token + same-origin check; see *Operator actions*). Each one
+  writes an `admin_events` row, and `retire`/`delete` also reach into the session
+  registry to close live sessions — a database-only change would be undone by the
+  next tick, since a live session is itself a source of presence. A nudge adds no
+  delivery path of its own: it is an ordinary `messages` row from `operator`, so an
+  agent needs no special handling to receive one.
 - **Self-heal:** a claim with no completion after `CLAIM_TTL_MINUTES` (default 15)
   reverts to `open` on the next open-poll, so an abandoned claim (agent claimed a
   task, then its turn died) can't sit invisibly in `claimed`. `status=claimed`
@@ -369,11 +487,13 @@ src/
   server.js   Express + Streamable HTTP wiring, per-session header binding
   db.js       SQLite schema + channel-scoped data operations
   tools.js    The MCP tool definitions
-  web.js      Dashboard router: /api/state, /api/activity, static UI
+  web.js      Dashboard router: /api/state, /api/activity, /api/admin/*, static UI
+  auth.js     Shared-secret guards + the operator-action token
   ui/         The dashboard page (no build step, no external assets)
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 test/
-  smoke.mjs   End-to-end self-test (npm run smoke)
+  smoke.mjs   End-to-end self-test: coordination + dashboard reads (npm run smoke)
+  admin.mjs   End-to-end self-test: operator actions + their guards (npm run test:admin)
 ```
 
 ---
@@ -389,5 +509,10 @@ test/
 - **`X-Agent` is honor-system identity**, not a security boundary — everyone
   shares one key, so holding it lets you claim to be any agent. Fine for
   coordinating your own agents.
+- **`operator` is a name, not an identity.** Operator actions are attributed to
+  `operator` so human cleanup can't be mistaken for an agent finishing work, but
+  the same shared key authorises them — the label records intent, not proof of who
+  clicked. Anything under `/api/admin/*` is trusted-operator territory; that's
+  another reason the port stays on `127.0.0.1`.
 - The paired agents must agree on channel/role names; the `.mcp.json` files here
   are the source of truth for the syncinator pair.

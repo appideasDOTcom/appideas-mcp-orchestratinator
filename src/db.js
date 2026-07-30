@@ -67,6 +67,28 @@ export function openDb(path) {
       last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (channel, agent)
     );
+
+    -- Operator-set flags on a channel. A channel is otherwise a derived key (see
+    -- listAllChannels), so archiving needs somewhere of its own to live.
+    CREATE TABLE IF NOT EXISTS channel_flags (
+      channel     TEXT PRIMARY KEY,
+      archived_at TEXT,
+      archived_by TEXT
+    );
+
+    -- Operator actions taken from the dashboard. These exist so the board can
+    -- explain itself: an unread count dropping from 139 to 0 with nothing in the
+    -- log is indistinguishable from a bug. Unioned into the activity feed.
+    CREATE TABLE IF NOT EXISTS admin_events (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel     TEXT NOT NULL,
+      action      TEXT NOT NULL,           -- advance | nudge | retire | unretire | task.close | ...
+      actor       TEXT NOT NULL DEFAULT 'operator',
+      target      TEXT,                    -- agent or task the action applied to
+      detail      TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_admin_events_channel ON admin_events(channel, id);
   `);
 
   // Presence detail added after v0.1 — the dashboard reads these to show an
@@ -84,6 +106,14 @@ export function openDb(path) {
   // server-wide default instead (see STATUS_TTL_MINUTES in web.js).
   addColumn(db, 'agents', 'status_detail', 'TEXT');                 // the human-readable line
   addColumn(db, 'agents', 'status_expires_at', 'TEXT');
+
+  // Retired = the operator has taken this agent off the board. Deliberately a
+  // flag and not a DELETE: the row is recreated by `touchAgent` the moment the
+  // agent connects again, so a delete would be undone by the next reconnect and
+  // look like the button didn't work. Any real activity clears it (see
+  // touchAgent) — hiding an agent that is actually working is the one failure
+  // worse than a cluttered board.
+  addColumn(db, 'agents', 'retired_at', 'TEXT');
 
   return db;
 }
@@ -176,7 +206,9 @@ export function makeStore(db) {
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen      = datetime('now'),
          last_action    = COALESCE(@action, last_action),
-         last_action_at = CASE WHEN @action IS NULL THEN last_action_at ELSE datetime('now') END`
+         last_action_at = CASE WHEN @action IS NULL THEN last_action_at ELSE datetime('now') END,
+         -- A retired agent that calls a tool is back, whatever the board said.
+         retired_at     = NULL`
     ),
     setAgentStatus: db.prepare(
       `INSERT INTO agents (channel, agent, last_seen, status, status_detail, status_at, status_expires_at)
@@ -186,7 +218,8 @@ export function makeStore(db) {
          status            = @status,
          status_detail     = @detail,
          status_at         = datetime('now'),
-         status_expires_at = datetime('now', @ttl)`
+         status_expires_at = datetime('now', @ttl),
+         retired_at        = NULL`
     ),
     advancePollCursor: db.prepare(
       `UPDATE agents SET poll_cursor = MAX(poll_cursor, @cursor)
@@ -195,14 +228,43 @@ export function makeStore(db) {
     listAgents: db.prepare(
       `SELECT agent, last_seen, status, status_detail, status_at, status_expires_at,
               last_action, last_action_at
-       FROM agents WHERE channel = @channel ORDER BY agent`
+       FROM agents WHERE channel = @channel AND retired_at IS NULL ORDER BY agent`
     ),
+
+    // --- operator actions (see src/web.js) ----------------------------------
+    retireAgent: db.prepare(
+      `UPDATE agents SET retired_at = datetime('now')
+       WHERE channel = @channel AND agent = @agent AND retired_at IS NULL`
+    ),
+    unretireAgent: db.prepare(
+      `UPDATE agents SET retired_at = NULL WHERE channel = @channel AND agent = @agent`
+    ),
+    reassignTask: db.prepare(
+      `UPDATE tasks SET assignee = @assignee, updated_at = datetime('now')
+       WHERE channel = @channel AND id = @id AND status != 'done'`
+    ),
+    setChannelArchived: db.prepare(
+      `INSERT INTO channel_flags (channel, archived_at, archived_by)
+       VALUES (@channel, @at, @by)
+       ON CONFLICT(channel) DO UPDATE SET archived_at = @at, archived_by = @by`
+    ),
+    insertAdminEvent: db.prepare(
+      `INSERT INTO admin_events (channel, action, actor, target, detail)
+       VALUES (@channel, @action, @actor, @target, @detail)`
+    ),
+    listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
 
     // --- dashboard reads (see src/web.js) -----------------------------------
     listAllAgents: db.prepare(
       `SELECT channel, agent, last_seen, status, status_detail, status_at, status_expires_at,
-              last_action, last_action_at, poll_cursor
+              last_action, last_action_at, poll_cursor, retired_at
        FROM agents ORDER BY channel, agent`
+    ),
+    // Every unfinished task, so the board can offer one by id instead of just
+    // counting it. Bounded because /api/state is polled every couple of seconds.
+    boardTasks: db.prepare(
+      `SELECT id, channel, title, status, assignee, claimed_by, created_by, updated_at
+       FROM tasks WHERE status != 'done' ORDER BY channel, id DESC LIMIT 2000`
     ),
     listAllChannels: db.prepare(
       `SELECT channel FROM (
@@ -239,8 +301,12 @@ export function makeStore(db) {
        WHERE status = 'claimed' ORDER BY updated_at DESC`
     ),
     // Messages an agent would receive on its next poll_messages call.
+    // `unread_max_id` is the id the operator's "mark read" must advance to — the
+    // highest message this agent can currently see, NOT the channel's max. The
+    // browser sends the value it rendered back, so a message that arrives between
+    // render and click stays unread instead of being silently swallowed.
     unreadCounts: db.prepare(
-      `SELECT a.channel, a.agent, COUNT(m.id) AS unread
+      `SELECT a.channel, a.agent, COUNT(m.id) AS unread, MAX(m.id) AS unread_max_id
          FROM agents a
          LEFT JOIN messages m
            ON m.channel = a.channel AND m.id > a.poll_cursor
@@ -271,6 +337,12 @@ export function makeStore(db) {
          SELECT 'contract.set', id, channel, updated_at, 0,
                 updated_by, NULL, key, substr(value, 1, 2000), NULL, version
            FROM contract_history
+         UNION ALL
+         -- seq 2 so an operator action sorts after the task/message rows it
+         -- caused when both land in the same one-second tick.
+         SELECT 'admin.' || action, id, channel, created_at, 2,
+                actor, target, action, substr(detail, 1, 2000), NULL, NULL
+           FROM admin_events
        )
        SELECT * FROM feed
         WHERE (@channel IS NULL OR channel = @channel)
@@ -278,6 +350,33 @@ export function makeStore(db) {
         LIMIT @limit OFFSET @offset`
     ),
   };
+
+  /**
+   * Delete every trace of a channel. A channel isn't a row anywhere — it's a key
+   * shared across five tables (see listAllChannels) — so this has to sweep all of
+   * them, in one transaction, or a half-deleted channel keeps reappearing from
+   * whichever table still holds it.
+   *
+   * `admin_events` is deliberately NOT swept. It records what the operator did
+   * rather than what the channel contained, and an audit trail you can erase by
+   * deleting the thing it describes is not an audit trail. Keeping it costs
+   * nothing on the board either: listAllChannels doesn't read this table, so the
+   * channel still disappears — the log just goes on remembering you deleted it.
+   */
+  const purgeChannel = db.transaction((channel, by) => {
+    const counts = {};
+    for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents', 'channel_flags']) {
+      counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
+    }
+    q.insertAdminEvent.run({
+      channel,
+      action: 'channel.delete',
+      actor: by,
+      target: channel,
+      detail: JSON.stringify(counts),
+    });
+    return counts;
+  });
 
   const setContract = db.transaction((channel, key, value, by) => {
     const row = q.getContractVersion.get({ channel, key });
@@ -312,11 +411,24 @@ export function makeStore(db) {
     touchAgent: (channel, agent, action = null) => q.touchAgent.run({ channel, agent, action }),
     setAgentStatus: (channel, agent, status, detail = null, ttlSeconds = STATUS_TTL_SECONDS) =>
       q.setAgentStatus.run({ channel, agent, status, detail, ttl: `+${Math.max(0, Math.floor(ttlSeconds))} seconds` }),
-    advancePollCursor: (channel, agent, cursor) => q.advancePollCursor.run({ channel, agent, cursor }),
+    advancePollCursor: (channel, agent, cursor) =>
+      q.advancePollCursor.run({ channel, agent, cursor }).changes,
     listAgents: (channel) => q.listAgents.all({ channel }),
+
+    // --- operator actions -----------------------------------------------------
+    retireAgent: (channel, agent) => q.retireAgent.run({ channel, agent }).changes,
+    unretireAgent: (channel, agent) => q.unretireAgent.run({ channel, agent }).changes,
+    reassignTask: (channel, id, assignee) => q.reassignTask.run({ channel, id, assignee }).changes,
+    setChannelArchived: (channel, archived, by) =>
+      q.setChannelArchived.run({ channel, at: archived ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null, by }).changes,
+    purgeChannel,
+    logAdmin: (channel, action, { actor = 'operator', target = null, detail = null } = {}) =>
+      n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid),
 
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),
+    listChannelFlags: () => q.listChannelFlags.all(),
+    boardTasks: () => q.boardTasks.all(),
     listAllChannels: () => q.listAllChannels.all().map((r) => r.channel),
     channelStats: () => ({
       tasks: q.countTasksByStatus.all(),

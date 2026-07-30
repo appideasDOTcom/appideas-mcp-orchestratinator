@@ -2,10 +2,18 @@ import express from 'express';
 import { fileURLToPath } from 'node:url';
 
 /**
- * The read-only dashboard: a small web UI (served at `/`) plus the two JSON
- * endpoints it polls. Everything here is derived from the same SQLite database
- * the MCP tools write to, so the dashboard never influences coordination — it
- * only reflects it.
+ * The dashboard: a small web UI (served at `/`), the JSON endpoints it polls,
+ * and the operator actions it can take. Everything is derived from the same
+ * SQLite database the MCP tools write to.
+ *
+ * The read half was originally the whole file, on the principle that the board
+ * should only ever reflect coordination and never influence it. `/api/admin/*`
+ * breaks that on purpose, because the alternative was worse: closing a stuck
+ * task or clearing a dead agent's backlog meant hand-editing SQLite, and the
+ * MCP surface already let any agent do both to anyone (complete_task has no
+ * ownership check; poll_messages takes an `agent` override). These endpoints
+ * grant no new authority — they make an existing one deliberate, attributed to
+ * `operator`, and logged where the board can show it.
  *
  * `sessions` is the live MCP session registry owned by server.js, which prunes
  * superseded and idle entries so a row in it means "a window we've heard from
@@ -25,6 +33,35 @@ const LEGACY_STATUS_TTL_MINUTES = 30;
 // guessing from the words. `blocked` is deliberately distinct from `waiting`:
 // waiting resolves on its own, blocked needs a human.
 const STATE_TONE = { working: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
+
+// How many unfinished tasks per channel /api/state carries in full. The counts
+// are always exact; this bounds only the list the task dialog offers, because
+// this payload is refetched every couple of seconds.
+const TASK_LIST_MAX = 25;
+
+// What a plain nudge says: the dashboard's stand-in for typing "check your
+// messages" into that agent's own window. It asks for ordinary behaviour — read,
+// act, answer — and deliberately says nothing about being brief or selective,
+// because a nudge that discourages a reply is a different button (below).
+// Works with an empty backlog too: the reason to nudge an agent is often that it
+// has gone quiet with nothing unread at all.
+const NUDGE = (unread) =>
+  'Operator: ' +
+  (unread
+    ? `you have ${unread} unread message${unread === 1 ? '' : 's'} waiting on this channel. `
+    : 'checking in on this channel. ') +
+  'Please poll your messages, look at the task board, handle anything that is yours, and respond normally — ' +
+  'treat this exactly as if I had typed it into your own window. Call set_status so the board shows where you landed.';
+
+// What a "catch up quietly" nudge actually says. Phrased so an agent that reads
+// it does the right thing without a human in the loop: skim, act only on what
+// matters, and leave a status behind so the board reflects the outcome.
+const CATCH_UP = (unread, upTo) =>
+  `Operator: you have ${unread} unread message${unread === 1 ? '' : 's'} on this channel, up to id ${upTo}. ` +
+  'Please skim them, act only on anything urgent or addressed directly to you, and reply only if a reply is genuinely needed. ' +
+  'Then call set_status so the board shows where you landed.';
+
+const NUDGE_STYLES = new Set(['normal', 'quiet']);
 
 /** SQLite `datetime('now')` is UTC without a zone marker — make it a real ISO string. */
 const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
@@ -107,6 +144,15 @@ function buildState(store, sessions, sessionStats, meta) {
   const claimed = store.claimedTasks();
   const unread = store.unreadCounts();
   const stats = store.channelStats();
+  const archivedAt = new Map(
+    store.listChannelFlags().filter((f) => f.archived_at).map((f) => [f.channel, f.archived_at])
+  );
+  const tasksByChannel = index(store.boardTasks(), (t) => t.channel);
+  // The same NUL-joined compound key the maps below use — neither a channel nor
+  // an agent name can contain one, so a pair can never collide.
+  const NUL = String.fromCharCode(0);
+  const agentKey = (channel, agent) => [channel, agent].join(NUL);
+  const unreadMaxByAgent = new Map(unread.map((r) => [agentKey(r.channel, r.agent), r.unread_max_id]));
 
   const claimedByAgent = index(claimed.filter((t) => t.claimed_by), (t) => `${t.channel}\u0000${t.claimed_by}`);
   const unreadByAgent = new Map(unread.map((r) => [`${r.channel}\u0000${r.agent}`, r.unread]));
@@ -146,7 +192,7 @@ function buildState(store, sessions, sessionStats, meta) {
   }
 
   const channels = [...channelNames].sort().map((channel) => {
-    const agents = (agentsByChannel.get(channel) ?? [])
+    const allAgents = (agentsByChannel.get(channel) ?? [])
       .slice()
       .sort((a, b) => a.agent.localeCompare(b.agent))
       .map((a) => {
@@ -186,21 +232,49 @@ function buildState(store, sessions, sessionStats, meta) {
           reported_expires_at: expiresAt,
           reported_expired: !!a.status && expired,
           unread: unreadByAgent.get(k) ?? 0,
+          // The id "mark read" has to advance to. The browser echoes this back so
+          // a message that arrives between render and click isn't swallowed.
+          unread_max_id: unreadMaxByAgent.get(agentKey(channel, a.agent)) ?? null,
+          retired: !!a.retired_at,
+          retired_at: iso(a.retired_at),
           claimed_tasks: mine.map((t) => ({ id: t.id, title: t.title })),
           assigned_open: assignedByAgent.get(k)?.assigned ?? 0,
         };
       });
 
+    // Retired agents ship in their own list rather than being dropped: the board
+    // shows a "retired (N)" affordance, because silently omitting a row is the
+    // one way this feature could mislead rather than declutter.
+    const agents = allAgents.filter((a) => !a.retired);
+    const retiredAgents = allAgents.filter((a) => a.retired);
+
     const tasks = taskCounts.get(channel) ?? { open: 0, claimed: 0, done: 0 };
+    const unfinished = tasksByChannel.get(channel) ?? [];
     return {
       channel,
+      archived: archivedAt.has(channel),
+      archived_at: iso(archivedAt.get(channel)),
       connected: agents.filter((a) => a.presence === 'connected').length,
       agents,
+      retired_agents: retiredAgents,
       tasks: { ...tasks, unassigned_open: unassignedByChannel.get(channel) ?? 0 },
+      // The counts above are exact; this list is capped (see TASK_LIST_MAX) and
+      // exists so the task dialog can name a task rather than just count it.
+      task_list: unfinished.slice(0, TASK_LIST_MAX).map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        assignee: t.assignee,
+        claimed_by: t.claimed_by,
+        updated_at: iso(t.updated_at),
+      })),
+      task_list_total: unfinished.length,
       messages: messageCounts.get(channel) ?? 0,
       contracts: contractCounts.get(channel) ?? 0,
     };
   });
+
+  const visible = channels.filter((c) => !c.archived);
 
   return {
     server: {
@@ -219,21 +293,205 @@ function buildState(store, sessions, sessionStats, meta) {
     },
     sessions: liveSessions.sort((a, b) => (a.channel ?? '').localeCompare(b.channel ?? '')),
     channels,
+    // Totals describe the board as displayed, so archived channels and retired
+    // agents are excluded — a header that counts things you can't see is worse
+    // than no header. Both are reported separately so nothing is hidden silently.
     totals: {
-      channels: channels.length,
-      agents: channels.reduce((n, c) => n + c.agents.length, 0),
+      channels: visible.length,
+      agents: visible.reduce((n, c) => n + c.agents.length, 0),
       // Agents, not sessions: one window can churn through many sessions, and
       // "2 agents · 21 connected" is a nonsense sentence.
-      connected: channels.reduce((n, c) => n + c.connected, 0),
+      connected: visible.reduce((n, c) => n + c.connected, 0),
       live_sessions: liveSessions.length,
-      open_tasks: channels.reduce((n, c) => n + c.tasks.open, 0),
-      claimed_tasks: channels.reduce((n, c) => n + c.tasks.claimed, 0),
+      open_tasks: visible.reduce((n, c) => n + c.tasks.open, 0),
+      claimed_tasks: visible.reduce((n, c) => n + c.tasks.claimed, 0),
+      archived_channels: channels.length - visible.length,
+      retired_agents: channels.reduce((n, c) => n + c.retired_agents.length, 0),
     },
   };
 }
 
-export function createWebRouter({ store, sessions, sessionStats, meta }) {
+/**
+ * The operator surface. Every route here is a write, so every route is guarded
+ * (see auth.adminGuard — enforced regardless of how open the read side is) and
+ * every route leaves an `admin_events` row behind, which the activity feed
+ * shows. Identity is always the literal `operator`, never a borrowed agent name,
+ * so a human's cleanup can never be mistaken for an agent finishing work.
+ *
+ * Channel and agent names travel in the JSON body rather than the path: they're
+ * free-form strings, and a path segment would need encoding conventions that
+ * only exist to be got wrong.
+ */
+function createAdminRouter({ store, auth, closeSessionsFor }) {
   const router = express.Router();
+
+  // Ahead of the guard below — this is the endpoint that hands out the token the
+  // guard wants, so it has its own (stricter) check.
+  router.get('/token', auth.adminTokenGuard, (_req, res) => {
+    res.json({ token: auth.adminToken });
+  });
+
+  router.use(auth.adminGuard);
+
+  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const bad = (res, error) => res.status(400).json({ error });
+  const missing = (res, error) => res.status(404).json({ error });
+
+  /** Pull and validate the (channel, agent) pair every agent route needs. */
+  const pair = (req) => ({ channel: str(req.body?.channel), agent: str(req.body?.agent) });
+  /** Does this agent have a row at all? unreadCounts has one per agent row. */
+  const agentRow = (channel, agent) =>
+    store.unreadCounts().find((r) => r.channel === channel && r.agent === agent) ?? null;
+
+  // Mark a backlog read on the agent's behalf. The store clamps with
+  // MAX(poll_cursor, …) so this can only ever move forward — a stale dialog
+  // can't rewind a cursor and resurrect messages the agent already dealt with.
+  router.post('/agent/advance', (req, res) => {
+    const { channel, agent } = pair(req);
+    const upTo = Number(req.body?.up_to_id);
+    if (!channel || !agent) return bad(res, 'channel and agent are required');
+    if (!Number.isInteger(upTo) || upTo < 0) return bad(res, 'up_to_id must be a non-negative integer');
+    const row = agentRow(channel, agent);
+    if (!row) return missing(res, `no agent "${agent}" on channel "${channel}"`);
+    const before = row.unread;
+    store.advancePollCursor(channel, agent, upTo);
+    const after = agentRow(channel, agent)?.unread ?? 0;
+    store.logAdmin(channel, 'advance', {
+      target: agent,
+      detail: `marked ${before - after} message(s) read up to id ${upTo}`,
+    });
+    res.json({ ok: true, channel, agent, cursor: upTo, cleared: before - after, unread: after });
+  });
+
+  /**
+   * Poke an agent from the dashboard instead of from its own window.
+   *
+   * Three flavours, all the same delivery: `normal` (the default) asks for
+   * ordinary behaviour, `quiet` asks it to drain a backlog without chatter, and
+   * any `text` is sent verbatim so the dashboard can carry your own words.
+   *
+   * This is a queued message, not a wake-up: MCP is pull-only, so it lands on the
+   * agent's next poll. An agent running a poll loop picks it up within one loop
+   * interval; a window that never polls again never sees it. `agent` needs no
+   * backlog — the whole point of the plain nudge is that it works on an idle one.
+   */
+  router.post('/agent/nudge', (req, res) => {
+    const { channel, agent } = pair(req);
+    if (!channel || !agent) return bad(res, 'channel and agent are required');
+    const style = str(req.body?.style) ?? 'normal';
+    if (!NUDGE_STYLES.has(style)) return bad(res, `style must be one of: ${[...NUDGE_STYLES].join(', ')}`);
+    const row = agentRow(channel, agent);
+    if (!row) return missing(res, `no agent "${agent}" on channel "${channel}"`);
+    const custom = str(req.body?.text);
+    const text = custom ?? (style === 'quiet' ? CATCH_UP(row.unread, row.unread_max_id ?? 0) : NUDGE(row.unread));
+    const id = store.insertMessage(channel, 'operator', agent, JSON.stringify({ kind: 'operator-nudge', text }));
+    store.logAdmin(channel, 'nudge', { target: agent, detail: text });
+    res.json({
+      ok: true,
+      channel,
+      agent,
+      style: custom ? 'custom' : style,
+      message_id: id,
+      text,
+      queued_behind_unread: row.unread,
+    });
+  });
+
+  /**
+   * Take an agent off the board: clear its backlog, close its live sessions, flag
+   * the row retired.
+   *
+   * Closing the sessions is what makes this meaningful rather than cosmetic. An
+   * unknown session id answers 404, which the MCP spec tells clients to
+   * re-initialise on — so a window that's still alive comes straight back and
+   * un-retires itself (see touchAgent), while a dead one stays gone. "Prove
+   * you're alive or stay off the board."
+   */
+  router.post('/agent/retire', (req, res) => {
+    const { channel, agent } = pair(req);
+    if (!channel || !agent) return bad(res, 'channel and agent are required');
+    const row = agentRow(channel, agent);
+    if (!row) return missing(res, `no agent "${agent}" on channel "${channel}"`);
+    if (row.unread_max_id) store.advancePollCursor(channel, agent, row.unread_max_id);
+    const closed = closeSessionsFor({ channel, agent });
+    store.retireAgent(channel, agent);
+    store.logAdmin(channel, 'retire', {
+      target: agent,
+      detail: `cleared ${row.unread} unread, closed ${closed} live session(s)`,
+    });
+    res.json({ ok: true, channel, agent, cleared: row.unread, sessions_closed: closed });
+  });
+
+  router.post('/agent/unretire', (req, res) => {
+    const { channel, agent } = pair(req);
+    if (!channel || !agent) return bad(res, 'channel and agent are required');
+    if (!store.unretireAgent(channel, agent)) return missing(res, `no agent "${agent}" on channel "${channel}"`);
+    store.logAdmin(channel, 'unretire', { target: agent, detail: 'restored to the board' });
+    res.json({ ok: true, channel, agent });
+  });
+
+  router.post('/task/close', (req, res) => {
+    const channel = str(req.body?.channel);
+    const id = Number(req.body?.id);
+    if (!channel || !Number.isInteger(id)) return bad(res, 'channel and an integer id are required');
+    const note = str(req.body?.note) ?? 'closed from the dashboard by the operator';
+    if (!store.completeTask(channel, id, note, 'operator')) {
+      return missing(res, `task #${id} not found on "${channel}", or already done`);
+    }
+    store.logAdmin(channel, 'task.close', { target: `#${id}`, detail: note });
+    res.json({ ok: true, channel, id, note });
+  });
+
+  router.post('/task/reassign', (req, res) => {
+    const channel = str(req.body?.channel);
+    const id = Number(req.body?.id);
+    if (!channel || !Number.isInteger(id)) return bad(res, 'channel and an integer id are required');
+    // An explicit null is meaningful: it puts the task back in the unassigned
+    // pool for whoever picks it up first.
+    const assignee = str(req.body?.assignee);
+    if (!store.reassignTask(channel, id, assignee)) {
+      return missing(res, `task #${id} not found on "${channel}", or already done`);
+    }
+    store.logAdmin(channel, 'task.reassign', { target: `#${id}`, detail: assignee ? `assigned to ${assignee}` : 'unassigned' });
+    res.json({ ok: true, channel, id, assignee });
+  });
+
+  // Archive is non-destructive and reversible, so it deliberately does NOT close
+  // sessions: agents on the channel keep working, their writes keep landing, and
+  // unarchiving shows the lot. Hiding is a statement about your attention, not
+  // about their work.
+  for (const [path, archived, action] of [['archive', true, 'channel.archive'], ['unarchive', false, 'channel.unarchive']]) {
+    router.post(`/channel/${path}`, (req, res) => {
+      const channel = str(req.body?.channel);
+      if (!channel) return bad(res, 'channel is required');
+      store.setChannelArchived(channel, archived, 'operator');
+      store.logAdmin(channel, action, { target: channel, detail: archived ? 'hidden from the board' : 'restored to the board' });
+      res.json({ ok: true, channel, archived });
+    });
+  }
+
+  /**
+   * Permanent, unrecoverable deletion of everything on a channel. Guarded by
+   * having to name the channel exactly: this is the one action on the board with
+   * no undo, and the only backup is whatever the Docker volume happens to hold.
+   */
+  router.post('/channel/delete', (req, res) => {
+    const channel = str(req.body?.channel);
+    const confirm = str(req.body?.confirm);
+    if (!channel) return bad(res, 'channel is required');
+    if (confirm !== channel) return bad(res, 'confirm must exactly match the channel name');
+    const closed = closeSessionsFor({ channel });
+    const deleted = store.purgeChannel(channel, 'operator');
+    res.json({ ok: true, channel, deleted, sessions_closed: closed });
+  });
+
+  return router;
+}
+
+export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor }) {
+  const router = express.Router();
+
+  router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor }));
 
   router.get('/api/state', (_req, res) => {
     res.json(buildState(store, sessions, sessionStats, meta));

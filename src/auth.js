@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 /**
  * A single shared secret that clients present on every MCP request.
@@ -22,6 +22,22 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 
 /** Clients send the secret here. `Authorization: Bearer <token>` also works. */
 export const AUTH_HEADER = 'x-orchestratinator-key';
+/**
+ * The dashboard sends this on every mutating request. It's a fresh random value
+ * per server process, handed to the page by GET /api/admin/token — which itself
+ * requires the shared secret (header, or the cookie a `/?key=…` visit drops).
+ *
+ * Two separate jobs, which is why it isn't just the shared secret again:
+ *  - It's a *custom* header, so a cross-origin POST from any other page needs a
+ *    CORS preflight. We answer no preflights, so the browser never sends the
+ *    real request. That's the CSRF lock, and a cookie alone cannot provide it —
+ *    cookies are precisely what CSRF rides on.
+ *  - It's readable by the page's JavaScript, which the httpOnly cookie is not.
+ * A foreign page can still *fire* the token request, but it can't read the
+ * response (no CORS headers are ever sent), and SameSite=lax withholds the
+ * cookie from cross-site fetches, so it gets a 401 and nothing else.
+ */
+export const ADMIN_HEADER = 'x-orch-admin-token';
 /** Set on the dashboard once, so a browser doesn't need the key in every URL. */
 const UI_COOKIE = 'orch_key';
 const VALID_MODES = new Set(['off', 'warn', 'enforce']);
@@ -60,6 +76,9 @@ function describe(req) {
 }
 
 export function createAuth(env = process.env) {
+  // Regenerated on every restart, so a token that leaks into a log or a devtools
+  // panel stops working the next time the container comes up.
+  const adminToken = randomBytes(32).toString('base64url');
   const token = (env.ORCH_AUTH_TOKEN ?? '').trim();
   const mode = token ? (env.ORCH_AUTH_MODE ?? 'enforce').trim().toLowerCase() : 'off';
   // A typo'd mode must not fail open — a silently unlocked door is the whole
@@ -93,6 +112,59 @@ export function createAuth(env = process.env) {
     return candidates.some((c) => tokensMatch(c, token));
   }
 
+  /**
+   * Belt to the custom header's braces: reject anything a browser tells us came
+   * from another site. `Origin` is absent on same-origin GETs (and on curl), so
+   * absence can't be treated as hostile — but when it's present it must match
+   * the host we were reached on, which holds through the ngrok tunnel too since
+   * both sides are then the tunnel hostname.
+   */
+  function sameOrigin(req) {
+    if (String(req.headers['sec-fetch-site'] ?? '') === 'cross-site') return false;
+    const origin = header(req, 'origin');
+    if (!origin) return true;
+    try { return new URL(origin).host === req.headers.host; } catch { return false; }
+  }
+
+  /**
+   * Guards the mutating dashboard endpoints (/api/admin/*).
+   *
+   * Unlike `uiGuard` this is never optional and never honours `warn` mode: reads
+   * being open is a config choice, but "anyone who can reach the port may delete
+   * a channel" is not a choice worth offering. The only exception is a server
+   * with no secret configured at all (mode `off`), where there is no key to
+   * demand — there, the CSRF lock is all that's left, and it still applies.
+   */
+  function adminGuard(req, res, next) {
+    if (!sameOrigin(req)) {
+      warn(`admin:${describe(req)}`, `[orchestratinator] admin DENY: cross-origin ${req.method} ${req.path}`);
+      return res.status(403).json({ error: 'cross-origin admin request refused' });
+    }
+    const presented = header(req, ADMIN_HEADER);
+    if (presented && tokensMatch(presented, adminToken)) return next();
+    if (mode !== 'off' && authorized(req)) return next();
+    warn(`admin:${describe(req)}`, `[orchestratinator] admin DENY: ${req.method} ${req.path} without a valid admin token`);
+    return res.status(401).json({
+      error: mode === 'off'
+        ? `Unauthorized: send the per-process admin token in the ${ADMIN_HEADER} header (GET /api/admin/token).`
+        : `Unauthorized: send the ${ADMIN_HEADER} header (GET /api/admin/token) or the shared secret in ${AUTH_HEADER}.`,
+    });
+  }
+
+  /**
+   * Guards GET /api/admin/token — the one thing that hands out write access, so
+   * it wants the shared secret even when the dashboard itself is open. In
+   * practice that means visiting `/?key=<secret>` once per browser; `uiGuard`
+   * drops the cookie on that visit in either mode.
+   */
+  function adminTokenGuard(req, res, next) {
+    if (!sameOrigin(req)) return res.status(403).json({ error: 'cross-origin admin request refused' });
+    if (mode === 'off' || authorized(req, true)) return next();
+    return res.status(401).json({
+      error: 'Unauthorized: open the dashboard once as /?key=<shared secret> to enable operator actions.',
+    });
+  }
+
   /** Guards /mcp. Registered before the body parser so a reject never parses 4mb. */
   function mcpGuard(req, res, next) {
     if (mode === 'off' || authorized(req)) return next();
@@ -119,7 +191,31 @@ export function createAuth(env = process.env) {
    * clean URL so the secret doesn't linger in the address bar or a Referer.
    */
   function uiGuard(req, res, next) {
-    if (!protectUi) return next();
+    // The cookie drop happens in both modes, ahead of the protectUi check: with
+    // the dashboard open the cookie isn't what lets you *read* the board, but it
+    // is what lets you take an operator action, and `/?key=…` has to be able to
+    // establish that either way.
+    const dropCookie = () => {
+      if (!token || req.method !== 'GET' || typeof req.query?.key !== 'string') return false;
+      // Only the dashboard page gets the cookie-and-redirect treatment. On an API
+      // route a redirect would be actively unhelpful: `?key=` there is a caller
+      // authenticating one request (curl, a script), and `authorized(req, true)`
+      // already accepts it — bouncing it to a keyless URL would just 401.
+      if (req.path.startsWith('/api/')) return false;
+      if (!tokensMatch(req.query.key, token)) return false;
+      res.cookie(UI_COOKIE, token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: 180 * 24 * 60 * 60 * 1000,
+      });
+      // Redirect to a clean URL so the secret doesn't linger in the address bar,
+      // the history, or a Referer header on the next request out.
+      res.redirect(req.path);
+      return true;
+    };
+
+    if (!protectUi) return dropCookie() ? undefined : next();
     if (!authorized(req, true)) {
       const who = describe(req);
       if (mode === 'warn') {
@@ -129,28 +225,25 @@ export function createAuth(env = process.env) {
       warn(`ui:${who}`, `[orchestratinator] auth DENY: dashboard request from ${who} had no valid key`);
       return res.status(401).type('text/plain').send('Unauthorized — open this page as /?key=<shared secret>\n');
     }
-    if (typeof req.query?.key === 'string' && req.method === 'GET') {
-      res.cookie(UI_COOKIE, token, {
-        httpOnly: true,
-        sameSite: 'lax',
-        path: '/',
-        maxAge: 180 * 24 * 60 * 60 * 1000,
-      });
-      return res.redirect(req.path);
-    }
+    if (dropCookie()) return undefined;
     return next();
   }
 
   return {
     mode,
     protectUi,
+    adminToken,
     mcpGuard,
     uiGuard,
+    adminGuard,
+    adminTokenGuard,
     /** One startup line, so the mode is never something you have to infer. */
     describeStartup() {
-      if (mode === 'off') return 'auth      OFF (no ORCH_AUTH_TOKEN set — any client may connect)';
+      if (mode === 'off') {
+        return 'auth      OFF (no ORCH_AUTH_TOKEN set — any client may connect; operator actions need only the admin token)';
+      }
       const ui = protectUi ? ', dashboard protected' : ', dashboard open';
-      return `auth      ${mode.toUpperCase()} via ${AUTH_HEADER}${ui}`;
+      return `auth      ${mode.toUpperCase()} via ${AUTH_HEADER}${ui}, operator actions ENFORCED (open /?key=… once per browser)`;
     },
   };
 }

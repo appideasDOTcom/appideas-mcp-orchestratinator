@@ -16,6 +16,7 @@
     </div>
     <div class="topbar-meta muted mono" id="server-meta"></div>
     <div class="topbar-actions">
+      <span id="admin-state" class="admin-locked mono hidden"></span>
       <label class="switch">
         <input type="checkbox" id="autorefresh" checked>
         <span>auto-refresh</span>
@@ -44,6 +45,7 @@
             <button class="chip on" data-kind="message">messages</button>
             <button class="chip on" data-kind="task">tasks</button>
             <button class="chip on" data-kind="contract">contracts</button>
+            <button class="chip on" data-kind="admin">operator</button>
           </div>
           <input id="filter-text" class="input" type="search" placeholder="search…" autocomplete="off">
           <span id="log-count" class="muted mono"></span>
@@ -62,6 +64,15 @@
       </div>
     </section>
   </main>
+
+  <!--
+    Operator dialogs live here, on <body>, and not inside #channels: that grid is
+    replaced wholesale on every data change, which would tear an open dialog out
+    from under the pointer mid-click.
+  -->
+  <dialog id="dlg" class="dlg">
+    <div id="dlg-body"></div>
+  </dialog>
 
   <script src="./app.js"></script>
 </body>
