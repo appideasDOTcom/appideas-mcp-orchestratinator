@@ -7,3 +7,4 @@ data/
 npm-debug.log*
 .DS_Store
 .mcp.json
+package-lock.json
