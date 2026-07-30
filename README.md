@@ -131,6 +131,16 @@ tool call is never read as "waiting". That gap looks identical whether the agent
 is blocked, crashed, or simply finished and quiet, so only the agent can say —
 which is what `set_status` is for.
 
+**Minimize a channel to change your focus.** The `–` on any channel header folds
+that card into a pill beneath the board; clicking the pill unfolds it, and `show
+all` brings everything back at once. This is *focus*, not a decision: it lives in
+`localStorage` in one browser, so nobody else's board changes, nothing is
+audited, and there's no server round-trip — which is the whole difference from
+archiving a channel, which is a shared and semi-permanent statement (see
+*Operator actions*). Because it isn't an operator action, minimize works on a
+read-only board too. A pill keeps the channel's unread count on it, so narrowing
+your focus never hides news.
+
 **Activity log.** Every interesting write — messages, task opened/claimed/done,
 contract versions, and operator actions — merged into one newest-first list,
 filterable by channel, by kind, and by free text. Click any row to expand the
@@ -170,7 +180,7 @@ it.
 | **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
 | **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
 | **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
-| **Archive a channel** | Hides it from the board. Nothing is deleted, and agents on it keep working — archiving is a statement about your attention, not about their work. |
+| **Archive a channel** | Hides it from the board for everyone, and says so in the log. Nothing is deleted and agents on it keep working. Semi-permanent by intent — if you only want it out of your way for the next hour, minimize it instead (see *The dashboard*). |
 | **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
 
 Three behaviours worth knowing before you use them:

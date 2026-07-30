@@ -1,6 +1,6 @@
 {
   "name": "appideas-mcp-orchestratinator",
-  "version": "0.2.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Shared MCP coordination server (mailbox + contracts + tasks + status dashboard) for coordinating Claude Code agents that live in separate VS Code windows.",

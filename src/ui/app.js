@@ -25,8 +25,28 @@ const el = {
   dlgBody: $('dlg-body'),
 };
 
+/*
+ * Minimizing a channel is a view preference, not a claim about the work, so it
+ * lives in this browser and nowhere else — that is the whole difference from
+ * archiving, which is a shared, audited statement everyone sees. Kept across
+ * reloads, because a board you have to re-tidy on every refresh isn't tidy.
+ */
+const MIN_KEY = 'orch.minimized';
+function loadMinimized() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MIN_KEY) ?? '[]');
+    return new Set(Array.isArray(raw) ? raw.filter((s) => typeof s === 'string') : []);
+  } catch {
+    return new Set();   // private mode, or someone put junk in there
+  }
+}
+function saveMinimized() {
+  try { localStorage.setItem(MIN_KEY, JSON.stringify([...ui.minimized])); } catch { /* not worth failing over */ }
+}
+
 const ui = {
   limit: PAGE,
+  minimized: loadMinimized(),
   kinds: new Set(['message', 'task', 'contract', 'admin']),
   text: '',
   channel: '',
@@ -172,9 +192,48 @@ function agentRow(c, a) {
             </div>`;
 }
 
+/** One channel card: the header line, its affordances, and every agent row. */
+function channelCard(c) {
+  const retired = c.retired_agents ?? [];
+  const rows = c.agents.map((a) => agentRow(c, a)).join('');
+  const retiredRows = ui.showRetired ? retired.map((a) => agentRow(c, a)).join('') : '';
+  const agents = rows || retiredRows
+    ? rows + retiredRows
+    : '<div class="empty">no agents seen yet</div>';
+  const retiredChip = retired.length
+    ? `<button type="button" class="chip tiny${ui.showRetired ? ' on' : ''}" data-act="toggle-retired" title="agents the operator took off this board">
+         ${retired.length} retired
+       </button>`
+    : '';
+  const openCount = c.tasks.open + c.tasks.claimed;
+  const tasksCell = openCount && !ui.admin.locked
+    ? `<button type="button" class="mini" data-act="tasks" data-channel="${esc(c.channel)}" title="close or reassign unfinished tasks"><b>${c.tasks.open}</b> open · <b>${c.tasks.claimed}</b> claimed</button>`
+    : `<b>${c.tasks.open}</b> open · <b>${c.tasks.claimed}</b> claimed`;
+
+  return `
+      <div class="channel${c.archived ? ' archived' : ''}">
+        <div class="channel-head">
+          <span class="channel-name">${esc(c.channel)}</span>
+          ${c.archived ? `<span class="state off" title="archived ${esc(absTime(c.archived_at))} — nothing was deleted">archived</span>` : ''}
+          ${retiredChip}
+          <span class="channel-stats">
+            ${tasksCell} · <b>${c.tasks.done}</b> done ·
+            <b>${c.contracts}</b> contracts · <b>${c.messages}</b> msgs
+          </span>
+          <div class="row-acts">
+            <!-- Minimize is view state, so unlike the trash can it is there even on
+                 a read-only board. -->
+            <button type="button" class="row-act" data-act="minimize" data-channel="${esc(c.channel)}" title="Minimize ${esc(c.channel)} — folds it into a pill below so you can focus. This browser only; nobody else sees it, and nothing is archived.">–</button>
+            ${ui.admin.locked ? '' : `<button type="button" class="row-act" data-act="channel" data-channel="${esc(c.channel)}" title="Archive or delete this channel">🗑</button>`}
+          </div>
+        </div>
+        ${agents}
+      </div>`;
+}
+
 function renderChannels(state) {
   const sig = JSON.stringify(state.channels) + JSON.stringify(state.totals) +
-    `|${ui.admin.locked}|${ui.showRetired}|${ui.showArchived}`;
+    `|${ui.admin.locked}|${ui.showRetired}|${ui.showArchived}|${[...ui.minimized].sort().join('\n')}`;
   if (sig === ui.lastChannelSig) {
     // Same data — but the ages still have to keep counting up.
     refreshAges(el.channels);
@@ -192,7 +251,9 @@ function renderChannels(state) {
     return;
   }
 
-  const shown = state.channels.filter((c) => ui.showArchived || !c.archived);
+  const onBoard = state.channels.filter((c) => ui.showArchived || !c.archived);
+  const shown = onBoard.filter((c) => !ui.minimized.has(c.channel));
+  const minimized = onBoard.filter((c) => ui.minimized.has(c.channel));
   // Archived channels and retired agents are never dropped silently — the count
   // is always on screen, even when the rows aren't.
   const bar = t.archived_channels
@@ -203,38 +264,31 @@ function renderChannels(state) {
        </div>`
     : '';
 
-  el.channels.innerHTML = bar + shown.map((c) => {
-    const retired = c.retired_agents ?? [];
-    const rows = c.agents.map((a) => agentRow(c, a)).join('');
-    const retiredRows = ui.showRetired ? retired.map((a) => agentRow(c, a)).join('') : '';
-    const agents = rows || retiredRows
-      ? rows + retiredRows
-      : '<div class="empty">no agents seen yet</div>';
-    const retiredChip = retired.length
-      ? `<button type="button" class="chip tiny${ui.showRetired ? ' on' : ''}" data-act="toggle-retired" title="agents the operator took off this board">
-           ${retired.length} retired
-         </button>`
-      : '';
-    const openCount = c.tasks.open + c.tasks.claimed;
-    const tasksCell = openCount && !ui.admin.locked
-      ? `<button type="button" class="mini" data-act="tasks" data-channel="${esc(c.channel)}" title="close or reassign unfinished tasks"><b>${c.tasks.open}</b> open · <b>${c.tasks.claimed}</b> claimed</button>`
-      : `<b>${c.tasks.open}</b> open · <b>${c.tasks.claimed}</b> claimed`;
+  // A minimized channel keeps whatever it is carrying on screen. A pill that hid
+  // an unread count would make the board lie by omission, which is the one thing
+  // it must not do — same reason archived channels keep a count.
+  const pills = minimized.length
+    ? `<div class="min-bar">${minimized.map((c) => {
+        const unread = (c.agents ?? []).reduce((sum, a) => sum + a.unread, 0);
+        const unfinished = c.tasks.open + c.tasks.claimed;
+        const title = `${c.channel} — click to restore · ${unread} unread · ` +
+          `${unfinished} unfinished task${unfinished === 1 ? '' : 's'} · ${c.messages} message${c.messages === 1 ? '' : 's'}`;
+        return `<button type="button" class="min-pill" data-act="restore" data-channel="${esc(c.channel)}" title="${esc(title)}">
+            <span class="min-name">${esc(c.channel)}</span>
+            ${c.archived ? '<span class="min-flag">archived</span>' : ''}
+            ${unread ? `<span class="min-count">${unread}</span>` : ''}
+          </button>`;
+      }).join('')}${minimized.length > 1
+        ? `<button type="button" class="min-pill min-all" data-act="restore-all" title="Bring all ${minimized.length} minimized channels back">show all</button>`
+        : ''}</div>`
+    : '';
 
-    return `
-      <div class="channel${c.archived ? ' archived' : ''}">
-        <div class="channel-head">
-          <span class="channel-name">${esc(c.channel)}</span>
-          ${c.archived ? `<span class="state off" title="archived ${esc(absTime(c.archived_at))} — nothing was deleted">archived</span>` : ''}
-          ${retiredChip}
-          <span class="channel-stats">
-            ${tasksCell} · <b>${c.tasks.done}</b> done ·
-            <b>${c.contracts}</b> contracts · <b>${c.messages}</b> msgs
-          </span>
-          ${ui.admin.locked ? '' : `<button type="button" class="row-act" data-act="channel" data-channel="${esc(c.channel)}" title="Archive or delete this channel">🗑</button>`}
-        </div>
-        ${agents}
-      </div>`;
-  }).join('');
+  const cards = !shown.length && minimized.length
+    ? '<div class="empty">every channel is minimized — click a pill to bring one back</div>'
+    : shown.map(channelCard).join('');
+
+  // Pills last, so they land on their own row beneath the cards.
+  el.channels.innerHTML = bar + cards + pills;
 }
 
 function renderServer(state) {
@@ -689,6 +743,19 @@ el.channels.addEventListener('click', (e) => {
     else ui.showRetired = !ui.showRetired;
     ui.lastChannelSig = null;
     tick();
+    return;
+  }
+
+  // So is minimizing, and it never leaves the browser — so it re-renders from the
+  // state already in hand rather than waiting on a fetch that would return the
+  // same thing. Changing what you're looking at should feel instant.
+  if (action === 'minimize' || action === 'restore' || action === 'restore-all') {
+    if (action === 'minimize') ui.minimized.add(channel);
+    else if (action === 'restore') ui.minimized.delete(channel);
+    else ui.minimized.clear();
+    saveMinimized();
+    ui.lastChannelSig = null;
+    if (ui.state) renderChannels(ui.state); else tick();
     return;
   }
   if (ui.admin.locked) return;

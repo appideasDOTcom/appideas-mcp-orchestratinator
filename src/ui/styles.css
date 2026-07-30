@@ -355,6 +355,47 @@ pre.raw {
 
 .chip.tiny { font-size: 10px; padding: 1px 6px; }
 .reveal-bar { grid-column: 1 / -1; display: flex; gap: 6px; }
+
+/* Minimized channels: a pill row under the cards. Dashed, so a pill reads as a
+   card that's been folded away rather than as one more filter chip. */
+.min-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.min-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease;
+}
+.min-pill:hover, .min-pill:focus-visible { border-style: solid; border-color: var(--accent); color: var(--text); }
+/* Widening your focus again shouldn't be N clicks. Not a channel, so no mono. */
+.min-all { border-style: none; text-decoration: underline dotted; }
+.min-name { font-family: var(--mono); }
+.min-flag { font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; opacity: .8; }
+/* Whatever the folded channel is carrying stays legible from out here. */
+.min-count {
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--wait-bg);
+  color: var(--wait);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: center;
+}
+/* The board's own empty states span the grid instead of sitting in column one. */
+.channel-grid > .empty { grid-column: 1 / -1; }
 .channel.archived { opacity: .72; }
 .agent.retired { opacity: .6; }
 
