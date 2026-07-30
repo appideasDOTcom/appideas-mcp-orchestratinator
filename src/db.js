@@ -89,6 +89,34 @@ export function openDb(path) {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_admin_events_channel ON admin_events(channel, id);
+
+    -- Humans who may open the dashboard. Separate from the shared MCP secret on
+    -- purpose: that key is one static string every agent holds, which is the
+    -- wrong shape for a person — you can't disable one holder of it, and it says
+    -- nothing about who took an action. Every user here is an admin; the model
+    -- is "people I know by name", not a permission system.
+    CREATE TABLE IF NOT EXISTS users (
+      username    TEXT PRIMARY KEY,        -- lower-cased on the way in
+      password    TEXT NOT NULL,           -- scrypt, never a plaintext (see auth.js)
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      last_login  TEXT
+    );
+
+    -- Live browser logins. In the database rather than a signed cookie so that
+    -- disabling or deleting a user takes effect on their next request instead of
+    -- whenever their cookie happens to expire — the whole point of an
+    -- enable/disable toggle is that it acts now.
+    CREATE TABLE IF NOT EXISTS ui_sessions (
+      id          TEXT PRIMARY KEY,        -- the cookie value: 32 random bytes
+      username    TEXT NOT NULL,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at  TEXT NOT NULL,
+      user_agent  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ui_sessions_user ON ui_sessions(username);
   `);
 
   // Presence detail added after v0.1 — the dashboard reads these to show an
@@ -133,6 +161,26 @@ const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
  * Settable to 0 so a test can prove the fallback actually fires.
  */
 export const STATUS_TTL_SECONDS = Math.max(0, Number(process.env.STATUS_TTL_SECONDS ?? 900));
+
+/**
+ * Every table a backup carries, and the only tables a restore will write.
+ *
+ * `ui_sessions` is deliberately absent. It holds live login cookies, which are
+ * credentials rather than data — carrying them into a file that gets downloaded
+ * and copied around would hand out access, and restoring them onto another host
+ * would resurrect logins nobody made there. A restore clears them instead, so
+ * everybody signs in again against the users the file did bring.
+ */
+export const BACKUP_TABLES = [
+  'messages',
+  'contracts',
+  'contract_history',
+  'tasks',
+  'agents',
+  'channel_flags',
+  'admin_events',
+  'users',
+];
 
 /**
  * Wrap a database handle in a small set of channel-scoped data operations.
@@ -253,6 +301,60 @@ export function makeStore(db) {
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
     listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
+
+    // --- dashboard users and their logins (see src/auth.js) -------------------
+    // `password` is never selected here: nothing outside verifyLogin has any
+    // business reading a hash, and a list endpoint that returns one is how it
+    // ends up in a log or a devtools panel.
+    listUsers: db.prepare(
+      `SELECT username, enabled, created_at, updated_at, last_login FROM users ORDER BY username`
+    ),
+    getUser: db.prepare(
+      `SELECT username, enabled, created_at, updated_at, last_login FROM users WHERE username = @username`
+    ),
+    getUserSecret: db.prepare(`SELECT username, password, enabled FROM users WHERE username = @username`),
+    countUsers: db.prepare(`SELECT COUNT(*) AS n FROM users`),
+    countEnabledUsers: db.prepare(`SELECT COUNT(*) AS n FROM users WHERE enabled = 1`),
+    insertUser: db.prepare(
+      `INSERT INTO users (username, password, enabled) VALUES (@username, @password, @enabled)`
+    ),
+    renameUser: db.prepare(
+      `UPDATE users SET username = @to, updated_at = datetime('now') WHERE username = @from`
+    ),
+    setUserPassword: db.prepare(
+      `UPDATE users SET password = @password, updated_at = datetime('now') WHERE username = @username`
+    ),
+    setUserEnabled: db.prepare(
+      `UPDATE users SET enabled = @enabled, updated_at = datetime('now') WHERE username = @username`
+    ),
+    deleteUser: db.prepare(`DELETE FROM users WHERE username = @username`),
+    touchUserLogin: db.prepare(`UPDATE users SET last_login = datetime('now') WHERE username = @username`),
+
+    insertUiSession: db.prepare(
+      `INSERT INTO ui_sessions (id, username, expires_at, user_agent)
+       VALUES (@id, @username, @expires, @ua)`
+    ),
+    // Joined to `users` so a disabled or deleted account's cookie stops working
+    // on the next request, without having to hunt down its sessions.
+    getUiSession: db.prepare(
+      `SELECT s.id, s.username, s.created_at, s.last_seen, s.expires_at
+         FROM ui_sessions s JOIN users u ON u.username = s.username
+        WHERE s.id = @id AND u.enabled = 1 AND s.expires_at > datetime('now')`
+    ),
+    touchUiSession: db.prepare(
+      `UPDATE ui_sessions SET last_seen = datetime('now'), expires_at = @expires WHERE id = @id`
+    ),
+    deleteUiSession: db.prepare(`DELETE FROM ui_sessions WHERE id = @id`),
+    deleteUiSessionsFor: db.prepare(`DELETE FROM ui_sessions WHERE username = @username`),
+    // A password change signs that person out everywhere else. Everywhere *else*:
+    // the browser making the change stays, because being logged out by your own
+    // password change reads as a bug rather than as security.
+    deleteUiSessionsExcept: db.prepare(`DELETE FROM ui_sessions WHERE username = @username AND id != @keep`),
+    // Sessions follow a rename rather than being dropped by it — the account is
+    // the same account, and its credentials haven't changed.
+    renameUiSessions: db.prepare(`UPDATE ui_sessions SET username = @to WHERE username = @from`),
+    deleteAllUiSessions: db.prepare(`DELETE FROM ui_sessions`),
+    sweepUiSessions: db.prepare(`DELETE FROM ui_sessions WHERE expires_at <= datetime('now')`),
 
     // --- dashboard reads (see src/web.js) -----------------------------------
     listAllAgents: db.prepare(
@@ -378,6 +480,81 @@ export function makeStore(db) {
     return counts;
   });
 
+  /**
+   * Prepared statements are cheap but not free, and a restore touches every table
+   * generically. Build the per-table SQL once, on first use.
+   */
+  const tableCache = new Map();
+  function tableInfo(table) {
+    if (!BACKUP_TABLES.includes(table)) throw new Error(`refusing to touch unknown table "${table}"`);
+    let info = tableCache.get(table);
+    if (!info) {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+      info = {
+        columns,
+        selectAll: db.prepare(`SELECT * FROM ${table}`),
+        deleteAll: db.prepare(`DELETE FROM ${table}`),
+        count: db.prepare(`SELECT COUNT(*) AS n FROM ${table}`),
+      };
+      tableCache.set(table, info);
+    }
+    return info;
+  }
+
+  /**
+   * Coerce one value into something SQLite will accept.
+   *
+   * A backup file is JSON that a human can open and edit, so it can come back
+   * holding a `true` where the column holds a 1, or an object where the column
+   * holds an encoded string. Failing the whole restore on that would be a poor
+   * trade — every one of these has an unambiguous storage form.
+   */
+  function bindable(v) {
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'boolean') return v ? 1 : 0;
+    if (typeof v === 'number' || typeof v === 'string' || typeof v === 'bigint') return v;
+    return JSON.stringify(v);
+  }
+
+  /**
+   * Replace the contents of the backed-up tables wholesale.
+   *
+   * "Replace" and not "merge", because the job this exists for is moving a board
+   * to a new host: a merge would leave the destination holding a blend of two
+   * histories with ids that mean different things in each. Unknown columns in the
+   * file are reported and skipped rather than failing the restore, so a backup
+   * taken before a migration still loads.
+   *
+   * One transaction over every table: a half-restored board is worse than a
+   * refused one, and better-sqlite3 rolls the lot back if any insert throws.
+   */
+  const restoreBackup = db.transaction((tables) => {
+    const report = {};
+    for (const [table, rows] of Object.entries(tables)) {
+      if (!BACKUP_TABLES.includes(table)) { report[table] = { skipped: 'unknown table' }; continue; }
+      if (!Array.isArray(rows)) { report[table] = { skipped: 'not an array of rows' }; continue; }
+      const { columns, deleteAll } = tableInfo(table);
+      const removed = deleteAll.run().changes;
+      // Column set is taken from the file's own rows, intersected with the live
+      // schema — so a file written by an older or newer build still loads.
+      const present = [...new Set(rows.flatMap((r) => Object.keys(r ?? {})))];
+      const use = present.filter((c) => columns.includes(c));
+      const ignored = present.filter((c) => !columns.includes(c));
+      let inserted = 0;
+      if (use.length && rows.length) {
+        const stmt = db.prepare(
+          `INSERT INTO ${table} (${use.join(', ')}) VALUES (${use.map((c) => `@${c}`).join(', ')})`
+        );
+        for (const row of rows) {
+          stmt.run(Object.fromEntries(use.map((c) => [c, bindable(row?.[c])])));
+          inserted++;
+        }
+      }
+      report[table] = { removed, inserted, ...(ignored.length ? { ignored_columns: ignored } : {}) };
+    }
+    return report;
+  });
+
   const setContract = db.transaction((channel, key, value, by) => {
     const row = q.getContractVersion.get({ channel, key });
     const version = (row?.version ?? 0) + 1;
@@ -424,6 +601,40 @@ export function makeStore(db) {
     purgeChannel,
     logAdmin: (channel, action, { actor = 'operator', target = null, detail = null } = {}) =>
       n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid),
+
+    // --- dashboard users ------------------------------------------------------
+    listUsers: () => q.listUsers.all().map((u) => ({ ...u, enabled: !!u.enabled })),
+    getUser: (username) => {
+      const u = q.getUser.get({ username });
+      return u ? { ...u, enabled: !!u.enabled } : null;
+    },
+    /** The one read that returns a hash. Callers verify and discard. */
+    getUserSecret: (username) => q.getUserSecret.get({ username }) ?? null,
+    countUsers: () => q.countUsers.get().n,
+    countEnabledUsers: () => q.countEnabledUsers.get().n,
+    createUser: (username, password, enabled = true) =>
+      q.insertUser.run({ username, password, enabled: enabled ? 1 : 0 }).changes,
+    renameUser: (from, to) => q.renameUser.run({ from, to }).changes,
+    setUserPassword: (username, password) => q.setUserPassword.run({ username, password }).changes,
+    setUserEnabled: (username, enabled) => q.setUserEnabled.run({ username, enabled: enabled ? 1 : 0 }).changes,
+    deleteUser: (username) => q.deleteUser.run({ username }).changes,
+    touchUserLogin: (username) => q.touchUserLogin.run({ username }).changes,
+
+    createUiSession: (id, username, expiresAt, ua = null) =>
+      q.insertUiSession.run({ id, username, expires: expiresAt, ua }).changes,
+    getUiSession: (id) => q.getUiSession.get({ id }) ?? null,
+    touchUiSession: (id, expiresAt) => q.touchUiSession.run({ id, expires: expiresAt }).changes,
+    deleteUiSession: (id) => q.deleteUiSession.run({ id }).changes,
+    deleteUiSessionsFor: (username) => q.deleteUiSessionsFor.run({ username }).changes,
+    deleteUiSessionsExcept: (username, keep) => q.deleteUiSessionsExcept.run({ username, keep }).changes,
+    renameUiSessions: (from, to) => q.renameUiSessions.run({ from, to }).changes,
+    deleteAllUiSessions: () => q.deleteAllUiSessions.run().changes,
+    sweepUiSessions: () => q.sweepUiSessions.run().changes,
+
+    // --- backup / restore -----------------------------------------------------
+    dumpTable: (table) => tableInfo(table).selectAll.all(),
+    countTable: (table) => tableInfo(table).count.get().n,
+    restoreBackup,
 
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),

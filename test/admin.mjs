@@ -87,6 +87,11 @@ const server = spawn('node', ['src/server.js'], {
     // Left at its default (open reads) on purpose: the operator endpoints must be
     // locked even when the dashboard itself is not.
     ORCH_AUTH_PROTECT_UI: 'false',
+    // The server loads ./.env itself, so a developer's own seed account would
+    // otherwise make every read in here require a sign-in. Explicitly empty wins
+    // over the file. Sign-in and backups have their own suite (test/auth.mjs).
+    ORCH_ADMIN_USER: '',
+    ORCH_ADMIN_PASSWORD: '',
     CLAIM_TTL_MINUTES: '15',
   },
   stdio: 'inherit',

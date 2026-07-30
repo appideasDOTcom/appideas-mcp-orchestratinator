@@ -483,3 +483,175 @@ pre.raw {
   border-color: color-mix(in srgb, var(--wait) 45%, transparent);
   background: var(--wait-bg);
 }
+
+/* ---------- settings ---------- */
+
+.whoami { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--muted); }
+.who-name { color: var(--text); }
+.link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+.link:hover { color: var(--accent); }
+
+.dlg-wide { width: min(740px, calc(100vw - 32px)); }
+
+.set-head { display: flex; align-items: center; gap: 14px; }
+.set-head h3 { margin: 0; }
+.tabs { display: flex; gap: 4px; margin-left: auto; }
+.tab {
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.tab.on { color: var(--text); border-bottom-color: var(--accent); }
+.tab:hover { color: var(--accent); }
+
+.set-bar { display: flex; align-items: center; gap: 10px; margin-top: 16px; font-size: 12px; }
+.set-bar .btn { margin-left: auto; }
+
+.user-list { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.user-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12.5px;
+}
+.user-row:first-child { border-top: none; }
+.user-row.off { opacity: .62; }
+.user-row.danger { background: var(--block-bg); }
+.user-row.editing { display: block; background: var(--surface-2); }
+.user-name { font-family: var(--mono); font-weight: 600; }
+.user-tag {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.user-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.user-warn { color: var(--block); font-size: 11.5px; }
+.user-acts { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+/* In a list that is entirely controls, hiding them until hover would just make
+   them hard to find — unlike the board, where the row is mostly something to read. */
+.row-act.bare { opacity: 1; }
+/* Same specificity as the rule above, so it has to come after it — otherwise the
+   controls locked on your own row keep full opacity and read as clickable. */
+.row-act.bare:disabled { opacity: .35; cursor: default; }
+.row-act.bare:disabled:hover { border-color: var(--border); background: none; }
+
+/* The enable/disable switch. A track plus its own word, because a bare switch
+   leaves you guessing which side means on. */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  padding: 2px 10px 2px 4px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.toggle-track {
+  width: 24px; height: 14px;
+  border-radius: 999px;
+  background: var(--off-bg);
+  border: 1px solid var(--border);
+  position: relative;
+  transition: background .14s ease;
+}
+.toggle-knob {
+  position: absolute; top: 1px; left: 1px;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--off);
+  transition: transform .14s ease, background .14s ease;
+}
+.toggle.on { color: var(--idle); border-color: color-mix(in srgb, var(--idle) 35%, transparent); }
+.toggle.on .toggle-track { background: var(--idle-bg); border-color: color-mix(in srgb, var(--idle) 40%, transparent); }
+.toggle.on .toggle-knob { transform: translateX(10px); background: var(--idle); }
+.toggle:disabled { cursor: default; opacity: .5; }
+
+.user-edit { display: flex; gap: 10px; flex-wrap: wrap; }
+.user-edit label {
+  flex: 1 1 170px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+}
+.user-edit .input { display: block; width: 100%; margin-top: 4px; font-size: 12.5px; }
+.user-row.editing .user-acts { margin: 10px 0 0; justify-content: flex-end; }
+
+.set-err {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--block);
+  border-radius: 6px;
+  background: var(--block-bg);
+  color: var(--block);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.set-err[hidden] { display: none; }
+.set-note-live { margin-top: 10px; font-size: 11.5px; color: var(--idle); }
+.set-note-live[hidden] { display: none; }
+.set-blocked { margin-top: 16px; font-size: 12.5px; color: var(--muted); }
+
+.set-tool {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.set-tool p { margin: 4px 0 0; font-size: 12.5px; }
+/* Outspecifying `.dlg h4`, which is red because the only h4 that existed before
+   this panel was the delete-a-channel heading. Exporting destroys nothing and must
+   not borrow that tone; the restore heading keeps it, because it does. */
+.dlg .set-h { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text); }
+.dlg .set-h.risky { color: var(--block); }
+.set-picker { display: block; margin-top: 10px; }
+.set-picker input { font-size: 11.5px; color: var(--muted); }
+
+.set-file {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+.set-file-head { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.set-file .tiny { margin-top: 3px; word-break: break-word; }
+
+.set-done {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--idle) 45%, transparent);
+  border-radius: 7px;
+  background: var(--idle-bg);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.set-done b { display: block; margin-bottom: 3px; }

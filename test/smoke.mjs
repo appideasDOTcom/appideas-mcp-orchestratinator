@@ -29,7 +29,18 @@ const call = (client, name, args = {}) => client.callTool({ name, arguments: arg
 
 function startServer(port, dbPath, extraEnv = {}) {
   return spawn('node', ['src/server.js'], {
-    env: { ...process.env, PORT: String(port), DB_PATH: dbPath, ...extraEnv },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DB_PATH: dbPath,
+      // The server loads ./.env itself, so a developer's own seed account would
+      // otherwise turn every dashboard read in here into a 401. Explicitly empty
+      // wins over the file (node reads it with --env-file semantics), which is
+      // what makes this an override rather than a hope. Sign-in has its own suite.
+      ORCH_ADMIN_USER: '',
+      ORCH_ADMIN_PASSWORD: '',
+      ...extraEnv,
+    },
     stdio: 'inherit',
   });
 }

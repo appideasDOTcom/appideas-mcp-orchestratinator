@@ -1,12 +1,13 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
-import { createAuth } from './auth.js';
+import { createAuth, seedFirstUser } from './auth.js';
 
 // Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
 // through compose's `environment:` block instead, so a missing file is normal.
@@ -14,7 +15,10 @@ import { createAuth } from './auth.js';
 try { process.loadEnvFile(); } catch { /* no .env — environment only */ }
 
 const NAME = 'appideas-orchestratinator';
-const VERSION = '0.2.0';
+// Read rather than duplicated: a hand-maintained copy of the version drifts from
+// package.json the first time one of them is bumped alone, and the dashboard
+// header then confidently reports a build that doesn't exist.
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const PORT = Number(process.env.PORT ?? 8787);
 // Inside Docker the process must bind 0.0.0.0 to be reachable through the port
 // mapping; compose publishes it on 127.0.0.1 only. Set HOST=127.0.0.1 when
@@ -30,13 +34,24 @@ const STARTED_AT = new Date().toISOString();
 
 const db = openDb(DB_PATH);
 const store = makeStore(db);
-const auth = createAuth();
+const auth = createAuth({ store });
+const seeded = seedFirstUser(store, process.env);
 
 const app = express();
+// Behind a TLS-terminating proxy on the permanent host, so req.ip is the client
+// rather than the proxy (the login throttle keys on it) and req.secure is honest
+// (the session cookie's `secure` flag follows it).
+app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback');
 // Ahead of the body parser: an unauthorized caller shouldn't get 4mb of parsing
 // done on its behalf. /health stays open — the container healthcheck uses it.
 app.use('/mcp', auth.mcpGuard);
-app.use(express.json({ limit: '4mb' }));
+// A restored backup is one JSON document holding an entire board, so it needs
+// headroom no other route should get. Chosen per-path rather than by raising the
+// limit globally: 4mb stays the ceiling for everything an agent can post.
+const jsonBody = express.json({ limit: process.env.BODY_LIMIT ?? '4mb' });
+const jsonRestore = express.json({ limit: process.env.RESTORE_BODY_LIMIT ?? '128mb' });
+app.use((req, res, next) =>
+  (req.path === '/api/admin/backup/restore' ? jsonRestore : jsonBody)(req, res, next));
 
 // One transport per MCP session (keyed by the mcp-session-id header).
 const transports = Object.create(null);
@@ -92,11 +107,13 @@ function supersede(sid, channel, agent) {
  * still alive reconnects and reappears — which is the intended behaviour, not a
  * leak. Returns how many it closed.
  */
-function closeSessionsFor({ channel, agent = null }) {
+function closeSessionsFor({ channel, agent = null, all = false }) {
   let closed = 0;
   for (const [sid, s] of Object.entries(sessions)) {
-    if (s.channel !== channel) continue;
-    if (agent && s.agent !== agent) continue;
+    if (!all) {
+      if (s.channel !== channel) continue;
+      if (agent && s.agent !== agent) continue;
+    }
     closeSession(sid);
     closed++;
   }
@@ -114,6 +131,9 @@ function sweepIdleSessions() {
   }
 }
 setInterval(sweepIdleSessions, SWEEP_MS).unref();
+// Expired browser logins are already refused (getUiSession checks the expiry in
+// SQL), so this is only housekeeping — it stops the table growing forever.
+setInterval(() => { try { store.sweepUiSessions(); } catch { /* next sweep */ } }, 10 * SWEEP_MS).unref();
 
 const markBusy = (sid) => {
   const s = sid ? sessions[sid] : undefined;
@@ -235,10 +255,16 @@ async function handleSessionRequest(req, res) {
 app.get('/mcp', handleSessionRequest);
 app.delete('/mcp', handleSessionRequest);
 
+// Sign in, sign out, "who am I". Ahead of the guard on purpose: these are exactly
+// the routes a browser that cannot get in has to be able to reach, and putting
+// them here means the guard needs no exemptions carved into it.
+app.use(auth.createAuthRouter());
+
 // Dashboard at `/` (+ its /api/* endpoints). Mounted last so it can never shadow
-// an MCP route. The uiGuard is a no-op unless ORCH_AUTH_PROTECT_UI is set, so
-// turning auth on doesn't silently lock the human out of the board; the operator
-// endpoints under /api/admin carry their own guard, which is never optional.
+// an MCP route. The uiGuard demands a sign-in once any dashboard user exists, and
+// otherwise is a no-op unless ORCH_AUTH_PROTECT_UI is set — so turning auth on
+// doesn't silently lock the human out of the board. The operator endpoints under
+// /api/admin carry their own guard, which is never optional.
 app.use(auth.uiGuard);
 app.use(createWebRouter({
   store,
@@ -261,4 +287,5 @@ app.listen(PORT, HOST, () => {
   console.log(`[orchestratinator] MCP       http://localhost:${PORT}/mcp`);
   console.log(`[orchestratinator] dashboard http://localhost:${PORT}/   (db: ${DB_PATH})`);
   console.log(`[orchestratinator] ${auth.describeStartup()}`);
+  if (seeded) console.log(`[orchestratinator] ${seeded}`);
 });

@@ -23,6 +23,11 @@ const el = {
   adminState: $('admin-state'),
   dlg: $('dlg'),
   dlgBody: $('dlg-body'),
+  openSettings: $('open-settings'),
+  whoami: $('whoami'),
+  setDlg: $('settings-dlg'),
+  setBody: $('set-body'),
+  setTabs: $('set-tabs'),
 };
 
 /*
@@ -56,9 +61,12 @@ const ui = {
   hasMore: false,
   showRetired: false,
   showArchived: false,
-  // Operator actions are locked until GET /api/admin/token hands us one, which
-  // it only does for a browser holding the shared secret.
+  // Operator actions are locked until GET /api/admin/token hands us one, which it
+  // only does for a browser holding a login or the shared secret.
   admin: { token: null, locked: true },
+  // Who the server says we are. `user` is null on a board with no accounts, and on
+  // one reached with the shared secret instead of a sign-in.
+  session: { user: null, loginRequired: false, sharedSecret: false, users: 0 },
   state: null,   // the most recent /api/state, so a dialog can read live counts
 };
 
@@ -333,6 +341,15 @@ const KIND_LABEL = {
   'admin.channel.archive': ['channel archived', 'admin'],
   'admin.channel.unarchive': ['channel restored', 'admin'],
   'admin.channel.delete': ['channel deleted', 'admin'],
+  // Server-wide operator actions. They carry the `(server)` channel because
+  // admin_events is channel-scoped and none of these belong to one.
+  'admin.user.create': ['user added', 'admin'],
+  'admin.user.update': ['user changed', 'admin'],
+  'admin.user.enable': ['user enabled', 'admin'],
+  'admin.user.disable': ['user disabled', 'admin'],
+  'admin.user.delete': ['user deleted', 'admin'],
+  'admin.backup.export': ['backup exported', 'admin'],
+  'admin.backup.restore': ['backup restored', 'admin'],
 };
 
 /** Turn one feed row into the "who" and "what" cells. */
@@ -414,10 +431,16 @@ function renderLog(rows) {
 
 /* ---------- operator actions ---------- */
 
+/** Why the affordances are missing, phrased for whichever door this board has. */
+const lockedNote = () =>
+  ui.session.loginRequired
+    ? 'read-only · sign in to enable operator actions'
+    : 'read-only · open as /?key=… to enable operator actions';
+
 /**
  * Ask for the per-process admin token. A 401 here isn't an error state — it's the
- * normal condition for a browser that hasn't presented the shared secret, and it
- * simply leaves every affordance rendered as plain text.
+ * normal condition for a browser that has presented no credential, and it simply
+ * leaves every affordance rendered as plain text.
  */
 async function loadAdminToken() {
   try {
@@ -428,9 +451,37 @@ async function loadAdminToken() {
     ui.admin.token = null;
   }
   ui.admin.locked = !ui.admin.token;
-  el.adminState.textContent = ui.admin.locked ? 'read-only · open as /?key=… to enable operator actions' : '';
+  el.adminState.textContent = ui.admin.locked ? lockedNote() : '';
   el.adminState.classList.toggle('hidden', !ui.admin.locked);
   ui.lastChannelSig = null;   // affordances appear/disappear with this flag
+}
+
+/**
+ * Who we are, and whether this server asks. Read before the first paint so the
+ * header doesn't announce a name a beat after the board arrives.
+ */
+async function loadSession() {
+  try {
+    const res = await fetch('./api/session');
+    const json = res.ok ? await res.json() : {};
+    ui.session = {
+      user: json.user ?? null,
+      loginRequired: !!json.login_required,
+      sharedSecret: !!json.shared_secret,
+      users: json.users ?? 0,
+    };
+  } catch {
+    /* offline — leave whatever we last knew */
+  }
+  const s = ui.session;
+  // A shared-secret browser gets a name too, because "who is this operator row
+  // attributed to" has a different answer for it: nobody in particular.
+  const label = s.user ?? (s.sharedSecret ? 'shared key' : null);
+  el.whoami.innerHTML = label
+    ? `<span class="who-name" title="${s.user ? `signed in as ${esc(s.user)}` : 'authenticated with the shared secret, not as a named user'}">${esc(label)}</span>` +
+      `<button type="button" class="link" id="sign-out" title="Sign out of this browser">sign out</button>`
+    : '';
+  el.whoami.classList.toggle('hidden', !label);
 }
 
 async function admin(path, body) {
@@ -477,7 +528,7 @@ function notify(message, { error = true } = {}) {
   el.adminState.classList.remove('hidden');
   notifyTimer = setTimeout(() => {
     el.adminState.classList.remove('err');
-    el.adminState.textContent = ui.admin.locked ? 'read-only · open as /?key=… to enable operator actions' : '';
+    el.adminState.textContent = ui.admin.locked ? lockedNote() : '';
     el.adminState.classList.toggle('hidden', !ui.admin.locked);
   }, 6000);
 }
@@ -654,9 +705,466 @@ function channelDialog(channel) {
   `);
 }
 
+/* ---------- settings: users and tools ---------- */
+
+/**
+ * Settings keeps its own state rather than deriving from /api/state, because none
+ * of it is coordination data: the user list is a server read of its own, and the
+ * rest is what you have typed and not yet committed.
+ */
+const set = {
+  tab: 'users',
+  users: null,        // null until fetched, so "no users" and "not loaded" differ
+  you: null,
+  sessionDays: null,
+  editing: null,      // a username being edited, or NEW for the add-a-user row
+  pendingDelete: null,
+  loadError: null,
+  backup: null,       // a chosen file, parsed and vetted, awaiting confirmation
+  backupName: null,
+  restored: null,     // the report from a completed restore
+};
+const NEW = ' new';   // can't collide with a username
+
+const setErr = (msg) => {
+  const box = el.setBody.querySelector('.set-err');
+  if (!box) return;
+  box.textContent = String(msg ?? '');
+  box.hidden = !msg;
+};
+const setNote = (msg) => {
+  const box = el.setBody.querySelector('.set-note-live');
+  if (!box) return;
+  box.textContent = String(msg ?? '');
+  box.hidden = !msg;
+};
+
+async function loadUsers() {
+  set.loadError = null;
+  try {
+    const res = await fetch('./api/admin/users', { headers: { 'x-orch-admin-token': ui.admin.token ?? '' } });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    set.users = json.users ?? [];
+    set.you = json.you ?? null;
+    set.sessionDays = json.session_days ?? null;
+  } catch (e) {
+    set.users = null;
+    set.loadError = String(e.message ?? e);
+  }
+}
+
+/** One row: the username, or the edit form that replaces it. */
+function userRow(u) {
+  const self = u.username === set.you;
+  const editing = set.editing === u.username;
+  if (editing) {
+    return `
+      <div class="user-row editing">
+        <div class="user-edit">
+          <label>username<input class="input" data-f="username" type="text" value="${esc(u.username)}" autocapitalize="none" spellcheck="false"></label>
+          <label>new password<input class="input" data-f="password" type="password" autocomplete="new-password" placeholder="leave blank to keep"></label>
+          <label>verify<input class="input" data-f="verify" type="password" autocomplete="new-password" placeholder="repeat it"></label>
+        </div>
+        <div class="user-acts">
+          <button type="button" class="btn primary" data-set="save" data-username="${esc(u.username)}">Save</button>
+          <button type="button" class="btn" data-set="cancel-edit">Cancel</button>
+        </div>
+      </div>`;
+  }
+  if (set.pendingDelete === u.username) {
+    return `
+      <div class="user-row danger">
+        <span class="user-name">${esc(u.username)}</span>
+        <span class="user-warn">Delete this account? Their sessions end immediately.</span>
+        <div class="user-acts">
+          <button type="button" class="btn danger" data-set="delete" data-username="${esc(u.username)}">Delete</button>
+          <button type="button" class="btn" data-set="cancel-delete">Keep</button>
+        </div>
+      </div>`;
+  }
+  // Why a control is unavailable belongs on the control. The server refuses these
+  // two as well — this is the explanation, not the enforcement.
+  const why = 'you cannot do this to the account you are signed in as';
+  return `
+    <div class="user-row${u.enabled ? '' : ' off'}">
+      <span class="user-name">${esc(u.username)}</span>
+      ${self ? '<span class="user-tag">you</span>' : ''}
+      <span class="user-meta">${u.last_login ? `last in ${age(u.last_login)}` : 'never signed in'}</span>
+      <div class="user-acts">
+        <button type="button" class="toggle${u.enabled ? ' on' : ''}" data-set="toggle"
+          data-username="${esc(u.username)}" data-enabled="${u.enabled ? '0' : '1'}"
+          ${self ? `disabled title="${why}"` : `title="${u.enabled ? 'Disable' : 'Enable'} ${esc(u.username)}"`}>
+          <span class="toggle-track"><span class="toggle-knob"></span></span>${u.enabled ? 'enabled' : 'disabled'}
+        </button>
+        <button type="button" class="row-act bare" data-set="edit" data-username="${esc(u.username)}" title="Change ${esc(u.username)}'s username or password">✎</button>
+        <button type="button" class="row-act bare" data-set="ask-delete" data-username="${esc(u.username)}"
+          ${self ? `disabled title="${why}"` : `title="Delete ${esc(u.username)}"`}>🗑</button>
+      </div>
+    </div>`;
+}
+
+function usersTab() {
+  if (ui.admin.locked) {
+    return `<p class="set-blocked">This browser is read-only, so it cannot manage accounts.
+      ${ui.session.loginRequired
+        ? 'Sign in first.'
+        : 'Open the dashboard once as <span class="mono">/?key=&lt;shared secret&gt;</span> — that is also how the very first account gets created.'}</p>`;
+  }
+  if (set.loadError) return `<div class="set-err">${esc(set.loadError)}</div>`;
+  if (!set.users) return '<div class="empty">loading…</div>';
+
+  const adding = set.editing === NEW;
+  const rows = set.users.length
+    ? set.users.map(userRow).join('')
+    : '<div class="empty">No accounts yet. The dashboard is open to anyone who can reach it.</div>';
+  const addRow = adding
+    ? `<div class="user-row editing">
+         <div class="user-edit">
+           <label>username<input class="input" data-f="username" type="text" autocapitalize="none" spellcheck="false" placeholder="a name you'll recognise"></label>
+           <label>password<input class="input" data-f="password" type="password" autocomplete="new-password"></label>
+           <label>verify<input class="input" data-f="verify" type="password" autocomplete="new-password"></label>
+         </div>
+         <div class="user-acts">
+           <button type="button" class="btn primary" data-set="create">Add</button>
+           <button type="button" class="btn" data-set="cancel-edit">Cancel</button>
+         </div>
+       </div>`
+    : '';
+
+  const enabled = set.users.filter((u) => u.enabled).length;
+  return `
+    <div class="set-bar">
+      <span class="muted">${set.users.length} account${set.users.length === 1 ? '' : 's'}${
+        set.users.length ? ` · ${enabled} enabled` : ''}</span>
+      <button type="button" class="btn primary" data-set="add"${adding ? ' disabled' : ''}>+ Add user</button>
+    </div>
+    <div class="user-list">${rows}${addRow}</div>
+    <div class="set-err" hidden></div>
+    <p class="set-note-live" hidden></p>
+    <p class="dlg-note">
+      Every account here is an admin — there are no roles, and anyone who signs in can do anything on this
+      board. ${enabled
+        ? `A sign-in lasts ${set.sessionDays ?? 30} days per browser, and disabling someone ends theirs on their next request.`
+        : 'While no account is <em>enabled</em>, nobody is asked to sign in at all.'}
+      Passwords are stored as scrypt hashes; nothing here can show you an existing one.
+    </p>`;
+}
+
+function toolsTab() {
+  if (ui.admin.locked) {
+    return `<p class="set-blocked">This browser is read-only, so it cannot export or restore.
+      ${ui.session.loginRequired ? 'Sign in first.' : 'Open the dashboard once as <span class="mono">/?key=&lt;shared secret&gt;</span>.'}</p>`;
+  }
+  const t = ui.state?.totals;
+  const b = set.backup;
+  const counted = b ? Object.entries(b.counts ?? {}).filter(([, n]) => n > 0) : [];
+
+  const chosen = b
+    ? `<div class="set-file">
+         <div class="set-file-head">${esc(set.backupName ?? 'backup')}</div>
+         <div class="muted mono tiny">
+           taken ${esc(b.created_at ? new Date(b.created_at).toLocaleString() : 'at an unrecorded time')} ·
+           from v${esc(b.server?.version ?? '?')} ·
+           ${counted.length ? counted.map(([k, n]) => `${n} ${k}`).join(' · ') : 'no rows at all'}
+         </div>
+         ${b.auth?.shared_secret_fingerprint
+           ? `<div class="muted mono tiny">its agents used shared secret ${esc(b.auth.shared_secret_fingerprint)} — the key itself is not in the file</div>`
+           : ''}
+       </div>
+       <div class="dlg-confirm">
+         <input class="input mono" id="restore-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="type RESTORE">
+         <button type="button" class="btn danger" data-set="restore">Restore</button>
+       </div>`
+    : '';
+
+  const done = set.restored
+    ? `<div class="set-done">
+         <b>Restored ${set.restored.rows} rows.</b>
+         ${(set.restored.notes ?? []).map((n) => `<div>${esc(n)}</div>`).join('')}
+         <div>${set.restored.snapshot?.saved
+           ? `The board as it was is saved at <span class="mono">${esc(set.restored.snapshot.path)}</span>.`
+           : 'The pre-restore snapshot could not be written.'}</div>
+       </div>`
+    : '';
+
+  return `
+    <div class="set-tool">
+      <div>
+        <h4 class="set-h">Export a backup</h4>
+        <p>Downloads this whole board as one JSON file: every message, task, contract with its history, agent,
+          channel flag, operator-action record, and dashboard account.
+          ${t ? `Right now that is ${t.channels + t.archived_channels} channel(s) and ${t.agents + t.retired_agents} agent(s).` : ''}</p>
+        <p><b>Two things are deliberately not in it.</b> The shared MCP secret — only a fingerprint of it, so you can
+          check the new host has the same one — and live sign-in cookies. It <em>does</em> carry password hashes,
+          so treat the file as a credential.</p>
+      </div>
+      <button type="button" class="btn primary" data-set="export">Export</button>
+    </div>
+
+    <div class="set-tool">
+      <div>
+        <h4 class="set-h risky">Recover from a backup</h4>
+        <p>Replaces everything on this board with the contents of a backup file. Not a merge: ids are per-board, so
+          blending two histories would give you one task <span class="mono">#14</span> that means two different things.</p>
+        <p>Before overwriting, the current board is written to the data directory next to the database, so a restore
+          you regret is recoverable. Live agent sessions are closed and reconnect by themselves.</p>
+        <label class="set-picker">
+          <input type="file" id="restore-file" accept=".json,application/json">
+        </label>
+        ${chosen}
+        ${done}
+      </div>
+    </div>
+    <div class="set-err" hidden></div>
+    <p class="set-note-live" hidden></p>
+    <p class="dlg-note">Moving to a new host: export here, start the new instance with the same
+      <span class="mono">ORCH_AUTH_TOKEN</span> in its <span class="mono">.env</span> (that part does not travel in the
+      file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`;
+}
+
+function renderSettings() {
+  for (const t of el.setTabs.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.tab === set.tab);
+  el.setBody.innerHTML = set.tab === 'users' ? usersTab() : toolsTab();
+}
+
+async function openSettings() {
+  set.tab = 'users';
+  set.editing = null;
+  set.pendingDelete = null;
+  set.restored = null;
+  set.backup = null;
+  set.backupName = null;
+  set.users = null;
+  renderSettings();
+  if (!el.setDlg.open) el.setDlg.showModal();
+  if (!ui.admin.locked) {
+    await loadUsers();
+    if (el.setDlg.open && set.tab === 'users') renderSettings();
+  }
+}
+
+/** POST a settings action, then reload the user list so the panel can't drift. */
+async function userAction(path, body, { after } = {}) {
+  setErr(null);
+  setNote(null);
+  const buttons = [...el.setBody.querySelectorAll('button, input')];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const res = await fetch(`./api/admin/${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-orch-admin-token': ui.admin.token ?? '' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    set.editing = null;
+    set.pendingDelete = null;
+    await loadUsers();
+    // Adding the first account turns sign-in on, and deleting the last turns it
+    // off. Both change what the header should say about you.
+    await loadSession();
+    renderSettings();
+    if (after) setNote(after(json));
+    tick();
+  } catch (e) {
+    buttons.forEach((b) => { b.disabled = false; });
+    setErr(e.message ?? e);
+  }
+}
+
+const fieldOf = (row, name) => row?.querySelector(`[data-f="${name}"]`)?.value ?? '';
+
+/**
+ * Download the backup.
+ *
+ * Fetched rather than linked, because the export needs the admin token in a header
+ * and an anchor cannot send one. The blob round-trip is what turns the response
+ * back into a file the browser will save.
+ */
+async function exportBackup() {
+  setErr(null);
+  setNote('preparing…');
+  try {
+    const res = await fetch('./api/admin/backup', { headers: { 'x-orch-admin-token': ui.admin.token ?? '' } });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? 'orchestratinator-backup.json';
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    setNote(`saved ${name} · ${(blob.size / 1024).toFixed(0)} kB`);
+    tick();   // the export is itself a logged operator action
+  } catch (e) {
+    setNote(null);
+    setErr(e.message ?? e);
+  }
+}
+
+/**
+ * Vet the chosen file in the browser before anything is sent.
+ *
+ * The server validates it again — that check is the real one. This exists so that
+ * picking the wrong file is a sentence on screen rather than a destructive request
+ * that happens to get refused, and so you can read what you are about to overwrite
+ * your board with while there is still nothing to undo.
+ */
+async function chooseBackupFile(file) {
+  set.backup = null;
+  set.backupName = null;
+  set.restored = null;
+  setErr(null);
+  setNote(null);
+  try {
+    const doc = JSON.parse(await file.text());
+    if (doc?.format !== 'orchestratinator-backup') throw new Error('that file is not an orchestratinator backup');
+    if (!doc.tables || typeof doc.tables !== 'object') throw new Error('that backup has no tables in it');
+    set.backup = doc;
+    set.backupName = file.name;
+  } catch (e) {
+    renderSettings();
+    setErr(`could not read ${file.name}: ${e.message ?? e}`);
+    return;
+  }
+  renderSettings();
+}
+
+async function restoreBackup() {
+  const typed = el.setBody.querySelector('#restore-confirm')?.value.trim() ?? '';
+  setErr(null);
+  setNote('restoring…');
+  const buttons = [...el.setBody.querySelectorAll('button, input')];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const res = await fetch('./api/admin/backup/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-orch-admin-token': ui.admin.token ?? '' },
+      body: JSON.stringify({ confirm: typed, backup: set.backup }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    set.restored = json;
+    set.backup = null;
+    set.backupName = null;
+    // The restore may have replaced the account this browser is signed in as, in
+    // which case the next poll gets a 401 and getJson reloads into the sign-in
+    // form. Ask now rather than letting that arrive as a surprise.
+    await loadSession();
+    await loadAdminToken();
+    renderSettings();
+    ui.lastChannelSig = null;
+    ui.lastLogSig = null;
+    tick();
+  } catch (e) {
+    buttons.forEach((b) => { b.disabled = false; });
+    setNote(null);
+    setErr(e.message ?? e);
+  }
+}
+
+el.openSettings.addEventListener('click', () => openSettings());
+
+el.whoami.addEventListener('click', async (e) => {
+  if (!e.target.closest('#sign-out')) return;
+  try { await fetch('./api/logout', { method: 'POST' }); } catch { /* reload anyway */ }
+  location.reload();
+});
+
+el.setDlg.addEventListener('click', (e) => {
+  if (e.target === el.setDlg) { el.setDlg.close(); return; }
+  const tab = e.target.closest('[data-tab]');
+  if (tab) {
+    set.tab = tab.dataset.tab;
+    set.editing = null;
+    set.pendingDelete = null;
+    renderSettings();
+    if (set.tab === 'users' && !set.users && !ui.admin.locked) loadUsers().then(renderSettings);
+    return;
+  }
+  const btn = e.target.closest('[data-set]');
+  if (!btn) return;
+  const row = btn.closest('.user-row');
+  const name = btn.dataset.username;
+
+  switch (btn.dataset.set) {
+    case 'close': el.setDlg.close(); break;
+    case 'add': set.editing = NEW; renderSettings(); el.setBody.querySelector('[data-f="username"]')?.focus(); break;
+    case 'edit': set.editing = name; set.pendingDelete = null; renderSettings(); el.setBody.querySelector('[data-f="password"]')?.focus(); break;
+    case 'cancel-edit': set.editing = null; renderSettings(); break;
+    case 'ask-delete': set.pendingDelete = name; set.editing = null; renderSettings(); break;
+    case 'cancel-delete': set.pendingDelete = null; renderSettings(); break;
+    case 'create':
+      userAction('users/create', {
+        username: fieldOf(row, 'username'),
+        password: fieldOf(row, 'password'),
+        verify: fieldOf(row, 'verify'),
+      }, { after: (j) => `added ${j.username}` });
+      break;
+    case 'save': {
+      const password = fieldOf(row, 'password');
+      userAction('users/update', {
+        username: name,
+        new_username: fieldOf(row, 'username'),
+        // Blank means "leave it", so don't send the verify field either — an empty
+        // verify against an empty password is not a mismatch worth reporting.
+        ...(password ? { password, verify: fieldOf(row, 'verify') } : {}),
+      }, { after: (j) => (j.changed ?? []).join('; ') });
+      break;
+    }
+    case 'toggle':
+      userAction('users/enabled', { username: name, enabled: btn.dataset.enabled === '1' });
+      break;
+    case 'delete':
+      userAction('users/delete', { username: name }, { after: (j) => j.warning ?? `deleted ${j.username}` });
+      break;
+    case 'export': exportBackup(); break;
+    case 'restore': restoreBackup(); break;
+    default: break;
+  }
+});
+
+// Enter anywhere in an edit row commits it, so adding a colleague is three fields
+// and a keystroke.
+el.setBody.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const row = e.target.closest('.user-row.editing');
+  if (!row) return;
+  e.preventDefault();
+  row.querySelector('[data-set="save"], [data-set="create"]')?.click();
+});
+
+el.setBody.addEventListener('change', (e) => {
+  const input = e.target.closest('#restore-file');
+  if (!input?.files?.[0]) return;
+  chooseBackupFile(input.files[0]);
+});
+
+el.setDlg.addEventListener('close', () => { set.editing = null; set.pendingDelete = null; });
+
 /* ---------- polling ---------- */
 
 let inFlight = false;
+
+/**
+ * A poll that notices being signed out.
+ *
+ * A session that expires (or an account someone disables) turns every poll into a
+ * 401 while the page goes on displaying the last board it saw — which is the worst
+ * possible failure for a monitoring screen, because a frozen board and a quiet
+ * board look identical. Reloading lands on the sign-in form, which is the truth.
+ */
+async function getJson(url) {
+  const res = await fetch(url);
+  if (res.status === 401) {
+    const json = await res.json().catch(() => ({}));
+    if (json.login_required) { location.reload(); throw new Error('signed out'); }
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
 async function tick({ background = false } = {}) {
   if (inFlight) return;
@@ -666,8 +1174,8 @@ async function tick({ background = false } = {}) {
     const qs = new URLSearchParams({ limit: String(ui.limit) });
     if (ui.channel) qs.set('channel', ui.channel);
     const [state, activity] = await Promise.all([
-      fetch('./api/state').then((r) => r.json()),
-      fetch(`./api/activity?${qs}`).then((r) => r.json()),
+      getJson('./api/state'),
+      getJson(`./api/activity?${qs}`),
     ]);
     ui.hasMore = activity.count >= ui.limit;
     ui.state = state;
@@ -845,6 +1353,10 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && el.autorefresh.checked) tick();
 });
 
-// Token first, so the very first render already knows whether to draw the
-// operator affordances — otherwise they'd flicker in a beat later.
-loadAdminToken().then(() => tick());
+// Identity and token first, so the very first render already knows who you are and
+// whether to draw the operator affordances — otherwise both flicker in a beat later.
+Promise.all([loadSession(), loadAdminToken()])
+  // loadAdminToken words its explanation differently depending on whether this
+  // server asks for a sign-in, and it can finish before the answer arrives.
+  .then(() => { if (ui.admin.locked) el.adminState.textContent = lockedNote(); })
+  .then(() => tick());

@@ -22,6 +22,8 @@
         <span>auto-refresh</span>
       </label>
       <button id="refresh-now" class="btn" title="Refresh now">↻</button>
+      <button id="open-settings" class="btn" title="Settings — dashboard users and backups">⚙</button>
+      <span id="whoami" class="whoami mono hidden"></span>
     </div>
   </header>
 
@@ -72,6 +74,24 @@
   -->
   <dialog id="dlg" class="dlg">
     <div id="dlg-body"></div>
+  </dialog>
+
+  <!--
+    Settings gets a dialog of its own rather than sharing the operator one. It is
+    wider, it holds in-progress editing state (a half-typed password), and the
+    operator helper closes its dialog and re-renders the board after every action
+    — which would throw that state away mid-edit.
+  -->
+  <dialog id="settings-dlg" class="dlg dlg-wide">
+    <div class="set-head">
+      <h3>Settings</h3>
+      <div class="tabs" id="set-tabs">
+        <button type="button" class="tab on" data-tab="users">Users</button>
+        <button type="button" class="tab" data-tab="tools">Tools</button>
+      </div>
+      <button type="button" class="btn" data-set="close" title="Close">✕</button>
+    </div>
+    <div id="set-body"></div>
   </dialog>
 
   <script src="./app.js"></script>

@@ -10,7 +10,8 @@
     "dev": "node --watch src/server.js",
     "smoke": "node test/smoke.mjs",
     "test:admin": "node test/admin.mjs",
-    "test": "npm run smoke && npm run test:admin"
+    "test:auth": "node test/auth.mjs",
+    "test": "npm run smoke && npm run test:admin && npm run test:auth"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

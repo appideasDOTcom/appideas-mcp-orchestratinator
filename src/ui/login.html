@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sign in · orchestratinator</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+  <!--
+    Everything is inline. This page is served by the guard *instead of* the
+    dashboard, so a browser that lands here cannot fetch styles.css or app.js —
+    they are behind the same guard. One self-contained file also means the sign-in
+    screen leaks nothing about the application behind it.
+  -->
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --border: #dfe3e8;
+      --text: #14181d; --muted: #6b7480; --accent: #3b6ef2; --block: #c4453d; --block-bg: #fbeae9;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1215; --surface: #171b20; --surface-2: #1e242b; --border: #2a3138;
+        --text: #e6e9ed; --muted: #8b95a1; --accent: #7aa2ff; --block: #f08a80; --block-bg: #3a2321;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px;
+      background: var(--bg); color: var(--text);
+      font: 14px/1.5 var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      width: min(370px, 100%);
+      padding: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .16);
+    }
+    .brand { display: flex; align-items: center; gap: 9px; margin-bottom: 4px; }
+    .brand h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+    .sat { font-size: 17px; }
+    p.sub { margin: 0 0 20px; font-size: 12px; color: var(--muted); }
+    label { display: block; margin-top: 13px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    input {
+      width: 100%; margin-top: 5px; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: var(--surface-2); color: var(--text);
+      font: inherit;
+    }
+    input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: -1px; }
+    button {
+      width: 100%; margin-top: 18px; padding: 8px 10px;
+      border: 1px solid var(--accent); border-radius: 6px;
+      background: transparent; color: var(--accent);
+      font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: var(--accent); color: #fff; }
+    button:disabled { opacity: .55; cursor: default; }
+    .err {
+      margin-top: 14px; padding: 8px 10px;
+      border: 1px solid var(--block); border-radius: 6px;
+      background: var(--block-bg); color: var(--block);
+      font-family: var(--mono); font-size: 11.5px;
+    }
+    .err[hidden] { display: none; }
+    .note { margin: 18px 0 0; font-size: 11px; color: var(--muted); line-height: 1.6; }
+    .mono { font-family: var(--mono); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><span class="sat">🛰️</span><h1>orchestratinator</h1></div>
+    <p class="sub">Sign in to see the board.</p>
+
+    <form id="f" autocomplete="on">
+      <label for="u">username</label>
+      <input id="u" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+      <label for="p">password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button id="go" type="submit">Sign in</button>
+      <div id="err" class="err" hidden></div>
+    </form>
+
+    <p class="note">
+      Agents are unaffected by this page — they authenticate with the shared
+      <span class="mono">X-Orchestratinator-Key</span> and keep coordinating whether or not anyone is signed in.
+    </p>
+  </main>
+
+  <script>
+    'use strict';
+    const f = document.getElementById('f');
+    const err = document.getElementById('err');
+    const go = document.getElementById('go');
+
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      go.disabled = true;
+      go.textContent = 'Signing in…';
+      try {
+        const res = await fetch('./api/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('u').value,
+            password: document.getElementById('p').value,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || ('HTTP ' + res.status));
+        // Full navigation rather than a rerender: the cookie is what changed, and
+        // the dashboard has to be fetched from behind the guard it just opened.
+        location.replace('./');
+        return;
+      } catch (e2) {
+        err.textContent = String(e2.message || e2);
+        err.hidden = false;
+        document.getElementById('p').select();
+      }
+      go.disabled = false;
+      go.textContent = 'Sign in';
+    });
+  </script>
+</body>
+</html>

@@ -19,6 +19,19 @@ services:
       # agent that's still on an old .mcp.json.
       - ORCH_AUTH_MODE=${ORCH_AUTH_MODE:-enforce}
       - ORCH_AUTH_PROTECT_UI=${ORCH_AUTH_PROTECT_UI:-false}
+      # The first dashboard account, created only when the user table is empty —
+      # so leaving these set is harmless once you've changed the password in the
+      # UI. Both blank means no account is seeded and the dashboard stays open
+      # until you create one (see .env.example).
+      - ORCH_ADMIN_USER=${ORCH_ADMIN_USER:-}
+      - ORCH_ADMIN_PASSWORD=${ORCH_ADMIN_PASSWORD:-}
+      - ORCH_SESSION_DAYS=${ORCH_SESSION_DAYS:-30}
+      # Unset means "secure cookies whenever the request arrived over TLS". Set it
+      # true once there's a certificate in front of this for good.
+      - ORCH_COOKIE_SECURE=${ORCH_COOKIE_SECURE:-}
+      # The login throttle keys on the client IP, so a reverse proxy in front of
+      # this needs to be trusted for X-Forwarded-For to be believed.
+      - TRUST_PROXY=${TRUST_PROXY:-loopback}
       - PORT=8787
       - DB_PATH=/data/orchestratinator.db
       - CLAIM_TTL_MINUTES=15
