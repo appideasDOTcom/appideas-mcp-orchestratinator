@@ -22,8 +22,7 @@
         <span>auto-refresh</span>
       </label>
       <button id="refresh-now" class="btn" title="Refresh now">↻</button>
-      <button id="open-settings" class="btn" title="Settings — dashboard users and backups">⚙</button>
-      <span id="whoami" class="whoami mono hidden"></span>
+      <button id="open-settings" class="btn" title="Settings — export and restore">⚙</button>
     </div>
   </header>
 
@@ -78,17 +77,13 @@
 
   <!--
     Settings gets a dialog of its own rather than sharing the operator one. It is
-    wider, it holds in-progress editing state (a half-typed password), and the
-    operator helper closes its dialog and re-renders the board after every action
-    — which would throw that state away mid-edit.
+    wider, it holds in-progress state (a chosen backup file awaiting a typed
+    confirmation), and the operator helper closes its dialog and re-renders the
+    board after every action — which would throw that state away mid-flow.
   -->
   <dialog id="settings-dlg" class="dlg dlg-wide">
     <div class="set-head">
-      <h3>Settings</h3>
-      <div class="tabs" id="set-tabs">
-        <button type="button" class="tab on" data-tab="users">Users</button>
-        <button type="button" class="tab" data-tab="tools">Tools</button>
-      </div>
+      <h3>Export &amp; restore</h3>
       <button type="button" class="btn" data-set="close" title="Close">✕</button>
     </div>
     <div id="set-body"></div>

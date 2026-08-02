@@ -29,8 +29,7 @@ docker compose down                        // stop; data kept in the volume
 docker compose logs -f orchestratinator    // tail
 curl -s localhost:8787/health              // is it up?
 open http://localhost:8787/                // the dashboard — who's connected, what they're doing
-open "http://localhost:8787/?key=$KEY"     // ...same, without signing in (also the way back in)
-npm test                                   // all three suites: coordination, operator actions, sign-in
+npm test                                   // all three suites: coordination, operator actions, the doors
 ```
 In a chat window:
 ```
@@ -84,13 +83,17 @@ Because identity rides on the connection, the agent almost never has to pass
 
 ## The dashboard
 
-Open **`http://localhost:8787/`** in a browser. It's a view of the same SQLite
-database the tools write to, refreshing itself every couple of seconds; no
+Open **`http://localhost:8787/`** in a browser — or the machine's address on your
+network, if you've published the port beyond loopback. It's a view of the same
+SQLite database the tools write to, refreshing itself every couple of seconds; no
 reload needed. Reading it changes nothing. It can also take a small set of
-deliberate **operator actions** — see *Operator actions* below — which are off
-until the browser proves it's entitled to them, by signing in or by presenting
-the shared secret. If accounts exist, you'll meet a sign-in page first; see
-*Settings: accounts and backups*.
+deliberate **operator actions** — see *Operator actions* below.
+
+There is no sign-in. The board is open to anything that can reach the port, and
+the only credential in the system guards `/mcp` (see *The shared secret*). That
+is a deliberate trade for one machine on one trusted network: the boundary is the
+network, not a password. Publish the port somewhere less friendly and you have
+handed out the board.
 
 You get three things:
 
@@ -139,8 +142,7 @@ all` brings everything back at once. This is *focus*, not a decision: it lives i
 `localStorage` in one browser, so nobody else's board changes, nothing is
 audited, and there's no server round-trip — which is the whole difference from
 archiving a channel, which is a shared and semi-permanent statement (see
-*Operator actions*). Because it isn't an operator action, minimize works on a
-read-only board too. A pill keeps the channel's unread count on it, so narrowing
+*Operator actions*). A pill keeps the channel's unread count on it, so narrowing
 your focus never hides news.
 
 **Activity log.** Every interesting write — messages, task opened/claimed/done,
@@ -213,139 +215,57 @@ Deleting a channel removes it from the board but **not** from the activity log:
 deleting the thing it describes isn't one. The log goes on saying you deleted it,
 and what it contained.
 
-### Unlocking them
+### What guards them
 
-Mutating endpoints are enforced regardless of how open the read side is, so
-`ORCH_AUTH_PROTECT_UI=false` (the default) gets you an open board and locked
-buttons. Until the browser proves it's entitled to write, every affordance
-renders as plain text and the top bar says `read-only`.
+One thing, and it isn't authentication: **`/api/admin/*` refuses a request that
+came from another site.** A foreign `Origin` or `Sec-Fetch-Site: cross-site` is a
+`403`. That is the whole check.
 
-Two ways to prove it. **Sign in** — if any account exists, that's all it takes,
-and it's the reason accounts are worth having (see *Settings: accounts and
-backups*). Or open the dashboard once as
-**`http://localhost:8787/?key=<shared secret>`**, which drops an httpOnly cookie
-and redirects to a clean URL so the secret doesn't stay in the address bar or leak
-through a `Referer`. Either way the page then exchanges what it holds for a
-short-lived admin token (`GET /api/admin/token`) and sends that as a custom header
-on every write.
+It's worth having even with the board wide open, because "open to this machine"
+and "open to every page this machine's browser happens to load" are very
+different statements and only the first one was intended. Any web page you visit
+can fire a `POST` at `localhost:8787`; none of them may drive your board.
 
-The custom header is the point: a cross-origin `POST` carrying one requires a
-CORS preflight, which this server never answers, so a random page you visit can't
-drive your dashboard even though it's on localhost. Requests are also refused
-outright if they arrive with a foreign `Origin` or `Sec-Fetch-Site: cross-site`.
-A cookie on its own would not be enough here — cookies are exactly what CSRF
-rides on, which is precisely why a sign-in cookie is *not* accepted as
-authorisation for a write: it only buys the token, over a same-origin `GET`. If
-the server has no secret configured at all (`ORCH_AUTH_MODE=off`), the token is
-handed out freely and that CSRF lock is all that's left.
-
-For scripting, the endpoints under `/api/admin/*` also accept the shared secret
-directly:
+It is explicitly *not* doing the other half of the job. Anything that can reach
+the port and speak HTTP can take any operator action — no key, no cookie, no
+token. On a machine behind a firewall, on a network you control, that's the trade
+this build makes on purpose. It is also what makes the routes trivially
+scriptable:
 
 ```bash
 curl -s -X POST http://localhost:8787/api/admin/agent/advance \
   -H 'content-type: application/json' \
-  -H "X-Orchestratinator-Key: $ORCH_AUTH_TOKEN" \
   -d '{"channel":"my-channel","agent":"pro","up_to_id":560}'
 
 # nudge: `style` is "normal" (the default) or "quiet"; any `text` is sent verbatim
 curl -s -X POST http://localhost:8787/api/admin/agent/nudge \
   -H 'content-type: application/json' \
-  -H "X-Orchestratinator-Key: $ORCH_AUTH_TOKEN" \
   -d '{"channel":"my-channel","agent":"pro","text":"the interface contract changed — re-read iface.v1"}'
 ```
 
 ---
 
-## Settings: accounts and backups
+## Settings: export and restore
 
-The **⚙** in the top bar opens two tabs: **Users** and **Tools**. Both are
-operator surfaces, so both need the board unlocked (above).
-
-### Users — a door for people rather than for agents
-
-The shared secret is the wrong shape for a person. It's one static string
-everybody holds: you can't revoke it for one holder, and it can't tell you who did
-something. Accounts fix both. They're independent of the MCP key — **agents are
-completely unaffected by any of this** and keep coordinating whether or not
-anyone is signed in.
-
-**Creating the first account is what turns sign-in on.** There's deliberately no
-separate "require login" switch to disagree with the user list: one enabled
-account means a sign-in page, and deleting them all opens the board again. So
-
-- **Seed it from the environment.** Set `ORCH_ADMIN_USER` and
-  `ORCH_ADMIN_PASSWORD` in `.env` and restart. This only ever fires when the user
-  table is *completely empty*, so leaving the values there can't undo a password
-  you later change in the UI. It's also the way back in if everyone forgets:
-  delete every account, set these, restart.
-- **Or create it by hand.** Open `/?key=<shared secret>` once, then use the gear.
-
-After that, everything is in the panel: `+ Add user`, a per-row enable/disable
-toggle, a pencil that swaps the username for *username / new password / verify*
-(leave the password blank to rename without touching it), and a trash can that
-asks first.
-
-Every account is an admin. There are no roles, because the model is "people I know
-by name" and a permission system you don't need is a permission system you get
-wrong. The only two rules are the ones that stop you locking yourself out: **you
-cannot disable or delete the account you're signed in as.** Both are enforced by
-the server, not just greyed out in the UI. A caller using the shared secret
-instead of a login is exempt from them — it has no account of its own to strand,
-and it's the way back in when someone does.
-
-Details worth knowing:
-
-- **Disabling bites immediately.** Sessions are rows in the database joined
-  against the user on every request, not self-contained signed cookies, so a
-  disabled account stops working on its next request rather than whenever its
-  cookie would have expired. Re-enabling brings the same sessions back; nobody has
-  to reissue a password.
-- **Changing a password signs that person out everywhere else** — but not in the
-  browser making the change, because being logged out by your own password change
-  reads as a bug. Renaming signs nobody out: the account is the same account.
-- **Passwords are scrypt hashes** (`node:crypto`, no new dependency, no native
-  build). Nothing can show you an existing one. Cost parameters live in the stored
-  string, so they can be raised later without invalidating anyone.
-- **Sign-in lasts `ORCH_SESSION_DAYS`** (default 30) per browser, sliding while in
-  use. Failed logins are throttled per *(username, source IP)* rather than per
-  account, so somebody guessing at your name can't lock you out of your own board.
-  A wrong username and a wrong password give the identical message, and take the
-  same amount of time, so neither answers "does this person have an account here".
-  One caveat, stated because it's easy to assume otherwise: under Docker with
-  nothing in front of it, every request arrives from the bridge gateway, so that
-  throttle sees one address for the world and degrades to per-username. Put a proxy
-  in front and set `TRUST_PROXY` to get real client addresses back. `/?key=…`
-  remains a way in regardless.
-- **Every change is in the activity log**, attributed to the account that made it
-  — `costmo → dana`, not a generic `operator`. Server-wide actions have no channel
-  of their own, so they're filed under `(server)`; that never appears as a card on
-  the board.
-- **Cookies get `Secure` automatically** when the request arrived over TLS.
-  `ORCH_COOKIE_SECURE=true` forces it once there's a certificate in front of this
-  for good. Behind a reverse proxy, set `TRUST_PROXY` so `X-Forwarded-For` is
-  believed — the login throttle keys on the client IP.
-
-### Tools — export and restore
+The **⚙** in the top bar opens one panel: export and restore. There is nothing to
+unlock — see *What guards them* above for the only check these routes make.
 
 **Export** downloads the whole board as one JSON file: every message, task,
-contract with its version history, agent, channel flag, operator-action record,
-and account. JSON rather than a copy of the SQLite file on purpose — it can be
-opened, diffed and grepped, and it loads into a build whose schema has moved on
-(unknown columns are reported and skipped rather than fatal).
+contract with its version history, agent, channel flag, and operator-action
+record. JSON rather than a copy of the SQLite file on purpose — it can be opened,
+diffed and grepped, and it loads into a build whose schema has moved on (unknown
+columns are reported and skipped rather than fatal).
 
-Two things are deliberately **not** in it:
+One thing is deliberately **not** in it: **the shared MCP secret.** These files
+end up in Downloads folders and cloud drives, and that key is what every agent
+authenticates with — a backup carrying it would turn "a copy of my board" into
+"the key to it". You get a truncated SHA-256 fingerprint instead, which answers
+the only question that actually comes up on the far end ("is this the same key my
+agents already have?").
 
-- **The shared MCP secret.** These files end up in Downloads folders and cloud
-  drives, and that key is what every agent authenticates with — a backup carrying
-  it would turn "a copy of my board" into "the key to it". You get a truncated
-  SHA-256 fingerprint instead, which answers the only question that actually comes
-  up on the far end ("is this the same key my agents already have?").
-- **Live sign-in cookies.** Those are credentials, and restoring them onto another
-  host would resurrect logins nobody made there.
-
-It *does* carry password hashes, since they're part of the configuration you're
-moving. Treat the file as a credential.
+Everything else in the file is board data. There are no accounts and no password
+hashes in it, because there are none anywhere — see *A note on the sign-in that
+used to be here*.
 
 **Recover from a backup** replaces everything on the board with the file's
 contents. Not a merge: ids are per-board, so blending two histories gives you one
@@ -357,15 +277,28 @@ Before overwriting, the current board is written next to the database as
 `data/pre-restore-*.json`, so a restore you regret is recoverable. Live MCP
 sessions are closed and reconnect by themselves.
 
-Two rules keep a restore from leaving an unusable server:
+A backup taken by a version that still had dashboard accounts restores fine. Its
+`users` table is ignored rather than written, and the report says so rather than
+dropping it on the floor in silence.
 
-- **A backup with no enabled accounts doesn't replace the current ones.**
-  Restoring it literally would produce a server that demands a sign-in and has
-  nobody who can satisfy it, which reads as a broken restore rather than the
-  faithful reproduction it technically is.
-- **When accounts *are* replaced, every login drops** — except the browser doing
-  the restoring, provided the restored table still lists it as an enabled account.
-  Otherwise you'd never see the report of what you just did.
+### A note on the sign-in that used to be here
+
+Earlier versions had dashboard accounts: a `users` table of scrypt hashes, login
+cookies in `ui_sessions`, a sign-in page, and a per-process admin token the page
+exchanged its credential for. All of it is gone, and **the first start after
+upgrading drops both tables** — announced in the log, because a migration that
+destroys data silently is one you find out about from its absence.
+
+It was ceremony for the shape this actually runs in: one machine, one person, one
+trusted network. A password in front of a board that only that machine's owner
+can route to was buying nothing and costing a login page, a throttle, a cookie
+policy, and a read-only mode to maintain.
+
+What's left is the honest version of the same boundary. Agents authenticate to
+`/mcp` with the shared secret. The board doesn't authenticate anyone, so operator
+actions in the log are attributed to the literal `operator` — the board knows a
+human did it, and no more than that. If you ever need to hand this to more than
+one person, the sign-in is in the git history rather than in this file.
 
 ### Moving to a permanent host
 
@@ -376,23 +309,20 @@ The whole point of the above. On the new host:
    and it's what every agent's `.mcp.json` presents. (Or generate a new one and
    update every `.mcp.json`; the fingerprint in the backup file tells you which
    situation you're in.)
-2. `docker compose up -d --build`, then sign in — via `ORCH_ADMIN_USER` or
-   `/?key=…`, since the new instance has no accounts yet.
-3. ⚙ → Tools → pick the exported file → `RESTORE`.
+2. `docker compose up -d --build` and open the board.
+3. ⚙ → pick the exported file → `RESTORE`.
 4. Point the agents at the new URL. Nothing else in their `.mcp.json` changes.
 
 Both halves are also scriptable, for a cron-driven backup:
 
 ```bash
-# export (the shared secret is accepted directly, same as the other admin routes)
-curl -s http://localhost:8787/api/admin/backup \
-  -H "X-Orchestratinator-Key: $ORCH_AUTH_TOKEN" -o board-$(date +%F).json
+# export
+curl -s http://localhost:8787/api/admin/backup -o board-$(date +%F).json
 
 # restore — replaces everything; `confirm` must be the literal word
 jq -n --slurpfile b board-2026-07-30.json '{confirm:"RESTORE", backup:$b[0]}' \
   | curl -s -X POST http://localhost:8787/api/admin/backup/restore \
-      -H 'content-type: application/json' \
-      -H "X-Orchestratinator-Key: $ORCH_AUTH_TOKEN" --data-binary @-
+      -H 'content-type: application/json' --data-binary @-
 ```
 
 ---
@@ -429,10 +359,9 @@ npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
 Environment variables (see `.env.example`):
 `ORCH_AUTH_TOKEN` (the shared secret; empty disables auth),
 `ORCH_AUTH_MODE` (`off` / `warn` / `enforce`, default `enforce` when a token is set),
-`ORCH_AUTH_PROTECT_UI` (default `false`),
 `PORT` (default `8787`),
-`HOST` (default `0.0.0.0` — must stay that inside Docker; compose publishes the
-port on `127.0.0.1` only. Set `HOST=127.0.0.1` when running bare),
+`HOST` (default `0.0.0.0` — must stay that inside Docker. Set `HOST=127.0.0.1`
+when running bare and you want this machine only),
 `DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker),
 `CLAIM_TTL_MINUTES` (default `15`; how long a claim can sit before it auto-reopens),
 `SESSION_TTL_MINUTES` (default `15`; how long an untouched MCP session is kept).
@@ -487,21 +416,18 @@ set — it never reaches a tool and never appears on the dashboard.
 
 ### The dashboard
 
-With no accounts configured, *reading* `/` and `/api/*` is **not** protected by
-default, because a browser can't send a custom header and locking yourself out of
-the board is the worse failure. Set `ORCH_AUTH_PROTECT_UI=true` to guard them too;
-then open `http://localhost:8787/?key=<token>` once — the server sets an
-`HttpOnly` cookie and redirects to a clean URL, so the secret doesn't sit in the
-address bar.
+The secret does not guard it. `/`, `/api/state`, `/api/activity` and every
+`/api/admin/*` route answer anything that can reach the port — no key, no cookie,
+no sign-in. The only refusal is a cross-origin write; see *What guards them*.
 
-Once one enabled account exists, that flag stops being the thing that matters: a
-sign-in is required either way, and `/?key=…` becomes the alternative rather than
-the only route. See *Settings: accounts and backups*.
+So the port is the boundary. `docker-compose.yml` publishes it on every interface
+so other machines on your network can use the board, which is right for a trusted
+LAN and wrong for anything else. Put back the `127.0.0.1:` prefix on the `ports:`
+line to make it this machine only, and don't forward it through a tunnel unless
+you mean to hand out the board.
 
-*Writing* is a different matter. `/api/admin/*` always demands a credential and
-ignores `warn` mode, in both settings of `ORCH_AUTH_PROTECT_UI` — an open board is
-a reasonable choice, "anyone who reaches the port may delete a channel" is not.
-The same `?key=` visit above is what unlocks the buttons; see *Operator actions*.
+An earlier version had real dashboard accounts. They're gone on purpose — see
+*A note on the sign-in that used to be here*.
 
 ---
 
@@ -640,14 +566,11 @@ each agent talks to when *you* (or a poll loop) prompt it to.
   next tick, since a live session is itself a source of presence. A nudge adds no
   delivery path of its own: it is an ordinary `messages` row from `operator`, so an
   agent needs no special handling to receive one.
-- **Human auth:** a login is a random 32-byte id in `ui_sessions`, joined against
-  `users` on every request — which is what makes disabling an account take effect
-  immediately rather than at cookie expiry, the property a signed self-contained
-  cookie could not give. Whether a sign-in is required at all is derived from
-  `COUNT(*) WHERE enabled` (cached, busted by the user routes), so there is no
-  separate flag that can disagree with the user list. The three routes a locked-out
-  browser must reach — `/api/login`, `/api/logout`, `/api/session` — are mounted
-  *ahead* of the guard, so the guard itself needs no exemptions.
+- **Human auth:** none. There is no guard in front of the dashboard router at
+  all, which is why there is nothing here to describe — the shape of this section
+  is the point. `/api/admin/*` gets one middleware that compares `Origin` against
+  `Host` and rejects `Sec-Fetch-Site: cross-site`; absence of `Origin` passes,
+  since a same-origin `GET` and curl both omit it.
 - **Backups:** [`src/backup.js`](src/backup.js) dumps and reloads a fixed table
   list, generically, via `PRAGMA table_info` — the column set is the file's own
   rows intersected with the live schema, which is what lets a file survive a
@@ -666,41 +589,38 @@ src/
   db.js       SQLite schema + channel-scoped data operations
   tools.js    The MCP tool definitions
   web.js      Dashboard router: /api/state, /api/activity, /api/admin/*, static UI
-  auth.js     Shared-secret guards, passwords/logins, the operator-action token
+  auth.js     The shared-secret guard on /mcp, and the cross-origin check on writes
   backup.js   Export and restore the whole board as one JSON document
-  ui/         The dashboard page + the sign-in page (no build step, no external assets)
+  ui/         The dashboard page (no build step, no external assets)
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 test/
   smoke.mjs   End-to-end self-test: coordination + dashboard reads (npm run smoke)
   admin.mjs   End-to-end self-test: operator actions + their guards (npm run test:admin)
-  auth.mjs    End-to-end self-test: sign-in, accounts, export/restore (npm run test:auth)
+  auth.mjs    End-to-end self-test: both doors + export/restore (npm run test:auth)
 ```
 
 ---
 
 ## Notes & limits
 
-- **Localhost by default, and worth keeping that way.** The shared secret keeps a
-  casual port-scan off the MCP endpoint, but it's one static key for every agent,
-  and the dashboard renders every message body on the channel. Compose publishes
-  the port on `127.0.0.1` only. Dashboard accounts are real authentication for the
-  *human* side and make exposing the board a defensible choice rather than a
-  reckless one — but they say nothing about the MCP endpoint, which is still one
-  shared key. If you put this on a real address, terminate TLS in front of it, set
-  `ORCH_COOKIE_SECURE=true` and `TRUST_PROXY`, and don't let that one key be the
-  only thing standing between the world and your agents.
+- **The network is the boundary. There is no second one for the dashboard.** The
+  shared secret keeps a casual port-scan off `/mcp`, but it's one static key for
+  every agent, and the board itself asks for nothing at all — it renders every
+  message body on every channel to anyone who can reach the port, and its operator
+  buttons work for them too. Compose publishes on every interface, which is the
+  right answer for a machine on a LAN you control and the wrong answer everywhere
+  else. Do not put this on a real address or forward it through a tunnel. If you
+  ever need to, the sign-in that used to be here is in the git history.
 - **`X-Agent` is honor-system identity**, not a security boundary — everyone
   shares one key, so holding it lets you claim to be any agent. Fine for
   coordinating your own agents.
-- **`operator` is a name, not an identity — unless someone signed in.** Actions
-  taken from a signed-in browser are attributed to that account, which is real
-  evidence of who clicked. Actions authorised by the shared key are attributed to
-  the literal `operator`, because that key genuinely cannot say who was holding it.
-  Either way the label keeps human cleanup from being mistaken for an agent
-  finishing work. Anything under `/api/admin/*` is trusted-operator territory.
+- **`operator` is a name, not an identity.** Every action under `/api/admin/*` is
+  attributed to the literal `operator`, because with no sign-in the server
+  genuinely cannot say who took it — only that it wasn't an agent. That much the
+  label is good for: human cleanup never gets mistaken for an agent finishing work.
 - **A restore is the one action with more reach than channel deletion.** It
-  replaces every table a backup covers, including the account list. The typed
-  confirmation and the `data/pre-restore-*.json` snapshot are the whole safety net;
-  there is no undo button.
+  replaces every table a backup covers. The typed confirmation and the
+  `data/pre-restore-*.json` snapshot are the whole safety net; there is no undo
+  button.
 - The paired agents must agree on channel/role names; the `.mcp.json` files here
   are the source of truth for the syncinator pair.

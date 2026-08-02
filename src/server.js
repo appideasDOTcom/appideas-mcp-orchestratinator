@@ -7,7 +7,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
-import { createAuth, seedFirstUser } from './auth.js';
+import { createAuth } from './auth.js';
 
 // Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
 // through compose's `environment:` block instead, so a missing file is normal.
@@ -34,13 +34,12 @@ const STARTED_AT = new Date().toISOString();
 
 const db = openDb(DB_PATH);
 const store = makeStore(db);
-const auth = createAuth({ store });
-const seeded = seedFirstUser(store, process.env);
+const auth = createAuth();
 
 const app = express();
-// Behind a TLS-terminating proxy on the permanent host, so req.ip is the client
-// rather than the proxy (the login throttle keys on it) and req.secure is honest
-// (the session cookie's `secure` flag follows it).
+// Only affects what req.ip reports, which is what the auth warnings name when an
+// agent presents a bad key. Left configurable because those log lines are useless
+// if every request appears to come from a proxy.
 app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback');
 // Ahead of the body parser: an unauthorized caller shouldn't get 4mb of parsing
 // done on its behalf. /health stays open — the container healthcheck uses it.
@@ -131,9 +130,6 @@ function sweepIdleSessions() {
   }
 }
 setInterval(sweepIdleSessions, SWEEP_MS).unref();
-// Expired browser logins are already refused (getUiSession checks the expiry in
-// SQL), so this is only housekeeping — it stops the table growing forever.
-setInterval(() => { try { store.sweepUiSessions(); } catch { /* next sweep */ } }, 10 * SWEEP_MS).unref();
 
 const markBusy = (sid) => {
   const s = sid ? sessions[sid] : undefined;
@@ -255,17 +251,11 @@ async function handleSessionRequest(req, res) {
 app.get('/mcp', handleSessionRequest);
 app.delete('/mcp', handleSessionRequest);
 
-// Sign in, sign out, "who am I". Ahead of the guard on purpose: these are exactly
-// the routes a browser that cannot get in has to be able to reach, and putting
-// them here means the guard needs no exemptions carved into it.
-app.use(auth.createAuthRouter());
-
 // Dashboard at `/` (+ its /api/* endpoints). Mounted last so it can never shadow
-// an MCP route. The uiGuard demands a sign-in once any dashboard user exists, and
-// otherwise is a no-op unless ORCH_AUTH_PROTECT_UI is set — so turning auth on
-// doesn't silently lock the human out of the board. The operator endpoints under
-// /api/admin carry their own guard, which is never optional.
-app.use(auth.uiGuard);
+// an MCP route. There is no guard in front of it: the board is open to anything
+// that can reach this port, which is the whole model on a single machine behind a
+// firewall. The operator endpoints under /api/admin still refuse a cross-origin
+// request, so a page you happen to visit can't drive the board on your behalf.
 app.use(createWebRouter({
   store,
   sessions,
@@ -287,5 +277,4 @@ app.listen(PORT, HOST, () => {
   console.log(`[orchestratinator] MCP       http://localhost:${PORT}/mcp`);
   console.log(`[orchestratinator] dashboard http://localhost:${PORT}/   (db: ${DB_PATH})`);
   console.log(`[orchestratinator] ${auth.describeStartup()}`);
-  if (seeded) console.log(`[orchestratinator] ${seeded}`);
 });

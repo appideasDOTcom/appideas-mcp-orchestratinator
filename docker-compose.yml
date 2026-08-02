@@ -4,33 +4,25 @@ services:
     container_name: appideas-orchestratinator
     restart: unless-stopped
     ports:
-      # Published on the loopback interface only. The shared-secret header below
-      # is a second lock, not a replacement for this one: it's one static key for
-      # every agent and the dashboard is open by default. Drop the 127.0.0.1
-      # prefix at your own risk.
-      - "127.0.0.1:8787:8787"
+      # Published on every interface, so other machines on your network can reach
+      # the board and their agents can reach /mcp. Read that as what it is: the
+      # dashboard has no sign-in, so anything that can route to this host can read
+      # the board and take operator actions on it. That is the intended model for
+      # one machine on one trusted network behind a firewall, and nothing else.
+      # Put back the "127.0.0.1:" prefix to make it this machine only.
+      - "8787:8787"
     environment:
-      # Shared secret clients present as X-Orchestratinator-Key. Substituted
+      # Shared secret MCP clients present as X-Orchestratinator-Key. Substituted
       # from ./.env, which is gitignored; compose fails loudly rather than
-      # quietly starting an unlocked server if it's missing.
+      # quietly starting an unlocked server if it's missing. This guards /mcp
+      # only — the dashboard is open.
       - ORCH_AUTH_TOKEN=${ORCH_AUTH_TOKEN:?set ORCH_AUTH_TOKEN in .env (see .env.example)}
       # off | warn | enforce — see .env.example. `warn` logs bad keys and lets
       # them through, which is how you roll this out without cutting off an
       # agent that's still on an old .mcp.json.
       - ORCH_AUTH_MODE=${ORCH_AUTH_MODE:-enforce}
-      - ORCH_AUTH_PROTECT_UI=${ORCH_AUTH_PROTECT_UI:-false}
-      # The first dashboard account, created only when the user table is empty —
-      # so leaving these set is harmless once you've changed the password in the
-      # UI. Both blank means no account is seeded and the dashboard stays open
-      # until you create one (see .env.example).
-      - ORCH_ADMIN_USER=${ORCH_ADMIN_USER:-}
-      - ORCH_ADMIN_PASSWORD=${ORCH_ADMIN_PASSWORD:-}
-      - ORCH_SESSION_DAYS=${ORCH_SESSION_DAYS:-30}
-      # Unset means "secure cookies whenever the request arrived over TLS". Set it
-      # true once there's a certificate in front of this for good.
-      - ORCH_COOKIE_SECURE=${ORCH_COOKIE_SECURE:-}
-      # The login throttle keys on the client IP, so a reverse proxy in front of
-      # this needs to be trusted for X-Forwarded-For to be believed.
+      # Only affects the client address named in an auth warning. Under Docker with
+      # nothing in front, every request arrives from the bridge gateway.
       - TRUST_PROXY=${TRUST_PROXY:-loopback}
       - PORT=8787
       - DB_PATH=/data/orchestratinator.db

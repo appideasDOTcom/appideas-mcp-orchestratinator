@@ -19,7 +19,6 @@ const MCP = `${HOST}/mcp`;
 const CHANNEL = 'admin-test';
 const KEY = 'admin-shared-secret';
 const AUTH_HEADER = 'X-Orchestratinator-Key';
-const ADMIN_HEADER = 'X-Orch-Admin-Token';
 
 let failures = 0;
 const assert = (cond, msg) => {
@@ -61,15 +60,17 @@ const agentOf = async (name) => {
   return c?.agents.find((a) => a.agent === name) ?? null;
 };
 
-/** POST an admin route. Defaults to the shared key, which adminGuard accepts. */
-const post = (path, body, { headers = {}, key = KEY } = {}) =>
+/**
+ * POST an admin route.
+ *
+ * No credential: the dashboard has no sign-in, so adminGuard's only question is
+ * whether the request came from somewhere else. A plain fetch with no Origin is
+ * exactly what the page itself sends.
+ */
+const post = (path, body, { headers = {} } = {}) =>
   fetch(`${HOST}/api/admin/${path}`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(key ? { [AUTH_HEADER]: key } : {}),
-      ...headers,
-    },
+    headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   });
 const postJson = async (path, body, opts) => {
@@ -82,16 +83,10 @@ const server = spawn('node', ['src/server.js'], {
     ...process.env,
     PORT: String(PORT),
     DB_PATH,
+    // The key guards /mcp only — every agent below presents it. The dashboard and
+    // its operator routes are open, which is what the guard block asserts.
     ORCH_AUTH_TOKEN: KEY,
     ORCH_AUTH_MODE: 'enforce',
-    // Left at its default (open reads) on purpose: the operator endpoints must be
-    // locked even when the dashboard itself is not.
-    ORCH_AUTH_PROTECT_UI: 'false',
-    // The server loads ./.env itself, so a developer's own seed account would
-    // otherwise make every read in here require a sign-in. Explicitly empty wins
-    // over the file. Sign-in and backups have their own suite (test/auth.mjs).
-    ORCH_ADMIN_USER: '',
-    ORCH_ADMIN_PASSWORD: '',
     CLAIM_TTL_MINUTES: '15',
   },
   stdio: 'inherit',
@@ -118,24 +113,15 @@ try {
 
   console.log('guard: what must be refused');
   {
-    const noAuth = await post('agent/advance', { channel: CHANNEL, agent: 'beta', up_to_id: 1 }, { key: null });
-    assert(noAuth.status === 401, 'no credentials at all → 401');
-
-    const wrongAdmin = await post(
-      'agent/advance',
-      { channel: CHANNEL, agent: 'beta', up_to_id: 1 },
-      { key: null, headers: { [ADMIN_HEADER]: 'not-the-token' } }
-    );
-    assert(wrongAdmin.status === 401, 'a wrong admin token → 401');
-
-    // The CSRF lock. A page on another origin can fire this request; it must not
-    // be honoured even when the caller somehow holds a valid credential.
+    // The whole guard, now that there is no dashboard credential to check. A page
+    // on another origin can fire this request at the port; it must not be honoured,
+    // or "open on my machine" quietly becomes "open to every site my browser loads".
     const foreignOrigin = await post(
       'agent/advance',
       { channel: CHANNEL, agent: 'beta', up_to_id: 1 },
       { headers: { origin: 'https://evil.example' } }
     );
-    assert(foreignOrigin.status === 403, 'a valid key from a foreign Origin → 403');
+    assert(foreignOrigin.status === 403, 'a write from a foreign Origin → 403');
 
     const crossSite = await post(
       'agent/advance',
@@ -150,34 +136,38 @@ try {
       { headers: { origin: HOST } }
     );
     assert(sameOrigin.status === 200, 'the same Origin is allowed through');
+
+    // No Origin at all is curl, or a same-origin GET. Absence cannot be treated as
+    // hostile, and on this build it is the ordinary case rather than a loophole.
+    const noOrigin = await post('agent/advance', { channel: CHANNEL, agent: 'beta', up_to_id: 0 });
+    assert(noOrigin.status === 200, 'a request with no Origin is allowed through');
+
+    // The agent door is a separate question, and it is still locked.
+    const mcp = await fetch(MCP, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+    assert(mcp.status === 401, '/mcp still refuses a client with no shared secret');
   }
 
-  console.log('\nguard: handing out the admin token');
+  console.log('\nthe dashboard needs no credential');
   {
-    const bare = await fetch(`${HOST}/api/admin/token`);
-    assert(bare.status === 401, 'the token endpoint refuses a browser with no key');
+    const page = await fetch(`${HOST}/`);
+    const html = await page.text();
+    assert(page.status === 200, 'the board is served to a browser with nothing to present');
+    assert(/api\/state/.test(html) || /app\.js/.test(html), 'and it is the dashboard, not a sign-in form');
 
-    const withQuery = await fetch(`${HOST}/api/admin/token?key=${KEY}`);
-    const token = (await withQuery.json().catch(() => ({}))).token;
-    assert(withQuery.status === 200 && typeof token === 'string' && token.length > 20, 'the token endpoint accepts ?key=');
-
-    // The dashboard's real path: one `/?key=…` visit sets a cookie, and the page
-    // then fetches the token with it. This has to work with the dashboard open
-    // (PROTECT_UI=false), which is what the cookie-drop move was for.
-    const visit = await fetch(`${HOST}/?key=${KEY}`, { redirect: 'manual' });
-    const cookie = (visit.headers.get('set-cookie') ?? '').split(';')[0];
-    assert(visit.status === 302 && cookie.startsWith('orch_key='), '/?key=… redirects and drops the cookie');
-    const withCookie = await fetch(`${HOST}/api/admin/token`, { headers: { cookie } });
-    const cookieToken = (await withCookie.json().catch(() => ({}))).token;
-    assert(withCookie.status === 200 && cookieToken === token, 'the cookie alone then buys the same token');
-
-    // And the token it hands out is accepted in place of the shared secret.
-    const viaToken = await post(
-      'agent/advance',
-      { channel: CHANNEL, agent: 'beta', up_to_id: 0 },
-      { key: null, headers: { [ADMIN_HEADER]: token } }
-    );
-    assert(viaToken.status === 200, 'the issued token authorises a write');
+    for (const gone of ['/api/session', '/api/admin/token', '/api/admin/users']) {
+      const res = await fetch(`${HOST}${gone}`);
+      assert(res.status === 404, `${gone} no longer exists`);
+    }
+    const login = await fetch(`${HOST}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'costmo', password: 'whatever' }),
+    });
+    assert(login.status === 404, '/api/login no longer exists');
   }
 
   console.log('\nadvance a cursor (mark read)');

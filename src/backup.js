@@ -15,8 +15,9 @@ import { BACKUP_TABLES } from './db.js';
  * than fatal). It is also restorable through the API, so moving a board never
  * needs anyone to go poking at a Docker volume by hand.
  *
- * What it deliberately does NOT contain: the shared MCP secret, and live login
- * cookies. See `describeAuth` and BACKUP_TABLES.
+ * What it deliberately does NOT contain: the shared MCP secret. See
+ * `describeAuth`. Everything else in the file is board data — there are no
+ * dashboard accounts to carry, because there is no dashboard sign-in.
  */
 
 export const FORMAT = 'orchestratinator-backup';
@@ -131,34 +132,23 @@ export function snapshotBeforeRestore({ store, meta, env = process.env }) {
 /**
  * Load a validated backup over the top of the current board.
  *
- * Two safety rules that aren't obvious from the shape of the data:
- *
- *  - A backup whose `users` table has nobody enabled in it does not get to
- *    replace the current users. Restoring it literally would leave a server with
- *    no account that can sign in, which reads as "the restore broke the login"
- *    rather than as the faithful reproduction it technically is. Keeping the
- *    current users is the only outcome that stays operable.
- *  - When users *are* replaced, every live login is dropped. The credentials that
- *    would keep those cookies valid have just been swapped out from underneath
- *    them, so continuing to honour them would mean trusting a session against a
- *    user table it was never checked against.
+ * Only the tables in BACKUP_TABLES are written; anything else in the file is
+ * ignored rather than fatal, which is what lets a file written by a different
+ * build still load. The case worth naming is a backup taken before dashboard
+ * sign-in was removed: those carry a `users` table of scrypt hashes for a
+ * feature that no longer exists, and silently dropping them on the floor would
+ * leave someone wondering where their accounts went. Say it instead.
  */
 export function applyBackup({ store, doc }) {
   const tables = {};
   for (const t of BACKUP_TABLES) if (Array.isArray(doc.tables[t])) tables[t] = doc.tables[t];
 
-  const incomingUsers = tables.users ?? null;
-  const usable = (incomingUsers ?? []).filter(
-    (u) => u && typeof u.username === 'string' && typeof u.password === 'string' && (u.enabled ?? 1)
-  );
   const notes = [];
-  const replacedUsers = !!incomingUsers && usable.length > 0;
-  if (incomingUsers && !replacedUsers) {
-    delete tables.users;
+  const staleUsers = Array.isArray(doc.tables.users) ? doc.tables.users.length : 0;
+  if (staleUsers) {
     notes.push(
-      incomingUsers.length
-        ? 'kept the current dashboard users: every account in the backup was disabled or malformed'
-        : 'kept the current dashboard users: the backup carried none'
+      `ignored ${staleUsers} dashboard account${staleUsers === 1 ? '' : 's'} in the backup — ` +
+      'this server has no sign-in, so the board is open to anyone who can reach it'
     );
   }
 
@@ -166,18 +156,10 @@ export function applyBackup({ store, doc }) {
   if (missing.length) notes.push(`left untouched (absent from the backup): ${missing.join(', ')}`);
 
   const report = store.restoreBackup(tables);
-  if (replacedUsers) {
-    const dropped = store.deleteAllUiSessions();
-    notes.push(
-      `replaced ${usable.length} dashboard user${usable.length === 1 ? '' : 's'} and signed out ` +
-      `${dropped} browser session${dropped === 1 ? '' : 's'} — everyone signs in against the restored accounts`
-    );
-  }
 
   return {
     report,
     notes,
-    replaced_users: replacedUsers,
     rows: Object.values(report).reduce((n, r) => n + (r.inserted ?? 0), 0),
   };
 }

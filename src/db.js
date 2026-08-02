@@ -89,35 +89,16 @@ export function openDb(path) {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_admin_events_channel ON admin_events(channel, id);
-
-    -- Humans who may open the dashboard. Separate from the shared MCP secret on
-    -- purpose: that key is one static string every agent holds, which is the
-    -- wrong shape for a person — you can't disable one holder of it, and it says
-    -- nothing about who took an action. Every user here is an admin; the model
-    -- is "people I know by name", not a permission system.
-    CREATE TABLE IF NOT EXISTS users (
-      username    TEXT PRIMARY KEY,        -- lower-cased on the way in
-      password    TEXT NOT NULL,           -- scrypt, never a plaintext (see auth.js)
-      enabled     INTEGER NOT NULL DEFAULT 1,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      last_login  TEXT
-    );
-
-    -- Live browser logins. In the database rather than a signed cookie so that
-    -- disabling or deleting a user takes effect on their next request instead of
-    -- whenever their cookie happens to expire — the whole point of an
-    -- enable/disable toggle is that it acts now.
-    CREATE TABLE IF NOT EXISTS ui_sessions (
-      id          TEXT PRIMARY KEY,        -- the cookie value: 32 random bytes
-      username    TEXT NOT NULL,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
-      expires_at  TEXT NOT NULL,
-      user_agent  TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_ui_sessions_user ON ui_sessions(username);
   `);
+
+  // v0.9 carried dashboard logins: a `users` table of scrypt hashes and a
+  // `ui_sessions` table of live cookies. Both are gone — the dashboard is open
+  // to whoever can reach the port, which on a single-user machine behind a
+  // firewall is the whole of the intended model. Dropped rather than left
+  // orphaned, because a table of password hashes for a feature that no longer
+  // exists is a liability with no reader: any backup, snapshot, or `.dump` of
+  // this file would go on carrying credentials nothing can check.
+  dropTables(db, ['ui_sessions', 'users']);
 
   // Presence detail added after v0.1 — the dashboard reads these to show an
   // approximate last-known state per agent. Added by migration so an existing
@@ -151,6 +132,22 @@ function addColumn(db, table, column, decl) {
   if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }
 
+/**
+ * Remove tables a past version created, and say so once.
+ *
+ * Announced rather than silent: this deletes rows from an existing volume, and a
+ * migration that destroys data without a word in the log is one you find out
+ * about from its absence.
+ */
+function dropTables(db, tables) {
+  const present = tables.filter(
+    (t) => !!db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t)
+  );
+  if (!present.length) return;
+  for (const t of present) db.exec(`DROP TABLE IF EXISTS ${t}`);
+  console.log(`[orchestratinator] migration: dropped ${present.join(', ')} — dashboard sign-in was removed`);
+}
+
 const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
 
 /**
@@ -165,11 +162,10 @@ export const STATUS_TTL_SECONDS = Math.max(0, Number(process.env.STATUS_TTL_SECO
 /**
  * Every table a backup carries, and the only tables a restore will write.
  *
- * `ui_sessions` is deliberately absent. It holds live login cookies, which are
- * credentials rather than data — carrying them into a file that gets downloaded
- * and copied around would hand out access, and restoring them onto another host
- * would resurrect logins nobody made there. A restore clears them instead, so
- * everybody signs in again against the users the file did bring.
+ * All board data and nothing else. Nothing here is a credential, which is what
+ * makes a backup file safe to email to yourself — see describeAuth in backup.js
+ * for the one secret that stays behind, and applyBackup for what happens to the
+ * `users` table an older backup may still carry.
  */
 export const BACKUP_TABLES = [
   'messages',
@@ -179,7 +175,6 @@ export const BACKUP_TABLES = [
   'agents',
   'channel_flags',
   'admin_events',
-  'users',
 ];
 
 /**
@@ -301,60 +296,6 @@ export function makeStore(db) {
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
     listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
-
-    // --- dashboard users and their logins (see src/auth.js) -------------------
-    // `password` is never selected here: nothing outside verifyLogin has any
-    // business reading a hash, and a list endpoint that returns one is how it
-    // ends up in a log or a devtools panel.
-    listUsers: db.prepare(
-      `SELECT username, enabled, created_at, updated_at, last_login FROM users ORDER BY username`
-    ),
-    getUser: db.prepare(
-      `SELECT username, enabled, created_at, updated_at, last_login FROM users WHERE username = @username`
-    ),
-    getUserSecret: db.prepare(`SELECT username, password, enabled FROM users WHERE username = @username`),
-    countUsers: db.prepare(`SELECT COUNT(*) AS n FROM users`),
-    countEnabledUsers: db.prepare(`SELECT COUNT(*) AS n FROM users WHERE enabled = 1`),
-    insertUser: db.prepare(
-      `INSERT INTO users (username, password, enabled) VALUES (@username, @password, @enabled)`
-    ),
-    renameUser: db.prepare(
-      `UPDATE users SET username = @to, updated_at = datetime('now') WHERE username = @from`
-    ),
-    setUserPassword: db.prepare(
-      `UPDATE users SET password = @password, updated_at = datetime('now') WHERE username = @username`
-    ),
-    setUserEnabled: db.prepare(
-      `UPDATE users SET enabled = @enabled, updated_at = datetime('now') WHERE username = @username`
-    ),
-    deleteUser: db.prepare(`DELETE FROM users WHERE username = @username`),
-    touchUserLogin: db.prepare(`UPDATE users SET last_login = datetime('now') WHERE username = @username`),
-
-    insertUiSession: db.prepare(
-      `INSERT INTO ui_sessions (id, username, expires_at, user_agent)
-       VALUES (@id, @username, @expires, @ua)`
-    ),
-    // Joined to `users` so a disabled or deleted account's cookie stops working
-    // on the next request, without having to hunt down its sessions.
-    getUiSession: db.prepare(
-      `SELECT s.id, s.username, s.created_at, s.last_seen, s.expires_at
-         FROM ui_sessions s JOIN users u ON u.username = s.username
-        WHERE s.id = @id AND u.enabled = 1 AND s.expires_at > datetime('now')`
-    ),
-    touchUiSession: db.prepare(
-      `UPDATE ui_sessions SET last_seen = datetime('now'), expires_at = @expires WHERE id = @id`
-    ),
-    deleteUiSession: db.prepare(`DELETE FROM ui_sessions WHERE id = @id`),
-    deleteUiSessionsFor: db.prepare(`DELETE FROM ui_sessions WHERE username = @username`),
-    // A password change signs that person out everywhere else. Everywhere *else*:
-    // the browser making the change stays, because being logged out by your own
-    // password change reads as a bug rather than as security.
-    deleteUiSessionsExcept: db.prepare(`DELETE FROM ui_sessions WHERE username = @username AND id != @keep`),
-    // Sessions follow a rename rather than being dropped by it — the account is
-    // the same account, and its credentials haven't changed.
-    renameUiSessions: db.prepare(`UPDATE ui_sessions SET username = @to WHERE username = @from`),
-    deleteAllUiSessions: db.prepare(`DELETE FROM ui_sessions`),
-    sweepUiSessions: db.prepare(`DELETE FROM ui_sessions WHERE expires_at <= datetime('now')`),
 
     // --- dashboard reads (see src/web.js) -----------------------------------
     listAllAgents: db.prepare(
@@ -601,35 +542,6 @@ export function makeStore(db) {
     purgeChannel,
     logAdmin: (channel, action, { actor = 'operator', target = null, detail = null } = {}) =>
       n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid),
-
-    // --- dashboard users ------------------------------------------------------
-    listUsers: () => q.listUsers.all().map((u) => ({ ...u, enabled: !!u.enabled })),
-    getUser: (username) => {
-      const u = q.getUser.get({ username });
-      return u ? { ...u, enabled: !!u.enabled } : null;
-    },
-    /** The one read that returns a hash. Callers verify and discard. */
-    getUserSecret: (username) => q.getUserSecret.get({ username }) ?? null,
-    countUsers: () => q.countUsers.get().n,
-    countEnabledUsers: () => q.countEnabledUsers.get().n,
-    createUser: (username, password, enabled = true) =>
-      q.insertUser.run({ username, password, enabled: enabled ? 1 : 0 }).changes,
-    renameUser: (from, to) => q.renameUser.run({ from, to }).changes,
-    setUserPassword: (username, password) => q.setUserPassword.run({ username, password }).changes,
-    setUserEnabled: (username, enabled) => q.setUserEnabled.run({ username, enabled: enabled ? 1 : 0 }).changes,
-    deleteUser: (username) => q.deleteUser.run({ username }).changes,
-    touchUserLogin: (username) => q.touchUserLogin.run({ username }).changes,
-
-    createUiSession: (id, username, expiresAt, ua = null) =>
-      q.insertUiSession.run({ id, username, expires: expiresAt, ua }).changes,
-    getUiSession: (id) => q.getUiSession.get({ id }) ?? null,
-    touchUiSession: (id, expiresAt) => q.touchUiSession.run({ id, expires: expiresAt }).changes,
-    deleteUiSession: (id) => q.deleteUiSession.run({ id }).changes,
-    deleteUiSessionsFor: (username) => q.deleteUiSessionsFor.run({ username }).changes,
-    deleteUiSessionsExcept: (username, keep) => q.deleteUiSessionsExcept.run({ username, keep }).changes,
-    renameUiSessions: (from, to) => q.renameUiSessions.run({ from, to }).changes,
-    deleteAllUiSessions: () => q.deleteAllUiSessions.run().changes,
-    sweepUiSessions: () => q.sweepUiSessions.run().changes,
 
     // --- backup / restore -----------------------------------------------------
     dumpTable: (table) => tableInfo(table).selectAll.all(),

@@ -1,8 +1,6 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
-import {
-  SERVER_CHANNEL, hashPassword, normalizeUsername, passwordProblem, usernameProblem,
-} from './auth.js';
+import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
@@ -318,11 +316,12 @@ function buildState(store, sessions, sessionStats, meta) {
 }
 
 /**
- * The operator surface. Every route here is a write, so every route is guarded
- * (see auth.adminGuard — enforced regardless of how open the read side is) and
- * every route leaves an `admin_events` row behind, which the activity feed
- * shows. Identity is always the literal `operator`, never a borrowed agent name,
- * so a human's cleanup can never be mistaken for an agent finishing work.
+ * The operator surface. Every route here is a write, so every route goes through
+ * auth.adminGuard — which on this build checks only that the request did not come
+ * from another origin, since the dashboard has no credential of its own. Every
+ * route also leaves an `admin_events` row behind, which the activity feed shows.
+ * Identity is always the literal `operator`, never a borrowed agent name, so a
+ * human's cleanup can never be mistaken for an agent finishing work.
  *
  * Channel and agent names travel in the JSON body rather than the path: they're
  * free-form strings, and a path segment would need encoding conventions that
@@ -330,12 +329,6 @@ function buildState(store, sessions, sessionStats, meta) {
  */
 function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
   const router = express.Router();
-
-  // Ahead of the guard below — this is the endpoint that hands out the token the
-  // guard wants, so it has its own (stricter) check.
-  router.get('/token', auth.adminTokenGuard, (_req, res) => {
-    res.json({ token: auth.adminToken });
-  });
 
   router.use(auth.adminGuard);
 
@@ -491,152 +484,29 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     res.json({ ok: true, channel, deleted, sessions_closed: closed });
   });
 
-  /* ---------- dashboard users ---------- */
+  /* ---------- server-wide actions ---------- */
 
   /**
-   * Who may open the dashboard. Every account is an admin — the model is "people
-   * I know by name", so there are no roles to get wrong, and the only rules are
-   * the two that stop the board being locked away from the person at the keyboard.
+   * Record something that isn't about one channel.
    *
-   * `you` is the account this request is authenticated as, and is null for a
-   * caller using the shared secret instead of a login. That's what the self-rules
-   * key off, so a shared-secret caller is unrestricted: it has no account to
-   * strand itself out of, and it is the way back in when someone does.
+   * Always attributed to the literal `operator`, because that is now the honest
+   * answer: the dashboard has no sign-in, so the board knows a human did this and
+   * nothing more. Filed under SERVER_CHANNEL, which the board never draws as a
+   * card.
    */
-  const you = (req) => auth.actor(req);
-  const logUser = (req, action, target, detail) =>
-    store.logAdmin(SERVER_CHANNEL, action, { actor: you(req) ?? 'operator', target, detail });
-
-  router.get('/users', (req, res) => {
-    res.json({
-      // Timestamps through `iso` like everywhere else: SQLite's datetime('now') has
-      // no zone marker, and a browser parsing it raw reads UTC as local time.
-      users: store.listUsers().map((u) => ({
-        ...u,
-        created_at: iso(u.created_at),
-        updated_at: iso(u.updated_at),
-        last_login: iso(u.last_login),
-      })),
-      you: you(req),
-      login_required: auth.loginRequired(),
-      session_days: auth.sessionDays,
-    });
-  });
-
-  router.post('/users/create', (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    const problem = usernameProblem(username) ?? passwordProblem(password);
-    if (problem) return bad(res, problem);
-    if (req.body?.verify != null && req.body.verify !== password) return bad(res, 'the two passwords do not match');
-    if (store.getUser(username)) return res.status(409).json({ error: `"${username}" already has an account` });
-    store.createUser(username, hashPassword(password), true);
-    auth.usersChanged();
-    logUser(req, 'user.create', username, `created the account "${username}"`);
-    res.json({ ok: true, username, user: store.getUser(username) });
-  });
-
-  /**
-   * Rename, change a password, or both.
-   *
-   * An empty password means "leave it alone", which is what makes it possible to
-   * fix a typo'd username without knowing the password behind it. A password that
-   * *is* supplied signs that person out of every other browser: the credential
-   * their cookies were issued against no longer exists. Every browser except this
-   * one — being logged out by your own password change reads as a bug, and the
-   * request itself is proof this browser is entitled to stay.
-   */
-  router.post('/users/update', (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    if (!store.getUser(username)) return missing(res, `no account "${username}"`);
-    const rename = req.body?.new_username == null || req.body.new_username === ''
-      ? null
-      : normalizeUsername(req.body.new_username);
-    const password = typeof req.body?.password === 'string' && req.body.password ? req.body.password : null;
-    if (!rename && !password) return bad(res, 'nothing to change — supply a new username, a new password, or both');
-
-    if (rename && rename !== username) {
-      const problem = usernameProblem(rename);
-      if (problem) return bad(res, problem);
-      if (store.getUser(rename)) return res.status(409).json({ error: `"${rename}" already has an account` });
-    }
-    if (password) {
-      const problem = passwordProblem(password);
-      if (problem) return bad(res, problem);
-      if (req.body?.verify != null && req.body.verify !== password) return bad(res, 'the two passwords do not match');
-    }
-
-    const changed = [];
-    let name = username;
-    if (rename && rename !== username) {
-      store.renameUser(username, rename);
-      // Sessions follow the account. Dropping them instead would sign someone out
-      // for a change that has nothing to do with their credentials.
-      store.renameUiSessions(username, rename);
-      name = rename;
-      changed.push(`renamed "${username}" to "${rename}"`);
-    }
-    if (password) {
-      store.setUserPassword(name, hashPassword(password));
-      const keep = auth.sessionIdOf(req);
-      const out = you(req) === name && keep
-        ? store.deleteUiSessionsExcept(name, keep)
-        : store.deleteUiSessionsFor(name);
-      changed.push(`changed the password${out ? `, signing out ${out} other browser session${out === 1 ? '' : 's'}` : ''}`);
-    }
-    auth.usersChanged();
-    logUser(req, 'user.update', name, changed.join(' and '));
-    res.json({ ok: true, username: name, user: store.getUser(name), changed });
-  });
-
-  // Disabling is the reversible half of removing someone: their sessions stop
-  // working on the next request (see getUiSession's join) and start working again
-  // if you re-enable them, without anybody having to re-issue a password.
-  router.post('/users/enabled', (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    const enabled = !!req.body?.enabled;
-    const user = store.getUser(username);
-    if (!user) return missing(res, `no account "${username}"`);
-    if (!enabled && you(req) === username) {
-      return bad(res, 'you cannot disable the account you are signed in as');
-    }
-    if (user.enabled === enabled) return res.json({ ok: true, username, user, unchanged: true });
-    store.setUserEnabled(username, enabled);
-    auth.usersChanged();
-    logUser(req, enabled ? 'user.enable' : 'user.disable', username, `${enabled ? 'enabled' : 'disabled'} the account "${username}"`);
-    res.json({ ok: true, username, user: store.getUser(username) });
-  });
-
-  router.post('/users/delete', (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    if (!store.getUser(username)) return missing(res, `no account "${username}"`);
-    if (you(req) === username) return bad(res, 'you cannot delete the account you are signed in as');
-    store.deleteUiSessionsFor(username);
-    store.deleteUser(username);
-    auth.usersChanged();
-    logUser(req, 'user.delete', username, `deleted the account "${username}"`);
-    // Said out loud rather than left to be discovered: with no accounts left the
-    // dashboard stops asking anyone to sign in.
-    const left = store.countEnabledUsers();
-    res.json({
-      ok: true,
-      username,
-      enabled_users_left: left,
-      ...(left === 0 ? { warning: 'no enabled accounts remain — the dashboard no longer requires a sign-in' } : {}),
-    });
-  });
+  const logServer = (action, target, detail) =>
+    store.logAdmin(SERVER_CHANNEL, action, { actor: 'operator', target, detail });
 
   /* ---------- backup and restore ---------- */
 
   /**
    * The whole board as one downloadable file. See src/backup.js for what is in it
-   * and, more importantly, what isn't: the shared MCP secret never travels, and
-   * live login cookies never travel.
+   * and, more importantly, what isn't: the shared MCP secret never travels.
    */
-  router.get('/backup', (req, res) => {
+  router.get('/backup', (_req, res) => {
     const doc = buildBackup({ store, meta: { ...meta, authMode: auth.mode } });
     const name = backupFilename();
-    logUser(req, 'backup.export', name, `exported ${doc.counts ? Object.values(doc.counts).reduce((n, v) => n + v, 0) : 0} rows`);
+    logServer('backup.export', name, `exported ${doc.counts ? Object.values(doc.counts).reduce((n, v) => n + v, 0) : 0} rows`);
     res.set('Content-Disposition', `attachment; filename="${name}"`);
     res.set('Cache-Control', 'no-store');
     res.json(doc);
@@ -666,22 +536,10 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     // re-initialise on, so a window that's still alive rejoins the restored board.
     const closed = closeSessionsFor({ all: true });
     const applied = applyBackup({ store, doc });
-    auth.usersChanged();
-
-    // Replacing the users table dropped every login, this one included. If the
-    // restored table still lists the person doing the restore as an enabled
-    // account, sign them straight back in: being bounced to a login form by your
-    // own restore means never seeing the report of what it did, and they hold the
-    // operator token either way. Anyone else re-authenticates.
-    const actor = you(req);
-    if (applied.replaced_users && actor && store.getUser(actor)?.enabled) {
-      auth.issueSession(req, res, actor);
-      applied.notes.push(`kept you signed in as "${actor}" — that account is in the backup too`);
-    }
 
     // Logged after the restore, never before: the restore wipes admin_events, so a
     // row written first would be destroyed by the thing it was recording.
-    logUser(req, 'backup.restore', doc.created_at ?? 'backup',
+    logServer('backup.restore', doc.created_at ?? 'backup',
       `restored ${applied.rows} rows from a backup taken ${doc.created_at ?? 'at an unrecorded time'}` +
       (snapshot.saved ? `; previous board saved to ${snapshot.path}` : '; the pre-restore snapshot could not be written'));
 
@@ -692,7 +550,6 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
       rows: applied.rows,
       tables: applied.report,
       notes: applied.notes,
-      replaced_users: applied.replaced_users,
       sessions_closed: closed,
       snapshot,
       shared_secret: doc.auth?.shared_secret_fingerprint ?? null,
