@@ -43,30 +43,6 @@ const STATE_TONE = { working: 'busy', waiting: 'waiting', blocked: 'blocked', id
 // this payload is refetched every couple of seconds.
 const TASK_LIST_MAX = 25;
 
-// What a plain nudge says: the dashboard's stand-in for typing "check your
-// messages" into that agent's own window. It asks for ordinary behaviour — read,
-// act, answer — and deliberately says nothing about being brief or selective,
-// because a nudge that discourages a reply is a different button (below).
-// Works with an empty backlog too: the reason to nudge an agent is often that it
-// has gone quiet with nothing unread at all.
-const NUDGE = (unread) =>
-  'Operator: ' +
-  (unread
-    ? `you have ${unread} unread message${unread === 1 ? '' : 's'} waiting on this channel. `
-    : 'checking in on this channel. ') +
-  'Please poll your messages, look at the task board, handle anything that is yours, and respond normally — ' +
-  'treat this exactly as if I had typed it into your own window. Call set_status so the board shows where you landed.';
-
-// What a "catch up quietly" nudge actually says. Phrased so an agent that reads
-// it does the right thing without a human in the loop: skim, act only on what
-// matters, and leave a status behind so the board reflects the outcome.
-const CATCH_UP = (unread, upTo) =>
-  `Operator: you have ${unread} unread message${unread === 1 ? '' : 's'} on this channel, up to id ${upTo}. ` +
-  'Please skim them, act only on anything urgent or addressed directly to you, and reply only if a reply is genuinely needed. ' +
-  'Then call set_status so the board shows where you landed.';
-
-const NUDGE_STYLES = new Set(['normal', 'quiet']);
-
 /** SQLite `datetime('now')` is UTC without a zone marker — make it a real ISO string. */
 const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
 const ageMinutes = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) / 60000 : Infinity);
@@ -360,40 +336,6 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
       detail: `marked ${before - after} message(s) read up to id ${upTo}`,
     });
     res.json({ ok: true, channel, agent, cursor: upTo, cleared: before - after, unread: after });
-  });
-
-  /**
-   * Poke an agent from the dashboard instead of from its own window.
-   *
-   * Three flavours, all the same delivery: `normal` (the default) asks for
-   * ordinary behaviour, `quiet` asks it to drain a backlog without chatter, and
-   * any `text` is sent verbatim so the dashboard can carry your own words.
-   *
-   * This is a queued message, not a wake-up: MCP is pull-only, so it lands on the
-   * agent's next poll. An agent running a poll loop picks it up within one loop
-   * interval; a window that never polls again never sees it. `agent` needs no
-   * backlog — the whole point of the plain nudge is that it works on an idle one.
-   */
-  router.post('/agent/nudge', (req, res) => {
-    const { channel, agent } = pair(req);
-    if (!channel || !agent) return bad(res, 'channel and agent are required');
-    const style = str(req.body?.style) ?? 'normal';
-    if (!NUDGE_STYLES.has(style)) return bad(res, `style must be one of: ${[...NUDGE_STYLES].join(', ')}`);
-    const row = agentRow(channel, agent);
-    if (!row) return missing(res, `no agent "${agent}" on channel "${channel}"`);
-    const custom = str(req.body?.text);
-    const text = custom ?? (style === 'quiet' ? CATCH_UP(row.unread, row.unread_max_id ?? 0) : NUDGE(row.unread));
-    const id = store.insertMessage(channel, 'operator', agent, JSON.stringify({ kind: 'operator-nudge', text }));
-    store.logAdmin(channel, 'nudge', { target: agent, detail: text });
-    res.json({
-      ok: true,
-      channel,
-      agent,
-      style: custom ? 'custom' : style,
-      message_id: id,
-      text,
-      queued_behind_unread: row.unread,
-    });
   });
 
   /**

@@ -198,44 +198,6 @@ try {
     eq(bad.status, 400, 'a negative up_to_id → 400');
   }
 
-  console.log('\nnudge (queued, not a wake-up)');
-  {
-    // The advance block above left beta's mailbox empty, which is the case that
-    // matters most for the plain nudge: the agent worth poking is usually the
-    // quiet one with nothing waiting, so an empty backlog must not be a no-op.
-    eq((await agentOf('beta')).unread, 0, 'beta starts this block with an empty mailbox');
-    const { status, json } = await postJson('agent/nudge', { channel: CHANNEL, agent: 'beta' });
-    assert(status === 200 && json.message_id > 0, 'a nudge to an agent with no backlog is still queued');
-    eq(json.style, 'normal', 'and the default style is the plain nudge');
-    assert(/respond normally/i.test(json.text), 'which asks for ordinary behaviour');
-    assert(!/only if/i.test(json.text), 'and does not talk the agent out of replying');
-    eq((await agentOf('beta')).unread, 1, 'beta now has exactly the nudge waiting');
-
-    // It arrives as a normal message from `operator` — no new delivery path, so
-    // an agent needs no special handling to receive it.
-    const got = await call(beta.client, 'poll_messages', { since: 3 });
-    eq([got.count, got.messages[0]?.from, got.messages[0]?.body?.kind], [1, 'operator', 'operator-nudge'], 'beta receives it from "operator" on a normal poll');
-
-    // With a real backlog the same button names it, and reports where in the queue
-    // the nudge landed — a nudge behind 40 messages is not a prompt reply.
-    await call(alpha.client, 'send_message', { to: 'beta', body: 'and another direct one' });
-    const piled = await postJson('agent/nudge', { channel: CHANNEL, agent: 'beta' });
-    assert(/unread message/.test(piled.json.text), 'a nudge sent over a backlog names the backlog');
-    assert(piled.json.queued_behind_unread >= 1, 'and reports what the agent reads first');
-
-    const quiet = await postJson('agent/nudge', { channel: CHANNEL, agent: 'beta', style: 'quiet' });
-    assert(quiet.status === 200 && /skim/i.test(quiet.json.text), 'style=quiet carries the catch-up instruction instead');
-    const shouty = await postJson('agent/nudge', { channel: CHANNEL, agent: 'beta', style: 'shouty' });
-    eq(shouty.status, 400, 'an unknown style → 400');
-
-    const custom = await postJson('agent/nudge', { channel: CHANNEL, agent: 'beta', text: 'stand down please' });
-    assert(custom.status === 200 && custom.json.text === 'stand down please', 'a custom nudge text is used verbatim');
-    eq(custom.json.style, 'custom', 'and is reported as custom, not as a template');
-
-    const unknown = await postJson('agent/nudge', { channel: CHANNEL, agent: 'nobody' });
-    eq(unknown.status, 404, 'nudging an agent that does not exist → 404');
-  }
-
   console.log('\nclose and reassign tasks');
   {
     const closed = await postJson('task/close', { channel: CHANNEL, id: t1, note: 'obsolete' });
@@ -368,7 +330,7 @@ try {
   {
     const rows = (await activity()).rows.filter((r) => r.kind.startsWith('admin.'));
     const kinds = new Set(rows.map((r) => r.kind));
-    for (const k of ['admin.advance', 'admin.nudge', 'admin.retire', 'admin.unretire', 'admin.task.close', 'admin.task.reassign', 'admin.channel.archive', 'admin.channel.unarchive', 'admin.channel.delete']) {
+    for (const k of ['admin.advance', 'admin.retire', 'admin.unretire', 'admin.task.close', 'admin.task.reassign', 'admin.channel.archive', 'admin.channel.unarchive', 'admin.channel.delete']) {
       assert(kinds.has(k), `${k} is in the feed`);
     }
     assert(rows.every((r) => r.actor === 'operator'), 'every operator row is attributed to "operator"');

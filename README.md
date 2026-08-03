@@ -47,16 +47,16 @@ sees new messages/tasks when it calls a tool to check. So coordination is a
 cooperative protocol, not remote control. In practice you bridge that gap one of
 three ways:
 
-1. **Nudge** — tell the other window's agent "check the orchestratinator." Simplest.
-   The dashboard can send that nudge for you (the 👋 on any agent row), so you don't
-   have to have that window in front of you — see *Operator actions*.
+1. **Type into the other window.** Simplest, and the only one that is immediate.
 2. **Poll on a loop** — have the consuming agent run `poll_messages` / `list_tasks`
-   every N minutes (e.g. Claude Code's `/loop`).
+   every N minutes (e.g. Claude Code's `/loop`). This is the one that lets you
+   leave something on the board and have it picked up without you being there.
 3. **Poll at boundaries** — a Stop/PostToolUse hook that checks the board when the
    agent finishes a step.
 
-Start with #1. #1 and #2 together are the useful combination: the loop is what
-makes a nudge from the dashboard land without you touching that window at all.
+Use #2. The dashboard deliberately has no button that claims to wake an agent:
+the server cannot make another window take a turn, and a button that pretends
+otherwise is worse than not having one.
 
 ---
 
@@ -162,14 +162,9 @@ Setting `ttl_seconds` to roughly how long the work should take is what makes a
 
 Sooner or later the board shows something only a human can resolve: an agent
 whose window you closed days ago, still holding 139 unread; a task nobody will
-ever claim; a channel you created by typo. Or, most often, an agent that just
-needs a poke. Hover a row and you get the small set of actions for that: unread
-counts and task counts become clickable, and a 👋 and a trash can appear on each
-agent row (the channel header gets its own trash can).
-
-The 👋 is the one you'll reach for daily — it's a nudge you send from the board
-instead of from that agent's own window, which is the difference between watching
-one screen and watching six.
+ever claim; a channel you created by typo. Hover a row and you get the small set
+of actions for that: unread counts and task counts become clickable, and a trash
+can appears on each agent row (the channel header gets its own).
 
 Nothing here is a new power. `complete_task` has never had an ownership check and
 `poll_messages` has always taken an `agent` override, so any connected agent
@@ -179,24 +174,13 @@ it.
 
 | Action | What it does |
 | --- | --- |
-| **Nudge** | Queues the message you'd otherwise have typed into that agent's window: poll your messages, look at the board, handle what's yours, respond normally. Works on an agent with an empty mailbox, which is the usual reason to nudge one. Type in the box (Enter sends) to send your own words instead. |
-| **Catch up quietly** | The same delivery with the opposite instruction: skim the backlog, act only on what's urgent or addressed directly to it, reply only if a reply is genuinely needed. For draining 139 unread without inviting 139 answers. Only offered when there *is* a backlog. |
 | **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
 | **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
 | **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
 | **Archive a channel** | Hides it from the board for everyone, and says so in the log. Nothing is deleted and agents on it keep working. Semi-permanent by intent — if you only want it out of your way for the next hour, minimize it instead (see *The dashboard*). |
 | **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
 
-Three behaviours worth knowing before you use them:
-
-**A nudge is a queued message, not a wake-up.** It's the same pull-only limit as
-everything else here: the server has no way to make another window take a turn.
-An agent on a poll loop picks a nudge up within one loop interval, which is what
-makes the button a real replacement for typing into that window — so if you plan
-to drive agents from the board, put them on `/loop` (see *it's pull, not push*).
-An agent idling at a prompt will not see it until someone talks to it. The dialog
-tells you where in the queue the nudge landed for exactly this reason: a nudge
-behind 40 unread messages is not the prompt reply you were expecting.
+Two behaviours worth knowing before you use them:
 
 **A removed agent comes back by itself.** Retiring closes its sessions, and an
 unknown session id answers `404` — the spec's cue to re-initialize — so a window
@@ -236,11 +220,6 @@ scriptable:
 curl -s -X POST http://localhost:8787/api/admin/agent/advance \
   -H 'content-type: application/json' \
   -d '{"channel":"my-channel","agent":"pro","up_to_id":560}'
-
-# nudge: `style` is "normal" (the default) or "quiet"; any `text` is sent verbatim
-curl -s -X POST http://localhost:8787/api/admin/agent/nudge \
-  -H 'content-type: application/json' \
-  -d '{"channel":"my-channel","agent":"pro","text":"the interface contract changed — re-read iface.v1"}'
 ```
 
 ---
@@ -513,7 +492,7 @@ free →  set_contract  key="filters.sync_payload"
                       value={ args:["post_id","payload","ctx"], since:"1.1" }
 free →  open_task     title="update consumers to 3-arg filter" assignee="pro"
 
-# later, in the pro window (after a nudge or on a poll loop):
+# later, in the pro window (on a poll loop, or when you next talk to it):
 pro  →  poll_messages
 pro  →  list_tasks    status="open"     → sees the task
 pro  →  claim_task     id=7
@@ -563,9 +542,7 @@ each agent talks to when *you* (or a poll loop) prompt it to.
   side (custom-header token + same-origin check; see *Operator actions*). Each one
   writes an `admin_events` row, and `retire`/`delete` also reach into the session
   registry to close live sessions — a database-only change would be undone by the
-  next tick, since a live session is itself a source of presence. A nudge adds no
-  delivery path of its own: it is an ordinary `messages` row from `operator`, so an
-  agent needs no special handling to receive one.
+  next tick, since a live session is itself a source of presence.
 - **Human auth:** none. There is no guard in front of the dashboard router at
   all, which is why there is nothing here to describe — the shape of this section
   is the point. `/api/admin/*` gets one middleware that compares `Origin` against

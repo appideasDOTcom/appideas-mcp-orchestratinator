@@ -82,7 +82,7 @@ export function openDb(path) {
     CREATE TABLE IF NOT EXISTS admin_events (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       channel     TEXT NOT NULL,
-      action      TEXT NOT NULL,           -- advance | nudge | retire | unretire | task.close | ...
+      action      TEXT NOT NULL,           -- advance | retire | unretire | task.close | ...
       actor       TEXT NOT NULL DEFAULT 'operator',
       target      TEXT,                    -- agent or task the action applied to
       detail      TEXT,

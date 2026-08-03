@@ -350,8 +350,6 @@ pre.raw {
    instead of spilling into an implicit grid column of its own. */
 .row-acts { align-self: center; display: flex; gap: 4px; }
 .row-acts:hover .row-act { opacity: 1; }
-/* Nudging is the routine one — it shouldn't borrow the destructive hover tone. */
-.row-act[data-act="nudge"]:hover { border-color: var(--accent); background: transparent; }
 
 .chip.tiny { font-size: 10px; padding: 1px 6px; }
 .reveal-bar { grid-column: 1 / -1; display: flex; gap: 6px; }
@@ -430,9 +428,6 @@ pre.raw {
   border-top: 1px solid var(--border);
 }
 .dlg-choice p { margin: 2px 0 0; }
-/* The free-text nudge. Full width and directly under its explanation, so it reads
-   as part of the Nudge choice rather than a field floating in the dialog. */
-.dlg-say { display: block; width: 100%; margin-top: 8px; }
 .dlg-list { margin: 10px 0 0 18px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
 .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 

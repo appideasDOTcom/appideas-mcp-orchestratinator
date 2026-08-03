@@ -129,9 +129,9 @@ try {
 
     // Operator actions need no credential either — only that the request did not
     // come from another site.
-    const nudge = await postAdmin('agent/nudge', { channel: CHANNEL, agent: 'alpha' });
-    eq(nudge.status, 200, 'an operator action works with nothing presented');
-    const foreign = await postAdmin('agent/nudge', { channel: CHANNEL, agent: 'alpha' }, { origin: 'https://evil.example' });
+    const ok = await postAdmin('agent/advance', { channel: CHANNEL, agent: 'alpha', up_to_id: 0 });
+    eq(ok.status, 200, 'an operator action works with nothing presented');
+    const foreign = await postAdmin('agent/advance', { channel: CHANNEL, agent: 'alpha', up_to_id: 0 }, { origin: 'https://evil.example' });
     eq(foreign.status, 403, 'but not from a foreign Origin');
   }
 

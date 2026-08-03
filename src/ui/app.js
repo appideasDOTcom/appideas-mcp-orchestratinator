@@ -138,7 +138,7 @@ function agentSub(a, channel) {
       `${a.unread} unread`,
       'unread',
       { channel, agent: a.agent },
-      `nudge ${a.agent}, or mark the backlog read on its behalf`
+      `mark ${a.agent}'s backlog read on its behalf`
     ));
   }
   if (a.assigned_open) {
@@ -169,12 +169,9 @@ function stateChip(a) {
 /** One agent row. `retired` rows get a restore button instead of a trash can. */
 function agentRow(c, a) {
   const at = `data-channel="${esc(c.channel)}" data-agent="${esc(a.agent)}"`;
-  // Nudge sits on every live row, not just rows with unread: the agent worth
-  // poking is usually the quiet one with an empty backlog.
   const acts = a.retired
     ? `<button type="button" class="row-act" data-act="unretire" ${at} title="Put ${esc(a.agent)} back on the board">↩</button>`
-    : `<button type="button" class="row-act" data-act="nudge" ${at} title="Nudge ${esc(a.agent)} — ask it to check in and respond">👋</button>
-       <button type="button" class="row-act" data-act="retire" ${at} title="Clear ${esc(a.agent)}'s backlog and take it off the board">🗑</button>`;
+    : `<button type="button" class="row-act" data-act="retire" ${at} title="Clear ${esc(a.agent)}'s backlog and take it off the board">🗑</button>`;
   const trash = acts ? `<div class="row-acts">${acts}</div>` : '';
   return `
             <div class="agent${a.retired ? ' retired' : ''}">
@@ -324,7 +321,6 @@ const KIND_LABEL = {
   // Operator actions. These share one badge tone: what matters when you're
   // scanning the log is that a human reached in, not which button they pressed.
   'admin.advance': ['marked read', 'admin'],
-  'admin.nudge': ['nudged', 'admin'],
   'admin.retire': ['agent retired', 'admin'],
   'admin.unretire': ['agent restored', 'admin'],
   'admin.task.close': ['task closed', 'admin'],
@@ -510,69 +506,31 @@ async function act(fn, { keepOpen = false } = {}) {
 }
 
 /**
- * Send one nudge and say so, since the dialog closes behind it.
+ * Deal with an agent's backlog on its behalf.
  *
- * Anything typed in the box wins over the template — but only for the plain
- * nudge. "Catch up quietly" has wording of its own, and quietly swapping a
- * half-finished sentence in for it would send something you didn't mean.
+ * Reached from the unread count. Marking read is an operator bookkeeping action,
+ * not a message: it moves the agent's cursor so the board stops counting mail the
+ * agent is never going to answer. Nothing here talks to the agent — the board has
+ * no way to make another window take a turn, and no longer pretends to.
  */
-async function sendNudge(d) {
-  const typed = el.dlgBody.querySelector('#nudge-text')?.value.trim();
-  const body = { channel: d.channel, agent: d.agent, style: d.style ?? 'normal' };
-  if (typed && body.style === 'normal') body.text = typed;
-  let ahead = 0;
-  const ok = await act(async () => { ahead = (await admin('agent/nudge', body)).queued_behind_unread ?? 0; });
-  // How far back in the queue it landed is the one thing worth saying out loud: a
-  // nudge behind 40 unread messages is not the prompt reply you were expecting.
-  if (ok) {
-    notify(
-      `nudged ${d.agent}` + (ahead ? ` · behind ${ahead} unread message${ahead === 1 ? '' : 's'}` : ''),
-      { error: false }
-    );
-  }
-}
-
-/**
- * Nudge an agent, and — when it has a backlog — deal with that backlog.
- *
- * Reached from the agent row's 👋 and from the unread count, so the same dialog
- * serves both "say something to this agent" and "clean up after it". Nudge is
- * first and primary because it's the one you press to avoid typing into another
- * window; the backlog options only appear when there is a backlog to answer for.
- */
-function nudgeDialog(channel, agent) {
+function backlogDialog(channel, agent) {
   const a = findAgent(channel, agent);
-  if (!a) return;
+  if (!a || !a.unread) return;
   const upTo = a.unread_max_id ?? 0;
   const at = `data-channel="${esc(channel)}" data-agent="${esc(agent)}"`;
   const n = (count) => (count === 1 ? '' : 's');
-  const backlog = a.unread > 0
-    ? `
-    <div class="dlg-choice">
-      <button type="button" class="btn" data-do="nudge" data-style="quiet" ${at}>Catch up quietly</button>
-      <p>Same delivery, quieter instruction: skim the ${a.unread} message${n(a.unread)}, act only on what is urgent or addressed directly to it, and reply only if a reply is genuinely needed.</p>
-    </div>
-    <div class="dlg-choice">
-      <button type="button" class="btn" data-do="advance" data-up-to="${upTo}" ${at}>Mark read (operator)</button>
-      <p>Moves the cursor to #${upTo}. ${esc(agent)} never sees these ${a.unread} message${n(a.unread)}, and the board stops counting them.</p>
-    </div>`
-    : '';
   openDialog(`
-    <h3>${esc(agent)}${a.unread ? ` · ${a.unread} unread` : ''}</h3>
+    <h3>${esc(agent)} · ${a.unread} unread</h3>
     <p class="dlg-sub">
       on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}
     </p>
     <div class="dlg-choice">
-      <button type="button" class="btn primary" data-do="nudge" data-style="normal" ${at}>Nudge</button>
-      <div>
-        <p>Sends what you would have typed in ${esc(agent)}'s own window: poll your messages, look at the board, handle what's yours, respond normally. Or type your own words below.</p>
-        <input class="input dlg-say" id="nudge-text" type="text" autocomplete="off" placeholder="optional — your own message to ${esc(agent)}, then Enter">
-      </div>
-    </div>${backlog}
-    <p class="dlg-note">A nudge is a queued message, delivered on ${esc(agent)}'s next poll — MCP gives the server no way to wake a window that has stopped asking. An agent running <span class="mono">/loop</span> picks it up within one loop interval; one sitting idle at a prompt will not.</p>
+      <button type="button" class="btn primary" data-do="advance" data-up-to="${upTo}" ${at}>Mark read (operator)</button>
+      <p>Moves the cursor to #${upTo}. ${esc(agent)} never sees these ${a.unread} message${n(a.unread)}, and the board stops counting them.</p>
+    </div>
+    <p class="dlg-note">To get ${esc(agent)}'s attention, type in its own window, or put it on <span class="mono">/loop</span> so it polls this board itself.</p>
     <div class="dlg-foot"><button type="button" class="btn" data-do="cancel">Cancel</button></div>
   `);
-  el.dlgBody.querySelector('#nudge-text')?.focus();
 }
 
 function retireDialog(channel, agent) {
@@ -979,7 +937,7 @@ el.channels.addEventListener('click', (e) => {
     return;
   }
 
-  if (action === 'unread' || action === 'nudge') nudgeDialog(channel, agent);
+  if (action === 'unread') backlogDialog(channel, agent);
   else if (action === 'tasks') taskDialog(channel, agent ?? null);
   else if (action === 'retire') retireDialog(channel, agent);
   else if (action === 'channel') channelDialog(channel);
@@ -1000,9 +958,6 @@ el.dlgBody.addEventListener('click', (e) => {
       break;
     case 'advance':
       act(() => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }));
-      break;
-    case 'nudge':
-      sendNudge(d);
       break;
     case 'retire':
       act(() => admin('agent/retire', { channel: d.channel, agent: d.agent }));
@@ -1026,15 +981,6 @@ el.dlgBody.addEventListener('click', (e) => {
     default:
       break;
   }
-});
-
-// Enter in the nudge box sends it. The box exists so a poke never costs more than
-// a keystroke — making you reach for the mouse to finish would defeat it.
-el.dlgBody.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' || !e.target.closest('#nudge-text')) return;
-  e.preventDefault();
-  const btn = el.dlgBody.querySelector('[data-do="nudge"][data-style="normal"]');
-  if (btn) sendNudge(btn.dataset);
 });
 
 // Reassign applies on change rather than behind a save button: there's one field,
