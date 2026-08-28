@@ -29,7 +29,8 @@ docker compose down                        // stop; data kept in the volume
 docker compose logs -f orchestratinator    // tail
 curl -s localhost:8787/health              // is it up?
 open http://localhost:8787/                // the dashboard — who's connected, what they're doing
-npm test                                   // all three suites: coordination, operator actions, the doors
+                                           //   (the board/floor switch is top right)
+npm test                                   // all four suites: coordination, operator actions, the doors, the floor
 ```
 In a chat window:
 ```
@@ -155,6 +156,98 @@ To make the state chips exact rather than inferred, have the agent call
 a step, and always before anything long-running" to the repo's `CLAUDE.md`.
 Setting `ttl_seconds` to roughly how long the work should take is what makes a
 `waiting` chip self-correcting when the agent never comes back.
+
+---
+
+## The floor
+
+The `board` / `floor` switch in the top bar gives you a second view of the same
+server: **one room per channel, one desk per agent**. It exists for the people
+who operate this system without having built it. The board answers *what is the
+state*; the floor answers *who is stuck, and what do I do about it* — the
+question that was otherwise being answered by holding several chat windows and a
+dashboard in one head at once.
+
+A floor is a channel. Nothing else would be honest: a channel is one project with
+one set of boundaries, and putting two of them in a room would draw a wall that
+isn't there.
+
+**What you get.** A ranked **Needs you** list at the top — who is blocked on a
+human, why, for how long, and which window to go to, longest wait first. Below
+it, a room per channel: each desk shows the person's state, the last thing they
+said or the tool they're running, and a red badge when they need you. Envelopes
+fly desk to desk on real `send_message` rows, never on a timer. Click any desk
+for that agent's conversation, live, with tool calls collapsed to one line.
+
+**What the floor knows that the board cannot.** The board is pull-based and
+cannot see inside an agent's turn — that limit is real and is the subject of
+*it's pull, not push* above. The floor closes the gap from the other end: Claude
+Code can see inside its own turn and will say so through hooks, so each
+workstation runs a small plugin that posts what its session is doing. That is
+the only new moving part, and it is optional — without it the board behaves
+exactly as it always has.
+
+Nothing on the floor is inferred from silence. A desk shows `needs you` only
+because Claude Code raised a permission or idle prompt, and it clears the moment
+real work happens. A quiet desk is drawn quiet, because quiet is indistinguishable
+from blocked, crashed, and finished — which is the same reason the board never
+guesses either.
+
+### Installing the plugin
+
+Once per machine, from anywhere:
+
+```
+/plugin marketplace add /path/to/appideas-mcp-orchestratinator
+/plugin install orchestratinator-floor
+```
+
+That is the whole setup. There is nothing to configure, because there is nothing
+new to tell it: the hook reads the repo's own `.mcp.json` — the file that already
+declares `X-Channel` and `X-Agent` — and posts to `/api/ingest` on the same
+origin as `/mcp`, with the same shared secret. A directory whose `.mcp.json`
+doesn't name the orchestratinator is not part of this system, so the hook exits
+in silence and that project never appears on a floor.
+
+It reports on session start and end, on each prompt you submit and each reply
+that finishes, as a tool starts, and when Claude Code needs you. Every hook
+detaches immediately, so none of it is on the critical path of a turn, and every
+failure — server down, network gone, malformed config — exits quietly. A floor
+going stale is visible on the floor; a red line in somebody's terminal is a bug
+report about a feature they weren't thinking about.
+
+### Nudging
+
+The desk panel has a composer, and its button **copies** — it does not send. This
+is the same rule the board follows in not offering a button that claims to wake
+an agent. A message posted to the mailbox is not connected to the session: the
+agent sees it on its next poll, if it polls, and it never appears in the window
+where the conversation is actually happening. So the floor writes the nudge and
+names the window; you paste it, and it lands where it works.
+
+`claude --remote-control` can genuinely queue a prompt into a live session and is
+the supported way to close that last gap. It is deliberately not wired up here:
+the human in the middle is load-bearing, and the job of this view is to make that
+role quick and obvious, not to route around it.
+
+### What this puts on the server
+
+Full prompts and full replies, on a dashboard that has no sign-in. That is a
+bigger claim than the board ever made and is worth being deliberate about — read
+the note on publishing the port, above, and mean it. Three things follow:
+
+- `/api/ingest` takes the **same shared secret as `/mcp`**, and refuses without it.
+- `turns` and `agent_sessions` are **excluded from backups**. A backup is meant to
+  be a file you can email yourself; that stops being true the moment it carries
+  everything anyone typed. The cast (`personas`) is included, since it's an
+  operator decision that would otherwise vanish on a restore.
+- Conversations are **trimmed** to the newest `TURN_RETENTION` turns per desk
+  (default 400). The floor shows a live tail, not an archive — the archive is the
+  transcript on the workstation that produced it, which is complete already.
+
+`tool_input` never crosses the wire whole: the hook reduces it to the one
+descriptive field that becomes the collapsed line, so writing a file does not put
+that file on the network.
 
 ---
 

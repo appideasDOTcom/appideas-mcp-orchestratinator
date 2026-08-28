@@ -139,16 +139,44 @@ export function createAuth({ env = process.env } = {}) {
     });
   }
 
+  /**
+   * Guards /api/ingest, where the hook plugin on each workstation posts what its
+   * Claude Code session is doing.
+   *
+   * Same secret and same modes as /mcp, because it is the same trust boundary
+   * seen from the other side: /mcp is an agent asking the board what to do, this
+   * is an agent's window saying what it just did. A separate credential would
+   * have meant a second thing to configure and rotate for no gain in what an
+   * attacker would have to hold.
+   *
+   * The reply is plain JSON rather than mcpGuard's JSON-RPC envelope: the caller
+   * here is `curl` in a hook, and handing it a `jsonrpc` error object to parse
+   * would be a small lie about what it is talking to.
+   */
+  function ingestGuard(req, res, next) {
+    if (mode === 'off' || authorized(req)) return next();
+    const who = describe(req);
+    if (mode === 'warn') {
+      warn(`ingest:${who}`, `[orchestratinator] ingest WARN: ${who} sent no valid ${AUTH_HEADER} (allowed — mode=warn)`);
+      return next();
+    }
+    warn(`ingest:${who}`, `[orchestratinator] ingest DENY: ${who} sent no valid ${AUTH_HEADER}`);
+    return res.status(401).json({
+      error: `Unauthorized: send the shared secret in the ${AUTH_HEADER} header.`,
+    });
+  }
+
   return {
     mode,
     mcpGuard,
     adminGuard,
+    ingestGuard,
     /** One startup line, so the mode is never something you have to infer. */
     describeStartup() {
       if (mode === 'off') {
         return 'auth      OFF (no ORCH_AUTH_TOKEN set — any client may connect) · dashboard open';
       }
-      return `auth      ${mode.toUpperCase()} on /mcp via ${AUTH_HEADER} · dashboard open (same-origin only)`;
+      return `auth      ${mode.toUpperCase()} on /mcp + /api/ingest via ${AUTH_HEADER} · dashboard open (same-origin only)`;
     },
   };
 }

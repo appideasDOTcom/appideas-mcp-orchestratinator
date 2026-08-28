@@ -4,14 +4,17 @@
   "private": true,
   "type": "module",
   "description": "Shared MCP coordination server (mailbox + contracts + tasks + status dashboard) for coordinating Claude Code agents that live in separate VS Code windows.",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "smoke": "node test/smoke.mjs",
     "test:admin": "node test/admin.mjs",
     "test:auth": "node test/auth.mjs",
-    "test": "npm run smoke && npm run test:admin && npm run test:auth"
+    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:floor",
+    "test:floor": "node test/floor.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

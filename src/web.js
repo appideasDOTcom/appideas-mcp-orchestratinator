@@ -4,6 +4,7 @@ import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
+import { createFloorRouter } from './floor.js';
 
 /**
  * The dashboard: a small web UI (served at `/`), the JSON endpoints it polls,
@@ -505,6 +506,9 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   const router = express.Router();
 
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
+  // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
+  // ahead of the static handler so /api/floor never falls through to index.html.
+  router.use(createFloorRouter({ store, auth }));
 
   router.get('/api/state', (_req, res) => {
     res.json(buildState(store, sessions, sessionStats, meta));

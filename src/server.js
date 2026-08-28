@@ -131,6 +131,24 @@ function sweepIdleSessions() {
 }
 setInterval(sweepIdleSessions, SWEEP_MS).unref();
 
+/**
+ * Trim the floor's stored conversation to the newest turns per desk.
+ *
+ * Unlike the session sweep this is housekeeping on disk, not on memory: turns
+ * arrive at every turn boundary from every window on the network, so without
+ * this the database grows for as long as anyone is working. Run on the same
+ * timer because it is cheap and because a prune that only happens at startup is
+ * a prune that never happens on a server that stays up for months.
+ */
+setInterval(() => {
+  try {
+    const removed = store.pruneTurns();
+    if (removed) console.log(`[orchestratinator] pruned ${removed} old turn${removed === 1 ? '' : 's'}`);
+  } catch (err) {
+    console.warn(`[orchestratinator] turn prune failed: ${err.message}`);
+  }
+}, SWEEP_MS).unref();
+
 const markBusy = (sid) => {
   const s = sid ? sessions[sid] : undefined;
   if (s) { s.inflight++; s.last_seen = new Date().toISOString(); }

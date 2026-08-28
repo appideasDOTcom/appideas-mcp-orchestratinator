@@ -89,6 +89,71 @@ export function openDb(path) {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_admin_events_channel ON admin_events(channel, id);
+
+    -- ─── The floor ────────────────────────────────────────────────────────────
+    -- Everything above is what agents say to *each other*. Everything below is
+    -- what each agent's own Claude Code session is doing — the half a human
+    -- could previously only see by looking at the window. It is written by the
+    -- hook plugin on each workstation (see plugin/), never by an MCP tool.
+    --
+    -- This exists because the people operating this system were reading N chat
+    -- windows and a dashboard at once to answer one question: who is stuck, and
+    -- on what. The board could never answer it, by design — it cannot see inside
+    -- an agent's turn. Claude Code can, and will tell us, so we ask it.
+
+    -- A Claude Code session, mapped onto a (channel, agent) by the hook. The
+    -- hook resolves that identity by reading the repo's own .mcp.json — the same
+    -- file that already declares X-Channel/X-Agent — so a workstation needs no
+    -- configuration beyond installing the plugin.
+    CREATE TABLE IF NOT EXISTS agent_sessions (
+      session_id       TEXT PRIMARY KEY,
+      channel          TEXT NOT NULL,
+      agent            TEXT NOT NULL,
+      cwd              TEXT,
+      transcript       TEXT,                -- path to the JSONL, for backfill
+      model            TEXT,
+      permission_mode  TEXT,
+      git_branch       TEXT,
+      -- The operator queue is derived from these three. awaiting_kind is the
+      -- Notification hook's notification_type — permission_prompt, idle_prompt.
+      -- Set when Claude Code says it needs a human; cleared by the next turn.
+      awaiting_kind    TEXT,
+      awaiting_message TEXT,
+      awaiting_since   TEXT,
+      ended_at         TEXT,
+      started_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_agent ON agent_sessions(channel, agent, updated_at);
+
+    -- One row per turn boundary. Tool calls are their own rows rather than being
+    -- folded into the assistant text, because the floor collapses them to a
+    -- single line and expands on click — which it can only do if they were never
+    -- flattened together in the first place.
+    CREATE TABLE IF NOT EXISTS turns (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel     TEXT NOT NULL,
+      agent       TEXT NOT NULL,
+      session_id  TEXT NOT NULL,
+      role        TEXT NOT NULL,            -- user | assistant | tool | error
+      text        TEXT,
+      tool_name   TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_turns_agent ON turns(channel, agent, id);
+
+    -- Who each agent is on the floor. Assigned on first sight and editable by
+    -- the operator, stored here rather than in a browser because a floor where
+    -- two people disagree about which desk is which stops being a shared
+    -- reference — the one job it has.
+    CREATE TABLE IF NOT EXISTS personas (
+      channel     TEXT NOT NULL,
+      agent       TEXT NOT NULL,
+      persona     TEXT NOT NULL,
+      seat        INTEGER,
+      assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
+    );
   `);
 
   // v0.9 carried dashboard logins: a `users` table of scrypt hashes and a
@@ -160,12 +225,44 @@ const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
 export const STATUS_TTL_SECONDS = Math.max(0, Number(process.env.STATUS_TTL_SECONDS ?? 900));
 
 /**
+ * How many turns are kept per desk. The floor shows a live tail, not an archive
+ * — the archive is the transcript on the workstation that produced it, which is
+ * complete and which this server has no business duplicating in full.
+ */
+export const TURN_RETENTION = Math.max(20, Number(process.env.TURN_RETENTION ?? 400));
+
+/**
+ * The default cast. Deliberately original names rather than characters from a
+ * television show: the metaphor is doing the work here, not the trademark, and
+ * a shipped product carrying someone else's cast list is a problem the operator
+ * shouldn't inherit from us. Rename any of them from the floor — the assignment
+ * lives in `personas` and is what every viewer sees.
+ *
+ * Assigned in order, so a channel's first agent is always Ada and the desks stay
+ * where people learned them. Beyond the list an agent simply keeps its own name,
+ * which is unglamorous but never collides.
+ */
+export const CAST = [
+  'Ada', 'Bo', 'Cleo', 'Dex', 'Edie', 'Finn', 'Greta', 'Hugo',
+  'Ines', 'Jonas', 'Kira', 'Lou', 'Mira', 'Nico', 'Opal', 'Piper',
+];
+
+/**
  * Every table a backup carries, and the only tables a restore will write.
  *
  * All board data and nothing else. Nothing here is a credential, which is what
  * makes a backup file safe to email to yourself — see describeAuth in backup.js
  * for the one secret that stays behind, and applyBackup for what happens to the
  * `users` table an older backup may still carry.
+ *
+ * `turns` and `agent_sessions` are deliberately absent. They hold what people
+ * actually typed to their agents and what those agents typed back, which is a
+ * very different thing to hand someone than a task list — and the sentence
+ * above, about a backup being safe to email to yourself, would stop being true
+ * the moment they were included. They are also reconstructible: the transcripts
+ * they were built from still sit on each workstation under ~/.claude/projects.
+ * `personas` is included because who sits at which desk is an operator decision
+ * that would otherwise be silently lost on a restore.
  */
 export const BACKUP_TABLES = [
   'messages',
@@ -175,6 +272,7 @@ export const BACKUP_TABLES = [
   'agents',
   'channel_flags',
   'admin_events',
+  'personas',
 ];
 
 /**
@@ -392,13 +490,115 @@ export function makeStore(db) {
         ORDER BY ts DESC, seq DESC, ref_id DESC
         LIMIT @limit OFFSET @offset`
     ),
+
+    // ─── The floor ──────────────────────────────────────────────────────────
+    upsertSession: db.prepare(
+      // Any activity clears `ended_at`: a resumed session is a live session, and
+      // leaving the tombstone set would grey out a desk somebody is sitting at.
+      // COALESCE on the detail columns because most hook events carry only the
+      // common fields, and a Stop must not blank the model a SessionStart knew.
+      `INSERT INTO agent_sessions
+         (session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch, updated_at)
+       VALUES (@session_id, @channel, @agent, @cwd, @transcript, @model, @permission_mode,
+               @git_branch, datetime('now'))
+       ON CONFLICT(session_id) DO UPDATE SET
+         channel         = excluded.channel,
+         agent           = excluded.agent,
+         cwd             = COALESCE(excluded.cwd, cwd),
+         transcript      = COALESCE(excluded.transcript, transcript),
+         model           = COALESCE(excluded.model, model),
+         permission_mode = COALESCE(excluded.permission_mode, permission_mode),
+         git_branch      = COALESCE(excluded.git_branch, git_branch),
+         ended_at        = NULL,
+         updated_at      = datetime('now')`
+    ),
+    setAwaiting: db.prepare(
+      // Re-notifying for the same reason must not restart the clock. The queue is
+      // ranked by how long a human has been the blocker, and a permission prompt
+      // that re-fires every few seconds would otherwise always look brand new —
+      // which is exactly backwards from what the operator needs to see.
+      `UPDATE agent_sessions
+          SET awaiting_kind    = @kind,
+              awaiting_message = @message,
+              awaiting_since   = CASE WHEN awaiting_kind = @kind AND awaiting_since IS NOT NULL
+                                      THEN awaiting_since ELSE datetime('now') END,
+              updated_at       = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    clearAwaiting: db.prepare(
+      `UPDATE agent_sessions
+          SET awaiting_kind = NULL, awaiting_message = NULL, awaiting_since = NULL,
+              updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    endSession: db.prepare(
+      `UPDATE agent_sessions
+          SET ended_at = datetime('now'), awaiting_kind = NULL, awaiting_message = NULL,
+              awaiting_since = NULL, updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    insertTurn: db.prepare(
+      `INSERT INTO turns (channel, agent, session_id, role, text, tool_name)
+       VALUES (@channel, @agent, @session_id, @role, @text, @tool_name)`
+    ),
+    // Keyed by channel+agent rather than session: a resumed session gets a new
+    // session_id but it is the same desk, and a chat panel that emptied itself
+    // every time somebody ran /resume would be worse than no chat panel.
+    recentTurns: db.prepare(
+      `SELECT id, session_id, role, text, tool_name, created_at
+         FROM turns
+        WHERE channel = @channel AND agent = @agent AND id > @since
+        ORDER BY id DESC
+        LIMIT @limit`
+    ),
+    floorSessions: db.prepare(
+      `SELECT session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch,
+              awaiting_kind, awaiting_message, awaiting_since, ended_at, started_at, updated_at
+         FROM agent_sessions
+        ORDER BY updated_at DESC`
+    ),
+    // The newest turn carrying text, per desk — what the avatar's bubble says.
+    lastTurns: db.prepare(
+      `SELECT t.channel, t.agent, t.role, t.text, t.tool_name, t.created_at, t.id
+         FROM turns t
+         JOIN (SELECT channel, agent, MAX(id) AS id
+                 FROM turns WHERE text IS NOT NULL AND text != ''
+                GROUP BY channel, agent) last
+           ON last.channel = t.channel AND last.agent = t.agent AND last.id = t.id`
+    ),
+    turnCounts: db.prepare(`SELECT channel, agent, COUNT(*) AS n FROM turns GROUP BY channel, agent`),
+    listPersonas: db.prepare(`SELECT channel, agent, persona, seat FROM personas`),
+    personasInChannel: db.prepare(`SELECT persona, seat FROM personas WHERE channel = ?`),
+    getPersona: db.prepare(`SELECT persona, seat FROM personas WHERE channel = ? AND agent = ?`),
+    upsertPersona: db.prepare(
+      `INSERT INTO personas (channel, agent, persona, seat)
+       VALUES (@channel, @agent, @persona, @seat)
+       ON CONFLICT(channel, agent) DO UPDATE SET
+         persona     = excluded.persona,
+         seat        = COALESCE(excluded.seat, seat),
+         assigned_at = datetime('now')`
+    ),
+    // Turns would otherwise grow without bound: this is full conversation text
+    // arriving at every turn boundary from every window on the network. Trimmed
+    // to the newest N per desk, which is more than the live tail can show.
+    pruneTurns: db.prepare(
+      `DELETE FROM turns
+        WHERE id IN (
+          SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (PARTITION BY channel, agent ORDER BY id DESC) AS rn
+              FROM turns
+          ) WHERE rn > @keep
+        )`
+    ),
   };
 
   /**
    * Delete every trace of a channel. A channel isn't a row anywhere — it's a key
-   * shared across five tables (see listAllChannels) — so this has to sweep all of
+   * shared across many tables (see listAllChannels) — so this has to sweep all of
    * them, in one transaction, or a half-deleted channel keeps reappearing from
-   * whichever table still holds it.
+   * whichever table still holds it. The floor tables are swept too: deleting a
+   * channel and leaving its conversations behind would be the worst of both, a
+   * board that forgets and a transcript store that doesn't.
    *
    * `admin_events` is deliberately NOT swept. It records what the operator did
    * rather than what the channel contained, and an audit trail you can erase by
@@ -408,7 +608,8 @@ export function makeStore(db) {
    */
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
-    for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents', 'channel_flags']) {
+    for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
+      'channel_flags', 'agent_sessions', 'turns', 'personas']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -504,6 +705,28 @@ export function makeStore(db) {
     return { version };
   });
 
+  /**
+   * Give an agent a face the first time the floor sees it, then leave it alone.
+   *
+   * Stability is the whole point: people learn the room by where somebody sits,
+   * so a cast that reshuffles on reconnect would cost more comprehension than
+   * the metaphor buys. The first free name in CAST wins, which makes the
+   * assignment deterministic per channel rather than dependent on who connected
+   * first on any given morning. An operator rename goes through setPersona and
+   * is never undone by this.
+   */
+  function ensurePersona(channel, agent) {
+    const existing = q.getPersona.get(channel, agent);
+    if (existing) return existing;
+    const taken = new Set(q.personasInChannel.all(channel).map((r) => r.persona));
+    // Past the end of the cast an agent simply keeps its own name — unglamorous,
+    // but it cannot collide and it cannot be wrong.
+    const persona = CAST.find((c) => !taken.has(c)) ?? agent;
+    const seat = taken.size;
+    q.upsertPersona.run({ channel, agent, persona, seat });
+    return { persona, seat };
+  }
+
   return {
     insertMessage: (channel, from, to, body) =>
       n(q.insertMessage.run({ channel, from, to, body }).lastInsertRowid),
@@ -563,5 +786,42 @@ export function makeStore(db) {
     unreadCounts: () => q.unreadCounts.all(),
     activity: ({ channel = null, limit = 200, offset = 0 } = {}) =>
       q.activity.all({ channel, limit, offset }),
+
+    // ─── The floor ──────────────────────────────────────────────────────────
+    upsertSession: (s) =>
+      q.upsertSession.run({
+        session_id: s.session_id,
+        channel: s.channel,
+        agent: s.agent,
+        cwd: s.cwd ?? null,
+        transcript: s.transcript ?? null,
+        model: s.model ?? null,
+        permission_mode: s.permission_mode ?? null,
+        git_branch: s.git_branch ?? null,
+      }).changes,
+    setAwaiting: (sessionId, kind, message = null) =>
+      q.setAwaiting.run({ session_id: sessionId, kind, message }).changes,
+    clearAwaiting: (sessionId) => q.clearAwaiting.run({ session_id: sessionId }).changes,
+    endSession: (sessionId) => q.endSession.run({ session_id: sessionId }).changes,
+    insertTurn: (t) =>
+      n(q.insertTurn.run({
+        channel: t.channel,
+        agent: t.agent,
+        session_id: t.session_id,
+        role: t.role,
+        text: t.text ?? null,
+        tool_name: t.tool_name ?? null,
+      }).lastInsertRowid),
+    // Oldest-first, because that is the order a conversation is read in.
+    recentTurns: (channel, agent, { since = 0, limit = 80 } = {}) =>
+      q.recentTurns.all({ channel, agent, since, limit }).reverse(),
+    floorSessions: () => q.floorSessions.all(),
+    lastTurns: () => q.lastTurns.all(),
+    turnCounts: () => q.turnCounts.all(),
+    listPersonas: () => q.listPersonas.all(),
+    setPersona: (channel, agent, persona, seat = null) =>
+      q.upsertPersona.run({ channel, agent, persona, seat }).changes,
+    ensurePersona,
+    pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
   };
 }

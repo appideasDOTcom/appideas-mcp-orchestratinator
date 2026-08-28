@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "appideas-orchestratinator",
+  "description": "The orchestratinator's own plugin: reports session activity to the floor.",
+  "owner": {
+    "name": "appideas",
+    "email": "chris@appideas.com"
+  },
+  "plugins": [
+    {
+      "name": "orchestratinator-floor",
+      "description": "Report this window's Claude Code activity to the orchestratinator floor.",
+      "category": "workflow",
+      "source": "./plugin"
+    }
+  ]
+}

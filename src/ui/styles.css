@@ -541,3 +541,140 @@ pre.raw {
   line-height: 1.6;
 }
 .set-done b { display: block; margin-bottom: 3px; }
+
+/* ─── The floor ───────────────────────────────────────────────────────────────
+   A second view of the same data. Everything here is scoped under #floor or
+   body.view-floor so the board's own styles cannot drift as a side effect of
+   changing this — the board works, and is not what we are experimenting on. */
+
+#floor { display: none; }
+body.view-floor #floor { display: block; }
+body.view-floor main > .panel:not(.panel-floor) { display: none; }
+
+.floor-body { display: flex; gap: 14px; align-items: flex-start; }
+.rooms { flex: 1 1 auto; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.rooms > .q-empty { padding: 28px; text-align: center; }
+
+svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margin-inline: auto; }
+
+/* Furniture. Deliberately flat and low-contrast: the room is the backdrop, and
+   anything here that competes with a person or a badge is a bug. */
+.roomFloor { fill: var(--surface-2); stroke: var(--border); }
+.roomWall  { fill: color-mix(in srgb, var(--border) 45%, transparent); stroke: none; }
+.roomName  { fill: var(--text); font: 600 13px var(--sans); }
+.roomMeta  { fill: var(--muted); font: 11px var(--mono); }
+.deskTop   { fill: color-mix(in srgb, var(--text) 12%, var(--surface)); stroke: var(--border); }
+.monitor   { fill: color-mix(in srgb, var(--text) 30%, var(--surface)); }
+.screen    { fill: var(--off-bg); transition: fill .3s ease; }
+
+.person .shadow { fill: rgba(0,0,0,.10); }
+.person .body   { fill: var(--off); transition: fill .3s ease; }
+.person .head   { fill: color-mix(in srgb, var(--off) 70%, #fff); transition: fill .3s ease; }
+
+.plateName { fill: var(--text); font: 600 12px var(--sans); }
+.plateRole { fill: var(--muted); font: 10px var(--mono); }
+
+.bubbleBox  { fill: var(--surface); stroke: var(--border); }
+.bubbleText { fill: var(--text); font: 10.5px var(--sans); }
+
+.desk { cursor: pointer; }
+.desk:focus { outline: none; }
+.desk:focus-visible .deskTop { stroke: var(--accent); stroke-width: 2; }
+.desk:hover .deskTop { stroke: var(--accent); }
+
+/* Seat colour is identity, not status — it is what makes a desk recognisable
+   from across the room after somebody has been renamed. Stated as one default
+   plus per-seat overrides at equal specificity: a state-scoped rule here would
+   outrank every seat and quietly paint the whole room one colour. */
+.person .body { fill: var(--accent); }
+.person[data-seat="1"] .body { fill: var(--wait); }
+.person[data-seat="2"] .body { fill: var(--idle); }
+.person[data-seat="3"] .body { fill: var(--busy); }
+.person[data-seat="4"] .body { fill: var(--block); }
+.desk.away .person .body { fill: var(--off) !important; }
+.desk.away .person .head { fill: var(--off-bg); }
+.desk.away { opacity: .55; }
+.desk.away .bubble { display: none; }
+
+.desk.working .screen { fill: color-mix(in srgb, var(--accent) 55%, var(--surface)); }
+.desk.needs-you .screen { fill: color-mix(in srgb, var(--block) 55%, var(--surface)); }
+
+.needsDot  { fill: var(--block); animation: needsPulse 1.6s ease-in-out infinite; }
+.needsMark { fill: #fff; font: 700 13px var(--sans); }
+@keyframes needsPulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .needsDot { animation: none; } }
+
+.envBody { fill: var(--surface); stroke: var(--accent); }
+.envFlap { fill: none; stroke: var(--accent); stroke-width: 1.2; }
+
+/* ─── the queue ─── */
+.queue { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.q-empty { color: var(--muted); font-size: 12.5px; padding: 10px 2px; }
+.q-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(0, 2.4fr) auto auto;
+  gap: 10px; align-items: center;
+  padding: 8px 10px;
+  background: var(--block-bg);
+  border: 1px solid color-mix(in srgb, var(--block) 35%, transparent);
+  border-radius: 8px;
+}
+.q-row.urgent { border-color: var(--block); }
+.q-who { display: flex; flex-direction: column; min-width: 0; }
+.q-name { font-weight: 600; }
+.q-agent { font-size: 10.5px; color: var(--muted); }
+.q-why { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.q-kind { font-size: 10.5px; font-weight: 600; color: var(--block); text-transform: uppercase; letter-spacing: .3px; }
+.q-msg { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-where { display: flex; flex-direction: column; align-items: flex-end; font-size: 11px; }
+.q-win { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-age { color: var(--muted); }
+
+/* ─── the desk panel ─── */
+.deskpanel {
+  flex: 0 0 clamp(300px, 34vw, 460px);
+  display: flex; flex-direction: column;
+  max-height: 74vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.p-head { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.p-id { display: flex; align-items: baseline; gap: 8px; margin-right: auto; min-width: 0; }
+.p-persona {
+  font: 600 14px var(--sans); color: var(--text);
+  background: none; border: 1px dashed transparent; border-radius: 5px;
+  padding: 1px 4px; cursor: pointer;
+}
+.p-persona:hover { border-color: var(--border); color: var(--accent); }
+.p-meta { padding: 6px 10px; font-size: 11px; border-bottom: 1px solid var(--border); }
+.p-alert {
+  padding: 8px 10px; font-size: 12px;
+  background: var(--block-bg);
+  border-bottom: 1px solid color-mix(in srgb, var(--block) 35%, transparent);
+}
+.p-turns { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
+.t-who { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; display: flex; gap: 6px; }
+.t-when { color: var(--muted); text-transform: none; letter-spacing: 0; }
+.t-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
+.t-user .t-body { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; }
+.t-error .t-body { color: var(--block); }
+/* Tool calls are one dim line by design — they are the texture of a session,
+   not its content, and a panel that gives them equal weight reads as noise. */
+.t-tool { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.t-tool .t-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.t-tool .t-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-compose { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); }
+.p-actions { display: flex; align-items: center; gap: 8px; }
+.p-hint { font-size: 10.5px; flex: 1 1 auto; line-height: 1.35; }
+
+@media (max-width: 900px) {
+  .floor-body { flex-direction: column; }
+  .deskpanel { flex: 1 1 auto; width: 100%; max-height: 60vh; }
+  .q-row { grid-template-columns: 1fr auto; }
+  .q-why, .q-where { grid-column: 1 / -1; }
+}
+/* Invisible, but the reason a whole desk is clickable and not just its pixels. */
+.deskHit { fill: transparent; pointer-events: all; }

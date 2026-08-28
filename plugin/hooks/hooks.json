@@ -1,0 +1,93 @@
+{
+  "description": "Report this session's activity to the orchestratinator floor. Reads stdin, then detaches so nothing here is ever on the critical path of a turn.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
