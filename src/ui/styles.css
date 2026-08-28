@@ -678,3 +678,12 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 }
 /* Invisible, but the reason a whole desk is clickable and not just its pixels. */
 .deskHit { fill: transparent; pointer-events: all; }
+
+/* Floor picker — one pill per channel, above the rooms. Empty with one floor. */
+#floor-pick { margin-bottom: 12px; flex-wrap: wrap; }
+#floor-pick:empty { display: none; }
+
+/* A desk the board knows but no window has reported from. Dimmed like "away"
+   (it inherits that) but the nameplate carries the reason, in the warning tone
+   rather than the error one: it is a to-do, not a failure. */
+.desk.not-reporting .plateRole { fill: var(--busy); }

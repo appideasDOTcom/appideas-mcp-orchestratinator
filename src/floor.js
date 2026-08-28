@@ -36,6 +36,21 @@ const TURNS_DEFAULT = 80;
 const TURNS_MAX = 500;
 
 /**
+ * How long a silent session keeps its seat before the desk shows as away.
+ *
+ * The floor has no connection to observe — its only signal is hook events — so
+ * "live" is a claim about recency, exactly like the board's presence dot: green
+ * means "we heard from this window recently", nothing more. A crashed window
+ * never sends SessionEnd, and without this its desk would sit there green for
+ * days, which is the floor equivalent of the stale `waiting` chip the status
+ * TTL exists to prevent. Generous by default because the counter-error is real
+ * too: a window that is open while its human reads or thinks for a while emits
+ * nothing, and flapping to "away" over lunch would teach people the floor
+ * cannot be trusted in the other direction.
+ */
+const SESSION_STALE_MINUTES = Math.max(1, Number(process.env.FLOOR_SESSION_TTL_MINUTES ?? 60));
+
+/**
  * The notification types that mean a human is the blocker.
  *
  * Everything else Claude Code notifies about — auth success, an elicitation
@@ -209,8 +224,21 @@ export function buildFloor(store) {
   const lastTurn = new Map(store.lastTurns().map((t) => [key(t.channel, t.agent), t]));
   const turnCount = new Map(store.turnCounts().map((r) => [key(r.channel, r.agent), r.n]));
 
+  // Every agent the board knows gets a desk, not only the ones whose windows
+  // run the plugin. A floor is a channel, and a channel with four agents on the
+  // board and one desk in the room is a room that lies about who works there.
+  // The desks without a session are drawn as not reporting, which also happens
+  // to be the clearest possible reminder of who still needs the plugin.
+  // Retired agents and archived channels stay off, matching the board's default.
+  const archived = new Set(store.listChannelFlags().filter((f) => f.archived_at).map((f) => f.channel));
+  for (const a of store.listAllAgents()) {
+    if (a.retired_at || archived.has(a.channel)) continue;
+    store.ensurePersona(a.channel, a.agent);
+  }
+
   const byChannel = new Map();
   for (const p of store.listPersonas()) {
+    if (archived.has(p.channel)) continue;
     if (!byChannel.has(p.channel)) byChannel.set(p.channel, []);
     byChannel.get(p.channel).push(p);
   }
@@ -226,7 +254,18 @@ export function buildFloor(store) {
         const s = current.get(k) ?? null;
         const t = lastTurn.get(k) ?? null;
         const awaitingSince = iso(s?.awaiting_since);
-        const live = !!s && !s.ended_at;
+        // Live means "heard from recently", never "still open" — see
+        // SESSION_STALE_MINUTES for why both halves of that matter. The one
+        // exemption is a desk waiting on a human: no hooks fire while Claude
+        // Code sits at a prompt, so that silence is expected, and aging the
+        // longest-waiting person out of the queue that exists to surface them
+        // would be exactly backwards. The queue shows the wait's age for the
+        // same reason the board shows a status's age — `waiting · 2h` reads as
+        // suspect on its own, so a prompt in a window somebody force-quit still
+        // gets looked at rather than trusted forever.
+        const heardMinutesAgo = s ? (nowMs - Date.parse(iso(s.updated_at))) / 60000 : Infinity;
+        const live = !!s && !s.ended_at &&
+          (s.awaiting_kind != null || heardMinutesAgo < SESSION_STALE_MINUTES);
 
         if (live && s.awaiting_kind) {
           queue.push({
@@ -250,6 +289,9 @@ export function buildFloor(store) {
           persona: p.persona,
           seat: p.seat ?? 0,
           live,
+          // False until this desk's window has posted a single hook event — the
+          // one distinction between "away" and "never installed the plugin".
+          reporting: !!s,
           session: s
             ? {
                 session_id: s.session_id,

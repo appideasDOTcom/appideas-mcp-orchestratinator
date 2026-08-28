@@ -48,6 +48,11 @@
     lastActivityId: 0,
     primed: false,       // first activity poll only records the high-water mark
     roomsSig: null,      // last drawn room signature, so a tick that changes nothing redraws nothing
+    pickSig: null,
+    floorFilter: null,   // a channel name, or null for every floor stacked
+    panelFor: null,      // which desk the panel skeleton was built for
+    renderedTurn: 0,     // highest turn id already in the panel
+    stick: true,         // auto-scroll follows only while the reader is at the bottom
     timer: null,
   };
 
@@ -155,7 +160,7 @@
     const { x, y } = deskXY(i, geo);
     const state = deskState(d);
     const g = el('g', {
-      class: `desk ${state}`,
+      class: `desk ${state}${d.reporting ? '' : ' not-reporting'}`,
       transform: `translate(${x} ${y})`,
       'data-channel': channel,
       'data-agent': d.agent,
@@ -194,7 +199,10 @@
     plate.appendChild(el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' }));
     plate.lastChild.textContent = d.persona;
     plate.appendChild(el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' }));
-    plate.lastChild.textContent = d.agent;
+    // A desk the board knows but no window has ever reported from says so on
+    // its nameplate — it is the difference between "stepped away" and "never
+    // installed the plugin", and only one of those is something to go fix.
+    plate.lastChild.textContent = d.reporting ? d.agent : `${d.agent} · not reporting`;
     g.appendChild(plate);
 
     // What this desk is doing — the collapsed tool call, or the start of the last
@@ -341,16 +349,58 @@
 
   /* ---------- the chat panel ---------- */
 
-  function turnHtml(t) {
+  function turnNode(t) {
+    const div = document.createElement('div');
+    div.dataset.id = t.id;
     if (t.role === 'tool') {
-      return `<div class="t t-tool" data-id="${t.id}"><span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span></div>`;
+      div.className = 't t-tool';
+      div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span>`;
+      return div;
     }
     const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? 'agent' : t.role;
-    return `
-      <div class="t t-${esc(t.role)}" data-id="${t.id}">
-        <div class="t-who">${esc(who)}<span class="t-when mono">${esc(ago(t.created_at))}</span></div>
-        <div class="t-body">${esc(t.text ?? '')}</div>
+    div.className = `t t-${esc(t.role)}`;
+    div.innerHTML = `
+      <div class="t-who">${esc(who)}<span class="t-when mono" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
+      <div class="t-body">${esc(t.text ?? '')}</div>`;
+    return div;
+  }
+
+  /**
+   * Build the panel's skeleton once per desk. Everything a tick touches after
+   * this is a slot inside it, which is the whole fix for two bugs that looked
+   * unrelated: a textarea rebuilt every two seconds loses what you were typing,
+   * and a scroll box rebuilt every two seconds forgets where you had scrolled.
+   * Neither node is ever created twice for the same desk.
+   */
+  function panelShell(wrap, channel, agent) {
+    wrap.innerHTML = `
+      <div class="p-head">
+        <div class="p-id">
+          <button class="p-persona" data-act="rename" title="Rename this desk — everyone sees the same cast"></button>
+          <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
+        </div>
+        <button class="btn" data-act="close-panel" title="Close">✕</button>
+      </div>
+      <div class="p-meta mono muted"></div>
+      <div class="p-alert-slot"></div>
+      <div class="p-turns" id="p-turns"></div>
+      <div class="p-compose">
+        <textarea id="p-text" class="input" rows="3"></textarea>
+        <div class="p-actions">
+          <span class="muted p-hint"></span>
+          <button class="btn primary" data-act="copy">Copy nudge</button>
+        </div>
       </div>`;
+    ui.stick = true;
+    ui.renderedTurn = 0;
+    const box = $('p-turns');
+    // Auto-scroll follows the conversation only while you are at the bottom.
+    // Scroll up to read and it lets go; scroll back down to the bottom and it
+    // takes over again. The threshold is a few pixels rather than zero so a
+    // box one subpixel short of the bottom after a font loads still counts.
+    box.addEventListener('scroll', () => {
+      ui.stick = box.scrollHeight - box.scrollTop - box.clientHeight < 12;
+    });
   }
 
   function renderPanel() {
@@ -358,6 +408,7 @@
     if (!ui.open) {
       wrap.classList.add('hidden');
       wrap.innerHTML = '';
+      ui.panelFor = null;
       return;
     }
     const { channel, agent } = ui.open;
@@ -367,36 +418,51 @@
       wrap.classList.add('hidden');
       return;
     }
-    const s = d.session ?? {};
-    const waiting = s.awaiting_kind
-      ? `<div class="p-alert"><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(s.awaiting_message, 160))} <span class="mono">${esc(ago(s.awaiting_since))}</span></div>`
-      : '';
-
+    const forKey = `${channel}|${agent}`;
+    if (ui.panelFor !== forKey) {
+      panelShell(wrap, channel, agent);
+      ui.panelFor = forKey;
+    }
     wrap.classList.remove('hidden');
-    wrap.innerHTML = `
-      <div class="p-head">
-        <div class="p-id">
-          <button class="p-persona" data-act="rename" title="Rename this desk — everyone sees the same cast">${esc(d.persona)}</button>
-          <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
-        </div>
-        <button class="btn" data-act="close-panel" title="Close">✕</button>
-      </div>
-      <div class="p-meta mono muted">
-        ${esc(s.window ?? 'no window seen')}${s.git_branch ? ` · ${esc(s.git_branch)}` : ''}${s.model ? ` · ${esc(s.model)}` : ''}
-        · ${d.live ? 'live' : 'not connected'} · ${d.turns} turn${d.turns === 1 ? '' : 's'}
-      </div>
-      ${waiting}
-      <div class="p-turns" id="p-turns">${ui.turns.map(turnHtml).join('') || '<div class="q-empty">No conversation captured yet. Install the floor plugin in this repo’s window and it will appear here as the session runs.</div>'}</div>
-      <div class="p-compose">
-        <textarea id="p-text" class="input" rows="3" placeholder="Write the nudge for ${esc(d.persona)}…"></textarea>
-        <div class="p-actions">
-          <span class="muted p-hint">Copies to your clipboard. Paste it into <b class="mono">${esc(s.window ?? agent)}</b> — this never types into a session for you.</span>
-          <button class="btn primary" data-act="copy">Copy nudge</button>
-        </div>
-      </div>`;
 
+    const s = d.session ?? {};
+    const presence = d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
+    wrap.querySelector('.p-persona').textContent = d.persona;
+    wrap.querySelector('.p-meta').textContent =
+      `${s.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${s.model ? ` · ${s.model}` : ''}` +
+      ` · ${presence} · ${d.turns} turn${d.turns === 1 ? '' : 's'}`;
+
+    // The alert is rebuilt only when what it says changes; its age ticks in place.
+    const alertSlot = wrap.querySelector('.p-alert-slot');
+    const alertSig = s.awaiting_kind ? `${s.awaiting_kind}|${s.awaiting_message ?? ''}|${s.awaiting_since ?? ''}` : '';
+    if (alertSlot.dataset.sig !== alertSig) {
+      alertSlot.dataset.sig = alertSig;
+      alertSlot.innerHTML = s.awaiting_kind
+        ? `<div class="p-alert"><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(s.awaiting_message, 160))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>`
+        : '';
+    }
+
+    $('p-text').placeholder = `Write the nudge for ${d.persona}…`;
+    wrap.querySelector('.p-hint').innerHTML =
+      `Copies to your clipboard. Paste it into <b class="mono">${esc(s.window ?? agent)}</b> — this never types into a session for you.`;
+
+    // Turns are appended, never re-rendered. A row already on screen stays
+    // exactly where it is, which is what makes reading upward possible.
     const box = $('p-turns');
-    if (box) box.scrollTop = box.scrollHeight;
+    if (!ui.turns.length) {
+      if (!box.querySelector('.q-empty')) {
+        box.innerHTML = `<div class="q-empty">${d.reporting
+          ? 'No conversation captured yet.'
+          : 'This window isn’t reporting. Install the <b>orchestratinator-floor</b> plugin on its machine and restart the session — its conversation appears here as it runs.'}</div>`;
+      }
+    } else {
+      box.querySelector('.q-empty')?.remove();
+      const fresh = ui.turns.filter((t) => t.id > ui.renderedTurn);
+      for (const t of fresh) box.appendChild(turnNode(t));
+      if (fresh.length) ui.renderedTurn = Math.max(...fresh.map((t) => t.id));
+    }
+    for (const w of wrap.querySelectorAll('.t-when[data-at]')) w.textContent = ago(w.dataset.at);
+    if (ui.stick) box.scrollTop = box.scrollHeight;
   }
 
   async function loadTurns(reset) {
@@ -426,14 +492,29 @@
     // this subtree is redrawn every two seconds, and replacing it unconditionally
     // drops keyboard focus, cancels :hover, and detaches the very node somebody
     // is in the middle of clicking. It would also delete envelopes mid-flight.
-    const sig = JSON.stringify(floor.channels);
+    // The floor picker. A floor is a channel, so this is how you walk from one
+    // room to another; "all floors" is the stacked view. Only offered once there
+    // are two, because a picker with one choice is furniture.
+    const names = floor.channels.map((c) => c.channel);
+    if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
+    const pickSig = JSON.stringify([names, ui.floorFilter]);
+    if (pickSig !== ui.pickSig) {
+      ui.pickSig = pickSig;
+      $('floor-pick').innerHTML = names.length < 2 ? '' : [
+        `<button class="chip${ui.floorFilter ? '' : ' on'}" data-floor="">all floors</button>`,
+        ...names.map((n) => `<button class="chip${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}">${esc(n)}</button>`),
+      ].join('');
+    }
+    const shown = ui.floorFilter ? floor.channels.filter((c) => c.channel === ui.floorFilter) : floor.channels;
+
+    const sig = JSON.stringify([ui.floorFilter, shown]);
     if (sig !== ui.roomsSig) {
       ui.roomsSig = sig;
-      if (!floor.channels.length) {
+      if (!shown.length) {
         rooms.innerHTML =
-          '<div class="q-empty">No desks yet. Install the <b>orchestratinator-floor</b> plugin in an agent’s window — the first hook event gives it a seat.</div>';
+          '<div class="q-empty">No desks yet. An agent gets a seat the moment it appears on the board or its window posts a hook event.</div>';
       } else {
-        rooms.replaceChildren(...floor.channels.map(room));
+        rooms.replaceChildren(...shown.map(room));
       }
     }
     $('floor-queue').innerHTML = queueHtml();
@@ -500,6 +581,14 @@
       return;
     }
 
+    const pick = e.target.closest?.('#floor-pick [data-floor]');
+    if (pick && ui.on) {
+      ui.floorFilter = pick.dataset.floor || null;
+      try { localStorage.setItem('orch.floor', ui.floorFilter ?? ''); } catch { /* not worth failing over */ }
+      render();
+      return;
+    }
+
     const act = e.target.closest?.('[data-act]');
     if (!act || !ui.on) return;
 
@@ -561,6 +650,7 @@
     if (b) setView(b.dataset.view);
   });
 
+  try { ui.floorFilter = localStorage.getItem('orch.floor') || null; } catch { /* default: all floors */ }
   let initial = 'board';
   try { initial = localStorage.getItem('orch.view') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
   setView(initial);

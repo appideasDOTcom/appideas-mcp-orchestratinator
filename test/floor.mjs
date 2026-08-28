@@ -63,7 +63,12 @@ const deskOf = (f, agent, channel = CH) =>
 
 rmDb(DB_PATH);
 const server = spawn('node', ['src/server.js'], {
-  env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce' },
+  // FLOOR_SESSION_TTL_MINUTES at its 1-minute floor, so the staleness assertions
+  // can age a session out with a direct SQL touch instead of a real hour.
+  env: {
+    ...process.env, PORT: String(PORT), DB_PATH,
+    ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 
@@ -161,6 +166,53 @@ try {
   eq(deskOf(f, 'pro').seat, before, 'the seat does not move — renaming somebody is not rearranging the room');
   await post(ev('pro', 's2', 'Stop', { last_assistant_message: 'still here' }));
   eq(deskOf(await floor(), 'pro').persona, 'Marguerite', 'and the next hook event does not undo it');
+
+  console.log('\na crashed window cannot stay live forever');
+  await post(ev('ghost', 's4', 'SessionStart'));
+  eq(deskOf(await floor(), 'ghost').live, true, 'a fresh session is live');
+  // Age the session past the TTL directly — the crash we are simulating is
+  // precisely "no more events arrive", so there is no event to send.
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`UPDATE agent_sessions SET updated_at = datetime('now', '-2 minutes') WHERE session_id = 's4'`).run();
+    db.close();
+  }
+  f = await floor();
+  eq(deskOf(f, 'ghost').live, false, 'past the TTL a silent session shows as away — live is a recency claim, like the board presence dot');
+  assert(!!deskOf(f, 'ghost'), 'the desk itself stays');
+  await post(ev('ghost', 's4', 'Stop', { last_assistant_message: 'back' }));
+  eq(deskOf(await floor(), 'ghost').live, true, 'and any event revives it');
+
+  console.log('\nbut a desk waiting on a human is exempt from staleness');
+  await post(ev('ghost', 's4', 'Notification', { notification_type: 'permission_prompt', notification_message: 'may I?' }));
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`UPDATE agent_sessions SET updated_at = datetime('now', '-2 minutes') WHERE session_id = 's4'`).run();
+    db.close();
+  }
+  f = await floor();
+  eq(deskOf(f, 'ghost').live, true, 'silence at a prompt is expected — no hooks fire while Claude Code waits');
+  eq(f.queue.some((q) => q.agent === 'ghost'), true, 'so the longest-waiting person is never aged out of the queue built to surface them');
+  await post(ev('ghost', 's4', 'UserPromptSubmit', { message: 'yes' }));
+
+  console.log('\nevery agent the board knows gets a desk');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`INSERT OR IGNORE INTO agents (channel, agent) VALUES (?, ?)`).run(CH, 'boardonly');
+    db.prepare(`INSERT OR IGNORE INTO agents (channel, agent, retired_at) VALUES (?, ?, datetime('now'))`).run(CH, 'retiredone');
+    db.close();
+  }
+  f = await floor();
+  const bo = deskOf(f, 'boardonly');
+  assert(!!bo, 'an agent that only ever talked to the board still has a seat — a floor is a channel, not a plugin roster');
+  eq(bo.reporting, false, 'and is marked as not reporting, which is the reminder of who still needs the plugin');
+  eq(bo.live, false, 'not live');
+  assert(!!bo.persona, `and has a face (${bo.persona})`);
+  eq(deskOf(f, 'retiredone'), undefined, 'a retired agent stays off the floor, matching the board');
+  eq(f.queue.some((q) => q.agent === 'boardonly'), false, 'and nothing is inferred about it — no session, no queue entry');
 
   console.log('\nchannels are floors, and stay separate');
   await post({ ...ev('free', 's9', 'SessionStart'), channel: 'other-floor' });
