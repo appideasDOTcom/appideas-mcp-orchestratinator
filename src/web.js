@@ -35,6 +35,10 @@ const UI_DIR = fileURLToPath(new URL('./ui', import.meta.url));
 // this payload is refetched every couple of seconds.
 const TASK_LIST_MAX = 25;
 
+// Same idea for a backlog. The count on the pill is always exact; this bounds
+// only the rows the dialog offers to act on.
+const BACKLOG_LIST_MAX = 25;
+
 function buildState(store, sessions, sessionStats, meta) {
   const nowMs = Date.now();
 
@@ -55,6 +59,9 @@ function buildState(store, sessions, sessionStats, meta) {
   }
 
   const agentRows = store.listAllAgents();
+  // The backlog dialog lists the messages, not just their number. Board-only:
+  // the floor's pills open this same dialog, and it reads them from here.
+  const backlogByAgent = index(store.unreadMessages(), (m) => agentKey(m.channel, m.agent));
   // The per-agent workload the floor draws from too — see agent-state.js.
   const idx = agentLoadIndex(store);
   const { unassignedByChannel } = idx;
@@ -101,6 +108,13 @@ function buildState(store, sessions, sessionStats, meta) {
         return {
           agent: a.agent,
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
+          unread_list: (backlogByAgent.get(k) ?? []).slice(0, BACKLOG_LIST_MAX).map((m) => ({
+            id: m.id,
+            from: m.from,
+            to: m.to,
+            body: m.body,
+            created_at: iso(m.created_at),
+          })),
           retired: !!a.retired_at,
           retired_at: iso(a.retired_at),
         };
@@ -256,6 +270,31 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     if (!store.unretireAgent(channel, agent)) return missing(res, `no agent "${agent}" on channel "${channel}"`);
     store.logAdmin(channel, 'unretire', { target: agent, detail: 'restored to the board' });
     res.json({ ok: true, channel, agent });
+  });
+
+  /**
+   * Point a message at a different agent, or at everyone.
+   *
+   * A message is a record of something said, so this rewrites history in a way
+   * reassigning a task does not — a task changing hands is the normal course of
+   * events, a message changing addressee is not. It is here because the backlog
+   * dialog needs it and the operator is the human in the middle either way; the
+   * admin log keeps who did it, which is the part that makes it recoverable.
+   */
+  router.post('/message/reassign', (req, res) => {
+    const channel = str(req.body?.channel);
+    const id = Number(req.body?.id);
+    const to = str(req.body?.to) || null;
+    if (!channel || !Number.isInteger(id)) return bad(res, 'channel and a numeric id are required');
+    const row = store.messageById(channel, id);
+    if (!row) return missing(res, `no message #${id} on channel "${channel}"`);
+    if (to && !agentRow(channel, to)) return missing(res, `no agent "${to}" on channel "${channel}"`);
+    const changes = store.reassignMessage(channel, id, to);
+    store.logAdmin(channel, 'message.reassign', {
+      target: to ?? '(everyone)',
+      detail: `#${id} was addressed to ${row.to ?? '(everyone)'}`,
+    });
+    res.json({ ok: true, channel, id, to, changes });
   });
 
   router.post('/task/close', (req, res) => {

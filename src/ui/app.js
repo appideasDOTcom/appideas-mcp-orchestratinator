@@ -108,6 +108,22 @@ function pretty(raw) {
 
 const clip = (s, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
+/**
+ * A message body as one readable line.
+ *
+ * Bodies are JSON-encoded and may be a string or a structured object, so the
+ * raw column is quoted or braced and reads badly in a list. Unwrap a plain
+ * string; leave anything else as compact JSON rather than guessing at a shape.
+ */
+function excerpt(body, n = 90) {
+  let text = String(body ?? '');
+  try {
+    const v = JSON.parse(text);
+    text = typeof v === 'string' ? v : JSON.stringify(v);
+  } catch { /* not JSON — show it as it is */ }
+  return clip(text.replace(/\s+/g, ' ').trim(), n) || '(empty)';
+}
+
 /* ---------- channels & agents ---------- */
 
 const TONE_CLASS = { busy: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
@@ -338,6 +354,7 @@ const KIND_LABEL = {
   'admin.unretire': ['agent restored', 'admin'],
   'admin.task.close': ['task closed', 'admin'],
   'admin.task.reassign': ['task reassigned', 'admin'],
+  'admin.message.reassign': ['message re-addressed', 'admin'],
   'admin.channel.archive': ['channel archived', 'admin'],
   'admin.channel.unarchive': ['channel restored', 'admin'],
   'admin.channel.delete': ['channel deleted', 'admin'],
@@ -532,17 +549,44 @@ function backlogDialog(channel, agent) {
   const upTo = a.unread_max_id ?? 0;
   const at = `data-channel="${esc(channel)}" data-agent="${esc(agent)}"`;
   const n = (count) => (count === 1 ? '' : 's');
+  ui.dlgCtx = { channel, agent, kind: 'unread' };
+  const c = findChannel(channel);
+  const names = (c?.agents ?? []).map((x) => x.agent);
+  const list = a.unread_list ?? [];
+
+  const rows = list.length ? list.map((m) => `
+    <div class="task-row">
+      <div>
+        <span class="ref">#${m.id}</span> <span class="title">${esc(excerpt(m.body))}</span>
+        <span class="badge ${m.to ? 'opened' : 'claimed'}">${m.to ? 'direct' : 'broadcast'}</span>
+        <div class="muted mono tiny">sent by ${esc(m.from)} · ${age(m.created_at)}</div>
+      </div>
+      <div class="task-acts">
+        <select class="input" data-reassign-msg="${m.id}" title="point this message at someone else">
+          <option value="">— everyone —</option>
+          ${names.map((x) => `<option value="${esc(x)}"${m.to === x ? ' selected' : ''}>${esc(x)}</option>`).join('')}
+        </select>
+        <button type="button" class="btn" data-do="read-to" data-channel="${esc(channel)}" data-agent="${esc(agent)}" data-up-to="${m.id}"
+          title="marks this one read, and anything older — read is a single cursor, not a per-message flag">close</button>
+      </div>
+    </div>`).join('') : '<div class="empty">nothing unread here</div>';
+
   openDialog(`
-    <h3>${esc(agent)} · ${a.unread} unread</h3>
+    <h3>Unread messages · ${esc(agent)}</h3>
     <p class="dlg-sub">
-      on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}
+      on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}${a.unread > list.length ? ` · showing ${list.length} of ${a.unread}` : ''}
     </p>
-    <div class="dlg-choice">
-      <button type="button" class="btn primary" data-do="advance" data-up-to="${upTo}" ${at}>Mark read (operator)</button>
-      <p>Moves the cursor to #${upTo}. ${esc(agent)} never sees these ${a.unread} message${n(a.unread)}, and the board stops counting them.</p>
+    <div class="task-list">${rows}</div>
+    <p class="dlg-note">
+      Whether an agent has seen a message is one cursor, not a flag per message — so <b>close</b> marks that
+      message read <b>and anything older than it</b>. Closing the top row is the same as marking all read.
+      Either way ${esc(agent)} never sees them, and the log keeps the record. Changing the dropdown re-addresses
+      the message immediately.
+    </p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="advance" data-up-to="${upTo}" ${at}>Mark all read (operator)</button>
     </div>
-    <p class="dlg-note">To get ${esc(agent)}'s attention, type in its own window, or put it on <span class="mono">/loop</span> so it polls this board itself.</p>
-    <div class="dlg-foot"><button type="button" class="btn" data-do="cancel">Cancel</button></div>
   `);
 }
 
@@ -986,7 +1030,12 @@ el.dlgBody.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-do]');
   if (!btn) return;
   const d = btn.dataset;
-  const reRender = (ok) => { if (ok && el.dlg.open && ui.dlgCtx) taskDialog(ui.dlgCtx.channel, ui.dlgCtx.agent, ui.dlgCtx.kind); };
+  const reRender = (ok) => {
+    if (!ok || !el.dlg.open || !ui.dlgCtx) return;
+    const { channel, agent, kind } = ui.dlgCtx;
+    if (kind === 'unread') backlogDialog(channel, agent);
+    else taskDialog(channel, agent, kind);
+  };
 
   switch (d.do) {
     case 'cancel':
@@ -1000,6 +1049,14 @@ el.dlgBody.addEventListener('click', (e) => {
       break;
     case 'close-task':
       act(() => admin('task/close', { channel: d.channel, id: Number(d.id) }), { keepOpen: true }).then(reRender);
+      break;
+    // Same endpoint as "Mark all read", a different cursor. Closing one row is
+    // "read to here", which is the only thing a single cursor can mean.
+    case 'read-to':
+      act(
+        () => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }),
+        { keepOpen: true }
+      ).then(reRender);
       break;
     case 'archive':
       act(() => admin('channel/archive', { channel: d.channel }));
@@ -1022,9 +1079,20 @@ el.dlgBody.addEventListener('click', (e) => {
 // Reassign applies on change rather than behind a save button: there's one field,
 // and the log records every move.
 el.dlgBody.addEventListener('change', (e) => {
-  const sel = e.target.closest('[data-reassign]');
-  if (!sel || !ui.dlgCtx) return;
+  if (!ui.dlgCtx) return;
   const { channel, agent, kind } = ui.dlgCtx;
+
+  const msg = e.target.closest('[data-reassign-msg]');
+  if (msg) {
+    act(
+      () => admin('message/reassign', { channel, id: Number(msg.dataset.reassignMsg), to: msg.value || null }),
+      { keepOpen: true }
+    ).then((ok) => { if (ok && el.dlg.open) backlogDialog(channel, agent); });
+    return;
+  }
+
+  const sel = e.target.closest('[data-reassign]');
+  if (!sel) return;
   act(
     () => admin('task/reassign', { channel, id: Number(sel.dataset.reassign), assignee: sel.value || null }),
     { keepOpen: true }

@@ -557,6 +557,28 @@ export function makeStore(db) {
           AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent))
         GROUP BY a.channel, a.agent`
     ),
+    // The unread messages themselves, not just the count. Bounded like
+    // boardTasks: the join is naturally small because it only matches messages
+    // past an agent's cursor, but a channel nobody has polled for a week would
+    // otherwise put its whole history in a dashboard poll.
+    unreadMessages: db.prepare(
+      `SELECT a.channel, a.agent, m.id, m.from_agent AS "from", m.to_agent AS "to",
+              m.body, m.created_at
+         FROM agents a
+         JOIN messages m
+           ON m.channel = a.channel AND m.id > a.poll_cursor
+          AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent))
+        WHERE a.retired_at IS NULL
+        ORDER BY a.channel, a.agent, m.id DESC
+        LIMIT 2000`
+    ),
+    reassignMessage: db.prepare(
+      `UPDATE messages SET to_agent = @to WHERE channel = @channel AND id = @id`
+    ),
+    messageById: db.prepare(
+      `SELECT id, channel, from_agent AS "from", to_agent AS "to", body, created_at
+         FROM messages WHERE channel = @channel AND id = @id`
+    ),
     activity: db.prepare(
       // One row per interesting database write, newest first. `detail` is capped
       // so a huge contract value can't blow up the response.
@@ -999,6 +1021,9 @@ export function makeStore(db) {
     agentTaskLoad: () => q.agentTaskLoad.all(),
     claimedTasks: () => q.claimedTasks.all(),
     unreadCounts: () => q.unreadCounts.all(),
+    unreadMessages: () => q.unreadMessages.all(),
+    messageById: (channel, id) => q.messageById.get({ channel, id }),
+    reassignMessage: (channel, id, to) => q.reassignMessage.run({ channel, id, to: to || null }).changes,
     activity: ({ channel = null, limit = 200, offset = 0 } = {}) =>
       q.activity.all({ channel, limit, offset }),
 
