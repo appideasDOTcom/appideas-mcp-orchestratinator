@@ -302,6 +302,71 @@ try {
   eq(refused.status, 409, 'a message with no host to take it is refused rather than swallowed');
   eq((await refused.json()).code, 'host_offline', 'with the reason');
   host = null;
+
+  /* ── which board this host serves ───────────────────────────────────────────
+   * This used to be `originOf(found[0].url)` — the first desk the filesystem
+   * walk happened to return. On a machine whose desks point at two boards that
+   * is a coin flip, and the losing side still registers, reports healthy, and
+   * serves nothing, with the only evidence a `skipping` line in a log nobody
+   * reads. Which board a host serves is the user's to say, so an ambiguous
+   * install has to stop and ask rather than pick. */
+  console.log('\n  which board this host serves');
+
+  const boards = `${FIX}/boards`;
+  const deskAt = (dir, agent, url) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(`${dir}/.mcp.json`, JSON.stringify({
+      mcpServers: {
+        orchestratinator: {
+          type: 'http',
+          url: `${url}/mcp`,
+          headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': `key-${agent}` },
+        },
+      },
+    }, null, 2));
+  };
+  // Resolves on the marker rather than a fixed wait: the startup line is
+  // printed before the first poll, and these hosts point at ports nothing is
+  // listening on, so waiting for exit would mean waiting out the retry backoff.
+  const runHost = (roots, { until: marker = null, ...extra } = {}) => new Promise((done) => {
+    const p = spawn('node', ['host/index.js'], {
+      env: {
+        ...process.env,
+        HOME,
+        ORCH_HOST_ROOTS: roots,
+        ORCH_TMUX_SESSION: TMUX_SESSION,
+        ORCH_HOST_CONFIG: '/nonexistent/host.json',
+        ORCH_HOST_CLAUDE: `${FIX}/claude`,
+        ORCH_URL: '',
+        ...extra,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    const finish = (code) => { clearTimeout(timer); try { p.kill('SIGKILL'); } catch { /* gone */ } done({ code, out }); };
+    const see = (d) => { out += d; if (marker && marker.test(out)) finish(null); };
+    p.stdout.on('data', see);
+    p.stderr.on('data', see);
+    const timer = setTimeout(() => finish(null), 8000);
+    p.on('exit', finish);
+  });
+
+  deskAt(`${boards}/one`, 'board-a', 'http://127.0.0.1:9911');
+  deskAt(`${boards}/two`, 'board-b', 'http://127.0.0.1:9922');
+
+  const split = await runHost(boards);
+  eq(split.code, 1, 'desks pointing at two boards stop the host rather than letting it guess');
+  assert(/different boards/.test(split.out), 'and it says that is why');
+  assert(/9911/.test(split.out) && /9922/.test(split.out), 'naming both, so the choice can be made');
+  assert(/--url/.test(split.out), 'and how to make it');
+
+  const pinned = await runHost(boards, { ORCH_URL: 'http://127.0.0.1:9922', until: /skipping/ });
+  assert(/serves http:\/\/127\.0\.0\.1:9922/.test(pinned.out), 'a configured url settles it');
+  assert(/skipping .*board-a/.test(pinned.out), 'and desks on the other board are named rather than silently dropped');
+
+  rmSync(`${boards}/two`, { recursive: true, force: true });
+  const agreed = await runHost(boards, { until: /tmux/ });
+  assert(/→ http:\/\/127\.0\.0\.1:9911/.test(agreed.out), 'desks that agree on one board need no url at all');
 } catch (err) {
   console.error(err);
   failures++;

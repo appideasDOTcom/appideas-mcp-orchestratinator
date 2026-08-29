@@ -33,7 +33,8 @@ is the part you do every day.
 
 **Before you start** you need Docker, `tmux`, and Claude Code installed and
 signed in — the host runs the same `claude` binary your terminal does, with your
-login. (Node 20 is only needed if you intend to run `npm test`.)
+login. Node is used to generate the secret in step 2 and to run the host; version
+20 or newer if you also intend to run `npm test`.
 
 **1. Get the code.**
 
@@ -64,7 +65,11 @@ docker compose up -d
 curl -s localhost:8787/health          # {"ok":true,...}
 ```
 
-It listens on `127.0.0.1` only, and keeps its data in a Docker volume.
+It keeps its data in a Docker volume. Note the port is published on **every
+interface**, so anything that can route to this machine can read the board and
+take operator actions on it — the dashboard has no sign-in. That is the intended
+model for one machine on one trusted network. To make it this machine only,
+change the port line in `docker-compose.yml` to `"127.0.0.1:8787:8787"`.
 
 **4. Make each repo a desk.**
 
@@ -102,6 +107,12 @@ The `.` is the clone from step 1, so this works when the Claude Code session you
 type it in was opened there. From any other window, give the full path to the
 clone instead.
 
+Some environments — the VS Code extension among them — don't accept arguments
+after `/plugin`, and answer *"/plugin isn't available in this environment."*
+There, type `/plugin` on its own and use the menu: add the marketplace by
+directory, then install **orchestratinator-floor** from it. It sits at the
+bottom of the plugin list, below the official ones.
+
 **6. Install the host** (this is what lets the floor open and drive windows):
 
 ```bash
@@ -110,13 +121,22 @@ clone instead.
 
 Name the directory your repos live under. It finds every desk beneath it,
 registers a LaunchAgent so it starts at login, and reads the server address and
-secret from the first desk it finds. Nothing else to configure.
+the shared secret from those desks.
+
+If your desks point at **more than one board** — a second server, or the same one
+by two addresses — nothing can infer which one this host serves, so it refuses to
+start and prints the boards it found. Name one:
+
+```bash
+./host/install.sh --url http://localhost:8787 ~/path/to/your/projects
+```
+
+Desks on the other boards are then listed as skipped in the log rather than
+silently ignored.
 
 **7. Open the floor.**
 
-```
-open [http://localhost:8787/](http://localhost:8787/) in a web browser.
-```
+Open <http://localhost:8787/> in a web browser.
 
 That lands on the dashboard; the board/floor switch is top right. Every desk you
 wired up in step 4 should be there.
@@ -338,6 +358,12 @@ Once per machine, from anywhere:
 /plugin install orchestratinator-floor
 ```
 
+Some environments — the VS Code extension among them — don't accept arguments
+after `/plugin`, and answer *"/plugin isn't available in this environment."*
+There, type `/plugin` on its own and use the menu: add the marketplace by
+directory, then install **orchestratinator-floor** from it. It sits at the
+bottom of the plugin list, below the official ones.
+
 That is the whole setup. There is nothing to configure, because there is nothing
 new to tell it: the hook reads the repo's own `.mcp.json` — the file that already
 declares `X-Channel` and `X-Agent` — and posts to `/api/ingest` on the same
@@ -350,8 +376,12 @@ that finishes, as a tool starts, and when Claude Code needs you. Every hook
 detaches immediately, so none of it is on the critical path of a turn, and every
 failure — server down, network gone, malformed config — exits quietly. A floor
 going stale is visible on the floor; a red line in somebody's terminal is a bug
-report about a feature they weren't thinking about. A session the host runs is
-reported by the host instead, and the hook stays silent for it.
+report about a feature they weren't thinking about. The hook reports every session, hosted or not.
+What it sends is *state* — a turn started, a prompt is open, the session ended —
+never the conversation, which the floor reads from Claude Code's own transcript
+and so does not depend on a hook firing. Content is sent too, and is used only
+for a desk on a machine with no host running, where a partial conversation beats
+none.
 
 ### Chatting with a desk
 

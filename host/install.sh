@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Install the orchestratinator host on this Mac and keep it running.
 #
-#   ./host/install.sh <projects-dir> [more dirs…]
+#   ./host/install.sh [--url <board>] <projects-dir> [more dirs…]
 #
 # Writes ~/.orchestratinator/host.json and registers a LaunchAgent so the host
-# starts at login and comes back if it stops. The server address and the shared secret are read from the first
-# orchestratinator .mcp.json found under the directories you name, so there is
-# nothing else to type. Run it again to change the directories.
+# starts at login and comes back if it stops. The shared secret is read from a
+# desk's .mcp.json, so there is nothing else to type. The server address is read
+# the same way when every desk agrees on one; when they don't, --url settles it
+# and the host refuses to start until something does. Run it again to change the
+# directories.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,9 +32,22 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
+URL=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --url) URL="${2:-}"; [ -n "$URL" ] || { echo "--url needs a value, e.g. --url http://localhost:8787" >&2; exit 2; }; shift 2 ;;
+    --url=*) URL="${1#--url=}"; shift ;;
+    --) shift; break ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
 if [ "$#" -lt 1 ]; then
-  echo "usage: $0 <projects-dir> [more dirs…]" >&2
+  echo "usage: $0 [--url <board>] <projects-dir> [more dirs…]" >&2
   echo "       the directories your orchestratinator repos live under" >&2
+  echo "       --url pins the board this host serves, for a machine whose desks" >&2
+  echo "            point at more than one (e.g. --url http://localhost:8787)" >&2
   exit 2
 fi
 
@@ -51,16 +66,16 @@ for d in "$@"; do
 done
 ROOTS="${ROOTS%,}]"
 
-# Keep anything already in the file that this script doesn't manage (url, token, name).
-if [ -f "$CONF" ]; then
-  "$NODE" -e '
-    const fs = require("fs"); const f = process.argv[1]; const roots = JSON.parse(process.argv[2]);
-    let c = {}; try { c = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
-    c.roots = roots; fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");
-  ' "$CONF" "$ROOTS"
-else
-  printf '{\n  "roots": %s\n}\n' "$ROOTS" > "$CONF"
-fi
+# Keep anything already in the file that this script doesn't manage (token, name),
+# and the url too unless --url was given. Writing roots is the whole job here;
+# everything else in that file was put there deliberately.
+"$NODE" -e '
+  const fs = require("fs"); const [f, rootsJson, url] = process.argv.slice(1);
+  let c = {}; try { c = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
+  c.roots = JSON.parse(rootsJson);
+  if (url) c.url = url.replace(/\/+$/, "");
+  fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");
+' "$CONF" "$ROOTS" "$URL"
 echo "wrote $CONF"
 
 # No install step: the host has no dependencies. It drives the `claude` already

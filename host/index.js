@@ -419,8 +419,25 @@ async function main() {
     warn(`no desks found under ${cfg.roots.join(', ')} — a desk is a directory whose .mcp.json carries X-Channel and X-Agent`);
   }
 
-  if (!cfg.url && found.length) cfg.url = originOf(found[0].url);
-  if (!cfg.token && found.length) cfg.token = found[0].key;
+  // Which board this host serves. A configured url wins; otherwise the desks
+  // decide, and only when they agree. Taking the first desk in walk order is
+  // what this used to do, and it is how a host ends up bound to a board none of
+  // the desks you care about live on: it registers, reports itself healthy, and
+  // silently serves nothing, with the only evidence a `skipping` line that
+  // scrolls past. Ambiguity is the user's to resolve, so say so and stop.
+  const origins = [...new Set(found.map((d) => originOf(d.url)).filter(Boolean))];
+  if (!cfg.url && origins.length === 1) cfg.url = origins[0];
+  if (!cfg.url && origins.length > 1) {
+    console.error(`[host] the desks under ${cfg.roots.join(', ')} point at ${origins.length} different boards, and nothing here says which one this host serves:`);
+    for (const o of origins) {
+      const names = found.filter((d) => originOf(d.url) === o).map((d) => `${d.channel}/${d.agent}`);
+      const shown = names.slice(0, 3).join(', ') + (names.length > 3 ? `, +${names.length - 3} more` : '');
+      console.error(`[host]   ${o}  — ${names.length} desk${names.length === 1 ? '' : 's'}: ${shown}`);
+    }
+    console.error('[host] pick one:  ./host/install.sh --url <board> <your projects dir>');
+    console.error(`[host] or set ORCH_URL, or add "url" to ${CONFIG_FILE}`);
+    process.exit(1);
+  }
   if (!cfg.url) {
     console.error('[host] no server: set ORCH_URL, or put a repo with an orchestratinator .mcp.json under ORCH_HOST_ROOTS');
     process.exit(1);
@@ -430,6 +447,12 @@ async function main() {
   const mine = found.filter((d) => originOf(d.url) === origin);
   for (const d of found.filter((d) => originOf(d.url) !== origin)) {
     log(`skipping ${d.channel}/${d.agent} — its board is ${originOf(d.url)}, this host serves ${origin}`);
+  }
+  // From a desk on the board we actually serve. found[0] was the same bug as
+  // the url: a key from another board authenticates against nothing here.
+  if (!cfg.token && mine.length) cfg.token = mine[0].key;
+  if (found.length && !mine.length) {
+    warn(`every desk found points at another board — this host serves ${origin} and has nothing to do`);
   }
 
   const host = new Host(cfg);
