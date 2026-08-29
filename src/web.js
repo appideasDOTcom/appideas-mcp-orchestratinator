@@ -6,7 +6,7 @@ import {
 } from './backup.js';
 import { createFloorRouter } from './floor.js';
 import {
-  agentBoard, agentKey, agentLoadIndex, ageMinutes, index, iso,
+  agentBoard, agentKey, agentLoadIndex, index, iso,
 } from './agent-state.js';
 
 /**
@@ -30,9 +30,6 @@ import {
 
 const UI_DIR = fileURLToPath(new URL('./ui', import.meta.url));
 
-// An agent with no live session but a recent tool call is probably still there
-// (its window is open, it just isn't polling). Past this it's shown as offline.
-const RECENT_MINUTES = 5;
 // How many unfinished tasks per channel /api/state carries in full. The counts
 // are always exact; this bounds only the list the task dialog offers, because
 // this payload is refetched every couple of seconds.
@@ -98,17 +95,12 @@ function buildState(store, sessions, sessionStats, meta) {
       .sort((a, b) => a.agent.localeCompare(b.agent))
       .map((a) => {
         const k = agentKey(channel, a.agent);
-        const liveCount = liveByKey.get(k) ?? 0;
-        const seenAgeMin = ageMinutes(iso(a.last_seen), nowMs);
-        // Presence is the board's own question — how we are hearing from this
-        // agent — and stays here. Everything below the name is the shared
-        // derivation, so the desk on the floor says the same thing.
-        const presence = liveCount > 0 ? 'connected' : seenAgeMin <= RECENT_MINUTES ? 'recent' : 'offline';
+        // Presence included: the floor draws it too, and a desk that disagreed
+        // with its own row about whether the agent is connected would be worse
+        // than not showing it at all.
         return {
           agent: a.agent,
-          presence,
-          sessions: liveCount,
-          ...agentBoard(a, idx, nowMs),
+          ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
           retired: !!a.retired_at,
           retired_at: iso(a.retired_at),
         };
@@ -399,7 +391,7 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth }));
+  router.use(createFloorRouter({ store, auth, sessions }));
 
   router.get('/api/state', (_req, res) => {
     res.json(buildState(store, sessions, sessionStats, meta));

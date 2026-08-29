@@ -1,6 +1,6 @@
 import express from 'express';
 import { CAST } from './db.js';
-import { agentBoard, agentLoadIndex } from './agent-state.js';
+import { agentBoard, agentLoadIndex, mcpSessionCounts } from './agent-state.js';
 
 /**
  * The floor: what each agent's own Claude Code session is doing — and, for
@@ -449,7 +449,7 @@ function applyHostEvent(store, live, hostId, ev) {
  * seat — the alternative, waiting for it to also appear on the board, would show
  * an empty room to somebody whose windows are plainly open.
  */
-export function buildFloor(store, live = null) {
+export function buildFloor(store, live = null, sessions = null) {
   const nowMs = Date.now();
   const key = deskKey;
 
@@ -504,6 +504,9 @@ export function buildFloor(store, live = null) {
     store.ensurePersona(a.channel, a.agent);
   }
   const load = agentLoadIndex(store);
+  // Keyed with deskKey so it lines up with `k` below, not with agent-state's
+  // own NUL key.
+  const mcp = mcpSessionCounts(sessions, key);
 
   const byChannel = new Map();
   for (const p of store.listPersonas()) {
@@ -618,7 +621,7 @@ export function buildFloor(store, live = null) {
           // Derived by the board's own code (agent-state.js) rather than
           // re-inferred here, so the sign on a desk and the row on the board
           // cannot drift into disagreeing about the same agent.
-          board: agentRows.has(k) ? agentBoard(agentRows.get(k), load, nowMs) : null,
+          board: agentRows.has(k) ? agentBoard(agentRows.get(k), load, nowMs, mcp.get(k) ?? 0) : null,
           turns: turnCount.get(k) ?? 0,
           sessions: sessionCount.get(k) ?? 0,
         };
@@ -660,7 +663,7 @@ export function buildFloor(store, live = null) {
   };
 }
 
-export function createFloorRouter({ store, auth }) {
+export function createFloorRouter({ store, auth, sessions = null }) {
   const router = express.Router();
   const live = createLive();
 
@@ -792,7 +795,7 @@ export function createFloorRouter({ store, auth }) {
   /* ───────────────────── the browser's doors ───────────────────── */
 
   router.get('/api/floor', (_req, res) => {
-    res.json(buildFloor(store, live));
+    res.json(buildFloor(store, live, sessions));
   });
 
   /**

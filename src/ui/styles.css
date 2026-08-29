@@ -714,6 +714,35 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 }
 /* Invisible, but the reason a whole desk is clickable and not just its pixels. */
 .deskHit { fill: transparent; pointer-events: all; }
+/* Same trick as .deskHit, for the nameplate: a transparent pad is still a
+   painted fill, so it takes the click the glyphs would otherwise drop. */
+.plateHit { fill: transparent; pointer-events: all; }
+.plate { cursor: pointer; }
+.plate:focus { outline: none; }
+.plate:focus-visible .plateName,
+.plate:hover .plateName { fill: var(--accent); }
+
+/* The nameplate popover. Fixed rather than absolute because it is anchored to
+   a rectangle captured at click time, not to a live element — the rooms are
+   rebuilt wholesale and that element is gone by the next tick. */
+#desk-pop {
+  position: fixed; z-index: 60; width: 268px; max-width: calc(100vw - 16px);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35); padding: 10px 12px;
+  font-size: 11.5px; line-height: 1.45; color: var(--text);
+}
+.dp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+           padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--border); }
+.dp-head .dp-dim { font-size: 10px; }
+.dp-row { display: flex; gap: 8px; padding: 2px 0; }
+.dp-k { flex: 0 0 82px; color: var(--muted); font-size: 10px; text-transform: uppercase;
+        letter-spacing: .04em; padding-top: 1px; }
+.dp-v { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.dp-dim { color: var(--muted); }
+.dp-none { color: var(--muted); font-style: italic; }
+.dp-detail { display: block; }
+.dp-foot { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 10px; }
+
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor. */
 #floor-pick { margin-bottom: 12px; flex-wrap: wrap; }

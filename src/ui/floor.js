@@ -40,18 +40,26 @@
 
   /* The desk front is the sign, and the tray of counts sits under the plate.
 
-     The board says everything about an agent on one long row. A desk is 168px
-     wide, so the same facts arrive a card at a time — a bus blind turning to
-     the next destination, not a ticker scrolling continuously. That choice is
-     load-bearing: continuous motion on every desk at once would compete with
-     the `!` badge, which is the one thing on this floor that must never be
-     missed. A blind is still between turns.
+     The counter carries one thing: what this agent last said it was doing. It
+     turns when that changes and at no other time — a bus blind rolls when the
+     route changes, not on a clock.
 
-     Putting it on the counter rather than in a panel below the nameplate costs
-     no height at all — the slab was already drawn there — and a counter deep
-     enough to read is still recognisably a desk, where a box floating under
-     the plate was furniture with a note left beside it. The slab grows
-     downward, so it occludes no more of the person than it did before. */
+     That is the whole point, and it was worth rebuilding to get: motion here
+     MEANS something. An earlier version cycled through three cards every few
+     seconds, which looked alive and told you nothing — every desk was always
+     moving, so a desk that had just changed looked exactly like one that had
+     not. Now a blind that turns is a status that changed, catchable from
+     across the room, and a still floor is a floor where nothing has happened.
+     It also leaves the `!` badge as the only other thing that moves, which is
+     the one thing that must never be missed.
+
+     Everything else the board shows about an agent — presence, last action,
+     the counts, when a status stops being believable — lives in the popover
+     off the nameplate, because it is reference material rather than news.
+
+     Putting the sign on the counter rather than in a panel below the nameplate
+     costs no height at all: the slab was already drawn there, and it grows
+     downward, so it occludes no more of the person than before. */
   const SIGN_LINE = 12;
   const SIGN_LINES = 3;
   const FACE_X = 14;
@@ -62,7 +70,10 @@
   const PLATE_Y = FACE_Y + FACE_H + 14;     // nameplate, now below the counter
   const PILL_H = 17;
   const PILL_Y = PLATE_Y + 23;
-  const ROLL_MS = 4500;                     // how long a card holds before the blind turns
+  // How long a just-changed sign keeps the old card on the strip. Covers the
+  // CSS transition with margin, so a room rebuilt mid-turn still shows the
+  // roll rather than snapping to the new card.
+  const ROLL_SETTLE_MS = 900;
 
   /** How far a desk draws below its origin: counter, nameplate, pill tray. */
   const DESK_BELOW = PILL_Y + PILL_H + 4;
@@ -88,11 +99,11 @@
     partial: '',         // the reply being streamed to the open desk right now
     filterWas: null,     // the session the panel was last scoped to
     timer: null,
-    // Which card each desk's sign is showing, kept outside the DOM so a room
-    // rebuilt mid-turn comes back on the same card instead of snapping to the
-    // first one every time anything on the floor changes.
-    roll: new Map(),
-    rollTimer: null,
+    // What each desk's sign last said, kept outside the DOM because the DOM is
+    // rebuilt wholesale and would otherwise forget the previous message — and
+    // the previous message is the only thing that makes a turn possible.
+    sign: new Map(),
+    details: null,       // { channel, agent } whose nameplate popover is open
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -153,64 +164,117 @@
   }
 
   /**
-   * The cards on one desk's blind — the board's agent row, cut into panels.
+   * What one desk's sign currently says.
    *
-   * Same order the board uses, and for the same reason: the self-reported
-   * detail leads because it is the whole point of an agent bothering to call
-   * `set_status`, and the derived fallbacks come after it.
+   * The detail line if the agent gave one, because that is the whole point of
+   * it bothering to call `set_status`; the label it filed that under
+   * otherwise. Deliberately carries no age: an age ticks, and a sign that
+   * turned every minute because a number moved would destroy the only thing
+   * that makes this sign readable — that it turns when something happened.
+   * The age lives in the popover, where it can tick harmlessly.
    */
-  function signCards(d) {
+  function signCard(d) {
     const b = d.board;
-    if (!b) return [];
-    const cards = [];
-    const card = (kind, text) => {
-      const lines = wrap(text, SIGN_CHARS, SIGN_LINES);
-      if (lines.length) cards.push({ kind, lines });
-    };
-    if (b.state?.detail) card('detail', b.state.detail);
-    if (b.state?.label) {
-      // A reported label carries its age for the same reason the board's chip
-      // does: "waiting · 40m ago" reads as suspect where "waiting" cannot. A
-      // derived one has no age to carry — it was inferred just now.
-      card(
-        b.state.source === 'reported' ? 'state' : 'derived',
-        b.state.source === 'reported' && b.reported_at
-          ? `${b.state.label} · ${ago(b.reported_at)}`
-          : b.state.label
-      );
-    }
-    if (b.last_action) card('action', `${b.last_action} · ${ago(b.last_action_at)}`);
-    else if (b.last_seen) card('action', `seen ${ago(b.last_seen)}`);
-    return cards;
+    if (!b?.state) return null;
+    const text = b.state.detail || b.state.label;
+    if (!text) return null;
+    const lines = wrap(text, SIGN_CHARS, SIGN_LINES);
+    if (!lines.length) return null;
+    return { kind: b.state.source === 'reported' ? 'state' : 'derived', text, lines };
   }
 
   const rollKey = (channel, agent) => `${channel}|${agent}`;
 
+  const clock = (t) => {
+    if (!t) return '';
+    const d = new Date(t);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
   /**
-   * Turn every blind on the floor one card.
+   * The nameplate popover: everything the board says about this agent that the
+   * counter deliberately does not.
    *
-   * Runs on its own timer rather than inside the poll, and reaches into the
-   * drawn DOM rather than re-rendering: a room is rebuilt only when something
-   * about it changed, and a sign that could only turn on that beat would sit
-   * frozen on a quiet floor — which is exactly the floor you are most likely
-   * to be staring at.
-   *
-   * Every blind turns on the same tick, on purpose. A station board flips in
-   * unison; desks turning independently would put scattered motion across the
-   * room all the time.
+   * The split is news versus reference. The sign carries the one fact that
+   * changes and is worth catching from across the room; this carries the rest —
+   * how we are hearing from the agent, when its claim about itself stops being
+   * believable, what it is holding. None of it is worth a desk turning for, and
+   * all of it is worth being one click away.
    */
-  function rollSigns() {
-    for (const sign of document.querySelectorAll('#floor-rooms svg.face')) {
-      const n = Number(sign.dataset.cards ?? 0);
-      if (n < 2) continue;
-      const deskEl = sign.closest('.desk');
-      if (!deskEl) continue;
-      const k = rollKey(deskEl.dataset.channel, deskEl.dataset.agent);
-      const next = ((ui.roll.get(k) ?? 0) + 1) % n;
-      ui.roll.set(k, next);
-      const blind = sign.querySelector('.blind');
-      if (blind) blind.style.transform = `translateY(${-next * FACE_H}px)`;
+  function detailsHtml(d, channel) {
+    const b = d.board;
+    const bits = [];
+    const row = (k, v, cls = '') =>
+      bits.push(`<div class="dp-row"><span class="dp-k">${esc(k)}</span><span class="dp-v ${cls}">${v}</span></div>`);
+
+    if (!b) {
+      row('board', '<span class="dp-none">this desk has never called an MCP tool</span>');
+    } else {
+      // Two different presences, named so nobody has to guess which is which.
+      row('mcp', `${esc(b.presence)}${b.sessions > 1 ? ` ×${b.sessions}` : ''}` +
+        (b.last_seen ? ` <span class="dp-dim">· seen ${esc(ago(b.last_seen))}</span>` : ''));
+
+      if (b.state.source === 'reported') {
+        row('status', `${esc(b.state.label)} <span class="dp-dim">· said ${esc(ago(b.reported_at))} ago</span>`);
+        // The one fact the sign cannot show: when to stop believing it.
+        if (b.reported_expires_at) {
+          row('believed until', `<span class="dp-dim">${esc(clock(b.reported_expires_at))}</span>`);
+        }
+      } else {
+        row('status', `${esc(b.state.label)} <span class="dp-dim">· derived</span>`);
+        row('', '<span class="dp-none">nothing self-reported — read off the task board</span>');
+      }
+      if (b.state.detail) row('detail', `<span class="dp-detail">${esc(b.state.detail)}</span>`);
+      if (b.last_action) row('last call', `${esc(b.last_action)} <span class="dp-dim">· ${esc(ago(b.last_action_at))} ago</span>`);
+
+      const counts = [];
+      if (b.unread) counts.push(`✉ ${b.unread} unread`);
+      if (b.assigned_open) counts.push(`☰ ${b.assigned_open} assigned`);
+      if (b.claimed_tasks?.length) counts.push(`☑ ${b.claimed_tasks.length} claimed`);
+      row('holding', counts.length ? esc(counts.join('  ·  ')) : '<span class="dp-none">nothing</span>');
     }
+
+    const s = d.session ?? {};
+    const where = d.hosted
+      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : `host ${d.hosted.host} offline`)
+      : d.live ? 'reporting' : d.reporting ? 'away' : 'never reported';
+    row('window', `${esc(s.window ?? d.hosted?.window ?? '—')} <span class="dp-dim">· ${esc(where)}</span>`);
+    if (s.git_branch) row('branch', `<span class="dp-dim">${esc(s.git_branch)}</span>`);
+
+    return `<div class="dp-head"><strong>${esc(d.persona)}</strong>` +
+      `<span class="dp-dim mono">${esc(channel)}/${esc(d.agent)}</span></div>${bits.join('')}` +
+      `<div class="dp-foot dp-dim">click the desk to open the conversation</div>`;
+  }
+
+  /** Draw, move or remove the popover to match `ui.details`. */
+  function renderDetails() {
+    let pop = document.getElementById('desk-pop');
+    if (!ui.details) { pop?.remove(); return; }
+    const c = floor.channels.find((x) => x.channel === ui.details.channel);
+    const d = c?.desks.find((x) => x.agent === ui.details.agent);
+    // A desk can vanish under an open popover — retired, or its channel
+    // archived. Close rather than leave a card describing something that is no
+    // longer on the floor.
+    if (!d) { ui.details = null; pop?.remove(); return; }
+
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.id = 'desk-pop';
+      document.body.appendChild(pop);
+    }
+    pop.innerHTML = detailsHtml(d, ui.details.channel);
+
+    // Anchored to where the nameplate was when it was clicked, not to the live
+    // element: rooms are rebuilt wholesale, so that element is already gone.
+    const r = ui.detailsRect;
+    if (!r) return;
+    const w = pop.offsetWidth;
+    const h = pop.offsetHeight;
+    const left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8));
+    const below = r.bottom + 8;
+    const top = below + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 8) : below;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
   }
 
   /** The counts the board puts in the same row, as a tray of buttons. */
@@ -321,21 +385,30 @@
     // The counter. A nested <svg> so the blind is clipped by the counter's own
     // edges — no clipPath, and so no page-unique id to collide with, which
     // matters because rooms here are rebuilt wholesale.
-    const cards = signCards(d);
+    const card = signCard(d);
     const face = el('svg', {
-      x: FACE_X, y: FACE_Y, width: FACE_W, height: FACE_H,
-      class: 'face', 'data-cards': cards.length,
+      x: FACE_X, y: FACE_Y, width: FACE_W, height: FACE_H, class: 'face',
     });
     face.appendChild(el('rect', { x: 0, y: 0, width: FACE_W, height: FACE_H, rx: 5, class: 'deskTop' }));
-    if (cards.length) {
-      // Every card is painted at once on one tall strip; turning the blind is a
-      // transform on the strip, not a redraw. That is what lets a card change
-      // without touching the room, and what keeps the animation alive across
-      // the ticks that rebuild everything else.
-      const at = Math.min(ui.roll.get(rollKey(channel, d.agent)) ?? 0, cards.length - 1);
+    if (card) {
+      // Compare against what this sign last said. A change puts the old message
+      // back on the strip above the new one so there is something to roll away
+      // from — a blind with one panel cannot turn.
+      const k = rollKey(channel, d.agent);
+      const was = ui.sign.get(k);
+      if (!was) ui.sign.set(k, { text: card.text, kind: card.kind, from: null, at: 0 });
+      else if (was.text !== card.text) {
+        ui.sign.set(k, { text: card.text, kind: card.kind, from: was.text, fromKind: was.kind, at: Date.now() });
+      }
+      const now = ui.sign.get(k);
+      const turning = now.from != null && Date.now() - now.at < ROLL_SETTLE_MS;
+
+      const strip = turning
+        ? [{ kind: now.fromKind, lines: wrap(now.from, SIGN_CHARS, SIGN_LINES) }, card]
+        : [card];
       const blind = el('g', { class: 'blind' });
-      blind.style.transform = `translateY(${-at * FACE_H}px)`;
-      cards.forEach((c, ci) => {
+      blind.style.transform = 'translateY(0px)';
+      strip.forEach((c, ci) => {
         const cg = el('g', { class: `card ${c.kind}`, transform: `translate(0 ${ci * FACE_H})` });
         const top = (FACE_H - c.lines.length * SIGN_LINE) / 2 + SIGN_LINE - 3;
         c.lines.forEach((line, li) => {
@@ -348,6 +421,14 @@
         blind.appendChild(cg);
       });
       face.appendChild(blind);
+      if (turning) {
+        // Two frames, not one: the strip has to be in the document and painted
+        // at its old offset before the new offset can be a transition rather
+        // than a starting value.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          blind.style.transform = `translateY(${-FACE_H}px)`;
+        }));
+      }
     }
     g.appendChild(face);
 
@@ -359,7 +440,19 @@
     // Nameplate. The persona leads because that is what people will say out
     // loud; the real agent name follows because that is what the .mcp.json says
     // and someone will eventually need to match the two up.
-    const plate = el('g', { class: 'plate', transform: `translate(84 ${PLATE_Y})` });
+    const plate = el('g', {
+      class: 'plate',
+      transform: `translate(84 ${PLATE_Y})`,
+      'data-act': 'details',
+      'data-channel': channel,
+      'data-agent': d.agent,
+      role: 'button',
+      tabindex: '0',
+    });
+    // First child, so the words draw over it: without a pad the only clickable
+    // part of a nameplate is the glyphs themselves, and the gaps between them
+    // fall through to the desk behind — which opens a conversation instead.
+    plate.appendChild(el('rect', { x: -74, y: -13, width: 148, height: 34, class: 'plateHit' }));
     plate.appendChild(el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' }));
     plate.lastChild.textContent = d.persona;
     plate.appendChild(el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' }));
@@ -869,6 +962,8 @@
         rooms.replaceChildren(...shown.map(room));
       }
     }
+    // Ages and counts in the open card tick with everything else.
+    renderDetails();
     $('floor-queue').innerHTML = queueHtml();
     const t = floor.totals ?? {};
     $('floor-totals').textContent =
@@ -927,14 +1022,11 @@
     if (ui.timer) return;
     tick();
     ui.timer = setInterval(tick, POLL_MS);
-    ui.rollTimer = setInterval(rollSigns, ROLL_MS);
   }
 
   function stop() {
     clearInterval(ui.timer);
     ui.timer = null;
-    clearInterval(ui.rollTimer);
-    ui.rollTimer = null;
   }
 
   /* ---------- events ---------- */
@@ -949,7 +1041,39 @@
     loadTurns(true).then(() => { render(); openStream(channel, agent); });
   }
 
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && ui.details) { ui.details = null; renderDetails(); }
+  });
+
+  // The card is positioned against a rectangle captured at click time, so any
+  // scroll leaves it pointing at nothing. Closing beats chasing.
+  window.addEventListener('scroll', () => {
+    if (ui.details) { ui.details = null; renderDetails(); }
+  }, true);
+
   document.addEventListener('click', async (e) => {
+    // Clicks inside the card are the card's own business.
+    if (e.target.closest?.('#desk-pop')) return;
+
+    // The nameplate toggles its popover. Ahead of the desk test for the same
+    // reason the pills are: the plate sits inside the desk group.
+    const plateEl = e.target.closest?.('svg.room .plate[data-act="details"]');
+    if (plateEl && ui.on) {
+      const { channel, agent } = plateEl.dataset;
+      const already = ui.details?.channel === channel && ui.details?.agent === agent;
+      ui.details = already ? null : { channel, agent };
+      // The whole desk, not the plate: the card hangs below the anchor, and a
+      // plate-sized anchor puts it straight over this desk's own pill tray.
+      // The room SVG is scaled to fit its width, so a fixed pixel offset would
+      // clear the pills at one zoom and not another — the desk's own box is the
+      // only measure that holds.
+      if (ui.details) ui.detailsRect = (plateEl.closest('.desk') ?? plateEl).getBoundingClientRect();
+      renderDetails();
+      return;
+    }
+    // Any other click dismisses it, then goes on to do whatever it was for.
+    if (ui.details) { ui.details = null; renderDetails(); }
+
     // Before the desk test, because a pill sits inside the desk group and the
     // desk would otherwise swallow the click and just open the panel.
     const pill = e.target.closest?.('svg.room .pill[data-act]');

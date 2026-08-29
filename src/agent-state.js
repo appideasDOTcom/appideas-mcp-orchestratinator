@@ -18,6 +18,10 @@
 // waiting resolves on its own, blocked needs a human.
 export const STATE_TONE = { working: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
 
+// An agent with no live MCP session but a recent tool call is probably still
+// there (its window is open, it just isn't polling). Past this it reads offline.
+export const RECENT_MINUTES = 5;
+
 // Fallback expiry for statuses written before `status_expires_at` existed.
 // Current writes carry their own expiry — see set_status's ttl_seconds.
 export const LEGACY_STATUS_TTL_MINUTES = 30;
@@ -53,6 +57,33 @@ export function statusExpired(row, nowMs) {
   const expiresAt = iso(row.status_expires_at);
   if (expiresAt) return Date.parse(expiresAt) <= nowMs;
   return ageMinutes(iso(row.status_at), nowMs) > LEGACY_STATUS_TTL_MINUTES;
+}
+
+/**
+ * How we are hearing from this agent over MCP.
+ *
+ * Deliberately not the same question the floor's `live` answers. That one is
+ * about Claude Code hook events — whether a window is reporting turns. This is
+ * about the MCP connection the agent's tools ride on. The two disagree often
+ * and legitimately: a window can be posting hooks with no MCP session, and an
+ * agent can hold an MCP session from a window that never installed the plugin.
+ * Showing one where a reader expects the other is the confusion this comment
+ * exists to prevent.
+ */
+export function presenceOf(lastSeen, liveCount, nowMs) {
+  if (liveCount > 0) return 'connected';
+  return ageMinutes(lastSeen, nowMs) <= RECENT_MINUTES ? 'recent' : 'offline';
+}
+
+/** Live MCP sessions per agent, keyed however the caller keys its own maps. */
+export function mcpSessionCounts(sessions, keyFn = agentKey) {
+  const counts = new Map();
+  for (const s of Object.values(sessions ?? {})) {
+    if (!s.channel || !s.agent) continue;
+    const k = keyFn(s.channel, s.agent);
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /**
@@ -136,14 +167,17 @@ export function agentLoadIndex(store) {
  * fields as a rotating sign plus a pill tray. Same numbers, two depictions —
  * which only holds because they both come from here.
  */
-export function agentBoard(row, idx, nowMs) {
+export function agentBoard(row, idx, nowMs, liveCount = 0) {
   const k = agentKey(row.channel, row.agent);
   const claimed = idx.claimedByAgent.get(k) ?? [];
   const unread = idx.unreadByAgent.get(k) ?? 0;
   const assignedOpen = idx.assignedByAgent.get(k)?.assigned ?? 0;
   const expired = statusExpired(row, nowMs);
+  const lastSeen = iso(row.last_seen);
 
   return {
+    presence: presenceOf(lastSeen, liveCount, nowMs),
+    sessions: liveCount,
     state: deriveState({
       reported: row.status,
       reportedDetail: row.status_detail,
@@ -159,7 +193,7 @@ export function agentBoard(row, idx, nowMs) {
     reported_expired: !!row.status && expired,
     last_action: row.last_action,
     last_action_at: iso(row.last_action_at),
-    last_seen: iso(row.last_seen),
+    last_seen: lastSeen,
     unread,
     // The id "mark read" has to advance to. The browser echoes this back so a
     // message that arrives between render and click isn't swallowed.
