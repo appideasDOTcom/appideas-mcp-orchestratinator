@@ -24,6 +24,130 @@ shared **contracts** (the agreed interface between two plugins), and a lightweig
 There is nothing to hand over and nothing to stop. You are never choosing between
 the floor and your terminal; they are two windows on the same session.
 
+## Start to finish
+
+Everything below is done once per machine, in order. Steps 1–7 are setup; step 8
+is the part you do every day.
+
+**Before you start** you need Docker, `tmux`, and Claude Code installed and
+signed in — the host runs the same `claude` binary your terminal does, with your
+login. (Node 20 is only needed if you intend to run `npm test`.)
+
+**1. Get the code.**
+
+```bash
+git clone git@github.com:appideasDOTcom/appideas-mcp-orchestratinator.git
+cd appideas-mcp-orchestratinator
+```
+
+Everything below is run from this directory unless it says otherwise.
+
+**2. Make a shared secret.**
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+Put it in `.env` at the root of this repo:
+
+```ini
+ORCH_AUTH_TOKEN=<the generated value>
+ORCH_AUTH_MODE=enforce
+```
+
+**3. Start the server.**
+
+```bash
+docker compose up -d
+curl -s localhost:8787/health          # {"ok":true,...}
+```
+
+It listens on `127.0.0.1` only, and keeps its data in a Docker volume.
+
+**4. Make each repo a desk.**
+
+A repo joins the board by declaring itself in its own `.mcp.json` — there is no
+central list, and no shared parent folder:
+
+```jsonc
+{
+  "mcpServers": {
+    "orchestratinator": {
+      "type": "http",
+      "url": "http://localhost:8787/mcp",
+      "headers": {
+        "X-Channel": "your-channel",
+        "X-Agent": "this-repo's-role",
+        "X-Orchestratinator-Key": "<the ORCH_AUTH_TOKEN from .env>"
+      }
+    }
+  }
+}
+```
+
+Repos sharing a `X-Channel` share a floor, a mailbox, and a task board. The
+`X-Agent` is that repo's seat on it. A directory without this file is invisible
+to the whole system.
+
+**5. Install the plugin** (this is what puts each session on the floor):
+
+```
+/plugin marketplace add .
+/plugin install orchestratinator-floor
+```
+
+The `.` is the clone from step 1, so this works when the Claude Code session you
+type it in was opened there. From any other window, give the full path to the
+clone instead.
+
+**6. Install the host** (this is what lets the floor open and drive windows):
+
+```bash
+./host/install.sh ~/path/to/your/projects
+```
+
+Name the directory your repos live under. It finds every desk beneath it,
+registers a LaunchAgent so it starts at login, and reads the server address and
+secret from the first desk it finds. Nothing else to configure.
+
+**7. Open the floor.**
+
+```
+open [http://localhost:8787/](http://localhost:8787/) in a web browser.
+```
+
+That lands on the dashboard; the board/floor switch is top right. Every desk you
+wired up in step 4 should be there.
+
+**8. Using it.**
+
+Work in your editor exactly as you always have. Nothing about Claude Code
+changes, and the floor shows the conversation as it happens.
+
+When you want to drive a desk from the floor instead:
+
+- **Close that conversation's tab in your editor.** A conversation is one
+  process, so one app holds it at a time. While your editor has it, the floor
+  shows it read-only and says so — the composer is greyed and the desk reads
+  *"open in your editor"*.
+- **A second or two later the composer comes alive.** Type and send. If no
+  window is open, the host opens one and *resumes the same conversation* — your
+  history is still there, and the reply continues it rather than starting over.
+- **To take it back, press "Open in VS Code."** The host closes its own window
+  first, then opens the conversation in your editor, with everything you did
+  from the floor already in it.
+
+Two things follow from "one app at a time", and both are visible rather than
+silent:
+
+- **Answer permission prompts where the conversation is.** If your editor holds
+  it, the floor shows the prompt but no buttons — answering means pressing a key
+  in the window that asked, and the floor has none to press. It says *"answer
+  this in your editor"* instead of offering a button that cannot work.
+- **You can sit in a window the floor opened.** `tmux attach -t orch` — each desk
+  the host has opened is a window in that session. Typing there is the same as
+  typing on the floor, because it is the same window.
+
 ## Some useful commands
 In a terminal:
 ```
