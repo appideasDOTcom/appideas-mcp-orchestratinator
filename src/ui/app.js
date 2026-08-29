@@ -1129,17 +1129,23 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'close-task':
       act(() => admin('task/close', { channel: d.channel, id: Number(d.id) }), { keepOpen: true }).then(reRender);
       break;
-    // Same endpoint as "Mark all read", a different cursor. Closing one row is
-    // "read to here", which is the only thing a single cursor can mean.
     // The word, into the window, via the host — the same path the floor's own
     // compose box uses. Not typed into a textarea and submitted: that would
     // depend on a panel being open and would fail in ways the endpoint does not.
+    //
+    // Unlike every other action in here, this one closes the dialog on success
+    // rather than re-rendering it. Nudging changes nothing the dialog is
+    // showing, so a dialog left open after the click is a dialog that looks
+    // like it did nothing: the operator clicks Nudge, sees no change, clicks
+    // Done, and the floor updates as they land back on it — which reads as
+    // though Done is what sent it. Closing is the acknowledgement. A nudge that
+    // is refused keeps the dialog, because then there is a reason to show.
     case 'nudge':
-      act(
-        () => floorPost('chat', { channel: d.channel, agent: d.agent, text: 'nudge' }),
-        { keepOpen: true }
-      ).then(reRender);
+      act(() => floorPost('chat', { channel: d.channel, agent: d.agent, text: 'nudge' }))
+        .then((ok) => { if (ok) window.floorNudged?.(d.channel, d.agent, 'nudge'); });
       break;
+    // Same endpoint as "Mark all read", a different cursor. Closing one row is
+    // "read to here", which is the only thing a single cursor can mean.
     case 'read-to':
       act(
         () => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }),

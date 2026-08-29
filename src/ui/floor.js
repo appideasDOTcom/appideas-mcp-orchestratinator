@@ -1244,6 +1244,29 @@
   }
 
   /**
+   * The board's "Nudge agent" button, told to the floor.
+   *
+   * Nudge is a shortcut for typing the word, so it has to look like typing the
+   * word. The endpoint is the same one `sendChat` posts to, but the button is
+   * in a dialog the board owns, so nothing here would otherwise know it had
+   * happened until the window echoed the turn back — a poll and a host
+   * round-trip later, by which time the operator has clicked something else and
+   * credits that instead.
+   *
+   * Shown as sending rather than as a turn, for the same reason `sendChat` does
+   * it: the board accepting the word is not the window having recorded it.
+   */
+  window.floorNudged = (channel, agent, text) => {
+    if (ui.open && ui.open.channel === channel && ui.open.agent === agent) {
+      ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
+      ui.stick = true;
+      renderPanel();
+    }
+    // Even with no panel open on that desk, its sign is about to change.
+    tick();
+  };
+
+  /**
    * Send: a user turn in the hosted session. The server refuses, with the
    * reason, if nothing is there to receive it — and the reason is shown, not a
    * generic failure, because "the host is offline" is something the person can
