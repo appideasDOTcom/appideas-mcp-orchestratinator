@@ -230,6 +230,19 @@
         title: `${b.assigned_open} open task${b.assigned_open === 1 ? '' : 's'} assigned to ${d.agent}`,
       });
     }
+    // Work this agent is actually holding. It earns a pill by the same test as
+    // the other two — the operator can clear it — and the button already
+    // existed: the task dialog filters on claimed_by as well as assignee. Until
+    // this was drawn, a claimed task was visible only in the derived state
+    // label, which a live self-reported status suppresses outright. An agent
+    // dutifully calling set_status while holding three tasks showed nothing.
+    const claimed = b.claimed_tasks?.length ?? 0;
+    if (claimed) {
+      pills.push({
+        act: 'tasks', cls: 'claimed', mark: '☑', n: claimed,
+        title: `${d.agent} is holding ${claimed} claimed task${claimed === 1 ? '' : 's'}`,
+      });
+    }
     return pills;
   }
 

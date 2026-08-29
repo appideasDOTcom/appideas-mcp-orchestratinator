@@ -149,6 +149,19 @@ function agentSub(a, channel) {
       `close or reassign ${a.agent}'s open tasks`
     ));
   }
+  // Work the agent is holding, not merely work pointed at it. Without this it
+  // shows up only in the derived state label — which a live self-reported
+  // status suppresses — so an agent that reports diligently while holding three
+  // claimed tasks said nothing about them anywhere on this row. The dialog
+  // behind it already listed them: taskDialog filters on claimed_by too.
+  if (a.claimed_tasks?.length) {
+    bits.push(actionable(
+      `${a.claimed_tasks.length} claimed`,
+      'tasks',
+      { channel, agent: a.agent },
+      `${a.agent} is holding ${a.claimed_tasks.length} claimed task${a.claimed_tasks.length === 1 ? '' : 's'}`
+    ));
+  }
   return bits.join('  ·  ');
 }
 

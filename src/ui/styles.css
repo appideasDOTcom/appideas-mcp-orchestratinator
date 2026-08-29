@@ -628,6 +628,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .pill:focus-visible .pillBox { stroke-width: 2; }
 .pill.tasks .pillBox { fill: color-mix(in srgb, var(--wait) 18%, var(--surface)); stroke: var(--wait); }
 .pill.tasks:hover .pillBox { fill: color-mix(in srgb, var(--wait) 34%, var(--surface)); }
+/* Held work gets the busy tone — the same colour the state chip uses for
+   "working" — so the tray reads in the same language as the label above it. */
+.pill.claimed .pillBox { fill: color-mix(in srgb, var(--busy) 18%, var(--surface)); stroke: var(--busy); }
+.pill.claimed:hover .pillBox { fill: color-mix(in srgb, var(--busy) 34%, var(--surface)); }
 
 @media (prefers-reduced-motion: reduce) { .blind { transition: none; } }
 
