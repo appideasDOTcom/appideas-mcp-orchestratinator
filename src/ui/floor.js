@@ -27,7 +27,6 @@
   const PAD = 28;
   const HEAD_H = 52;   // clears a two-line bubble hanging above the first row
   const DESK_W = 168;
-  const DESK_H = 150;
   const GAP = 30;
   /* Bubble sizing. These three numbers are related and have to stay that way:
      a character budget picked independently of the box width is how you get a
@@ -62,12 +61,28 @@
      downward, so it occludes no more of the person than before. */
   const SIGN_LINE = 12;
   const SIGN_LINES = 3;
-  const FACE_X = 14;
-  const FACE_W = 140;
+  // The desk is a frame around the sign, and the frame is the same thickness on
+  // all four sides. An even border is most of what makes a panel read as a sign
+  // mounted on something rather than as text lying on a slab — uneven margins
+  // read as an accident of layout, which is exactly what they were.
+  const FRAME = 7;
+  const SIGN_PAD = 6;                       // sign edge to the words
+  const FACE_W = 150;
+  const FACE_X = (DESK_W - FACE_W) / 2;
   const FACE_Y = 62;
-  const FACE_H = SIGN_LINES * SIGN_LINE + 10;
-  const SIGN_CHARS = Math.floor((FACE_W - 14) / CHAR_W);
-  const PLATE_Y = FACE_Y + FACE_H + 14;     // nameplate, now below the counter
+  const SIGN_W = FACE_W - FRAME * 2;
+  const SIGN_H = SIGN_LINES * SIGN_LINE + SIGN_PAD * 2;
+  const FACE_H = SIGN_H + FRAME * 2;
+  const SIGN_CHARS = Math.floor((SIGN_W - SIGN_PAD * 2) / CHAR_W);
+
+  // The stitch: the seam between two messages on one blind. Real roller blinds
+  // are a loop of fabric joined at a seam, and the seam is what you actually
+  // catch out of the corner of your eye — the words are too small to register
+  // at that distance, a thick bar sweeping past is not.
+  const BAR_H = 6;
+  const CARD_STEP = SIGN_H + BAR_H;
+
+  const PLATE_Y = FACE_Y + FACE_H + 14;     // nameplate, below the counter
   const PILL_H = 17;
   const PILL_Y = PLATE_Y + 23;
   // How long a just-changed sign keeps the old card on the strip. Covers the
@@ -77,6 +92,18 @@
 
   /** How far a desk draws below its origin: counter, nameplate, pill tray. */
   const DESK_BELOW = PILL_Y + PILL_H + 4;
+
+  // Row pitch has to clear both what a desk draws below its origin and the
+  // bubble the next row down hangs above its own, or a second-row desk with two
+  // lines of speech lands on the tray of the desk above it.
+  //
+  // Derived rather than a constant because it stopped being safe as a constant:
+  // it was 150 when a desk drew 126 below the origin, and the sign moving onto
+  // the counter pushed that past 150 without anything on screen saying so — the
+  // second row simply had no bubble on the day. Tie it to the two numbers it
+  // actually depends on and it cannot drift again.
+  const BUBBLE_ABOVE = BUBBLE_LINES * 13 + 12;
+  const DESK_H = DESK_BELOW + BUBBLE_ABOVE - GAP + 8;
 
   /** How long a sent message may sit unrecorded before it says so. */
   const SENDING_GRACE_MS = 30_000;
@@ -377,7 +404,10 @@
     // behind — so a click aimed squarely at somebody's desk does nothing, which
     // is the kind of failure people quietly decide is their own fault.
     g.appendChild(el('rect', {
-      x: 0, y: -46, width: DESK_W, height: DESK_H, class: 'deskHit',
+      // Everything the desk draws, not a fixed box: the pad exists so gaps
+      // between the painted parts do not fall through to the floor behind, and
+      // it can only do that if it actually reaches the bottom of the cell.
+      x: 0, y: -46, width: DESK_W, height: DESK_BELOW + 46, class: 'deskHit',
     }));
 
     // Order matters and is the whole illusion: the person is drawn first so the
@@ -395,6 +425,13 @@
       x: FACE_X, y: FACE_Y, width: FACE_W, height: FACE_H, class: 'face',
     });
     face.appendChild(el('rect', { x: 0, y: 0, width: FACE_W, height: FACE_H, rx: 5, class: 'deskTop' }));
+
+    // The sign gets a viewport of its own, inset by the frame. That is what
+    // makes the stitch vanish at the top of the message area rather than
+    // sliding out under the desk's own border — the blind is clipped by the
+    // sign it runs behind, exactly as the fabric is.
+    const sign = el('svg', { x: FRAME, y: FRAME, width: SIGN_W, height: SIGN_H, class: 'sign' });
+    sign.appendChild(el('rect', { x: 0, y: 0, width: SIGN_W, height: SIGN_H, rx: 2, class: 'signFace' }));
     if (card) {
       // Compare against what this sign last said. A change puts the old message
       // back on the strip above the new one so there is something to roll away
@@ -414,27 +451,44 @@
       const blind = el('g', { class: 'blind' });
       blind.style.transform = 'translateY(0px)';
       strip.forEach((c, ci) => {
-        const cg = el('g', { class: `card ${c.kind}`, transform: `translate(0 ${ci * FACE_H})` });
-        const top = (FACE_H - c.lines.length * SIGN_LINE) / 2 + SIGN_LINE - 3;
+        const cg = el('g', { class: `card ${c.kind}`, transform: `translate(0 ${ci * CARD_STEP})` });
+        const top = (SIGN_H - c.lines.length * SIGN_LINE) / 2 + SIGN_LINE - 3;
         c.lines.forEach((line, li) => {
           const t = el('text', {
-            x: FACE_W / 2, y: top + li * SIGN_LINE, 'text-anchor': 'middle', class: 'signText',
+            x: SIGN_W / 2, y: top + li * SIGN_LINE, 'text-anchor': 'middle', class: 'signText',
           });
           t.textContent = line;
           cg.appendChild(t);
         });
         blind.appendChild(cg);
+        // The seam sits in the gap after every card but the last, so it is
+        // genuinely between two messages rather than painted over either. It
+        // starts just below the viewport and ends just above it: by the time
+        // the new message has settled the stitch has gone out of the top.
+        if (ci < strip.length - 1) {
+          blind.appendChild(el('rect', {
+            x: 0, y: ci * CARD_STEP + SIGN_H, width: SIGN_W, height: BAR_H, class: 'stitch',
+          }));
+        }
       });
-      face.appendChild(blind);
-      if (turning) {
+      sign.appendChild(blind);
+      if (turning && now.played) {
+        // The sweep already happened and the settle window has not closed yet.
+        // Land on the new message without replaying it: a room rebuilt in that
+        // gap would otherwise run the seam past a second time, for a change
+        // that happened once.
+        blind.style.transform = `translateY(${-CARD_STEP}px)`;
+      } else if (turning) {
+        now.played = true;
         // Two frames, not one: the strip has to be in the document and painted
         // at its old offset before the new offset can be a transition rather
         // than a starting value.
         requestAnimationFrame(() => requestAnimationFrame(() => {
-          blind.style.transform = `translateY(${-FACE_H}px)`;
+          blind.style.transform = `translateY(${-CARD_STEP}px)`;
         }));
       }
     }
+    face.appendChild(sign);
     // On top of the words, exactly as on the nameplate: the sign's own text
     // would otherwise be what a click reports, and routing up from a glyph is
     // what sent clicks to the wrong place last time. One pad, one target.

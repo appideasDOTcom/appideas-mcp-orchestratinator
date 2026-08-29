@@ -12,6 +12,10 @@
 
   --accent:    #3b6ef2;
   --busy:      #b7791f;
+  /* The sign face, one step lighter than the desk it is mounted on. It needs a
+     token of its own rather than a color-mix off --text, because "lighter"
+     runs toward white here and toward the text colour in the dark theme. */
+  --sign-face: #ffffff;
   --busy-bg:   #fdf3dd;
   --wait:      #7a5af0;
   --wait-bg:   #efeafe;
@@ -34,6 +38,12 @@
     --border:    #2a3138;
     --text:      #e6e9ed;
     --muted:     #8b95a1;
+
+    /* Lighter than .deskTop, which computes to about rgb(48,52,57) here — the
+       first value picked for this was darker than the desk and the sign read as
+       a recess rather than a panel. Checked against the computed fill, not by
+       eye: --text at 12% over --surface is not obviously a mid-grey. */
+    --sign-face: #3b4149;
 
     --accent:    #7aa2ff;
     --busy:      #e8b339;
@@ -610,8 +620,14 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    The counter keeps `.deskTop`, so the hover and focus rules below still find
    it: it is a desk that reads, not a sign that happens to sit where a desk was. */
 .face      { overflow: hidden; }
+.sign      { overflow: hidden; }
+.signFace  { fill: var(--sign-face); }
 .signText  { fill: var(--text); font: 10.5px var(--sans); }
 .blind     { transition: transform .5s cubic-bezier(.55,.06,.18,1); }
+/* The seam. Solid and mid-toned rather than subtle: it is meant to be caught
+   in peripheral vision, which is the whole reason it is here — at desk-across-
+   the-room distance the words are unreadable but a bar sweeping past is not. */
+.stitch    { fill: color-mix(in srgb, var(--text) 42%, var(--sign-face)); }
 .card.derived .signText,
 .card.action  .signText { fill: var(--muted); font-family: var(--mono); font-size: 9.5px; }
 
