@@ -561,6 +561,18 @@ pre.raw {
 body.view-floor #floor { display: block; }
 body.view-floor main > .panel:not(.panel-floor) { display: none; }
 
+/* Everything below the panel head sat flush against the panel border: .panel
+   carries no padding of its own and .panel-head brings its own, so the queue,
+   the floor picker and the rooms each butted up against the edge. Inset them to
+   the head's own 10px/14px rather than inventing a second number — the head is
+   right there on screen to be compared against, and a near-miss would read as a
+   mistake in a way a match cannot. */
+.panel-floor > .queue,
+.panel-floor > .chips,
+.panel-floor > .floor-body { padding-inline: 14px; }
+.panel-floor > .queue { padding-top: 10px; }
+.panel-floor > .floor-body { padding-bottom: 14px; }
+
 .floor-body { display: flex; gap: 14px; align-items: flex-start; }
 .rooms { flex: 1 1 auto; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .rooms > .q-empty { padding: 28px; text-align: center; }
