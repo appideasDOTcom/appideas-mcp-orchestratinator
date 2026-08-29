@@ -449,19 +449,28 @@
       role: 'button',
       tabindex: '0',
     });
-    // First child, so the words draw over it: without a pad the only clickable
-    // part of a nameplate is the glyphs themselves, and the gaps between them
-    // fall through to the desk behind — which opens a conversation instead.
-    plate.appendChild(el('rect', { x: -74, y: -13, width: 148, height: 34, class: 'plateHit' }));
-    plate.appendChild(el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' }));
-    plate.lastChild.textContent = d.persona;
-    plate.appendChild(el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' }));
+    const name = el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' });
+    name.textContent = d.persona;
+    plate.appendChild(name);
     // A desk the board knows but no window has ever reported from says so on
     // its nameplate — it is the difference between "stepped away" and "never
     // installed the plugin", and only one of those is something to go fix.
-    plate.lastChild.textContent = d.hosted
+    const role = el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' });
+    role.textContent = d.hosted
       ? `${d.agent} · ${d.hosted.live ? 'ready' : 'host offline'}`
       : d.reporting ? d.agent : `${d.agent} · not reporting`;
+    plate.appendChild(role);
+    // The pad goes LAST, so it lies over the words rather than behind them.
+    //
+    // Behind them, every click had to be routed by walking up from whatever it
+    // landed on, and a click on a glyph reported the glyph. That worked here
+    // and did not on the machine that matters, where hitting the words opened
+    // the conversation and only the margin around them opened this card. On
+    // top, the pad is the only thing in the plate that can be hit at all, so
+    // there is no walk to get wrong — the whole nameplate is one target.
+    // Transparent fill is still painted, so it takes the click; the words are
+    // still readable through it, and `.plate:hover` still lights them.
+    plate.appendChild(el('rect', { x: -74, y: -13, width: 148, height: 34, class: 'plateHit' }));
     g.appendChild(plate);
 
     // The tray. These are buttons, not labels — they open the board's own
