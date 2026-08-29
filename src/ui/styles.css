@@ -717,6 +717,7 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* Same trick as .deskHit, for the nameplate: a transparent pad is still a
    painted fill, so it takes the click the glyphs would otherwise drop. */
 .plateHit { fill: transparent; pointer-events: all; }
+.faceHit  { fill: transparent; pointer-events: all; cursor: pointer; }
 .plate { cursor: pointer; }
 .plate:focus { outline: none; }
 .plate:focus-visible .plateName,
@@ -741,7 +742,12 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .dp-dim { color: var(--muted); }
 .dp-none { color: var(--muted); font-style: italic; }
 .dp-detail { display: block; }
-.dp-foot { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 10px; }
+.dp-foot { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.dp-open { width: 100%; padding: 6px 10px; border-radius: 7px; cursor: pointer;
+           background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+           border: 1px solid var(--accent); color: var(--text);
+           font: 600 11px var(--sans); }
+.dp-open:hover { background: color-mix(in srgb, var(--accent) 34%, var(--surface)); }
 
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor. */

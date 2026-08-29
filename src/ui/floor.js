@@ -241,9 +241,14 @@
     row('window', `${esc(s.window ?? d.hosted?.window ?? '—')} <span class="dp-dim">· ${esc(where)}</span>`);
     if (s.git_branch) row('branch', `<span class="dp-dim">${esc(s.git_branch)}</span>`);
 
+    // A button, not a sentence. The sentence said "click the desk", which became
+    // the wrong instruction the moment the desk started opening this card — and
+    // was ambiguous even before that, because "the desk" means the counter to a
+    // reader and the whole cell to this file.
     return `<div class="dp-head"><strong>${esc(d.persona)}</strong>` +
       `<span class="dp-dim mono">${esc(channel)}/${esc(d.agent)}</span></div>${bits.join('')}` +
-      `<div class="dp-foot dp-dim">click the desk to open the conversation</div>`;
+      `<div class="dp-foot"><button type="button" class="dp-open" data-act="open"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button></div>`;
   }
 
   /** Draw, move or remove the popover to match `ui.details`. */
@@ -430,6 +435,10 @@
         }));
       }
     }
+    // On top of the words, exactly as on the nameplate: the sign's own text
+    // would otherwise be what a click reports, and routing up from a glyph is
+    // what sent clicks to the wrong place last time. One pad, one target.
+    face.appendChild(el('rect', { x: 0, y: 0, width: FACE_W, height: FACE_H, class: 'faceHit' }));
     g.appendChild(face);
 
     // The monitor sits on the desk beside them and lights up only when something
@@ -1061,22 +1070,37 @@
   }, true);
 
   document.addEventListener('click', async (e) => {
-    // Clicks inside the card are the card's own business.
-    if (e.target.closest?.('#desk-pop')) return;
+    // The card's own clicks. Only one thing in it does anything.
+    if (e.target.closest?.('#desk-pop')) {
+      const openBtn = e.target.closest?.('[data-act="open"]');
+      if (openBtn && ui.on) {
+        ui.details = null;
+        renderDetails();
+        openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
+      }
+      return;
+    }
 
-    // The nameplate toggles its popover. Ahead of the desk test for the same
-    // reason the pills are: the plate sits inside the desk group.
-    const plateEl = e.target.closest?.('svg.room .plate[data-act="details"]');
-    if (plateEl && ui.on) {
-      const { channel, agent } = plateEl.dataset;
+    // The desk and the nameplate both open the details card. They are the two
+    // surfaces already carrying words about this agent, so asking them for more
+    // words is the obvious move — and the sign in particular is what a reader is
+    // looking at when they want to know more.
+    //
+    // Ahead of the cell test for the same reason the pills are: both sit inside
+    // the cell's group, which would otherwise swallow the click and open a
+    // conversation instead.
+    const infoEl = e.target.closest?.('svg.room .plate[data-act="details"], svg.room svg.face');
+    if (infoEl && ui.on) {
+      const cell = infoEl.closest('.desk');
+      const { channel, agent } = cell.dataset;
       const already = ui.details?.channel === channel && ui.details?.agent === agent;
       ui.details = already ? null : { channel, agent };
-      // The whole desk, not the plate: the card hangs below the anchor, and a
-      // plate-sized anchor puts it straight over this desk's own pill tray.
-      // The room SVG is scaled to fit its width, so a fixed pixel offset would
-      // clear the pills at one zoom and not another — the desk's own box is the
-      // only measure that holds.
-      if (ui.details) ui.detailsRect = (plateEl.closest('.desk') ?? plateEl).getBoundingClientRect();
+      // Anchored to the whole cell, not to what was clicked: the card hangs
+      // below its anchor, and anything smaller puts it over this cell's own
+      // pill tray. The room SVG is scaled to fit its width, so a fixed pixel
+      // offset would clear the pills at one zoom and not another — the cell's
+      // own box is the only measure that holds.
+      if (ui.details) ui.detailsRect = cell.getBoundingClientRect();
       renderDetails();
       return;
     }
