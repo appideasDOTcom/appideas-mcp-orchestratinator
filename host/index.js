@@ -42,6 +42,8 @@ import { discoverDesks, originOf } from './identity.js';
 import * as W from './window.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
+/** How long a queued permission answer stays worth delivering. */
+const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
@@ -108,6 +110,12 @@ class Desk {
     // a repo reached through a symlink is spelled two ways. See canonical().
     this.cwd = W.canonical(cwd);
     this.sessionId = null;   // whatever conversation is live here now
+    // The conversation this desk belongs to, which outlives any window onto
+    // it. sessionId goes null the moment a window closes — and that is exactly
+    // when the id is needed, to reopen the same conversation rather than start
+    // a fresh one. Closing an editor tab is not the end of a conversation.
+    this.lastSessionId = null;
+    this.holder = null;      // 'floor' | 'editor' | null, as last reported
     this.offset = 0;         // bytes of that transcript already sent up
   }
 
@@ -119,7 +127,17 @@ class Desk {
    * opened a different one — is not a handoff to negotiate; it is simply the
    * conversation now, and the floor is told so.
    */
-  async watch(session) {
+  async watch(live = [], paneByPid = new Map()) {
+    // The conversation this desk is. Pinned on first sight and kept: a desk
+    // does not change conversation because a window closed, or because another
+    // one in the same folder happens to be newer.
+    if (!this.lastSessionId && live.length) {
+      const newest = live.reduce((a, b) => ((b.startedAt ?? 0) > (a.startedAt ?? 0) ? b : a));
+      this.lastSessionId = newest.sessionId;
+    }
+    const session = this.lastSessionId
+      ? live.find((x) => x.sessionId === this.lastSessionId) ?? null
+      : null;
     const id = session?.sessionId ?? null;
     if (id !== this.sessionId) {
       this.sessionId = id;
@@ -131,17 +149,30 @@ class Desk {
         type: 'session', channel: this.channel, agent: this.agent,
         session_id: id, cwd: this.cwd, pid: session?.pid ?? null,
       }, true);
-      if (!id) return;
     }
-    if (!this.sessionId) return;
 
-    const path = W.transcriptPath(this.cwd, this.sessionId);
+    // Who has it: a pane we opened, an editor we cannot type into, or nobody.
+    const pane = session ? paneByPid.get(session.pid) ?? null : null;
+    const holder = session ? (pane ? 'floor' : 'editor') : null;
+    if (holder !== this.holder) {
+      this.holder = holder;
+      this.host.emit({
+        type: 'holder', channel: this.channel, agent: this.agent,
+        holder, window: pane?.window ?? null, pid: session?.pid ?? null,
+      }, true);
+    }
+    // Keep reading the desk's conversation even with no window open on it.
+    // Closing a tab does not un-say what was said, and the floor should still
+    // be showing it when you come back.
+    if (!this.lastSessionId) return;
+
+    const path = W.transcriptPath(this.cwd, this.lastSessionId);
     const r = await W.readTranscript(path, { after: this.offset });
     if (!r.ok) return;
     this.offset = r.offset;
     for (const turn of r.turns) {
       this.host.emit({
-        type: 'turn', channel: this.channel, agent: this.agent, session_id: this.sessionId,
+        type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,
         role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
         tool_name: turn.tool_name ?? null, tool_input: turn.tool_input ?? null,
       });
@@ -150,7 +181,10 @@ class Desk {
 
   /** Type into this repo's window, opening one if there isn't one. */
   async say(text) {
-    const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId });
+    // Resume the conversation this desk is, not merely the one that happens to
+    // have a window open — those differ for exactly as long as it takes to
+    // switch apps, which is when the floor is used.
+    const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId ?? this.lastSessionId });
     if (!r.ok) {
       this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error }, true);
     } else if (r.unverified) {
@@ -220,17 +254,25 @@ class Host {
     // window opens, closes and moves, and a stale address is worse than none.
     const desks = [];
     for (const d of this.desks.values()) {
-      const pane = await W.paneFor(d.cwd).catch(() => null);
-      const stray = pane ? null : await W.outsideTmux(d.cwd).catch(() => null);
+      const held = await W.holderOf(d.cwd, d.lastSessionId).catch(() => null);
       desks.push({
-        channel: d.channel, agent: d.agent, cwd: d.cwd, session_id: d.sessionId,
-        window: pane?.window ?? null,
-        outside_pid: stray?.pid ?? null,
+        channel: d.channel, agent: d.agent, cwd: d.cwd,
+        session_id: d.lastSessionId,
+        window: held?.where === 'floor' ? held.window : null,
+        outside_pid: held?.where === 'editor' ? held.pid : null,
       });
     }
-    return this.request('/api/host/register', {
+    const reply = await this.request('/api/host/register', {
       method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession },
     });
+    // Take back the conversation ids the board is holding. A restarted host
+    // has none of its own, and without them the next message from the floor
+    // starts a new conversation instead of continuing the one on screen.
+    for (const d of Array.isArray(reply?.desks) ? reply.desks : []) {
+      const desk = this.desks.get(`${d.channel}|${d.agent}`);
+      if (desk && !desk.lastSessionId && d.sdk_session_id) desk.lastSessionId = d.sdk_session_id;
+    }
+    return reply;
   }
 
   /** Re-read the roster and each desk's transcript. This is the whole of how
@@ -238,14 +280,26 @@ class Host {
   async watch() {
     const r = await W.roster();
     if (!r.ok) return;
+    // Every live session per directory, not the newest one.
+    //
+    // A repo routinely has several conversations open at once — two editor
+    // tabs, an old one reopened to look something up. Reducing them to
+    // "newest" made a desk change conversation whenever a tab closed: the
+    // history on the floor vanished and the next message landed in whichever
+    // one happened to win. A desk is one conversation; it picks its own.
     const byCwd = new Map();
     for (const s of r.sessions) {
       if (s.kind !== 'interactive') continue;
-      const prev = byCwd.get(s.cwd);
-      if (!prev || (s.startedAt ?? 0) > (prev.startedAt ?? 0)) byCwd.set(s.cwd, s);
+      if (!byCwd.has(s.cwd)) byCwd.set(s.cwd, []);
+      byCwd.get(s.cwd).push(s);
     }
+    // Which pane is running what, read once for all desks. Who is holding a
+    // conversation changes the moment somebody closes a tab, and a minute-old
+    // answer is worse than none: the floor offers a composer that cannot
+    // deliver, which is the failure this whole design exists to avoid.
+    const paneByPid = new Map((await W.panes()).map((p) => [p.pid, p]));
     for (const desk of this.desks.values()) {
-      try { await desk.watch(byCwd.get(desk.cwd) ?? null); } catch (err) { warn(`${desk.label}: ${err.message}`); }
+      try { await desk.watch(byCwd.get(desk.cwd) ?? [], paneByPid); } catch (err) { warn(`${desk.label}: ${err.message}`); }
     }
   }
 
@@ -257,6 +311,17 @@ class Host {
         if (typeof item.payload?.text === 'string' && item.payload.text.trim()) await desk.say(item.payload.text);
         break;
       case 'permission': {
+        // An answer is only worth giving while the question is still on screen.
+        //
+        // A decision queued when no window could be reached would otherwise sit
+        // there and be delivered later, into whatever window exists by then —
+        // as a bare keystroke, to a prompt that is no longer asking. That is how
+        // a row of 1s ended up submitted as somebody's message.
+        const age = Date.now() - (Number(item.payload?.queued_at) || 0);
+        if (item.payload?.queued_at && age > ANSWER_TTL_MS) {
+          warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
+          break;
+        }
         const r = await desk.answer(item.payload?.decision);
         if (!r.ok) warn(`${desk.label}: could not answer the prompt — ${r.error}`);
         break;
@@ -272,14 +337,14 @@ class Host {
           this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: shut.error }, true);
           break;
         }
-        const opened = await W.openInEditor({ sessionId: desk.sessionId });
+        const opened = await W.openInEditor({ sessionId: desk.sessionId ?? desk.lastSessionId });
         if (!opened.ok) {
           this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true);
         }
         break;
       }
       case 'open': {
-        const r = await W.open(desk.cwd, { resume: desk.sessionId });
+        const r = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
         if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
         // Wait for it to actually be running, for two reasons: a window that
         // dies on its first line should say so here rather than look open, and

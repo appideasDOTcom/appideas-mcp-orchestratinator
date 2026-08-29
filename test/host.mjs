@@ -31,6 +31,7 @@ const CH = 'host-test';
 const FIX = resolve(`./data/host-fixture-${process.pid}`);
 const HOME = `${FIX}/home`;
 const TMUX_SESSION = `orch-host-test-${process.pid}`;
+const WATCH_SETTLE_MS = 2000;
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const REPO = `${FIX}/repo-a`;
 const SINK = `${FIX}/received.txt`;
@@ -139,7 +140,9 @@ function fixture() {
     `const SINK = ${JSON.stringify(SINK)};`,
     `const TRANSCRIPT = ${JSON.stringify(transcript())};`,
     `const SESSION_ID = ${JSON.stringify(SESSION_ID)};`,
+    `const ARGV = ${JSON.stringify(`${FIX}/argv.log`)};`,
     `if (process.argv[2] === 'agents') { process.stdout.write(fs.readFileSync(ROSTER, 'utf8')); process.exit(0); }`,
+    `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     `fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
     String.raw`process.stdout.write('\u001b[?2004h');`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
@@ -265,6 +268,32 @@ try {
   await sleep(600);
   assert(!((await turns('free')).rows ?? []).some((r) => r.text === 'subagent chatter'),
     "a subagent's own conversation stays inside the tool call that owns it");
+
+  console.log('\nswitching apps');
+
+  // Closing the window you were typing in does not end the conversation.
+  //
+  // The desk forgets its live session the moment a window goes away — and that
+  // is exactly when the id is needed. Without remembering it, the next message
+  // from the floor opened a brand new conversation: the history on screen
+  // vanished and the reply came back in something else.
+  const before = existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '';
+  execFileSync('tmux', ['kill-session', '-t', TMUX_SESSION], { stdio: 'ignore' });
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  // Let the host actually notice. Without this the message is handled before a
+  // watch cycle runs, the desk still holds its live session id, and the test
+  // passes whether or not the id is remembered — which is the bug it exists for.
+  await sleep(WATCH_SETTLE_MS);
+
+  const again = await chat('free', 'still there?');
+  eq(again.status, 200, 'and the floor still takes a message for it');
+  const started = await until(() => {
+    const log = existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '';
+    return log.length > before.length ? log.slice(before.length) : null;
+  }, 20000);
+  assert(started, 'which opens a window again');
+  assert((started ?? '').includes(`--resume ${SESSION_ID}`),
+    `and resumes the same conversation rather than starting a new one — ${JSON.stringify((started ?? '').trim())}`);
 
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');

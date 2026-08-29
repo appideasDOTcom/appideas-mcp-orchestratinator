@@ -40,6 +40,9 @@
   const BUBBLE_LINES = 2;
   const PER_LINE = Math.floor((BUBBLE_W - 16) / CHAR_W);
 
+  /** How long a sent message may sit unrecorded before it says so. */
+  const SENDING_GRACE_MS = 30_000;
+
   const ui = {
     on: false,
     open: null,          // { channel, agent } whose chat panel is showing
@@ -349,7 +352,8 @@
             </div>
             ${q.hosted && q.request_id ? `
               <button class="btn primary" data-act="permit" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Approve</button>
-              <button class="btn danger" data-act="refuse" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Deny</button>` : ''}
+              <button class="btn danger" data-act="refuse" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Deny</button>`
+              : q.held === 'editor' ? `<span class="q-elsewhere">answer this in your editor</span>` : ''}
             <button class="btn q-open" data-act="open" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">open</button>
           </div>`;
       })
@@ -520,7 +524,12 @@
     for (const p of ui.sending) {
       const node = document.createElement('div');
       node.className = 't t-user t-pending';
-      node.innerHTML = `<div class="t-who">you<span class="t-when mono">sending…</span></div>` +
+      // A message stops claiming to be on its way once it plainly is not.
+      // Nothing here can prove it failed — only that it has not been recorded —
+      // so it says that, rather than spinning forever or vanishing.
+      const stale = Date.now() - (p.at ?? 0) > SENDING_GRACE_MS;
+      node.classList.toggle('stale', stale);
+      node.innerHTML = `<div class="t-who">you<span class="t-when mono">${stale ? 'not recorded — send again' : 'sending…'}</span></div>` +
         ' <div class="t-body"></div>';
       node.querySelector('.t-body').textContent = p.text;
       box.insertBefore(node, partialNode);
@@ -611,10 +620,13 @@
         // Another session on this desk is not this conversation. A hosted
         // session's id is only known once it has announced itself, so a turn
         // with no session on either side is let through rather than lost.
-        if (sess && ev.turn.session_id && ev.turn.session_id !== sess) return;
+        // Settle first. A turn filtered out of this panel still proves the
+        // message was recorded, and a "sending" bubble that never clears is a
+        // worse lie than one shown a moment early.
+        settle([ev.turn]);
+        if (sess && ev.turn.session_id && ev.turn.session_id !== sess) { renderPanel(); return; }
         ui.turns = ui.turns.concat([ev.turn]).slice(-300);
         ui.sinceTurn = ev.turn.id;
-        settle([ev.turn]);
         if (ev.turn.role === 'assistant') ui.partial = '';
         renderPanel();
       } else if (ev.type === 'partial') {
@@ -775,7 +787,15 @@
       // From the panel the desk is ui.open; from the queue the row names it.
       if (act.dataset.channel && act.dataset.agent && !ui.open) ui.open = { channel: act.dataset.channel, agent: act.dataset.agent };
       else if (act.dataset.channel && act.dataset.agent) ui.open = { channel: act.dataset.channel, agent: act.dataset.agent };
-      await decide(act.dataset.request, act.dataset.act === 'permit' ? 'allow' : 'deny');
+      // Hold the buttons while it is in flight. Clicking again cannot help,
+      // and a prompt that looks unresponsive invites exactly that.
+      const pair = act.parentElement?.querySelectorAll('[data-act="permit"],[data-act="refuse"]') ?? [act];
+      for (const b of pair) b.disabled = true;
+      try {
+        await decide(act.dataset.request, act.dataset.act === 'permit' ? 'allow' : 'deny');
+      } finally {
+        for (const b of pair) b.disabled = false;
+      }
     } else if (act.dataset.act === 'stop') {
       await interruptDesk();
     } else if (act.dataset.act === 'handback') {
@@ -823,7 +843,7 @@
       if (!r.ok) throw new Error(body.error ?? `send failed (${r.status})`);
       // Accepted by the board is not the same as in the conversation, so it
       // shows as sending until the window itself reports it.
-      ui.sending = ui.sending.concat([{ text }]);
+      ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
       $('p-text').value = '';
       ui.stick = true;
       renderPanel();

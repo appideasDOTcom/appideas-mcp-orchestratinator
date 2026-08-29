@@ -309,7 +309,7 @@ export function windowName(cwd) {
 }
 
 /** Every live pane in our tmux session. */
-async function panes() {
+export async function panes() {
   // The directory goes last and takes everything after the third separator: it
   // is the one field whose contents are not ours, and a directory is allowed
   // to contain a '|'. The three before it are tmux's own ids and a flag.
@@ -376,6 +376,27 @@ export async function outsideTmux(cwd) {
   if (!r.ok) return null;
   const inPanes = new Set(all.map((p) => p.pid).filter(Boolean));
   return r.sessions.find((s) => s.cwd === here && s.kind === 'interactive' && !inPanes.has(s.pid)) ?? null;
+}
+
+/**
+ * Who is holding a particular conversation right now.
+ *
+ * The question is about the conversation, not the directory. A repo can have
+ * several open at once — two editor tabs and a window the floor started — and
+ * "is anything running here" answers none of the things that matter: whether
+ * the floor can type, and where the person is sitting. Asking it that way had
+ * the floor believing it held a desk because *some* pane existed, while the
+ * conversation on screen was in an editor tab it could never reach.
+ */
+export async function holderOf(cwd, sessionId) {
+  if (!sessionId) return { where: null, pid: null, window: null };
+  const [r, all] = await Promise.all([roster(), panes()]);
+  if (!r.ok) return { where: null, pid: null, window: null };
+  const live = r.sessions.find((x) => x.sessionId === sessionId);
+  if (!live) return { where: null, pid: null, window: null };
+  const pane = all.find((p) => p.pid === live.pid);
+  if (pane) return { where: 'floor', pid: live.pid, window: pane.window };
+  return { where: 'editor', pid: live.pid, window: null };
 }
 
 /**
@@ -454,7 +475,7 @@ export async function open(cwd, { resume = null } = {}) {
   const already = await paneFor(here);
   if (already) return { ok: true, target: already.target, created: false };
 
-  const stray = await outsideTmux(here);
+  const stray = (await holderOf(here, resume)).where === 'editor' ? await outsideTmux(here) : null;
   if (stray) {
     return {
       ok: false,
@@ -513,7 +534,22 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
   const here = canonical(cwd);
 
-  let pane = await paneFor(here);
+  // Which window, if any, is running this conversation — and whether it is one
+  // we can type into. A folder can hold several conversations at once, so
+  // "some pane exists here" is not the same question and answering it that way
+  // typed into whichever window happened to be open.
+  const held = await holderOf(here, resume);
+  if (held.where === 'editor') {
+    return {
+      ok: false,
+      code: 'held_by_editor',
+      error: `That conversation is open in your editor (pid ${held.pid}). One app holds a conversation at a time — close it there, or move it back, and this will go through.`,
+    };
+  }
+  let pane = held.where === 'floor' ? (await panes()).find((p) => p.pid === held.pid) ?? null : null;
+  // With no conversation named, the folder is all there is to go on — which
+  // is right for a caller that just wants "this repo's window".
+  if (!pane && !resume) pane = await paneFor(here);
   if (!pane && autoOpen) {
     const opened = await open(here, { resume });
     if (!opened.ok) return opened;

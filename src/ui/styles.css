@@ -699,7 +699,9 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 
 /* Sent, but not yet in the conversation. It has to read as pending, because
    the whole point is that "accepted" and "delivered" are different things. */
+.q-elsewhere { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .t-pending { opacity: 0.55; }
+.t-pending.stale .t-when { color: var(--bad, #d97070); }
 .t-pending .t-body { border: 1px dashed var(--line); background: transparent; }
 .t-partial .t-body { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
 .t-partial .t-body::after { content: '▍'; color: var(--accent); animation: caret 1s steps(2) infinite; }

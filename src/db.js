@@ -739,6 +739,12 @@ export function makeStore(db) {
          window_id = excluded.window_id, outside_pid = excluded.outside_pid,
          state = 'idle', updated_at = datetime('now')`
     ),
+    setHostedHolder: db.prepare(
+      // Only who is holding the desk. Deliberately not the upsert: that resets
+      // state to 'idle', and the holder changes while a turn is running.
+      `UPDATE hosted_desks SET window_id = @window_id, outside_pid = @outside_pid, updated_at = datetime('now')
+        WHERE channel = @channel AND agent = @agent`
+    ),
     setHostedSession: db.prepare(
       // Whichever conversation is live in that repo right now. It changes when
       // the person there starts a new one, and that is not an event to
@@ -1055,6 +1061,8 @@ export function makeStore(db) {
       q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession }).changes,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
     listHosts: () => q.listHosts.all(),
+    setHostedHolder: (channel, agent, { windowId = null, outsidePid = null } = {}) =>
+      q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid }).changes,
     hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null } = {}) =>
       q.upsertHostedDesk.run({
         channel, agent, host_id: hostId, cwd, window_id: windowId, outside_pid: outsidePid,

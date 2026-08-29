@@ -377,6 +377,16 @@ function applyHostEvent(store, live, hostId, ev) {
      * cleared the conversation or started a different one, that is the
      * conversation now.
      */
+    case 'holder': {
+      // Who is holding this desk's conversation, as of the host's last look.
+      // Reported on its own so the floor knows within a poll rather than
+      // within a heartbeat.
+      store.setHostedHolder(channel, agent, {
+        windowId: ev.holder === 'floor' ? (str(ev.window) ?? null) : null,
+        outsidePid: ev.holder === 'editor' ? (Number(ev.pid) || null) : null,
+      });
+      break;
+    }
     case 'session': {
       const live_id = str(ev.session_id);
       if (!live_id) {
@@ -536,8 +546,13 @@ export function buildFloor(store, live = null) {
             // unreadable; the last segment is what the tab actually says.
             window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
             session_id: s.session_id,
-            // A hosted prompt can be answered right here.
-            hosted: !!h,
+            // A hosted prompt can be answered right here — but only if the
+            // floor can reach the window that is asking. Answering means
+            // pressing a key in it, and a conversation open in an editor has
+            // no window we can press a key in. Offering the buttons anyway
+            // gave a prompt that swallowed a dozen clicks and never closed.
+            hosted: !!h && !h.outside_pid,
+            held: h?.outside_pid ? 'editor' : null,
             request_id: pendingReq?.request_id ?? null,
           });
         }
@@ -931,8 +946,18 @@ export function createFloorRouter({ store, auth }) {
       return res.status(409).json({ error: 'That prompt is no longer open.', code: 'stale_request' });
     }
 
+    // One decision per prompt, taken here rather than queued once per click.
+    //
+    // Every click used to enqueue its own work item. When the window that
+    // asked could not be reached, nothing visibly happened, so the button got
+    // pressed again — and once a window did exist, twenty-nine queued
+    // approvals arrived in it as twenty-nine keystrokes, which submitted
+    // themselves as a message. Clearing the prompt first makes the second
+    // click a no-op instead of a stored one.
+    live.pending.delete(key);
+    live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
-      request_id: requestId, decision, message: str(req.body?.message),
+      request_id: requestId, decision, message: str(req.body?.message), queued_at: Date.now(),
     });
     live.wake(check.hosted.host_id);
     store.logAdmin(channel, `permission.${decision}`, { target: agent, detail: pendingReq.summary });
