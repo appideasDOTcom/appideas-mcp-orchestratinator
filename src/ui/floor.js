@@ -322,7 +322,7 @@
     }
     if (b.assigned_open) {
       pills.push({
-        act: 'tasks', cls: 'tasks', mark: '☰', n: b.assigned_open,
+        act: 'tasks', kind: 'assigned', cls: 'tasks', mark: '☰', n: b.assigned_open,
         title: `${b.assigned_open} open task${b.assigned_open === 1 ? '' : 's'} assigned to ${d.agent}`,
       });
     }
@@ -335,7 +335,7 @@
     const claimed = b.claimed_tasks?.length ?? 0;
     if (claimed) {
       pills.push({
-        act: 'tasks', cls: 'claimed', mark: '☑', n: claimed,
+        act: 'tasks', kind: 'claimed', cls: 'claimed', mark: '☑', n: claimed,
         title: `${d.agent} is holding ${claimed} claimed task${claimed === 1 ? '' : 's'}`,
       });
     }
@@ -550,6 +550,7 @@
           class: `pill ${q.cls}`,
           transform: `translate(${px} ${PILL_Y})`,
           'data-act': q.act,
+          'data-kind': q.kind ?? null,
           'data-channel': channel,
           'data-agent': d.agent,
           role: 'button',
@@ -1172,7 +1173,9 @@
       // clicked. If the board half is not there, fall back to opening the desk
       // rather than swallowing the click silently.
       const dlg = which === 'unread' ? window.backlogDialog : window.taskDialog;
-      if (typeof dlg === 'function') dlg(channel, agent);
+      // The third argument tells the task dialog which pill was pressed, so it
+      // shows claims or assignments rather than both under one heading.
+      if (typeof dlg === 'function') dlg(channel, agent, pill.dataset.kind ?? null);
       else openDesk(channel, agent);
       return;
     }

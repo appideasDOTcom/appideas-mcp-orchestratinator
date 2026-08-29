@@ -130,6 +130,9 @@ function buildState(store, sessions, sessionStats, meta) {
         status: t.status,
         assignee: t.assignee,
         claimed_by: t.claimed_by,
+        // Who asked for the work. The dialog leads with this rather than with
+        // the assignee, which the row's own dropdown already shows.
+        created_by: t.created_by,
         updated_at: iso(t.updated_at),
       })),
       task_list_total: unfinished.length,

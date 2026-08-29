@@ -145,7 +145,7 @@ function agentSub(a, channel) {
     bits.push(actionable(
       `${a.assigned_open} assigned`,
       'tasks',
-      { channel, agent: a.agent },
+      { channel, agent: a.agent, kind: 'assigned' },
       `close or reassign ${a.agent}'s open tasks`
     ));
   }
@@ -158,7 +158,7 @@ function agentSub(a, channel) {
     bits.push(actionable(
       `${a.claimed_tasks.length} claimed`,
       'tasks',
-      { channel, agent: a.agent },
+      { channel, agent: a.agent, kind: 'claimed' },
       `${a.agent} is holding ${a.claimed_tasks.length} claimed task${a.claimed_tasks.length === 1 ? '' : 's'}`
     ));
   }
@@ -565,21 +565,44 @@ function retireDialog(channel, agent) {
   `);
 }
 
-function taskDialog(channel, agent) {
+/**
+ * The task list behind a count pill.
+ *
+ * `kind` is which pill was clicked, and it decides both the heading and the
+ * rows. It used to decide neither: one list matched `assignee === agent ||
+ * claimed_by === agent` under a single "Unfinished tasks" heading, so an agent
+ * holding one of each got both in one list under a title true of neither, and
+ * the dialog's contents did not match the number on the pill that opened it.
+ *
+ * The filters below are deliberately the same conditions `agentTaskLoad` counts
+ * on the server — assigned means open-and-assigned, claimed means claimed-by.
+ * A dialog that disagreed with the pill you pressed to reach it is worse than
+ * no dialog.
+ */
+function taskDialog(channel, agent, kind = null) {
   const c = findChannel(channel);
   if (!c) return;
   // Remembered so an action that keeps the dialog open can rebuild it against
   // the refreshed state instead of leaving a stale row on screen.
-  ui.dlgCtx = { channel, agent: agent ?? null };
+  ui.dlgCtx = { channel, agent: agent ?? null, kind };
   const all = c.task_list ?? [];
-  const list = agent ? all.filter((t) => t.assignee === agent || t.claimed_by === agent) : all;
+  const mine = kind === 'claimed'
+    ? (t) => t.claimed_by === agent
+    : kind === 'assigned'
+      ? (t) => t.assignee === agent && t.status === 'open'
+      : (t) => t.assignee === agent || t.claimed_by === agent;
+  const list = agent ? all.filter(mine) : all;
   const names = (c.agents ?? []).map((a) => a.agent);
   const rows = list.length ? list.map((t) => `
     <div class="task-row">
       <div>
         <span class="ref">#${t.id}</span> <span class="title">${esc(t.title)}</span>
         <span class="badge ${t.status === 'claimed' ? 'claimed' : 'opened'}">${esc(t.status)}</span>
-        <div class="muted mono tiny">${t.claimed_by ? `claimed by ${esc(t.claimed_by)}` : t.assignee ? `assigned to ${esc(t.assignee)}` : 'unassigned'} · ${age(t.updated_at)}</div>
+        <!-- Who asked for it. "assigned to X" restated the dropdown sitting
+             beside it, and "claimed by X" under a heading about claims read as
+             a riddle. Neither told you the one thing the row could not
+             otherwise show. -->
+        <div class="muted mono tiny">${t.created_by ? `requested by ${esc(t.created_by)}` : 'no requester recorded'} · ${age(t.updated_at)}</div>
       </div>
       <div class="task-acts">
         <select class="input" data-reassign="${t.id}" title="reassign">
@@ -590,10 +613,10 @@ function taskDialog(channel, agent) {
         </select>
         <button type="button" class="btn" data-do="close-task" data-channel="${esc(channel)}" data-id="${t.id}">close</button>
       </div>
-    </div>`).join('') : '<div class="empty">nothing unfinished here</div>';
+    </div>`).join('') : `<div class="empty">${kind === 'claimed' ? 'nothing claimed here' : kind === 'assigned' ? 'nothing assigned here' : 'nothing unfinished here'}</div>`;
 
   openDialog(`
-    <h3>Unfinished tasks${agent ? ` · ${esc(agent)}` : ''}</h3>
+    <h3>${kind === 'claimed' ? 'Pending claims' : kind === 'assigned' ? 'Pending tasks' : 'Unfinished tasks'}${agent ? ` · ${esc(agent)}` : ''}</h3>
     <p class="dlg-sub">on <span class="mono">${esc(channel)}</span>${c.task_list_total > all.length ? ` · showing ${all.length} of ${c.task_list_total}` : ''}</p>
     <div class="task-list">${rows}</div>
     <p class="dlg-note">Closing marks the task done with a note attributed to <span class="mono">operator</span> — it is not deleted, and the log keeps the record. Changing the dropdown reassigns immediately.</p>
@@ -951,7 +974,7 @@ el.channels.addEventListener('click', (e) => {
   }
 
   if (action === 'unread') backlogDialog(channel, agent);
-  else if (action === 'tasks') taskDialog(channel, agent ?? null);
+  else if (action === 'tasks') taskDialog(channel, agent ?? null, act.dataset.kind ?? null);
   else if (action === 'retire') retireDialog(channel, agent);
   else if (action === 'channel') channelDialog(channel);
   // Restoring is trivially reversible and self-explanatory, so it skips the
@@ -963,7 +986,7 @@ el.dlgBody.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-do]');
   if (!btn) return;
   const d = btn.dataset;
-  const reRender = (ok) => { if (ok && el.dlg.open && ui.dlgCtx) taskDialog(ui.dlgCtx.channel, ui.dlgCtx.agent); };
+  const reRender = (ok) => { if (ok && el.dlg.open && ui.dlgCtx) taskDialog(ui.dlgCtx.channel, ui.dlgCtx.agent, ui.dlgCtx.kind); };
 
   switch (d.do) {
     case 'cancel':
@@ -1001,11 +1024,11 @@ el.dlgBody.addEventListener('click', (e) => {
 el.dlgBody.addEventListener('change', (e) => {
   const sel = e.target.closest('[data-reassign]');
   if (!sel || !ui.dlgCtx) return;
-  const { channel, agent } = ui.dlgCtx;
+  const { channel, agent, kind } = ui.dlgCtx;
   act(
     () => admin('task/reassign', { channel, id: Number(sel.dataset.reassign), assignee: sel.value || null }),
     { keepOpen: true }
-  ).then((ok) => { if (ok && el.dlg.open) taskDialog(channel, agent); });
+  ).then((ok) => { if (ok && el.dlg.open) taskDialog(channel, agent, kind); });
 });
 
 // Clicking the backdrop closes. <dialog> already handles Esc.
