@@ -154,7 +154,52 @@ export function openDb(path) {
       assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (channel, agent)
     );
+
+    -- ─── Hosting ──────────────────────────────────────────────────────────────
+    -- A host is a workstation service (host/) that runs each desk's Claude Code
+    -- in a tmux pane and connects it to the floor, so a desk becomes a chat.
+    -- Hosts only ever reach *out* to this server: they register, then hold a
+    -- request open asking for work. Nothing here connects to a workstation.
+    CREATE TABLE IF NOT EXISTS hosts (
+      host_id       TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Which desks a host runs, and the SDK session each one last had — kept
+    -- across host restarts so the conversation resumes rather than restarts.
+    CREATE TABLE IF NOT EXISTS hosted_desks (
+      channel        TEXT NOT NULL,
+      agent          TEXT NOT NULL,
+      host_id        TEXT NOT NULL,
+      cwd            TEXT NOT NULL,
+      sdk_session_id TEXT,
+      state          TEXT NOT NULL DEFAULT 'idle',   -- idle | working | awaiting | offline
+      updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
+    );
+
+    -- Work waiting for a host: a message to deliver, a permission decision to
+    -- apply, an interrupt. A table rather than memory so a message typed while
+    -- the server restarts is still there when the host next asks.
+    CREATE TABLE IF NOT EXISTS host_outbox (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      host_id     TEXT NOT NULL,
+      channel     TEXT NOT NULL,
+      agent       TEXT NOT NULL,
+      kind        TEXT NOT NULL,              -- chat | permission | interrupt
+      payload     TEXT NOT NULL,              -- JSON
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      taken_at    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_host_outbox_pending ON host_outbox(host_id, taken_at, id);
   `);
+
+  // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
+  // to the agent at its next turn boundary. It worked, and it was the wrong
+  // shape: a message that lands "eventually" is not a chat. Hosting replaced it.
+  dropTables(db, ['nudges'], 'the floor now hosts sessions instead of queueing nudges');
 
   // v0.9 carried dashboard logins: a `users` table of scrypt hashes and a
   // `ui_sessions` table of live cookies. Both are gone — the dashboard is open
@@ -163,7 +208,7 @@ export function openDb(path) {
   // orphaned, because a table of password hashes for a feature that no longer
   // exists is a liability with no reader: any backup, snapshot, or `.dump` of
   // this file would go on carrying credentials nothing can check.
-  dropTables(db, ['ui_sessions', 'users']);
+  dropTables(db, ['ui_sessions', 'users'], 'dashboard sign-in was removed');
 
   // Presence detail added after v0.1 — the dashboard reads these to show an
   // approximate last-known state per agent. Added by migration so an existing
@@ -189,6 +234,38 @@ export function openDb(path) {
   // worse than a cluttered board.
   addColumn(db, 'agents', 'retired_at', 'TEXT');
 
+  // Where a session was first heard about: 'hook' for one a window reported
+  // itself, 'host' for one the host saw in `claude agents --json`. The same
+  // session is usually both, and which arrived first is of no consequence —
+  // it is kept because it says whether a desk has the plugin installed at all.
+  // `pid` and `parent_session` are informational; nothing depends on them now
+  // that a window is found by asking rather than by watching a process.
+  addColumn(db, 'agent_sessions', 'runner', 'TEXT');
+  addColumn(db, 'agent_sessions', 'pid', 'INTEGER');
+  addColumn(db, 'agent_sessions', 'parent_session', 'TEXT');
+  // A desk used to have a *driver* — 'floor' or 'terminal' — because a window
+  // somebody had open was believed to own its session outright, so the host had
+  // to stand aside and the floor became a copy-and-paste box. That was never
+  // true: a live Claude Code window can be typed into (see host/window.js), and
+  // with it there is nothing to arbitrate. One conversation per repo, two doors
+  // onto it, no ownership. These three columns described the arbitration.
+  dropColumns(db, 'hosted_desks', ['driver', 'terminal_session_id', 'resume_fork'],
+    'a desk has no driver any more — both doors reach the same window');
+
+  // How a person sits down at a desk.
+  //
+  // The floor can type into a desk's window; so can whoever is attached to it.
+  // But nothing on the floor ever said *where* that window is, so the second
+  // door existed and was invisible — you could watch a conversation you had no
+  // way to join. These carry the address: which tmux session the host runs, and
+  // which window in it belongs to this desk.
+  addColumn(db, 'hosts', 'tmux_session', 'TEXT');
+  addColumn(db, 'hosted_desks', 'window_id', 'TEXT');
+  // And when a repo's Claude Code is running somewhere the floor cannot reach —
+  // an editor's own panel, with no stdin to type into — this is the pid of it,
+  // so the floor can say so and say what to do instead of failing on send.
+  addColumn(db, 'hosted_desks', 'outside_pid', 'INTEGER');
+
   return db;
 }
 
@@ -204,13 +281,37 @@ function addColumn(db, table, column, decl) {
  * migration that destroys data without a word in the log is one you find out
  * about from its absence.
  */
-function dropTables(db, tables) {
+function dropTables(db, tables, why) {
   const present = tables.filter(
     (t) => !!db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t)
   );
   if (!present.length) return;
   for (const t of present) db.exec(`DROP TABLE IF EXISTS ${t}`);
-  console.log(`[orchestratinator] migration: dropped ${present.join(', ')} — dashboard sign-in was removed`);
+  console.log(`[orchestratinator] migration: dropped ${present.join(', ')} — ${why}`);
+}
+
+/**
+ * Remove columns a past version added, and say so once.
+ *
+ * The same bargain as dropTables: this discards data in an existing volume, so
+ * it is announced. A SQLite too old for DROP COLUMN leaves them in place, which
+ * is harmless — nothing reads them any more — and says so rather than failing
+ * a startup over a column nobody wants.
+ */
+function dropColumns(db, table, columns, why) {
+  const present = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  const doomed = columns.filter((c) => present.includes(c));
+  if (!doomed.length) return;
+  const dropped = [];
+  for (const c of doomed) {
+    try {
+      db.exec(`ALTER TABLE ${table} DROP COLUMN ${c}`);
+      dropped.push(c);
+    } catch (err) {
+      console.warn(`[orchestratinator] migration: left ${table}.${c} in place (${err.message}); nothing reads it`);
+    }
+  }
+  if (dropped.length) console.log(`[orchestratinator] migration: dropped ${table}.${dropped.join(', ')} — ${why}`);
 }
 
 const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
@@ -262,7 +363,9 @@ export const CAST = [
  * the moment they were included. They are also reconstructible: the transcripts
  * they were built from still sit on each workstation under ~/.claude/projects.
  * `personas` is included because who sits at which desk is an operator decision
- * that would otherwise be silently lost on a restore.
+ * that would otherwise be silently lost on a restore. The hosting tables are
+ * runtime state — hosts re-register within a minute of any restart — and a
+ * restored copy of them would only describe machines that may not exist.
  */
 export const BACKUP_TABLES = [
   'messages',
@@ -498,9 +601,10 @@ export function makeStore(db) {
       // COALESCE on the detail columns because most hook events carry only the
       // common fields, and a Stop must not blank the model a SessionStart knew.
       `INSERT INTO agent_sessions
-         (session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch, updated_at)
+         (session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch,
+          runner, pid, parent_session, updated_at)
        VALUES (@session_id, @channel, @agent, @cwd, @transcript, @model, @permission_mode,
-               @git_branch, datetime('now'))
+               @git_branch, @runner, @pid, @parent_session, datetime('now'))
        ON CONFLICT(session_id) DO UPDATE SET
          channel         = excluded.channel,
          agent           = excluded.agent,
@@ -509,6 +613,9 @@ export function makeStore(db) {
          model           = COALESCE(excluded.model, model),
          permission_mode = COALESCE(excluded.permission_mode, permission_mode),
          git_branch      = COALESCE(excluded.git_branch, git_branch),
+         runner          = COALESCE(excluded.runner, runner),
+         pid             = COALESCE(excluded.pid, pid),
+         parent_session  = COALESCE(excluded.parent_session, parent_session),
          ended_at        = NULL,
          updated_at      = datetime('now')`
     ),
@@ -545,17 +652,39 @@ export function makeStore(db) {
     // session_id but it is the same desk, and a chat panel that emptied itself
     // every time somebody ran /resume would be worse than no chat panel.
     recentTurns: db.prepare(
+      // Optionally one conversation only. A desk can have more than one session
+      // on it, and the panel should show the one you are in. `sessions` is a
+      // JSON array rather than one id because a conversation can span ids: a
+      // fork carries its parent's history, and the two read as one.
       `SELECT id, session_id, role, text, tool_name, created_at
          FROM turns
         WHERE channel = @channel AND agent = @agent AND id > @since
+          AND (@sessions IS NULL OR session_id IN (SELECT value FROM json_each(@sessions)))
         ORDER BY id DESC
         LIMIT @limit`
     ),
     floorSessions: db.prepare(
       `SELECT session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch,
+              runner, pid, parent_session,
               awaiting_kind, awaiting_message, awaiting_since, ended_at, started_at, updated_at
          FROM agent_sessions
         ORDER BY updated_at DESC`
+    ),
+    getSession: db.prepare(
+      `SELECT session_id, channel, agent, cwd, runner, pid, parent_session,
+              awaiting_kind, ended_at, updated_at
+         FROM agent_sessions WHERE session_id = ?`
+    ),
+    // Windows open on a desk, newest first — the candidates to drive it.
+    liveHookSessions: db.prepare(
+      `SELECT session_id, cwd, pid, awaiting_kind, ended_at, updated_at
+         FROM agent_sessions
+        WHERE channel = ? AND agent = ? AND runner = 'hook' AND ended_at IS NULL
+        ORDER BY updated_at DESC`
+    ),
+    turnsInSessions: db.prepare(
+      `SELECT COUNT(*) AS n, MAX(created_at) AS last_at FROM turns
+        WHERE channel = ? AND agent = ? AND session_id IN (SELECT value FROM json_each(?))`
     ),
     // The newest turn carrying text, per desk — what the avatar's bubble says.
     lastTurns: db.prepare(
@@ -590,6 +719,71 @@ export function makeStore(db) {
           ) WHERE rn > @keep
         )`
     ),
+
+    // ─── Hosting ────────────────────────────────────────────────────────────
+    upsertHost: db.prepare(
+      `INSERT INTO hosts (host_id, name, tmux_session, last_seen)
+       VALUES (@host_id, @name, @tmux_session, datetime('now'))
+       ON CONFLICT(host_id) DO UPDATE SET
+         name = excluded.name, tmux_session = excluded.tmux_session, last_seen = datetime('now')`
+    ),
+    touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, registered_at, last_seen FROM hosts ORDER BY name`),
+    upsertHostedDesk: db.prepare(
+      // Re-registering brings a desk back from offline; the session id it had
+      // is deliberately left alone so the host can resume it.
+      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, state, updated_at)
+       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, 'idle', datetime('now'))
+       ON CONFLICT(channel, agent) DO UPDATE SET
+         host_id = excluded.host_id, cwd = excluded.cwd,
+         window_id = excluded.window_id, outside_pid = excluded.outside_pid,
+         state = 'idle', updated_at = datetime('now')`
+    ),
+    setHostedSession: db.prepare(
+      // Whichever conversation is live in that repo right now. It changes when
+      // the person there starts a new one, and that is not an event to
+      // negotiate — it is simply the conversation now.
+      `UPDATE hosted_desks SET sdk_session_id = @sdk_session_id, updated_at = datetime('now')
+        WHERE channel = @channel AND agent = @agent`
+    ),
+    setHostedState: db.prepare(
+      `UPDATE hosted_desks SET state = @state, updated_at = datetime('now')
+        WHERE channel = @channel AND agent = @agent`
+    ),
+    setHostState: db.prepare(
+      `UPDATE hosted_desks SET state = @state, updated_at = datetime('now') WHERE host_id = @host_id`
+    ),
+    listHostedDesks: db.prepare(
+      `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
+              d.window_id, d.outside_pid,
+              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
+         FROM hosted_desks d
+         LEFT JOIN hosts h ON h.host_id = d.host_id`
+    ),
+    hostedDesk: db.prepare(
+      `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
+              d.window_id, d.outside_pid,
+              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
+         FROM hosted_desks d
+         LEFT JOIN hosts h ON h.host_id = d.host_id
+        WHERE d.channel = ? AND d.agent = ?`
+    ),
+    enqueueHostWork: db.prepare(
+      `INSERT INTO host_outbox (host_id, channel, agent, kind, payload)
+       VALUES (@host_id, @channel, @agent, @kind, @payload)`
+    ),
+    pendingHostWork: db.prepare(
+      `SELECT id, channel, agent, kind, payload, created_at FROM host_outbox
+        WHERE host_id = ? AND taken_at IS NULL ORDER BY id`
+    ),
+    markWorkTaken: db.prepare(`UPDATE host_outbox SET taken_at = datetime('now') WHERE id = ?`),
+    pruneHostWork: db.prepare(
+      `DELETE FROM host_outbox WHERE taken_at IS NOT NULL AND taken_at < datetime('now', '-1 day')`
+    ),
+    rekeyTurns: db.prepare(
+      `UPDATE turns SET session_id = @to WHERE channel = @channel AND agent = @agent AND session_id = @from`
+    ),
+    deleteSession: db.prepare(`DELETE FROM agent_sessions WHERE session_id = ?`),
   };
 
   /**
@@ -609,7 +803,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'agent_sessions', 'turns', 'personas']) {
+      'channel_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -715,6 +909,21 @@ export function makeStore(db) {
    * first on any given morning. An operator rename goes through setPersona and
    * is never undone by this.
    */
+  /**
+   * Hand a host everything waiting for it, and mark it taken, in one
+   * transaction — so a host that asks twice (a retried request, say) cannot be
+   * handed the same message twice and deliver it twice.
+   */
+  const takeHostWork = db.transaction((hostId) => {
+    const rows = q.pendingHostWork.all(hostId);
+    for (const r of rows) q.markWorkTaken.run(r.id);
+    return rows.map((r) => {
+      let payload = {};
+      try { payload = JSON.parse(r.payload); } catch { /* a bad row is an empty job */ }
+      return { id: r.id, channel: r.channel, agent: r.agent, kind: r.kind, payload, created_at: r.created_at };
+    });
+  });
+
   function ensurePersona(channel, agent) {
     const existing = q.getPersona.get(channel, agent);
     if (existing) return existing;
@@ -798,7 +1007,24 @@ export function makeStore(db) {
         model: s.model ?? null,
         permission_mode: s.permission_mode ?? null,
         git_branch: s.git_branch ?? null,
+        runner: s.runner ?? null,
+        pid: s.pid ?? null,
+        parent_session: s.parent_session ?? null,
       }).changes,
+    getSession: (sessionId) => q.getSession.get(sessionId) ?? null,
+    liveHookSessions: (channel, agent) => q.liveHookSessions.all(channel, agent),
+    /** A conversation's session ids, newest first: the session and the ones it was forked from. */
+    sessionChain: (sessionId) => {
+      const chain = [];
+      let id = sessionId;
+      while (id && chain.length < 8 && !chain.includes(id)) {
+        chain.push(id);
+        id = q.getSession.get(id)?.parent_session ?? null;
+      }
+      return chain;
+    },
+    turnsInSessions: (channel, agent, sessions) =>
+      q.turnsInSessions.get(channel, agent, JSON.stringify(sessions ?? [])),
     setAwaiting: (sessionId, kind, message = null) =>
       q.setAwaiting.run({ session_id: sessionId, kind, message }).changes,
     clearAwaiting: (sessionId) => q.clearAwaiting.run({ session_id: sessionId }).changes,
@@ -813,8 +1039,8 @@ export function makeStore(db) {
         tool_name: t.tool_name ?? null,
       }).lastInsertRowid),
     // Oldest-first, because that is the order a conversation is read in.
-    recentTurns: (channel, agent, { since = 0, limit = 80 } = {}) =>
-      q.recentTurns.all({ channel, agent, since, limit }).reverse(),
+    recentTurns: (channel, agent, { since = 0, limit = 80, sessions = null } = {}) =>
+      q.recentTurns.all({ channel, agent, since, limit, sessions: sessions?.length ? JSON.stringify(sessions) : null }).reverse(),
     floorSessions: () => q.floorSessions.all(),
     lastTurns: () => q.lastTurns.all(),
     turnCounts: () => q.turnCounts.all(),
@@ -823,5 +1049,35 @@ export function makeStore(db) {
       q.upsertPersona.run({ channel, agent, persona, seat }).changes,
     ensurePersona,
     pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
+
+    // ─── Hosting ────────────────────────────────────────────────────────────
+    registerHost: (hostId, name, tmuxSession = null) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession }).changes,
+    touchHost: (hostId) => q.touchHost.run(hostId).changes,
+    listHosts: () => q.listHosts.all(),
+    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null } = {}) =>
+      q.upsertHostedDesk.run({
+        channel, agent, host_id: hostId, cwd, window_id: windowId, outside_pid: outsidePid,
+      }).changes,
+    setHostedSession: (channel, agent, sdkSessionId) =>
+      q.setHostedSession.run({ channel, agent, sdk_session_id: sdkSessionId }).changes,
+    setHostedState: (channel, agent, state) => q.setHostedState.run({ channel, agent, state }).changes,
+    setHostState: (hostId, state) => q.setHostState.run({ host_id: hostId, state }).changes,
+    listHostedDesks: () => q.listHostedDesks.all(),
+    hostedDesk: (channel, agent) => q.hostedDesk.get(channel, agent) ?? null,
+    enqueueHostWork: (hostId, channel, agent, kind, payload) =>
+      n(q.enqueueHostWork.run({ host_id: hostId, channel, agent, kind, payload: JSON.stringify(payload ?? {}) }).lastInsertRowid),
+    takeHostWork,
+    pruneHostWork: () => q.pruneHostWork.run().changes,
+    /**
+     * A hosted session only learns its own id on its first turn, so the message
+     * that started it was filed under a placeholder. Move those turns to the
+     * real id and drop the placeholder, so the conversation is one conversation.
+     */
+    rekeySession: db.transaction((channel, agent, from, to) => {
+      const moved = q.rekeyTurns.run({ channel, agent, from, to }).changes;
+      q.deleteSession.run(from);
+      return moved;
+    }),
   };
 }

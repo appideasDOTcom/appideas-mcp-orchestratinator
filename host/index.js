@@ -1,0 +1,387 @@
+#!/usr/bin/env node
+/**
+ * The orchestratinator host: this workstation's link between the floor and the
+ * Claude Code windows running here.
+ *
+ * There is one conversation per repo and nobody owns it. Claude Code runs in a
+ * tmux pane; the floor types into that pane, and so do you, by attaching to it.
+ * Switching between the two costs nothing because nothing moves. You never
+ * exit a session to hand it over, and you never resume one to get it back.
+ *
+ * That is the whole of it, and it is why this file is half what it was. The
+ * driver/release/fork/TTL/pid-watch machinery it used to carry existed only to
+ * work around "a terminal owns its session and cannot be typed into from
+ * anywhere else", which was never true. See host/window.js.
+ *
+ * What this process actually does:
+ *
+ *   - enumerates the repos here that belong to the board (each one's
+ *     `.mcp.json` says which desk it is),
+ *   - asks `claude agents --json` which of them have a live window,
+ *   - tails each live session's own transcript and sends the turns up, so a
+ *     turn you type in your own terminal appears on the floor with nothing
+ *     reporting it,
+ *   - and does what the floor asks: deliver a message, answer a permission
+ *     prompt, stop a turn, open a window.
+ *
+ * It only ever reaches out. The server never connects to this machine and
+ * nothing here listens on a port. If the server is down it retries with
+ * backoff; if this host is down the floor says so.
+ *
+ *   ORCH_HOST_ROOTS   colon-separated directories to look for repos under
+ *   ORCH_URL          the board, e.g. http://localhost:8787 (from .mcp.json if unset)
+ *   ORCH_AUTH_TOKEN   the shared secret                     (from .mcp.json if unset)
+ *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
+ *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir, hostname } from 'node:os';
+import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { discoverDesks, originOf } from './identity.js';
+import * as W from './window.js';
+
+const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
+const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
+const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
+/** How often the roster and the transcripts are re-read. */
+const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
+const REQUEST_TIMEOUT_MS = 5_000;
+
+/**
+ * Which key answers a permission prompt in Claude Code's own dialog. The floor
+ * knows a prompt is open because the plugin's PermissionRequest hook says so —
+ * structured, not scraped — and this is how the answer is typed back in.
+ *
+ * Deny is Escape, not a number. Claude Code's prompts do not have a fixed shape:
+ * some offer three options ("Yes" / "Yes, and don't ask again" / "No"), some
+ * only two ("Yes, allow reading from etc/" / "No"), and the folder-trust dialog
+ * has its own. A deny that pressed "3" would do nothing at all on a two-option
+ * prompt — leaving it open while the floor reported it answered — and on some
+ * other shape could land on an option that is not a refusal. Escape is offered
+ * by every one of them ("Esc to cancel") and was verified against a live prompt
+ * to produce `The tool use was rejected`.
+ *
+ * Allow is "1" because the first option is the affirmative in every dialog, and
+ * a number is immune to the selection having been moved by whoever is sitting
+ * at the window.
+ */
+const ANSWER_KEY = { allow: '1', deny: 'Escape' };
+
+const log = (...a) => console.log('[host]', ...a);
+const warn = (...a) => console.warn('[host]', ...a);
+
+/* ───────────────────────── configuration ───────────────────────── */
+
+function loadConfig() {
+  let file = {};
+  if (existsSync(CONFIG_FILE)) {
+    try { file = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); } catch (e) { warn(`could not read ${CONFIG_FILE}: ${e.message}`); }
+  }
+  const roots = (process.env.ORCH_HOST_ROOTS ? process.env.ORCH_HOST_ROOTS.split(':') : file.roots ?? [process.cwd()])
+    .map((r) => r.replace(/^~(?=$|\/)/, homedir()))
+    .filter(Boolean);
+  return {
+    roots,
+    url: process.env.ORCH_URL ?? file.url ?? null,
+    token: process.env.ORCH_AUTH_TOKEN ?? file.token ?? null,
+    name: process.env.ORCH_HOST_NAME ?? file.name ?? hostname(),
+    hostId: process.env.ORCH_HOST_ID ?? file.host_id ?? hostname(),
+  };
+}
+
+/* ───────────────────────── one desk ───────────────────────── */
+
+/**
+ * A desk is a repo. Not a session, not a process — those come and go, and the
+ * desk does not care which one is there. It only tracks how far it has read
+ * into whatever conversation is current, so the floor is never told the same
+ * turn twice.
+ */
+class Desk {
+  constructor(host, { channel, agent, cwd }) {
+    this.host = host;
+    this.channel = channel;
+    this.agent = agent;
+    // Canonical, because everything downstream matches this against the cwd
+    // Claude Code reports and against the transcript path derived from it, and
+    // a repo reached through a symlink is spelled two ways. See canonical().
+    this.cwd = W.canonical(cwd);
+    this.sessionId = null;   // whatever conversation is live here now
+    this.offset = 0;         // bytes of that transcript already sent up
+  }
+
+  get label() { return `${this.channel}/${this.agent}`; }
+
+  /**
+   * Follow whatever session is live in this repo, and send up anything new it
+   * has said. A conversation that changes underneath — you ran /clear, or
+   * opened a different one — is not a handoff to negotiate; it is simply the
+   * conversation now, and the floor is told so.
+   */
+  async watch(session) {
+    const id = session?.sessionId ?? null;
+    if (id !== this.sessionId) {
+      this.sessionId = id;
+      // Start where the conversation already is, so attaching to a long one
+      // does not replay it onto the floor — and so a new one, whose transcript
+      // is empty, is followed from its very first turn.
+      this.offset = id ? await W.transcriptSize(W.transcriptPath(this.cwd, id)) : 0;
+      this.host.emit({
+        type: 'session', channel: this.channel, agent: this.agent,
+        session_id: id, cwd: this.cwd, pid: session?.pid ?? null,
+      }, true);
+      if (!id) return;
+    }
+    if (!this.sessionId) return;
+
+    const path = W.transcriptPath(this.cwd, this.sessionId);
+    const r = await W.readTranscript(path, { after: this.offset });
+    if (!r.ok) return;
+    this.offset = r.offset;
+    for (const turn of r.turns) {
+      this.host.emit({
+        type: 'turn', channel: this.channel, agent: this.agent, session_id: this.sessionId,
+        role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
+        tool_name: turn.tool_name ?? null, tool_input: turn.tool_input ?? null,
+      });
+    }
+  }
+
+  /** Type into this repo's window, opening one if there isn't one. */
+  async say(text) {
+    const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId });
+    if (!r.ok) {
+      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error }, true);
+    } else if (r.unverified) {
+      // Delivered, but with no transcript to check it against. The floor is
+      // not told a message failed when it may well have arrived — but this
+      // does not pass silently either, because silence is how messages got
+      // lost in the first place.
+      warn(`${this.label}: typed the message in, but there is no session to confirm it landed`);
+    }
+    return r;
+  }
+
+  async answer(decision) {
+    const key = ANSWER_KEY[decision];
+    if (!key) return { ok: false, error: `unknown decision ${decision}` };
+    return W.sendKeys(this.cwd, key);
+  }
+
+  async interrupt() { return W.interrupt(this.cwd); }
+}
+
+/* ───────────────────────── the host ───────────────────────── */
+
+class Host {
+  constructor(cfg) {
+    this.cfg = cfg;
+    this.desks = new Map();
+    this.outbox = [];
+    this.flushTimer = null;
+    this.stopping = false;
+  }
+
+  async request(path, { method = 'GET', body, timeout = REQUEST_TIMEOUT_MS } = {}) {
+    const res = await fetch(`${this.cfg.url}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', 'x-orchestratinator-key': this.cfg.token ?? '' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout),
+    });
+    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
+    return res.json();
+  }
+
+  emit(ev, now = false) {
+    this.outbox.push(ev);
+    if (now) return this.flush();
+    if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flush(), 150);
+    return undefined;
+  }
+
+  async flush() {
+    clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    if (!this.outbox.length) return;
+    const events = this.outbox.splice(0);
+    try {
+      await this.request('/api/host/events', { method: 'POST', body: { host_id: this.cfg.hostId, events } });
+    } catch (err) {
+      warn(`events not delivered (${err.message}); will retry with the next batch`);
+      this.outbox.unshift(...events);
+      if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flush(), 1000);
+    }
+  }
+
+  async register() {
+    // Where each desk can be sat at, reported every time rather than once: a
+    // window opens, closes and moves, and a stale address is worse than none.
+    const desks = [];
+    for (const d of this.desks.values()) {
+      const pane = await W.paneFor(d.cwd).catch(() => null);
+      const stray = pane ? null : await W.outsideTmux(d.cwd).catch(() => null);
+      desks.push({
+        channel: d.channel, agent: d.agent, cwd: d.cwd, session_id: d.sessionId,
+        window: pane?.window ?? null,
+        outside_pid: stray?.pid ?? null,
+      });
+    }
+    return this.request('/api/host/register', {
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession },
+    });
+  }
+
+  /** Re-read the roster and each desk's transcript. This is the whole of how
+   *  the floor learns what is happening — no hook has to report a turn. */
+  async watch() {
+    const r = await W.roster();
+    if (!r.ok) return;
+    const byCwd = new Map();
+    for (const s of r.sessions) {
+      if (s.kind !== 'interactive') continue;
+      const prev = byCwd.get(s.cwd);
+      if (!prev || (s.startedAt ?? 0) > (prev.startedAt ?? 0)) byCwd.set(s.cwd, s);
+    }
+    for (const desk of this.desks.values()) {
+      try { await desk.watch(byCwd.get(desk.cwd) ?? null); } catch (err) { warn(`${desk.label}: ${err.message}`); }
+    }
+  }
+
+  async handle(item) {
+    const desk = this.desks.get(`${item.channel}|${item.agent}`);
+    if (!desk) return warn(`work for a desk this host doesn't have: ${item.channel}/${item.agent}`);
+    switch (item.kind) {
+      case 'chat':
+        if (typeof item.payload?.text === 'string' && item.payload.text.trim()) await desk.say(item.payload.text);
+        break;
+      case 'permission': {
+        const r = await desk.answer(item.payload?.decision);
+        if (!r.ok) warn(`${desk.label}: could not answer the prompt — ${r.error}`);
+        break;
+      }
+      case 'interrupt':
+        await desk.interrupt();
+        break;
+      case 'handback': {
+        // Give the conversation to the editor: close ours first, then open it
+        // there. The order matters — the reverse leaves two live copies.
+        const shut = await W.closeWindow(desk.cwd);
+        if (!shut.ok) {
+          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: shut.error }, true);
+          break;
+        }
+        const opened = await W.openInEditor({ sessionId: desk.sessionId });
+        if (!opened.ok) {
+          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true);
+        }
+        break;
+      }
+      case 'open': {
+        const r = await W.open(desk.cwd, { resume: desk.sessionId });
+        if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
+        // Wait for it to actually be running, for two reasons: a window that
+        // dies on its first line should say so here rather than look open, and
+        // a freshly created window holds its pane after exit until something
+        // confirms it started — which is what waitReady releases.
+        if (r.created) {
+          const up = await W.waitReady(desk.cwd, { pid: r.pid, target: r.target });
+          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
+        }
+        break;
+      }
+      default:
+        warn(`unknown work kind ${item.kind}`);
+    }
+  }
+
+  async run() {
+    let backoff = 1000;
+    let lastRegister = 0;
+    let lastWatch = 0;
+    while (!this.stopping) {
+      try {
+        if (Date.now() - lastRegister > HEARTBEAT_MS) {
+          await this.register();
+          lastRegister = Date.now();
+        }
+        // The long poll is the pacing: work arrives within milliseconds of
+        // being typed, and the roster/transcripts are re-read around it.
+        if (Date.now() - lastWatch > WATCH_MS) {
+          await this.watch();
+          lastWatch = Date.now();
+        }
+        const reply = await this.request(
+          `/api/host/work?host_id=${encodeURIComponent(this.cfg.hostId)}&wait=${Math.ceil(WATCH_MS / 1000)}`,
+          { timeout: WATCH_MS + 10_000 },
+        );
+        for (const item of reply.work ?? []) await this.handle(item);
+        backoff = 1000;
+      } catch (err) {
+        if (this.stopping) break;
+        warn(`${err.message}; retrying in ${backoff / 1000}s`);
+        lastRegister = 0;
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, 30_000);
+      }
+    }
+  }
+
+  async stop() {
+    if (this.stopping) return;
+    this.stopping = true;
+    log('shutting down');
+    // The windows are left running. They are Claude Code sessions in tmux, and
+    // they belong to the person at this machine, not to this process.
+    await this.flush();
+    try { await this.request('/api/host/unregister', { method: 'POST', body: { host_id: this.cfg.hostId }, timeout: 2000 }); } catch { /* best effort */ }
+  }
+}
+
+/* ───────────────────────── main ───────────────────────── */
+
+async function main() {
+  const cfg = loadConfig();
+
+  if (!(await W.tmuxAvailable())) {
+    console.error('[host] tmux is not installed. The floor drives Claude Code through it — install it with `brew install tmux` (or your package manager) and start this again.');
+    process.exit(1);
+  }
+
+  const found = discoverDesks(cfg.roots);
+  if (!found.length) {
+    warn(`no desks found under ${cfg.roots.join(', ')} — a desk is a directory whose .mcp.json carries X-Channel and X-Agent`);
+  }
+
+  if (!cfg.url && found.length) cfg.url = originOf(found[0].url);
+  if (!cfg.token && found.length) cfg.token = found[0].key;
+  if (!cfg.url) {
+    console.error('[host] no server: set ORCH_URL, or put a repo with an orchestratinator .mcp.json under ORCH_HOST_ROOTS');
+    process.exit(1);
+  }
+  cfg.url = cfg.url.replace(/\/+$/, '');
+  const origin = originOf(cfg.url);
+  const mine = found.filter((d) => originOf(d.url) === origin);
+  for (const d of found.filter((d) => originOf(d.url) !== origin)) {
+    log(`skipping ${d.channel}/${d.agent} — its board is ${originOf(d.url)}, this host serves ${origin}`);
+  }
+
+  const host = new Host(cfg);
+  for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
+
+  log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · tmux ${W.tmuxSession} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
+  for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}`);
+  log(`attach to any of them with:  tmux attach -t ${W.tmuxSession}`);
+
+  const stop = () => host.stop().finally(() => process.exit(0));
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+
+  await host.run();
+}
+
+main().catch((err) => {
+  console.error('[host] fatal:', err?.stack ?? err);
+  process.exit(1);
+});

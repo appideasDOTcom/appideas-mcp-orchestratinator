@@ -1,0 +1,812 @@
+/**
+ * A repo's Claude Code window.
+ *
+ * There is one conversation per repo and no such thing as owning it. Claude
+ * Code runs in a tmux pane; the floor types into that pane; you type into it
+ * too, by attaching to the same pane in your own terminal. Neither of you is
+ * "the driver", because a pane is not a thing that can be held. Switching
+ * between the floor and the terminal costs nothing, because nothing moves.
+ *
+ * This replaces the old driver/release/fork/TTL/pid-watch machinery, which
+ * existed solely to work around "a terminal owns its session outright and
+ * cannot be typed into from anywhere else". That was never true:
+ *
+ *   - `~/.claude/sessions/<pid>.json` is every live session announcing its own
+ *     pid, cwd and session id. (`claude agents --json` prints the same thing
+ *     and is the fallback, but it boots the whole CLI to do it — thirteen
+ *     seconds here — which no watch loop can afford.)
+ *   - `tmux send-keys` / `paste-buffer` deliver a real user turn into a live
+ *     interactive session.
+ *   - `~/.claude/projects/<slug>/<session>.jsonl` is both sides of the
+ *     conversation, so the floor mirrors by tailing a file.
+ *
+ * All three are documented, stable surfaces. Nothing here reverse-engineers a
+ * protocol, so a Claude Code update cannot silently break it.
+ *
+ * Everything lives in one tmux session (ORCH_TMUX_SESSION, default `orch`)
+ * with one window per repo, named after the repo's directory. That means
+ * `tmux attach -t orch` is a perfectly good front end to the whole board: the
+ * windows are the desks, in the same order the floor shows them.
+ */
+import { execFile } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
+
+/**
+ * tmux escapes whatever it thinks the terminal cannot print, so a directory
+ * with a character outside ASCII comes back as octal escapes unless the locale
+ * says UTF-8 — and under launchd there is no locale at all. Take the person's
+ * if they have one; otherwise say UTF-8, because a repo's name is not ours to
+ * mangle.
+ */
+const TMUX_ENV = {
+  ...process.env,
+  LC_ALL: process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || 'en_US.UTF-8',
+};
+
+const TMUX = process.env.ORCH_TMUX ?? 'tmux';
+/**
+ * The field separator for `-F` formats.
+ *
+ * This was a tab, and it cost an evening. tmux puts its format output through
+ * the same escaping a terminal gets, and with no locale in the environment —
+ * which is exactly the case under launchd, where this host actually runs — a
+ * tab comes back as `_`. Every field ran together, so panes() parsed nothing,
+ * every send opened a *second* window for a repo that already had one, and
+ * then failed against a target like `orch:@3.%3_8235`. Run by hand from a
+ * shell, where a locale is set, the identical code was fine.
+ *
+ * TMUX_ENV below stops that happening again, but the separator is a printable
+ * character regardless: parsing does not get to depend on an environment
+ * variable. Every field before the last is tmux's own ids or a session name
+ * sanitised on the way in, so none of them can contain it — see panes().
+ */
+const SEP = '|';
+const SESSION = (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._-]/g, '-') || 'orch';
+const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
+/** Long enough for a cold `claude agents --json`, short enough not to stall a poll. */
+const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
+/** How long a freshly opened window gets to become a running session. */
+const READY_TIMEOUT_MS = Number(process.env.ORCH_READY_TIMEOUT_MS ?? 45_000);
+/** Pause before each attempt to submit a pasted message — see send(). */
+const SUBMIT_SETTLE_MS = Number(process.env.ORCH_SUBMIT_SETTLE_MS ?? 400);
+/** How long a message waits for a running turn to end before it is typed in. */
+const IDLE_TIMEOUT_MS = Number(process.env.ORCH_IDLE_TIMEOUT_MS ?? 300_000);
+/** How long a pasted message has to become a turn before it counts as lost. */
+const LAND_TIMEOUT_MS = Number(process.env.ORCH_LAND_TIMEOUT_MS ?? 20_000);
+/** How many times Enter is pressed before giving up on a paste — see send(). */
+const SUBMIT_ATTEMPTS = Math.max(1, Number(process.env.ORCH_SUBMIT_ATTEMPTS ?? 3));
+/**
+ * Where Claude Code keeps its own files. Overridable so the tests can prove
+ * what happens to a message that never lands without writing into the real one.
+ */
+const CLAUDE_HOME = process.env.ORCH_CLAUDE_HOME ?? join(homedir(), '.claude');
+
+/**
+ * tmux exits non-zero for ordinary answers ("no such session"), so callers
+ * that are asking a question rather than giving an order use `ok: false`
+ * instead of catching. Only a missing tmux binary is worth reporting up.
+ */
+async function tmux(args, { timeout = 5000 } = {}) {
+  try {
+    const { stdout } = await run(TMUX, args, { timeout, encoding: 'utf8', env: TMUX_ENV });
+    return { ok: true, out: stdout.trim() };
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { ok: false, missing: true, error: 'tmux is not installed' };
+    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim() };
+  }
+}
+
+/** Whether tmux is usable at all. The floor degrades honestly if it isn't. */
+export async function tmuxAvailable() {
+  const r = await tmux(['-V']);
+  return r.ok;
+}
+
+/**
+ * The real path of a directory, with symlinks resolved.
+ *
+ * Everything here matches a repo to a session by comparing directories, and
+ * two spellings of the same directory are the normal case, not an edge one: on
+ * macOS `/tmp` is a symlink to `/private/tmp`, so a desk found at
+ * `/tmp/x` and the Claude Code session that reports itself in
+ * `/private/tmp/x` are the same window and must compare equal. They didn't,
+ * once, and the symptom was a desk that opened a window fine and then never
+ * showed a word of the conversation — the transcript path is derived from this
+ * too, so a mismatch quietly pointed at a file that does not exist.
+ */
+export function canonical(p) {
+  if (typeof p !== 'string' || !p) return p;
+  try { return realpathSync.native(p); } catch { return p; }
+}
+
+/* ───────────────────────── the roster ───────────────────────── */
+
+/**
+ * Every live Claude Code session on this machine, keyed by the directory it
+ * was started in. This is the whole of discovery: no `.mcp.json` crawl, no
+ * hook reporting a pid, no TTL guessing which windows are still open. A
+ * session that has exited is simply not in the list.
+ */
+export async function roster() {
+  const fast = readSessionFiles();
+  if (fast) return fast;
+  return rosterViaCli();
+}
+
+/** Signal 0 is the portable "are you there". EPERM means yes, just not ours. */
+function alive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (err) { return err?.code === 'EPERM'; }
+}
+
+/**
+ * The roster, read from the files Claude Code writes about itself.
+ *
+ * Every running session drops `~/.claude/sessions/<pid>.json` describing itself
+ * — pid, session id, cwd, kind — and removes it on the way out. This is the
+ * same information `claude agents --json` prints, from the same place, and it
+ * is the difference between a host that answers in a millisecond and one that
+ * does not work at all: that command takes **thirteen seconds** on this machine,
+ * because it boots the whole CLI to do it. A watch loop that runs every second
+ * cannot call it, and the readiness check got three tries inside a 45-second
+ * budget before giving up on a window that was already running.
+ *
+ * A file can outlive its process if a session was killed, so the pid is checked
+ * rather than trusted. Returns null — not an empty roster — when the directory
+ * isn't there at all, so the caller can fall back rather than conclude that
+ * nothing is running.
+ */
+function readSessionFiles() {
+  const dir = join(CLAUDE_HOME, 'sessions');
+  let names;
+  try { names = readdirSync(dir); } catch { return null; }
+  const sessions = [];
+  for (const name of names) {
+    if (!/^\d+\.json$/.test(name)) continue;
+    let d;
+    try { d = JSON.parse(readFileSync(join(dir, name), 'utf8')); } catch { continue; }
+    if (typeof d?.cwd !== 'string' || typeof d?.sessionId !== 'string') continue;
+    const pid = Number(d.pid) || null;
+    if (!alive(pid)) continue;
+    sessions.push({
+      pid,
+      cwd: canonical(d.cwd),
+      sessionId: d.sessionId,
+      kind: typeof d.kind === 'string' ? d.kind : 'interactive',
+      // How this session was started — 'claude-vscode' for the VS Code
+      // extension, and so on. It is the difference between a window that can be
+      // typed into and one that has to be reached another way, which is not a
+      // detail: it decides whether a message can be delivered at all.
+      entrypoint: typeof d.entrypoint === 'string' ? d.entrypoint : null,
+      name: typeof d.name === 'string' ? d.name : null,
+      startedAt: Number(d.startedAt) || null,
+    });
+  }
+  return { ok: true, sessions };
+}
+
+/** The documented way to ask, kept as a fallback. Correct, and very slow. */
+async function rosterViaCli() {
+  let out;
+  try {
+    ({ stdout: out } = await run(CLAUDE, ['agents', '--json'], { timeout: LIST_TIMEOUT_MS, encoding: 'utf8' }));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { ok: false, error: 'the claude CLI is not on PATH', sessions: [] };
+    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim(), sessions: [] };
+  }
+  let rows;
+  try {
+    rows = JSON.parse(out);
+  } catch {
+    return { ok: false, error: 'claude agents --json did not return JSON', sessions: [] };
+  }
+  if (!Array.isArray(rows)) return { ok: false, error: 'unexpected roster shape', sessions: [] };
+  return {
+    ok: true,
+    sessions: rows
+      .filter((r) => r && typeof r.cwd === 'string' && typeof r.sessionId === 'string')
+      .map((r) => ({
+        pid: Number(r.pid) || null,
+        cwd: canonical(r.cwd),
+        sessionId: r.sessionId,
+        kind: typeof r.kind === 'string' ? r.kind : 'interactive',
+        name: typeof r.name === 'string' ? r.name : null,
+        startedAt: Number(r.startedAt) || null,
+      })),
+  };
+}
+
+/** The live session for a repo, if one is open. Newest wins if a repo has two. */
+export async function sessionFor(cwd) {
+  const r = await roster();
+  if (!r.ok) return { ...r, session: null };
+  const here = canonical(cwd);
+  const mine = r.sessions
+    .filter((s) => s.cwd === here && s.kind === 'interactive')
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  return { ok: true, session: mine[0] ?? null };
+}
+
+/**
+ * Wait until this repo has a live Claude Code session, not merely a pane.
+ *
+ * The roster is the honest readiness signal: a session appears in it only once
+ * it is actually running, which is after any first-run dialog has been
+ * answered. Timing out is not an error to hide — it usually means the window is
+ * sitting on a question only a person can answer, and the floor says so.
+ *
+ * `pid` matters more than it looks. A repo can have two Claude Code sessions in
+ * it — the one this host just opened in a pane, and one the person already had
+ * open in their editor — and asking merely "is a session running in this
+ * directory" is then answered instantly by the wrong one. The paste goes into
+ * the window that is still booting and is lost. The pane's own process is the
+ * only unambiguous way to ask about the window we actually opened.
+ */
+export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
+  const stop = Date.now() + timeoutMs;
+  let seen = [];
+  for (;;) {
+    // Did it exit? A window that is gone is never going to become ready, and
+    // waiting the full timeout to say nothing useful about it helps nobody.
+    if (target) {
+      const dead = await tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
+      if (dead.ok && dead.out.trim() === '1') {
+        const last = await tmux(['capture-pane', '-p', '-t', target, '-S', '-40']);
+        await tmux(['kill-window', '-t', target]);
+        const said = (last.out ?? '').split('\n').map((l) => l.trimEnd()).filter(Boolean).slice(-6).join(' / ');
+        return {
+          ok: false,
+          code: 'window_exited',
+          error: `Claude Code exited as soon as the window opened${said ? `: ${said}` : ' without saying anything'}`,
+        };
+      }
+    }
+    const all = await roster();
+    seen = all.sessions;
+    const session = pid
+      ? all.sessions.find((s) => s.pid === pid) ?? null
+      : (await sessionFor(cwd)).session;
+    if (session) {
+      // Up and running: let the window close normally from here on.
+      if (target) await tmux(['set-option', '-w', '-t', target, 'remain-on-exit', 'off']);
+      return { ok: true, session };
+    }
+    if (Date.now() >= stop) {
+      // Say what was actually looked at. "It has not finished starting" is the
+      // right thing to tell a person, but on its own it is unfalsifiable: the
+      // same sentence covers a trust dialog, a roster this cannot read, and a
+      // window that died on the first line.
+      const roll = seen.length
+        ? seen.map((x) => `${x.pid}@${x.cwd}`).join(
+)
+        : 'nothing at all';
+      return {
+        ok: false,
+        code: 'not_ready',
+        error: `Claude Code is open in that window but has not finished starting — on a repo it has not seen before it asks whether the folder is trusted. Answer it there and this will go through. (waited for ${pid ? `pid ${pid}` : cwd} for ${Math.round(timeoutMs / 1000)}s; the roster had ${roll})`,
+      };
+    }
+    await sleep(400);
+  }
+}
+
+/* ───────────────────────── the window ───────────────────────── */
+
+/**
+ * A tmux window name has to survive `tmux select-window -t orch:name`, so it
+ * carries only characters that mean nothing to tmux's target syntax. It is not
+ * an identifier — two repos can produce the same one — so nothing matches on it
+ * alone; see paneFor.
+ */
+export function windowName(cwd) {
+  return basename(cwd).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) || 'desk';
+}
+
+/** Every live pane in our tmux session. */
+async function panes() {
+  // The directory goes last and takes everything after the third separator: it
+  // is the one field whose contents are not ours, and a directory is allowed
+  // to contain a '|'. The three before it are tmux's own ids and a flag.
+  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', '#{pane_current_path}'];
+  const r = await tmux(['list-panes', '-t', SESSION, '-a', '-F', fields.join(SEP)]);
+  if (!r.ok || !r.out) return [];
+  return r.out.split('\n')
+    .map((line) => {
+      const parts = line.split(SEP);
+      if (parts.length < fields.length) return null;
+      const [target, dead, pid] = parts;
+      // The window id is inside the target (session:@window.%pane). It is what
+      // a person needs to be given to sit down at this desk, and pulling it
+      // out of a string we already have beats another tmux call.
+      const window = target.match(/@\d+/)?.[0] ?? null;
+      return { target, window, dead: dead === '1', pid: Number(pid) || null, cwd: parts.slice(3).join(SEP) };
+    })
+    .filter((p) => p && p.target && p.cwd && !p.dead);
+}
+
+/** The window names already in use, so a new window can avoid colliding. */
+async function windowNames() {
+  const r = await tmux(['list-windows', '-a', '-F', '#{window_name}']);
+  return r.ok && r.out ? r.out.split('\n') : [];
+}
+
+/**
+ * The pane running this repo's Claude Code, or null.
+ *
+ * The directory is the identity, and the only one. A window is *named* after
+ * the repo's last path segment because that is what reads well in `tmux
+ * attach`, but a name is not an identifier: two repos can end in the same
+ * segment — two checkouts of one project, or any two `api` folders — and
+ * delivering one agent's message into another agent's window is far worse than
+ * any failure that comes of being strict here.
+ *
+ * There was briefly a "fall back to the name if exactly one pane has it" clause
+ * for the case of a pane whose directory drifts. It reintroduced the collision
+ * through the back door: opening the second desk found the first desk's window
+ * by name and handed it over. If a pane's directory ever does drift, this opens
+ * a second window — visible, and recoverable — rather than quietly typing into
+ * the wrong one.
+ */
+export async function paneFor(cwd) {
+  const here = canonical(cwd);
+  const all = await panes();
+  return all.find((p) => canonical(p.cwd) === here) ?? null;
+}
+
+/**
+ * A live Claude Code for this repo that is not in any tmux pane.
+ *
+ * The floor types by pasting into a pane, so a session running anywhere else —
+ * an editor's built-in terminal, a plain shell — cannot be typed into at all.
+ * Opening a second one "for the floor" is far worse than refusing: both resume
+ * the same conversation and append to the same transcript, so every message the
+ * floor sends is read and answered by the copy, in a window nobody is watching,
+ * while the person waits in the one they are actually sitting at. That is not a
+ * hypothetical — it is what this did.
+ */
+export async function outsideTmux(cwd) {
+  const here = canonical(cwd);
+  const [r, all] = await Promise.all([roster(), panes()]);
+  if (!r.ok) return null;
+  const inPanes = new Set(all.map((p) => p.pid).filter(Boolean));
+  return r.sessions.find((s) => s.cwd === here && s.kind === 'interactive' && !inPanes.has(s.pid)) ?? null;
+}
+
+/**
+ * Whether the window is in the middle of a turn.
+ *
+ * Claude Code offers `esc to interrupt` exactly while it is working, so that
+ * is the signal. It is a string on a screen, which nobody promised to keep —
+ * but it is only ever used to decide to *wait longer*, and nothing is believed
+ * because of it. If the wording ever changes this reads as idle and the send
+ * behaves as it would have anyway, verification and all.
+ */
+async function busy(target) {
+  const r = await tmux(['capture-pane', '-p', '-t', target, '-S', '-6']);
+  return r.ok && /esc to interrupt/i.test(r.out);
+}
+
+/** Wait for a turn to finish. Resolves false if it simply never does. */
+async function waitIdle(target, ms = IDLE_TIMEOUT_MS) {
+  const stop = Date.now() + ms;
+  for (;;) {
+    if (!(await busy(target))) return true;
+    if (Date.now() >= stop) return false;
+    await sleep(500);
+  }
+}
+
+/** What the window looks like right now, for deciding whether it is doing
+ *  anything. Short, because this is asked repeatedly. */
+async function screenOf(target) {
+  const r = await tmux(['capture-pane', '-p', '-t', target, '-S', '-12']);
+  return r.ok ? r.out : '';
+}
+
+/**
+ * Wait until the window stops redrawing.
+ *
+ * Claude Code takes a bracketed paste asynchronously, and an Enter that
+ * arrives while it is still reading one is treated as part of the paste: it
+ * becomes a newline in the composer instead of submitting. A fixed delay is a
+ * guess at that, and a wrong one on a slow machine; the screen going still is
+ * the actual condition, so that is what this waits for. It is not believed —
+ * the message still has to be found in the transcript afterwards.
+ */
+async function settled(target, { quiet = 2, tries = 20 } = {}) {
+  let last = null;
+  let same = 0;
+  for (let i = 0; i < tries && same < quiet; i++) {
+    await sleep(SUBMIT_SETTLE_MS);
+    const now = await screenOf(target);
+    if (now === last) same++;
+    else { same = 0; last = now; }
+  }
+}
+
+/** Whitespace is not meaningful here: a composer rewraps, and a transcript
+ *  records what was submitted rather than how it was typed. */
+const squash = (t) => t.replace(/\s+/g, ' ').trim();
+
+/** Whether this exact message is in the conversation yet. */
+async function landed(path, after, text) {
+  const want = squash(text);
+  const t = await readTranscript(path, { after });
+  return t.turns.some((x) => x.role === 'user' && squash(x.text).includes(want));
+}
+/**
+ * Open this repo's Claude Code in a pane, or hand back the one already there.
+ *
+ * `resume` continues a specific conversation; without it Claude Code does what
+ * it does in any terminal — which, for a repo that has a recent session, is
+ * the same conversation the floor was just showing.
+ */
+export async function open(cwd, { resume = null } = {}) {
+  if (!existsSync(cwd)) return { ok: false, error: `no such directory: ${cwd}` };
+
+  const here = canonical(cwd);
+  const already = await paneFor(here);
+  if (already) return { ok: true, target: already.target, created: false };
+
+  const stray = await outsideTmux(here);
+  if (stray) {
+    return {
+      ok: false,
+      code: 'outside_tmux',
+      error: `Claude Code is already running for this repo outside tmux (pid ${stray.pid}), and the floor can only type into a tmux window. Opening a second one would answer you in a copy you are not looking at. Quit that one, or sit in it here: tmux attach -t ${SESSION}`,
+    };
+  }
+
+  // Keep the plain repo name when it is free, so `tmux attach` reads as a list
+  // of desks. When another repo has already taken it, disambiguate rather than
+  // create a second window with the same name — see paneFor.
+  const taken = (await windowNames()).includes(windowName(here));
+  const name = taken ? `${windowName(here)}-${(Math.abs(hash(here)) % 65536).toString(16).padStart(4, '0')}` : windowName(here);
+  // `claude` is exec'd rather than run from a shell so the pane dies with the
+  // session instead of dropping to a prompt that looks like a live window.
+  const cmd = [CLAUDE, ...(resume ? ['--resume', resume] : [])]
+    .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
+    .join(' ');
+
+  // Take the target tmux hands back rather than looking the new pane up again.
+  //
+  // A pane does not report its directory the instant it is created, so asking
+  // paneFor() straight afterwards could find nothing and fail with "the window
+  // was created but no pane appeared" — a window would open, sit there, and the
+  // message that opened it would be lost. `-P -F` prints the new pane's target
+  // as part of creating it, which is exact and cannot race.
+  const FORMAT = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_pid}'].join(SEP);
+  const has = await tmux(['has-session', '-t', SESSION]);
+  const made = has.ok
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', SESSION, '-n', name, '-c', here, `exec ${cmd}`])
+    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, `exec ${cmd}`]);
+  if (!made.ok) return { ok: false, error: made.error, missing: made.missing };
+  const [target, pid] = made.out.split('\n')[0].split(SEP);
+  if (!target?.trim()) return { ok: false, error: 'tmux created the window but did not say where' };
+
+  // Keep the pane if what we started exits, so its last words survive to be
+  // read. Without this a window that dies on its first line — `claude` not on
+  // PATH, a wrapper with a syntax error — leaves nothing behind but an empty
+  // tmux session, and the only thing anyone can say is that it "has not
+  // finished starting", for the full timeout. waitReady turns this off once
+  // the session is really up, so a window that closes normally still closes.
+  await tmux(['set-option', '-w', '-t', target.trim(), 'remain-on-exit', 'on']);
+  return { ok: true, target: target.trim(), pid: Number(pid) || null, created: true };
+}
+
+/**
+ * Type into this repo's window.
+ *
+ * The text goes through a tmux buffer and a bracketed paste rather than
+ * `send-keys -l`, because a message with a newline in it would otherwise
+ * submit halfway through — every newline is an Enter to the thing reading the
+ * pane. Bracketed paste arrives as one block, which is what a person pasting
+ * into Claude Code gets, and then Enter sends it.
+ */
+export async function send(cwd, text, { open: autoOpen = false, resume = null } = {}) {
+  if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
+  const here = canonical(cwd);
+
+  let pane = await paneFor(here);
+  if (!pane && autoOpen) {
+    const opened = await open(here, { resume });
+    if (!opened.ok) return opened;
+    // A pane is not a session. Claude Code takes a moment to start, and on a
+    // repo it has not seen before it stops to ask whether the folder is
+    // trusted and whether to use its MCP servers. Pasting during any of that
+    // types the message into a dialog, where it is both lost and confusing.
+    const up = await waitReady(here, { pid: opened.pid, target: opened.target });
+    if (!up.ok) return up;
+    pane = { target: opened.target, pid: opened.pid };
+  }
+  if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
+
+  // Which conversation this is going into — needed to confirm below that the
+  // message actually became a turn rather than sitting in the composer. It is
+  // the pane's session, not just any session in this directory: the person may
+  // have their own window open on the same repo, and that is not the one being
+  // typed into.
+  const known = await roster();
+  const live = (pane.pid ? known.sessions.find((s) => s.pid === pane.pid) : null)
+    ?? (await sessionFor(here)).session
+    ?? null;
+  const path = live?.sessionId ? transcriptPath(here, live.sessionId) : null;
+
+  // Wait for the window to finish what it is doing before typing into it.
+  //
+  // A message pasted into a running turn is not queued, it is dropped: the
+  // composer is empty afterwards and the text is simply gone. That is the
+  // ordinary case from the floor rather than an edge one — a person types
+  // while the agent is working — and it was losing two messages in three.
+  // Waiting is what someone at the keyboard would do.
+  if (!(await waitIdle(pane.target))) {
+    return { ok: false, code: 'busy', error: 'the window has been working for too long to take a message — nothing was typed in' };
+  }
+
+  const buffer = `orch-${process.pid}-${Math.abs(hash(here))}`;
+  const set = await tmux(['set-buffer', '-b', buffer, '--', text]);
+  if (!set.ok) return { ok: false, error: set.error };
+  // -p is the bracketed paste; -d deletes the buffer so it doesn't pile up.
+  const paste = await tmux(['paste-buffer', '-p', '-d', '-b', buffer, '-t', pane.target]);
+  if (!paste.ok) {
+    await tmux(['delete-buffer', '-b', buffer]);
+    return { ok: false, error: paste.error };
+  }
+  // Submit, and prove it went by finding the message itself in the transcript.
+  //
+  // This used to watch the transcript merely *grow*, which anything at all
+  // satisfies — a tool result, a subagent, a second process writing the same
+  // file — so a message that never left the composer was reported as
+  // delivered. Nothing downstream looked at the flag either, so a lost message
+  // reached the floor as a sent one and no human could have known.
+  //
+  // Claude Code consumes a bracketed paste asynchronously, and an Enter that
+  // arrives while it is still doing so is dropped — the message then sits in
+  // the composer, typed but never sent, which looks exactly like the floor
+  // having silently failed. Worse, the *next* message pastes onto the end of
+  // it and the two are submitted as one.
+  //
+  // A fixed delay is a magic number that a slower machine breaks, so this
+  // confirms instead: the transcript growing is proof the turn was accepted,
+  // and until it does, Enter is pressed again. Enter on an empty composer does
+  // nothing, so a retry after a submission that did land is harmless.
+  //
+  // A stand-in that just reads stdin cannot reproduce any of this — it accepts
+  // the Enter a TUI drops — so the tests cannot prove it. It was found by
+  // watching a real window, and it is verified there.
+  const before = path ? await transcriptSize(path) : null;
+  await settled(pane.target);
+
+  let sent = false;
+  let last = await screenOf(pane.target);
+  const stop = Date.now() + LAND_TIMEOUT_MS;
+  for (let press = 0; press < SUBMIT_ATTEMPTS && !sent && Date.now() < stop; press++) {
+    const enter = await tmux(['send-keys', '-t', pane.target, 'Enter']);
+    if (!enter.ok) return { ok: false, error: enter.error };
+    // Nothing to check against: the pane is running something with no Claude
+    // Code session to find. A real desk always has one, because waitReady does
+    // not return without it, so this is the stand-in the tests drive.
+    if (!path) return { ok: true, target: pane.target, confirmed: false, unverified: true };
+
+    // Press Enter again only if the window has gone completely still without
+    // the message appearing. Retrying blind is worse than not retrying: an
+    // Enter that Claude Code reads as part of the paste becomes a newline in
+    // the composer, so a message once arrived carrying the eight carriage
+    // returns of the eight retries that "delivered" it.
+    let frozen = 0;
+    while (!sent && Date.now() < stop && frozen < 4) {
+      await sleep(250);
+      sent = await landed(path, before, text);
+      if (sent) break;
+      const now = await screenOf(pane.target);
+      if (now === last) frozen++;
+      else { frozen = 0; last = now; }
+    }
+  }
+
+  if (!sent) {
+    return {
+      ok: false,
+      code: 'not_delivered',
+      target: pane.target,
+      error: 'the window took the message but never submitted it — it is not in the conversation',
+    };
+  }
+  return { ok: true, target: pane.target, confirmed: true };
+}
+
+/**
+ * Press keys in this repo's window — tmux key names, not literal text.
+ *
+ * This is for answering, not for saying: the digit that picks an option in a
+ * permission dialog, the Escape that stops a turn. Anything a person would
+ * type as a message goes through send(), which pastes it as one block.
+ */
+export async function sendKeys(cwd, ...keys) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
+  const r = await tmux(['send-keys', '-t', pane.target, ...keys]);
+  return r.ok ? { ok: true, target: pane.target } : { ok: false, error: r.error };
+}
+
+/**
+ * Hand a message to Claude Code in the editor, through the URL the extension
+ * publishes for exactly this.
+ *
+ * `vscode://anthropic.claude-code/open?session=…&prompt=…` opens a conversation
+ * in VS Code with the text already in the input box. It is a supported entry
+ * point declared by the extension, not a way around one — the same link a page
+ * or a menu item would use.
+ *
+ * Two things it will not do, both load-bearing:
+ *   - it does not press Enter, so the person sends their own message;
+ *   - it refuses a session that is already open ("Session is already open") and
+ *     drops the prompt, so the caller must know that case and say so rather
+ *     than hand over a message that goes nowhere.
+ */
+export async function openInEditor({ sessionId = null, text = null } = {}) {
+  // Both parts are optional: with a prompt this hands over a message, without
+  // one it just brings the conversation up in the editor.
+  if (!sessionId && !(typeof text === "string" && text.trim())) {
+    return { ok: false, error: 'nothing to open' };
+  }
+  const q = new URLSearchParams();
+  if (sessionId) q.set('session', sessionId);
+  if (typeof text === 'string' && text.trim()) q.set('prompt', text);
+  const url = `vscode://anthropic.claude-code/open?${q}`;
+  try {
+    await run('open', ['-a', 'Visual Studio Code', url], { timeout: 10_000 });
+    return { ok: true, url };
+  } catch (err) {
+    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim() };
+  }
+}
+
+/**
+ * Close the window the floor has been driving.
+ *
+ * Handing a conversation to the editor means giving it up here: two processes
+ * resuming one session write to one transcript, and the person ends up talking
+ * to whichever copy they are not looking at.
+ */
+export async function closeWindow(cwd) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: true, closed: false };   // nothing of ours is open
+  const r = await tmux(['kill-window', '-t', pane.target]);
+  return r.ok ? { ok: true, closed: true } : { ok: false, error: r.error };
+}
+
+/** Stop whatever the window is doing, the way Escape does for a person. */
+export async function interrupt(cwd) {
+  return sendKeys(cwd, 'Escape');
+}
+
+/** What the window looks like right now — for the floor to show while a turn runs. */
+export async function screen(cwd, { lines = 60 } = {}) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
+  const r = await tmux(['capture-pane', '-p', '-t', pane.target, '-S', `-${Math.max(1, lines)}`]);
+  return r.ok ? { ok: true, text: r.out } : { ok: false, error: r.error };
+}
+
+/* ───────────────────────── the conversation ───────────────────────── */
+
+/**
+ * Claude Code's own transcript for a session. This is the mirror: both sides
+ * of the conversation, written by Claude Code itself, whoever typed it and
+ * from wherever. The floor tails it instead of being told about turns, which
+ * is why a turn you type in your own terminal shows up on the floor without
+ * anything reporting it.
+ */
+export function transcriptPath(cwd, sessionId) {
+  const slug = cwd.replace(/[^A-Za-z0-9]/g, '-');
+  return join(CLAUDE_HOME, 'projects', slug, `${sessionId}.jsonl`);
+}
+
+/**
+ * How much of a transcript exists right now.
+ *
+ * Used as the starting offset when a desk begins following a conversation, so
+ * that attaching to one already hours long doesn't replay it onto the floor —
+ * while a conversation that is genuinely new starts at 0 and has its opening
+ * exchange reported like any other. Guessing this from "is this the first
+ * read" instead silently loses the first turns of every new session.
+ */
+export async function transcriptSize(path) {
+  try {
+    const { stat } = await import('node:fs/promises');
+    return (await stat(path)).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** The text of one content block list, ignoring tool calls and thinking. */
+function textOf(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('');
+}
+
+/**
+ * The only tool_input keys the floor's collapsed line ever reads. A Write of a
+ * whole file would otherwise put that file on the network on its way to
+ * becoming a one-line summary.
+ */
+const TOOL_INPUT_KEYS = ['command', 'file_path', 'path', 'pattern', 'description', 'prompt', 'url'];
+
+function reduceToolInput(input) {
+  if (!input || typeof input !== 'object') return null;
+  const out = {};
+  for (const k of TOOL_INPUT_KEYS) {
+    if (typeof input[k] === 'string' && input[k].trim()) out[k] = input[k].slice(0, 300);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Read a transcript into turns the floor can render. `after` is a byte offset,
+ * so tailing is a read from where the last one stopped rather than a re-parse
+ * of a conversation that may be very long.
+ */
+export async function readTranscript(path, { after = 0 } = {}) {
+  if (!existsSync(path)) return { ok: false, error: 'no transcript yet', turns: [], offset: after };
+  const { readFile, stat } = await import('node:fs/promises');
+  const { size } = await stat(path);
+  if (size <= after) return { ok: true, turns: [], offset: size };
+  const buf = await readFile(path);
+  // Start at the previous offset, but never mid-line: a JSONL file being
+  // appended to can be read between the write and its newline.
+  const slice = buf.subarray(after).toString('utf8');
+  // Splitting on the newline always leaves a final element that is not a
+  // finished line — the empty string after a trailing newline, or the half of
+  // a line that has been written so far. Either way it is not ours to consume.
+  const complete = slice.split('\n').slice(0, -1);
+  const consumed = complete.reduce((n, l) => n + Buffer.byteLength(l) + 1, 0);
+
+  // This is the floor's only source of conversation turns. The hooks report
+  // state — a prompt is open, a turn started, a turn ended — but not content:
+  // two sources would file every turn twice, and the transcript is the one
+  // Claude Code writes itself, whoever typed and from wherever.
+  const turns = [];
+  for (const line of complete) {
+    if (!line.trim()) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    if (d.type !== 'user' && d.type !== 'assistant') continue;
+    // Sidechain is a subagent's own conversation; it belongs inside the tool
+    // call that owns it, not beside the turns of the session that spawned it.
+    if (d.isMeta || d.isSidechain) continue;
+    const at = d.timestamp ?? null;
+    const uuid = d.uuid ?? null;
+
+    if (d.type === 'user') {
+      const text = textOf(d.message?.content);
+      if (text.trim()) turns.push({ role: 'user', text, at, uuid });
+      continue;
+    }
+    const content = d.message?.content;
+    const text = textOf(content);
+    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid });
+    for (const block of Array.isArray(content) ? content : []) {
+      if (block?.type !== 'tool_use') continue;
+      turns.push({ role: 'tool', text: '', tool_name: block.name ?? 'tool', tool_input: reduceToolInput(block.input), at, uuid });
+    }
+  }
+  return { ok: true, turns, offset: after + consumed };
+}
+
+/** Small stable hash, only used to name a tmux buffer per repo. */
+function hash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+export const tmuxSession = SESSION;

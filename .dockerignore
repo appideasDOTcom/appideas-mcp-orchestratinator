@@ -9,3 +9,4 @@ clients
 *.db-wal
 *.db-shm
 README.md
+host/node_modules

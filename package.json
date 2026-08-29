@@ -13,8 +13,11 @@
     "smoke": "node test/smoke.mjs",
     "test:admin": "node test/admin.mjs",
     "test:auth": "node test/auth.mjs",
-    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:floor",
-    "test:floor": "node test/floor.mjs"
+    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:floor && npm run test:host && npm run test:window",
+    "test:floor": "node test/floor.mjs",
+    "test:host": "node test/host.mjs",
+    "host": "node host/index.js",
+    "test:window": "node test/window.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

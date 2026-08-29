@@ -2,29 +2,45 @@ import express from 'express';
 import { CAST } from './db.js';
 
 /**
- * The floor: what each agent's own Claude Code session is doing.
+ * The floor: what each agent's own Claude Code session is doing — and, for
+ * desks a host has claimed, the session itself.
  *
  * The board (see web.js) answers "what have these agents agreed between
  * themselves". It deliberately cannot answer "who is stuck right now", because
  * an MCP server never sees inside an agent's turn — that limit is real and is
- * documented at length in the README. This module closes the gap from the other
- * end: Claude Code *can* see inside its own turn and will tell anyone who asks,
- * via hooks, so each workstation runs a small plugin that posts here.
+ * documented at length in the README. This module closes the gap from two
+ * directions:
  *
- * Two things follow from that, and they shape everything below:
+ *   1. Reporting. A workstation plugin (plugin/) posts hook events here as each
+ *      Claude Code session runs, so a window you are not looking at still has
+ *      a desk that says what it is doing and whether it needs a human.
  *
- *   - The data arrives by push, not poll. A window that goes quiet stops
+ *   2. Hosting. A workstation service (host/) runs each desk's Claude Code in a
+ *      tmux pane and connects it to the floor. Those desks are a real chat:
+ *      what you type is a user turn in that window, the reply comes back, and a
+ *      permission prompt becomes Approve / Deny here. The human is still the one
+ *      deciding — from one screen instead of one per agent. Nothing is owned:
+ *      you can be attached to the same pane, typing into it, at the same time.
+ *
+ * Two things follow from the first and shape everything below:
+ *
+ *   - Reported data arrives by push, not poll. A window that goes quiet stops
  *     posting, which is information, but a window that is *switched off* also
  *     stops posting and looks identical. So nothing here infers "waiting" from
  *     silence. Waiting is only ever what Claude Code explicitly said it was
- *     waiting for — a permission prompt or an idle prompt — and it is cleared by
- *     the next thing that happens.
+ *     waiting for, and it is cleared by the next thing that happens.
  *
  *   - It is conversation content. Full prompts and full replies, on a server
  *     whose dashboard has no sign-in. That is a deliberate choice for one
  *     trusted network (see the README's note on the port), but it is a bigger
  *     claim than the board ever made, and it is why `turns` is excluded from
- *     backups and why the ingest door needs the same secret as /mcp.
+ *     backups and why the ingest and host doors need the same secret as /mcp.
+ *
+ * And one thing follows from the second: the host is on a workstation, the
+ * server is wherever it is, and only the workstation can reach out. So the host
+ * talks to this server the same way the plugin does — outbound only — and the
+ * server never holds an open port toward anybody's machine. Work for a host
+ * waits in a table until the host asks for it.
  */
 
 /** Per-turn cap. Full text was the point, but one pasted logfile shouldn't
@@ -49,6 +65,21 @@ const TURNS_MAX = 500;
  * cannot be trusted in the other direction.
  */
 const SESSION_STALE_MINUTES = Math.max(1, Number(process.env.FLOOR_SESSION_TTL_MINUTES ?? 60));
+
+/**
+ * A host that hasn't been heard from for this long is offline. Hosts long-poll
+ * for work in ~25-second requests and re-register once a minute, so the default
+ * means two missed check-ins. The chat composer switches to copy-only the
+ * moment a host is offline, because "Send" to a host that isn't there is the
+ * one lie the floor is not allowed to tell.
+ */
+const HOST_STALE_SECONDS = Math.max(30, Number(process.env.FLOOR_HOST_TTL_SECONDS ?? 90));
+
+/** Longest a host's work request is held open before answering "nothing yet". */
+const WORK_WAIT_MAX_MS = 25_000;
+
+/** Longest message accepted from the composer. */
+const CHAT_MAX = 20_000;
 
 /**
  * The notification types that mean a human is the blocker.
@@ -79,6 +110,15 @@ const clip = (v, max = TEXT_MAX) => {
   return s.length > max ? `${s.slice(0, max)}\n… [truncated at ${max} characters]` : s;
 };
 const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
+const secondsSince = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) / 1000 : Infinity);
+const deskKey = (channel, agent) => `${channel}|${agent}`;
+
+/**
+ * The session id a hosted desk's turns are filed under before its SDK session
+ * has announced its own. Deterministic, so the message that starts a session
+ * and the session it starts can be joined up afterwards — see rekeySession.
+ */
+const placeholderSession = (hostId, channel, agent) => `host:${hostId}:${channel}:${agent}`;
 
 /**
  * One line describing a tool call, for the collapsed row in the chat panel.
@@ -105,14 +145,14 @@ function toolSummary(toolName, toolInput) {
 }
 
 /**
- * Apply one hook event.
+ * Apply one hook event from the workstation plugin.
  *
  * Every event upserts the session first, because any event at all is proof the
  * window exists — and because most hook payloads carry only the common fields,
  * the upsert COALESCEs rather than overwrites, so a Stop can't blank the model a
  * SessionStart knew.
  */
-export function ingestHookEvent(store, body) {
+export function ingestHookEvent(store, body, live = null) {
   const channel = str(body.channel);
   const agent = str(body.agent);
   const sessionId = str(body.session_id);
@@ -120,6 +160,7 @@ export function ingestHookEvent(store, body) {
     return { ok: false, error: 'channel, agent and session_id are required' };
   }
   const event = str(body.hook_event_name) ?? 'unknown';
+  const pid = Number.isInteger(Number(body.pid)) && Number(body.pid) > 0 ? Number(body.pid) : null;
 
   store.upsertSession({
     session_id: sessionId,
@@ -130,53 +171,113 @@ export function ingestHookEvent(store, body) {
     model: str(body.model),
     permission_mode: str(body.permission_mode),
     git_branch: str(body.git_branch),
+    runner: 'hook',
+    pid,
   });
   const persona = store.ensurePersona(channel, agent);
+
+  /**
+   * Whether a host is tailing this repo's transcript right now.
+   *
+   * When one is, it is the authority on conversation *content* — it reads what
+   * Claude Code wrote, which is complete and has the tool calls in it — and
+   * these hooks would file every turn a second time. When there is no host
+   * (its machine is off, the service isn't running), the hooks are the only
+   * source there is, and the floor is better off with a partial conversation
+   * than an empty desk. Either way the hooks remain the authority on *state*:
+   * a prompt is open, a turn started, a turn ended.
+   */
+  const hosted = store.hostedDesk(channel, agent);
+  const mirrored = !!hosted && secondsSince(iso(hosted.host_seen), Date.now()) < HOST_STALE_SECONDS;
+
+  const key = deskKey(channel, agent);
+  const state = (s) => {
+    if (!hosted) return;
+    store.setHostedState(channel, agent, s);
+    live?.publish(key, { type: 'state', state: s });
+  };
 
   const turn = (role, text, toolName = null) => {
     const clipped = clip(text);
     if (!clipped && !toolName) return 0;
-    return store.insertTurn({
+    const id = store.insertTurn({
       channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName,
     });
+    live?.publish(deskKey(channel, agent), {
+      type: 'turn',
+      turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, created_at: new Date().toISOString() },
+    });
+    return id;
   };
 
   // Ordered so the clear happens before anything that might set it again.
-  if (CLEARS_AWAITING.has(event)) store.clearAwaiting(sessionId);
+  if (CLEARS_AWAITING.has(event)) {
+    store.clearAwaiting(sessionId);
+    // A prompt that was open is closed by work happening, whether it was
+    // answered from the floor or by the person sitting at the window.
+    if (live?.pending.has(key)) {
+      live.pending.delete(key);
+      live.publish(key, { type: 'permission', request: null });
+    }
+  }
 
   let recorded = null;
   switch (event) {
     case 'SessionEnd':
       store.endSession(sessionId);
+      live?.pending.delete(key);
+      state('idle');
       break;
 
     case 'UserPromptSubmit':
       // The human just typed. By definition they are not the blocker any more,
       // which is why this event clears the queue entry above rather than waiting
       // for the turn to finish.
-      if (body.message) recorded = turn('user', body.message);
+      if (body.message && !mirrored) recorded = turn('user', body.message);
+      state('working');
       break;
 
     case 'Stop':
-      if (body.last_assistant_message) recorded = turn('assistant', body.last_assistant_message);
+      if (body.last_assistant_message && !mirrored) recorded = turn('assistant', body.last_assistant_message);
+      state('idle');
       break;
 
     case 'PreToolUse':
       // Recorded as the tool *starts*, so the floor shows what is happening now
       // rather than what finished a moment ago. PostToolUse would be the honest
       // record of completion, but by then the interesting second has passed.
-      if (str(body.tool_name)) {
+      if (str(body.tool_name) && !mirrored) {
         recorded = turn('tool', toolSummary(body.tool_name, body.tool_input), body.tool_name);
       }
+      state('working');
       break;
 
-    case 'PermissionRequest':
-      store.setAwaiting(
-        sessionId,
-        'permission_request',
-        str(body.tool_name) ? `${body.tool_name} needs a permission decision` : 'a tool needs a permission decision'
-      );
+    /**
+     * A permission prompt, straight from the session that opened it.
+     *
+     * This is why the floor never has to read a prompt off a screen to know one
+     * is open: Claude Code says so. Answering it is a keystroke sent into the
+     * window (see host/index.js), which is exactly what the person sitting at
+     * it would do — and either of them can be the one who does it.
+     */
+    case 'PermissionRequest': {
+      const summary = str(body.tool_name)
+        ? toolSummary(body.tool_name, body.tool_input)
+        : 'a tool needs a permission decision';
+      store.setAwaiting(sessionId, 'permission_request', summary);
+      // The id is only ever used to notice that an answer arrived for a prompt
+      // that has since closed — the window itself is answered with a keystroke.
+      live?.pending.set(key, {
+        request_id: `${sessionId}:${body.tool_name ?? 'tool'}:${Date.parse(new Date().toISOString())}`,
+        tool: str(body.tool_name) ?? 'tool',
+        summary: clip(summary, 500),
+        message: clip(body.notification_message ?? body.message, 500),
+        at: new Date().toISOString(),
+      });
+      state('awaiting');
+      live?.publish(key, { type: 'permission', request: live.pending.get(key) });
       break;
+    }
 
     case 'Notification':
       if (AWAITING_NOTIFICATIONS.has(str(body.notification_type))) {
@@ -200,6 +301,135 @@ export function ingestHookEvent(store, body) {
 }
 
 /**
+ * State that is live rather than stored: the text of a reply while it streams,
+ * the permission prompts hosts are waiting on, the browsers watching a desk,
+ * and the hosts waiting for work. All of it is rebuilt from the hosts within a
+ * minute of a restart — they re-register and re-announce anything pending — so
+ * a table would be a table of things that are about to be wrong.
+ */
+export function createLive() {
+  const partial = new Map();   // deskKey -> text of the reply so far
+  const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
+  const watchers = new Map();  // deskKey -> Set<fn>
+  const waiters = new Map();   // host_id -> wake fn for a held work request
+  return {
+    partial,
+    pending,
+    subscribe(key, fn) {
+      if (!watchers.has(key)) watchers.set(key, new Set());
+      watchers.get(key).add(fn);
+      return () => watchers.get(key)?.delete(fn);
+    },
+    publish(key, event) {
+      for (const fn of watchers.get(key) ?? []) {
+        try { fn(event); } catch { /* a dead browser must not break the rest */ }
+      }
+    },
+    wait(hostId, ms) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { waiters.delete(hostId); resolve(); }, ms);
+        waiters.set(hostId, () => { clearTimeout(timer); waiters.delete(hostId); resolve(); });
+      });
+    },
+    wake(hostId) {
+      waiters.get(hostId)?.();
+    },
+  };
+}
+
+/**
+ * Apply one event from a host about one of its desks.
+ *
+ * A hosted session is written into the same tables as a reported one, so the
+ * rest of the floor — the queue, the staleness rule, the chat panel — cannot
+ * tell the difference and does not need to. The extra state a host has that a
+ * hook doesn't (the reply as it streams, a prompt it is holding open) lives in
+ * `live`.
+ */
+function applyHostEvent(store, live, hostId, ev) {
+  const channel = str(ev.channel);
+  const agent = str(ev.agent);
+  if (!channel || !agent) return false;
+  const key = deskKey(channel, agent);
+  const desk = store.hostedDesk(channel, agent);
+  if (!desk || desk.host_id !== hostId) return false;
+
+  const placeholder = placeholderSession(hostId, channel, agent);
+  const sessionId = str(ev.session_id) ?? desk.sdk_session_id ?? placeholder;
+  const now = new Date().toISOString();
+  const turn = (role, text, toolName = null) => {
+    const clipped = clip(text);
+    if (!clipped && !toolName) return 0;
+    const id = store.insertTurn({ channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName });
+    live.publish(key, { type: 'turn', turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, created_at: now } });
+    return id;
+  };
+  const state = (s) => {
+    store.setHostedState(channel, agent, s);
+    live.publish(key, { type: 'state', state: s });
+  };
+
+  switch (str(ev.type)) {
+    /**
+     * Which conversation is live in that repo now — or none, when the window
+     * has been closed. Not a handoff and nothing to arbitrate: the host simply
+     * reports what `claude agents --json` says is there, and if the person
+     * cleared the conversation or started a different one, that is the
+     * conversation now.
+     */
+    case 'session': {
+      const live_id = str(ev.session_id);
+      if (!live_id) {
+        // No window open here. The desk stays, with the last conversation it
+        // had, so opening one again continues rather than starts over.
+        state('idle');
+        break;
+      }
+      store.upsertSession({
+        session_id: live_id, channel, agent, cwd: str(ev.cwd) ?? desk.cwd, runner: 'host', pid: Number(ev.pid) || null,
+      });
+      // A message sent to a repo with no window was filed under the
+      // placeholder while one was opening. This is when the real id is known.
+      if (live_id !== placeholder) store.rekeySession(channel, agent, placeholder, live_id);
+      if (desk.sdk_session_id !== live_id) {
+        store.setHostedSession(channel, agent, live_id);
+        live.publish(key, { type: 'session', session_id: live_id });
+      }
+      store.ensurePersona(channel, agent);
+      break;
+    }
+
+    /**
+     * A turn, read from Claude Code's own transcript by the host.
+     *
+     * This is the floor's only source of conversation content, and it does not
+     * care who typed it. A message you type in your own terminal arrives here
+     * exactly like one sent from the floor's composer, because both of them
+     * end up in the same transcript. That is the whole reason the floor no
+     * longer needs to know which door a desk is being used through.
+     */
+    case 'turn': {
+      const role = str(ev.role);
+      if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name));
+      else if (role === 'user' || role === 'assistant') turn(role, ev.text);
+      else return false;
+      store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd });
+      break;
+    }
+
+    case 'error':
+      turn('error', str(ev.message) ?? 'the host reported an error');
+      store.setAwaiting(sessionId, 'error', clip(ev.message, 500));
+      state('idle');
+      break;
+
+    default:
+      return false;
+  }
+  return true;
+}
+
+/**
  * The floor's view: one entry per channel, one desk per agent.
  *
  * Sessions arrive newest-first, so the first one seen for a (channel, agent) is
@@ -208,21 +438,42 @@ export function ingestHookEvent(store, body) {
  * seat — the alternative, waiting for it to also appear on the board, would show
  * an empty room to somebody whose windows are plainly open.
  */
-export function buildFloor(store) {
+export function buildFloor(store, live = null) {
   const nowMs = Date.now();
-  const NUL = String.fromCharCode(0);
-  const key = (channel, agent) => [channel, agent].join(NUL);
+  const key = deskKey;
 
   const current = new Map();     // channel+agent -> newest session row
+
   const sessionCount = new Map();
   for (const s of store.floorSessions()) {
     const k = key(s.channel, s.agent);
+
     sessionCount.set(k, (sessionCount.get(k) ?? 0) + 1);
     if (!current.has(k)) current.set(k, s);
   }
 
   const lastTurn = new Map(store.lastTurns().map((t) => [key(t.channel, t.agent), t]));
   const turnCount = new Map(store.turnCounts().map((r) => [key(r.channel, r.agent), r.n]));
+
+  // Hosted desks, with whether their host is actually there to hear us.
+  const hosted = new Map();
+  for (const h of store.listHostedDesks()) {
+    const seen = iso(h.host_seen);
+    hosted.set(key(h.channel, h.agent), {
+      host_id: h.host_id,
+      host_name: h.host_name ?? h.host_id,
+      host_seen: seen,
+      live: h.state !== 'offline' && secondsSince(seen, nowMs) < HOST_STALE_SECONDS,
+      state: h.state,
+      cwd: h.cwd,
+      sdk_session_id: h.sdk_session_id,
+      // Which window the floor drives, and the editor process holding this
+      // conversation instead — the two facts that decide whether it can be
+      // typed into from here.
+      window_id: h.window_id ?? null,
+      outside_pid: h.outside_pid ?? null,
+    });
+  }
 
   // Every agent the board knows gets a desk, not only the ones whose windows
   // run the plugin. A floor is a channel, and a channel with four agents on the
@@ -251,6 +502,7 @@ export function buildFloor(store) {
       .sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0) || a.agent.localeCompare(b.agent))
       .map((p) => {
         const k = key(channel, p.agent);
+        const h = hosted.get(k) ?? null;
         const s = current.get(k) ?? null;
         const t = lastTurn.get(k) ?? null;
         const awaitingSince = iso(s?.awaiting_since);
@@ -263,11 +515,14 @@ export function buildFloor(store) {
         // same reason the board shows a status's age — `waiting · 2h` reads as
         // suspect on its own, so a prompt in a window somebody force-quit still
         // gets looked at rather than trusted forever.
+        // A hosted desk is live exactly as long as its host is: the host says
+        // so once a minute, and it is the one watching that repo's window.
         const heardMinutesAgo = s ? (nowMs - Date.parse(iso(s.updated_at))) / 60000 : Infinity;
-        const live = !!s && !s.ended_at &&
-          (s.awaiting_kind != null || heardMinutesAgo < SESSION_STALE_MINUTES);
+        const hookLive = !!s && !s.ended_at && (s.awaiting_kind != null || heardMinutesAgo < SESSION_STALE_MINUTES);
+        const live_ = h ? h.live : hookLive;
+        const pendingReq = live ? live.pending.get(k) ?? null : null;
 
-        if (live && s.awaiting_kind) {
+        if (live_ && s?.awaiting_kind) {
           queue.push({
             channel,
             agent: p.agent,
@@ -281,6 +536,9 @@ export function buildFloor(store) {
             // unreadable; the last segment is what the tab actually says.
             window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
             session_id: s.session_id,
+            // A hosted prompt can be answered right here.
+            hosted: !!h,
+            request_id: pendingReq?.request_id ?? null,
           });
         }
 
@@ -288,10 +546,32 @@ export function buildFloor(store) {
           agent: p.agent,
           persona: p.persona,
           seat: p.seat ?? 0,
-          live,
+          live: live_,
           // False until this desk's window has posted a single hook event — the
           // one distinction between "away" and "never installed the plugin".
           reporting: !!s,
+          hosted: h
+            ? {
+                host: h.host_name,
+                live: h.live,
+                state: h.state,
+                window: h.cwd ? h.cwd.split('/').filter(Boolean).pop() : null,
+                // The conversation the panel is scoped to — whichever one is
+                // live in that repo. Before a window has opened, the
+                // placeholder the first message is filed under, so the panel is
+                // scoped from the first keystroke rather than the first reply.
+                session_id: h.sdk_session_id ?? placeholderSession(h.host_id, channel, p.agent),
+                // Who is holding this conversation right now.
+                //
+                // A conversation is one process. When it is open in an editor,
+                // the floor cannot type into it — not a failure, just where it
+                // is. The floor says so and offers the move, instead of taking
+                // a message it cannot deliver.
+                held: h.outside_pid ? 'editor' : (h.window_id ? 'floor' : null),
+                held_pid: h.outside_pid ?? null,
+              }
+            : null,
+          permission: pendingReq,
           session: s
             ? {
                 session_id: s.session_id,
@@ -329,22 +609,34 @@ export function buildFloor(store) {
   // sort in their head.
   queue.sort((a, b) => (b.waiting_seconds ?? 0) - (a.waiting_seconds ?? 0));
 
+  const hosts = store.listHosts().map((h) => ({
+    host_id: h.host_id,
+    name: h.name,
+    last_seen: iso(h.last_seen),
+    live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+  }));
+
   return {
     now: new Date(nowMs).toISOString(),
     channels,
     queue,
+    hosts,
     cast: CAST,
     totals: {
       channels: channels.length,
       desks: channels.reduce((n, c) => n + c.desks.length, 0),
       live: channels.reduce((n, c) => n + c.live, 0),
       awaiting: queue.length,
+      hosted: channels.reduce((n, c) => n + c.desks.filter((d) => d.hosted?.live).length, 0),
     },
   };
 }
 
 export function createFloorRouter({ store, auth }) {
   const router = express.Router();
+  const live = createLive();
+
+  /* ───────────────────── the plugin's door ───────────────────── */
 
   /**
    * Where each workstation's hook plugin posts. Guarded by the same shared
@@ -361,7 +653,7 @@ export function createFloorRouter({ store, auth }) {
       return res.status(400).json({ ok: false, error: 'expected a JSON object' });
     }
     try {
-      const result = ingestHookEvent(store, body);
+      const result = ingestHookEvent(store, body, live);
       return res.status(result.ok ? 200 : 400).json(result);
     } catch (err) {
       console.warn(`[orchestratinator] ingest failed: ${err.message}`);
@@ -369,8 +661,110 @@ export function createFloorRouter({ store, auth }) {
     }
   });
 
+  /* ───────────────────── the host's doors ───────────────────── */
+
+  /**
+   * A host announces itself and the desks it can run. Called at startup and
+   * then once a minute as a heartbeat, carrying any permission prompt it is
+   * still holding open — which is how `live.pending` survives a server restart
+   * without ever being written down.
+   *
+   * The reply tells the host which SDK session each desk last had, so a host
+   * that restarted can resume the conversation rather than start a new one.
+   */
+  router.post('/api/host/register', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    const name = str(req.body?.name) ?? hostId;
+    store.registerHost(hostId, name, str(req.body?.tmux));
+
+    const desks = Array.isArray(req.body?.desks) ? req.body.desks : [];
+    const accepted = [];
+    for (const d of desks) {
+      const channel = str(d?.channel);
+      const agent = str(d?.agent);
+      const cwd = str(d?.cwd);
+      if (!channel || !agent || !cwd) continue;
+      store.hostDesk(channel, agent, hostId, cwd, {
+        windowId: str(d?.window),
+        outsidePid: Number(d?.outside_pid) || null,
+      });
+      store.ensurePersona(channel, agent);
+      const row = store.hostedDesk(channel, agent);
+      accepted.push({
+        channel, agent, cwd,
+        sdk_session_id: row?.sdk_session_id ?? null,
+      });
+    }
+
+    for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
+      applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' });
+    }
+
+    res.json({ ok: true, host_id: hostId, desks: accepted, work_wait_max_ms: WORK_WAIT_MAX_MS });
+  });
+
+  /** A host going away cleanly. Its desks stay, marked offline, so the session
+   *  ids they carry survive for the next time it comes back. */
+  router.post('/api/host/unregister', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    store.setHostState(hostId, 'offline');
+    for (const d of store.listHostedDesks().filter((x) => x.host_id === hostId)) {
+      const k = deskKey(d.channel, d.agent);
+      live.pending.delete(k);
+      live.partial.delete(k);
+      live.publish(k, { type: 'state', state: 'offline' });
+    }
+    res.json({ ok: true });
+  });
+
+  /**
+   * Work for a host: chat messages to deliver, permission decisions to apply,
+   * interrupts. Held open for up to `wait` seconds so the host learns about a
+   * message within milliseconds of it being typed without polling in a tight
+   * loop, and without this server ever connecting *to* a workstation.
+   */
+  router.get('/api/host/work', auth.ingestGuard, async (req, res) => {
+    const hostId = str(req.query.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    store.touchHost(hostId);
+    const waitMs = Math.min(WORK_WAIT_MAX_MS, Math.max(0, Number(req.query.wait) || 0) * 1000);
+
+    let items = store.takeHostWork(hostId);
+    if (!items.length && waitMs > 0) {
+      let gone = false;
+      req.on('close', () => { gone = true; live.wake(hostId); });
+      await live.wait(hostId, waitMs);
+      if (gone) return;
+      items = store.takeHostWork(hostId);
+      store.touchHost(hostId);
+    }
+    res.json({ work: items });
+  });
+
+  /** What a host's desks are doing. A batch, because a streaming reply would
+   *  otherwise be one HTTP request per token. */
+  router.post('/api/host/events', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    store.touchHost(hostId);
+    const events = Array.isArray(req.body?.events) ? req.body.events : [];
+    let applied = 0;
+    for (const ev of events) {
+      try {
+        if (ev && typeof ev === 'object' && applyHostEvent(store, live, hostId, ev)) applied++;
+      } catch (err) {
+        console.warn(`[orchestratinator] host event failed: ${err.message}`);
+      }
+    }
+    res.json({ ok: true, applied });
+  });
+
+  /* ───────────────────── the browser's doors ───────────────────── */
+
   router.get('/api/floor', (_req, res) => {
-    res.json(buildFloor(store));
+    res.json(buildFloor(store, live));
   });
 
   /**
@@ -384,11 +778,46 @@ export function createFloorRouter({ store, auth }) {
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
     const since = Math.max(0, Number(req.query.since) || 0);
     const limit = Math.min(TURNS_MAX, Math.max(1, Number(req.query.limit) || TURNS_DEFAULT));
-    const rows = store.recentTurns(channel, agent, { since, limit }).map((r) => ({
+    const session = str(req.query.session);
+    // A conversation can span session ids — a fork carries its parent's
+    // history — so the filter is the chain, not the one id.
+    const sessions = session ? store.sessionChain(session) : null;
+    const rows = store.recentTurns(channel, agent, { since, limit, sessions }).map((r) => ({
       ...r,
       created_at: iso(r.created_at),
     }));
-    res.json({ channel, agent, since, count: rows.length, rows });
+    res.json({ channel, agent, since, session, sessions, count: rows.length, rows, partial: live.partial.get(deskKey(channel, agent)) ?? '' });
+  });
+
+  /**
+   * A desk, live. Server-sent events: each new turn, the reply as it streams,
+   * state changes, and permission prompts as they open and close. Read-only,
+   * like every other GET here, and it degrades to the two-second poll if a
+   * proxy in the way doesn't like long responses.
+   */
+  router.get('/api/floor/stream', (req, res) => {
+    const channel = str(req.query.channel);
+    const agent = str(req.query.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const key = deskKey(channel, agent);
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    res.write('retry: 2000\n\n');
+    const send = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* closed */ } };
+
+    // What's true right now, so a panel that just opened doesn't wait for the
+    // next event to learn there is a reply mid-stream or a prompt open.
+    if (live.partial.get(key)) send({ type: 'partial', text: live.partial.get(key) });
+    if (live.pending.get(key)) send({ type: 'permission', request: live.pending.get(key) });
+
+    const unsubscribe = live.subscribe(key, send);
+    const heartbeat = setInterval(() => { try { res.write(': hb\n\n'); } catch { /* closed */ } }, 15_000);
+    req.on('close', () => { clearInterval(heartbeat); unsubscribe(); });
   });
 
   /**
@@ -407,6 +836,120 @@ export function createFloorRouter({ store, auth }) {
     const changes = store.setPersona(channel, agent, persona);
     store.logAdmin(channel, 'persona.set', { target: agent, detail: persona });
     res.json({ ok: true, changes, channel, agent, persona });
+  });
+
+  /** A hosted desk that can take a message right now, or the reason it can't. */
+  function hostedOrWhyNot(channel, agent) {
+    const h = store.hostedDesk(channel, agent);
+    if (!h) return { error: 'No host on this board is running that repo, so there is nowhere to send this.', code: 'not_hosted' };
+    if (h.state === 'offline' || secondsSince(iso(h.host_seen), Date.now()) >= HOST_STALE_SECONDS) {
+      return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
+    }
+    // A conversation is one process, and right now an editor has it. Nothing
+    // can be typed into it from here — so say that before a message is taken,
+    // rather than accepting one and failing to deliver it.
+    if (h.outside_pid) {
+      return {
+        error: 'This conversation is open in your editor. Close it there, or use “Open in VS Code” to move it back, then type here.',
+        code: 'held_by_editor',
+      };
+    }
+    return { hosted: h };
+  }
+
+  /**
+   * Say something to a hosted desk. The message is a user turn in that session:
+   * recorded here, handed to the host, and answered in the same conversation.
+   * Refused, with the reason, when nothing is there to receive it — the floor
+   * would rather say "the host is offline" than swallow a message.
+   */
+  router.post('/api/floor/chat', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    if (!channel || !agent || !text) return res.status(400).json({ error: 'channel, agent and text are required' });
+    if (text.length > CHAT_MAX) return res.status(400).json({ error: `text must be ${CHAT_MAX} characters or fewer` });
+    const check = hostedOrWhyNot(channel, agent);
+    if (check.error) return res.status(409).json(check);
+
+    const h = check.hosted;
+    // The message is not written down here.
+    //
+    // It used to be, the moment it was accepted, and it was then written a
+    // second time when the mirror read it back out of the window's own
+    // transcript — so every message you sent appeared on the floor twice. The
+    // deeper problem was that the first copy was a claim rather than a fact:
+    // it appeared identically whether the window took the message or dropped
+    // it. The conversation is what the window recorded, and nothing else, so
+    // this enqueues the work and lets the mirror say what actually happened.
+    // The page shows your message as sending until it comes back.
+    // The host does the delivery: it types this into the desk's window, the
+    // same window the person's own terminal is attached to. Nothing has to be
+    // handed over first, so there is nothing to say here about whose turn it is.
+    store.enqueueHostWork(h.host_id, channel, agent, 'chat', { text });
+    live.wake(h.host_id);
+    res.json({ ok: true, host: h.host_name ?? h.host_id });
+  });
+
+  /**
+   * Move this desk's conversation into the editor.
+   *
+   * One process holds a conversation. If the floor has it open in a window of
+   * its own, that window is closed first — two processes on one transcript is
+   * the bug that made a message get answered by a copy nobody was watching.
+   */
+  router.post('/api/floor/handback', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const h = store.hostedDesk(channel, agent);
+    if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
+    store.enqueueHostWork(h.host_id, channel, agent, 'handback', {});
+    live.wake(h.host_id);
+    res.json({ ok: true });
+  });
+
+  /**
+   * Answer a permission prompt a hosted desk is holding open. This is the
+   * human-in-the-middle, done from the floor: the same decision the window
+   * would have asked for, recorded as an operator action so the log can say
+   * who allowed what.
+   */
+  router.post('/api/floor/permission', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    const requestId = str(req.body?.request_id);
+    const decision = str(req.body?.decision);
+    if (!channel || !agent || !requestId || !['allow', 'deny'].includes(decision)) {
+      return res.status(400).json({ error: 'channel, agent, request_id and a decision of allow or deny are required' });
+    }
+    const check = hostedOrWhyNot(channel, agent);
+    if (check.error) return res.status(409).json(check);
+    const key = deskKey(channel, agent);
+    const pendingReq = live.pending.get(key);
+    if (!pendingReq || pendingReq.request_id !== requestId) {
+      return res.status(409).json({ error: 'That prompt is no longer open.', code: 'stale_request' });
+    }
+
+    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
+      request_id: requestId, decision, message: str(req.body?.message),
+    });
+    live.wake(check.hosted.host_id);
+    store.logAdmin(channel, `permission.${decision}`, { target: agent, detail: pendingReq.summary });
+    res.json({ ok: true, request_id: requestId, decision });
+  });
+
+  /** Stop the current turn on a hosted desk. */
+  router.post('/api/floor/interrupt', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const check = hostedOrWhyNot(channel, agent);
+    if (check.error) return res.status(409).json(check);
+    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'interrupt', {});
+    live.wake(check.hosted.host_id);
+    store.logAdmin(channel, 'interrupt', { target: agent });
+    res.json({ ok: true });
   });
 
   return router;

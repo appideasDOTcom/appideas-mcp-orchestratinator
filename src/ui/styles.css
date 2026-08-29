@@ -687,3 +687,36 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    (it inherits that) but the nameplate carries the reason, in the warning tone
    rather than the error one: it is a to-do, not a failure. */
 .desk.not-reporting .plateRole { fill: var(--busy); }
+
+/* The copy button after it worked — the one moment it should look different. */
+.btn.primary.done { background: var(--idle-bg); border-color: var(--idle); color: var(--idle); }
+
+/* The reply as it streams in — same shape as a finished turn, a shade quieter,
+   and replaced by the real row the moment the turn ends. */
+/* A conversation an editor is holding. The composer stays visible — you can
+   still read the desk — but it reads as parked rather than broken. */
+.p-compose.held #p-text { opacity: 0.5; }
+
+/* Sent, but not yet in the conversation. It has to read as pending, because
+   the whole point is that "accepted" and "delivered" are different things. */
+.t-pending { opacity: 0.55; }
+.t-pending .t-body { border: 1px dashed var(--line); background: transparent; }
+.t-partial .t-body { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
+.t-partial .t-body::after { content: '▍'; color: var(--accent); animation: caret 1s steps(2) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .t-partial .t-body::after { animation: none; } }
+
+/* A permission prompt the floor can answer. The buttons sit inside the alert
+   because the decision and its reason belong in one glance. */
+.p-alert-ask { display: flex; flex-direction: column; gap: 6px; }
+.p-decide { display: flex; gap: 6px; }
+.q-row .btn.primary, .q-row .btn.danger { padding: 2px 9px; }
+
+/* A hosted desk: the monitor is on, because the floor is what's on it. */
+.desk.hosted .monitor { fill: color-mix(in srgb, var(--accent) 45%, var(--surface)); }
+.desk.hosted .plateRole { fill: var(--accent); }
+.desk.hosted.away .plateRole { fill: var(--block); }
+/* A terminal has the desk: the floor is a window on it, so the plate says so in plain text. */
+
+.btn.done { background: var(--idle-bg); border-color: var(--idle); color: var(--idle); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }

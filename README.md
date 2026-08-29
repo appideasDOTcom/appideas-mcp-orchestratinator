@@ -12,14 +12,17 @@ shared **contracts** (the agreed interface between two plugins), and a lightweig
 ---
 
 ## Simplest use case
-- On the Pro plugin chat window
-```
-/loop 60s Poll the orchestratinator: list_tasks status=open, and poll_messages.
-Claim and handle anything for pro per CLAUDE.md, then complete_task.
-If nothing is pending, report idle and do nothing else.
-```
-- Chat from the Free window. Try to be clear about Pro implementation vs. Free
-- Stop the loop when done
+- Run the host on your machine once (`./host/install.sh <your projects dir>`); it
+  stays running and finds every repo that is a desk.
+- Open the floor at `http://localhost:8787/` and type to a desk. If no Claude Code
+  window is open for that repo, one opens; if one is already open, the message
+  lands in it.
+- Sit at any desk yourself whenever you want: `tmux attach -t orch`. Each desk is
+  a window in that session. Type there instead — same conversation, and the floor
+  keeps showing it.
+
+There is nothing to hand over and nothing to stop. You are never choosing between
+the floor and your terminal; they are two windows on the same session.
 
 ## Some useful commands
 In a terminal:
@@ -30,7 +33,8 @@ docker compose logs -f orchestratinator    // tail
 curl -s localhost:8787/health              // is it up?
 open http://localhost:8787/                // the dashboard — who's connected, what they're doing
                                            //   (the board/floor switch is top right)
-npm test                                   // all four suites: coordination, operator actions, the doors, the floor
+npm test                                   // all six suites: coordination, operator actions, the doors,
+                                           //   the floor, the host, and the window
 ```
 In a chat window:
 ```
@@ -40,24 +44,30 @@ list_tasks status=claimed                  // in-progress claims (stale ones aut
 get_contract                               // read the whole agreed interface
 ```
 
-## The one concept that shapes everything: it's pull, not push
+## Two different questions, two different mechanisms
 
-MCP is client-initiated. This server can **hold** shared state and messages, but
-it **cannot wake an idle agent** in another window and make it act. An agent only
-sees new messages/tasks when it calls a tool to check. So coordination is a
-cooperative protocol, not remote control. In practice you bridge that gap one of
-three ways:
+**Agents talking to each other is pull.** MCP is client-initiated: this server can
+**hold** shared state and messages, but an agent only sees new messages and tasks
+when it calls a tool to check. Coordination between two agents is a cooperative
+protocol, not remote control, and nothing here pretends otherwise.
 
-1. **Type into the other window.** Simplest, and the only one that is immediate.
-2. **Poll on a loop** — have the consuming agent run `poll_messages` / `list_tasks`
-   every N minutes (e.g. Claude Code's `/loop`). This is the one that lets you
-   leave something on the board and have it picked up without you being there.
-3. **Poll at boundaries** — a Stop/PostToolUse hook that checks the board when the
-   agent finishes a step.
+**A human talking to an agent is push.** That is a different problem with a
+different answer. Claude Code runs in a tmux pane, so the floor types into it the
+way you would — `tmux send-keys`, as one bracketed paste. The window does not
+have to be idle, does not have to be polling, and does not have to be yours: you
+can be attached to the same pane at the same time.
 
-Use #2. The dashboard deliberately has no button that claims to wake an agent:
-the server cannot make another window take a turn, and a button that pretends
-otherwise is worse than not having one.
+This used to be one question with one answer, and the answer was wrong. The floor
+had a *driver* per desk — a window you had open "owned" its session, so the floor
+stood aside and offered you a copy button. That was built on the belief that a
+live Claude Code window cannot be typed into from outside. It can. Everything
+that belief produced — the driver, the release, the fork-versus-resume, the
+process watching, the session TTL, and a second half-built chat client called
+`orch` — is gone.
+
+What the floor still cannot do is make an agent act *on the board*: leaving a task
+in `list_tasks` does not wake anybody. Type to them on the floor instead, which
+now actually reaches them.
 
 ---
 
@@ -214,21 +224,53 @@ that finishes, as a tool starts, and when Claude Code needs you. Every hook
 detaches immediately, so none of it is on the critical path of a turn, and every
 failure — server down, network gone, malformed config — exits quietly. A floor
 going stale is visible on the floor; a red line in somebody's terminal is a bug
-report about a feature they weren't thinking about.
+report about a feature they weren't thinking about. A session the host runs is
+reported by the host instead, and the hook stays silent for it.
 
-### Nudging
+### Chatting with a desk
 
-The desk panel has a composer, and its button **copies** — it does not send. This
-is the same rule the board follows in not offering a button that claims to wake
-an agent. A message posted to the mailbox is not connected to the session: the
-agent sees it on its next poll, if it polls, and it never appears in the window
-where the conversation is actually happening. So the floor writes the nudge and
-names the window; you paste it, and it lands where it works.
+A desk is one of two things, and the panel says which.
 
-`claude --remote-control` can genuinely queue a prompt into a live session and is
-the supported way to close that last gap. It is deliberately not wired up here:
-the human in the middle is load-bearing, and the job of this view is to make that
-role quick and obvious, not to route around it.
+A **reported** desk is a window on somebody's machine — a VS Code session the
+plugin tells the floor about. You can watch it; you cannot type into it, because
+nothing can. (Remote Control is the one thing that sends into an interactive
+session, and only claude.ai and the Claude apps can drive it.) The composer on a
+reported desk offers **copy**: it puts your text on the clipboard and names the
+window to paste it into.
+
+A **hosted** desk is a session the floor runs. A small service on the
+workstation — the host, under [`host/`](host/) — runs each agent through the
+Agent SDK: the same engine, tools, `.mcp.json`, hooks and `CLAUDE.md` as an
+interactive window in that directory, driven over a pipe instead of a keyboard.
+Type on the floor and it is a user turn in that session; the reply streams back
+into the panel; a permission prompt becomes **Approve / Deny** on the desk and in
+the *Needs you* list. The human is still the one deciding — from one screen
+instead of one per agent. Enter sends, Shift+Enter is a new line, **stop**
+interrupts the turn.
+
+The host only ever reaches *out*. It registers with the server, then holds a
+request open asking for work; the server never connects to a workstation and
+nothing on the workstation listens. If the server is down the host retries; if
+the host is down the floor says so and the composer goes back to copy. Sessions
+survive host restarts — the server remembers each desk's session id and the host
+resumes it.
+
+#### Installing the host
+
+Once per machine, from this repo:
+
+```
+./host/install.sh ~/Documents/dev/appideas
+```
+
+Name the directory (or directories) your orchestratinator repos live under. The
+script finds them — a repo is a desk if its `.mcp.json` carries `X-Channel` and
+`X-Agent` — reads the server address and the shared secret from the first one,
+installs the host's single dependency, and registers a LaunchAgent so the host
+starts at login and comes back if it stops. `claude` has to be on the PATH and
+signed in: the host runs the same binary your terminal does, with the same login.
+
+To run it by hand instead: `ORCH_HOST_ROOTS=~/Documents/dev/appideas npm run host`.
 
 ### What this puts on the server
 

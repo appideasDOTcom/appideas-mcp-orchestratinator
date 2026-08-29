@@ -44,6 +44,7 @@
     on: false,
     open: null,          // { channel, agent } whose chat panel is showing
     turns: [],
+    sending: [],         // messages accepted but not yet seen in the conversation
     sinceTurn: 0,
     lastActivityId: 0,
     primed: false,       // first activity poll only records the high-water mark
@@ -53,6 +54,9 @@
     panelFor: null,      // which desk the panel skeleton was built for
     renderedTurn: 0,     // highest turn id already in the panel
     stick: true,         // auto-scroll follows only while the reader is at the bottom
+    stream: null,        // EventSource for the open desk, if the browser has one
+    partial: '',         // the reply being streamed to the open desk right now
+    filterWas: null,     // the session the panel was last scoped to
     timer: null,
   };
 
@@ -117,7 +121,7 @@
   function deskState(d) {
     if (!d.live) return 'away';
     if (d.session?.awaiting_kind) return 'needs-you';
-    if (d.last_turn?.role === 'tool') return 'working';
+    if (d.hosted?.state === 'working' || d.last_turn?.role === 'tool') return 'working';
     return 'here';
   }
 
@@ -160,7 +164,7 @@
     const { x, y } = deskXY(i, geo);
     const state = deskState(d);
     const g = el('g', {
-      class: `desk ${state}${d.reporting ? '' : ' not-reporting'}`,
+      class: `desk ${state}${d.reporting || d.hosted ? '' : ' not-reporting'}${d.hosted ? ' hosted' : ''}`,
       transform: `translate(${x} ${y})`,
       'data-channel': channel,
       'data-agent': d.agent,
@@ -202,7 +206,9 @@
     // A desk the board knows but no window has ever reported from says so on
     // its nameplate — it is the difference between "stepped away" and "never
     // installed the plugin", and only one of those is something to go fix.
-    plate.lastChild.textContent = d.reporting ? d.agent : `${d.agent} · not reporting`;
+    plate.lastChild.textContent = d.hosted
+      ? `${d.agent} · ${d.hosted.live ? 'ready' : 'host offline'}`
+      : d.reporting ? d.agent : `${d.agent} · not reporting`;
     g.appendChild(plate);
 
     // What this desk is doing — the collapsed tool call, or the start of the last
@@ -341,6 +347,9 @@
               <span class="q-win mono" title="${esc(q.cwd ?? '')}">${esc(q.window ?? '—')}</span>
               <span class="q-age mono">${esc(ago(q.since))}</span>
             </div>
+            ${q.hosted && q.request_id ? `
+              <button class="btn primary" data-act="permit" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Approve</button>
+              <button class="btn danger" data-act="refuse" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Deny</button>` : ''}
             <button class="btn q-open" data-act="open" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">open</button>
           </div>`;
       })
@@ -388,7 +397,9 @@
         <textarea id="p-text" class="input" rows="3"></textarea>
         <div class="p-actions">
           <span class="muted p-hint"></span>
-          <button class="btn primary" data-act="copy">Copy nudge</button>
+          <button class="btn" data-act="stop" title="Stop the current turn">stop</button>
+          <button class="btn" data-act="handback" title="Open this conversation in VS Code">Open in VS Code</button>
+          <button class="btn primary" data-act="send">Send</button>
         </div>
       </div>`;
     ui.stick = true;
@@ -409,6 +420,7 @@
       wrap.classList.add('hidden');
       wrap.innerHTML = '';
       ui.panelFor = null;
+      closeStream();
       return;
     }
     const { channel, agent } = ui.open;
@@ -426,40 +438,104 @@
     wrap.classList.remove('hidden');
 
     const s = d.session ?? {};
-    const presence = d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
+    const h = d.hosted;
+    // Whether this desk can be typed into at all. There is no longer a case
+    // for "somebody else has it": a message goes to the repo's Claude Code
+    // window, and if there isn't one open the host opens one. The only thing
+    // that can stop it is the host on that machine not running.
+    // A conversation is one process. When an editor has it, the floor can show
+    // it and can move it, but cannot type into it — a different thing from a
+    // desk that is offline, and it needs to read that way.
+    const held = h?.held === 'editor';
+    const canChat = !!h?.live && !held;
+    const presence = h
+      ? (h.live ? `on ${h.host}${h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
+      : d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
     wrap.querySelector('.p-persona').textContent = d.persona;
     wrap.querySelector('.p-meta').textContent =
-      `${s.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${s.model ? ` · ${s.model}` : ''}` +
+      `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${s.model ? ` · ${s.model}` : ''}` +
       ` · ${presence} · ${d.turns} turn${d.turns === 1 ? '' : 's'}`;
 
-    // The alert is rebuilt only when what it says changes; its age ticks in place.
+    // The alert is rebuilt only when what it says changes; its age ticks in
+    // place. On a hosted desk a permission prompt carries its answer buttons:
+    // this is the human-in-the-middle, the same decision the window would have
+    // asked for, answered from here.
     const alertSlot = wrap.querySelector('.p-alert-slot');
-    const alertSig = s.awaiting_kind ? `${s.awaiting_kind}|${s.awaiting_message ?? ''}|${s.awaiting_since ?? ''}` : '';
+    const req = canChat ? d.permission : null;
+    const alertSig = s.awaiting_kind ? `${s.awaiting_kind}|${s.awaiting_message ?? ''}|${s.awaiting_since ?? ''}|${req?.request_id ?? ''}` : '';
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = s.awaiting_kind
-        ? `<div class="p-alert"><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(s.awaiting_message, 160))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>`
+        ? `<div class="p-alert${req ? ' p-alert-ask' : ''}">
+             <div><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary ?? s.awaiting_message, 200))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
+             ${req ? `<div class="p-decide">
+               <button class="btn primary" data-act="permit" data-request="${esc(req.request_id)}">Approve</button>
+               <button class="btn danger" data-act="refuse" data-request="${esc(req.request_id)}">Deny</button>
+             </div>` : ''}
+           </div>`
         : '';
     }
 
-    $('p-text').placeholder = `Write the nudge for ${d.persona}…`;
-    wrap.querySelector('.p-hint').innerHTML =
-      `Copies to your clipboard. Paste it into <b class="mono">${esc(s.window ?? agent)}</b> — this never types into a session for you.`;
+    $('p-text').placeholder = canChat
+      ? `Message ${d.persona}…`
+      : held
+      ? `${d.persona}’s conversation is open in your editor…`
+      : `${d.persona}’s machine isn’t reachable right now…`;
+    wrap.querySelector('[data-act="send"]').disabled = !canChat;
+    wrap.querySelector('[data-act="stop"]').classList.toggle('hidden', !(canChat && h.state === 'working'));
+    wrap.querySelector('[data-act="handback"]').classList.toggle('hidden', !h?.live);
+    wrap.querySelector('.p-compose').classList.toggle('held', held);
+    // The hint says exactly what will happen, because a Send button that
+    // sometimes can't is worse than one that says why.
+    wrap.querySelector('.p-hint').innerHTML = held
+      ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the button — one app holds a conversation at a time.`
+      : canChat
+      ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
+      : h
+        ? `The host for this desk (${esc(h.host)}) is offline, so nothing sent here can reach it. Start it on that machine and this works again.`
+        : `No host on this board is running that repo, so there is nowhere to send this yet.`;
 
     // Turns are appended, never re-rendered. A row already on screen stays
-    // exactly where it is, which is what makes reading upward possible.
+    // exactly where it is, which is what makes reading upward possible. The
+    // reply-in-progress is one extra node at the bottom, updated in place.
     const box = $('p-turns');
-    if (!ui.turns.length) {
+    let partialNode = box.querySelector('.t-partial');
+    if (!ui.turns.length && !ui.partial) {
       if (!box.querySelector('.q-empty')) {
-        box.innerHTML = `<div class="q-empty">${d.reporting
-          ? 'No conversation captured yet.'
-          : 'This window isn’t reporting. Install the <b>orchestratinator-floor</b> plugin on its machine and restart the session — its conversation appears here as it runs.'}</div>`;
+        box.innerHTML = `<div class="q-empty">${canChat
+          ? `Say something to ${esc(d.persona)}.`
+          : d.reporting
+            ? 'No conversation captured yet.'
+            : 'This window isn’t reporting. Install the <b>orchestratinator-floor</b> plugin on its machine and restart the session — its conversation appears here as it runs.'}</div>`;
       }
     } else {
       box.querySelector('.q-empty')?.remove();
       const fresh = ui.turns.filter((t) => t.id > ui.renderedTurn);
-      for (const t of fresh) box.appendChild(turnNode(t));
+      for (const t of fresh) box.insertBefore(turnNode(t), partialNode);
       if (fresh.length) ui.renderedTurn = Math.max(...fresh.map((t) => t.id));
+    }
+    // Anything sent but not yet in the conversation, shown as itself rather
+    // than as a turn: it is not one until the window says so.
+    for (const stale of box.querySelectorAll('.t-pending')) stale.remove();
+    for (const p of ui.sending) {
+      const node = document.createElement('div');
+      node.className = 't t-user t-pending';
+      node.innerHTML = `<div class="t-who">you<span class="t-when mono">sending…</span></div>` +
+        ' <div class="t-body"></div>';
+      node.querySelector('.t-body').textContent = p.text;
+      box.insertBefore(node, partialNode);
+    }
+
+    if (ui.partial) {
+      if (!partialNode) {
+        partialNode = document.createElement('div');
+        partialNode.className = 't t-assistant t-partial';
+        partialNode.innerHTML = '<div class="t-who">agent<span class="t-when mono">typing…</span></div><div class="t-body"></div>';
+        box.appendChild(partialNode);
+      }
+      partialNode.querySelector('.t-body').textContent = ui.partial;
+    } else if (partialNode) {
+      partialNode.remove();
     }
     for (const w of wrap.querySelectorAll('.t-when[data-at]')) w.textContent = ago(w.dataset.at);
     if (ui.stick) box.scrollTop = box.scrollHeight;
@@ -469,18 +545,94 @@
     if (!ui.open) return;
     if (reset) {
       ui.turns = [];
+    ui.sending = [];
       ui.sinceTurn = 0;
     }
     const { channel, agent } = ui.open;
-    const url = `./api/floor/turns?channel=${encodeURIComponent(channel)}&agent=${encodeURIComponent(agent)}&since=${ui.sinceTurn}`;
+    // A hosted desk shows the hosted session — the one you can talk to — even
+    // if a window in the same repo is reporting turns of its own to this desk.
+    const sess = sessionFilter();
+    const url = `./api/floor/turns?channel=${encodeURIComponent(channel)}&agent=${encodeURIComponent(agent)}&since=${ui.sinceTurn}` +
+      (sess ? `&session=${encodeURIComponent(sess)}` : '');
     const r = await fetch(url, { headers: { accept: 'application/json' } });
     if (!r.ok) return;
     const d = await r.json();
     if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) return;
     if (d.rows.length) {
-      ui.turns = ui.turns.concat(d.rows).slice(-300);
+      const known = new Set(ui.turns.map((x) => x.id));
+      ui.turns = ui.turns.concat(d.rows.filter((x) => !known.has(x.id))).slice(-300);
       ui.sinceTurn = Math.max(ui.sinceTurn, ...d.rows.map((x) => x.id));
+      settle(d.rows);
     }
+    if (typeof d.partial === 'string' && !ui.stream) ui.partial = d.partial;
+  }
+
+  /**
+   * Forget a pending message once the window has actually recorded it.
+   *
+   * Matching on the text is exactly right here: the turn that comes back is
+   * the window saying "this is in the conversation", and that is the only
+   * thing that should retire the "sending" state.
+   */
+  const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+  function settle(rows) {
+    if (!ui.sending.length) return;
+    const arrived = rows.filter((r) => r.role === 'user').map((r) => squash(r.text));
+    if (rows.some((r) => r.role === 'error')) return void (ui.sending = []);
+    if (!arrived.length) return;
+    ui.sending = ui.sending.filter((p) => !arrived.some((a) => a.includes(squash(p.text))));
+  }
+
+  /** The session the open desk's panel is scoped to, or null for all of them. */
+  function sessionFilter() {
+    if (!ui.open) return null;
+    const d = floor.channels.find((c) => c.channel === ui.open.channel)?.desks.find((x) => x.agent === ui.open.agent);
+    return d?.hosted?.session_id ?? null;
+  }
+
+  /* ---------- live updates for the open desk ---------- */
+
+  /**
+   * Server-sent events for the desk whose panel is open: turns as they land,
+   * the reply as it streams, prompts as they open and close. The two-second
+   * poll keeps running underneath, so if a proxy chokes on the stream the
+   * panel is merely slower, never wrong.
+   */
+  function openStream(channel, agent) {
+    closeStream();
+    if (typeof EventSource === 'undefined') return;
+    const es = new EventSource(`./api/floor/stream?channel=${encodeURIComponent(channel)}&agent=${encodeURIComponent(agent)}`);
+    es.onmessage = (m) => {
+      if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) return;
+      let ev;
+      try { ev = JSON.parse(m.data); } catch { return; }
+      if (ev.type === 'turn' && ev.turn && ev.turn.id > ui.sinceTurn) {
+        const sess = sessionFilter();
+        // Another session on this desk is not this conversation. A hosted
+        // session's id is only known once it has announced itself, so a turn
+        // with no session on either side is let through rather than lost.
+        if (sess && ev.turn.session_id && ev.turn.session_id !== sess) return;
+        ui.turns = ui.turns.concat([ev.turn]).slice(-300);
+        ui.sinceTurn = ev.turn.id;
+        settle([ev.turn]);
+        if (ev.turn.role === 'assistant') ui.partial = '';
+        renderPanel();
+      } else if (ev.type === 'partial') {
+        ui.partial = ev.text ?? '';
+        renderPanel();
+      } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session') {
+        // Both change what the desk and the queue say; the cheapest correct
+        // thing is to fetch the floor again rather than mirror the logic here.
+        tick();
+      }
+    };
+    ui.stream = es;
+  }
+
+  function closeStream() {
+    if (ui.stream) { try { ui.stream.close(); } catch { /* already closed */ } }
+    ui.stream = null;
+    ui.partial = '';
   }
 
   /* ---------- render ---------- */
@@ -550,7 +702,24 @@
       }
     } catch { /* as above */ }
 
-    if (ui.open) await loadTurns(false);
+    if (ui.open) {
+      // The conversation the panel is scoped to can change under it — a hosted
+      // session announces its real id on its first turn — and when it does the
+      // turns on screen are the wrong set. Start the panel over from that
+      // session rather than appending to a list filed under the old key.
+      const filter = sessionFilter();
+      if (filter !== ui.filterWas) {
+        ui.filterWas = filter;
+        ui.turns = [];
+    ui.sending = [];
+        ui.sinceTurn = 0;
+        ui.renderedTurn = 0;
+        $('p-turns')?.replaceChildren();
+        await loadTurns(true);
+      } else {
+        await loadTurns(false);
+      }
+    }
     render();
   }
 
@@ -570,8 +739,11 @@
   function openDesk(channel, agent) {
     ui.open = { channel, agent };
     ui.turns = [];
+    ui.sending = [];
     ui.sinceTurn = 0;
-    loadTurns(true).then(render);
+    ui.partial = '';
+    ui.filterWas = sessionFilter();
+    loadTurns(true).then(() => { render(); openStream(channel, agent); });
   }
 
   document.addEventListener('click', async (e) => {
@@ -597,17 +769,17 @@
     } else if (act.dataset.act === 'close-panel') {
       ui.open = null;
       render();
-    } else if (act.dataset.act === 'copy') {
-      const text = $('p-text')?.value ?? '';
-      if (!text.trim()) return;
-      try {
-        await navigator.clipboard.writeText(text);
-        act.textContent = 'Copied — now paste it';
-        setTimeout(() => { act.textContent = 'Copy nudge'; }, 2200);
-      } catch {
-        act.textContent = 'Copy failed — select and copy';
-        setTimeout(() => { act.textContent = 'Copy nudge'; }, 2600);
-      }
+    } else if (act.dataset.act === 'send') {
+      await sendChat();
+    } else if (act.dataset.act === 'permit' || act.dataset.act === 'refuse') {
+      // From the panel the desk is ui.open; from the queue the row names it.
+      if (act.dataset.channel && act.dataset.agent && !ui.open) ui.open = { channel: act.dataset.channel, agent: act.dataset.agent };
+      else if (act.dataset.channel && act.dataset.agent) ui.open = { channel: act.dataset.channel, agent: act.dataset.agent };
+      await decide(act.dataset.request, act.dataset.act === 'permit' ? 'allow' : 'deny');
+    } else if (act.dataset.act === 'stop') {
+      await interruptDesk();
+    } else if (act.dataset.act === 'handback') {
+      await handBack(act);
     } else if (act.dataset.act === 'rename' && ui.open) {
       const next = prompt('Who sits here?', act.textContent.trim());
       if (!next || !next.trim()) return;
@@ -620,8 +792,108 @@
     }
   });
 
+
+  /** A short note on the send button, then back to normal. */
+  function flash(btn, text, ms = 2600) {
+    if (!btn) return;
+    const was = btn.dataset.label ?? btn.textContent;
+    btn.dataset.label = was;
+    btn.textContent = text;
+    setTimeout(() => { btn.textContent = was; }, ms);
+  }
+
+  /**
+   * Send: a user turn in the hosted session. The server refuses, with the
+   * reason, if nothing is there to receive it — and the reason is shown, not a
+   * generic failure, because "the host is offline" is something the person can
+   * act on and "failed" is not.
+   */
+  async function sendChat() {
+    const text = $('p-text')?.value ?? '';
+    const btn = document.querySelector('#floor-panel [data-act="send"]');
+    if (!text.trim() || !btn || !ui.open || btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch('./api/floor/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...ui.open, text }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error ?? `send failed (${r.status})`);
+      // Accepted by the board is not the same as in the conversation, so it
+      // shows as sending until the window itself reports it.
+      ui.sending = ui.sending.concat([{ text }]);
+      $('p-text').value = '';
+      ui.stick = true;
+      renderPanel();
+      await tick();
+    } catch (err) {
+      flash(btn, String(err.message).slice(0, 60));
+    } finally {
+      btn.disabled = false;
+      $('p-text')?.focus();
+    }
+  }
+
+  async function decide(requestId, decision) {
+    if (!ui.open || !requestId) return;
+    const r = await fetch('./api/floor/permission', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...ui.open, request_id: requestId, decision }),
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      alert(body.error ?? `That didn't work (${r.status}).`);
+    }
+    tick();
+  }
+
+  /**
+   * Move the open desk's conversation into the editor.
+   *
+   * The host closes its own window before opening it there, so the
+   * conversation is never live in two places. Nothing is sent — this is a
+   * change of seat, not a message.
+   */
+  async function handBack(btn) {
+    if (!ui.open) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch('./api/floor/handback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(ui.open),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        flash(btn, String(body.error ?? `couldn't move it (${r.status})`).slice(0, 60));
+      }
+    } finally {
+      btn.disabled = false;
+      tick();
+    }
+  }
+
+  async function interruptDesk() {
+    if (!ui.open) return;
+    await fetch('./api/floor/interrupt', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ui.open),
+    });
+    tick();
+  }
+
   document.addEventListener('keydown', (e) => {
     if (!ui.on) return;
+    // Enter sends; Shift+Enter is a newline, the way every chat box works.
+    if (e.target?.id === 'p-text' && e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat();
+      return;
+    }
     if (e.key === 'Escape' && ui.open) {
       ui.open = null;
       render();

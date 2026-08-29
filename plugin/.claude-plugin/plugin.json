@@ -1,7 +1,7 @@
 {
   "name": "orchestratinator-floor",
   "description": "Reports each Claude Code session's activity to the orchestratinator floor, so a human can see who is stuck without opening every window. Identity is read from the repo's own .mcp.json; repos that do not use the orchestratinator are skipped in silence.",
-  "version": "0.1.0",
+  "version": "0.4.1",
   "author": {
     "name": "appideas",
     "email": "chris@appideas.com"

@@ -16,6 +16,12 @@
  *      descriptive field that becomes the collapsed line, so a Write of a whole
  *      file does not put that file on the network.
  *
+ * What this reports is *state*, not content: a turn started, a prompt is open,
+ * the session ended. The conversation itself the floor reads from Claude Code's
+ * own transcript (see host/window.js), which is complete and does not depend on
+ * a hook firing. Content is still sent, and is still used — but only for a desk
+ * whose machine has no host running, where a partial conversation beats none.
+ *
  * Identity is not configured. It is read from the repo's own `.mcp.json` — the
  * same file that already declares X-Channel and X-Agent to reach the board — so
  * a workstation that can talk to the orchestratinator at all needs nothing added
@@ -148,6 +154,7 @@ async function main() {
     agent: process.env.ORCH_AGENT ?? id.agent,
     session_id: ev.session_id,
     hook_event_name: ev.hook_event_name,
+    source: ev.source,
     transcript_path: ev.transcript_path,
     cwd,
     permission_mode: ev.permission_mode,
@@ -168,17 +175,17 @@ async function main() {
   const headers = { 'content-type': 'application/json' };
   if (id.key) headers['x-orchestratinator-key'] = id.key;
 
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch {
+  const report = fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  }).catch(() => {
     // The floor is a convenience. Nothing about this session depends on it, and
     // a person whose server is down should notice that on the board, not here.
-  }
+  });
+
+  await report;
 }
 
-main().catch(() => {}).finally(() => process.exit(0));
+main().then(() => process.exit(0)).catch(() => process.exit(0));

@@ -1,5 +1,5 @@
 {
-  "description": "Report this session's activity to the orchestratinator floor. Reads stdin, then detaches so nothing here is ever on the critical path of a turn.",
+  "description": "Report this session's state to the orchestratinator floor. Every event reads stdin and detaches, so nothing is on the critical path of a turn. The floor reads the conversation itself from Claude Code's own transcript; these hooks say what is happening, not what was said.",
   "hooks": {
     "SessionStart": [
       {

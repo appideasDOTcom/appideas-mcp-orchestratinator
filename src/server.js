@@ -144,6 +144,9 @@ setInterval(() => {
   try {
     const removed = store.pruneTurns();
     if (removed) console.log(`[orchestratinator] pruned ${removed} old turn${removed === 1 ? '' : 's'}`);
+    // Work a host has already taken is only kept for a day, to answer "did that
+    // message ever get delivered" — after that it is just rows.
+    store.pruneHostWork();
   } catch (err) {
     console.warn(`[orchestratinator] turn prune failed: ${err.message}`);
   }
