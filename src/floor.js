@@ -115,6 +115,36 @@ const secondsSince = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) /
 const deskKey = (channel, agent) => `${channel}|${agent}`;
 
 /**
+ * Can anything be typed into this desk's window right now, and if not, why not?
+ *
+ * Pure, and takes the already-fetched row so a caller with a whole list does not
+ * make one query per desk. Exported because two surfaces need the same verdict:
+ * the chat endpoint enforces it, and the board greys out its Nudge button with
+ * it. A button that decided for itself would eventually disagree with the server
+ * that actually refuses the work — enabled and 409ing, or greyed out over a
+ * window that was perfectly reachable.
+ *
+ * The one rule underneath all three refusals is the one this whole repo is built
+ * on: a conversation is one process, and only the app holding it can type.
+ */
+export function deliverable(h, nowMs = Date.now()) {
+  if (!h) return { error: 'No host on this board is running that repo, so there is nowhere to send this.', code: 'not_hosted' };
+  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
+  }
+  // A conversation is one process, and right now an editor has it. Nothing can
+  // be typed into it from here — so say that before a message is taken, rather
+  // than accepting one and failing to deliver it.
+  if (h.outside_pid) {
+    return {
+      error: 'This conversation is open in your editor. Close it there, or use “Open in VS Code” to move it back, then type here.',
+      code: 'held_by_editor',
+    };
+  }
+  return { hosted: h };
+}
+
+/**
  * The session id a hosted desk's turns are filed under before its SDK session
  * has announced its own. Deterministic, so the message that starts a session
  * and the session it starts can be joined up afterwards — see rekeySession.
@@ -870,23 +900,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
   });
 
   /** A hosted desk that can take a message right now, or the reason it can't. */
-  function hostedOrWhyNot(channel, agent) {
-    const h = store.hostedDesk(channel, agent);
-    if (!h) return { error: 'No host on this board is running that repo, so there is nowhere to send this.', code: 'not_hosted' };
-    if (h.state === 'offline' || secondsSince(iso(h.host_seen), Date.now()) >= HOST_STALE_SECONDS) {
-      return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
-    }
-    // A conversation is one process, and right now an editor has it. Nothing
-    // can be typed into it from here — so say that before a message is taken,
-    // rather than accepting one and failing to deliver it.
-    if (h.outside_pid) {
-      return {
-        error: 'This conversation is open in your editor. Close it there, or use “Open in VS Code” to move it back, then type here.',
-        code: 'held_by_editor',
-      };
-    }
-    return { hosted: h };
-  }
+  const hostedOrWhyNot = (channel, agent) => deliverable(store.hostedDesk(channel, agent));
 
   /**
    * Say something to a hosted desk. The message is a user turn in that session:

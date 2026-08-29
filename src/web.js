@@ -4,7 +4,7 @@ import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
-import { createFloorRouter } from './floor.js';
+import { createFloorRouter, deliverable } from './floor.js';
 import {
   agentBoard, agentKey, agentLoadIndex, index, iso,
 } from './agent-state.js';
@@ -62,6 +62,9 @@ function buildState(store, sessions, sessionStats, meta) {
   // The backlog dialog lists the messages, not just their number. Board-only:
   // the floor's pills open this same dialog, and it reads them from here.
   const backlogByAgent = index(store.unreadMessages(), (m) => agentKey(m.channel, m.agent));
+  // Fetched once and indexed rather than queried per agent: /api/state is polled
+  // every couple of seconds and every desk would otherwise cost a lookup.
+  const hostedByAgent = new Map(store.listHostedDesks().map((h) => [agentKey(h.channel, h.agent), h]));
   // The per-agent workload the floor draws from too — see agent-state.js.
   const idx = agentLoadIndex(store);
   const { unassignedByChannel } = idx;
@@ -108,6 +111,14 @@ function buildState(store, sessions, sessionStats, meta) {
         return {
           agent: a.agent,
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
+          // Whether the operator can nudge this agent — the same verdict the
+          // chat endpoint enforces, so the button and the server agree.
+          nudge: (() => {
+            const v = deliverable(hostedByAgent.get(k), nowMs);
+            return v.error
+              ? { ok: false, code: v.code, reason: v.error }
+              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+          })(),
           unread_list: (backlogByAgent.get(k) ?? []).slice(0, BACKLOG_LIST_MAX).map((m) => ({
             id: m.id,
             from: m.from,

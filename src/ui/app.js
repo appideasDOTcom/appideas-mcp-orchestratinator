@@ -454,6 +454,22 @@ function renderLog(rows) {
  * No credential to attach: the server's only check is that the request is
  * same-origin, which a fetch from this page satisfies by construction.
  */
+/**
+ * The floor's endpoints, from the board. Same origin, so the same guard lets it
+ * through — the board is nudging into a window the floor owns, which is exactly
+ * the kind of thing only the operator should be able to do.
+ */
+async function floorPost(path, body) {
+  const res = await fetch(`./api/floor/${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json;
+}
+
 async function admin(path, body) {
   const res = await fetch(`./api/admin/${path}`, {
     method: 'POST',
@@ -516,9 +532,45 @@ function notify(message, { error = true } = {}) {
  * Returns whether it succeeded, so a caller keeping the dialog open knows whether
  * it's safe to re-render over the error message.
  */
+/**
+ * Re-draw whichever dialog is open — or close it, if what it was showing is gone.
+ *
+ * Every one of these dialogs is opened from a count on the board, so when that
+ * count reaches zero the pill that opened it has gone too and there is nothing
+ * left in here to act on. Closing is not just tidier than an empty list: it
+ * removes the state where a re-render is skipped and the dialog is left showing
+ * rows that have already moved somewhere else, which is exactly what reassigning
+ * the last message used to do.
+ *
+ * The channel-scoped list has no count behind it, so it stays open and says it
+ * is empty.
+ */
+function refreshDialog() {
+  if (!el.dlg.open || !ui.dlgCtx) return;
+  const { channel, agent, kind } = ui.dlgCtx;
+  if (agent) {
+    const a = findAgent(channel, agent);
+    const left = !a ? 0
+      : kind === 'unread' ? a.unread
+      : kind === 'claimed' ? (a.claimed_tasks?.length ?? 0)
+      : kind === 'assigned' ? a.assigned_open
+      : 1;
+    if (!left) { closeDialog(); return; }
+  }
+  if (kind === 'unread') backlogDialog(channel, agent);
+  else taskDialog(channel, agent, kind);
+}
+
 async function act(fn, { keepOpen = false } = {}) {
   const scoped = el.dlg.open;
-  const toggle = (disabled) => el.dlgBody.querySelectorAll('button, select, input').forEach((b) => { b.disabled = disabled; });
+  // Only the controls this call actually disabled are re-enabled afterwards.
+  // A blanket re-enable switches on anything that was disabled deliberately —
+  // the Nudge button on a desk with no window to type into, for one — and it
+  // survives whenever the re-draw that would have rebuilt it is skipped.
+  const held = scoped
+    ? [...el.dlgBody.querySelectorAll('button, select, input')].filter((b) => !b.disabled)
+    : [];
+  const toggle = (disabled) => held.forEach((b) => { b.disabled = disabled; });
   if (scoped) toggle(true);
   try {
     await fn();
@@ -543,6 +595,34 @@ async function act(fn, { keepOpen = false } = {}) {
  * agent is never going to answer. Nothing here talks to the agent — the board has
  * no way to make another window take a turn, and no longer pretends to.
  */
+// What the operator is told when the button cannot be pressed. The full
+// sentence is on the button's tooltip; this is the version that fits a line.
+const NUDGE_BLOCKED = {
+  held_by_editor: 'the floor needs this conversation — close it in your editor, or move it back with “Open in VS Code”.',
+  host_offline: 'that desk’s host is offline, so nothing can be typed into its window.',
+  not_hosted: 'no host is running this repo, so this desk has no window to type into.',
+};
+
+/**
+ * "Nudge agent" — types the word into the desk's own window, which is the thing
+ * the operator would otherwise go and do by hand.
+ *
+ * Disabled in fact and not only in appearance: `disabled` on the button, so a
+ * click cannot fire at all. The reason comes from the server, computed by the
+ * same function the chat endpoint refuses with, so the greyed-out state and the
+ * refusal can never tell different stories.
+ */
+function nudgeHead(channel, agent, a) {
+  if (!agent) return { button: '', note: '' };
+  const n = a?.nudge ?? { ok: false, code: 'not_hosted', reason: 'Nothing is known about this desk yet.' };
+  const at = `data-channel="${esc(channel)}" data-agent="${esc(agent)}"`;
+  const title = n.ok ? `Types “nudge” into ${agent}'s window on ${n.host}` : n.reason;
+  return {
+    button: `<button type="button" class="btn nudge" data-do="nudge" ${at}${n.ok ? '' : ' disabled'} title="${esc(title)}">Nudge agent</button>`,
+    note: n.ok ? '' : `<p class="dlg-note nudge-why">Can’t nudge — ${esc(NUDGE_BLOCKED[n.code] ?? n.reason)}</p>`,
+  };
+}
+
 function backlogDialog(channel, agent) {
   const a = findAgent(channel, agent);
   if (!a || !a.unread) return;
@@ -571,8 +651,10 @@ function backlogDialog(channel, agent) {
       </div>
     </div>`).join('') : '<div class="empty">nothing unread here</div>';
 
+  const nudge = nudgeHead(channel, agent, a);
   openDialog(`
-    <h3>Unread messages · ${esc(agent)}</h3>
+    <div class="dlg-head"><h3>Unread messages · ${esc(agent)}</h3>${nudge.button}</div>
+    ${nudge.note}
     <p class="dlg-sub">
       on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}${a.unread > list.length ? ` · showing ${list.length} of ${a.unread}` : ''}
     </p>
@@ -659,8 +741,10 @@ function taskDialog(channel, agent, kind = null) {
       </div>
     </div>`).join('') : `<div class="empty">${kind === 'claimed' ? 'nothing claimed here' : kind === 'assigned' ? 'nothing assigned here' : 'nothing unfinished here'}</div>`;
 
+  const nudge = nudgeHead(channel, agent, agent ? findAgent(channel, agent) : null);
   openDialog(`
-    <h3>${kind === 'claimed' ? 'Pending claims' : kind === 'assigned' ? 'Pending tasks' : 'Unfinished tasks'}${agent ? ` · ${esc(agent)}` : ''}</h3>
+    <div class="dlg-head"><h3>${kind === 'claimed' ? 'Pending claims' : kind === 'assigned' ? 'Pending tasks' : 'Unfinished tasks'}${agent ? ` · ${esc(agent)}` : ''}</h3>${nudge.button}</div>
+    ${nudge.note}
     <p class="dlg-sub">on <span class="mono">${esc(channel)}</span>${c.task_list_total > all.length ? ` · showing ${all.length} of ${c.task_list_total}` : ''}</p>
     <div class="task-list">${rows}</div>
     <p class="dlg-note">Closing marks the task done with a note attributed to <span class="mono">operator</span> — it is not deleted, and the log keeps the record. Changing the dropdown reassigns immediately.</p>
@@ -1018,7 +1102,7 @@ el.channels.addEventListener('click', (e) => {
   }
 
   if (action === 'unread') backlogDialog(channel, agent);
-  else if (action === 'tasks') taskDialog(channel, agent ?? null, act.dataset.kind ?? null);
+  else if (action === 'tasks') taskDialog(channel, agent ?? null, btn.dataset.kind ?? null);
   else if (action === 'retire') retireDialog(channel, agent);
   else if (action === 'channel') channelDialog(channel);
   // Restoring is trivially reversible and self-explanatory, so it skips the
@@ -1030,12 +1114,7 @@ el.dlgBody.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-do]');
   if (!btn) return;
   const d = btn.dataset;
-  const reRender = (ok) => {
-    if (!ok || !el.dlg.open || !ui.dlgCtx) return;
-    const { channel, agent, kind } = ui.dlgCtx;
-    if (kind === 'unread') backlogDialog(channel, agent);
-    else taskDialog(channel, agent, kind);
-  };
+  const reRender = (ok) => { if (ok) refreshDialog(); };
 
   switch (d.do) {
     case 'cancel':
@@ -1052,6 +1131,15 @@ el.dlgBody.addEventListener('click', (e) => {
       break;
     // Same endpoint as "Mark all read", a different cursor. Closing one row is
     // "read to here", which is the only thing a single cursor can mean.
+    // The word, into the window, via the host — the same path the floor's own
+    // compose box uses. Not typed into a textarea and submitted: that would
+    // depend on a panel being open and would fail in ways the endpoint does not.
+    case 'nudge':
+      act(
+        () => floorPost('chat', { channel: d.channel, agent: d.agent, text: 'nudge' }),
+        { keepOpen: true }
+      ).then(reRender);
+      break;
     case 'read-to':
       act(
         () => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }),
@@ -1087,7 +1175,7 @@ el.dlgBody.addEventListener('change', (e) => {
     act(
       () => admin('message/reassign', { channel, id: Number(msg.dataset.reassignMsg), to: msg.value || null }),
       { keepOpen: true }
-    ).then((ok) => { if (ok && el.dlg.open) backlogDialog(channel, agent); });
+    ).then(reassigned => { if (reassigned) refreshDialog(); });
     return;
   }
 
@@ -1096,7 +1184,7 @@ el.dlgBody.addEventListener('change', (e) => {
   act(
     () => admin('task/reassign', { channel, id: Number(sel.dataset.reassign), assignee: sel.value || null }),
     { keepOpen: true }
-  ).then((ok) => { if (ok && el.dlg.open) taskDialog(channel, agent, kind); });
+  ).then((ok) => { if (ok) refreshDialog(); });
 });
 
 // Clicking the backdrop closes. <dialog> already handles Esc.
