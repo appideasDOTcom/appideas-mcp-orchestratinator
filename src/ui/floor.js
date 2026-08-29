@@ -29,8 +29,6 @@
   const DESK_W = 168;
   const DESK_H = 150;
   const GAP = 30;
-  /** How far a desk draws below its origin: desk slab, then nameplate. */
-  const DESK_BELOW = 126;
   /* Bubble sizing. These three numbers are related and have to stay that way:
      a character budget picked independently of the box width is how you get a
      sentence painted straight across the desk next door. Everything is derived
@@ -39,6 +37,35 @@
   const CHAR_W = 5.4;            // ≈ average advance at the 10.5px bubble font
   const BUBBLE_LINES = 2;
   const PER_LINE = Math.floor((BUBBLE_W - 16) / CHAR_W);
+
+  /* The desk front is the sign, and the tray of counts sits under the plate.
+
+     The board says everything about an agent on one long row. A desk is 168px
+     wide, so the same facts arrive a card at a time — a bus blind turning to
+     the next destination, not a ticker scrolling continuously. That choice is
+     load-bearing: continuous motion on every desk at once would compete with
+     the `!` badge, which is the one thing on this floor that must never be
+     missed. A blind is still between turns.
+
+     Putting it on the counter rather than in a panel below the nameplate costs
+     no height at all — the slab was already drawn there — and a counter deep
+     enough to read is still recognisably a desk, where a box floating under
+     the plate was furniture with a note left beside it. The slab grows
+     downward, so it occludes no more of the person than it did before. */
+  const SIGN_LINE = 12;
+  const SIGN_LINES = 3;
+  const FACE_X = 14;
+  const FACE_W = 140;
+  const FACE_Y = 62;
+  const FACE_H = SIGN_LINES * SIGN_LINE + 10;
+  const SIGN_CHARS = Math.floor((FACE_W - 14) / CHAR_W);
+  const PLATE_Y = FACE_Y + FACE_H + 14;     // nameplate, now below the counter
+  const PILL_H = 17;
+  const PILL_Y = PLATE_Y + 23;
+  const ROLL_MS = 4500;                     // how long a card holds before the blind turns
+
+  /** How far a desk draws below its origin: counter, nameplate, pill tray. */
+  const DESK_BELOW = PILL_Y + PILL_H + 4;
 
   /** How long a sent message may sit unrecorded before it says so. */
   const SENDING_GRACE_MS = 30_000;
@@ -61,6 +88,11 @@
     partial: '',         // the reply being streamed to the open desk right now
     filterWas: null,     // the session the panel was last scoped to
     timer: null,
+    // Which card each desk's sign is showing, kept outside the DOM so a room
+    // rebuilt mid-turn comes back on the same card instead of snapping to the
+    // first one every time anything on the floor changes.
+    roll: new Map(),
+    rollTimer: null,
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -118,6 +150,87 @@
     }
     for (const c of [].concat(children)) if (c) n.appendChild(c);
     return n;
+  }
+
+  /**
+   * The cards on one desk's blind — the board's agent row, cut into panels.
+   *
+   * Same order the board uses, and for the same reason: the self-reported
+   * detail leads because it is the whole point of an agent bothering to call
+   * `set_status`, and the derived fallbacks come after it.
+   */
+  function signCards(d) {
+    const b = d.board;
+    if (!b) return [];
+    const cards = [];
+    const card = (kind, text) => {
+      const lines = wrap(text, SIGN_CHARS, SIGN_LINES);
+      if (lines.length) cards.push({ kind, lines });
+    };
+    if (b.state?.detail) card('detail', b.state.detail);
+    if (b.state?.label) {
+      // A reported label carries its age for the same reason the board's chip
+      // does: "waiting · 40m ago" reads as suspect where "waiting" cannot. A
+      // derived one has no age to carry — it was inferred just now.
+      card(
+        b.state.source === 'reported' ? 'state' : 'derived',
+        b.state.source === 'reported' && b.reported_at
+          ? `${b.state.label} · ${ago(b.reported_at)}`
+          : b.state.label
+      );
+    }
+    if (b.last_action) card('action', `${b.last_action} · ${ago(b.last_action_at)}`);
+    else if (b.last_seen) card('action', `seen ${ago(b.last_seen)}`);
+    return cards;
+  }
+
+  const rollKey = (channel, agent) => `${channel}|${agent}`;
+
+  /**
+   * Turn every blind on the floor one card.
+   *
+   * Runs on its own timer rather than inside the poll, and reaches into the
+   * drawn DOM rather than re-rendering: a room is rebuilt only when something
+   * about it changed, and a sign that could only turn on that beat would sit
+   * frozen on a quiet floor — which is exactly the floor you are most likely
+   * to be staring at.
+   *
+   * Every blind turns on the same tick, on purpose. A station board flips in
+   * unison; desks turning independently would put scattered motion across the
+   * room all the time.
+   */
+  function rollSigns() {
+    for (const sign of document.querySelectorAll('#floor-rooms svg.face')) {
+      const n = Number(sign.dataset.cards ?? 0);
+      if (n < 2) continue;
+      const deskEl = sign.closest('.desk');
+      if (!deskEl) continue;
+      const k = rollKey(deskEl.dataset.channel, deskEl.dataset.agent);
+      const next = ((ui.roll.get(k) ?? 0) + 1) % n;
+      ui.roll.set(k, next);
+      const blind = sign.querySelector('.blind');
+      if (blind) blind.style.transform = `translateY(${-next * FACE_H}px)`;
+    }
+  }
+
+  /** The counts the board puts in the same row, as a tray of buttons. */
+  function signPills(d) {
+    const b = d.board;
+    if (!b) return [];
+    const pills = [];
+    if (b.unread) {
+      pills.push({
+        act: 'unread', cls: 'unread', mark: '✉', n: b.unread,
+        title: `${b.unread} unread — mark ${d.agent}'s backlog read on its behalf`,
+      });
+    }
+    if (b.assigned_open) {
+      pills.push({
+        act: 'tasks', cls: 'tasks', mark: '☰', n: b.assigned_open,
+        title: `${b.assigned_open} open task${b.assigned_open === 1 ? '' : 's'} assigned to ${d.agent}`,
+      });
+    }
+    return pills;
   }
 
   /** A desk's state, in the one word the room is drawn from. */
@@ -192,7 +305,38 @@
     p.setAttribute('transform', 'translate(66 22)');
     g.appendChild(p);
 
-    g.appendChild(el('rect', { x: 20, y: 62, width: 128, height: 30, rx: 5, class: 'deskTop' }));
+    // The counter. A nested <svg> so the blind is clipped by the counter's own
+    // edges — no clipPath, and so no page-unique id to collide with, which
+    // matters because rooms here are rebuilt wholesale.
+    const cards = signCards(d);
+    const face = el('svg', {
+      x: FACE_X, y: FACE_Y, width: FACE_W, height: FACE_H,
+      class: 'face', 'data-cards': cards.length,
+    });
+    face.appendChild(el('rect', { x: 0, y: 0, width: FACE_W, height: FACE_H, rx: 5, class: 'deskTop' }));
+    if (cards.length) {
+      // Every card is painted at once on one tall strip; turning the blind is a
+      // transform on the strip, not a redraw. That is what lets a card change
+      // without touching the room, and what keeps the animation alive across
+      // the ticks that rebuild everything else.
+      const at = Math.min(ui.roll.get(rollKey(channel, d.agent)) ?? 0, cards.length - 1);
+      const blind = el('g', { class: 'blind' });
+      blind.style.transform = `translateY(${-at * FACE_H}px)`;
+      cards.forEach((c, ci) => {
+        const cg = el('g', { class: `card ${c.kind}`, transform: `translate(0 ${ci * FACE_H})` });
+        const top = (FACE_H - c.lines.length * SIGN_LINE) / 2 + SIGN_LINE - 3;
+        c.lines.forEach((line, li) => {
+          const t = el('text', {
+            x: FACE_W / 2, y: top + li * SIGN_LINE, 'text-anchor': 'middle', class: 'signText',
+          });
+          t.textContent = line;
+          cg.appendChild(t);
+        });
+        blind.appendChild(cg);
+      });
+      face.appendChild(blind);
+    }
+    g.appendChild(face);
 
     // The monitor sits on the desk beside them and lights up only when something
     // is really running — it is the one piece of furniture carrying state.
@@ -202,7 +346,7 @@
     // Nameplate. The persona leads because that is what people will say out
     // loud; the real agent name follows because that is what the .mcp.json says
     // and someone will eventually need to match the two up.
-    const plate = el('g', { class: 'plate', transform: 'translate(84 104)' });
+    const plate = el('g', { class: 'plate', transform: `translate(84 ${PLATE_Y})` });
     plate.appendChild(el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' }));
     plate.lastChild.textContent = d.persona;
     plate.appendChild(el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' }));
@@ -213,6 +357,37 @@
       ? `${d.agent} · ${d.hosted.live ? 'ready' : 'host offline'}`
       : d.reporting ? d.agent : `${d.agent} · not reporting`;
     g.appendChild(plate);
+
+    // The tray. These are buttons, not labels — they open the board's own
+    // dialogs, which is the whole reason a count here and a count there can
+    // never come to mean different things.
+    const pills = signPills(d);
+    if (pills.length) {
+      const width = (q) => `${q.mark} ${q.n}`.length * 6 + 12;
+      const total = pills.reduce((sum, q) => sum + width(q), 0) + (pills.length - 1) * 6;
+      let px = (DESK_W - total) / 2;
+      for (const q of pills) {
+        const w = width(q);
+        const pg = el('g', {
+          class: `pill ${q.cls}`,
+          transform: `translate(${px} ${PILL_Y})`,
+          'data-act': q.act,
+          'data-channel': channel,
+          'data-agent': d.agent,
+          role: 'button',
+          tabindex: '0',
+        });
+        pg.appendChild(el('rect', { x: 0, y: 0, width: w, height: PILL_H, rx: PILL_H / 2, class: 'pillBox' }));
+        const pt = el('text', { x: w / 2, y: PILL_H / 2 + 4, 'text-anchor': 'middle', class: 'pillText' });
+        pt.textContent = `${q.mark} ${q.n}`;
+        pg.appendChild(pt);
+        const tip = el('title');
+        tip.textContent = q.title;
+        pg.appendChild(tip);
+        g.appendChild(pg);
+        px += w + 6;
+      }
+    }
 
     // What this desk is doing — the collapsed tool call, or the start of the last
     // thing said. Wrapped to a box that cannot reach the desk next door.
@@ -739,11 +914,14 @@
     if (ui.timer) return;
     tick();
     ui.timer = setInterval(tick, POLL_MS);
+    ui.rollTimer = setInterval(rollSigns, ROLL_MS);
   }
 
   function stop() {
     clearInterval(ui.timer);
     ui.timer = null;
+    clearInterval(ui.rollTimer);
+    ui.rollTimer = null;
   }
 
   /* ---------- events ---------- */
@@ -759,6 +937,22 @@
   }
 
   document.addEventListener('click', async (e) => {
+    // Before the desk test, because a pill sits inside the desk group and the
+    // desk would otherwise swallow the click and just open the panel.
+    const pill = e.target.closest?.('svg.room .pill[data-act]');
+    if (pill && ui.on) {
+      const { channel, agent, act: which } = pill.dataset;
+      // app.js owns these dialogs and both scripts share one page. Calling them
+      // is deliberate: a second implementation of "mark this backlog read" is
+      // how one button comes to mean two things depending on where it was
+      // clicked. If the board half is not there, fall back to opening the desk
+      // rather than swallowing the click silently.
+      const dlg = which === 'unread' ? window.backlogDialog : window.taskDialog;
+      if (typeof dlg === 'function') dlg(channel, agent);
+      else openDesk(channel, agent);
+      return;
+    }
+
     const deskEl = e.target.closest?.('svg.room .desk');
     if (deskEl && ui.on) {
       openDesk(deskEl.dataset.channel, deskEl.dataset.agent);

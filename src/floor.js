@@ -1,5 +1,6 @@
 import express from 'express';
 import { CAST } from './db.js';
+import { agentBoard, agentLoadIndex } from './agent-state.js';
 
 /**
  * The floor: what each agent's own Claude Code session is doing — and, for
@@ -492,10 +493,17 @@ export function buildFloor(store, live = null) {
   // to be the clearest possible reminder of who still needs the plugin.
   // Retired agents and archived channels stay off, matching the board's default.
   const archived = new Set(store.listChannelFlags().filter((f) => f.archived_at).map((f) => f.channel));
+  // The board's row for each agent, kept rather than discarded: the desk's sign
+  // shows what the board shows, and that comes off these same columns. A desk
+  // can exist without one — a window can post hook events before its agent has
+  // ever called an MCP tool — and then there is simply no sign to paint.
+  const agentRows = new Map();
   for (const a of store.listAllAgents()) {
     if (a.retired_at || archived.has(a.channel)) continue;
+    agentRows.set(key(a.channel, a.agent), a);
     store.ensurePersona(a.channel, a.agent);
   }
+  const load = agentLoadIndex(store);
 
   const byChannel = new Map();
   for (const p of store.listPersonas()) {
@@ -606,6 +614,11 @@ export function buildFloor(store, live = null) {
           last_turn: t
             ? { role: t.role, text: t.text, tool_name: t.tool_name, at: iso(t.created_at), id: t.id }
             : null,
+          // What the board says about this agent — status, mailbox, task load.
+          // Derived by the board's own code (agent-state.js) rather than
+          // re-inferred here, so the sign on a desk and the row on the board
+          // cannot drift into disagreeing about the same agent.
+          board: agentRows.has(k) ? agentBoard(agentRows.get(k), load, nowMs) : null,
           turns: turnCount.get(k) ?? 0,
           sessions: sessionCount.get(k) ?? 0,
         };

@@ -5,6 +5,9 @@ import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
 import { createFloorRouter } from './floor.js';
+import {
+  agentBoard, agentKey, agentLoadIndex, ageMinutes, index, iso,
+} from './agent-state.js';
 
 /**
  * The dashboard: a small web UI (served at `/`), the JSON endpoints it polls,
@@ -30,76 +33,10 @@ const UI_DIR = fileURLToPath(new URL('./ui', import.meta.url));
 // An agent with no live session but a recent tool call is probably still there
 // (its window is open, it just isn't polling). Past this it's shown as offline.
 const RECENT_MINUTES = 5;
-// Fallback expiry for statuses written before `status_expires_at` existed.
-// Current writes carry their own expiry — see set_status's ttl_seconds.
-const LEGACY_STATUS_TTL_MINUTES = 30;
-
-// The agent told us its state, so map it straight to a chip tone rather than
-// guessing from the words. `blocked` is deliberately distinct from `waiting`:
-// waiting resolves on its own, blocked needs a human.
-const STATE_TONE = { working: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
-
 // How many unfinished tasks per channel /api/state carries in full. The counts
 // are always exact; this bounds only the list the task dialog offers, because
 // this payload is refetched every couple of seconds.
 const TASK_LIST_MAX = 25;
-
-/** SQLite `datetime('now')` is UTC without a zone marker — make it a real ISO string. */
-const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
-const ageMinutes = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) / 60000 : Infinity);
-
-/** Group rows into a Map keyed by one column. */
-function index(rows, keyFn) {
-  const map = new Map();
-  for (const r of rows) {
-    const k = keyFn(r);
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(r);
-  }
-  return map;
-}
-
-/**
- * Best-effort answer to "what is this agent doing right now?".
- *
- * A live self-reported status (via the `set_status` tool) always wins — only
- * the agent knows whether a quiet stretch is work, a wait, or a crash. Once it
- * expires we treat it as absent and infer from what the agent holds on the task
- * board and what's waiting in its mailbox.
- *
- * Note what is deliberately NOT inferred: nothing here reads a long gap since
- * `last_action` as "waiting". That gap looks identical whether the agent is
- * blocked, crashed, or finished and quiet, so it can only produce a confident
- * wrong answer.
- */
-function deriveState({ reported, reportedDetail, expired, claimed, assignedOpen, unread }) {
-  if (reported && !expired) {
-    return {
-      label: reported,
-      detail: reportedDetail ?? null,
-      tone: STATE_TONE[reported] ?? 'busy',
-      source: 'reported',
-    };
-  }
-  // No age here on purpose: `reported_at` is the fact and the client derives the
-  // age from it. Baking a minute-counter into this payload would change it every
-  // minute and defeat the dashboard's re-render memo.
-  const derived = (label, tone) => ({ label, detail: null, tone, source: 'derived' });
-  if (claimed.length) {
-    const t = claimed[0];
-    return derived(
-      claimed.length > 1 ? `working — ${claimed.length} claimed tasks` : `working — #${t.id} ${t.title}`,
-      'busy'
-    );
-  }
-  if (unread > 0) {
-    return derived(`waiting — ${unread} unread message${unread === 1 ? '' : 's'}`, 'waiting');
-  }
-  if (assignedOpen > 0) {
-    return derived(`waiting — ${assignedOpen} task${assignedOpen === 1 ? '' : 's'} assigned`, 'waiting');
-  }
-  return derived('idle', 'idle');
-}
 
 function buildState(store, sessions, sessionStats, meta) {
   const nowMs = Date.now();
@@ -121,31 +58,14 @@ function buildState(store, sessions, sessionStats, meta) {
   }
 
   const agentRows = store.listAllAgents();
-  const load = store.agentTaskLoad();
-  const claimed = store.claimedTasks();
-  const unread = store.unreadCounts();
+  // The per-agent workload the floor draws from too — see agent-state.js.
+  const idx = agentLoadIndex(store);
+  const { unassignedByChannel } = idx;
   const stats = store.channelStats();
   const archivedAt = new Map(
     store.listChannelFlags().filter((f) => f.archived_at).map((f) => [f.channel, f.archived_at])
   );
   const tasksByChannel = index(store.boardTasks(), (t) => t.channel);
-  // The same NUL-joined compound key the maps below use — neither a channel nor
-  // an agent name can contain one, so a pair can never collide.
-  const NUL = String.fromCharCode(0);
-  const agentKey = (channel, agent) => [channel, agent].join(NUL);
-  const unreadMaxByAgent = new Map(unread.map((r) => [agentKey(r.channel, r.agent), r.unread_max_id]));
-
-  const claimedByAgent = index(claimed.filter((t) => t.claimed_by), (t) => `${t.channel}\u0000${t.claimed_by}`);
-  const unreadByAgent = new Map(unread.map((r) => [`${r.channel}\u0000${r.agent}`, r.unread]));
-  const assignedByAgent = new Map();
-  const unassignedByChannel = new Map();
-  for (const r of load) {
-    if (r.bucket === 'unassigned') unassignedByChannel.set(r.channel, r.n);
-    else if (r.agent) {
-      const k = `${r.channel}\u0000${r.agent}`;
-      assignedByAgent.set(k, { ...(assignedByAgent.get(k) ?? {}), [r.bucket]: r.n });
-    }
-  }
 
   const taskCounts = new Map();
   for (const r of stats.tasks) {
@@ -177,49 +97,20 @@ function buildState(store, sessions, sessionStats, meta) {
       .slice()
       .sort((a, b) => a.agent.localeCompare(b.agent))
       .map((a) => {
-        const k = `${channel}\u0000${a.agent}`;
+        const k = agentKey(channel, a.agent);
         const liveCount = liveByKey.get(k) ?? 0;
-        const lastSeen = iso(a.last_seen);
-        const seenAgeMin = ageMinutes(lastSeen, nowMs);
+        const seenAgeMin = ageMinutes(iso(a.last_seen), nowMs);
+        // Presence is the board's own question — how we are hearing from this
+        // agent — and stays here. Everything below the name is the shared
+        // derivation, so the desk on the floor says the same thing.
         const presence = liveCount > 0 ? 'connected' : seenAgeMin <= RECENT_MINUTES ? 'recent' : 'offline';
-        const mine = claimedByAgent.get(k) ?? [];
-        const reportedAt = iso(a.status_at);
-        const reportedAgeMin = ageMinutes(reportedAt, nowMs);
-        // Prefer the expiry the agent chose; rows predating that column fall
-        // back to the old server-wide window so they still age off.
-        const expiresAt = iso(a.status_expires_at);
-        const expired = expiresAt
-          ? Date.parse(expiresAt) <= nowMs
-          : reportedAgeMin > LEGACY_STATUS_TTL_MINUTES;
-        const state = deriveState({
-          reported: a.status,
-          reportedDetail: a.status_detail,
-          expired,
-          claimed: mine,
-          assignedOpen: assignedByAgent.get(k)?.assigned ?? 0,
-          unread: unreadByAgent.get(k) ?? 0,
-        });
         return {
           agent: a.agent,
           presence,
           sessions: liveCount,
-          state,
-          last_seen: lastSeen,
-          last_action: a.last_action,
-          last_action_at: iso(a.last_action_at),
-          reported_status: a.status,
-          reported_detail: a.status_detail ?? null,
-          reported_at: reportedAt,
-          reported_expires_at: expiresAt,
-          reported_expired: !!a.status && expired,
-          unread: unreadByAgent.get(k) ?? 0,
-          // The id "mark read" has to advance to. The browser echoes this back so
-          // a message that arrives between render and click isn't swallowed.
-          unread_max_id: unreadMaxByAgent.get(agentKey(channel, a.agent)) ?? null,
+          ...agentBoard(a, idx, nowMs),
           retired: !!a.retired_at,
           retired_at: iso(a.retired_at),
-          claimed_tasks: mine.map((t) => ({ id: t.id, title: t.title })),
-          assigned_open: assignedByAgent.get(k)?.assigned ?? 0,
         };
       });
 

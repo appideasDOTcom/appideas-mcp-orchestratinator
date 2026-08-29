@@ -599,6 +599,38 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .desk.working .screen { fill: color-mix(in srgb, var(--accent) 55%, var(--surface)); }
 .desk.needs-you .screen { fill: color-mix(in srgb, var(--block) 55%, var(--surface)); }
 
+/* The desk front, which is the sign, and the tray of counts under the plate.
+
+   The blind is one tall strip carrying every card; turning it is a transform,
+   which is why a card can change without the room being redrawn. The easing is
+   weighted to the back end on purpose — a roller blind arrives at a stop, it
+   does not glide to one. Under reduced motion the card still changes, it just
+   changes instantly: the information is the point, the movement is the flavour.
+
+   The counter keeps `.deskTop`, so the hover and focus rules below still find
+   it: it is a desk that reads, not a sign that happens to sit where a desk was. */
+.face      { overflow: hidden; }
+.signText  { fill: var(--text); font: 10.5px var(--sans); }
+.blind     { transition: transform .5s cubic-bezier(.55,.06,.18,1); }
+.card.derived .signText,
+.card.action  .signText { fill: var(--muted); font-family: var(--mono); font-size: 9.5px; }
+
+/* A count is an operator affordance, so it reads as one: filled rather than
+   outlined, in the accent the rest of the board uses for things you can click.
+   It cannot be exempted from `.desk.away`'s fade — that opacity is on the desk
+   group and group opacity composites, so a child rule claiming to undo it would
+   simply be untrue. */
+.pill { cursor: pointer; }
+.pill:focus { outline: none; }
+.pillBox  { fill: color-mix(in srgb, var(--accent) 16%, var(--surface)); stroke: var(--accent); }
+.pillText { fill: var(--text); font: 600 9.5px var(--mono); }
+.pill:hover .pillBox { fill: color-mix(in srgb, var(--accent) 32%, var(--surface)); }
+.pill:focus-visible .pillBox { stroke-width: 2; }
+.pill.tasks .pillBox { fill: color-mix(in srgb, var(--wait) 18%, var(--surface)); stroke: var(--wait); }
+.pill.tasks:hover .pillBox { fill: color-mix(in srgb, var(--wait) 34%, var(--surface)); }
+
+@media (prefers-reduced-motion: reduce) { .blind { transition: none; } }
+
 .needsDot  { fill: var(--block); animation: needsPulse 1.6s ease-in-out infinite; }
 .needsMark { fill: #fff; font: 700 13px var(--sans); }
 @keyframes needsPulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
