@@ -15,14 +15,16 @@ shared **contracts** (the agreed interface between two plugins), and a lightweig
 - Run the host on your machine once (`./host/install.sh <your projects dir>`); it
   stays running and finds every repo that is a desk.
 - Open the floor at `http://localhost:8787/` and type to a desk. If no Claude Code
-  window is open for that repo, one opens; if one is already open, the message
-  lands in it.
-- Sit at any desk yourself whenever you want: `tmux attach -t orch`. Each desk is
-  a window in that session. Type there instead — same conversation, and the floor
-  keeps showing it.
+  window is open for that repo, the host opens one and resumes the conversation
+  where it left off.
+- Sit at any desk yourself whenever you want: `tmux attach -t orch`. Every window
+  the host opened is a window in that session. Type there instead — same
+  conversation, and the floor keeps showing it.
 
-There is nothing to hand over and nothing to stop. You are never choosing between
-the floor and your terminal; they are two windows on the same session.
+A conversation is one process, so one app holds it at a time. While your editor
+has one open, the floor shows it and says so, and the composer is greyed; close
+that tab and the floor picks it up. **Open in VS Code** hands it back. The next
+section walks through all of it.
 
 ## Start to finish
 
@@ -353,29 +355,36 @@ reported by the host instead, and the hook stays silent for it.
 
 ### Chatting with a desk
 
-A desk is one of two things, and the panel says which.
+A desk is one conversation, and one app holds it at a time — a conversation is a
+`claude` process, not a document two windows can share. The panel always says who
+holds this one.
 
-A **reported** desk is a window on somebody's machine — a VS Code session the
-plugin tells the floor about. You can watch it; you cannot type into it, because
-nothing can. (Remote Control is the one thing that sends into an interactive
-session, and only claude.ai and the Claude apps can drive it.) The composer on a
-reported desk offers **copy**: it puts your text on the clipboard and names the
-window to paste it into.
+**The floor holds it.** A small service on the workstation — the host, under
+[`host/`](host/) — is running that desk's `claude` in a tmux window: the same
+binary, login, tools, `.mcp.json`, hooks and `CLAUDE.md` as any window you open in
+that directory. Type on the floor and it is a user turn in that session; the reply
+comes back into the panel as the session writes it; a permission prompt becomes
+**Approve / Deny** on the desk and in the *Needs you* list. The human is still the
+one deciding — from one screen instead of one per agent. Enter sends, Shift+Enter
+is a new line, **stop** interrupts the turn. You can sit in that same window
+yourself: `tmux attach -t orch`.
 
-A **hosted** desk is a session the floor runs. A small service on the
-workstation — the host, under [`host/`](host/) — runs each agent through the
-Agent SDK: the same engine, tools, `.mcp.json`, hooks and `CLAUDE.md` as an
-interactive window in that directory, driven over a pipe instead of a keyboard.
-Type on the floor and it is a user turn in that session; the reply streams back
-into the panel; a permission prompt becomes **Approve / Deny** on the desk and in
-the *Needs you* list. The human is still the one deciding — from one screen
-instead of one per agent. Enter sends, Shift+Enter is a new line, **stop**
-interrupts the turn.
+**Your editor holds it.** The floor still shows the conversation, but the composer
+is greyed and names the pid holding it. Permission prompts appear with no buttons —
+answering one means a keystroke in the window that asked, and the floor has none to
+press, so it says *"answer this in your editor"* rather than offering a button that
+cannot work. Close the tab and the floor takes over a second or two later. **Open
+in VS Code** moves it back the other way: the host shuts its own window first, then
+opens the conversation in your editor with everything you did from the floor
+already in it.
+
+**Nobody holds it.** No host on the board is running that repo, so the desk says
+so instead of offering a composer with nowhere to deliver.
 
 The host only ever reaches *out*. It registers with the server, then holds a
 request open asking for work; the server never connects to a workstation and
 nothing on the workstation listens. If the server is down the host retries; if
-the host is down the floor says so and the composer goes back to copy. Sessions
+the host is down the floor says so and the composer goes quiet. Sessions
 survive host restarts — the server remembers each desk's session id and the host
 resumes it.
 
@@ -390,8 +399,8 @@ Once per machine, from this repo:
 Name the directory (or directories) your orchestratinator repos live under. The
 script finds them — a repo is a desk if its `.mcp.json` carries `X-Channel` and
 `X-Agent` — reads the server address and the shared secret from the first one,
-installs the host's single dependency, and registers a LaunchAgent so the host
-starts at login and comes back if it stops. `claude` has to be on the PATH and
+and registers a LaunchAgent so the host starts at login and comes back if it
+stops. The host has no dependencies of its own; it needs Node and `tmux`. `claude` has to be on the PATH and
 signed in: the host runs the same binary your terminal does, with the same login.
 
 To run it by hand instead: `ORCH_HOST_ROOTS=~/Documents/dev/appideas npm run host`.
