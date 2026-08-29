@@ -143,7 +143,14 @@ function fixture() {
     `const ARGV = ${JSON.stringify(`${FIX}/argv.log`)};`,
     `if (process.argv[2] === 'agents') { process.stdout.write(fs.readFileSync(ROSTER, 'utf8')); process.exit(0); }`,
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
-    `fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
+    // Announcing late is how a real session behaves when something on screen
+    // is waiting for an answer: the window is up, the pid is not in the roster
+    // yet, and send() sits in waitReady. ORCH_TEST_READY_DELAY_MS makes that
+    // window a known length so a test can look at what the host does *during*
+    // it. Unset, it announces immediately, as before.
+    `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
+    `const readyDelay = Number(process.env.ORCH_TEST_READY_DELAY_MS || 0);`,
+    `if (readyDelay > 0) setTimeout(announce, readyDelay); else announce();`,
     String.raw`process.stdout.write('\u001b[?2004h');`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
     `let acc = '', composer = '', n = 0;`,
@@ -177,7 +184,7 @@ function fixture() {
   chmodSync(`${FIX}/claude`, 0o755);
 }
 
-function startHost(id = 'host-test-1') {
+function startHost(id = 'host-test-1', extraEnv = {}) {
   const h = spawn('node', ['host/index.js'], {
     env: {
       ...process.env,
@@ -190,6 +197,7 @@ function startHost(id = 'host-test-1') {
       // calls it delivered. The stand-in writes one, so this is the real path;
       // the timeout is only shortened so a genuine failure fails fast.
       ORCH_SUBMIT_SETTLE_MS: '150', ORCH_LAND_TIMEOUT_MS: '8000',
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -303,6 +311,53 @@ try {
   eq((await refused.json()).code, 'host_offline', 'with the reason');
   host = null;
 
+  /* ── the floor keeps hearing while a message is being delivered ─────────────
+   * Relaying the conversation and delivering a message used to share one loop,
+   * so handling a chat stopped the relay: send() opens a window, waits for
+   * Claude Code to come up, then waits for the message to reach the transcript.
+   * For that whole stretch the floor was told nothing — not the reply, not even
+   * the echo of the message it had just sent, which the composer reads as a
+   * send that failed and marks in red. Then the entire stretch arrived at once
+   * the moment send() returned. What is happening cannot queue behind what was
+   * asked. */
+  console.log('\n  hearing the desk while a message is still going in');
+
+  killTmux();
+  // The stand-in writes the roster and cannot unwrite it when the pane is
+  // killed under it. Left behind, its entry is a session with no pane, which
+  // holderOf reads — correctly — as an editor holding the conversation, and
+  // the send is refused before any of this is exercised.
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+  host = startHost('host-test-1', { ORCH_TEST_READY_DELAY_MS: '6000' });
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
+    'a host is back and the desk is live again');
+
+  const turnsBefore = ((await turns('free')).rows ?? []).length;
+  const marker = `SPOKEN-WHILE-BUSY-${Date.now()}`;
+  const queued = await chat('free', 'this one takes a while to go in');
+  eq(queued.status, 200, 'the floor accepts the message');
+
+  // The window has to be opened and the stand-in will not announce itself for
+  // six seconds, so the host is now stuck inside send(). Anything the desk says
+  // in the meantime still has to reach the floor.
+  appendTurn({
+    type: 'assistant', uuid: `busy-${Date.now()}`, timestamp: new Date().toISOString(),
+    message: { role: 'assistant', content: [{ type: 'text', text: marker }] },
+  });
+
+  const heard = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => (r.text ?? '').includes(marker)) ? rows : null;
+  }, 4000);
+  assert(!!heard, 'a turn written while the send is still in flight reaches the floor anyway');
+  assert(!clean(received()).includes('takes a while to go in'),
+    'and it got there before the message it was queued behind — the relay is not waiting on the delivery');
+  assert((heard?.length ?? 0) > turnsBefore, 'the floor gained a turn rather than replaying the transcript');
+
+  assert(await until(() => (clean(received()).includes('takes a while to go in') ? true : null), 20000),
+    'and the message itself still lands once the window finishes starting');
+
   /* ── which board this host serves ───────────────────────────────────────────
    * This used to be `originOf(found[0].url)` — the first desk the filesystem
    * walk happened to return. On a machine whose desks point at two boards that
@@ -382,6 +437,14 @@ try {
       console.log('\n--- desk turns ---');
       for (const t of d.rows ?? []) console.log(`${t.id} ${t.role} ${JSON.stringify((t.text ?? '').slice(0, 500))}`);
     } catch { /* the board may already be gone */ }
+  }
+  // What the window was actually given, and what it was asked to run. A send
+  // that "did not land" is either bytes that never arrived or a window that
+  // never opened, and these two files say which without guessing.
+  if (failures) {
+    for (const [label, path] of [['pane received', SINK], ['claude argv', `${FIX}/argv.log`]]) {
+      try { if (existsSync(path)) console.log(`\n--- ${label} ---\n${readFileSync(path, 'utf8').trim()}`); } catch { /* gone */ }
+    }
   }
   if (failures && hostLog.trim()) console.log(`\n--- host log ---\n${hostLog.trim()}\n----------------`);
   try { host?.kill('SIGKILL'); } catch { /* gone */ }

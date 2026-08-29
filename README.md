@@ -169,6 +169,14 @@ silent:
 - **You can sit in a window the floor opened.** `tmux attach -t orch` — each desk
   the host has opened is a window in that session. Typing there is the same as
   typing on the floor, because it is the same window.
+- **The first window the floor opens for a repo may stop and ask something.**
+  Claude Code approves an MCP server once per project, and records it in
+  `.claude/settings.local.json`, which is not committed. So a repo you have never
+  opened in Claude Code yourself shows *"New MCP server found in this project"*
+  and waits there — it never finishes starting, and the floor reports that it
+  stalled, quoting what is on the window's screen. Answer it once with `tmux
+  attach -t orch` and that repo is settled for good. Opening the repo in Claude
+  Code yourself, once, does the same thing ahead of time.
 
 ## Some useful commands
 In a terminal:

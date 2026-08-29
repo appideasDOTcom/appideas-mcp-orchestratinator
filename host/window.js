@@ -81,6 +81,10 @@ const IDLE_TIMEOUT_MS = Number(process.env.ORCH_IDLE_TIMEOUT_MS ?? 300_000);
 const LAND_TIMEOUT_MS = Number(process.env.ORCH_LAND_TIMEOUT_MS ?? 20_000);
 /** How many times Enter is pressed before giving up on a paste — see send(). */
 const SUBMIT_ATTEMPTS = Math.max(1, Number(process.env.ORCH_SUBMIT_ATTEMPTS ?? 3));
+/** How long one paste has to show up in the composer before it is re-sent. */
+const PASTE_CONFIRM_MS = Number(process.env.ORCH_PASTE_CONFIRM_MS ?? 3_000);
+/** The whole budget for getting the text into the composer — see pasteInto(). */
+const PASTE_TIMEOUT_MS = Number(process.env.ORCH_PASTE_TIMEOUT_MS ?? 60_000);
 /**
  * Where Claude Code keeps its own files. Overridable so the tests can prove
  * what happens to a message that never lands without writing into the real one.
@@ -278,18 +282,28 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
       return { ok: true, session };
     }
     if (Date.now() >= stop) {
-      // Say what was actually looked at. "It has not finished starting" is the
-      // right thing to tell a person, but on its own it is unfalsifiable: the
-      // same sentence covers a trust dialog, a roster this cannot read, and a
-      // window that died on the first line.
+      // Show the screen rather than name a cause. This used to assert a trust
+      // dialog, which is only one of the things that stops a window here: an
+      // MCP server waiting to be approved does it too, and so does anything
+      // else Claude Code puts up before it registers. Naming the wrong one is
+      // worse than naming none — it sends the reader off to answer a prompt
+      // that isn't there while the real one sits on screen, unread. The window
+      // is still alive at this point (a dead one returned above), so whatever
+      // is blocking it can simply be quoted.
+      const shot = target ? await tmux(['capture-pane', '-p', '-t', target, '-S', '-40']) : null;
+      const onScreen = (shot?.out ?? '')
+        .split('\n')
+        .map((l) => l.replace(/\s+$/, ''))
+        .filter(Boolean)
+        .slice(-8)
+        .join(' / ');
       const roll = seen.length
-        ? seen.map((x) => `${x.pid}@${x.cwd}`).join(
-)
+        ? seen.map((x) => `${x.pid}@${x.cwd}`).join(', ')
         : 'nothing at all';
       return {
         ok: false,
         code: 'not_ready',
-        error: `Claude Code is open in that window but has not finished starting — on a repo it has not seen before it asks whether the folder is trusted. Answer it there and this will go through. (waited for ${pid ? `pid ${pid}` : cwd} for ${Math.round(timeoutMs / 1000)}s; the roster had ${roll})`,
+        error: `Claude Code is open in that window but has not finished starting — something on screen is waiting for an answer. Attach with \`tmux attach -t ${SESSION}\` and reply to it, and this will go through.${onScreen ? ` The window is showing: ${onScreen}` : ''} (waited for ${pid ? `pid ${pid}` : cwd} for ${Math.round(timeoutMs / 1000)}s; the roster had ${roll})`,
       };
     }
     await sleep(400);
@@ -449,6 +463,110 @@ async function settled(target, { quiet = 2, tries = 20 } = {}) {
     if (now === last) same++;
     else { same = 0; last = now; }
   }
+  // Whether it actually went still, rather than ran out of tries. A window
+  // that never stops redrawing is not the same as one that has quietened down
+  // and the caller is entitled to know which it got — this used to return
+  // nothing, so a window still painting a long transcript was indistinguishable
+  // from an idle one and got typed into anyway.
+  return same >= quiet;
+}
+
+/**
+ * The text sitting in the composer, or null if no composer is on screen.
+ *
+ * The composer is the box at the bottom: a rule, a prompt line, its wrapped
+ * continuation lines, another rule. Reading just that is the point — the rest
+ * of the screen changes on its own (the hint line under the box rotates
+ * through "? for shortcuts", "paste again to expand", "Ctrl+Y to paste deleted
+ * text"), so a whole-screen comparison answers "did anything happen" rather
+ * than "did my paste arrive".
+ *
+ * Returns null rather than an empty string when there is no box to read, which
+ * is a different answer: the caller falls back to the whole screen instead of
+ * concluding the composer is empty.
+ */
+function composerOf(screen) {
+  const lines = screen.split('\n');
+  const rule = /^[\s│|]*[─━—-]{20,}/;
+  let at = -1;
+  for (let n = lines.length - 1; n >= 0; n--) {
+    if (/^\s*[❯>]/.test(lines[n])) { at = n; break; }
+  }
+  if (at < 0) return null;
+  const body = [lines[at].replace(/^\s*[❯>]/, '')];
+  for (let n = at + 1; n < lines.length && !rule.test(lines[n]); n++) body.push(lines[n]);
+  return body.join('\n').replace(/\s+$/, '');
+}
+
+/** What to compare before and after a paste: the composer when there is one,
+ *  the whole screen when there is not. */
+async function inputState(target) {
+  const screen = await screenOf(target);
+  return composerOf(screen) ?? screen;
+}
+
+/**
+ * Put the text in the composer, and prove it is there.
+ *
+ * A bracketed paste is not reliably delivered, and the failure is silent: tmux
+ * reports success because it wrote the bytes, while Claude Code drops them.
+ * The window this was found in had just been opened with `--resume` on a large
+ * transcript, and the drop lines up exactly with the moment the session
+ * registers itself — which is the moment waitReady() returns, so the floor was
+ * pasting into the one instant the window would not take it. Measured on a
+ * resume: a paste at 0.5s arrived, the paste at 1.1s — session registration —
+ * vanished, and pastes from 1.6s on arrived. On the cold window this was
+ * reported from, that gap was thirty seconds wide.
+ *
+ * So the paste is checked rather than assumed, the same way the submit already
+ * is. What it can be checked against is limited: a long message is collapsed to
+ * `[Pasted text #1 +39 lines]`, so its own text is not on screen to look for.
+ * The composer *changing* is what is available, and it is enough — the composer
+ * only changes here because something was typed into it.
+ *
+ * Before re-pasting, the composer is cleared. A paste that was merely slow
+ * rather than dropped would otherwise be joined by the retry and submitted as
+ * the message twice over.
+ */
+async function pasteInto(target, text) {
+  const buffer = `orch-${process.pid}-${Math.abs(hash(target))}`;
+  const stop = Date.now() + PASTE_TIMEOUT_MS;
+  let attempts = 0;
+  for (;;) {
+    // Never paste into a window that is still painting: that is when it drops
+    // them. Not settling is not fatal — the paste is verified either way — but
+    // it is worth waiting for while there is budget left.
+    await settled(target);
+    const before = await inputState(target);
+
+    const set = await tmux(['set-buffer', '-b', buffer, '--', text]);
+    if (!set.ok) return { ok: false, error: set.error };
+    // -p is the bracketed paste; -d deletes the buffer so it doesn't pile up.
+    const paste = await tmux(['paste-buffer', '-p', '-d', '-b', buffer, '-t', target]);
+    if (!paste.ok) {
+      await tmux(['delete-buffer', '-b', buffer]);
+      return { ok: false, error: paste.error };
+    }
+    attempts++;
+
+    const confirmBy = Date.now() + PASTE_CONFIRM_MS;
+    while (Date.now() < confirmBy) {
+      await sleep(250);
+      if ((await inputState(target)) !== before) return { ok: true, attempts };
+    }
+
+    if (Date.now() >= stop) {
+      return {
+        ok: false,
+        code: 'paste_lost',
+        error: `the window would not take the message — it was pasted in ${attempts} time${attempts === 1 ? '' : 's'} over ${Math.round(PASTE_TIMEOUT_MS / 1000)}s and never appeared in the composer. Nothing was sent.`,
+      };
+    }
+    // Clear anything that arrives late, so the next paste is not appended to a
+    // copy of the same message. One Ctrl-U per line, and a collapsed paste is
+    // one line however long the message was.
+    for (let i = 0; i < 8; i++) await tmux(['send-keys', '-t', target, 'C-u']);
+  }
 }
 
 /** Whitespace is not meaningful here: a composer rewraps, and a transcript
@@ -585,15 +703,19 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     return { ok: false, code: 'busy', error: 'the window has been working for too long to take a message — nothing was typed in' };
   }
 
-  const buffer = `orch-${process.pid}-${Math.abs(hash(here))}`;
-  const set = await tmux(['set-buffer', '-b', buffer, '--', text]);
-  if (!set.ok) return { ok: false, error: set.error };
-  // -p is the bracketed paste; -d deletes the buffer so it doesn't pile up.
-  const paste = await tmux(['paste-buffer', '-p', '-d', '-b', buffer, '-t', pane.target]);
-  if (!paste.ok) {
-    await tmux(['delete-buffer', '-b', buffer]);
-    return { ok: false, error: paste.error };
-  }
+  // Where the transcript stood before anything was typed. Taken here rather
+  // than after the paste because getting the text in can itself take a while
+  // on a window that is still starting, and a turn written during that would
+  // then be behind the offset and invisible to landed() — the message would be
+  // in the conversation and still reported lost.
+  const before = path ? await transcriptSize(path) : null;
+
+  // Get the text into the composer, and confirm it is there before pressing
+  // anything. This is a paste that can be silently dropped, not a write that
+  // either works or errors — see pasteInto().
+  const typed = await pasteInto(pane.target, text);
+  if (!typed.ok) return { ...typed, target: pane.target };
+
   // Submit, and prove it went by finding the message itself in the transcript.
   //
   // This used to watch the transcript merely *grow*, which anything at all
@@ -616,7 +738,6 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // A stand-in that just reads stdin cannot reproduce any of this — it accepts
   // the Enter a TUI drops — so the tests cannot prove it. It was found by
   // watching a real window, and it is verified there.
-  const before = path ? await transcriptSize(path) : null;
   await settled(pane.target);
 
   let sent = false;
@@ -651,7 +772,11 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       ok: false,
       code: 'not_delivered',
       target: pane.target,
-      error: 'the window took the message but never submitted it — it is not in the conversation',
+      // This now says something it can back up. The text was seen in the
+      // composer before Enter was pressed, so "took it but did not submit it"
+      // is an observation rather than the only remaining guess, and the message
+      // really is still sitting there for you to send by hand.
+      error: `the window took the message but never submitted it — it is still in the composer, not in the conversation. Attach with \`tmux attach -t ${SESSION}\` and press Enter to send it.`,
     };
   }
   return { ok: true, target: pane.target, confirmed: true };

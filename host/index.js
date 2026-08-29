@@ -127,24 +127,38 @@ class Desk {
    * opened a different one — is not a handoff to negotiate; it is simply the
    * conversation now, and the floor is told so.
    */
+  /**
+   * Start following a conversation, from wherever it has already got to.
+   *
+   * The offset is snapshotted here and nowhere else. It used to be re-taken
+   * every time the *live session* changed — but which process is running a
+   * conversation changes every time you switch apps, and re-snapshotting on
+   * that skips everything written in between. In the worst case the window
+   * opens, `send()` types the message and Claude Code writes it, all inside one
+   * watch interval; the next tick then moves the offset past it and the floor
+   * never sees the message it just sent.
+   */
+  async follow(id) {
+    this.lastSessionId = id;
+    this.offset = id ? await W.transcriptSize(W.transcriptPath(this.cwd, id)) : 0;
+  }
+
   async watch(live = [], paneByPid = new Map()) {
     // The conversation this desk is. Pinned on first sight and kept: a desk
     // does not change conversation because a window closed, or because another
     // one in the same folder happens to be newer.
     if (!this.lastSessionId && live.length) {
       const newest = live.reduce((a, b) => ((b.startedAt ?? 0) > (a.startedAt ?? 0) ? b : a));
-      this.lastSessionId = newest.sessionId;
+      await this.follow(newest.sessionId);
     }
     const session = this.lastSessionId
       ? live.find((x) => x.sessionId === this.lastSessionId) ?? null
       : null;
     const id = session?.sessionId ?? null;
     if (id !== this.sessionId) {
+      // Only which process holds it changed. The conversation, and how far the
+      // floor has read into it, are the desk's and survive the handover.
       this.sessionId = id;
-      // Start where the conversation already is, so attaching to a long one
-      // does not replay it onto the floor — and so a new one, whose transcript
-      // is empty, is followed from its very first turn.
-      this.offset = id ? await W.transcriptSize(W.transcriptPath(this.cwd, id)) : 0;
       this.host.emit({
         type: 'session', channel: this.channel, agent: this.agent,
         session_id: id, cwd: this.cwd, pid: session?.pid ?? null,
@@ -270,7 +284,7 @@ class Host {
     // starts a new conversation instead of continuing the one on screen.
     for (const d of Array.isArray(reply?.desks) ? reply.desks : []) {
       const desk = this.desks.get(`${d.channel}|${d.agent}`);
-      if (desk && !desk.lastSessionId && d.sdk_session_id) desk.lastSessionId = d.sdk_session_id;
+      if (desk && !desk.lastSessionId && d.sdk_session_id) await desk.follow(d.sdk_session_id);
     }
     return reply;
   }
@@ -361,22 +375,38 @@ class Host {
     }
   }
 
+  /**
+   * Read the roster and the transcripts, forever, on its own clock.
+   *
+   * This is deliberately not part of run(). The two used to share one loop, and
+   * handling a chat blocked it: send() opens a window, waits up to
+   * READY_TIMEOUT_MS for Claude Code to come up, then up to LAND_TIMEOUT_MS for
+   * the message to appear in the transcript. For that minute-plus the floor was
+   * told nothing at all — no reply, not even the echo of the message it had
+   * just sent, which the composer reads as a send that failed. Then the whole
+   * minute arrived in a single batch the moment send() returned. Relaying what
+   * is happening cannot be behind doing what was asked.
+   */
+  async watchLoop() {
+    while (!this.stopping) {
+      try { await this.watch(); } catch (err) { warn(`watch: ${err.message}`); }
+      if (this.stopping) break;
+      await sleep(WATCH_MS);
+    }
+  }
+
   async run() {
     let backoff = 1000;
     let lastRegister = 0;
-    let lastWatch = 0;
+    const watching = this.watchLoop();
     while (!this.stopping) {
       try {
         if (Date.now() - lastRegister > HEARTBEAT_MS) {
           await this.register();
           lastRegister = Date.now();
         }
-        // The long poll is the pacing: work arrives within milliseconds of
-        // being typed, and the roster/transcripts are re-read around it.
-        if (Date.now() - lastWatch > WATCH_MS) {
-          await this.watch();
-          lastWatch = Date.now();
-        }
+        // The long poll is the pacing for *work*. The transcripts are read by
+        // watchLoop() beside this, not between these lines.
         const reply = await this.request(
           `/api/host/work?host_id=${encodeURIComponent(this.cfg.hostId)}&wait=${Math.ceil(WATCH_MS / 1000)}`,
           { timeout: WATCH_MS + 10_000 },
@@ -391,6 +421,7 @@ class Host {
         backoff = Math.min(backoff * 2, 30_000);
       }
     }
+    await watching;
   }
 
   async stop() {
