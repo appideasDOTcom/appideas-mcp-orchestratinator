@@ -146,10 +146,32 @@ export function openDb(path) {
     -- the operator, stored here rather than in a browser because a floor where
     -- two people disagree about which desk is which stops being a shared
     -- reference — the one job it has.
+    -- What an agent is called, for every channel at once.
+    --
+    -- Keyed by the agent id and nothing else, because that is what an operator
+    -- means by "the name": X-Agent identifies the worker, so an agent called
+    -- coordinator, renamed on one channel, is renamed on all of them. The derived default
+    -- already behaved this way — it comes from the id, so it is the same
+    -- everywhere — and a per-channel override made the two disagree the moment
+    -- anybody used it.
+    --
+    -- A row exists only for an agent somebody has actually named. Absence means
+    -- "use the derived default", so changing that derivation reaches every
+    -- agent that was happy with it rather than only the ones seen since.
+    CREATE TABLE IF NOT EXISTS agent_names (
+      agent    TEXT PRIMARY KEY,
+      persona  TEXT NOT NULL,
+      named_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Where an agent sits, which is per channel because a room is per channel.
+    -- The table keeps its name for the sake of every database already carrying
+    -- it; what it no longer keeps is the agent's name. Older copies still have a
+    -- persona column here, and migratePersonas removes it after lifting the
+    -- operator-chosen names into agent_names above.
     CREATE TABLE IF NOT EXISTS personas (
       channel     TEXT NOT NULL,
       agent       TEXT NOT NULL,
-      persona     TEXT NOT NULL,
       seat        INTEGER,
       assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (channel, agent)
@@ -266,7 +288,63 @@ export function openDb(path) {
   // so the floor can say so and say what to do instead of failing on send.
   addColumn(db, 'hosted_desks', 'outside_pid', 'INTEGER');
 
+  migratePersonas(db);
+
   return db;
+}
+
+/**
+ * Retire the arrival-order cast in databases that still carry it.
+ *
+ * Only rows whose name is still exactly a cast name are rewritten — anything an
+ * operator typed is theirs and is left alone. The test is imperfect by
+ * construction: an operator who deliberately named someone "Ada" loses it here,
+ * once. That is accepted rather than solved, because the alternative is a
+ * `named_by` column existing forever to record a distinction that stops
+ * mattering the moment this has run.
+ *
+ * Seats are untouched, so no desk moves.
+ */
+function migratePersonas(db) {
+  const cols = db.prepare(`PRAGMA table_info(personas)`).all().map((c) => c.name);
+  if (!cols.includes('persona')) return;   // already migrated
+
+  const rows = db.prepare(`SELECT channel, agent, persona, assigned_at FROM personas`).all();
+  const cast = new Set(CAST);
+
+  // A name worth keeping is one an operator actually chose: not a cast name,
+  // and not the default this agent would derive anyway. Where the same agent
+  // was named differently on two channels the most recent wins, because a
+  // global name can only be one thing and the last thing said is the best
+  // available guess at what the operator currently wants.
+  const chosen = new Map();
+  for (const r of rows) {
+    if (!r.persona || cast.has(r.persona) || r.persona === humanName(r.agent)) continue;
+    const prev = chosen.get(r.agent);
+    if (!prev || String(r.assigned_at ?? '') >= String(prev.assigned_at ?? '')) chosen.set(r.agent, r);
+  }
+
+  const insert = db.prepare(
+    `INSERT INTO agent_names (agent, persona, named_at) VALUES (?, ?, COALESCE(?, datetime('now')))
+     ON CONFLICT(agent) DO NOTHING`
+  );
+  db.transaction(() => {
+    for (const [agent, r] of chosen) insert.run(agent, r.persona, r.assigned_at);
+  })();
+
+  const conflicts = [...chosen.keys()].filter(
+    (a) => new Set(rows.filter((r) => r.agent === a && r.persona && !cast.has(r.persona)).map((r) => r.persona)).size > 1
+  );
+  console.log(
+    `[db] names are now global: kept ${chosen.size} operator-chosen name${chosen.size === 1 ? '' : 's'}` +
+    `, everything else derives from its agent id` +
+    (conflicts.length ? ` · ${conflicts.join(', ')} had different names on different channels — kept the most recent` : '')
+  );
+
+  // The column is gone rather than left to rot: two places holding a name is
+  // how they come to disagree, and a reader finding `personas.persona` would
+  // reasonably believe it.
+  dropColumns(db, 'personas', ['persona'], 'a name belongs to the agent now, not to one of its desks');
 }
 
 function addColumn(db, table, column, decl) {
@@ -333,20 +411,38 @@ export const STATUS_TTL_SECONDS = Math.max(0, Number(process.env.STATUS_TTL_SECO
 export const TURN_RETENTION = Math.max(20, Number(process.env.TURN_RETENTION ?? 400));
 
 /**
- * The default cast. Deliberately original names rather than characters from a
- * television show: the metaphor is doing the work here, not the trademark, and
- * a shipped product carrying someone else's cast list is a problem the operator
- * shouldn't inherit from us. Rename any of them from the floor — the assignment
- * lives in `personas` and is what every viewer sees.
+ * The cast this system used to hand out: Ada, Bo, Cleo… assigned in arrival
+ * order. It is kept for one reason only — `migratePersonas` needs to recognise
+ * an auto-assigned name in an existing database — and nothing assigns from it
+ * any more.
  *
- * Assigned in order, so a channel's first agent is always Ada and the desks stay
- * where people learned them. Beyond the list an agent simply keeps its own name,
- * which is unglamorous but never collides.
+ * It was replaced because a name given by arrival order is arbitrary, and an
+ * arbitrary name used as an identifier is worse than no name: two channels each
+ * called their first agent Ada, so "Ada" meant nothing on its own and the
+ * operator had to translate it back to an X-Agent every time. A name derived
+ * from the agent's own id cannot drift from what it names.
  */
 export const CAST = [
   'Ada', 'Bo', 'Cleo', 'Dex', 'Edie', 'Finn', 'Greta', 'Hugo',
   'Ines', 'Jonas', 'Kira', 'Lou', 'Mira', 'Nico', 'Opal', 'Piper',
 ];
+
+/**
+ * The name an agent is given when nobody has chosen one: its own id, made
+ * readable. Words split on anything that is not a letter or a digit, and each
+ * gets its first character upper-cased — `appideas-qa` becomes `Appideas Qa`.
+ *
+ * The rest of each word is left exactly as written, so an id that already
+ * carries capitals keeps them (`QA` stays `QA` rather than becoming `Qa`).
+ * An id with nothing alphanumeric in it is returned unchanged, because a blank
+ * nameplate would be worse than an ugly one.
+ */
+export function humanName(agent) {
+  const raw = String(agent ?? '');
+  const words = raw.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  if (!words.length) return raw;
+  return words.map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+}
 
 /**
  * Every table a backup carries, and the only tables a restore will write.
@@ -362,8 +458,9 @@ export const CAST = [
  * above, about a backup being safe to email to yourself, would stop being true
  * the moment they were included. They are also reconstructible: the transcripts
  * they were built from still sit on each workstation under ~/.claude/projects.
- * `personas` is included because who sits at which desk is an operator decision
- * that would otherwise be silently lost on a restore. The hosting tables are
+ * `personas` and `agent_names` are included because where an agent sits and
+ * what it is called are both operator decisions that would otherwise be
+ * silently lost on a restore. The hosting tables are
  * runtime state — hosts re-register within a minute of any restart — and a
  * restored copy of them would only describe machines that may not exist.
  */
@@ -376,6 +473,7 @@ export const BACKUP_TABLES = [
   'channel_flags',
   'admin_events',
   'personas',
+  'agent_names',
 ];
 
 /**
@@ -718,16 +816,32 @@ export function makeStore(db) {
            ON last.channel = t.channel AND last.agent = t.agent AND last.id = t.id`
     ),
     turnCounts: db.prepare(`SELECT channel, agent, COUNT(*) AS n FROM turns GROUP BY channel, agent`),
-    listPersonas: db.prepare(`SELECT channel, agent, persona, seat FROM personas`),
-    personasInChannel: db.prepare(`SELECT persona, seat FROM personas WHERE channel = ?`),
-    getPersona: db.prepare(`SELECT persona, seat FROM personas WHERE channel = ? AND agent = ?`),
-    upsertPersona: db.prepare(
-      `INSERT INTO personas (channel, agent, persona, seat)
-       VALUES (@channel, @agent, @persona, @seat)
+    // `personas` now records only where an agent sits. The name is joined in
+    // from `agent_names`, and is NULL for anyone nobody has renamed — callers
+    // fill that with the derived default rather than storing it, so the
+    // derivation stays a live rule instead of a snapshot taken at first sight.
+    listPersonas: db.prepare(
+      `SELECT p.channel, p.agent, n.persona AS persona, p.seat
+         FROM personas p LEFT JOIN agent_names n ON n.agent = p.agent`
+    ),
+    seatsInChannel: db.prepare(`SELECT agent, seat FROM personas WHERE channel = ?`),
+    getPersona: db.prepare(
+      `SELECT n.persona AS persona, p.seat
+         FROM personas p LEFT JOIN agent_names n ON n.agent = p.agent
+        WHERE p.channel = ? AND p.agent = ?`
+    ),
+    upsertSeat: db.prepare(
+      `INSERT INTO personas (channel, agent, seat)
+       VALUES (@channel, @agent, @seat)
        ON CONFLICT(channel, agent) DO UPDATE SET
-         persona     = excluded.persona,
          seat        = COALESCE(excluded.seat, seat),
          assigned_at = datetime('now')`
+    ),
+    getName: db.prepare(`SELECT persona FROM agent_names WHERE agent = ?`),
+    // One row per agent, every channel at once.
+    upsertName: db.prepare(
+      `INSERT INTO agent_names (agent, persona) VALUES (@agent, @persona)
+       ON CONFLICT(agent) DO UPDATE SET persona = excluded.persona, named_at = datetime('now')`
     ),
     // Turns would otherwise grow without bound: this is full conversation text
     // arriving at every turn boundary from every window on the network. Trimmed
@@ -954,14 +1068,21 @@ export function makeStore(db) {
 
   function ensurePersona(channel, agent) {
     const existing = q.getPersona.get(channel, agent);
-    if (existing) return existing;
-    const taken = new Set(q.personasInChannel.all(channel).map((r) => r.persona));
-    // Past the end of the cast an agent simply keeps its own name — unglamorous,
-    // but it cannot collide and it cannot be wrong.
-    const persona = CAST.find((c) => !taken.has(c)) ?? agent;
-    const seat = taken.size;
-    q.upsertPersona.run({ channel, agent, persona, seat });
-    return { persona, seat };
+    // A seat row can exist with no name — that is the normal case now, and it
+    // means "call it whatever the id derives to".
+    if (existing) return { persona: existing.persona ?? humanName(agent), seat: existing.seat };
+    // Seat is still arrival order — it decides where the desk is drawn, and
+    // desks staying where people learned them is worth keeping. The *name* is
+    // not: it comes from the agent's own id, so it means the same thing on
+    // every channel and needs no translation back to an X-Agent.
+    //
+    // Deliberately no uniqueness check. Two agents may end up sharing a name,
+    // here or after an operator renames one, and that is allowed: the id below
+    // the name is what identifies them, and a guard would only be able to
+    // refuse an operator something they asked for on purpose.
+    const seat = q.seatsInChannel.all(channel).length;
+    q.upsertSeat.run({ channel, agent, seat });
+    return { persona: q.getName.get(agent)?.persona ?? humanName(agent), seat };
   }
 
   return {
@@ -1075,9 +1196,25 @@ export function makeStore(db) {
     floorSessions: () => q.floorSessions.all(),
     lastTurns: () => q.lastTurns.all(),
     turnCounts: () => q.turnCounts.all(),
-    listPersonas: () => q.listPersonas.all(),
-    setPersona: (channel, agent, persona, seat = null) =>
-      q.upsertPersona.run({ channel, agent, persona, seat }).changes,
+    // Names filled in here rather than in SQL: the derivation is JavaScript, and
+    // duplicating it as SQL string surgery is exactly how two answers to "what
+    // is this agent called" start to disagree.
+    listPersonas: () => q.listPersonas.all().map((r) => ({ ...r, persona: r.persona ?? humanName(r.agent) })),
+    /**
+     * Every name an operator has chosen, as { agent: persona }.
+     *
+     * Separate from `listPersonas` because that one is per *desk* and only
+     * knows agents that have taken a seat. A name outlives its seats: an agent
+     * renamed on one channel must answer to that name on a channel where it has
+     * never posted a hook event, which is most of them.
+     */
+    listAgentNames: () => Object.fromEntries(
+      db.prepare(`SELECT agent, persona FROM agent_names`).all().map((r) => [r.agent, r.persona])
+    ),
+    // `channel` is accepted and ignored: a name belongs to the agent, not to one
+    // of its desks. It stays in the signature because every caller has one to
+    // hand and the admin log records which board the operator was looking at.
+    setPersona: (_channel, agent, persona) => q.upsertName.run({ agent, persona }).changes,
     ensurePersona,
     pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
 

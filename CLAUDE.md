@@ -56,6 +56,36 @@ relays the conversation, `run()` handles work. Keep them apart. When they shared
 one loop, delivering a message blocked the relay for up to a minute — the floor
 went silent mid-conversation and then dumped the backlog in one batch.
 
+## The two surfaces
+
+One page draws two views. `index.html` loads `app.js` then `floor.js`, and
+`body.view-floor` toggles between them:
+
+| | Payload | Script |
+|---|---|---|
+| **board** — rows per agent | `/api/state` | [`src/ui/app.js`](src/ui/app.js) |
+| **floor** — an SVG room per channel, a desk per agent | `/api/floor` | [`src/ui/floor.js`](src/ui/floor.js) |
+
+**Anything both surfaces show is derived once, in
+[`src/agent-state.js`](src/agent-state.js).** Presence, the state label, the pill
+counts. Two views deriving "is this agent working" from the same columns by
+different code is precisely the drift to avoid — a desk and its board row must
+not disagree. The same rule put `deliverable()` in `src/floor.js`: one answer to
+"can this desk be typed into", used by the compose box and the Nudge button
+alike.
+
+The two scripts talk over `window`, in both directions — `app.js` is a classic
+script so its top-level functions are already global, `floor.js` is an IIFE and
+exposes only what it assigns. Call across with `?.` so either surface loading
+alone is not a crash.
+
+For the vocabulary of the parts, see
+[`docs/review/floor-nomenclature.png`](docs/review/floor-nomenclature.png) — it
+is a labelled screenshot, and it exists because we spent a round meaning
+different things by "the desk". Before claiming any UI change works, use the
+**verify-ui-change** skill; the page is the only honest test, and it lists the
+ways a green result has lied here.
+
 ## Tests
 
 `npm test` runs six suites. `test:host` and `test:window` are not unit tests:
@@ -70,6 +100,13 @@ real.
 
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
+- **You are an agent on this board, not only its author.** The protocol you are
+  building is one you are also subject to:
+  [`docs/multi-agent-team-playbook.md`](docs/multi-agent-team-playbook.md).
+  Read §8 at least — **"nudge" is a trigger word**, not conversation. It means
+  the operator can see something waiting on your channel, so poll before
+  replying. Answering "nudge" with acknowledgement instead of a channel check is
+  the most likely way to look broken while working perfectly.
 - **Errors state what is observed, never a guessed cause.** A message that named
   one likely reason for a stalled window sent two people after a dialog that was
   not on screen while the real prompt sat there unread. Quote the pane.

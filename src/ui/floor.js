@@ -273,6 +273,9 @@
     // was ambiguous even before that, because "the desk" means the counter to a
     // reader and the whole cell to this file.
     return `<div class="dp-head"><strong>${esc(d.persona)}</strong>` +
+      `<button type="button" class="pencil" data-act="rename"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
+      ` title="Rename ${esc(d.persona)}" aria-label="Rename ${esc(d.persona)}">\u270e</button>` +
       `<span class="dp-dim mono">${esc(channel)}/${esc(d.agent)}</span></div>${bits.join('')}` +
       `<div class="dp-foot"><button type="button" class="dp-open" data-act="open"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button></div>`;
@@ -743,7 +746,8 @@
     wrap.innerHTML = `
       <div class="p-head">
         <div class="p-id">
-          <button class="p-persona" data-act="rename" title="Rename this desk — everyone sees the same cast"></button>
+          <button class="p-persona" data-act="rename" data-channel="${esc(channel)}" data-agent="${esc(agent)}"
+                  title="Rename — everyone sees the same name"></button>
           <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
         </div>
         <button class="btn" data-act="close-panel" title="Close">✕</button>
@@ -1125,13 +1129,25 @@
   }, true);
 
   document.addEventListener('click', async (e) => {
-    // The card's own clicks. Only one thing in it does anything.
+    // The card's own clicks. Everything else inside it is text, so anything not
+    // named here is deliberately swallowed rather than falling through to the
+    // desk handlers underneath and re-opening the thing you clicked out of.
     if (e.target.closest?.('#desk-pop')) {
       const openBtn = e.target.closest?.('[data-act="open"]');
       if (openBtn && ui.on) {
         ui.details = null;
         renderDetails();
         openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
+        return;
+      }
+      // Renaming from the card, which is the one place showing the name and the
+      // id together. The card closes first: it is positioned against the desk it
+      // came from and would otherwise sit under the modal.
+      const pencil = e.target.closest?.('[data-act="rename"]');
+      if (pencil && typeof window.renameDialog === 'function') {
+        ui.details = null;
+        renderDetails();
+        window.renameDialog(pencil.dataset.channel, pencil.dataset.agent);
       }
       return;
     }
@@ -1221,15 +1237,17 @@
       await interruptDesk();
     } else if (act.dataset.act === 'handback') {
       await handBack(act);
-    } else if (act.dataset.act === 'rename' && ui.open) {
-      const next = prompt('Who sits here?', act.textContent.trim());
-      if (!next || !next.trim()) return;
-      await fetch('./api/floor/persona', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...ui.open, persona: next.trim() }),
-      });
-      tick();
+    } else if (act.dataset.act === 'rename') {
+      // app.js owns the dialogs on this page — same reason the pills call into
+      // it rather than growing a second implementation. A `prompt()` used to do
+      // this: it could not show the agent id the name belongs to, could not say
+      // what clearing the field would restore, and is styled by the browser.
+      // The desk may be named from its popover with no panel open, so take the
+      // target from the button rather than from ui.open.
+      const channel = act.dataset.channel ?? ui.open?.channel;
+      const agent = act.dataset.agent ?? ui.open?.agent;
+      if (!channel || !agent) return;
+      if (typeof window.renameDialog === 'function') window.renameDialog(channel, agent);
     }
   });
 

@@ -87,7 +87,7 @@ try {
   let f = await floor();
   const free = deskOf(f, 'free');
   assert(!!free, 'one hook event is enough to get a seat');
-  eq(free.persona, 'Ada', 'the first agent on a channel is always Ada, so desks stay where people learned them');
+  eq(free.persona, 'Free', "an agent's name is derived from its own id, not from the order it arrived in");
   eq(free.live, true, 'and is live');
   eq(free.session.window, 'free', 'the window name is the last segment of cwd, which is what the tab says');
   eq(free.session.git_branch, 'main', 'the branch it is on');
@@ -110,7 +110,7 @@ try {
   console.log('\nwaiting is only ever what Claude Code said it was waiting for');
   await post(ev('pro', 's2', 'SessionStart'));
   f = await floor();
-  eq(deskOf(f, 'pro').persona, 'Bo', 'the second agent is Bo');
+  eq(deskOf(f, 'pro').persona, 'Pro', 'and so is the second one — arrival order decides the seat, never the name');
   eq(f.queue.length, 0, 'a quiet desk is not inferred to be waiting');
   await post(ev('pro', 's2', 'Notification', { notification_type: 'auth_success', notification_message: 'signed in' }));
   eq((await floor()).queue.length, 0, 'and news that is not a blocker stays out of the queue');
@@ -163,6 +163,7 @@ try {
   eq(r.status, 200, 'an operator can rename a desk');
   f = await floor();
   eq(deskOf(f, 'pro').persona, 'Marguerite', 'and everyone sees it, because it is stored on the server');
+  eq(deskOf(f, 'free').persona, 'Free', 'and renaming one desk leaves every other name alone');
   eq(deskOf(f, 'pro').seat, before, 'the seat does not move — renaming somebody is not rearranging the room');
   await post(ev('pro', 's2', 'Stop', { last_assistant_message: 'still here' }));
   eq(deskOf(await floor(), 'pro').persona, 'Marguerite', 'and the next hook event does not undo it');
@@ -218,15 +219,33 @@ try {
   await post({ ...ev('free', 's9', 'SessionStart'), channel: 'other-floor' });
   f = await floor();
   eq(f.channels.length, 2, 'a new channel is a new floor with no server change');
-  eq(deskOf(f, 'free', 'other-floor').persona, 'Ada', 'whose cast starts again from the top — a floor is its own room');
+  eq(deskOf(f, 'free', 'other-floor').persona, 'Free',
+     'where the same id gets the same name — which is the point: a name means one thing everywhere');
   eq(f.totals.channels, 2, 'and the totals agree');
+
+  // The bug this replaced: a rename wrote one (channel, agent) row, so the same
+  // worker answered to two names depending on which room you were looking at —
+  // while the *derived* name, coming from the id, was identical on both. The
+  // default propagated and the override did not.
+  await post({ ...ev('pro', 's10', 'SessionStart'), channel: 'other-floor' });
+  eq(deskOf(await floor(), 'pro', 'other-floor').persona, 'Marguerite',
+     'a name given on one channel is the name on every channel — it belongs to the agent, not the desk');
+  r = await fetch(`${HOST}/api/floor/persona`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: 'other-floor', agent: 'pro', persona: 'Bocefus' }),
+  });
+  eq(r.status, 200, 'and renaming from the other channel is the same edit');
+  f = await floor();
+  eq(deskOf(f, 'pro', 'other-floor').persona, 'Bocefus', 'seen where it was typed');
+  eq(deskOf(f, 'pro', CH).persona, 'Bocefus', 'and back on the channel it was first named from');
+  eq(deskOf(f, 'free', CH).persona, 'Free', 'while a different id is still untouched');
 
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();
   const tables = Object.keys(backup.tables ?? {});
   assert(!tables.includes('turns'), 'turns are NOT in a backup — it holds what people typed, and the file is meant to be safe to email yourself');
   assert(!tables.includes('agent_sessions'), 'nor are sessions');
-  assert(tables.includes('personas'), 'but the cast is, because it is an operator decision that would otherwise be lost');
+  assert(tables.includes('personas'), 'but names are, because a rename is an operator decision that would otherwise be lost');
 } catch (err) {
   failures++;
   console.error(`\n  ✗ ${err.stack ?? err}`);

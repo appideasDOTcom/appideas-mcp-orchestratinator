@@ -195,6 +195,30 @@ function stateChip(a) {
   return `<span class="state ${tone}" title="${esc(title)}">${esc(a.state.label)} · ${age(a.reported_at)}</span>`;
 }
 
+/**
+ * An agent's name, the id underneath it, and the way to change the name.
+ *
+ * Both are shown because they answer different questions: the name is what
+ * people say out loud, the id is what routes a message and what appears in
+ * `.mcp.json`. Showing only the name would repeat the mistake this replaced —
+ * an arbitrary label standing in for an identifier — and showing only the id
+ * makes the board a wall of slugs.
+ *
+ * The pencil is hidden until the name is hovered. It is a real button rather
+ * than a click handler on the name itself so it reaches the keyboard, and it
+ * carries the agent's *current* name so the dialog can open already filled in.
+ */
+function nameplate(channel, a) {
+  const name = a.persona ?? a.agent;
+  return `<span class="named">
+            <span class="agent-name">${esc(name)}</span>
+            <button type="button" class="pencil" data-act="rename"
+                    data-channel="${esc(channel)}" data-agent="${esc(a.agent)}" data-persona="${esc(name)}"
+                    title="Rename ${esc(name)}" aria-label="Rename ${esc(name)}">\u270e</button>
+          </span>
+          <span class="agent-id mono" title="X-Agent — what routes messages to this desk">${esc(a.agent)}</span>`;
+}
+
 /** One agent row. `retired` rows get a restore button instead of a trash can. */
 function agentRow(c, a) {
   const at = `data-channel="${esc(c.channel)}" data-agent="${esc(a.agent)}"`;
@@ -207,7 +231,7 @@ function agentRow(c, a) {
               <span class="dot ${PRESENCE_DOT[a.presence]}" title="${esc(a.presence)} · last seen ${esc(absTime(a.last_seen))}"></span>
               <div>
                 <div class="agent-line">
-                  <span class="agent-name">${esc(a.agent)}</span>
+                  ${nameplate(c.channel, a)}
                   <span class="presence" title="${a.sessions} live MCP session${a.sessions === 1 ? '' : 's'}">${esc(a.presence)}${a.sessions > 1 ? ` ×${a.sessions}` : ''}</span>
                   ${a.retired ? `<span class="state off" title="retired by the operator ${esc(absTime(a.retired_at))} — it returns by itself if it calls a tool">retired</span>` : stateChip(a)}
                 </div>
@@ -481,6 +505,22 @@ async function admin(path, body) {
   return json;
 }
 
+/**
+ * What to call an agent, and how to write it where the id also matters.
+ *
+ * `personas` ships per channel rather than only on agent rows, because a task's
+ * requester may have no row here — retired, or on a channel the board is not
+ * showing. Falling back to the id is correct rather than defensive: an agent
+ * with no persona row yet genuinely has no name but its own.
+ */
+const nameOf = (channel, agent) =>
+  (agent ? findChannel(channel)?.personas?.[agent] : null) ?? agent ?? '';
+/** "Appideas Qa (appideas-qa)" — collapses to one when the name adds nothing. */
+const nameAndId = (channel, agent) => {
+  const name = nameOf(channel, agent);
+  return !agent || name === agent ? String(agent ?? '') : `${name} (${agent})`;
+};
+
 const findChannel = (name) => (ui.state?.channels ?? []).find((c) => c.channel === name) ?? null;
 const findAgent = (channel, agent) => {
   const c = findChannel(channel);
@@ -548,6 +588,9 @@ function notify(message, { error = true } = {}) {
 function refreshDialog() {
   if (!el.dlg.open || !ui.dlgCtx) return;
   const { channel, agent, kind } = ui.dlgCtx;
+  // Not every dialog is a list. A rename has no count behind it and nothing to
+  // redraw, so leave it exactly as the operator is using it.
+  if (kind === 'rename') return;
   if (agent) {
     const a = findAgent(channel, agent);
     const left = !a ? 0
@@ -632,6 +675,7 @@ function backlogDialog(channel, agent) {
   ui.dlgCtx = { channel, agent, kind: 'unread' };
   const c = findChannel(channel);
   const names = (c?.agents ?? []).map((x) => x.agent);
+  const who = nameAndId(channel, agent);
   const list = a.unread_list ?? [];
 
   const rows = list.length ? list.map((m) => `
@@ -639,12 +683,12 @@ function backlogDialog(channel, agent) {
       <div>
         <span class="ref">#${m.id}</span> <span class="title">${esc(excerpt(m.body))}</span>
         <span class="badge ${m.to ? 'opened' : 'claimed'}">${m.to ? 'direct' : 'broadcast'}</span>
-        <div class="muted mono tiny">sent by ${esc(m.from)} · ${age(m.created_at)}</div>
+        <div class="muted mono tiny">sent by ${esc(nameOf(channel, m.from))} · ${age(m.created_at)}</div>
       </div>
       <div class="task-acts">
         <select class="input" data-reassign-msg="${m.id}" title="point this message at someone else">
           <option value="">— everyone —</option>
-          ${names.map((x) => `<option value="${esc(x)}"${m.to === x ? ' selected' : ''}>${esc(x)}</option>`).join('')}
+          ${names.map((x) => `<option value="${esc(x)}"${m.to === x ? ' selected' : ''}>${esc(nameAndId(channel, x))}</option>`).join('')}
         </select>
         <button type="button" class="btn" data-do="read-to" data-channel="${esc(channel)}" data-agent="${esc(agent)}" data-up-to="${m.id}"
           title="marks this one read, and anything older — read is a single cursor, not a per-message flag">close</button>
@@ -653,7 +697,7 @@ function backlogDialog(channel, agent) {
 
   const nudge = nudgeHead(channel, agent, a);
   openDialog(`
-    <div class="dlg-head"><h3>Unread messages · ${esc(agent)}</h3>${nudge.button}</div>
+    <div class="dlg-head"><h3>Unread messages · ${esc(who)}</h3>${nudge.button}</div>
     ${nudge.note}
     <p class="dlg-sub">
       on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}${a.unread > list.length ? ` · showing ${list.length} of ${a.unread}` : ''}
@@ -662,7 +706,7 @@ function backlogDialog(channel, agent) {
     <p class="dlg-note">
       Whether an agent has seen a message is one cursor, not a flag per message — so <b>close</b> marks that
       message read <b>and anything older than it</b>. Closing the top row is the same as marking all read.
-      Either way ${esc(agent)} never sees them, and the log keeps the record. Changing the dropdown re-addresses
+      Either way ${esc(nameOf(channel, agent))} never sees them, and the log keeps the record. Changing the dropdown re-addresses
       the message immediately.
     </p>
     <div class="dlg-foot">
@@ -670,6 +714,60 @@ function backlogDialog(channel, agent) {
       <button type="button" class="btn primary" data-do="advance" data-up-to="${upTo}" ${at}>Mark all read (operator)</button>
     </div>
   `);
+}
+
+/**
+ * Rename an agent.
+ *
+ * The name is an operator decision stored on the server, so everyone looking at
+ * this board sees the same one — it is not a per-browser nickname. Deliberately
+ * unguarded: no uniqueness check, and no protection against overwriting a name
+ * somebody else chose. Both were considered and refused. A guard could only
+ * refuse the operator something they asked for on purpose, and the id under the
+ * name is what actually distinguishes two desks.
+ *
+ * Clearing the field restores the derived default rather than leaving a desk
+ * blank, which is the only reason this needs a note at all.
+ */
+function renameDialog(channel, agent) {
+  ui.dlgCtx = { channel, agent, kind: 'rename' };
+  const current = nameOf(channel, agent);
+  openDialog(`
+    <div class="dlg-head"><h3>Rename ${esc(current)}</h3></div>
+    <p class="dlg-sub">on <span class="mono">${esc(channel)}</span> · <span class="mono">${esc(agent)}</span></p>
+    <label class="field">
+      <span>Display name</span>
+      <input id="persona-name" class="input" type="text" maxlength="40" value="${esc(current)}"
+             placeholder="${esc(agent)}" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="dlg-note">
+      Everyone sees this name. It follows <span class="mono">${esc(agent)}</span> everywhere on the board and
+      the floor — the id itself never changes, so messages and tasks keep routing exactly as they do now.
+      Leave it empty to go back to <b>${esc(defaultName(agent))}</b>.
+    </p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="rename-save"
+              data-channel="${esc(channel)}" data-agent="${esc(agent)}">Save</button>
+    </div>
+  `);
+  const input = el.dlgBody.querySelector('#persona-name');
+  input?.focus();
+  input?.select();
+  // Enter saves, because a one-field dialog that needs a mouse is a chore.
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); el.dlgBody.querySelector('[data-do="rename-save"]')?.click(); }
+  });
+}
+
+/**
+ * The name an agent gets when nobody has chosen one — the same derivation the
+ * server does in `humanName`. Duplicated here only so the dialog can *name* the
+ * default it is offering to restore; the server remains the one that assigns it.
+ */
+function defaultName(agent) {
+  const words = String(agent ?? '').split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  return words.length ? words.map((w) => w[0].toUpperCase() + w.slice(1)).join(' ') : String(agent ?? '');
 }
 
 function retireDialog(channel, agent) {
@@ -728,14 +826,14 @@ function taskDialog(channel, agent, kind = null) {
              beside it, and "claimed by X" under a heading about claims read as
              a riddle. Neither told you the one thing the row could not
              otherwise show. -->
-        <div class="muted mono tiny">${t.created_by ? `requested by ${esc(t.created_by)}` : 'no requester recorded'} · ${age(t.updated_at)}</div>
+        <div class="muted mono tiny">${t.created_by ? `requested by ${esc(nameOf(channel, t.created_by))}` : 'no requester recorded'} · ${age(t.updated_at)}</div>
       </div>
       <div class="task-acts">
         <select class="input" data-reassign="${t.id}" title="reassign">
           <!-- "no assignee" rather than "unassigned": a claimed task has no
                assignee but is very much someone's, and the row says who. -->
           <option value="">— no assignee —</option>
-          ${names.map((n) => `<option value="${esc(n)}"${t.assignee === n ? ' selected' : ''}>${esc(n)}</option>`).join('')}
+          ${names.map((n) => `<option value="${esc(n)}"${t.assignee === n ? ' selected' : ''}>${esc(nameAndId(channel, n))}</option>`).join('')}
         </select>
         <button type="button" class="btn" data-do="close-task" data-channel="${esc(channel)}" data-id="${t.id}">close</button>
       </div>
@@ -743,7 +841,7 @@ function taskDialog(channel, agent, kind = null) {
 
   const nudge = nudgeHead(channel, agent, agent ? findAgent(channel, agent) : null);
   openDialog(`
-    <div class="dlg-head"><h3>${kind === 'claimed' ? 'Pending claims' : kind === 'assigned' ? 'Pending tasks' : 'Unfinished tasks'}${agent ? ` · ${esc(agent)}` : ''}</h3>${nudge.button}</div>
+    <div class="dlg-head"><h3>${kind === 'claimed' ? 'Pending claims' : kind === 'assigned' ? 'Pending tasks' : 'Unfinished tasks'}${agent ? ` · ${esc(nameAndId(channel, agent))}` : ''}</h3>${nudge.button}</div>
     ${nudge.note}
     <p class="dlg-sub">on <span class="mono">${esc(channel)}</span>${c.task_list_total > all.length ? ` · showing ${all.length} of ${c.task_list_total}` : ''}</p>
     <div class="task-list">${rows}</div>
@@ -1103,6 +1201,7 @@ el.channels.addEventListener('click', (e) => {
 
   if (action === 'unread') backlogDialog(channel, agent);
   else if (action === 'tasks') taskDialog(channel, agent ?? null, btn.dataset.kind ?? null);
+  else if (action === 'rename') renameDialog(channel, agent);
   else if (action === 'retire') retireDialog(channel, agent);
   else if (action === 'channel') channelDialog(channel);
   // Restoring is trivially reversible and self-explanatory, so it skips the
@@ -1152,6 +1251,14 @@ el.dlgBody.addEventListener('click', (e) => {
         { keepOpen: true }
       ).then(reRender);
       break;
+    // An empty field means "give it back the derived name" rather than "leave it
+    // blank" — the endpoint requires a non-empty persona, so send the default.
+    case 'rename-save': {
+      const typed = (el.dlgBody.querySelector('#persona-name')?.value ?? '').trim();
+      const persona = typed || defaultName(d.agent);
+      act(() => floorPost('persona', { channel: d.channel, agent: d.agent, persona }));
+      break;
+    }
     case 'archive':
       act(() => admin('channel/archive', { channel: d.channel }));
       break;

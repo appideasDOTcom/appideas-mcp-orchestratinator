@@ -86,6 +86,26 @@ Also confirm the host picked the right board — `grep '→ http' ~/.orchestrati
 should say `http://localhost:8787`. The log goes quiet after startup, so silence
 proves nothing.
 
+**And check the desks, not just the code.** `discoverDesks()` runs once, in
+`main()`. The host then re-registers that same cached array every minute, so the
+heartbeat is live while the desk list behind it is frozen at boot — a host that
+looks perfectly healthy can be serving an identity the repo abandoned hours ago.
+Compare the host's start time against the *repo's* `.mcp.json`, not only against
+`host/index.js`:
+
+```bash
+ps -o lstart= -p $(pgrep -f "host/index.js" | head -1)
+ls -lT .mcp.json                      # X-Channel / X-Agent live in here
+grep -A3 '→ http' ~/.orchestratinator/log/host.log | tail -4   # what it actually serves
+```
+
+If the log names a channel the repo no longer declares, that is the bug, and the
+same `kickstart` fixes it. This is worth knowing because of how it presents: a
+stale desk list makes the floor say **"No host on this board is running that
+repo"** — `not_hosted`, decided before the editor is ever consulted — so closing
+the editor, reopening it, and refreshing the page all correctly change nothing.
+Every instinct the message provokes is a dead end.
+
 ## 6. Is the server the code you edited?
 
 The stack runs from a Docker image. Compare its build time against `src/`:

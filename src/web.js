@@ -5,6 +5,9 @@ import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
 import { createFloorRouter, deliverable } from './floor.js';
+// The same derivation the store uses, so a row for an agent with no persona row
+// yet shows the name it is about to be given rather than a raw id for one poll.
+import { humanName } from './db.js';
 import {
   agentBoard, agentKey, agentLoadIndex, index, iso,
 } from './agent-state.js';
@@ -86,6 +89,12 @@ function buildState(store, sessions, sessionStats, meta) {
   // Channels known to the database, plus any a live session claims but that has
   // yet to write anything.
   const channelNames = new Set(store.listAllChannels());
+
+  // Who each agent is called. One name per agent id, for every channel at once —
+  // read straight from the names table rather than from the per-desk seating
+  // rows, because a name outlives its seats: an agent renamed while working on
+  // one channel must answer to that name on a channel it has never sat down in.
+  const chosenNames = store.listAgentNames();
   for (const s of liveSessions) if (s.channel) channelNames.add(s.channel);
 
   const agentsByChannel = index(agentRows, (r) => r.channel);
@@ -100,6 +109,15 @@ function buildState(store, sessions, sessionStats, meta) {
   }
 
   const channels = [...channelNames].sort().map((channel) => {
+    // Chosen names first, then the derived default for every agent that has not
+    // been renamed. The map has to be *complete*, not merely correct: it is what
+    // resolves a name anywhere the id appears — a task's requester, a reassign
+    // dropdown, a dialog heading — and a half-filled one silently falls back to
+    // raw ids in exactly those places while the agent rows show proper names.
+    const personas = {};
+    for (const a of agentsByChannel.get(channel) ?? []) {
+      personas[a.agent] = chosenNames[a.agent] ?? humanName(a.agent);
+    }
     const allAgents = (agentsByChannel.get(channel) ?? [])
       .slice()
       .sort((a, b) => a.agent.localeCompare(b.agent))
@@ -110,6 +128,10 @@ function buildState(store, sessions, sessionStats, meta) {
         // than not showing it at all.
         return {
           agent: a.agent,
+          // The display name. `agent` stays alongside it everywhere it is shown:
+          // the name is for reading, the id is what routes. Read from the same
+          // map the dialogs use, so a row and a heading cannot disagree.
+          persona: personas[a.agent],
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
           // Whether the operator can nudge this agent — the same verdict the
           // chat endpoint enforces, so the button and the server agree.
@@ -141,6 +163,9 @@ function buildState(store, sessions, sessionStats, meta) {
     const unfinished = tasksByChannel.get(channel) ?? [];
     return {
       channel,
+      // Every name on this channel, so a dialog can render "requested by
+      // <name>" for an agent that has no row of its own.
+      personas,
       archived: archivedAt.has(channel),
       archived_at: iso(archivedAt.get(channel)),
       connected: agents.filter((a) => a.presence === 'connected').length,
