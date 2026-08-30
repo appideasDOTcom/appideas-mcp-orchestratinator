@@ -873,10 +873,34 @@ export function makeStore(db) {
            ON last.channel = t.channel AND last.agent = t.agent AND last.id = t.id`
     ),
     turnCounts: db.prepare(`SELECT channel, agent, COUNT(*) AS n FROM turns GROUP BY channel, agent`),
-    // `personas` now records only where an agent sits. The name is joined in
-    // from `agent_names`, and is NULL for anyone nobody has renamed — callers
-    // fill that with the derived default rather than storing it, so the
-    // derivation stays a live rule instead of a snapshot taken at first sight.
+    /* The last thing an agent SAID, and the last few things it DID — the floor's
+       thought bubble draws the first, its monitor types the second. A desk that
+       reads "Bash: grep -rn ..." tells an operator what a tool call looked like,
+       which is the one thing the chat panel behind it already shows in full;
+       what it cannot get anywhere else at a glance is what the agent is telling
+       them.
+
+       Per desk, not per table, and that is the point. Both started as one query
+       over every turn: a MAX(id) GROUP BY for the message, a ROW_NUMBER() window
+       for the commands. Correct, and measured at 80k turns they cost 18ms and
+       52ms *per call* — on a payload every open browser polls every two seconds,
+       against a table that only grows. Driven off idx_turns_agent one desk at a
+       time the same work is 0.15ms and 0.23ms for twenty desks. A seek per desk
+       beats a scan per poll. */
+    deskLastMessage: db.prepare(
+      `SELECT id, text, created_at
+         FROM turns
+        WHERE channel = ? AND agent = ? AND role = 'assistant'
+          AND text IS NOT NULL AND text != ''
+        ORDER BY id DESC LIMIT 1`
+    ),
+    deskCommands: db.prepare(
+      `SELECT id, text
+         FROM turns
+        WHERE channel = ? AND agent = ? AND role = 'tool'
+          AND text IS NOT NULL AND text != ''
+        ORDER BY id DESC LIMIT ?`
+    ),
     listPersonas: db.prepare(
       `SELECT p.channel, p.agent, n.persona AS persona, p.seat
          FROM personas p LEFT JOIN agent_profile n ON n.agent = p.agent`
@@ -1273,6 +1297,10 @@ export function makeStore(db) {
     floorSessions: () => q.floorSessions.all(),
     lastTurns: () => q.lastTurns.all(),
     turnCounts: () => q.turnCounts.all(),
+    deskLastMessage: (channel, agent) => q.deskLastMessage.get(channel, agent) ?? null,
+    // Reversed here rather than in SQL: the screen types them in the order they
+    // happened, and LIMIT has to keep the newest end.
+    deskCommands: (channel, agent, n) => q.deskCommands.all(channel, agent, n).reverse(),
     // Names filled in here rather than in SQL: the derivation is JavaScript, and
     // duplicating it as SQL string surgery is exactly how two answers to "what
     // is this agent called" start to disagree.

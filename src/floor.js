@@ -124,6 +124,11 @@ const clip = (v, max = TEXT_MAX) => {
 };
 const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
 const secondsSince = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) / 1000 : Infinity);
+/* How many recent tool calls a desk carries for its monitor. A shade more than
+   the four lines the screen shows, so a browser that missed a poll still has
+   the run to type rather than a gap. */
+const SCREEN_COMMANDS = 6;
+
 const deskKey = (channel, agent) => `${channel}|${agent}`;
 
 /**
@@ -573,6 +578,9 @@ export function buildFloor(store, live = null, sessions = null) {
         const h = hosted.get(k) ?? null;
         const s = current.get(k) ?? null;
         const t = lastTurn.get(k) ?? null;
+        // Said and did, kept apart, and looked up per desk — see the note on
+        // deskLastMessage in db.js for why these are not one query each.
+        const m = store.deskLastMessage(channel, p.agent);
         const awaitingSince = iso(s?.awaiting_since);
         // Live means "heard from recently", never "still open" — see
         // SESSION_STALE_MINUTES for why both halves of that matter. The one
@@ -676,6 +684,14 @@ export function buildFloor(store, live = null, sessions = null) {
           last_turn: t
             ? { role: t.role, text: t.text, tool_name: t.tool_name, at: iso(t.created_at), id: t.id }
             : null,
+          // What this agent last said, which is what its thought bubble shows.
+          // Separate from last_turn, which stays because it is what tells the
+          // floor whether the desk is mid-tool-call and therefore working.
+          last_message: m ? { text: m.text, at: iso(m.created_at), id: m.id } : null,
+          // The last few tool calls, oldest first — the desk's monitor types
+          // them out. Ids travel with them so the browser can tell a command it
+          // has already typed from one that has just arrived.
+          commands: store.deskCommands(channel, p.agent, SCREEN_COMMANDS),
           // What the board says about this agent — status, mailbox, task load.
           // Derived by the board's own code (agent-state.js) rather than
           // re-inferred here, so the sign on a desk and the row on the board

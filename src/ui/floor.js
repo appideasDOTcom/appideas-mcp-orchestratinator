@@ -143,6 +143,32 @@
   const HEAD_AIR = 6;                    // band to bubble, so they never just touch
   const HEAD_H = HEAD_BAND + HEAD_AIR + BUBBLE_ABOVE - PAD;
 
+  /* The desk's monitor.
+     ---------------------
+     36 x 20 units of glass, which is about 45 x 25 CSS pixels — far too small to
+     read, and meant to be. Commands used to be the bubble's job, where they were
+     legible and mostly noise: an operator does not need to read `Bash: grep -rn
+     ...` off a desk when the chat panel behind it has the whole thing. What they
+     do want from across the room is to see that something is happening. So the
+     commands moved here, where being illegible is the point.
+
+     Every number below is screen-local — the glass is a nested <svg>, so (0,0)
+     is its top-left corner and anything past its edges is clipped away. */
+  const SCREEN_X = 103;
+  const SCREEN_Y = 39;
+  const SCREEN_W = 36;
+  const SCREEN_H = 20;
+  const SCREEN_LINES = 4;
+  const SCREEN_PAD = 1.4;
+  const SCREEN_LINE = (SCREEN_H - SCREEN_PAD * 2) / SCREEN_LINES;
+  const SCREEN_ASCENT = 3.1;     // baseline inside a line box at the screen font
+  /* How much of a command gets typed. About 16 characters fit across the glass,
+     so the tail of this runs off the right edge and is clipped — which is what a
+     terminal actually looks like, and is why the budget is bigger than the glass
+     rather than trimmed to it. */
+  const SCREEN_CHARS = 22;
+  const SCREEN_TICK_MS = 45;     // one character per tick: ~1s to type a line
+
   /** How long a sent message may sit unrecorded before it says so. */
   const SENDING_GRACE_MS = 30_000;
 
@@ -173,6 +199,12 @@
     // Outside the DOM because rooms are rebuilt wholesale — the scroll
     // position has to outlive the nodes that were showing it.
     scroll: {},
+    // What each desk's monitor is part-way through typing, keyed by desk. Kept
+    // out of the DOM for the same reason `sign` is: rooms are rebuilt wholesale
+    // on every poll that changes anything, and a half-typed line living in a
+    // text node would be thrown away several times a second.
+    screens: new Map(),
+    typer: null,         // the interval driving all of them
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -429,6 +461,67 @@
       // ending in a band of empty carpet that reads as "somebody is missing".
       h: PAD * 2 + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW,
     };
+  }
+
+  /* ---------- the monitor ---------- */
+
+  const screenKey = (channel, agent) => `${channel}|${agent}`;
+
+  /** A command as one line of terminal: whitespace collapsed, tail trimmed. */
+  const oneLine = (text) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, SCREEN_CHARS);
+
+  /**
+   * Hand a desk's monitor whatever it has not typed yet.
+   *
+   * Called from desk() on every rebuild, which is also every poll that changed
+   * anything — so a command that has just landed is queued the moment the room
+   * redraws. Ids are monotonic, so `since` is all the bookkeeping needed to tell
+   * a new command from one already on the glass; a Set of seen ids would grow
+   * for as long as the page is open.
+   *
+   * A desk that has stopped working loses its state entirely, which blanks the
+   * screen and means the next spell of work starts from a clear one.
+   */
+  function feedScreen(k, commands, working) {
+    if (!working) { ui.screens.delete(k); return null; }
+    let st = ui.screens.get(k);
+    if (!st) { st = { since: 0, queue: [], done: [], typing: '', full: '' }; ui.screens.set(k, st); }
+    for (const c of commands ?? []) {
+      if (c.id <= st.since) continue;
+      st.since = c.id;
+      const line = oneLine(c.text);
+      if (line) st.queue.push(line);
+    }
+    return st;
+  }
+
+  /** One character on every monitor that still has something to say. */
+  function typeTick() {
+    let moved = false;
+    for (const st of ui.screens.values()) {
+      if (st.typing.length < st.full.length) {
+        st.typing = st.full.slice(0, st.typing.length + 1);
+        moved = true;
+      } else if (st.queue.length) {
+        // The finished line scrolls up and the oldest falls off the top.
+        if (st.full) st.done.push(st.full);
+        while (st.done.length > SCREEN_LINES - 1) st.done.shift();
+        st.full = st.queue.shift();
+        st.typing = '';
+        moved = true;
+      }
+    }
+    if (!moved) return;
+    for (const el_ of document.querySelectorAll('#floor-rooms svg.room .desk')) {
+      paintScreen(el_, ui.screens.get(screenKey(el_.dataset.channel, el_.dataset.agent)));
+    }
+  }
+
+  /** Write a monitor's state onto its glass. No state means a blank screen. */
+  function paintScreen(deskEl, st) {
+    const rows = deskEl.querySelectorAll('.screenLine');
+    const lines = st ? [...st.done, st.typing] : [];
+    rows.forEach((row, i) => { row.textContent = lines[i] ?? ''; });
   }
 
   /** How many desks are scrolled off the left of a collapsed storey. */
@@ -772,7 +865,22 @@
     // The monitor sits on the desk beside them and lights up only when something
     // is really running — it is the one piece of furniture carrying state.
     g.appendChild(el('rect', { x: 100, y: 36, width: 42, height: 28, rx: 3, class: 'monitor' }));
-    g.appendChild(el('rect', { x: 103, y: 39, width: 36, height: 20, rx: 2, class: 'screen' }));
+    // A nested <svg> so anything drawn on the screen is clipped by the screen's
+    // own bounds — the same trick the counter's blind uses, and for the same
+    // reason: a line of text longer than the glass has to run off the edge, not
+    // across the desk. Its contents are in screen-local coordinates.
+    const glass = el('svg', { x: SCREEN_X, y: SCREEN_Y, width: SCREEN_W, height: SCREEN_H, class: 'glass' });
+    glass.appendChild(el('rect', { x: 0, y: 0, width: SCREEN_W, height: SCREEN_H, rx: 2, class: 'screen' }));
+    const feed = el('g', { class: 'screenText' });
+    for (let i = 0; i < SCREEN_LINES; i += 1) {
+      feed.appendChild(el('text', { x: SCREEN_PAD, y: SCREEN_PAD + SCREEN_ASCENT + i * SCREEN_LINE, class: 'screenLine' }));
+    }
+    glass.appendChild(feed);
+    g.appendChild(glass);
+    // Paint straight away rather than waiting for the next tick: this node was
+    // created a moment ago by a rebuild, and a blank frame between rebuilds is
+    // the flicker the state exists to avoid.
+    paintScreen(g, feedScreen(screenKey(channel, d.agent), d.commands, state === 'working'));
 
     // Nameplate. The persona leads because that is what people will say out
     // loud; the real agent name follows because that is what the .mcp.json says
@@ -842,14 +950,15 @@
       }
     }
 
-    // What this desk is doing — the collapsed tool call, or the start of the last
-    // thing said. Wrapped to a box that cannot reach the desk next door.
-    if (d.last_turn) {
-      const lines = wrap(
-        d.last_turn.role === 'tool' ? (d.last_turn.text ?? d.last_turn.tool_name) : d.last_turn.text,
-        PER_LINE,
-        BUBBLE_LINES
-      );
+    // What this agent last SAID, wrapped to a box that cannot reach the desk next
+    // door. Deliberately not the last *turn*: that is usually a tool call, so
+    // the bubble spent most of its life reading "Bash: grep -rn ..." — the one
+    // thing the chat panel behind it already shows in full, and the thing an
+    // operator is least likely to need at a glance. It also meant the bubble
+    // changed on every tool call, which is many times a minute. Commands have
+    // their own home now: the monitor types them out (see screenLines).
+    if (d.last_message) {
+      const lines = wrap(d.last_message.text, PER_LINE, BUBBLE_LINES);
       if (lines.length) {
         const w = Math.min(BUBBLE_W, Math.max(BUBBLE_MIN_W, Math.max(...lines.map((l) => l.length)) * CHAR_W + 16));
         const h = bubbleHeight(lines.length);
@@ -1440,11 +1549,18 @@
     if (ui.timer) return;
     tick();
     ui.timer = setInterval(tick, POLL_MS);
+    // One typewriter for every monitor on the floor, rather than one each: the
+    // work per tick is a string slice per working desk, and a timer per desk
+    // would have to be torn down and rebuilt with the rooms.
+    ui.typer = setInterval(typeTick, SCREEN_TICK_MS);
   }
 
   function stop() {
     clearInterval(ui.timer);
     ui.timer = null;
+    clearInterval(ui.typer);
+    ui.typer = null;
+    ui.screens.clear();
   }
 
   /* ---------- events ---------- */

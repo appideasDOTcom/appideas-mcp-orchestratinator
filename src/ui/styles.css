@@ -730,6 +730,11 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .deskTop   { fill: color-mix(in srgb, var(--text) 12%, var(--surface)); stroke: var(--border); }
 .monitor   { fill: color-mix(in srgb, var(--text) 30%, var(--surface)); }
 .screen    { fill: var(--off-bg); transition: fill .3s ease; }
+/* Commands, typed onto the glass while work is running. White rather than a
+   theme token because the lit screen is accent-tinted in both themes and this
+   sits on top of it — and because the point is the shape of moving text, not
+   its legibility. It is roughly 4 CSS pixels tall; nobody is reading it. */
+.screenLine { fill: rgba(255, 255, 255, .88); font: 3.4px var(--mono); }
 
 /* Hair is one colour in both themes, and it is a warm brown rather than the
    near-black it started as.
