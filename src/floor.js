@@ -1,6 +1,6 @@
 import express from 'express';
 import { CAST } from './db.js';
-import { agentBoard, agentLoadIndex, mcpSessionCounts } from './agent-state.js';
+import { agentBoard, agentLoadIndex, channelCounts, mcpSessionCounts, ZERO_COUNTS } from './agent-state.js';
 import { PALETTE, DEFAULT_HAIR, DEFAULT_SKIN, shirtForSeat } from './palette.js';
 
 /**
@@ -550,6 +550,10 @@ export function buildFloor(store, live = null, sessions = null) {
   // own NUL key.
   const mcp = mcpSessionCounts(sessions, key);
 
+  // The board's channel-header numbers, so a storey can print the same line.
+  // Shaped by agent-state.js rather than here — see channelCounts.
+  const counts = channelCounts(store);
+
   const byChannel = new Map();
   const profiles = store.listProfiles();
   for (const p of store.listPersonas()) {
@@ -687,6 +691,9 @@ export function buildFloor(store, live = null, sessions = null) {
       desks,
       live: desks.filter((d) => d.live).length,
       awaiting: desks.filter((d) => d.live && d.session?.awaiting_kind).length,
+      // What the board prints in this channel's header. Same numbers, same
+      // source, so the two surfaces cannot report different amounts of work.
+      stats: counts.get(channel) ?? ZERO_COUNTS,
     };
   });
 

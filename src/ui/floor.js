@@ -25,7 +25,10 @@
   const POLL_MS = 2000;
   const COLS = 3;
   const PAD = 28;
-  const HEAD_H = 52;   // clears a two-line bubble hanging above the first row
+  /* The header band behind the channel name and the stat line under it. HEAD_H,
+     which is what actually pushes the desks down, is derived from this further
+     down — it has to clear a speech bubble as well as the band. */
+  const HEAD_BAND = 60;
   const DESK_W = 168;
   const GAP = 30;
   /* One width for every floor: a full row of desks, whatever the room holds.
@@ -110,6 +113,16 @@
   // actually depends on and it cannot drift again.
   const BUBBLE_ABOVE = BUBBLE_LINES * 13 + 12;
   const DESK_H = DESK_BELOW + BUBBLE_ABOVE - GAP + 8;
+
+  /* How far the first row of desks sits below the top of the room.
+     Derived for exactly the reason DESK_H above is. It was a hand-picked 52,
+     commented "clears a two-line bubble hanging above the first row" — and it
+     did, until the header grew a second line for the board's stat line and the
+     bubble was back inside the band with nothing on screen saying the constant
+     had stopped being true. Tied to the band and the bubble, it cannot drift
+     again: whatever the header comes to hold, the desks move to clear it. */
+  const HEAD_AIR = 6;                    // band to bubble, so they never just touch
+  const HEAD_H = HEAD_BAND + HEAD_AIR + BUBBLE_ABOVE - PAD;
 
   /** How long a sent message may sit unrecorded before it says so. */
   const SENDING_GRACE_MS = 30_000;
@@ -420,6 +433,28 @@
     const arrow = (dir) => svg.querySelector(`.deskArrow.${dir}`);
     arrow('left')?.classList.toggle('spent', off <= 0);
     arrow('right')?.classList.toggle('spent', off >= max);
+  }
+
+  /**
+   * "2 open · 2 claimed · 1 done · 0 contracts · 5 msgs" — the board's line.
+   *
+   * One <text> of tspans rather than five positioned elements: the numbers vary
+   * in width, and anything laid out by hand goes ragged the moment a count
+   * reaches double digits.
+   */
+  function statLine(stats, x, y) {
+    const s = stats ?? {};
+    const parts = [
+      [s.open ?? 0, 'open'], [s.claimed ?? 0, 'claimed'], [s.done ?? 0, 'done'],
+      [s.contracts ?? 0, 'contracts'], [s.messages ?? 0, 'msgs'],
+    ];
+    const t = el('text', { x, y, class: 'roomStat' });
+    parts.forEach(([n, word], i) => {
+      if (i) t.appendChild(el('tspan')).textContent = ' · ';
+      t.appendChild(el('tspan', { class: 'roomStatN' })).textContent = String(n);
+      t.appendChild(el('tspan')).textContent = ` ${word}`;
+    });
+    return t;
   }
 
   /** One scroll arrow, sitting in the floor's own left or right margin. */
@@ -757,11 +792,17 @@
     });
 
     svg.appendChild(el('rect', { x: 0, y: 0, width: geo.w, height: geo.h, rx: 12, class: 'roomFloor' }));
-    svg.appendChild(el('rect', { x: 0, y: 0, width: geo.w, height: HEAD_H + 8, rx: 12, class: 'roomWall' }));
+    svg.appendChild(el('rect', { x: 0, y: 0, width: geo.w, height: HEAD_BAND, rx: 12, class: 'roomWall' }));
 
     const label = el('text', { x: PAD - 6, y: 23, class: 'roomName' });
     label.textContent = c.channel;
     svg.appendChild(label);
+
+    // The board's channel-header line, verbatim, under the name and on the same
+    // left edge. Same numbers from the same helper (agent-state's
+    // channelCounts) — the point of showing it here is that an operator who
+    // knows the board's line can read a storey without relearning anything.
+    svg.appendChild(statLine(c.stats, PAD - 6, 41));
 
     const meta = el('text', { x: geo.w - PAD + 6, y: 23, class: 'roomMeta', 'text-anchor': 'end' });
     meta.textContent = `${c.live}/${c.desks.length} here${c.awaiting ? ` · ${c.awaiting} need you` : ''}`;

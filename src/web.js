@@ -10,7 +10,7 @@ import { createFloorRouter, deliverable } from './floor.js';
 import { humanName } from './db.js';
 import { PALETTE, SHIRTS, DEFAULT_HAIR, DEFAULT_SKIN } from './palette.js';
 import {
-  agentBoard, agentKey, agentLoadIndex, index, iso,
+  agentBoard, agentKey, agentLoadIndex, channelCounts, index, iso, ZERO_COUNTS,
 } from './agent-state.js';
 
 /**
@@ -72,20 +72,14 @@ function buildState(store, sessions, sessionStats, meta) {
   // The per-agent workload the floor draws from too — see agent-state.js.
   const idx = agentLoadIndex(store);
   const { unassignedByChannel } = idx;
-  const stats = store.channelStats();
+  // The five numbers a channel header prints, shaped once — the floor prints the
+  // same line under each storey and imports the same helper.
+  const counts = channelCounts(store);
   const archivedAt = new Map(
     store.listChannelFlags().filter((f) => f.archived_at).map((f) => [f.channel, f.archived_at])
   );
   const tasksByChannel = index(store.boardTasks(), (t) => t.channel);
 
-  const taskCounts = new Map();
-  for (const r of stats.tasks) {
-    const c = taskCounts.get(r.channel) ?? { open: 0, claimed: 0, done: 0 };
-    c[r.status] = r.n;
-    taskCounts.set(r.channel, c);
-  }
-  const messageCounts = new Map(stats.messages.map((r) => [r.channel, r.n]));
-  const contractCounts = new Map(stats.contracts.map((r) => [r.channel, r.n]));
 
   // Channels known to the database, plus any a live session claims but that has
   // yet to write anything.
@@ -166,7 +160,8 @@ function buildState(store, sessions, sessionStats, meta) {
     const agents = allAgents.filter((a) => !a.retired);
     const retiredAgents = allAgents.filter((a) => a.retired);
 
-    const tasks = taskCounts.get(channel) ?? { open: 0, claimed: 0, done: 0 };
+    const n = counts.get(channel) ?? ZERO_COUNTS;
+    const tasks = { open: n.open, claimed: n.claimed, done: n.done };
     const unfinished = tasksByChannel.get(channel) ?? [];
     return {
       channel,
@@ -193,8 +188,8 @@ function buildState(store, sessions, sessionStats, meta) {
         updated_at: iso(t.updated_at),
       })),
       task_list_total: unfinished.length,
-      messages: messageCounts.get(channel) ?? 0,
-      contracts: contractCounts.get(channel) ?? 0,
+      messages: n.messages,
+      contracts: n.contracts,
     };
   });
 

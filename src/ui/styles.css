@@ -717,6 +717,12 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .roomWall  { fill: color-mix(in srgb, var(--border) 45%, transparent); stroke: none; }
 .roomName  { fill: var(--text); font: 600 13px var(--sans); }
 .roomMeta  { fill: var(--muted); font: 11px var(--mono); }
+/* The board's channel-header line, on a storey. Same 11px mono, same muted
+   body with the counts picked out — .channel-stats and .channel-stats b are the
+   pair being matched, and matching them is the whole point: an operator reads
+   one line in two places, not two lines that happen to hold the same numbers. */
+.roomStat  { fill: var(--muted); font: 11px var(--mono); }
+.roomStatN { fill: var(--text); font-weight: 600; }
 .deskTop   { fill: color-mix(in srgb, var(--text) 12%, var(--surface)); stroke: var(--border); }
 .monitor   { fill: color-mix(in srgb, var(--text) 30%, var(--surface)); }
 .screen    { fill: var(--off-bg); transition: fill .3s ease; }

@@ -202,3 +202,33 @@ export function agentBoard(row, idx, nowMs, liveCount = 0) {
     claimed_tasks: claimed.map((t) => ({ id: t.id, title: t.title })),
   };
 }
+
+/**
+ * What a channel amounts to, in the five numbers both surfaces print.
+ *
+ * Here for the same reason everything else in this file is: the board has shown
+ * "N open · N claimed · N done · N contracts · N msgs" in its channel header for
+ * a long time, and the floor now prints the same line under each storey's name.
+ * Two surfaces reshaping the same three SQL aggregates by different code is how
+ * a floor comes to disagree with the board about how much work a channel is
+ * holding — and the whole point of putting them side by side is that they agree.
+ *
+ * Returns a Map channel -> { open, claimed, done, contracts, messages }.
+ * Channels with no rows at all are absent; callers fall back to ZERO_COUNTS.
+ */
+export const ZERO_COUNTS = { open: 0, claimed: 0, done: 0, contracts: 0, messages: 0 };
+
+export function channelCounts(store) {
+  const stats = store.channelStats();
+  const out = new Map();
+  const at = (channel) => {
+    if (!out.has(channel)) out.set(channel, { ...ZERO_COUNTS });
+    return out.get(channel);
+  };
+  // countTasksByStatus returns one row per (channel, status); anything the query
+  // grows a status for lands in the object rather than being silently dropped.
+  for (const r of stats.tasks) at(r.channel)[r.status] = r.n;
+  for (const r of stats.messages) at(r.channel).messages = r.n;
+  for (const r of stats.contracts) at(r.channel).contracts = r.n;
+  return out;
+}
