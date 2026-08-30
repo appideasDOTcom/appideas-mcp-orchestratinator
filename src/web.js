@@ -8,6 +8,7 @@ import { createFloorRouter, deliverable } from './floor.js';
 // The same derivation the store uses, so a row for an agent with no persona row
 // yet shows the name it is about to be given rather than a raw id for one poll.
 import { humanName } from './db.js';
+import { PALETTE, SHIRTS, DEFAULT_HAIR, DEFAULT_SKIN } from './palette.js';
 import {
   agentBoard, agentKey, agentLoadIndex, index, iso,
 } from './agent-state.js';
@@ -133,8 +134,11 @@ function buildState(store, sessions, sessionStats, meta) {
           // map the dialogs use, so a row and a heading cannot disagree.
           persona: personas[a.agent],
           // The board draws no avatars, but it is where the dialog that edits
-          // one is opened from, so the current value has to reach it.
+          // one is opened from, so every current value has to reach it.
           gender: profiles[a.agent]?.gender ?? 'neutral',
+          shirt: profiles[a.agent]?.shirt ?? SHIRTS[0],
+          hair: profiles[a.agent]?.hair ?? DEFAULT_HAIR,
+          skin: profiles[a.agent]?.skin ?? DEFAULT_SKIN,
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
           // Whether the operator can nudge this agent — the same verdict the
           // chat endpoint enforces, so the button and the server agree.
@@ -212,6 +216,11 @@ function buildState(store, sessions, sessionStats, meta) {
       now: new Date(nowMs).toISOString(),
     },
     sessions: liveSessions.sort((a, b) => (a.channel ?? '').localeCompare(b.channel ?? '')),
+    // The colours a picker may offer, sent rather than hard-coded in the page:
+    // the endpoint validates against this same list, so a swatch that appears
+    // is a swatch that will save. Static and small — a few hundred bytes on a
+    // payload that already carries every agent on the board.
+    palette: PALETTE,
     channels,
     // Totals describe the board as displayed, so archived channels and retired
     // agents are excluded — a header that counts things you can't see is worse

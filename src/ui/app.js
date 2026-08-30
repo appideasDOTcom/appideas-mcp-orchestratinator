@@ -735,10 +735,41 @@ const GENDERS = [
   ['female', 'Female', 'long hair, past the shoulders'],
 ];
 
+/**
+ * One colour choice: the current value as a swatch, and the choices behind it.
+ *
+ * The grid is in the markup from the start rather than built on demand, hidden
+ * until asked for. It means the chosen value lives in the DOM the whole time —
+ * `aria-checked` on a radio — so saving reads the same place whether or not the
+ * operator ever opened the picker, and there is no state to keep in step.
+ *
+ * No contrast rule between the three. An operator may put brown hair on a brown
+ * shirt; that is their business, and a picker that refuses combinations is
+ * harder to explain than one that does not.
+ */
+function swatchRow(kind, label, current) {
+  const choices = ui.state?.palette?.[kind] ?? [];
+  const value = choices.includes(current) ? current : (choices[0] ?? '#888888');
+  return `
+    <div class="swatch-row" data-kind="${esc(kind)}">
+      <span class="swatch-label">${esc(label)}</span>
+      <button type="button" class="swatch current" data-do="open-swatches"
+              style="--c:${esc(value)}" aria-expanded="false"
+              aria-label="${esc(label)} colour, ${esc(value)} — choose another"></button>
+      <div class="swatches" role="radiogroup" aria-label="${esc(label)} colour" hidden>
+        ${choices.map((c) => `
+          <button type="button" class="swatch" role="radio" data-do="pick-swatch" data-color="${esc(c)}"
+                  aria-checked="${c === value}" style="--c:${esc(c)}"
+                  title="${esc(c)}" aria-label="${esc(c)}"></button>`).join('')}
+      </div>
+    </div>`;
+}
+
 function renameDialog(channel, agent) {
   ui.dlgCtx = { channel, agent, kind: 'rename' };
   const current = nameOf(channel, agent);
-  const gender = findAgent(channel, agent)?.gender ?? 'neutral';
+  const a = findAgent(channel, agent);
+  const gender = a?.gender ?? 'neutral';
   openDialog(`
     <div class="dlg-head"><h3>${esc(current)}</h3></div>
     <p class="dlg-sub">on <span class="mono">${esc(channel)}</span> · <span class="mono">${esc(agent)}</span></p>
@@ -747,17 +778,21 @@ function renameDialog(channel, agent) {
       <input id="persona-name" class="input" type="text" maxlength="40" value="${esc(current)}"
              placeholder="${esc(agent)}" autocomplete="off" spellcheck="false">
     </label>
-    <label class="field">
+    <div class="field">
       <span>Avatar</span>
       <select id="persona-gender" class="input">
         ${GENDERS.map(([v, label, why]) =>
           `<option value="${esc(v)}"${gender === v ? ' selected' : ''}>${esc(label)} — ${esc(why)}</option>`).join('')}
       </select>
-    </label>
+      ${swatchRow('shirt', 'Shirt', a?.shirt)}
+      ${swatchRow('hair', 'Hair', a?.hair)}
+      ${swatchRow('skin', 'Skin', a?.skin)}
+    </div>
     <p class="dlg-note">
-      Everyone sees both of these, and they follow <span class="mono">${esc(agent)}</span> everywhere on the
-      board and the floor — the id itself never changes, so messages and tasks keep routing exactly as they do
-      now. Leave the name empty to go back to <b>${esc(defaultName(agent))}</b>.
+      Everyone sees all of this, and it follows <span class="mono">${esc(agent)}</span> everywhere on the board
+      and the floor — the id itself never changes, so messages and tasks keep routing exactly as they do now.
+      Leave the name empty to go back to <b>${esc(defaultName(agent))}</b>. Hair and skin show on the floor's
+      figures; a neutral avatar has no hair to colour.
     </p>
     <div class="dlg-foot">
       <button type="button" class="btn" data-do="cancel">Cancel</button>
@@ -1267,12 +1302,45 @@ el.dlgBody.addEventListener('click', (e) => {
       break;
     // An empty field means "give it back the derived name" rather than "leave it
     // blank" — the endpoint requires a non-empty persona, so send the default.
+    // Opening one picker closes any other: two grids open at once in a dialog
+    // this size pushes the buttons off the bottom.
+    case 'open-swatches': {
+      const row = btn.closest('.swatch-row');
+      const grid = row.querySelector('.swatches');
+      const opening = grid.hidden;
+      for (const g of el.dlgBody.querySelectorAll('.swatches')) g.hidden = true;
+      for (const b of el.dlgBody.querySelectorAll('[data-do="open-swatches"]')) b.setAttribute('aria-expanded', 'false');
+      grid.hidden = !opening;
+      btn.setAttribute('aria-expanded', String(opening));
+      if (opening) grid.querySelector('[aria-checked="true"]')?.focus();
+      break;
+    }
+    case 'pick-swatch': {
+      const row = btn.closest('.swatch-row');
+      for (const b of row.querySelectorAll('[data-do="pick-swatch"]')) b.setAttribute('aria-checked', 'false');
+      btn.setAttribute('aria-checked', 'true');
+      const swatch = row.querySelector('.swatch.current');
+      swatch.style.setProperty('--c', btn.dataset.color);
+      swatch.setAttribute('aria-expanded', 'false');
+      row.querySelector('.swatches').hidden = true;
+      swatch.focus();
+      break;
+    }
     case 'rename-save': {
       const typed = (el.dlgBody.querySelector('#persona-name')?.value ?? '').trim();
       const persona = typed || defaultName(d.agent);
       const gender = el.dlgBody.querySelector('#persona-gender')?.value ?? 'neutral';
-      // One request, so a dialog that changed both cannot half-succeed.
-      act(() => floorPost('profile', { channel: d.channel, agent: d.agent, persona, gender }));
+      const colour = (kind) =>
+        el.dlgBody.querySelector(`.swatch-row[data-kind="${kind}"] [aria-checked="true"]`)?.dataset.color;
+      const patch = { channel: d.channel, agent: d.agent, persona, gender };
+      // Only fields with a value are sent — omitting one means "leave it", and
+      // sending undefined would be the same as sending nothing anyway.
+      for (const kind of ['shirt', 'hair', 'skin']) {
+        const c = colour(kind);
+        if (c) patch[kind] = c;
+      }
+      // One request, so a dialog that changed several things cannot half-succeed.
+      act(() => floorPost('profile', patch));
       break;
     }
     case 'archive':

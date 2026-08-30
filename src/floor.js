@@ -1,6 +1,7 @@
 import express from 'express';
 import { CAST } from './db.js';
 import { agentBoard, agentLoadIndex, mcpSessionCounts } from './agent-state.js';
+import { PALETTE, DEFAULT_HAIR, DEFAULT_SKIN, shirtForSeat } from './palette.js';
 
 /**
  * The floor: what each agent's own Claude Code session is doing — and, for
@@ -617,6 +618,14 @@ export function buildFloor(store, live = null, sessions = null) {
           // so a desk always states it, and an unset agent cannot be told apart
           // from one deliberately set to neutral — they are the same thing.
           gender: profiles[p.agent]?.gender ?? 'neutral',
+          // Resolved here, so a desk always states the colour it is drawn in and
+          // the drawing code never has to know what a default is. Shirt is the
+          // exception that needs no fallback in practice — it is written down
+          // the first time a desk is seen — but one is kept for a profile row
+          // that predates that.
+          shirt: profiles[p.agent]?.shirt ?? shirtForSeat(p.seat ?? 0),
+          hair: profiles[p.agent]?.hair ?? DEFAULT_HAIR,
+          skin: profiles[p.agent]?.skin ?? DEFAULT_SKIN,
           seat: p.seat ?? 0,
           live: live_,
           // False until this desk's window has posted a single hook event — the
@@ -943,11 +952,23 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       }
       patch.gender = gender;
     }
+    // Colours are checked against the same lists the picker is drawn from, so
+    // the only values that reach the database are ones an operator could have
+    // clicked. An arbitrary hex would render — which is exactly why it has to
+    // be refused here rather than trusted: nothing downstream would notice.
+    for (const field of ['shirt', 'hair', 'skin']) {
+      if (req.body?.[field] === undefined) continue;
+      const value = str(req.body[field]);
+      if (!PALETTE[field].includes(value)) {
+        return res.status(400).json({ error: `${field} must be one of the ${PALETTE[field].length} colours offered for it` });
+      }
+      patch[field] = value;
+    }
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'nothing to change' });
 
     const changes = store.setProfile(channel, agent, patch);
     for (const [k, v] of Object.entries(patch)) {
-      store.logAdmin(channel, k === 'persona' ? 'persona.set' : 'avatar.set', { target: agent, detail: v });
+      store.logAdmin(channel, k === 'persona' ? 'persona.set' : 'avatar.set', { target: agent, detail: `${k}: ${v}` });
     }
     res.json({ ok: true, changes, channel, agent, ...patch });
   });

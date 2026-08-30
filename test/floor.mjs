@@ -185,6 +185,32 @@ try {
   eq(deskOf(await floor(), 'pro').gender, 'male', 'and leaves the avatar alone, which is the other half of the same rule');
   eq((await profile({ channel: CH, agent: 'pro' })).status, 400, 'an edit that changes nothing is refused rather than logged');
 
+  console.log('\navatar colours');
+  const paletteOf = async () => (await (await fetch(`${HOST}/api/state`)).json()).palette;
+  const pal = await paletteOf();
+  eq([pal.shirt.length, pal.hair.length, pal.skin.length], [20, 6, 6],
+     'the page is sent the colours it may offer, so picker and validator cannot disagree');
+  const proDesk = deskOf(await floor(), 'pro');
+  eq(proDesk.hair, pal.hair[pal.hair.length - 1], 'hair starts at the darkest brown — the colour every figure had before this');
+  eq(proDesk.skin, pal.skin[0], 'and skin at the neutral placeholder, which is the head as it was already drawn');
+  assert(pal.shirt.includes(proDesk.shirt), 'the shirt it was given is one of the shirts on offer');
+
+  // The shirt is a fact about arrival order, so it is written down rather than
+  // recomputed: a desk removed from ahead of this one must not repaint it.
+  eq(deskOf(await floor(), 'free').shirt === deskOf(await floor(), 'pro').shirt, false,
+     'two desks that arrived at different seats do not share a shirt');
+
+  eq((await profile({ channel: CH, agent: 'pro', shirt: pal.shirt[11], hair: pal.hair[0], skin: pal.skin[4] })).status, 200,
+     'an operator can set all three at once');
+  let coloured = deskOf(await floor(), 'pro');
+  eq([coloured.shirt, coloured.hair, coloured.skin], [pal.shirt[11], pal.hair[0], pal.skin[4]], 'and each one lands');
+  eq(coloured.persona, 'Marguerite II', 'while the name is untouched');
+  eq(coloured.gender, 'male', 'and so is the avatar shape');
+
+  eq((await profile({ channel: CH, agent: 'pro', hair: '#ff00ff' })).status, 400,
+     'a colour that is not on the list is refused — it would render, which is exactly why nothing downstream would catch it');
+  eq(deskOf(await floor(), 'pro').hair, pal.hair[0], 'and the refusal changed nothing');
+
   console.log('\na crashed window cannot stay live forever');
   await post(ev('ghost', 's4', 'SessionStart'));
   eq(deskOf(await floor(), 'ghost').live, true, 'a fresh session is live');
@@ -258,6 +284,8 @@ try {
   eq(deskOf(f, 'free', CH).persona, 'Free', 'while a different id is still untouched');
   eq(deskOf(f, 'pro', 'other-floor').gender, 'male',
      'and the avatar travels with the agent for the same reason the name does');
+  eq(deskOf(f, 'pro', 'other-floor').hair, deskOf(f, 'pro', CH).hair,
+     'colours travel too — one agent, one appearance, whichever room you are looking at');
 
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();

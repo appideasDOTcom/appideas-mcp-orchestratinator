@@ -468,6 +468,40 @@ pre.raw {
                 letter-spacing: .06em; color: var(--muted); margin-bottom: 5px; }
 .field .input { width: 100%; font-size: 14px; padding: 7px 9px; }
 
+/* The colour rows sit under the gender picker inside the same Avatar field —
+   they are all properties of one thing, so they get one heading between them
+   rather than three. */
+.swatch-row { display: flex; align-items: center; gap: 9px; margin-top: 9px; flex-wrap: wrap; }
+.swatch-label { flex: 0 0 46px; font-size: 11.5px; color: var(--muted); }
+.swatch {
+  width: 22px; height: 22px; flex: 0 0 auto; padding: 0; cursor: pointer;
+  background: var(--c); border: 1px solid rgba(0,0,0,.28); border-radius: 6px;
+}
+.swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swatch.current { width: 26px; height: 26px; border-radius: 7px; }
+/* The whole row of choices, revealed by the current swatch. It takes the full
+   width and wraps, because twenty shirts do not fit on one line at this size. */
+/* A fixed ten columns rather than wrapping on available width: twenty shirts
+   wrapped 18-and-2, which reads as a mistake. Ten and ten is a block; the
+   six-colour rows simply fill the first six cells of one. */
+.swatches {
+  flex: 1 0 100%; display: grid; grid-template-columns: repeat(10, 22px);
+  gap: 6px; justify-content: start;
+  padding: 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2);
+}
+/* Needed, and easy to miss: the browser's own `[hidden] { display: none }` has
+   the same specificity as the rule above and loses to it for coming first, so
+   without this the `hidden` property reads true while the grid stays on screen.
+   A test that asserts the property rather than the computed display sees
+   nothing wrong. */
+.swatches[hidden] { display: none; }
+/* The chosen one, marked by a ring that sits outside the swatch so it does not
+   eat into the colour being judged. */
+.swatches [aria-checked="true"] {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
 /* An action and the sentence explaining what it will actually do, side by side —
    the explanation is the point, so it sits with the button and not in a tooltip. */
 .dlg-choice {
@@ -644,10 +678,13 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
  
    An outline was tried first and backed out: it read as a border, which nothing
    else in this UI has. */
-.person { --hair: #5a4130; }
+/* Every avatar colour is an operator choice now, handed down from the payload
+   as a variable on the group. The fallbacks here are only for a figure drawn
+   before one arrives — the server resolves the real defaults. */
+.person { --shirt: #7aa2ff; --hair: #5a4130; --skin: #a9afb8; }
 .person .shadow { fill: rgba(0,0,0,.10); }
-.person .body   { fill: var(--off); transition: fill .3s ease; }
-.person .head   { fill: color-mix(in srgb, var(--off) 70%, #fff); transition: fill .3s ease; }
+.person .body   { fill: var(--shirt); transition: fill .3s ease; }
+.person .head   { fill: var(--skin); transition: fill .3s ease; }
 /* Hair is deliberately not a seat colour. Seat colour is identity — it is how a
    desk stays recognisable after a rename — so painting hair with it would make
    two agents of the same gender look alike and fight the thing it sits next to.
@@ -667,15 +704,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .desk:focus-visible .deskTop { stroke: var(--accent); stroke-width: 2; }
 .desk:hover .deskTop { stroke: var(--accent); }
 
-/* Seat colour is identity, not status — it is what makes a desk recognisable
-   from across the room after somebody has been renamed. Stated as one default
-   plus per-seat overrides at equal specificity: a state-scoped rule here would
-   outrank every seat and quietly paint the whole room one colour. */
-.person .body { fill: var(--accent); }
-.person[data-seat="1"] .body { fill: var(--wait); }
-.person[data-seat="2"] .body { fill: var(--idle); }
-.person[data-seat="3"] .body { fill: var(--busy); }
-.person[data-seat="4"] .body { fill: var(--block); }
+/* Shirt colour is identity, not status — it is what makes a desk recognisable
+   from across the room after somebody has been renamed. This used to be five
+   CSS rules keyed on seat; it is now a stored choice per agent, defaulted from
+   the seat so the room looks the same as it did. */
 .desk.away .person .body { fill: var(--off) !important; }
 .desk.away .person .head { fill: var(--off-bg); }
 /* An away figure carries no detail at all. A greyed-out avatar with a haircut

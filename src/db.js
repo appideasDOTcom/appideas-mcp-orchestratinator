@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { shirtForSeat } from './palette.js';
 
 /**
  * Open (and migrate) the SQLite database.
@@ -164,6 +165,9 @@ export function openDb(path) {
       agent      TEXT PRIMARY KEY,
       persona    TEXT,
       gender     TEXT,
+      shirt      TEXT,
+      hair       TEXT,
+      skin       TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -293,6 +297,10 @@ export function openDb(path) {
 
   migratePersonas(db);
   migrateAgentNames(db);
+  addColumn(db, 'agent_profile', 'shirt', 'TEXT');
+  addColumn(db, 'agent_profile', 'hair', 'TEXT');
+  addColumn(db, 'agent_profile', 'skin', 'TEXT');
+  migrateShirts(db);
 
   return db;
 }
@@ -349,6 +357,31 @@ function migratePersonas(db) {
   // how they come to disagree, and a reader finding `personas.persona` would
   // reasonably believe it.
   dropColumns(db, 'personas', ['persona'], 'a name belongs to the agent now, not to one of its desks');
+}
+
+/**
+ * Give every agent that already has a seat the shirt that seat implied.
+ *
+ * Before this the colour was a CSS rule keyed on seat, so it existed only while
+ * the page was open. Writing it down changes nothing on screen — the values are
+ * the same five, in the same order — and it is what makes the colour editable
+ * without the edit being undone by the next re-render.
+ */
+function migrateShirts(db) {
+  const seated = db.prepare(
+    `SELECT p.agent, MIN(p.seat) AS seat FROM personas p
+      WHERE NOT EXISTS (SELECT 1 FROM agent_profile a WHERE a.agent = p.agent AND a.shirt IS NOT NULL)
+      GROUP BY p.agent`
+  ).all();
+  if (!seated.length) return;
+  const set = db.prepare(
+    `INSERT INTO agent_profile (agent, shirt) VALUES (?, ?)
+     ON CONFLICT(agent) DO UPDATE SET shirt = COALESCE(shirt, excluded.shirt)`
+  );
+  db.transaction(() => {
+    for (const r of seated) set.run(r.agent, shirtForSeat(r.seat));
+  })();
+  console.log(`[db] recorded a shirt colour for ${seated.length} agent${seated.length === 1 ? '' : 's'} from the seat each already had`);
 }
 
 /**
@@ -862,14 +895,23 @@ export function makeStore(db) {
          assigned_at = datetime('now')`
     ),
     getName: db.prepare(`SELECT persona FROM agent_profile WHERE agent = ?`),
-    listProfiles: db.prepare(`SELECT agent, persona, gender FROM agent_profile`),
+    listProfiles: db.prepare(`SELECT agent, persona, gender, shirt, hair, skin FROM agent_profile`),
+    getShirt: db.prepare(`SELECT shirt FROM agent_profile WHERE agent = ?`),
+    setShirtIfUnset: db.prepare(
+      `INSERT INTO agent_profile (agent, shirt) VALUES (@agent, @shirt)
+       ON CONFLICT(agent) DO UPDATE SET shirt = COALESCE(shirt, excluded.shirt)`
+    ),
     // One row per agent, every channel at once. COALESCE so setting one field
     // never silently clears another: the caller passes NULL for "leave it".
     upsertProfile: db.prepare(
-      `INSERT INTO agent_profile (agent, persona, gender) VALUES (@agent, @persona, @gender)
+      `INSERT INTO agent_profile (agent, persona, gender, shirt, hair, skin)
+       VALUES (@agent, @persona, @gender, @shirt, @hair, @skin)
        ON CONFLICT(agent) DO UPDATE SET
          persona    = COALESCE(@persona, persona),
          gender     = COALESCE(@gender, gender),
+         shirt      = COALESCE(@shirt, shirt),
+         hair       = COALESCE(@hair, hair),
+         skin       = COALESCE(@skin, skin),
          updated_at = datetime('now')`
     ),
     // Turns would otherwise grow without bound: this is full conversation text
@@ -1111,6 +1153,12 @@ export function makeStore(db) {
     // refuse an operator something they asked for on purpose.
     const seat = q.seatsInChannel.all(channel).length;
     q.upsertSeat.run({ channel, agent, seat });
+    // The shirt is written down now and never derived again. Every other
+    // default resolves at read time so it can be improved later, but this one
+    // depends on arrival order: leave it underived and an agent's shirt would
+    // change whenever a desk ahead of it was removed. It is a fact about when
+    // this agent arrived, so it is recorded once, here.
+    q.setShirtIfUnset.run({ agent, shirt: shirtForSeat(seat) });
     return { persona: q.getName.get(agent)?.persona ?? humanName(agent), seat };
   }
 
@@ -1238,7 +1286,9 @@ export function makeStore(db) {
      * it has never posted a hook event, which is most of them.
      */
     listProfiles: () => Object.fromEntries(
-      q.listProfiles.all().map((r) => [r.agent, { persona: r.persona, gender: r.gender }])
+      q.listProfiles.all().map((r) => [r.agent, {
+        persona: r.persona, gender: r.gender, shirt: r.shirt, hair: r.hair, skin: r.skin,
+      }])
     ),
     /**
      * Set what an operator has chosen about an agent — for every channel at once,
@@ -1249,8 +1299,8 @@ export function makeStore(db) {
      * accepted and ignored: every caller has one to hand, and the admin log
      * records which board the operator was looking at when they did it.
      */
-    setProfile: (_channel, agent, { persona = null, gender = null } = {}) =>
-      q.upsertProfile.run({ agent, persona, gender }).changes,
+    setProfile: (_channel, agent, { persona = null, gender = null, shirt = null, hair = null, skin = null } = {}) =>
+      q.upsertProfile.run({ agent, persona, gender, shirt, hair, skin }).changes,
     ensurePersona,
     pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
 

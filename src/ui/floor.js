@@ -424,9 +424,15 @@
 
   /** A person: head, shoulders, and a chair back. Drawn rather than sprited so
    *  there is no asset licence anywhere in this repo and no build step to add. */
-  function person(state, seat, gender) {
+  function person(state, seat, d) {
     const g = el('g', { class: `person ${state}`, 'data-seat': seat });
-    const hair = HAIR[gender] ?? null;
+    // Colours arrive already resolved and are handed to CSS as variables, so
+    // the stylesheet still owns *how* the figure is painted (including what
+    // happens when the desk is away) while the server owns *which* colours.
+    g.style.setProperty('--shirt', d.shirt);
+    g.style.setProperty('--hair', d.hair);
+    g.style.setProperty('--skin', d.skin);
+    const hair = HAIR[d.gender] ?? null;
     g.appendChild(el('ellipse', { cx: 0, cy: 46, rx: 26, ry: 6, class: 'shadow' }));
     // Behind the body on purpose — see the note on `female.back` above.
     if (hair?.back) g.appendChild(el('path', { d: hair.back, class: 'hair' }));
@@ -464,7 +470,7 @@
     // Order matters and is the whole illusion: the person is drawn first so the
     // desk occludes them from the chest down, which is what "sitting at a desk"
     // looks like. Drawn the other way round they float in front of the monitor.
-    const p = person(state, d.seat, d.gender);
+    const p = person(state, d.seat, d);
     p.setAttribute('transform', 'translate(66 22)');
     g.appendChild(p);
 
