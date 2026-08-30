@@ -378,13 +378,61 @@
     };
   }
 
+  /**
+   * Hair, which is the whole of the difference between one avatar and another.
+   *
+   * Two layers, because the head circle sits between them: `back` is drawn
+   * before the head and `front` after it. That ordering is what makes this
+   * cheap — the head covers the middle of the back shape, so the silhouette
+   * needs no face cut out of it and there is not a clip path or a mask
+   * anywhere. Long hair also has to fall *over* the shoulders, and the body is
+   * already drawn by then, so back-hair lands in the right place for free.
+   *
+   * Head is a circle at (0, 4) with r 12; the body starts at y 18. Every number
+   * below is in that space.
+   */
+  const HAIR = {
+    neutral: null,
+    // A short cut: a cap over the crown, its lower edge swept across to one
+    // side. Asymmetry is the only thing that reads as a *style* at this size —
+    // a symmetric cap just looks like a darker head.
+    male: {
+      back: null,
+      // Both ends of the arc sit *on* the head circle (r 12 about 0,4), which is
+      // what keeps the hairline flush. Ending short of it leaves a sliver of
+      // head above the hair that reads as a rendering fault, and closing the
+      // path back past the edge leaves a spur — two shapes tried before this.
+      front: 'M -11.8 6 A 12 12 0 0 1 11.3 0 C 4 4 -3 2 -11.8 6 Z',
+    },
+    // Long hair, as two pieces around the figure rather than one on top of it.
+    //
+    // The back is a plain dome and carries no face cut-out at all: the head is
+    // drawn over its middle, so carving one only opened a hole that showed the
+    // room through the neck. It also sits *behind* the body, which is what
+    // stops it covering the torso — the torso is the seat colour, and the seat
+    // colour is how a desk stays recognisable, so hair must never paint over
+    // it. What is left is hair spilling past the shoulders on both sides.
+    female: {
+      // No split in the silhouette. A gap between the locks would be the neck
+      // on a real figure, but these have no neck — the head sits straight on
+      // the shoulders — so the gap read as two pigtails instead. Splitting it
+      // lower was tried and is invisible: the body covers that band anyway.
+      back: 'M -14 24 C -16 6 -14 -6 0 -6 C 14 -6 16 6 14 24 Z',
+      front: 'M -12 4 A 12 12 0 0 1 12 4 C 7 -5 -7 -5 -12 4 Z',
+    },
+  };
+
   /** A person: head, shoulders, and a chair back. Drawn rather than sprited so
    *  there is no asset licence anywhere in this repo and no build step to add. */
-  function person(state, seat) {
+  function person(state, seat, gender) {
     const g = el('g', { class: `person ${state}`, 'data-seat': seat });
+    const hair = HAIR[gender] ?? null;
     g.appendChild(el('ellipse', { cx: 0, cy: 46, rx: 26, ry: 6, class: 'shadow' }));
+    // Behind the body on purpose — see the note on `female.back` above.
+    if (hair?.back) g.appendChild(el('path', { d: hair.back, class: 'hair' }));
     g.appendChild(el('path', { d: 'M -20 44 q 0 -26 20 -26 q 20 0 20 26 z', class: 'body' }));
     g.appendChild(el('circle', { cx: 0, cy: 4, r: 12, class: 'head' }));
+    if (hair?.front) g.appendChild(el('path', { d: hair.front, class: 'hair' }));
     return g;
   }
 
@@ -416,7 +464,7 @@
     // Order matters and is the whole illusion: the person is drawn first so the
     // desk occludes them from the chest down, which is what "sitting at a desk"
     // looks like. Drawn the other way round they float in front of the monitor.
-    const p = person(state, d.seat);
+    const p = person(state, d.seat, d.gender);
     p.setAttribute('transform', 'translate(66 22)');
     g.appendChild(p);
 

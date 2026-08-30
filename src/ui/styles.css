@@ -631,9 +631,30 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .monitor   { fill: color-mix(in srgb, var(--text) 30%, var(--surface)); }
 .screen    { fill: var(--off-bg); transition: fill .3s ease; }
 
+/* Hair is one colour in both themes, and it is a warm brown rather than the
+   near-black it started as.
+ 
+   The near-black it started as scored 1.12:1 against the room (#1e242b) —
+   present in the DOM and invisible on screen. Lightening it was the obvious fix
+   and the wrong one: the room is a cool blue-grey at 212deg, so a brown sits
+   about 173deg away and separates by hue as well as by lightness. This one is
+   only 1.66:1 against the room and still reads clearly, which a grey at the
+   same lightness would not — and staying that dark keeps it twice as far from
+   the skin tone, so it looks like hair rather than a lighter head.
+ 
+   An outline was tried first and backed out: it read as a border, which nothing
+   else in this UI has. */
+.person { --hair: #5a4130; }
 .person .shadow { fill: rgba(0,0,0,.10); }
 .person .body   { fill: var(--off); transition: fill .3s ease; }
 .person .head   { fill: color-mix(in srgb, var(--off) 70%, #fff); transition: fill .3s ease; }
+/* Hair is deliberately not a seat colour. Seat colour is identity — it is how a
+   desk stays recognisable after a rename — so painting hair with it would make
+   two agents of the same gender look alike and fight the thing it sits next to.
+
+   Not derived from --text either: that put near-white hair on a near-white head
+   in dark mode. The chosen value and the reasoning behind it are on --hair. */
+.person .hair   { fill: var(--hair); transition: fill .3s ease; }
 
 .plateName { fill: var(--text); font: 600 12px var(--sans); }
 .plateRole { fill: var(--muted); font: 10px var(--mono); }
@@ -657,6 +678,11 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .person[data-seat="4"] .body { fill: var(--block); }
 .desk.away .person .body { fill: var(--off) !important; }
 .desk.away .person .head { fill: var(--off-bg); }
+/* An away figure carries no detail at all. A greyed-out avatar with a haircut
+   read as a rendering fault rather than as a state — the hair kept its shape
+   while everything around it lost its colour, so it looked like the one thing
+   that had failed to dim. Absence is legible; a half-dimmed feature is not. */
+.desk.away .person .hair { display: none; }
 .desk.away { opacity: .55; }
 .desk.away .bubble { display: none; }
 

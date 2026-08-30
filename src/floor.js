@@ -76,6 +76,17 @@ const SESSION_STALE_MINUTES = Math.max(1, Number(process.env.FLOOR_SESSION_TTL_M
  */
 const HOST_STALE_SECONDS = Math.max(30, Number(process.env.FLOOR_HOST_TTL_SECONDS ?? 90));
 
+/**
+ * How an avatar is drawn. The whole difference is hair, because a head, a pair
+ * of shoulders and a chair back is all the character these figures have — there
+ * is nowhere else to put a distinction without inventing detail the flat style
+ * does not carry.
+ *
+ * `neutral` is first because it is the default and it draws no hair at all,
+ * which is exactly what every desk looked like before this existed.
+ */
+export const GENDERS = ['neutral', 'male', 'female'];
+
 /** Longest a host's work request is held open before answering "nothing yet". */
 const WORK_WAIT_MAX_MS = 25_000;
 
@@ -539,6 +550,7 @@ export function buildFloor(store, live = null, sessions = null) {
   const mcp = mcpSessionCounts(sessions, key);
 
   const byChannel = new Map();
+  const profiles = store.listProfiles();
   for (const p of store.listPersonas()) {
     if (archived.has(p.channel)) continue;
     if (!byChannel.has(p.channel)) byChannel.set(p.channel, []);
@@ -601,6 +613,10 @@ export function buildFloor(store, live = null, sessions = null) {
         return {
           agent: p.agent,
           persona: p.persona,
+          // How to draw this one. Defaulted here rather than in the drawing code
+          // so a desk always states it, and an unset agent cannot be told apart
+          // from one deliberately set to neutral — they are the same thing.
+          gender: profiles[p.agent]?.gender ?? 'neutral',
           seat: p.seat ?? 0,
           live: live_,
           // False until this desk's window has posted a single hook event — the
@@ -894,9 +910,46 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       return res.status(400).json({ error: 'channel, agent and persona are required' });
     }
     if (persona.length > 40) return res.status(400).json({ error: 'persona must be 40 characters or fewer' });
-    const changes = store.setPersona(channel, agent, persona);
+    const changes = store.setProfile(channel, agent, { persona });
     store.logAdmin(channel, 'persona.set', { target: agent, detail: persona });
     res.json({ ok: true, changes, channel, agent, persona });
+  });
+
+  /**
+   * Everything an operator chooses about an agent, in one edit.
+   *
+   * Both fields are optional and only what is sent is written, so the dialog can
+   * save a name and an avatar together without either having to know the other's
+   * current value. Applies to every channel at once, like the name it extends.
+   */
+  router.post('/api/floor/profile', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+
+    const patch = {};
+    if (req.body?.persona !== undefined) {
+      const persona = str(req.body.persona);
+      if (!persona) return res.status(400).json({ error: 'persona cannot be empty — omit it to leave the name alone' });
+      if (persona.length > 40) return res.status(400).json({ error: 'persona must be 40 characters or fewer' });
+      patch.persona = persona;
+    }
+    if (req.body?.gender !== undefined) {
+      const gender = str(req.body.gender);
+      // Refused rather than silently coerced: a value this does not know would
+      // otherwise be stored and then draw as neutral forever, looking saved.
+      if (!GENDERS.includes(gender)) {
+        return res.status(400).json({ error: `gender must be one of ${GENDERS.join(', ')}` });
+      }
+      patch.gender = gender;
+    }
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'nothing to change' });
+
+    const changes = store.setProfile(channel, agent, patch);
+    for (const [k, v] of Object.entries(patch)) {
+      store.logAdmin(channel, k === 'persona' ? 'persona.set' : 'avatar.set', { target: agent, detail: v });
+    }
+    res.json({ ok: true, changes, channel, agent, ...patch });
   });
 
   /** A hosted desk that can take a message right now, or the reason it can't. */

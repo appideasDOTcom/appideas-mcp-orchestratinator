@@ -729,21 +729,35 @@ function backlogDialog(channel, agent) {
  * Clearing the field restores the derived default rather than leaving a desk
  * blank, which is the only reason this needs a note at all.
  */
+const GENDERS = [
+  ['neutral', 'Neutral', 'no hair — the figure as it has always been drawn'],
+  ['male', 'Male', 'a short, swept cut'],
+  ['female', 'Female', 'long hair, past the shoulders'],
+];
+
 function renameDialog(channel, agent) {
   ui.dlgCtx = { channel, agent, kind: 'rename' };
   const current = nameOf(channel, agent);
+  const gender = findAgent(channel, agent)?.gender ?? 'neutral';
   openDialog(`
-    <div class="dlg-head"><h3>Rename ${esc(current)}</h3></div>
+    <div class="dlg-head"><h3>${esc(current)}</h3></div>
     <p class="dlg-sub">on <span class="mono">${esc(channel)}</span> · <span class="mono">${esc(agent)}</span></p>
     <label class="field">
       <span>Display name</span>
       <input id="persona-name" class="input" type="text" maxlength="40" value="${esc(current)}"
              placeholder="${esc(agent)}" autocomplete="off" spellcheck="false">
     </label>
+    <label class="field">
+      <span>Avatar</span>
+      <select id="persona-gender" class="input">
+        ${GENDERS.map(([v, label, why]) =>
+          `<option value="${esc(v)}"${gender === v ? ' selected' : ''}>${esc(label)} — ${esc(why)}</option>`).join('')}
+      </select>
+    </label>
     <p class="dlg-note">
-      Everyone sees this name. It follows <span class="mono">${esc(agent)}</span> everywhere on the board and
-      the floor — the id itself never changes, so messages and tasks keep routing exactly as they do now.
-      Leave it empty to go back to <b>${esc(defaultName(agent))}</b>.
+      Everyone sees both of these, and they follow <span class="mono">${esc(agent)}</span> everywhere on the
+      board and the floor — the id itself never changes, so messages and tasks keep routing exactly as they do
+      now. Leave the name empty to go back to <b>${esc(defaultName(agent))}</b>.
     </p>
     <div class="dlg-foot">
       <button type="button" class="btn" data-do="cancel">Cancel</button>
@@ -1256,7 +1270,9 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'rename-save': {
       const typed = (el.dlgBody.querySelector('#persona-name')?.value ?? '').trim();
       const persona = typed || defaultName(d.agent);
-      act(() => floorPost('persona', { channel: d.channel, agent: d.agent, persona }));
+      const gender = el.dlgBody.querySelector('#persona-gender')?.value ?? 'neutral';
+      // One request, so a dialog that changed both cannot half-succeed.
+      act(() => floorPost('profile', { channel: d.channel, agent: d.agent, persona, gender }));
       break;
     }
     case 'archive':

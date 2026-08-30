@@ -146,7 +146,7 @@ export function openDb(path) {
     -- the operator, stored here rather than in a browser because a floor where
     -- two people disagree about which desk is which stops being a shared
     -- reference — the one job it has.
-    -- What an agent is called, for every channel at once.
+    -- What an agent is called and how it is drawn, for every channel at once.
     --
     -- Keyed by the agent id and nothing else, because that is what an operator
     -- means by "the name": X-Agent identifies the worker, so an agent called
@@ -155,13 +155,16 @@ export function openDb(path) {
     -- everywhere — and a per-channel override made the two disagree the moment
     -- anybody used it.
     --
-    -- A row exists only for an agent somebody has actually named. Absence means
-    -- "use the derived default", so changing that derivation reaches every
-    -- agent that was happy with it rather than only the ones seen since.
-    CREATE TABLE IF NOT EXISTS agent_names (
-      agent    TEXT PRIMARY KEY,
-      persona  TEXT NOT NULL,
-      named_at TEXT NOT NULL DEFAULT (datetime('now'))
+    -- A row exists only for an agent somebody has actually customised, and every
+    -- column in it is nullable for the same reason: NULL means "the default",
+    -- so changing a default reaches every agent that was happy with it rather
+    -- than only the ones seen since. The name derives from the agent id; the
+    -- gender is neutral, which is the avatar drawn with no hair at all.
+    CREATE TABLE IF NOT EXISTS agent_profile (
+      agent      TEXT PRIMARY KEY,
+      persona    TEXT,
+      gender     TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     -- Where an agent sits, which is per channel because a room is per channel.
@@ -289,6 +292,7 @@ export function openDb(path) {
   addColumn(db, 'hosted_desks', 'outside_pid', 'INTEGER');
 
   migratePersonas(db);
+  migrateAgentNames(db);
 
   return db;
 }
@@ -345,6 +349,26 @@ function migratePersonas(db) {
   // how they come to disagree, and a reader finding `personas.persona` would
   // reasonably believe it.
   dropColumns(db, 'personas', ['persona'], 'a name belongs to the agent now, not to one of its desks');
+}
+
+/**
+ * `agent_names` held one thing about an agent; `agent_profile` holds several.
+ *
+ * Renamed rather than extended because a table called "names" that also carries
+ * how somebody is drawn misleads the next reader, and more avatar settings are
+ * coming. Short-lived table, so this only ever matches a database written in the
+ * window between the two.
+ */
+function migrateAgentNames(db) {
+  const has = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_names'`).get();
+  if (!has) return;
+  const moved = db.prepare(
+    `INSERT INTO agent_profile (agent, persona, updated_at)
+     SELECT agent, persona, named_at FROM agent_names
+     WHERE TRUE ON CONFLICT(agent) DO UPDATE SET persona = COALESCE(agent_profile.persona, excluded.persona)`
+  ).run().changes;
+  db.exec(`DROP TABLE agent_names`);
+  console.log(`[db] agent_names -> agent_profile (${moved} name${moved === 1 ? '' : 's'} carried over)`);
 }
 
 function addColumn(db, table, column, decl) {
@@ -458,8 +482,8 @@ export function humanName(agent) {
  * above, about a backup being safe to email to yourself, would stop being true
  * the moment they were included. They are also reconstructible: the transcripts
  * they were built from still sit on each workstation under ~/.claude/projects.
- * `personas` and `agent_names` are included because where an agent sits and
- * what it is called are both operator decisions that would otherwise be
+ * `personas` and `agent_profile` are included because where an agent sits and
+ * how it is named and drawn are both operator decisions that would otherwise be
  * silently lost on a restore. The hosting tables are
  * runtime state — hosts re-register within a minute of any restart — and a
  * restored copy of them would only describe machines that may not exist.
@@ -473,7 +497,7 @@ export const BACKUP_TABLES = [
   'channel_flags',
   'admin_events',
   'personas',
-  'agent_names',
+  'agent_profile',
 ];
 
 /**
@@ -822,12 +846,12 @@ export function makeStore(db) {
     // derivation stays a live rule instead of a snapshot taken at first sight.
     listPersonas: db.prepare(
       `SELECT p.channel, p.agent, n.persona AS persona, p.seat
-         FROM personas p LEFT JOIN agent_names n ON n.agent = p.agent`
+         FROM personas p LEFT JOIN agent_profile n ON n.agent = p.agent`
     ),
     seatsInChannel: db.prepare(`SELECT agent, seat FROM personas WHERE channel = ?`),
     getPersona: db.prepare(
       `SELECT n.persona AS persona, p.seat
-         FROM personas p LEFT JOIN agent_names n ON n.agent = p.agent
+         FROM personas p LEFT JOIN agent_profile n ON n.agent = p.agent
         WHERE p.channel = ? AND p.agent = ?`
     ),
     upsertSeat: db.prepare(
@@ -837,11 +861,16 @@ export function makeStore(db) {
          seat        = COALESCE(excluded.seat, seat),
          assigned_at = datetime('now')`
     ),
-    getName: db.prepare(`SELECT persona FROM agent_names WHERE agent = ?`),
-    // One row per agent, every channel at once.
-    upsertName: db.prepare(
-      `INSERT INTO agent_names (agent, persona) VALUES (@agent, @persona)
-       ON CONFLICT(agent) DO UPDATE SET persona = excluded.persona, named_at = datetime('now')`
+    getName: db.prepare(`SELECT persona FROM agent_profile WHERE agent = ?`),
+    listProfiles: db.prepare(`SELECT agent, persona, gender FROM agent_profile`),
+    // One row per agent, every channel at once. COALESCE so setting one field
+    // never silently clears another: the caller passes NULL for "leave it".
+    upsertProfile: db.prepare(
+      `INSERT INTO agent_profile (agent, persona, gender) VALUES (@agent, @persona, @gender)
+       ON CONFLICT(agent) DO UPDATE SET
+         persona    = COALESCE(@persona, persona),
+         gender     = COALESCE(@gender, gender),
+         updated_at = datetime('now')`
     ),
     // Turns would otherwise grow without bound: this is full conversation text
     // arriving at every turn boundary from every window on the network. Trimmed
@@ -1201,20 +1230,27 @@ export function makeStore(db) {
     // is this agent called" start to disagree.
     listPersonas: () => q.listPersonas.all().map((r) => ({ ...r, persona: r.persona ?? humanName(r.agent) })),
     /**
-     * Every name an operator has chosen, as { agent: persona }.
+     * Everything an operator has chosen, as { agent: { persona, gender } }.
      *
      * Separate from `listPersonas` because that one is per *desk* and only
-     * knows agents that have taken a seat. A name outlives its seats: an agent
-     * renamed on one channel must answer to that name on a channel where it has
-     * never posted a hook event, which is most of them.
+     * knows agents that have taken a seat. A profile outlives its seats: an
+     * agent renamed on one channel must answer to that name on a channel where
+     * it has never posted a hook event, which is most of them.
      */
-    listAgentNames: () => Object.fromEntries(
-      db.prepare(`SELECT agent, persona FROM agent_names`).all().map((r) => [r.agent, r.persona])
+    listProfiles: () => Object.fromEntries(
+      q.listProfiles.all().map((r) => [r.agent, { persona: r.persona, gender: r.gender }])
     ),
-    // `channel` is accepted and ignored: a name belongs to the agent, not to one
-    // of its desks. It stays in the signature because every caller has one to
-    // hand and the admin log records which board the operator was looking at.
-    setPersona: (_channel, agent, persona) => q.upsertName.run({ agent, persona }).changes,
+    /**
+     * Set what an operator has chosen about an agent — for every channel at once,
+     * because these belong to the agent and not to one of its desks.
+     *
+     * Fields left `undefined` are untouched, so the name and the avatar can be
+     * edited independently without either erasing the other. `channel` is
+     * accepted and ignored: every caller has one to hand, and the admin log
+     * records which board the operator was looking at when they did it.
+     */
+    setProfile: (_channel, agent, { persona = null, gender = null } = {}) =>
+      q.upsertProfile.run({ agent, persona, gender }).changes,
     ensurePersona,
     pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
 

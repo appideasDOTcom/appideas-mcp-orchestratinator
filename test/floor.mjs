@@ -168,6 +168,23 @@ try {
   await post(ev('pro', 's2', 'Stop', { last_assistant_message: 'still here' }));
   eq(deskOf(await floor(), 'pro').persona, 'Marguerite', 'and the next hook event does not undo it');
 
+  console.log('\navatars');
+  eq(deskOf(await floor(), 'pro').gender, 'neutral',
+     'an agent nobody has drawn is neutral — the figure exactly as it was before avatars existed');
+  const profile = (body) => fetch(`${HOST}/api/floor/profile`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  eq((await profile({ channel: CH, agent: 'pro', gender: 'male' })).status, 200, 'an operator can choose one');
+  eq(deskOf(await floor(), 'pro').gender, 'male', 'and the desk says so');
+  eq(deskOf(await floor(), 'pro').persona, 'Marguerite',
+     'while the name is untouched — the two are edited in one dialog but stored apart');
+  eq((await profile({ channel: CH, agent: 'pro', gender: 'wizard' })).status, 400,
+     'a value the drawing code has no shape for is refused, not stored — it would save and then draw as neutral forever');
+  eq(deskOf(await floor(), 'pro').gender, 'male', 'and the refusal changed nothing');
+  eq((await profile({ channel: CH, agent: 'pro', persona: 'Marguerite II' })).status, 200, 'a name-only edit is allowed');
+  eq(deskOf(await floor(), 'pro').gender, 'male', 'and leaves the avatar alone, which is the other half of the same rule');
+  eq((await profile({ channel: CH, agent: 'pro' })).status, 400, 'an edit that changes nothing is refused rather than logged');
+
   console.log('\na crashed window cannot stay live forever');
   await post(ev('ghost', 's4', 'SessionStart'));
   eq(deskOf(await floor(), 'ghost').live, true, 'a fresh session is live');
@@ -228,7 +245,7 @@ try {
   // while the *derived* name, coming from the id, was identical on both. The
   // default propagated and the override did not.
   await post({ ...ev('pro', 's10', 'SessionStart'), channel: 'other-floor' });
-  eq(deskOf(await floor(), 'pro', 'other-floor').persona, 'Marguerite',
+  eq(deskOf(await floor(), 'pro', 'other-floor').persona, 'Marguerite II',
      'a name given on one channel is the name on every channel — it belongs to the agent, not the desk');
   r = await fetch(`${HOST}/api/floor/persona`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -239,6 +256,8 @@ try {
   eq(deskOf(f, 'pro', 'other-floor').persona, 'Bocefus', 'seen where it was typed');
   eq(deskOf(f, 'pro', CH).persona, 'Bocefus', 'and back on the channel it was first named from');
   eq(deskOf(f, 'free', CH).persona, 'Free', 'while a different id is still untouched');
+  eq(deskOf(f, 'pro', 'other-floor').gender, 'male',
+     'and the avatar travels with the agent for the same reason the name does');
 
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();

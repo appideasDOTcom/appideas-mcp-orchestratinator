@@ -94,7 +94,7 @@ function buildState(store, sessions, sessionStats, meta) {
   // read straight from the names table rather than from the per-desk seating
   // rows, because a name outlives its seats: an agent renamed while working on
   // one channel must answer to that name on a channel it has never sat down in.
-  const chosenNames = store.listAgentNames();
+  const profiles = store.listProfiles();
   for (const s of liveSessions) if (s.channel) channelNames.add(s.channel);
 
   const agentsByChannel = index(agentRows, (r) => r.channel);
@@ -116,7 +116,7 @@ function buildState(store, sessions, sessionStats, meta) {
     // raw ids in exactly those places while the agent rows show proper names.
     const personas = {};
     for (const a of agentsByChannel.get(channel) ?? []) {
-      personas[a.agent] = chosenNames[a.agent] ?? humanName(a.agent);
+      personas[a.agent] = profiles[a.agent]?.persona ?? humanName(a.agent);
     }
     const allAgents = (agentsByChannel.get(channel) ?? [])
       .slice()
@@ -132,6 +132,9 @@ function buildState(store, sessions, sessionStats, meta) {
           // the name is for reading, the id is what routes. Read from the same
           // map the dialogs use, so a row and a heading cannot disagree.
           persona: personas[a.agent],
+          // The board draws no avatars, but it is where the dialog that edits
+          // one is opened from, so the current value has to reach it.
+          gender: profiles[a.agent]?.gender ?? 'neutral',
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
           // Whether the operator can nudge this agent — the same verdict the
           // chat endpoint enforces, so the button and the server agree.
