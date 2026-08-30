@@ -44,6 +44,25 @@
   const BUBBLE_W = 158;          // hard ceiling, a shade under DESK_W + GAP
   const CHAR_W = 5.4;            // ≈ average advance at the 10.5px bubble font
   const BUBBLE_LINES = 2;
+  const BUBBLE_LINE = 13;        // line box, a shade over the 10.5px font
+  /* Box edge to the text, and the same figure top and bottom. It was not: the
+     height was `lines * 13 + 8` against a first baseline of 17, which works out
+     to about 7 above the text and well under 1 below it, so every bubble sat
+     high in its own box. Both margins now come from this one number. */
+  const BUBBLE_PAD = 8;
+  const BUBBLE_LIFT = 4;         // bubble's bottom edge to the desk origin
+  /* The text's own box at the bubble font, as the browser reports it: ascent
+     above the baseline, descent below, both constant per line whatever the words
+     are. Measured, not assumed — the first attempt derived the baseline from
+     half the leading plus a guessed ascent and produced 7.2 above the text
+     against 9.0 below, which is the same lopsidedness BUBBLE_PAD exists to fix.
+     With these, both margins are BUBBLE_PAD by arithmetic rather than by luck. */
+  const BUBBLE_ASCENT = 10.4;
+  const BUBBLE_DESCENT = 2.4;
+  /** How tall a bubble holding n lines is: the text's box, plus BUBBLE_PAD both sides. */
+  function bubbleHeight(n) {
+    return BUBBLE_PAD * 2 + BUBBLE_ASCENT + BUBBLE_DESCENT + (n - 1) * BUBBLE_LINE;
+  }
   const PER_LINE = Math.floor((BUBBLE_W - 16) / CHAR_W);
 
   /* The desk front is the sign, and the tray of counts sits under the plate.
@@ -111,7 +130,7 @@
   // the counter pushed that past 150 without anything on screen saying so — the
   // second row simply had no bubble on the day. Tie it to the two numbers it
   // actually depends on and it cannot drift again.
-  const BUBBLE_ABOVE = BUBBLE_LINES * 13 + 12;
+  const BUBBLE_ABOVE = bubbleHeight(BUBBLE_LINES) + BUBBLE_LIFT;
   const DESK_H = DESK_BELOW + BUBBLE_ABOVE - GAP + 8;
 
   /* How far the first row of desks sits below the top of the room.
@@ -436,6 +455,101 @@
   }
 
   /**
+   * The three dots that make a speech bubble a *thought* bubble.
+   *
+   * They replace the tail triangle. A tail says the words were spoken; dots
+   * trailing toward the head say they are being thought, which is what a desk's
+   * counter actually reports — the last thing this agent was doing, not
+   * something it said to anybody.
+   *
+   * They run down the bubble's *left* and curve in to the head, on the side away
+   * from the monitor. The first attempt dropped them straight down from the
+   * middle, and there is only 18 units of clear air between the bubble's
+   * underside and the top of the head — three dots in that gap have to be tiny
+   * to fit, which is exactly how they read. The person's left is empty desk all
+   * the way down, so going that way buys the length that lets them be seen.
+   *
+   * Laid out in desk space, where the fixed landmarks are, then converted: the
+   * person sits at translate(66 22) with the head a circle at (0 4) r 12, so the
+   * head occupies desk x 54..78 centred on (66, 26), and the monitor is
+   * everything to the right of it. The bubble is centred at x 84 with its
+   * underside at y -BUBBLE_LIFT whatever it holds.
+   */
+  const DOT_R = [6.8, 4.8, 3.2];  // biggest at the bubble, smallest at the head
+  const DOT_INSET = 9;            // bubble's left edge to the first dot's centre
+  const DOT_GAP = 1;              // clear air under the bubble, so they do not touch
+  /* The furthest right the first dot may start, and with it the narrowest a
+     bubble is allowed to be — because the trail's room comes from the box's left
+     edge, not from the text. A box that shrink-wrapped a two-word status put its
+     left edge almost over the head, and the three dots piled up on each other
+     with 13 units of run between them where they need about 26. The minimum is
+     derived from the trail rather than chosen, so raising a dot's radius cannot
+     quietly reintroduce the overlap. */
+  const DOT_FIRST_X = 28;
+  const BUBBLE_MIN_W = (84 - (DOT_FIRST_X - DOT_INSET)) * 2;   // 130
+  // Beside the head's upper-left rather than above it, and standing off it: the
+  // last dot used to land 0.3 units from the head, which at a glance is touching.
+  const DOT_HEAD = { x: 51, y: 16 };
+  /* How far the trail sags off the straight line between bubble and head. The
+     middle dot lands half of this off the chord, so 9 buys about 4.5 units of
+     arc — the previous version interpolated the middle dot at fixed fractions
+     (0.55 across, 0.62 down) which put it 0.9 units off the line, and 0.9 units
+     over a 38-unit run is a straight line as far as the eye is concerned. */
+  const DOT_BOW = 9;
+
+  /**
+   * One cycle of the dot animation, in ms — read from the stylesheet, which owns
+   * it, and cached because it cannot change for the life of the page.
+   */
+  let thoughtMs = null;
+  function thoughtPeriod() {
+    if (thoughtMs === null) {
+      const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--thought-ms'));
+      thoughtMs = Number.isFinite(v) && v > 0 ? v : 1600;
+    }
+    return thoughtMs;
+  }
+
+  function thoughtDots(w, h) {
+    // The group is translated to (84, -h - BUBBLE_LIFT), so this is the inverse.
+    const toBubble = (p) => ({ x: p.x - 84, y: p.y + h + BUBBLE_LIFT });
+    const first = {
+      // Never right of DOT_FIRST_X. BUBBLE_MIN_W guarantees the box reaches at
+      // least that far left, so the dot is always under it, never floating.
+      x: Math.min(84 - w / 2 + DOT_INSET, DOT_FIRST_X),
+      y: -BUBBLE_LIFT + DOT_R[0] + DOT_GAP,
+    };
+    const last = DOT_HEAD;
+    // A real quadratic rather than a nudged straight line: the control point is
+    // the chord's midpoint pushed out along the chord's normal, so the trail
+    // bows consistently whatever the bubble's width does to the chord.
+    const dx = last.x - first.x;
+    const dy = last.y - first.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ctrl = {
+      x: (first.x + last.x) / 2 - (dy / len) * DOT_BOW,
+      y: (first.y + last.y) / 2 + (dx / len) * DOT_BOW,
+    };
+    const at = (t) => ({
+      x: (1 - t) ** 2 * first.x + 2 * (1 - t) * t * ctrl.x + t ** 2 * last.x,
+      y: (1 - t) ** 2 * first.y + 2 * (1 - t) * t * ctrl.y + t ** 2 * last.y,
+    });
+    const g = el('g', { class: 'thought' });
+    // Where the shared cycle is right now, as a negative delay. Set on the group
+    // so it inherits to all three circles, and so a room rebuilt mid-cycle
+    // resumes rather than restarting — see the note in styles.css.
+    const period = thoughtPeriod();
+    g.style.setProperty('--thought-phase', `${-(Date.now() % period)}ms`);
+    [at(0), at(0.5), at(1)].forEach((p, i) => {
+      const q = toBubble(p);
+      g.appendChild(el('circle', {
+        cx: +q.x.toFixed(2), cy: +q.y.toFixed(2), r: DOT_R[i], class: 'thoughtDot',
+      }));
+    });
+    return g;
+  }
+
+  /**
    * "2 open · 2 claimed · 1 done · 0 contracts · 5 msgs" — the board's line.
    *
    * One <text> of tspans rather than five positioned elements: the numbers vary
@@ -737,16 +851,19 @@
         BUBBLE_LINES
       );
       if (lines.length) {
-        const w = Math.min(BUBBLE_W, Math.max(48, Math.max(...lines.map((l) => l.length)) * CHAR_W + 16));
-        const h = lines.length * 13 + 8;
-        const b = el('g', { class: 'bubble', transform: `translate(84 ${-h - 4})` });
+        const w = Math.min(BUBBLE_W, Math.max(BUBBLE_MIN_W, Math.max(...lines.map((l) => l.length)) * CHAR_W + 16));
+        const h = bubbleHeight(lines.length);
+        const b = el('g', { class: 'bubble', transform: `translate(84 ${-h - BUBBLE_LIFT})` });
         b.appendChild(el('rect', { x: -w / 2, y: 0, width: w, height: h, rx: 8, class: 'bubbleBox' }));
-        b.appendChild(el('path', { d: `M -4 ${h - 1} l 4 7 l 4 -7 z`, class: 'bubbleBox' }));
         lines.forEach((line, li) => {
-          const t = el('text', { x: 0, y: 17 + li * 13, class: 'bubbleText', 'text-anchor': 'middle' });
+          const t = el('text', {
+            x: 0, y: BUBBLE_PAD + BUBBLE_ASCENT + li * BUBBLE_LINE,
+            class: 'bubbleText', 'text-anchor': 'middle',
+          });
           t.textContent = line;
           b.appendChild(t);
         });
+        b.appendChild(thoughtDots(w, h));
         g.appendChild(b);
       }
     }
