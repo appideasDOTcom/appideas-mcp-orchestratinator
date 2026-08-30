@@ -1179,6 +1179,206 @@
       .join('');
   }
 
+  /* ---------- markdown ---------- */
+
+  /**
+   * Turn an agent's message into HTML. Half the assistant turns on this board
+   * carry markdown — inline code in nearly half of them — and a panel that
+   * shows the asterisks is showing the source of a message rather than the
+   * message.
+   *
+   * The string is escaped ONCE, here, before any pattern below runs. Every
+   * pattern after this point matches text that is already inert and emits only
+   * tags we wrote, so there is no path by which turn text becomes markup and
+   * nothing left to sanitise afterwards. Turn text is arbitrary — an agent
+   * pasting a file is pasting whatever is in it — so that ordering is the
+   * whole safety argument, not a detail. Its one visible cost is that the
+   * blockquote matcher below looks for `&gt;`: by the time it runs, escaping
+   * has already happened.
+   */
+  function md(text) {
+    return mdBlocks(esc(String(text ?? '').replace(/\r\n?/g, '\n')).split('\n'));
+  }
+
+  const RE_FENCE = /^ {0,3}(`{3,}|~{3,})/;
+  const RE_HEAD = /^ {0,3}(#{1,6}) +(.*?)\s*#*\s*$/;
+  const RE_HR = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
+  const RE_QUOTE = /^ {0,3}&gt; ?/;
+  const RE_ITEM = /^(\s*)(?:([-*+])|(\d{1,9})[.)]) +(.*)$/;
+  const RE_ROW = /^ {0,3}\|(.*)\|\s*$/;
+  const RE_SEP = /^ {0,3}\|[-\s|:]*-[-\s|:]*\|\s*$/;
+  const isTable = (a, b) => RE_ROW.test(a ?? '') && RE_SEP.test(b ?? '');
+
+  /**
+   * Blocks, in the order they have to be tried. Recursive, because a
+   * blockquote or a list item holds blocks of its own; every leaf that becomes
+   * text leaves through mdInline().
+   *
+   * Indented code blocks are deliberately absent. Four leading spaces meaning
+   * "code" is the largest source of false positives in real chat text — a
+   * wrapped line under a list item hits it constantly — and every code block
+   * in the turns on this board is fenced.
+   */
+  function mdBlocks(lines) {
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i++; continue; }
+
+      const fence = line.match(RE_FENCE);
+      if (fence) {
+        // Closed by the same character, at least as long. An unterminated
+        // fence runs to the end rather than falling back to paragraphs.
+        const close = new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}\\s*$`);
+        const body = [];
+        i++;
+        while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+        i++;
+        out.push(`<pre><code>${body.join('\n')}</code></pre>`);
+        continue;
+      }
+
+      const head = line.match(RE_HEAD);
+      if (head) {
+        const n = head[1].length;
+        out.push(`<h${n}>${mdInline(head[2])}</h${n}>`);
+        i++;
+        continue;
+      }
+
+      if (RE_HR.test(line)) { out.push('<hr>'); i++; continue; }
+
+      if (isTable(line, lines[i + 1])) {
+        const cells = (l) => l.replace(/^ {0,3}\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+        const heads = cells(line);
+        const align = cells(lines[i + 1]).map((c) =>
+          /^:-+:$/.test(c) ? ' class="md-c"' : /^-+:$/.test(c) ? ' class="md-r"' : '');
+        i += 2;
+        const rows = [];
+        while (i < lines.length && RE_ROW.test(lines[i])) rows.push(cells(lines[i++]));
+        const cell = (tag) => (c, n) => `<${tag}${align[n] ?? ''}>${mdInline(c)}</${tag}>`;
+        out.push(
+          `<table><thead><tr>${heads.map(cell('th')).join('')}</tr></thead>` +
+          `<tbody>${rows.map((r) => `<tr>${r.map(cell('td')).join('')}</tr>`).join('')}</tbody></table>`
+        );
+        continue;
+      }
+
+      if (RE_QUOTE.test(line)) {
+        const body = [];
+        // A quote takes the plain lines that follow it too — agents wrap a long
+        // quoted line without repeating the marker.
+        while (i < lines.length && (RE_QUOTE.test(lines[i]) || (body.length && lines[i].trim()))) {
+          body.push(lines[i++].replace(RE_QUOTE, ''));
+        }
+        out.push(`<blockquote>${mdBlocks(body)}</blockquote>`);
+        continue;
+      }
+
+      if (RE_ITEM.test(line)) {
+        const items = [];
+        while (i < lines.length) {
+          if (RE_ITEM.test(lines[i]) || (items.length && lines[i].trim())) { items.push(lines[i++]); continue; }
+          // A blank line stays inside the list when what follows still belongs
+          // to it. That is the difference between a list with a paragraph in
+          // it and two lists that happen to touch.
+          const next = lines[i + 1] ?? '';
+          if (items.length && (RE_ITEM.test(next) || /^\s{2,}\S/.test(next))) { items.push(lines[i++]); continue; }
+          break;
+        }
+        out.push(mdList(items));
+        continue;
+      }
+
+      const para = [];
+      while (i < lines.length && lines[i].trim() &&
+             !RE_FENCE.test(lines[i]) && !RE_HEAD.test(lines[i]) && !RE_HR.test(lines[i]) &&
+             !RE_QUOTE.test(lines[i]) && !RE_ITEM.test(lines[i]) && !isTable(lines[i], lines[i + 1])) {
+        para.push(lines[i++]);
+      }
+      if (!para.length) { i++; continue; }   // consuming nothing here would spin
+      out.push(`<p>${mdInline(para.join('\n'))}</p>`);
+    }
+    return out.join('');
+  }
+
+  /**
+   * One list, however deep. Continuation lines lose this level's indent, so
+   * the recursive pass sees a nested list starting at column zero and does not
+   * have to know it is nested.
+   */
+  function mdList(lines) {
+    const first = lines[0].match(RE_ITEM);
+    const ordered = !!first[3];
+    const indent = first[1].length;
+    const items = [];
+    let buf = null;
+    for (const l of lines) {
+      const m = l.match(RE_ITEM);
+      if (m && m[1].length <= indent + 1) { buf = [m[4]]; items.push(buf); continue; }
+      if (buf) buf.push(l.slice(Math.min(l.length - l.trimStart().length, indent + 2)));
+    }
+    const tag = ordered ? 'ol' : 'ul';
+    const start = ordered && first[3] !== '1' ? ` start="${Number(first[3])}"` : '';
+    const body = items.map((b) => {
+      // A one-paragraph item stays a bare <li>; anything holding a blank line,
+      // a nested list or a code block gets the full block treatment.
+      const simple = !b.some((l) => !l.trim() || RE_ITEM.test(l) || RE_FENCE.test(l));
+      return `<li>${simple ? mdInline(b.join('\n')) : mdBlocks(b)}</li>`;
+    }).join('');
+    return `<${tag}${start}>${body}</${tag}>`;
+  }
+
+  /**
+   * Inline markup. Code spans and links are lifted out into slots before the
+   * emphasis pass, so a `*` inside either is left alone — the ordering a
+   * hand-written renderer gets wrong first. Restoring is recursive because a
+   * link's label can hold a slot of its own.
+   *
+   * A slot reads `<7>`, which is safe for the same reason the rest of this is:
+   * the text arrived escaped, so it contains no `<` of its own and cannot
+   * counterfeit one.
+   */
+  function mdInline(text) {
+    const slots = [];
+    const hold = (html) => `<${slots.push(html) - 1}>`;
+    let s = String(text);
+    s = s.replace(/(`+)([^`]+?)\1/g, (m, ticks, body) => hold(`<code>${body}</code>`));
+    s = s.replace(/\[([^\]\n]+)\]\(([^\s)]+)\)/g, (m, label, href) => hold(mdLink(label, href)));
+    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]*[^\s<).,;:!?'"])/g, (m, pre, url) => pre + hold(mdLink(url, url)));
+    s = mdEmph(s);
+    // Inside a paragraph a newline stays a newline. CommonMark folds it into a
+    // space, but half these turns are not markdown at all and their line breaks
+    // are the only structure they have — losing those to make *emphasis* work
+    // would be a bad trade.
+    s = s.replace(/\n/g, '<br>');
+    const back = (t) => t.replace(/<(\d+)>/g, (m, n) => back(slots[n]));
+    return back(s);
+  }
+
+  // Emphasis never opens or closes on a space, and `*` will not italicise
+  // across a word boundary: `2 * 3 * 4` is arithmetic, not emphasis. `_` is not
+  // an emphasis marker here at all, because snake_case is far commoner in these
+  // messages than underscore italics.
+  const mdEmph = (s) => s
+    .replace(/\*\*(?![\s*])([^]*?[^\s*])\*\*/g, '<strong>$1</strong>')
+    .replace(/~~(?![\s~])([^]*?[^\s~])~~/g, '<del>$1</del>')
+    .replace(/(^|[^\w*])\*(?![\s*])([^*\n]*[^\s*])\*(?!\w)/g, '$1<em>$2</em>');
+
+  /**
+   * Only http(s) and mailto become anchors, which is also what keeps
+   * `javascript:` out. Everything else is nearly always a repo-relative path —
+   * [host/window.js](host/window.js), a clickable file reference in an editor
+   * and a 404 on this board — so it keeps its label as code: still readable,
+   * still copyable, and not a link that goes nowhere.
+   */
+  function mdLink(label, href) {
+    return /^(https?:\/\/|mailto:)/i.test(href)
+      ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${mdEmph(label)}</a>`
+      : `<code>${label}</code>`;
+  }
+
   /* ---------- the chat panel ---------- */
 
   function turnNode(t) {
@@ -1191,9 +1391,16 @@
     }
     const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? 'agent' : t.role;
     div.className = `t t-${esc(t.role)}`;
+    // Only the agent's own messages are read as markdown. What the operator
+    // typed comes back exactly as typed — the compose box is a plain textarea,
+    // and a line that starts with a dash should not become a bullet on its way
+    // back to the person who wrote it.
+    const body = t.role === 'assistant'
+      ? `<div class="t-body t-md">${md(t.text)}</div>`
+      : `<div class="t-body">${esc(t.text ?? '')}</div>`;
     div.innerHTML = `
       <div class="t-who">${esc(who)}<span class="t-when mono" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
-      <div class="t-body">${esc(t.text ?? '')}</div>`;
+      ${body}`;
     return div;
   }
 
