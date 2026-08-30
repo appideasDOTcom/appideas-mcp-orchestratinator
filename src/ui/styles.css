@@ -655,6 +655,62 @@ body.view-floor main > .panel:not(.panel-floor) { display: none; }
 
 svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margin-inline: auto; }
 
+/* The building.
+   ------------
+   Stacked floors are storeys, so they get drawn inside one. Walls on the left,
+   right and bottom only: a building seen in section has no roof in the way, and
+   the open top is what says "there are more floors than this" without a caption.
+
+   The wall is --text at low alpha rather than a colour per theme. That is
+   white-with-opacity on the dark theme and its only sensible counterpart on the
+   light one, where "lighter than the background" has nowhere to go against a
+   white page — one rule, and it cannot drift out of step the way two literals
+   did. It has to survive both themes because the silhouette is the whole of the
+   depiction: a stark black outline on a near-black page is not a dark building,
+   it is no building.
+
+   Width is fixed, not fluid: every floor is a full floor's width (ROOM_MAX_W,
+   775px) plus these walls and padding. Storeys of different widths do not read
+   as a building, they read as a mistake. */
+.rooms.building {
+  --wall-w: 16px;
+  max-width: calc(775px + var(--wall-w) * 2 + 28px);
+  margin-inline: auto;
+  /* Clear of the floor picker: the chips choose which floor, the building is
+     what they choose from, and they were close enough to read as one control. */
+  margin-top: 1rem;
+  padding: 16px 14px 18px;
+  gap: 18px;
+  border: var(--wall-w) solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+}
+
+/* A storey is one button. The pointer says so, and the carpet lifts under it —
+   the floor you are about to ride to is the whole storey, not the desk you
+   happen to be over. */
+.rooms.building svg.room { cursor: pointer; }
+/* Not while the pointer is on an arrow: the arrow stays on this floor, and
+   lighting the storey under it promises the opposite. */
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover)) .roomName { fill: var(--accent); }
+
+/* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
+   drawn at all: it is anchored to the room's edge rather than to its partner,
+   so hiding one moves nothing, and a floor that fits its desks should not carry
+   two dead controls saying otherwise. */
+.deskTrack { transition: transform .22s ease; }
+.deskArrow { cursor: pointer; }
+.deskArrow .arrowChip {
+  fill: color-mix(in srgb, var(--text) 14%, var(--surface));
+  stroke: var(--border);
+  transition: fill .15s ease;
+}
+.deskArrow .arrowGlyph { fill: none; stroke: var(--text); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.deskArrow:hover .arrowChip { fill: color-mix(in srgb, var(--text) 26%, var(--surface)); }
+.deskArrow:focus-visible .arrowChip { stroke: var(--text); stroke-width: 2; }
+.deskArrow.spent { display: none; }
+
 /* Furniture. Deliberately flat and low-contrast: the room is the backdrop, and
    anything here that competes with a person or a badge is a bug. */
 .roomFloor { fill: var(--surface-2); stroke: var(--border); }

@@ -28,6 +28,12 @@
   const HEAD_H = 52;   // clears a two-line bubble hanging above the first row
   const DESK_W = 168;
   const GAP = 30;
+  /* One width for every floor: a full row of desks, whatever the room holds.
+     ROOM_MAX_W is that same width on screen — the 1.25 was the ceiling a room
+     was allowed to stretch to, and pinning it makes every floor render the size
+     a full one always did rather than shrinking them all to fit the narrowest. */
+  const ROOM_W = PAD * 2 + COLS * DESK_W + (COLS - 1) * GAP;   // 620
+  const ROOM_MAX_W = Math.round(ROOM_W * 1.25);                // 775
   /* Bubble sizing. These three numbers are related and have to stay that way:
      a character budget picked independently of the box width is how you get a
      sentence painted straight across the desk next door. Everything is derived
@@ -131,6 +137,10 @@
     // the previous message is the only thing that makes a turn possible.
     sign: new Map(),
     details: null,       // { channel, agent } whose nameplate popover is open
+    // How far each storey is scrolled, in whole desks, keyed by channel.
+    // Outside the DOM because rooms are rebuilt wholesale — the scroll
+    // position has to outlive the nodes that were showing it.
+    scroll: {},
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -360,13 +370,28 @@
 
   /* ---------- drawing ---------- */
 
-  function roomGeometry(n) {
-    const cols = Math.min(COLS, Math.max(1, n));
-    const rows = Math.max(1, Math.ceil(n / cols));
+  /**
+   * A floor is always the width of a *full* floor, whatever it happens to hold,
+   * and a short row is left-aligned inside it.
+   *
+   * It used to size itself to its own occupancy, which made the same desk a
+   * different size from one channel to the next — the floor trades on
+   * recognising a person across the room, and that is spent the moment the
+   * person changes size when you look at a different channel. In the building
+   * view it also made the storeys ragged, and a building whose floors are
+   * different widths is not a building.
+   *
+   * `collapsed` is the building view: one row, and the rest of the floor scrolls
+   * past it.
+   */
+  function roomGeometry(n, collapsed) {
+    const cols = COLS;
+    const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / cols));
     return {
       cols,
       rows,
-      w: PAD * 2 + cols * DESK_W + (cols - 1) * GAP,
+      collapsed: !!collapsed,
+      w: ROOM_W,
       // The last row contributes only what it draws below the desk origin (the
       // nameplate), not a whole cell — a full DESK_H there leaves every room
       // ending in a band of empty carpet that reads as "somebody is missing".
@@ -374,9 +399,47 @@
     };
   }
 
+  /** How many desks are scrolled off the left of a collapsed storey. */
+  function maxScroll(n) { return Math.max(0, n - COLS); }
+
+  /**
+   * Point a storey at its remembered scroll offset and show only the arrows
+   * that can still go somewhere.
+   *
+   * Applied rather than baked into the markup so an arrow click costs one
+   * transform instead of a rebuild — rebuilding to scroll would drop :hover,
+   * cancel the sign's roll animation and delete envelopes in flight.
+   */
+  function applyScroll(svg, n) {
+    if (!svg?.classList.contains('collapsed')) return;
+    const ch = svg.dataset.channel;
+    const max = maxScroll(n);
+    const off = Math.min(Math.max(0, ui.scroll[ch] ?? 0), max);
+    ui.scroll[ch] = off;
+    svg.querySelector('.deskTrack')?.setAttribute('transform', `translate(${-off * (DESK_W + GAP)} 0)`);
+    const arrow = (dir) => svg.querySelector(`.deskArrow.${dir}`);
+    arrow('left')?.classList.toggle('spent', off <= 0);
+    arrow('right')?.classList.toggle('spent', off >= max);
+  }
+
+  /** One scroll arrow, sitting in the floor's own left or right margin. */
+  function scrollArrow(dir, geo) {
+    const cx = dir === 'left' ? 15 : geo.w - 15;
+    const cy = PAD + HEAD_H + DESK_BELOW / 2;
+    const g = el('g', { class: `deskArrow ${dir}`, 'data-scroll': dir, role: 'button', tabindex: '0' });
+    g.appendChild(el('title')).textContent = dir === 'left' ? 'Earlier desks' : 'More desks';
+    g.appendChild(el('circle', { cx, cy, r: 13, class: 'arrowChip' }));
+    const tip = dir === 'left' ? cx - 3.5 : cx + 3.5;
+    const tail = dir === 'left' ? cx + 3 : cx - 3;
+    g.appendChild(el('path', { d: `M ${tail} ${cy - 5} L ${tip} ${cy} L ${tail} ${cy + 5}`, class: 'arrowGlyph' }));
+    return g;
+  }
+
   function deskXY(i, geo) {
-    const col = i % geo.cols;
-    const row = Math.floor(i / geo.cols);
+    // A collapsed storey never wraps: the fourth desk runs off to the right and
+    // is reached with an arrow, which is the whole point of collapsing it.
+    const col = geo.collapsed ? i : i % geo.cols;
+    const row = geo.collapsed ? 0 : Math.floor(i / geo.cols);
     return {
       x: PAD + col * (DESK_W + GAP),
       y: PAD + HEAD_H + row * (DESK_H + GAP),
@@ -666,10 +729,23 @@
     return g;
   }
 
+  let clipSeq = 0;
+
+  /**
+   * Is the floor being drawn as a building?
+   *
+   * Only with two or more channels, and for the same reason the floor picker
+   * appears only then: one storey is not a building, and collapsing it would
+   * hide desks behind a scroll arrow with no chip anywhere offering the way
+   * back out.
+   */
+  function inBuilding() { return !ui.floorFilter && (floor.channels?.length ?? 0) > 1; }
+
   function room(c) {
-    const geo = roomGeometry(c.desks.length);
+    const collapsed = inBuilding();
+    const geo = roomGeometry(c.desks.length, collapsed);
     const svg = el('svg', {
-      class: 'room',
+      class: `room${collapsed ? ' collapsed' : ''}`,
       viewBox: `0 0 ${geo.w} ${geo.h}`,
       preserveAspectRatio: 'xMidYMin meet',
       'data-channel': c.channel,
@@ -677,7 +753,7 @@
       // channel stretched across a wide monitor turns furniture into billboards
       // and makes the same desk look different from room to room, which is
       // exactly the recognisability the floor is trading on.
-      style: `max-width:${Math.round(geo.w * 1.25)}px`,
+      style: `max-width:${ROOM_MAX_W}px`,
     });
 
     svg.appendChild(el('rect', { x: 0, y: 0, width: geo.w, height: geo.h, rx: 12, class: 'roomFloor' }));
@@ -695,8 +771,40 @@
     // can be removed without touching anything that was drawn from data.
     const mail = el('g', { class: 'mailLayer' });
 
-    c.desks.forEach((d, i) => svg.appendChild(desk(d, i, geo, c.channel)));
-    svg.appendChild(mail);
+    // Desks and mail ride the same group, so a scrolled storey carries its
+    // envelopes with it. deskXY() coordinates are track-local either way; in the
+    // full-floor view the track simply never moves.
+    const track = el('g', { class: 'deskTrack' });
+    c.desks.forEach((d, i) => track.appendChild(desk(d, i, geo, c.channel)));
+    track.appendChild(mail);
+
+    if (!collapsed) {
+      svg.appendChild(track);
+      return svg;
+    }
+
+    // Clipped to the carpet between the margins, so a desk scrolling out goes
+    // under the wall rather than sliding over the room's own edge. The SVG's
+    // own overflow would hide everything past x=0, which leaves a desk drawn
+    // across the left margin on its way out.
+    const clipId = `deskclip-${++clipSeq}`;
+    const defs = el('defs');
+    const clip = el('clipPath', { id: clipId });
+    clip.appendChild(el('rect', { x: PAD - 2, y: 0, width: geo.w - (PAD - 2) * 2, height: geo.h }));
+    defs.appendChild(clip);
+    svg.appendChild(defs);
+
+    const win = el('g', { 'clip-path': `url(#${clipId})` });
+    win.appendChild(track);
+    svg.appendChild(win);
+
+    // Both are drawn and applyScroll hides whichever has nowhere to go. Drawn
+    // rather than conditional so scrolling never rebuilds the storey — see
+    // applyScroll — and each is pinned to its own margin, so the one that stays
+    // does not move when the other goes.
+    svg.appendChild(scrollArrow('left', geo));
+    svg.appendChild(scrollArrow('right', geo));
+    applyScroll(svg, c.desks.length);
     return svg;
   }
 
@@ -715,7 +823,10 @@
     if (!svg) return;
     const c = floor.channels.find((x) => x.channel === channel);
     if (!c) return;
-    const geo = roomGeometry(c.desks.length);
+    // Ask the room how it is drawn rather than assuming — a collapsed storey is
+    // one row, and laying an envelope out on a three-row grid it is not using
+    // sends it to a desk that is not there.
+    const geo = roomGeometry(c.desks.length, svg.classList.contains('collapsed'));
     const idx = (a) => c.desks.findIndex((d) => d.agent === a);
     const from = idx(fromAgent);
     if (from < 0) return;
@@ -1088,6 +1199,10 @@
     }
     const shown = ui.floorFilter ? floor.channels.filter((c) => c.channel === ui.floorFilter) : floor.channels;
 
+    // Stacked floors are drawn inside a building; one floor on its own is just
+    // that floor. The class carries the whole difference in the stylesheet.
+    rooms.classList.toggle('building', inBuilding());
+
     const sig = JSON.stringify([ui.floorFilter, shown]);
     if (sig !== ui.roomsSig) {
       ui.roomsSig = sig;
@@ -1105,6 +1220,15 @@
     $('floor-totals').textContent =
       `${t.channels ?? 0} floor${t.channels === 1 ? '' : 's'} · ${t.desks ?? 0} desk${t.desks === 1 ? '' : 's'} · ${t.live ?? 0} here · ${t.awaiting ?? 0} need you`;
     renderPanel();
+  }
+
+  /** Ride to a floor, or back out to the building. */
+  function setFloor(name) {
+    ui.floorFilter = name || null;
+    // The card is anchored to a desk that is about to be redrawn somewhere else.
+    ui.details = null;
+    try { localStorage.setItem('orch.floor', ui.floorFilter ?? ''); } catch { /* not worth failing over */ }
+    render();
   }
 
   /* ---------- polling ---------- */
@@ -1211,6 +1335,30 @@
       return;
     }
 
+    // The building view is navigation, not operation. A storey is one button:
+    // click the carpet, a desk, a nameplate, the header — anything on it — and
+    // you ride to that floor, where the desks can actually be worked. Ahead of
+    // every desk handler below, because in this view a desk is scenery.
+    //
+    // The arrows are the one exception, and they have to be tested first: they
+    // sit inside the storey, so the storey would otherwise swallow the click
+    // and take you to the floor you were only trying to look along.
+    const scroller = e.target.closest?.('svg.room .deskArrow');
+    if (scroller && ui.on) {
+      const svg = scroller.closest('svg.room');
+      const c = floor.channels.find((x) => x.channel === svg.dataset.channel);
+      const ch = svg.dataset.channel;
+      ui.scroll[ch] = (ui.scroll[ch] ?? 0) + (scroller.classList.contains('left') ? -1 : 1);
+      applyScroll(svg, c?.desks.length ?? 0);
+      return;
+    }
+
+    const storey = e.target.closest?.('svg.room.collapsed');
+    if (storey && ui.on) {
+      setFloor(storey.dataset.channel);
+      return;
+    }
+
     // The desk and the nameplate both open the details card. They are the two
     // surfaces already carrying words about this agent, so asking them for more
     // words is the obvious move — and the sign in particular is what a reader is
@@ -1263,9 +1411,7 @@
 
     const pick = e.target.closest?.('#floor-pick [data-floor]');
     if (pick && ui.on) {
-      ui.floorFilter = pick.dataset.floor || null;
-      try { localStorage.setItem('orch.floor', ui.floorFilter ?? ''); } catch { /* not worth failing over */ }
-      render();
+      setFloor(pick.dataset.floor || null);
       return;
     }
 
@@ -1439,11 +1585,21 @@
       ui.open = null;
       render();
     }
-    const deskEl = document.activeElement?.closest?.('svg.room .desk');
-    if (deskEl && (e.key === 'Enter' || e.key === ' ')) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+
+    // Keyboard has to mean what the pointer means, or the two surfaces teach
+    // different things about what a desk is.
+    const arrowEl = document.activeElement?.closest?.('svg.room .deskArrow');
+    if (arrowEl) {
       e.preventDefault();
-      openDesk(deskEl.dataset.channel, deskEl.dataset.agent);
+      arrowEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return;
     }
+    const deskEl = document.activeElement?.closest?.('svg.room .desk');
+    if (!deskEl) return;
+    e.preventDefault();
+    if (deskEl.closest('svg.room.collapsed')) setFloor(deskEl.closest('svg.room').dataset.channel);
+    else openDesk(deskEl.dataset.channel, deskEl.dataset.agent);
   });
 
   /* ---------- view switch ---------- */
