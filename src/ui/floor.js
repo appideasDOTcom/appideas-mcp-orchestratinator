@@ -495,10 +495,35 @@
     return st;
   }
 
+  /* Somebody who has asked their system for less motion. Read fresh on every
+     tick rather than captured once: the setting can be turned on mid-session,
+     and a floor left running overnight should notice.
+
+     The guard has to be here rather than in the stylesheet with the other four,
+     because this animation is a string growing by a character rather than a CSS
+     property changing — @media cannot reach it. There is a pointer beside
+     .screenLine in styles.css so that reading the guards there does not leave
+     someone concluding this one was forgotten. */
+  const still = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
+
   /** One character on every monitor that still has something to say. */
   function typeTick() {
+    const instant = still?.matches ?? false;
     let moved = false;
     for (const st of ui.screens.values()) {
+      if (instant) {
+        // No typewriter: land on the finished screen in one step. The commands
+        // are still there, and the screen still says work is running by having
+        // text on it at all — the same trade the thought dots make, where the
+        // trail stays put and only the cycling stops.
+        while (st.queue.length) {
+          if (st.full) st.done.push(st.full);
+          st.full = st.queue.shift();
+        }
+        while (st.done.length > SCREEN_LINES - 1) st.done.shift();
+        if (st.typing !== st.full) { st.typing = st.full; moved = true; }
+        continue;
+      }
       if (st.typing.length < st.full.length) {
         st.typing = st.full.slice(0, st.typing.length + 1);
         moved = true;

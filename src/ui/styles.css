@@ -735,6 +735,9 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    sits on top of it — and because the point is the shape of moving text, not
    its legibility. It is roughly 4 CSS pixels tall; nobody is reading it. */
 .screenLine { fill: rgba(255, 255, 255, .88); font: 3.4px var(--mono); }
+/* Its reduced-motion guard is not here with the others: the typing is a string
+   growing by a character, not a property @media can reach, so the check lives
+   next to typeTick() in floor.js. Under `reduce` each command lands complete. */
 
 /* Hair is one colour in both themes, and it is a warm brown rather than the
    near-black it started as.
