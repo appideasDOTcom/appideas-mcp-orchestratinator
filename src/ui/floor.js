@@ -272,11 +272,16 @@
     // the wrong instruction the moment the desk started opening this card — and
     // was ambiguous even before that, because "the desk" means the counter to a
     // reader and the whole cell to this file.
-    return `<div class="dp-head"><strong>${esc(d.persona)}</strong>` +
-      `<button type="button" class="pencil" data-act="rename"` +
-      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
-      ` title="Rename ${esc(d.persona)}" aria-label="Rename ${esc(d.persona)}">\u270e</button>` +
-      `<span class="dp-dim mono">${esc(channel)}/${esc(d.agent)}</span></div>${bits.join('')}` +
+    // Name, then the id under it, then the way in. Stacked rather than laid out
+    // across one line: a hover-only pencil beside the name was discoverable
+    // only by people who already knew it was there, and this card is the first
+    // thing an operator opens when they want to know who a desk is.
+    return `<div class="dp-head">` +
+      `<strong>${esc(d.persona)}</strong>` +
+      `<span class="dp-dim mono">${esc(channel)}/${esc(d.agent)}</span>` +
+      `<button type="button" class="dp-open" data-act="rename"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Edit avatar</button>` +
+      `</div>${bits.join('')}` +
       `<div class="dp-foot"><button type="button" class="dp-open" data-act="open"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button></div>`;
   }
@@ -1194,14 +1199,14 @@
         openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
         return;
       }
-      // Renaming from the card, which is the one place showing the name and the
-      // id together. The card closes first: it is positioned against the desk it
-      // came from and would otherwise sit under the modal.
-      const pencil = e.target.closest?.('[data-act="rename"]');
-      if (pencil && typeof window.renameDialog === 'function') {
+      // "Edit avatar", from the card that already names this desk. The card
+      // closes first: it is positioned against the desk it came from and would
+      // otherwise sit under the modal.
+      const edit = e.target.closest?.('[data-act="rename"]');
+      if (edit && typeof window.renameDialog === 'function') {
         ui.details = null;
         renderDetails();
-        window.renameDialog(pencil.dataset.channel, pencil.dataset.agent);
+        window.renameDialog(edit.dataset.channel, edit.dataset.agent);
       }
       return;
     }
