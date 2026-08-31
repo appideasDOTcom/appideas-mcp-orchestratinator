@@ -411,7 +411,19 @@ class Host {
             type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed',
             message: `your answers did not land — ${r.error}`,
           }, true);
+          break;
         }
+        // Success used to log nothing, which is exactly the case that needed a
+        // record: a run that played every step and still left the confirmation
+        // standing looked identical, from here, to one that worked. The step
+        // tail is what says which.
+        // Counted apart, because they are not the same thing: the script's steps
+        // are what the operator chose, the confirm presses are the host getting
+        // the window to take them. "22 of 21" was the first version of this line.
+        const confirms = r.done.filter((d) => d === 'Enter(confirm)').length;
+        log(`${desk.label}: answered with ${r.done.length - confirms} of ${steps.length} step(s)` +
+          `${confirms ? `, confirmed after ${confirms} press${confirms === 1 ? '' : 'es'}` : ''}` +
+          `${r.closed ? ' (the form was gone before the end)' : ''} — ${r.done.slice(-4).join(' ')}`);
         break;
       }
       case 'interrupt':

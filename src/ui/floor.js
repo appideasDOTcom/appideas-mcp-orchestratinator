@@ -27,6 +27,19 @@
      the host and offers the ordinary buttons instead. Reading walks the window's
      tabs, which is a second or two; this is generous against that. */
   const READ_GIVE_UP_MS = 12_000;
+  /* The other half of the same wait. Submitting is not a POST that finishes: the
+     host has to walk back to the first tab, press a key per choice, type any free
+     text, tab to Submit and then press the confirmation until the window takes it
+     — measured at twenty-one keystrokes for two questions. For that whole time the
+     form sat there looking unpressed, which is what invites a second click.
+
+     Generous against the host's own pace (a step is ~120ms, plus up to three
+     confirm presses ~900ms apart). What it bounds is only the spinner: by the
+     time this runs the prompt has been deleted server-side, so there is no form
+     to put back and nothing to re-answer. A host that genuinely fails says so
+     through an error event, which raises its own alert — this deadline is just
+     what stops a silent one from turning for ever. */
+  const ANSWER_SEND_MS = 25_000;
   /* Moving a conversation between apps is the host's work, not the POST's. It
      closes a tmux window and opens the editor, or opens a window and waits for
      Claude Code to come up — up to READY_TIMEOUT_MS (45s) on the host — and the
@@ -2050,8 +2063,25 @@
     // no — so past this it falls through to the ordinary buttons, which is what
     // was there before any of this and is at least something to press.
     const reading = !!req?.reading && Date.now() - Date.parse(req.at ?? 0) < READ_GIVE_UP_MS;
+    // What this waits on is not the prompt closing. /api/floor/answer clears the
+    // desk's awaiting state as soon as it queues the work, so by the time the
+    // POST returns the alert is already gone and the panel is back to normal —
+    // which is the whole problem, because the host has not pressed anything yet.
+    // Keying the spinner on awaiting_kind would settle it instantly and show
+    // nothing at all. Measured on the real page before this read the turn count.
+    //
+    // A new turn is the honest signal: the window took the answers and the
+    // conversation moved on. The deadline is the other way out, for a host that
+    // never gets there.
+    const answering = ui.answering?.channel === channel && ui.answering?.agent === agent ? ui.answering : null;
+    if (answering && ((d.turns ?? 0) > answering.turns || Date.now() - answering.since > ANSWER_SEND_MS)) {
+      ui.answering = null;
+    }
+    const sendingAnswers = !!answering && ui.answering === answering;
     const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
-    const alertSig = !s.awaiting_kind
+    const alertSig = sendingAnswers
+      ? `sending|${answering.request_id}`
+      : !s.awaiting_kind
       ? ''
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
@@ -2059,7 +2089,11 @@
           `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}`;
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
-      alertSlot.innerHTML = s.awaiting_kind
+      alertSlot.innerHTML = sendingAnswers
+        ? `<div class="p-alert p-alert-ask">
+             <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to the window…</div>
+           </div>`
+        : s.awaiting_kind
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
              <div>${req?.questions?.length
                // "permission request — AskUserQuestion" is the hook's words for
@@ -2622,6 +2656,15 @@
         flash(act, 'nothing chosen yet');
         return;
       }
+      // The spinner goes up on the POST succeeding, not on the click. Not for
+      // caution — because the two waits are wildly different lengths. Queueing
+      // the work is a local POST; what takes seconds is the host afterwards,
+      // walking back to the first tab and pressing a key per choice.
+      //
+      // Doing it this way round is also what keeps a refusal cheap: showing the
+      // spinner first would mean taking the form down, and putting it back
+      // rebuilds it from the payload — so every answer just ticked would be lost
+      // to an error that changed nothing.
       for (const b of form.querySelectorAll('button')) b.disabled = true;
       try {
         const r = await fetch('./api/floor/answer', {
@@ -2629,7 +2672,16 @@
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ...ui.open, request_id: form.dataset.request, answers }),
         });
-        if (!r.ok) {
+        if (r.ok) {
+          // The count as it stands now, because what retires the spinner is this
+          // desk gaining a turn — the window having taken the answers and moved
+          // on. Captured here rather than in renderPanel so a poll landing
+          // between the click and the first draw cannot settle it early.
+          const now = floor?.channels?.find((c) => c.channel === ui.open.channel)
+            ?.desks?.find((x) => x.agent === ui.open.agent);
+          ui.answering = { ...ui.open, request_id: form.dataset.request, since: Date.now(), turns: now?.turns ?? 0 };
+          renderPanel();
+        } else {
           const body = await r.json().catch(() => ({}));
           flash(act, String(body.error ?? `that didn't send (${r.status})`).slice(0, 60));
           for (const b of form.querySelectorAll('button')) b.disabled = false;

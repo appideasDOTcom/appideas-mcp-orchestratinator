@@ -1196,6 +1196,7 @@ export async function answerQuestion(cwd, steps = []) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo', done: [] };
   const done = [];
+  let closed = false;
   for (const step of steps) {
     const asking = askingOf(await screenOf(pane.target));
     if (!asking) {
@@ -1204,7 +1205,11 @@ export async function answerQuestion(cwd, steps = []) {
       // depending on where its cursor already sat, so whichever one lands, the
       // other finds nothing — and that is the answer having gone through, not a
       // failure to send it.
-      if (step.final) return { ok: true, done, closed: true };
+      // Not a return: "askingOf sees nothing" is good evidence the form is gone
+      // but not proof, and the same optimism further down is what let an
+      // unsubmitted confirmation be reported as an answer. Fall through to the
+      // check below, which reads the pane instead of assuming.
+      if (step.final) { closed = true; break; }
       return {
         ok: false,
         code: 'no_prompt',
@@ -1223,8 +1228,47 @@ export async function answerQuestion(cwd, steps = []) {
     await sleep(step.settle ?? STEP_MS);
     done.push(typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key));
   }
-  return { ok: true, done, screen: await screenOf(pane.target) };
+
+  // Playing the last step is not the same as the answer having gone in. The
+  // confirmation opens with its cursor already on "Submit answers", so the digit
+  // before the Enter can be a no-op, and a press that arrives while the tab walk
+  // is still settling is swallowed with nothing to show for it. Both were true
+  // once: the script ran to its end, reported success, the floor cleared the
+  // alert — and the window sat on "Ready to submit your answers?" for 42 seconds
+  // until the operator pressed it in tmux themselves.
+  //
+  // The operator asked not to be the one to confirm. So the end of the script is
+  // not the end of the job: look at the pane, and keep pressing while it is
+  // still asking. This is why the count is a loop and not one more step.
+  for (let i = 0; i < CONFIRM_TRIES; i++) {
+    if (!CONFIRMING.test(await screenOf(pane.target))) break;
+    const r = await tmux(['send-keys', '-t', pane.target, 'Enter']);
+    if (!r.ok) return { ok: false, error: r.error, done };
+    done.push('Enter(confirm)');
+    await sleep(ANSWER_CONFIRM_MS);
+  }
+
+  const screen = await screenOf(pane.target);
+  if (CONFIRMING.test(screen)) {
+    return {
+      ok: false,
+      code: 'not_confirmed',
+      done,
+      screen,
+      error: `the window is still showing "Ready to submit your answers?" after ${CONFIRM_TRIES}` +
+        ` attempt${CONFIRM_TRIES === 1 ? '' : 's'} to confirm it`,
+    };
+  }
+  return { ok: true, done, screen, closed };
 }
+
+/** The review screen's own words. Matching the question rather than the footer
+ *  keeps this independent of how many choices the confirmation offers. */
+const CONFIRMING = /ready to submit your answers/i;
+
+/** Enough to cover a press landing mid-redraw, few enough that a window which is
+ *  genuinely stuck says so instead of being hammered. */
+const CONFIRM_TRIES = Number(process.env.ORCH_CONFIRM_TRIES ?? 3);
 
 /** How long the window gets to act on an answer before we look at the result. */
 const ANSWER_CONFIRM_MS = Number(process.env.ORCH_ANSWER_CONFIRM_MS ?? 900);

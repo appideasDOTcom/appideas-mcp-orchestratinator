@@ -662,6 +662,27 @@ async function main() {
     assert(closes.ok, 'a final step meeting a closed window is the answer having gone through');
     eq(closes.closed, true, 'and says so, rather than reporting what it did not press');
 
+    // The confirmation is its own screen, and playing the last step is not the
+    // same as that screen having been taken. This is the shape of a real
+    // failure: every step played, the host reported success, the floor cleared
+    // the alert — and the window sat on "Ready to submit your answers?" until
+    // the operator pressed it in tmux themselves. Silent success is the bug.
+    const unconfirmed = await pane('unconfirmed',
+      `printf '%s\\n' '  ←  ☒ After submit  ☒ Rough edges  ✔ Submit  →'`,
+      `printf '%s\\n' '  Review your answers'`,
+      `printf '%s\\n' '  Ready to submit your answers?'`,
+      `printf '%s\\n' '  ❯ 1. Submit answers'`,
+      `printf '%s\\n' '    2. Cancel'`,
+      'stty raw -echo', 'sleep 30');
+
+    const stuck = await W.answerQuestion(unconfirmed, [{ key: '1', final: true }, { key: 'Enter', final: true }]);
+    eq(stuck.ok, false, 'a confirmation the window never takes is not a submitted answer');
+    eq(stuck.code, 'not_confirmed', 'and it is reported as unconfirmed rather than as an answer');
+    assert(/ready to submit your answers/i.test(stuck.error ?? ''),
+      `and quotes the screen rather than guessing why — ${stuck.error ?? ''}`);
+    eq(stuck.done.filter((d) => d === 'Enter(confirm)').length, 3,
+      'having pressed it more than once, in case the first arrived mid-redraw');
+
     const nowhere = await W.answerQuestion(`${PROMPT_DIR}/never-opened`, [{ key: '1' }]);
     eq(nowhere.code, 'no_window', 'and a repo with no window is its own answer');
 
