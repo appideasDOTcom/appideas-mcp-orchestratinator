@@ -2078,6 +2078,16 @@
       ui.answering = null;
     }
     const sendingAnswers = !!answering && ui.answering === answering;
+    // An alert nobody could read. Not "no request object" — a permission_prompt
+    // notification makes one of those with every choice null, which is exactly
+    // the case in question. What decides it is whether anything came back that
+    // can be pressed: no approve, no deny, no numbered choices, no form.
+    //
+    // Before this, that state rendered buttons saying Approve and Deny, which
+    // claim an understanding nobody has. The window might be asking something
+    // else entirely.
+    const unreadable = !!req && !req.questions?.length
+      && !req.choices?.approve && !req.choices?.deny && !(req.choices?.extras ?? []).length;
     const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
     const alertSig = sendingAnswers
       ? `sending|${answering.request_id}`
@@ -2086,7 +2096,7 @@
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${unreadable ? 'unreadable' : ''}`;
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
@@ -2100,11 +2110,24 @@
                // what the tool is called. What it is, to the person reading it,
                // is a question.
                ? `<b>${req.questions.length === 1 ? 'A question for you' : `${req.questions.length} questions for you`}</b>`
-               : `<b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window is waiting on you — open it to see what it is asking', 200))}`
+               // Not "open it to see what it is asking" any more. That sentence
+               // was the whole failure: it told the operator the floor could not
+               // help and sent them to a terminal, which is the outcome the
+               // floor exists to avoid.
+               : `<b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
              } <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
              ${req?.questions?.length ? askHtml(req) : ''}
              ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question from the window\u2026</div>` : ''}
-             ${req && !req.questions?.length && !reading ? `<div class="p-decide">
+             ${unreadable && !reading ? `<div class="p-unknown">
+               <div class="p-unknown-why">The window is waiting on something this board could not read.
+                 These press the usual keys — they are a guess, not an answer to a question we understood.</div>
+               <div class="p-decide">
+                 <button class="btn primary" data-act="press" data-choice="yes">Yes</button>
+                 <button class="btn danger" data-act="press" data-choice="no">No</button>
+                 <button class="btn" data-act="press" data-choice="interrupt" title="Stop the turn instead of answering it">Interrupt</button>
+               </div>
+             </div>` : ''}
+             ${req && !req.questions?.length && !reading && !unreadable ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="decide" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
@@ -2689,6 +2712,32 @@
       } catch (err) {
         flash(act, String(err.message).slice(0, 60));
         for (const b of form.querySelectorAll('button')) b.disabled = false;
+      }
+      tick();
+    } else if (act.dataset.act === 'press') {
+      // Hold all three while it is in flight, for the same reason `decide` does:
+      // a prompt that looks unresponsive is one that gets clicked again, and
+      // these keys go straight into somebody's window.
+      const all = act.closest('.p-alert')?.querySelectorAll('[data-act="press"]') ?? [act];
+      for (const b of all) b.disabled = true;
+      try {
+        const choice = act.dataset.choice;
+        // Interrupt is not a guessed key — it stops the turn, and that already
+        // has a route with its own checks. Sending it through `press` would be a
+        // second way to do one thing.
+        const r = await fetch(choice === 'interrupt' ? './api/floor/interrupt' : './api/floor/press', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(choice === 'interrupt' ? { ...ui.open } : { ...ui.open, choice }),
+        });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          flash(act, String(body.error ?? `that didn't send (${r.status})`).slice(0, 60));
+        }
+      } catch (err) {
+        flash(act, String(err.message).slice(0, 60));
+      } finally {
+        for (const b of all) b.disabled = false;
       }
       tick();
     } else if (act.dataset.act === 'decide') {

@@ -1298,6 +1298,62 @@ export function sameQuestion(a, b) {
 }
 
 /**
+ * Answer something nobody here understands.
+ *
+ * Every other path in this file reads the window first and presses a key it
+ * chose from what it read. This one is for the case where that failed: the desk
+ * is waiting, and neither the hook nor the pane reader could say on what. A new
+ * dialog, a wording change, a prompt from a tool that did not exist last week.
+ *
+ * The alternative is showing the operator a sentence and no buttons, which the
+ * board has done and which is the worst outcome available — the conversation is
+ * stopped, and the only way on is to leave the floor for a terminal. Offering a
+ * yes and a no that might be the wrong keys is better than offering nothing,
+ * *provided* nobody is told they were understood. The panel says outright that
+ * it does not know what the window is asking; this only presses.
+ *
+ * What it will not do is type into a composer. That guard is not theoretical:
+ * this repo's own driver once typed "2113" into the operator's message box by
+ * pressing menu digits at a window that had gone back to its prompt. So a
+ * readable composer means there is no question standing and nothing is sent.
+ */
+export async function pressBlind(cwd, key) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+
+  const before = await screenOf(pane.target);
+  // Not askingOf: the whole reason this exists is that askingOf returned nothing
+  // and the prompt is real anyway. The composer is the negative test that does
+  // not depend on recognising the dialog — while the window holds any question,
+  // there is nowhere to type.
+  if (composerOf(before) !== null) {
+    return {
+      ok: false,
+      code: 'no_prompt',
+      error: 'the window is back at its composer, so there is no question standing and nothing was sent',
+    };
+  }
+
+  const r = await tmux(['send-keys', '-t', pane.target, String(key)]);
+  if (!r.ok) return { ok: false, code: 'send_failed', error: r.error };
+  await sleep(ANSWER_CONFIRM_MS);
+
+  const after = await screenOf(pane.target);
+  if (after === before) {
+    // Quote it rather than guess why. A window that ignored the key and a window
+    // that is busy look the same from here, and naming the wrong one is how two
+    // people went looking for a dialog that was not on screen.
+    const foot = String(after).split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).pop() ?? '';
+    return {
+      ok: false,
+      code: 'not_taken',
+      error: `the window looks unchanged ${ANSWER_CONFIRM_MS}ms after ${key} was sent — it still reads "${foot.trim().slice(0, 80)}"`,
+    };
+  }
+  return { ok: true, screen: after };
+}
+
+/**
  * Answer a prompt in this repo's window, and find out whether it took.
  *
  * `sendKeys` reports success the moment tmux accepts the keystroke, which says

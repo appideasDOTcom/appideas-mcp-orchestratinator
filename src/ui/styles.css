@@ -1390,6 +1390,11 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
   overflow: hidden;
 }
 .p-more-why { font-size: 11px; }
+/* The prompt nobody could read. Deliberately quieter than an error — nothing has
+   gone wrong, the board simply does not recognise what the window is asking, and
+   dressing that in red invites the operator to treat a working session as broken. */
+.p-unknown { display: flex; flex-direction: column; gap: 7px; }
+.p-unknown-why { font-size: 11px; line-height: 1.45; color: var(--muted); }
 /* The alert is a row in the compose stack now, so it takes the stack's gap and
    needs no margin of its own. */
 .p-compose > .p-alert-slot:empty { display: none; }

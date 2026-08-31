@@ -1614,6 +1614,41 @@ export function createFloorRouter({ store, auth, sessions = null }) {
   });
 
   /** Stop the current turn on a hosted desk. */
+  /**
+   * Press yes or no at a prompt the floor could not read.
+   *
+   * Every other answer route matches a request_id, because it is answering
+   * something the board parsed and drew. This one exists for when that failed:
+   * the desk reports it is waiting, and nothing here can say on what. There is
+   * no request to name, so there is none required.
+   *
+   * That makes it looser than the others by design, and the safety lives one
+   * layer down instead: the host refuses to send anything at a window that is
+   * back at its composer. What is refused *here* is only what the panel already
+   * knows — a desk with no reachable window, and a desk that is not waiting at
+   * all, so a stale page cannot press keys into a conversation that moved on.
+   */
+  router.post('/api/floor/press', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    const choice = str(req.body?.choice);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    if (choice !== 'yes' && choice !== 'no') {
+      return res.status(400).json({ error: 'choice must be yes or no', code: 'bad_choice' });
+    }
+    const check = hostedOrWhyNot(channel, agent);
+    if (check.error) return res.status(409).json(check);
+    // The newest window on the desk, which is the one the panel drew from.
+    const waiting = store.liveHookSessions(channel, agent).some((s) => s.awaiting_kind);
+    if (!waiting) {
+      return res.status(409).json({ error: 'That desk is not waiting on anything.', code: 'not_waiting' });
+    }
+    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'press', { choice, queued_at: Date.now() });
+    live.wake(check.hosted.host_id);
+    store.logAdmin(channel, 'permission.pressed', { target: agent, detail: `${choice} at an unreadable prompt` });
+    res.json({ ok: true, choice });
+  });
+
   router.post('/api/floor/interrupt', auth.adminGuard, (req, res) => {
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);

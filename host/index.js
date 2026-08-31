@@ -74,6 +74,11 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // footer says so ("3. No" beside "Esc to cancel").
 const ANSWER_KEY = { allow: '1', deny: 'Escape', cancel: 'Escape' };
 
+/* The same two keys, for a prompt nothing could read. Deliberately only two:
+   "interrupt" is not here because it already has its own path, which stops the
+   turn rather than guessing at an answer. */
+const PRESS_KEY = { yes: '1', no: 'Escape' };
+
 const log = (...a) => console.log('[host]', ...a);
 const warn = (...a) => console.warn('[host]', ...a);
 
@@ -424,6 +429,27 @@ class Host {
         log(`${desk.label}: answered with ${r.done.length - confirms} of ${steps.length} step(s)` +
           `${confirms ? `, confirmed after ${confirms} press${confirms === 1 ? '' : 'es'}` : ''}` +
           `${r.closed ? ' (the form was gone before the end)' : ''} — ${r.done.slice(-4).join(' ')}`);
+        break;
+      }
+      // The floor could not read what the window is asking, and the operator
+      // chose an answer anyway rather than be left stuck. Two keys, and the
+      // window is the only thing that can say whether either was taken.
+      case 'press': {
+        const key = PRESS_KEY[String(item.payload?.choice ?? '')];
+        if (!key) {
+          warn(`${desk.label}: not pressing anything for "${item.payload?.choice}" — only yes and no are keys here`);
+          break;
+        }
+        const r = await W.pressBlind(desk.cwd, key);
+        if (!r.ok) {
+          warn(`${desk.label}: could not press ${key} — ${r.error}`);
+          this.emit({
+            type: 'error', channel: desk.channel, agent: desk.agent, code: 'press_failed',
+            message: `that did not land — ${r.error}`,
+          }, true);
+          break;
+        }
+        log(`${desk.label}: pressed ${key} at a prompt nothing could read`);
         break;
       }
       case 'interrupt':
