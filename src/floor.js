@@ -201,6 +201,57 @@ export function nudgeable(h, nowMs = Date.now()) {
 }
 
 /**
+ * Is a turn actually running at this desk?
+ *
+ * Two signals, because the hooks and the transcript agree only eventually. The
+ * desk's own state is what Claude Code reported and is authoritative, but it
+ * arrives a beat late. A tool call as the newest turn covers that beat:
+ * PreToolUse is recorded as the tool *starts*, so a desk halfway through a
+ * command reads as working before its next state event lands.
+ *
+ * Derived here and carried on the payload rather than worked out again in the
+ * browser. The floor draws a desk as working from this and lights its stop sign
+ * from it; two answers to one question is a desk that is visibly working with a
+ * dead sign on it.
+ */
+export function isWorking(h, lastTurn) {
+  return h?.state === 'working' || lastTurn?.role === 'tool';
+}
+
+/* Every refusal below is somebody else's sentence, written for sending or for
+   nudging. The conditions are worth sharing — they are the same conditions —
+   but the words are not: "send a message instead" is no help at all to someone
+   trying to stop one. Same verdict, re-worded by its code. */
+const STOP_WHY = {
+  not_hosted: 'No host on this board is running that repo, so there is nothing here to stop.',
+  held_by_editor: 'This conversation is open in your editor. Stop it there — one app holds a conversation at a time.',
+  no_window: 'No window is open for this desk, so there is nothing running to stop.',
+};
+
+/**
+ * Can this desk's turn be stopped, and if not, why not?
+ *
+ * Stopping is a keystroke — Escape, the very one a person presses — so it wants
+ * what a nudge wants: a window of ours to press it in. Hence nudgeable() rather
+ * than deliverable(). Chat is allowed to open a window because chat is content;
+ * there is nothing to interrupt in a window that does not exist yet.
+ *
+ * "Nothing is running" is refused here too, and by the endpoint rather than
+ * only greyed out in the browser. A confirmation dialog puts a few seconds
+ * between looking and clicking, which is long enough for a turn to end — and
+ * being told it already finished is a better answer than an Escape pressed
+ * silently into an idle prompt.
+ */
+export function stoppable(h, lastTurn, nowMs = Date.now()) {
+  const can = nudgeable(h, nowMs);
+  if (can.error) return { ...can, error: STOP_WHY[can.code] ?? can.error };
+  if (!isWorking(h, lastTurn)) {
+    return { error: 'Nothing is running at this desk right now, so there is nothing to stop.', code: 'not_working' };
+  }
+  return can;
+}
+
+/**
  * The session id a hosted desk's turns are filed under before its SDK session
  * has announced its own. Deterministic, so the message that starts a session
  * and the session it starts can be joined up afterwards — see rekeySession.
@@ -720,6 +771,17 @@ export function buildFloor(store, live = null, sessions = null) {
             const v = nudgeable(h, nowMs);
             return v.error ? { ok: false, code: v.code, reason: v.error } : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
           })(),
+          // Whether a turn is running, said once. The desk is drawn from this
+          // and the chat panel's stop sign is lit from it, so they cannot
+          // disagree about whether there is anything to stop.
+          working: isWorking(h, t),
+          // And whether that turn can be stopped, decided here for the same
+          // reason `nudge` is: the endpoint refuses on exactly this, so a sign
+          // that made its own mind up would eventually be live over a 409.
+          stop: (() => {
+            const v = stoppable(h, t, nowMs);
+            return v.error ? { ok: false, code: v.code, reason: v.error } : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+          })(),
           permission: pendingReq,
           session: s
             ? {
@@ -1187,7 +1249,11 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    const check = hostedOrWhyNot(channel, agent);
+    // stoppable(), not deliverable(): this ends in Escape being pressed in a
+    // tmux pane, so there has to be one, and there has to be something in it to
+    // interrupt. Both facts are what the panel's sign was drawn from — checking
+    // anything looser here is how a live sign and a refusing server drift apart.
+    const check = stoppable(store.hostedDesk(channel, agent), store.deskLastTurn(channel, agent));
     if (check.error) return res.status(409).json(check);
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'interrupt', {});
     live.wake(check.hosted.host_id);

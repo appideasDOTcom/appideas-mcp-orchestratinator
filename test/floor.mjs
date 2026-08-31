@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
-import { deliverable, nudgeable } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -316,6 +316,38 @@ try {
   eq(nudgeable({ ...live, host_seen: 'not a date' }).code, 'host_offline',
      'a timestamp that makes no sense fails closed, because the one thing it must never do is make a desk look alive');
 
+  console.log('\nwho can be stopped, which is stricter again');
+  // Stopping is Escape pressed in a pane, so it wants everything a nudge wants
+  // and one thing more: something has to be running to interrupt.
+  const busy = { ...live, state: 'working' };
+  assert(isWorking(busy, null), 'a desk whose state says working is working');
+  assert(isWorking(live, { role: 'tool' }),
+         'and so is an idle-looking one whose newest turn is a tool call — PreToolUse is recorded as the tool starts, so this is the beat before the state event lands');
+  assert(!isWorking(live, { role: 'assistant' }), 'a desk that has just spoken is not');
+  // Not hosted, and still working: an agent that reports through the hooks with
+  // no host row is exactly this shape, and the floor has always drawn it busy
+  // off its turns alone. Worth pinning, because "working" and "stoppable" part
+  // company right here — the desk below is drawn mid-command and its sign is
+  // dark, since there is no window of ours to press Escape in.
+  assert(isWorking(null, { role: 'tool' }), 'a desk with no host row is still working if its newest turn is a tool call');
+  eq(stoppable(null, { role: 'tool' }).code, 'not_hosted', 'but it cannot be stopped, which is the one case where those two answers differ');
+
+  assert(!stoppable(busy, null).error, 'a working desk on a live host can be stopped');
+  assert(!stoppable(live, { role: 'tool' }).error, 'so can one mid-tool-call');
+  eq(stoppable(live, null).code, 'not_working',
+     'an idle desk cannot: there is nothing to interrupt, and the endpoint says so rather than pressing Escape into a waiting prompt');
+  eq(stoppable({ ...busy, window_id: null }, null).code, 'no_window',
+     'nor one with no window — unlike chat, this cannot open one, because there is nothing running in a window that does not exist');
+  eq(stoppable({ ...busy, outside_pid: 4242 }, null).code, 'held_by_editor', 'nor one an editor is holding');
+  eq(stoppable(null, null).code, 'not_hosted', 'nor one no host is running');
+  eq(stoppable({ ...busy, host_seen: 'not a date' }, null).code, 'host_offline',
+     'and an unreadable host timestamp fails closed here too');
+  // The words are re-written per action even though the conditions are shared:
+  // "send a message instead — that opens one" is no help to someone trying to
+  // stop one, and it is the sentence that ends up in the sign's tooltip.
+  assert(!/nudge|Send a message/i.test(stoppable({ ...busy, window_id: null }, null).error),
+         'and its refusal is written for stopping, not borrowed from the nudge that shares the condition');
+
   console.log('\nputting a conversation back on the floor');
   // The direction that was missing. handback moves a conversation into the
   // editor; nothing moved it the other way, so a desk whose editor had let go
@@ -363,6 +395,69 @@ try {
     body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }),
   });
   eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
+
+  console.log('\nstopping a turn');
+  // End to end this time, because the interesting part is that the endpoint and
+  // the sign refuse on the same facts. The desk is driven into `working` by a
+  // real hook event rather than a SQL touch, so the state under test is the one
+  // the floor actually gets.
+  const askStop = (agent) =>
+    fetch(`${HOST}/api/floor/interrupt`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: CH, agent }),
+    });
+
+  await register({ channel: CH, agent: 'runner', cwd: '/repo/runner', window: '@9' });
+  await post(ev('runner', 's-run', 'SessionStart'));
+  let refused = await askStop('runner');
+  eq(refused.status, 409, 'an idle desk cannot be stopped');
+  eq((await refused.json()).code, 'not_working', 'and is told there is nothing running, not that it went wrong');
+  eq(await takeWork(), [], 'a refused stop queues nothing');
+
+  await post(ev('runner', 's-run', 'UserPromptSubmit', { message: 'go' }));
+  let stopped = await askStop('runner');
+  eq(stopped.status, 200, 'a working desk can be stopped');
+  eq(await takeWork(), ['interrupt'], 'and the host is handed exactly that work');
+
+  // The chat panel draws its stop sign from the same verdict, so the payload has
+  // to carry it — a live-looking sign over a refusing endpoint is the drift this
+  // pairing exists to prevent.
+  let f2 = await floor();
+  eq(deskOf(f2, 'runner').working, true, 'the desk says it is working');
+  eq(deskOf(f2, 'runner').stop.ok, true, 'and that its stop sign is live');
+
+  await post(ev('runner', 's-run', 'Stop', { last_assistant_message: 'done' }));
+  f2 = await floor();
+  eq(deskOf(f2, 'runner').working, false, 'when the turn ends the desk says so');
+  eq(deskOf(f2, 'runner').stop.ok, false, 'and the sign dims with it');
+  eq(deskOf(f2, 'runner').stop.code, 'not_working', 'carrying the reason the endpoint would give');
+
+  console.log('\nan interrupt marker is not the operator talking');
+  // Claude Code writes `[Request interrupted by user]` into the transcript as a
+  // user turn. Counted as one, the bubble would say "Thinking…" at the exact
+  // moment the operator stopped the agent thinking.
+  //
+  // Deliberately an UNhosted desk: a hosted one is `mirrored`, so its hooks file
+  // no turns at all and every assertion below would pass for that reason instead
+  // of the one under test.
+  const spoke = async (agent) => !!deskOf(await floor(), agent).heard;
+  await post(ev('marks', 's-mark', 'SessionStart'));
+  await post(ev('marks', 's-mark', 'UserPromptSubmit', { message: 'do a thing' }));
+  eq(await spoke('marks'), true, 'the operator speaks and the desk knows it');
+  await post(ev('marks', 's-mark', 'Stop', { last_assistant_message: 'done' }));
+  eq(await spoke('marks'), false, 'the agent answers and it stops waiting');
+
+  await post(ev('marks', 's-mark', 'UserPromptSubmit', { message: '[Request interrupted by user]' }));
+  eq(await spoke('marks'), false, 'a bare interrupt marker does not make the desk look spoken-to');
+  // The row has to be there for that to mean anything: excluded by the filter,
+  // not missing because nothing was written.
+  const said = (await turns('marks')).rows.map((t) => t.text);
+  assert(said.includes('[Request interrupted by user]'),
+         'and the marker is in the conversation all the same — the panel shows it, the bubble just does not count it');
+
+  await post(ev('marks', 's-mark', 'UserPromptSubmit', { message: '[Request interrupted by user] do the other thing instead' }));
+  eq(await spoke('marks'), true,
+     'but the marker with a message after it does — that one is the operator, interrupting by typing');
 
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();

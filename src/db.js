@@ -905,11 +905,29 @@ export function makeStore(db) {
        floor's compose box, the bell, or the keyboard at the window itself.
        Compared against deskLastMessage to answer one question: has the agent
        said anything since it was spoken to? Same seek off idx_turns_agent as
-       its two neighbours, for the reason written above them. */
+       its two neighbours, for the reason written above them.
+
+       `[Request interrupted by user]` is filed as a user turn, but Claude Code
+       writes it, not the operator — so counting it would put "Thinking…" in the
+       bubble at the exact moment the operator stopped the agent thinking, which
+       is the stale-bubble problem this query exists to fix, inverted. The
+       bracket has to close for the line to be only the marker: interrupting by
+       typing leaves the marker with the real message after it, and that one IS
+       the operator speaking. */
     deskLastUserTurn: db.prepare(
       `SELECT id, created_at
          FROM turns
         WHERE channel = ? AND agent = ? AND role = 'user'
+          AND NOT (text LIKE '[Request interrupted%' AND text LIKE '%]')
+        ORDER BY id DESC LIMIT 1`
+    ),
+    /* The newest turn of any kind, for the one caller that needs a single
+       desk's rather than every desk's — see lastTurns above for the bulk form.
+       Same shape, same "a turn with no text is not a turn" rule. */
+    deskLastTurn: db.prepare(
+      `SELECT id, role, tool_name, created_at
+         FROM turns
+        WHERE channel = ? AND agent = ? AND text IS NOT NULL AND text != ''
         ORDER BY id DESC LIMIT 1`
     ),
     listPersonas: db.prepare(
@@ -1313,6 +1331,7 @@ export function makeStore(db) {
     // happened, and LIMIT has to keep the newest end.
     deskCommands: (channel, agent, n) => q.deskCommands.all(channel, agent, n).reverse(),
     deskLastUserTurn: (channel, agent) => q.deskLastUserTurn.get(channel, agent) ?? null,
+    deskLastTurn: (channel, agent) => q.deskLastTurn.get(channel, agent) ?? null,
     // Names filled in here rather than in SQL: the derivation is JavaScript, and
     // duplicating it as SQL string surgery is exactly how two answers to "what
     // is this agent called" start to disagree.

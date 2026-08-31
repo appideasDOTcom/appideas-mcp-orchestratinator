@@ -853,6 +853,38 @@ function retireDialog(channel, agent) {
  * A dialog that disagreed with the pill you pressed to reach it is worse than
  * no dialog.
  */
+/**
+ * Confirm stopping a turn. Opened from the stop sign in the floor's chat panel,
+ * which is the only caller — but it lives here because app.js owns the dialogs
+ * on this page, the same reason the desk pills call in rather than growing a
+ * second copy.
+ *
+ * It says what Escape does, because "stop" is vaguer than what happens: the
+ * turn ends where it is, the work already done stays done, and the conversation
+ * is still there to carry on from. Nobody should have to find that out by
+ * trying it on an agent they care about.
+ *
+ * `persona` is passed in rather than looked up: the floor opened this from a
+ * desk it is drawing right now, so it holds the better name.
+ */
+function stopDialog(channel, agent, persona) {
+  const who = persona || nameOf(channel, agent);
+  openDialog(`
+    <h3>Stop ${esc(who)}?</h3>
+    <p class="dlg-sub">on <span class="mono">${esc(channel)}</span></p>
+    <ul class="dlg-list">
+      <li>presses <span class="mono">Escape</span> in its window — the same key you would</li>
+      <li>ends the turn where it is; anything already written or run stays</li>
+      <li>leaves the conversation open, so you can say what to do instead</li>
+    </ul>
+    <p class="dlg-note">Claude Code records this in the transcript as <span class="mono">[Request interrupted by user]</span>, so the agent can see it was stopped rather than that it finished.</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn danger" data-do="stop-desk" data-channel="${esc(channel)}" data-agent="${esc(agent)}">Stop ${esc(who)}</button>
+    </div>
+  `);
+}
+
 function taskDialog(channel, agent, kind = null) {
   const c = findChannel(channel);
   if (!c) return;
@@ -1292,6 +1324,14 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'nudge':
       act(() => floorPost('chat', { channel: d.channel, agent: d.agent, text: 'nudge' }))
         .then((ok) => { if (ok) window.floorNudged?.(d.channel, d.agent, 'nudge'); });
+      break;
+    // Escape, into the window, via the host. Closes on success like the nudge
+    // above and for the same reason — the change it makes is on the floor
+    // behind this dialog, not in it. A refusal keeps it open: by the time the
+    // prompt has been read the turn may simply have ended, and "nothing is
+    // running at this desk right now" is the answer, not an error to swallow.
+    case 'stop-desk':
+      act(() => floorPost('interrupt', { channel: d.channel, agent: d.agent }));
       break;
     // Same endpoint as "Mark all read", a different cursor. Closing one row is
     // "read to here", which is the only thing a single cursor can mean.

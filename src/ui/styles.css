@@ -783,6 +783,7 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    floor it depicts, so nothing inside it operates. */
 .rooms.building .bell { display: none; }
 
+
 /* Sound.
    ------
    Six arcs, struck in pairs from the middle outward and let go in the same
@@ -1106,6 +1107,52 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); }
 .p-actions { display: flex; align-items: center; gap: 8px; }
 .p-hint { font-size: 10.5px; flex: 1 1 auto; line-height: 1.35; }
+
+/* The stop sign, in the row it belongs to rather than on every desk.
+   Hollow, because at this size a filled octagon is a red dot and the eight
+   edges are the entire reason anyone recognises it. The fill is not zero
+   though — fully transparent read as a hole punched in the button — it is the
+   barest wash of the same red.
+
+   Square, so the octagon is an octagon: the row's other buttons are sized by
+   their words, and a shape stretched to a word's width is a different shape.
+   The height is matched to Send rather than guessed, so the row still sits on
+   one line. */
+.btn.stopbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 24px; padding: 0;
+  /* No border of its own. A .btn's rounded rectangle around an octagon is two
+     competing shapes at the same size, and the outer one wins — the sign stops
+     reading as a sign. The octagon IS the control, the way the bell is. */
+  border-color: transparent;
+  background: none;
+}
+.stopGlyph { width: 16px; height: 16px; display: block; overflow: visible; }
+.stopGlyph polygon {
+  fill: color-mix(in srgb, var(--block) 12%, var(--surface));
+  stroke: var(--block);
+  stroke-linejoin: round;
+  /* The viewBox is two units across, so a plain stroke-width here would be in
+     those units and would have to be re-derived if the glyph ever changed size.
+     non-scaling-stroke makes it pixels: 1.7 is the weight the sign carried when
+     it stood on the desk. */
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.7px;
+}
+/* Hover lands on the glyph, not on a box drawn around it — same as .pencil. */
+.btn.stopbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.stopbtn:hover:not(:disabled) .stopGlyph polygon {
+  fill: color-mix(in srgb, var(--block) 32%, var(--surface));
+  stroke-width: 2.2px;
+}
+/* Keyboard focus still needs a mark, and the glyph is what to mark — a ring
+   round the button's box would put back the rectangle removed above. */
+.btn.stopbtn:focus { outline: none; }
+.btn.stopbtn:focus-visible .stopGlyph polygon { stroke: var(--accent); stroke-width: 2.4px; }
+/* Dimmed in place rather than hidden, exactly like .bell.blocked: most of the
+   time nothing is running, and that is this control's resting state, not a
+   fault. The reason it cannot be pressed is on hover. */
+.btn.stopbtn:disabled { opacity: .32; }
 
 /* The two seat-change actions. They were .btn, and in a panel this narrow each
    wrapped to three lines — which reads as damage, not as a control. A link is

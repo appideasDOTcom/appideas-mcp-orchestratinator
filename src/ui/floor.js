@@ -237,6 +237,20 @@
   const RING_A0 = 38;            // degrees from vertical: where each arc starts
   const RING_A1 = 68;            // and ends
 
+  /* The stop sign's octagon, as a points list on a unit circle (0..2 across),
+     so whatever draws it decides how big it is.
+
+     It lives in the chat panel rather than on the desk. Stopping is something
+     you do while reading what an agent is writing, not something you reach for
+     across a room — and a dim octagon on every desk was standing clutter bought
+     for a rare action. The shape still carries the whole message, so it is
+     drawn the same way: flat top, not vertex up, because the flat edge is most
+     of what makes an octagon read as a road sign rather than a gem. */
+  const STOP_PTS = Array.from({ length: 8 }, (_, k) => {
+    const a = (Math.PI / 8) + (k * Math.PI) / 4;
+    return `${(1 + Math.cos(a)).toFixed(3)},${(1 + Math.sin(a)).toFixed(3)}`;
+  }).join(' ');
+
   /** How long a sent message may sit unrecorded before it says so. */
   const SENDING_GRACE_MS = 30_000;
 
@@ -506,7 +520,12 @@
   function deskState(d) {
     if (!d.live) return 'away';
     if (d.session?.awaiting_kind) return 'needs-you';
-    if (d.hosted?.state === 'working' || d.last_turn?.role === 'tool') return 'working';
+    // The server's answer, not a second reading of the same two columns. It
+    // used to be `hosted.state === 'working' || last_turn.role === 'tool'` right
+    // here, which was fine until the stop sign needed the same fact: a desk
+    // drawn as working with a sign that would not light is the drift this file
+    // keeps warning about.
+    if (d.working) return 'working';
     return 'here';
   }
 
@@ -556,6 +575,10 @@
    * and there is one place left where the answer can be wrong.
    */
   const nudgeBlock = (d) => (d?.nudge?.ok ? null : d?.nudge?.reason ?? 'Nothing is known about this desk yet.');
+  /* And whether its turn can be stopped. Same shape, and used the same way: the
+     control stays where it is and dims, with the server's reason on hover. A
+     control that vanishes tells you nothing. */
+  const stopBlock = (d) => (d?.stop?.ok ? null : d?.stop?.reason ?? 'Nothing is known about this desk yet.');
 
   /* How long one peal lasts, read from the stylesheet rather than repeated
      here. CSS owns the timing — the same arrangement --thought-ms has, and for
@@ -1741,7 +1764,7 @@
         <textarea id="p-text" class="input" rows="3"></textarea>
         <div class="p-actions">
           <span class="muted p-hint"></span>
-          <button class="btn" data-act="stop" title="Stop the current turn">stop</button>
+          <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="0 0 2 2" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
         <div class="p-links">
@@ -1831,7 +1854,20 @@
       ? `${d.persona}’s conversation is open in your editor…`
       : `${d.persona}’s machine isn’t reachable right now…`;
     wrap.querySelector('[data-act="send"]').disabled = !canChat;
-    wrap.querySelector('[data-act="stop"]').classList.toggle('hidden', !(canChat && h.state === 'working'));
+    // The stop sign. It used to hide itself when there was nothing to stop,
+    // which is most of the time — so the row it sits in changed width whenever
+    // an agent started or finished, and the control you wanted was the one that
+    // had just moved. Dimmed in place instead, exactly like the bell, with the
+    // server's own reason on hover.
+    //
+    // The verdict comes from the server rather than from `h.state` here: the
+    // endpoint refuses on exactly this, so a live-looking button over a 409 is
+    // the drift the payload's `stop` exists to prevent.
+    const stopBtn = wrap.querySelector('[data-act="stop"]');
+    const cannotStop = stopBlock(d);
+    stopBtn.disabled = !!cannotStop;
+    stopBtn.title = cannotStop ?? `Stop ${d.persona}`;
+    stopBtn.setAttribute('aria-label', cannotStop ? `Cannot stop ${d.persona}` : `Stop ${d.persona}`);
     const toVsc = wrap.querySelector('[data-act="handback"]');
     const toFloor = wrap.querySelector('[data-act="openhere"]');
     toVsc.classList.toggle('hidden', !h?.live);
@@ -2288,7 +2324,19 @@
         for (const b of pair) b.disabled = false;
       }
     } else if (act.dataset.act === 'stop') {
-      await interruptDesk();
+      // Ask first. Nothing else in this panel throws work away, and a turn
+      // three minutes in is worth a sentence of confirmation.
+      //
+      // app.js owns the dialogs on this page, the same arrangement the pills
+      // use. If the board half is missing, do nothing rather than stopping an
+      // agent with no prompt — the prompt is the feature.
+      if (ui.open && typeof window.stopDialog === 'function') {
+        // This payload's name for the desk, not the board's — both read the same
+        // rows, but the panel is open on a desk this one is guaranteed to hold.
+        const open = floor.channels.find((c) => c.channel === ui.open.channel)
+          ?.desks.find((x) => x.agent === ui.open.agent);
+        window.stopDialog(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent);
+      }
     } else if (act.dataset.act === 'handback') {
       await handBack(act);
     } else if (act.dataset.act === 'openhere') {
@@ -2444,16 +2492,6 @@
       btn.disabled = false;
       tick();
     }
-  }
-
-  async function interruptDesk() {
-    if (!ui.open) return;
-    await fetch('./api/floor/interrupt', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(ui.open),
-    });
-    tick();
   }
 
   document.addEventListener('keydown', (e) => {
