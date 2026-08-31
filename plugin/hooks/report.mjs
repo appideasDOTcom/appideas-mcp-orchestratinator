@@ -28,7 +28,8 @@
  * to talk to its floor. A directory with no such file is not part of this system
  * and is skipped, which is what keeps unrelated projects off the board.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const TIMEOUT_MS = Number(process.env.ORCH_FLOOR_TIMEOUT_MS ?? 2000);
@@ -95,6 +96,65 @@ function findIdentity(startDir) {
   return null;
 }
 
+/**
+ * Where a session's repo is remembered, so an event raised from somewhere else
+ * can still be reported.
+ *
+ * A session does not stay in its repo. Agents work in a scratch directory, in
+ * /tmp, in another checkout — and findIdentity walks up from the event's cwd, so
+ * the moment it is outside, nothing above it has a `.mcp.json` and the hook
+ * returns in silence. Measured against a live board with one session id: cwd in
+ * the repo raised the alert, cwd in /private/tmp raised nothing at all.
+ *
+ * That silence is worst exactly when it costs most. The conversation still
+ * relays, because the host reads it off the pane and does not care where the
+ * session is — so the floor looks healthy while the window sits blocked on a
+ * prompt no one can see.
+ *
+ * What is stored is the directory, not the identity. The channel, the agent and
+ * the key are read back out of that repo's own `.mcp.json` every time, so this
+ * file never becomes a second copy of a credential, and a repo that changes
+ * hands is not remembered as its old self.
+ */
+const MEMO = join(homedir(), '.orchestratinator', 'sessions.json');
+/** Long enough to outlive a working session, short enough that the file does not
+ *  accumulate a machine's whole history. */
+const MEMO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MEMO_MAX = 200;
+
+function readMemo() {
+  try {
+    return JSON.parse(readFileSync(MEMO, 'utf8')) ?? {};
+  } catch {
+    // Absent, half-written, or hand-edited into nonsense. All the same here: a
+    // memo that cannot be read is a memo that has nothing to say.
+    return {};
+  }
+}
+
+/** Remember, prune, and replace atomically — several hooks from several sessions
+ *  can be writing this at once, and a torn file would take the memory of every
+ *  session with it rather than just this one. */
+function remember(sessionId, root) {
+  try {
+    const now = Date.now();
+    const memo = readMemo();
+    if (memo[sessionId]?.root === root) return;
+    memo[sessionId] = { root, at: now };
+    const live = Object.entries(memo)
+      .filter(([, v]) => v && typeof v.root === 'string' && now - (Number(v.at) || 0) < MEMO_TTL_MS)
+      .sort((a, b) => (Number(b[1].at) || 0) - (Number(a[1].at) || 0))
+      .slice(0, MEMO_MAX);
+    mkdirSync(dirname(MEMO), { recursive: true });
+    const tmp = `${MEMO}.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(live)), { mode: 0o600 });
+    renameSync(tmp, MEMO);
+  } catch {
+    // Reporting is a convenience and remembering is a convenience about a
+    // convenience. Never the reason someone's session makes a noise.
+  }
+}
+
 /** The board is at /mcp on the same origin the floor's ingest lives on. */
 function ingestUrl(mcpUrl) {
   try {
@@ -141,9 +201,22 @@ async function main() {
   }
 
   const cwd = typeof ev.cwd === 'string' && ev.cwd ? ev.cwd : process.cwd();
-  const id = findIdentity(cwd);
-  // Not an orchestratinator repo. This is the common case across a machine and
-  // is exactly how a user-level install stays out of unrelated projects.
+  const sessionId = typeof ev.session_id === 'string' ? ev.session_id : null;
+
+  // Where the session is now, or failing that, where it was when it last stood
+  // somewhere that could answer the question. SessionStart fires in the repo, so
+  // by the time a session has wandered there is something to fall back on.
+  let id = findIdentity(cwd);
+  if (id && sessionId) remember(sessionId, id.root);
+  if (!id && sessionId) {
+    const root = readMemo()[sessionId]?.root;
+    // Re-resolved rather than replayed: a remembered repo whose .mcp.json has
+    // since gone is a repo that has left the board, and should report nothing.
+    if (root) id = findIdentity(root);
+  }
+  // Not an orchestratinator repo, and never was one. This is the common case
+  // across a machine and is exactly how a user-level install stays out of
+  // unrelated projects.
   if (!id) return;
 
   const url = process.env.ORCH_FLOOR_URL ?? ingestUrl(id.url);
@@ -156,7 +229,12 @@ async function main() {
     hook_event_name: ev.hook_event_name,
     source: ev.source,
     transcript_path: ev.transcript_path,
-    cwd,
+    // The repo the identity came from, not wherever the session happens to be
+    // standing. Everything downstream reads this as "which desk is this" — the
+    // session row, the floor's label — and a desk is a checkout, not a cursor.
+    // Sending the raw cwd would file a session under /private/tmp the moment its
+    // agent used a scratch directory, which is the same wandering this fixes.
+    cwd: id.root,
     permission_mode: ev.permission_mode,
     model: typeof ev.model === 'string' ? ev.model : ev.model?.id ?? null,
     git_branch: gitBranch(id.root),
