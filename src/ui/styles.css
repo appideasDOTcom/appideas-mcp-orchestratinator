@@ -1107,6 +1107,34 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .p-actions { display: flex; align-items: center; gap: 8px; }
 .p-hint { font-size: 10.5px; flex: 1 1 auto; line-height: 1.35; }
 
+/* The two seat-change actions. They were .btn, and in a panel this narrow each
+   wrapped to three lines — which reads as damage, not as a control. A link is
+   the truer affordance anyway: neither one sends anything or changes the
+   conversation, they move it to a different window. One per line, because side
+   by side is what wrapped in the first place.
+   The caps are a text-transform so the DOM keeps sentence case: flash() swaps
+   the label for an error and puts the original back, and the accessible name
+   should not be shouted. */
+.p-links { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.p-link {
+  background: none; border: 0; padding: 0; margin: 0;
+  font: 600 10.5px/1.5 var(--sans);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+.p-link:hover:not(:disabled) { color: var(--busy); }
+/* Same pairing as .desk/.pill/.plate/.bell: a mouse click must not draw a ring,
+   a keyboard tab must. */
+.p-link:focus { outline: none; }
+.p-link:focus-visible { color: var(--busy); outline: 2px solid color-mix(in srgb, var(--busy) 45%, transparent); outline-offset: 3px; }
+.p-link:disabled { opacity: .5; cursor: default; }
+/* An error borrowed the label. Muted grey small-caps is the wrong voice for it,
+   and the sentence is not an action, so drop the shouting with the colour. */
+.p-link.flashed { color: var(--block); text-transform: none; letter-spacing: 0; }
+
 @media (max-width: 900px) {
   .floor-body { flex-direction: column; }
   .deskpanel { flex: 1 1 auto; width: 100%; max-height: 60vh; }

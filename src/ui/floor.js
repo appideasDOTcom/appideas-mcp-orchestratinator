@@ -1742,9 +1742,11 @@
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn" data-act="stop" title="Stop the current turn">stop</button>
-          <button class="btn" data-act="openhere" title="Open a window for this conversation on this machine">Open on the floor</button>
-          <button class="btn" data-act="handback" title="Open this conversation in VS Code">Open in VS Code</button>
           <button class="btn primary" data-act="send">Send</button>
+        </div>
+        <div class="p-links">
+          <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">Open on the floor</button>
+          <button class="p-link" data-act="handback" title="Open this conversation in VS Code">Open in VS Code</button>
         </div>
       </div>`;
     ui.stick = true;
@@ -1830,17 +1832,24 @@
       : `${d.persona}’s machine isn’t reachable right now…`;
     wrap.querySelector('[data-act="send"]').disabled = !canChat;
     wrap.querySelector('[data-act="stop"]').classList.toggle('hidden', !(canChat && h.state === 'working'));
-    wrap.querySelector('[data-act="handback"]').classList.toggle('hidden', !h?.live);
+    const toVsc = wrap.querySelector('[data-act="handback"]');
+    const toFloor = wrap.querySelector('[data-act="openhere"]');
+    toVsc.classList.toggle('hidden', !h?.live);
     // Offered only when the desk has no window and no editor on it. With an
     // editor holding it this would open a second process on one transcript,
     // which is the thing handback closes its own window to avoid; with a floor
     // window already up there is nothing to do.
-    wrap.querySelector('[data-act="openhere"]').classList.toggle('hidden', !(h?.live && !h.held));
+    toFloor.classList.toggle('hidden', !(h?.live && !h.held));
+    // Hiding both links is not the same as hiding the strip: an empty flex
+    // column is zero-height but still counts as a row, so .p-compose's gap
+    // leaves a blank line where the links were.
+    wrap.querySelector('.p-links').classList
+      .toggle('hidden', toVsc.classList.contains('hidden') && toFloor.classList.contains('hidden'));
     wrap.querySelector('.p-compose').classList.toggle('held', held);
     // The hint says exactly what will happen, because a Send button that
     // sometimes can't is worse than one that says why.
     wrap.querySelector('.p-hint').innerHTML = held
-      ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the button — one app holds a conversation at a time.`
+      ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the link below — one app holds a conversation at a time.`
       : canChat
       ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
       : h
@@ -2305,7 +2314,8 @@
     const was = btn.dataset.label ?? btn.textContent;
     btn.dataset.label = was;
     btn.textContent = text;
-    setTimeout(() => { btn.textContent = was; }, ms);
+    btn.classList.add('flashed');
+    setTimeout(() => { btn.textContent = was; btn.classList.remove('flashed'); }, ms);
   }
 
   /**
