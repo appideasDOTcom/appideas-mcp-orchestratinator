@@ -67,6 +67,21 @@ const header = (req, name) => {
   return Array.isArray(v) ? v[0] : v;
 };
 
+/**
+ * Say when a session is turned away, and for what.
+ *
+ * The server refused a client silently for as long as this has existed. A
+ * window that came up with no tools looked identical on this side to one that
+ * never asked — so the only account of it was the client's one-line error,
+ * which names the code and not the request that earned it. An id is logged by
+ * its first eight characters: enough to pair a refusal with the session it came
+ * from in the same log, not enough to be a credential in a file someone pastes.
+ */
+const refused = (req, sessionId, why) =>
+  console.log(`[orchestratinator] refused ${req.method} /mcp` +
+    ` (${req.method === 'POST' ? (req.body?.method ?? 'no method') : 'stream'})` +
+    ` session=${sessionId ? String(sessionId).slice(0, 8) : 'none'} — ${why}`);
+
 /** Drop a session. Closing the transport fires onclose, which clears both maps. */
 function closeSession(sid) {
   const transport = transports[sid];
@@ -180,16 +195,31 @@ app.post('/mcp', async (req, res) => {
   if (transport) {
     markBusy(sessionId);
   } else {
-    if (sessionId) {
-      // The client knows a session we don't: it expired or was superseded. 404 is
-      // what the spec tells clients to re-initialise on, so this self-heals.
-      return res.status(404).json({
-        jsonrpc: '2.0',
-        id: null,
-        error: { code: -32001, message: 'Session not found' },
-      });
-    }
+    // The body decides, not the header, and that order is the fix rather than a
+    // tidy-up. An `initialize` IS the request to start a new session, so a stale
+    // `mcp-session-id` alongside one is a leftover, not a claim — the client is
+    // already asking for exactly what it is about to be given.
+    //
+    // Checking the header first refused that handshake with a 404. The comment
+    // that used to sit here said the spec has clients re-initialise on a 404, so
+    // it self-heals; the spec does, and it did not. Claude Code carries the last
+    // session id across `claude --resume`, so every conversation handed back
+    // from the floor to the editor re-connected with an id whose window had just
+    // closed, was refused, and started with no orchestratinator tools at all —
+    // the agent silently absent from the board it had just been working on.
+    //
+    // A non-initialize request with an unknown id is still a 404: that one has
+    // no handshake in it, and 404 is what tells the client to send one.
     if (!isInitializeRequest(req.body)) {
+      if (sessionId) {
+        refused(req, sessionId, 'unknown session, and no initialize to start a new one');
+        return res.status(404).json({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32001, message: 'Session not found' },
+        });
+      }
+      refused(req, sessionId, 'no session and no initialize');
       return res.status(400).json({
         jsonrpc: '2.0',
         id: null,
@@ -253,6 +283,7 @@ async function handleSessionRequest(req, res) {
   const sessionId = header(req, 'mcp-session-id');
   const transport = sessionId ? transports[sessionId] : undefined;
   if (!transport) {
+    refused(req, sessionId, sessionId ? 'unknown session' : 'no session id');
     return res
       .status(sessionId ? 404 : 400)
       .json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } });

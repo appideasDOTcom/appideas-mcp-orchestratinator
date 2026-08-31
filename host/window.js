@@ -238,12 +238,105 @@ export async function sessionFor(cwd) {
 }
 
 /**
+ * The questions the host is allowed to answer for you, and the answer.
+ *
+ * Deliberately one entry long, and it will stay short. Most of what Claude Code
+ * asks on the way up is a decision that is genuinely the operator's — whether a
+ * folder is trusted, whether an MCP server may run. Answering those on someone's
+ * behalf is the thing that must not be automated, so they are not here and the
+ * window keeps waiting for a person.
+ *
+ * The resume-mode question is different, and the difference is not that it
+ * matters less. Its answer is *forced* by what a handoff is. This whole system
+ * rests on a conversation being one process that moves between windows intact;
+ * "resume from summary" hands the new window a lossy copy, which is not moving a
+ * conversation but forking one. There is exactly one option consistent with the
+ * button the operator pressed, and the prompt's warning is about a cost they
+ * already accepted by pressing it.
+ *
+ * Matched on the option's *words*, never its number. The numbers mean opposite
+ * things from one dialog to the next — on the trust question "2" is "No, exit" —
+ * so a host that learned to press a number would eventually press it at the
+ * wrong screen.
+ */
+const ANSWERS = [
+  {
+    name: 'resume mode',
+    // The sentence that identifies the screen, not one of the options: a menu
+    // has to be recognised before anything is pressed at it.
+    asks: /Resuming the full session will consume/i,
+    pick: /^\s*[\u276f>]?\s*\d+\.\s*Resume full session as-is/i,
+  },
+];
+
+/** One option's words, without the cursor that may or may not be sitting on it.
+ *  Comparing raw lines instead is how the read-back below silently never
+ *  matched: the line it had planned for had no cursor, and the line it read
+ *  back had one. */
+const optionText = (line) => String(line ?? '').replace(/^\s*[\u276f>]?\s*/, '').trim();
+
+/** The numbered options on screen, and which one the cursor is on. */
+export function menuOf(screen) {
+  const rows = [];
+  let at = -1;
+  for (const line of screen.split('\n')) {
+    if (!/^\s*[\u276f>]?\s*\d+\.\s/.test(line)) continue;
+    if (/^\s*[\u276f>]/.test(line)) at = rows.length;
+    rows.push(line);
+  }
+  return { rows, at };
+}
+
+/**
+ * Answer a question the host recognises, if one is on screen.
+ *
+ * Nothing is confirmed blind. The cursor is walked to the wanted option, the
+ * screen is read back, and Enter is pressed only once the highlighted line is
+ * the line that was asked for. If it is not — the menu redrew, the wording
+ * moved, anything — this gives up and returns null, and the caller goes on
+ * waiting and eventually quotes the screen. A question we half-recognise is a
+ * question for a person.
+ */
+export function plannedAnswer(screen, done = new Set()) {
+  const known = ANSWERS.find((a) => a.asks.test(screen) && !done.has(a.name));
+  if (!known) return null;
+  const { rows, at } = menuOf(screen);
+  const want = rows.findIndex((r) => known.pick.test(r));
+  if (at < 0 || want < 0) return null;
+  return { name: known.name, from: at, to: want, chose: optionText(rows[want]) };
+}
+
+async function answerKnown(target, done = new Set()) {
+  const plan = plannedAnswer(await screenOf(target), done);
+  if (!plan) return null;
+
+  const key = plan.to > plan.from ? 'Down' : 'Up';
+  for (let n = 0; n < Math.abs(plan.to - plan.from); n++) {
+    const moved = await tmux(['send-keys', '-t', target, key]);
+    if (!moved.ok) return null;
+    await sleep(60);
+  }
+
+  // Read it back before committing. This is the whole safety of the thing: the
+  // cursor has to be sitting on the line that was asked for, on the screen as
+  // it is now, before anything is confirmed.
+  const now = menuOf(await screenOf(target));
+  if (now.at < 0 || optionText(now.rows[now.at]) !== plan.chose) return null;
+  const sent = await tmux(['send-keys', '-t', target, 'Enter']);
+  if (!sent.ok) return null;
+  return { name: plan.name, chose: plan.chose };
+}
+
+/**
  * Wait until this repo has a live Claude Code session, not merely a pane.
  *
  * The roster is the honest readiness signal: a session appears in it only once
- * it is actually running, which is after any first-run dialog has been
- * answered. Timing out is not an error to hide — it usually means the window is
- * sitting on a question only a person can answer, and the floor says so.
+ * it is actually running, which is after any dialog on the way up has been
+ * answered — and while waiting, this answers the ones the host is allowed to
+ * answer (see ANSWERS; it is one question long, and the reasoning for keeping
+ * it that way is written there). Timing out is not an error to hide — it means
+ * the window is sitting on a question the host would not answer for you, and
+ * the floor quotes it rather than naming a cause.
  *
  * `pid` matters more than it looks. A repo can have two Claude Code sessions in
  * it — the one this host just opened in a pane, and one the person already had
@@ -255,6 +348,8 @@ export async function sessionFor(cwd) {
 export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
   const stop = Date.now() + timeoutMs;
   let seen = [];
+  const answered = [];
+  const done = new Set();
   for (;;) {
     // Did it exit? A window that is gone is never going to become ready, and
     // waiting the full timeout to say nothing useful about it helps nobody.
@@ -271,6 +366,26 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
         };
       }
     }
+    // The screen before the roster, and that order is the whole point. The
+    // roster does NOT wait for the startup question: a window sitting on the
+    // resume-mode menu is registered, interactive, and completely unable to
+    // take a message. Checking the roster first returned ok in a few
+    // milliseconds and left the question standing — which is the bug this was
+    // written to fix, reproduced by the fix itself.
+    //
+    // Each question is answered at most once. Still on screen next time round
+    // means it was not really answered, and pressing Enter at it again is
+    // guessing.
+    if (target) {
+      const did = await answerKnown(target, done);
+      if (did) {
+        done.add(did.name);
+        answered.push(did);
+        await sleep(250);
+        continue;                       // let it redraw before judging it ready
+      }
+    }
+
     const all = await roster();
     seen = all.sessions;
     const session = pid
@@ -279,7 +394,7 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
     if (session) {
       // Up and running: let the window close normally from here on.
       if (target) await tmux(['set-option', '-w', '-t', target, 'remain-on-exit', 'off']);
-      return { ok: true, session };
+      return { ok: true, session, answered };
     }
     if (Date.now() >= stop) {
       // Show the screen rather than name a cause. This used to assert a trust
@@ -484,8 +599,20 @@ async function settled(target, { quiet = 2, tries = 20 } = {}) {
  * Returns null rather than an empty string when there is no box to read, which
  * is a different answer: the caller falls back to the whole screen instead of
  * concluding the composer is empty.
+ *
+ * The closing rule is required, and that is not tidiness. `❯` is also Claude
+ * Code's selection cursor in a menu — the folder-trust question, the MCP
+ * approval, and the resume-mode prompt a large `--resume` opens with all draw
+ * one. Matching the marker alone, this read the highlighted option as composer
+ * text, so pasteInto compared a menu against itself, saw nothing change, and
+ * re-pasted into it until its budget ran out. A menu has no rule under it; the
+ * composer is a box, which is what the paragraph above already said it was.
+ *
+ * Finding no box degrades to the old answer rather than a wrong one: the caller
+ * falls back to the whole screen, which still changes when a real composer
+ * takes a paste.
  */
-function composerOf(screen) {
+export function composerOf(screen) {
   const lines = screen.split('\n');
   const rule = /^[\s│|]*[─━—-]{20,}/;
   let at = -1;
@@ -494,7 +621,12 @@ function composerOf(screen) {
   }
   if (at < 0) return null;
   const body = [lines[at].replace(/^\s*[❯>]/, '')];
-  for (let n = at + 1; n < lines.length && !rule.test(lines[n]); n++) body.push(lines[n]);
+  let closed = false;
+  for (let n = at + 1; n < lines.length; n++) {
+    if (rule.test(lines[n])) { closed = true; break; }
+    body.push(lines[n]);
+  }
+  if (!closed) return null;
   return body.join('\n').replace(/\s+$/, '');
 }
 
@@ -531,8 +663,18 @@ async function inputState(target) {
 async function pasteInto(target, text) {
   const buffer = `orch-${process.pid}-${Math.abs(hash(target))}`;
   const stop = Date.now() + PASTE_TIMEOUT_MS;
+  const done = new Set();
   let attempts = 0;
   for (;;) {
+    // A question cannot be answered by pasting at it, and this is where that
+    // was learnt: a window on the resume-mode menu took fourteen pastes over
+    // sixty seconds and none of them were an answer. send() only calls
+    // waitReady() for a pane it opened itself, and "Open on the floor" made a
+    // pane it did not open the ordinary case — so the check belongs here too,
+    // at the point where the message is actually going in.
+    const did = await answerKnown(target, done);
+    if (did) { done.add(did.name); await sleep(250); }
+
     // Never paste into a window that is still painting: that is when it drops
     // them. Not settling is not fatal — the paste is verified either way — but
     // it is worth waiting for while there is budget left.
@@ -556,10 +698,24 @@ async function pasteInto(target, text) {
     }
 
     if (Date.now() >= stop) {
+      // Say what is on the screen, not just how hard we tried. This error was
+      // read once with no idea what it meant, because a count of attempts
+      // describes our own behaviour and nothing about the window's — and the
+      // window was sitting on a question the whole time, in plain sight of
+      // anyone who thought to look. Retrying cannot answer a question, so the
+      // pane is the only part of this worth reading. waitReady() has quoted its
+      // screen on timeout for exactly this reason; this one never learned.
+      const shot = await tmux(['capture-pane', '-p', '-t', target, '-S', '-40']);
+      const onScreen = (shot.out ?? '')
+        .split('\n')
+        .map((l) => l.replace(/\s+$/, ''))
+        .filter(Boolean)
+        .slice(-8)
+        .join(' / ');
       return {
         ok: false,
         code: 'paste_lost',
-        error: `the window would not take the message — it was pasted in ${attempts} time${attempts === 1 ? '' : 's'} over ${Math.round(PASTE_TIMEOUT_MS / 1000)}s and never appeared in the composer. Nothing was sent.`,
+        error: `the window would not take the message — it was pasted in ${attempts} time${attempts === 1 ? '' : 's'} over ${Math.round(PASTE_TIMEOUT_MS / 1000)}s and never appeared in the composer. Nothing was sent.${onScreen ? ` The window is showing: ${onScreen}` : ''}`,
       };
     }
     // Clear anything that arrives late, so the next paste is not appended to a

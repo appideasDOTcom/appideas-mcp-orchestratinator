@@ -234,6 +234,36 @@ try {
   });
   assert(retired.status === 404, 'the superseded session answers 404 so the client re-initializes');
 
+  // ...and re-initializing is allowed to still be carrying the dead id. This is
+  // the case that broke: Claude Code keeps the last session id across
+  // `claude --resume`, so a conversation handed back from the floor to the
+  // editor arrives with an id whose window has just closed. Refusing the
+  // handshake over a leftover header left the agent with no tools at all, on
+  // the board it had been working on a moment earlier. The body says
+  // `initialize`, which is a request for a new session however stale the header.
+  const reinit = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json', accept: 'application/json, text/event-stream',
+      'mcp-session-id': ghost1, 'X-Channel': CHANNEL, 'X-Agent': 'ghost', [AUTH_HEADER]: KEY,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'resumed', version: '0.0.0' } } }),
+  });
+  await reinit.text();
+  const ghost3 = reinit.headers.get('mcp-session-id');
+  assert(reinit.status === 200, 'an initialize carrying a dead session id is honoured rather than refused');
+  assert(!!ghost3 && ghost3 !== ghost1 && ghost3 !== ghost2, 'and it is answered with a new session, not the dead one');
+
+  // The 404 above is still the right answer for a request that carries no
+  // handshake — that is the cue the client acts on, and losing it would leave a
+  // stale client with nothing to react to.
+  const stillGone = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': ghost1, [AUTH_HEADER]: KEY },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+  });
+  assert(stillGone.status === 404, 'while a non-initialize call on a dead id still gets its 404');
+
   const after = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
   const agents = after.channels.find((c) => c.channel === CHANNEL).agents;
   const ghostAfter = agents.find((a) => a.agent === 'ghost');

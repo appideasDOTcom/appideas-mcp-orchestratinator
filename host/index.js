@@ -366,6 +366,11 @@ class Host {
         // confirms it started — which is what waitReady releases.
         if (r.created) {
           const up = await W.waitReady(desk.cwd, { pid: r.pid, target: r.target });
+          // Say what was pressed on the operator's behalf. Answering a question
+          // for someone and not telling them is how a system stops being
+          // predictable — and this is the log they will read when a window came
+          // up in a mode they did not choose.
+          for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
           if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
         }
         break;

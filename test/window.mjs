@@ -99,6 +99,73 @@ async function main() {
     eq(W.windowName('/a/b/my-repo'), 'my-repo', 'window name is the repo directory');
     eq(W.windowName('/a/b/we:ird name'), 'we-ird-name', 'characters tmux would read as a target are replaced');
 
+    // Reading the composer, which is how a paste is confirmed to have landed.
+    // The case that matters is the one that is NOT a composer: `❯` is also the
+    // selection cursor in Claude Code's menus, and a menu mistaken for a
+    // composer is compared against itself forever.
+    const RULE = '\u2500'.repeat(60);
+    const box = (...body) => [RULE, ...body, RULE, '  auto mode on (shift+tab to cycle)'].join('\n');
+    const menu = (title, ...opts) => [RULE, `  ${title}`, ...opts, '  Enter to confirm \u00b7 Esc to cancel'].join('\n');
+    eq(W.composerOf(box('\u276f ')), '', 'an empty composer reads as empty, not as missing');
+    eq(W.composerOf(box('\u276f hello there')), ' hello there', 'and a typed one gives back what is in it');
+    assert(W.composerOf(box('\u276f one')) !== W.composerOf(box('\u276f two')),
+           'two different composers do not compare equal — this is the whole paste check');
+    eq(W.composerOf(menu('Do you trust the files in this folder?', '  \u276f 1. Yes, proceed', '    2. No, exit')), null,
+       'the folder-trust menu is not a composer, however much its cursor looks like one');
+    eq(W.composerOf(menu('This session is 2d 22h old and 287.9k tokens.', '  \u276f 1. Resume from summary', '    2. Resume full session as-is', '    3. Don\u2019t ask me again')), null,
+       'nor is the resume-mode question a large --resume opens with — the one that ate a message for sixty seconds');
+    eq(W.composerOf(menu('New MCP server found in this project', '  \u276f 1. Use this MCP server', '    2. Continue without it')), null,
+       'nor the MCP approval');
+    eq(W.composerOf('nothing on screen at all'), null, 'and a screen with no box at all is null, so the caller falls back to it');
+
+    // Answering a startup question on the operator's behalf. The decision is
+    // separated from the keystrokes precisely so it can be checked here: this
+    // is code that presses Enter in someone's window, and the only thing
+    // standing between it and the wrong answer is which line it matched.
+    const resumeAsk = menu(
+      'This session is 2d 22h old and 287.9k tokens.',
+      '  Resuming the full session will consume a substantial portion of your usage limits.',
+      '  \u276f 1. Resume from summary (recommended)',
+      '    2. Resume full session as-is',
+      '    3. Don\u2019t ask me again',
+    );
+    const plan = W.plannedAnswer(resumeAsk);
+    eq(plan?.name, 'resume mode', 'the resume-mode question is one the host answers');
+    eq(plan?.chose, '2. Resume full session as-is',
+       'and it picks the full session — a summary is a copy of a conversation, not the conversation, and a handoff that forks one has not moved anything');
+    eq([plan?.from, plan?.to], [0, 1], 'by walking the cursor to that line rather than pressing its number');
+
+    // The cursor may already be there, or below it; the plan is a position, not
+    // a direction.
+    const already = W.plannedAnswer(menu('x', '  Resuming the full session will consume a lot',
+        '    1. Resume from summary', '  \u276f 2. Resume full session as-is'));
+    eq(already?.to, 1, 'a cursor already on the answer plans no movement at all');
+    // An option is named by its words, cursor or no cursor. Comparing raw lines
+    // instead is how the confirm step silently never fired: it planned against a
+    // line with no cursor and read back the same line with one, decided they
+    // disagreed, and declined to press Enter — leaving the cursor moved and the
+    // question standing. The unit tests all passed; only the real dialog showed it.
+    eq(already?.chose, '2. Resume full session as-is', 'and the option it names carries no cursor glyph');
+
+    // Everything else is left for a person, and this is the assertion that
+    // matters most: these numbers mean opposite things.
+    eq(W.plannedAnswer(menu('Do you trust the files in this folder?', '  \u276f 1. Yes, proceed', '    2. No, exit')), null,
+       'the folder-trust question is NOT answered for you — pressing 2 there exits');
+    eq(W.plannedAnswer(menu('New MCP server found in this project', '  \u276f 1. Use this MCP server', '    2. Continue without it')), null,
+       'nor is the MCP approval — that is a decision about what may run on your machine');
+    eq(W.plannedAnswer(box('\u276f ')), null, 'and an ordinary composer is not a question at all');
+
+    // Answered once. Still on screen next time round means it was not really
+    // answered, and pressing Enter at it again is guessing.
+    eq(W.plannedAnswer(resumeAsk, new Set(['resume mode'])), null,
+       'a question already answered is not answered a second time');
+
+    // The words are what is matched. A menu whose wording has moved on is a
+    // menu we no longer recognise, which is the safe answer, not a silent one.
+    eq(W.plannedAnswer(menu('x', '  Resuming the full session will consume a lot',
+        '  \u276f 1. Resume from summary', '    2. Resume the whole thing')), null,
+       'and an option whose wording has changed is left alone rather than guessed at by position');
+
     // Nothing is open yet, and send() says so rather than pretending.
     const cold = await W.send(FIX, 'anyone there?');
     eq(cold.code, 'no_window', 'a message to a repo with no window is refused with a reason');
