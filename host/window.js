@@ -1102,7 +1102,17 @@ export function questionOf(screen) {
         checked: box ? box[1].trim() !== '' : null,
         // The free-text choice. Claude Code always offers one; picking it turns
         // the row into a field you type into.
-        other: /^type something$/i.test((box ? box[2] : text).trim()),
+        //
+        // The two widgets spell it differently, and an anchored match on one of
+        // them silently loses the other. Measured off a real pane, same form:
+        //
+        //     4. Type something.        <- single-select, with a full stop
+        //     4. [ ] Type something     <- multi-select, without
+        //
+        // Missing the flag does not render a broken field, it renders none at
+        // all — so the row was there to click and nothing happened, which reads
+        // as the floor being dead rather than as a choice it failed to spot.
+        other: /^type something\s*[.!…]*$/i.test((box ? box[2] : text).trim()),
       };
       if (m[2]) cursor = options.length;
       options.push(opt);
