@@ -23,6 +23,23 @@
   const SVG = 'http://www.w3.org/2000/svg';
 
   const POLL_MS = 2000;
+  /* Moving a conversation between apps is the host's work, not the POST's. It
+     closes a tmux window and opens the editor, or opens a window and waits for
+     Claude Code to come up — up to READY_TIMEOUT_MS (45s) on the host — and the
+     board only hears about it when the desk's holder changes, a second or more
+     later. Until then the link had nothing to show for having been clicked, so
+     it got clicked again. This is the deadline after which the spinner gives up
+     and says what it saw, rather than turning forever; comfortably past the
+     host's own timeout so a slow open is a slow open and not a lie. */
+  const MOVE_MS = 90_000;
+  /* The links' labels, here as well as in the markup, because the spinner takes
+     one over and something has to put it back. */
+  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code' };
+  /* Which seat each link is asking for. That seat arriving is what "done" means
+     — the POST returning only means the host has been told. Note this is not
+     the same as the link going away: handback stays offered while the editor
+     has it, so a spinner keyed to its own visibility would never stop. */
+  const LINK_SEAT = { openhere: 'floor', handback: 'editor' };
   const COLS = 3;
   const PAD = 28;
   /* The header band behind the channel name and the stat line under it. HEAD_H,
@@ -293,6 +310,11 @@
     // mid-peal about half the time. It is also what rejects a second click —
     // the timestamp outlives the node, so the guard does too.
     rings: new Map(),
+    // A seat change in flight: { channel, agent, act, since }. Outside the DOM
+    // for the usual reason and one more — the panel skeleton is rebuilt when
+    // you switch desks, and a spinner has to outlive both the poll that redraws
+    // it and a trip to another desk and back.
+    moving: null,
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -1768,8 +1790,8 @@
           <button class="btn primary" data-act="send">Send</button>
         </div>
         <div class="p-links">
-          <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">Open on the floor</button>
-          <button class="p-link" data-act="handback" title="Open this conversation in VS Code">Open in VS Code</button>
+          <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">${LINK_LABEL.openhere}</button>
+          <button class="p-link" data-act="handback" title="Open this conversation in VS Code">${LINK_LABEL.handback}</button>
         </div>
       </div>`;
     ui.stick = true;
@@ -1870,17 +1892,49 @@
     stopBtn.setAttribute('aria-label', cannotStop ? `Cannot stop ${d.persona}` : `Stop ${d.persona}`);
     const toVsc = wrap.querySelector('[data-act="handback"]');
     const toFloor = wrap.querySelector('[data-act="openhere"]');
+    // A move in flight is settled here, against the payload, because the
+    // payload is the only thing that knows. The POST is answered the moment the
+    // work is queued; the seat changes when the host has actually done it, and
+    // the desk's `held` says so. Failing that, the deadline.
+    let failed = null;
+    const pending = ui.moving && ui.moving.channel === channel && ui.moving.agent === agent ? ui.moving : null;
+    if (pending) {
+      if (h?.held === LINK_SEAT[pending.act]) ui.moving = null;
+      else if (Date.now() - pending.since > MOVE_MS) {
+        // What was seen, not why it happened. If the host failed it has already
+        // said so in its own error turn, right above this; all this line knows
+        // is that the seat never changed.
+        failed = pending.act === 'handback'
+          ? `no editor has it after ${MOVE_MS / 1000}s`
+          : `still no window after ${MOVE_MS / 1000}s`;
+        ui.moving = null;
+      }
+    }
+    const move = ui.moving === pending ? pending : null;
     toVsc.classList.toggle('hidden', !h?.live);
     // Offered only when the desk has no window and no editor on it. With an
     // editor holding it this would open a second process on one transcript,
     // which is the thing handback closes its own window to avoid; with a floor
     // window already up there is nothing to do.
     toFloor.classList.toggle('hidden', !(h?.live && !h.held));
+    // Mid-move the strip shows the clicked link, spinning, and nothing else.
+    // Leaving the other one up offers the opposite seat while the host is on
+    // its way to this one, and it makes the strip change height twice — once
+    // for the spinner and again when the move lands. Hiding it puts the strip
+    // straight into the shape it will finish in.
+    if (move) {
+      (move.act === 'handback' ? toVsc : toFloor).classList.remove('hidden');
+      (move.act === 'handback' ? toFloor : toVsc).classList.add('hidden');
+    }
+    setLinkBusy(toVsc, move?.act === 'handback');
+    setLinkBusy(toFloor, move?.act === 'openhere');
     // Hiding both links is not the same as hiding the strip: an empty flex
     // column is zero-height but still counts as a row, so .p-compose's gap
     // leaves a blank line where the links were.
     wrap.querySelector('.p-links').classList
       .toggle('hidden', toVsc.classList.contains('hidden') && toFloor.classList.contains('hidden'));
+    // After setLinkBusy, so the label is back before flash() borrows it.
+    if (failed) flash(wrap.querySelector(`[data-act="${pending.act}"]`), failed);
     wrap.querySelector('.p-compose').classList.toggle('held', held);
     // The hint says exactly what will happen, because a Send button that
     // sometimes can't is worse than one that says why.
@@ -2337,10 +2391,8 @@
           ?.desks.find((x) => x.agent === ui.open.agent);
         window.stopDialog(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent);
       }
-    } else if (act.dataset.act === 'handback') {
-      await handBack(act);
-    } else if (act.dataset.act === 'openhere') {
-      await openHere(act);
+    } else if (act.dataset.act === 'handback' || act.dataset.act === 'openhere') {
+      await moveSeat(act.dataset.act);
     } else if (act.dataset.act === 'rename') {
       // app.js owns the dialogs on this page — same reason the pills call into
       // it rather than growing a second implementation. A `prompt()` used to do
@@ -2441,57 +2493,79 @@
     tick();
   }
 
-  /**
-   * Move the open desk's conversation into the editor.
-   *
-   * The host closes its own window before opening it there, so the
-   * conversation is never live in two places. Nothing is sent — this is a
-   * change of seat, not a message.
-   */
-  async function handBack(btn) {
-    if (!ui.open) return;
-    btn.disabled = true;
-    try {
-      const r = await fetch('./api/floor/handback', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(ui.open),
-      });
-      if (!r.ok) {
-        const body = await r.json().catch(() => ({}));
-        flash(btn, String(body.error ?? `couldn't move it (${r.status})`).slice(0, 60));
-      }
-    } finally {
-      btn.disabled = false;
-      tick();
+  /** Swap a seat link for a spinner, and back again. */
+  function setLinkBusy(btn, busy) {
+    if (!btn) return;
+    // Only on the transition. Rewriting the node every poll restarts the CSS
+    // animation, and a spinner that jumps back to the top every two seconds
+    // reads as a page that keeps starting over rather than one that is working.
+    if (busy === (btn.dataset.busy === '1')) return;
+    if (busy) {
+      btn.dataset.busy = '1';
+      btn.innerHTML = '<span class="pspin" aria-hidden="true"></span>';
+      btn.setAttribute('aria-busy', 'true');
+      // The glyph is decorative, so the name has to carry the whole meaning.
+      btn.setAttribute('aria-label', `${LINK_LABEL[btn.dataset.act]} — waiting`);
+    } else {
+      delete btn.dataset.busy;
+      btn.textContent = LINK_LABEL[btn.dataset.act];
+      btn.removeAttribute('aria-busy');
+      btn.removeAttribute('aria-label');
     }
   }
 
   /**
-   * Open a window for this conversation here — the other direction of handBack.
+   * Move the open desk's conversation between the editor and the floor.
    *
-   * The host does the work and reports what happened through the desk's own
-   * state, so there is nothing to confirm here: the button goes away when the
-   * desk turns up holding a floor window, which is the only evidence worth
-   * showing anyway.
+   * A conversation is one process, so this is a change of seat and not a
+   * message. `handback` has the host close its own window before opening the
+   * editor — the reverse order leaves two live copies — and `open` has it open
+   * a window here, refused outright while an editor still holds it, for the
+   * same reason.
+   *
+   * The click is answered long before the work is done: the server queues it,
+   * the host picks it up on its next poll, closes or opens a window, and for
+   * `open` waits for Claude Code to actually come up. Seconds, sometimes many.
+   * The links showed nothing at all for that, so the only thing left to do was
+   * click again — and clicking again queued a second move. The spinner is the
+   * receipt for the click; the seat arriving is the receipt for the move, and
+   * only renderPanel can see that, so that is where this ends.
    */
-  async function openHere(btn) {
+  async function moveSeat(act) {
     if (!ui.open) return;
-    btn.disabled = true;
+    const { channel, agent } = ui.open;
+    // One move per desk at a time — both links go to the same host queue, and
+    // two in flight is a request to be in two places. A stale move left on some
+    // other desk is not a reason to refuse this one; it is simply replaced,
+    // since only the open desk's spinner is on screen to settle.
+    if (ui.moving && ui.moving.channel === channel && ui.moving.agent === agent) return;
+    ui.moving = { channel, agent, act, since: Date.now() };
+    // Before the fetch, not after. The whole point is that the click is
+    // acknowledged while the request is still open.
+    renderPanel();
     try {
-      const r = await fetch('./api/floor/open', {
+      const r = await fetch(act === 'handback' ? './api/floor/handback' : './api/floor/open', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(ui.open),
+        body: JSON.stringify({ channel, agent }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
-        flash(btn, String(body.error ?? `couldn't open it (${r.status})`).slice(0, 60));
+        failMove(act, String(body.error ?? `couldn't ${act === 'handback' ? 'move' : 'open'} it (${r.status})`).slice(0, 60));
       }
-    } finally {
-      btn.disabled = false;
-      tick();
+    } catch (err) {
+      failMove(act, String(err.message).slice(0, 60));
     }
+    tick();
+  }
+
+  /** A move that was refused outright: stop waiting now, and say what came back. */
+  function failMove(act, message) {
+    ui.moving = null;
+    // Puts the label back before flash() borrows it — the spinner has no text
+    // to save and restore.
+    renderPanel();
+    flash($('floor-panel').querySelector(`[data-act="${act}"]`), message);
   }
 
   document.addEventListener('keydown', (e) => {

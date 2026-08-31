@@ -54,10 +54,23 @@ async function makeClient(agent, base, key = KEY) {
   return { client, transport };
 }
 /**
- * Hand-rolled initialize: no notification stream, no DELETE — i.e. what a client
- * that opens a throwaway session per turn leaves behind on the server.
+ * Hand-rolled connect: the handshake and nothing else — no notification stream,
+ * no DELETE — i.e. what a client that opens a throwaway session per turn leaves
+ * behind on the server.
+ *
+ * The closing `notifications/initialized` is part of it because a real client
+ * sends one, and the server now treats it as the moment a session becomes
+ * supersedable. A fixture that skipped it used to stand in for a churning client
+ * and no longer can: it would model a client stuck mid-handshake, which is the
+ * one thing supersede must leave alone.
  */
 async function rawInitialize(port, agent) {
+  const sid = await rawInitializeOnly(port, agent);
+  await rawNotifyInitialized(port, sid);
+  return sid;
+}
+/** The first half only: a connection that has not finished shaking hands yet. */
+async function rawInitializeOnly(port, agent) {
   const res = await fetch(`http://localhost:${port}/mcp`, {
     method: 'POST',
     headers: {
@@ -76,6 +89,19 @@ async function rawInitialize(port, agent) {
   });
   await res.text(); // drain so the response stream doesn't stay open
   return res.headers.get('mcp-session-id');
+}
+/** The second half of the handshake, on its own so a test can withhold it. */
+function rawNotifyInitialized(port, sessionId) {
+  return fetch(`http://localhost:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      'mcp-session-id': sessionId,
+      [AUTH_HEADER]: KEY,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  }).then(async (r) => { await r.text(); return r.status; });
 }
 const rmDb = (p) => { for (const ext of ['', '-wal', '-shm']) { try { rmSync(p + ext); } catch { /* ignore */ } } };
 
@@ -263,6 +289,31 @@ try {
     body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
   });
   assert(stillGone.status === 404, 'while a non-initialize call on a dead id still gets its 404');
+
+  // The connection a client kills by opening its second one.
+  //
+  // Claude Code opens more than one MCP connection at startup, and both carry
+  // the same channel/agent headers. Superseding used to skip a session only
+  // while `inflight > 0`, and a session between its initialize response and its
+  // `notifications/initialized` has none — so whichever connection lost the race
+  // was closed by its sibling, and the client took a 404 on the notification and
+  // came up with no tools. It presented as "the handoff lost the tools", and it
+  // did, about half the time.
+  const twinA = await rawInitializeOnly(PORT, 'twins');
+  const twinB = await rawInitializeOnly(PORT, 'twins');
+  assert(!!twinA && !!twinB && twinA !== twinB, 'two connections opened at once really are distinct');
+  assert(await rawNotifyInitialized(PORT, twinA) === 202,
+    'the first connection can still finish its handshake after the second arrives');
+  assert(await rawNotifyInitialized(PORT, twinB) === 202, 'and so can the second');
+  // Once both have finished, the older one is a candidate again — the leak
+  // protection is deferred, not dropped.
+  const twinC = await rawInitialize(PORT, 'twins');
+  const oldTwin = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': twinA, [AUTH_HEADER]: KEY },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  assert(!!twinC && oldTwin.status === 404, 'a handshake that did complete is superseded by the next one');
 
   const after = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
   const agents = after.channels.find((c) => c.channel === CHANNEL).agents;

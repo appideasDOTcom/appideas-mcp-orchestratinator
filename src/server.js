@@ -97,15 +97,36 @@ function closeSession(sid) {
  * `McpServer` instances, and the dashboard's connection count all grow forever.
  *
  * A channel+agent pair is one logical identity here, so once a new session
- * claims it, any earlier idle session for it is by definition abandoned. Closing
- * it is safe because an unknown session id now answers 404, which is the spec's
- * "start over" signal — a client that does come back just re-initialises.
+ * claims it, any earlier idle session for it is by definition abandoned.
+ *
+ * Two things that used to be written here are not true, and both cost an
+ * evening:
+ *
+ * "a client that does come back just re-initialises" — it does not.
+ * `Client.connect()` in the MCP SDK returns early when its transport already
+ * carries a session id ("we are trying to reconnect... we don't need to
+ * initialize again"), so a resumed client sends its first real call under the
+ * dead id, takes the 404, and gives up with no tools.
+ *
+ * "still in use" was read from `inflight`, and a session mid-handshake has none.
+ * markIdle clears it in the `finally` of the initialize request, so for the gap
+ * between that response and the `notifications/initialized` that follows it, a
+ * seconds-old session looks abandoned. A client that opens two connections at
+ * once — Claude Code does — had its own first connection culled by its second,
+ * at random, depending on which won the race. That is the whole of why an agent
+ * came back from a handoff with the board's tools missing: not the handshake
+ * being refused, but this, killing the connection that had just made one.
+ *
+ * So a session is only superseded once it has said `notifications/initialized`.
+ * One that never does is left to the idle sweeper, which is the right owner for
+ * a client that connects and then says nothing.
  */
 function supersede(sid, channel, agent) {
   if (!channel || !agent) return;
   for (const [otherId, s] of Object.entries(sessions)) {
     if (otherId === sid || s.channel !== channel || s.agent !== agent) continue;
     if (s.inflight > 0 || s.streaming) continue; // still in use — leave it alone
+    if (!s.ready) continue;                      // still shaking hands — see above
     sessionStats.superseded++;
     closeSession(otherId);
   }
@@ -194,6 +215,12 @@ app.post('/mcp', async (req, res) => {
 
   if (transport) {
     markBusy(sessionId);
+    // The end of the handshake, and the only signal a client gives that its
+    // connection is actually up. Recorded rather than assumed because it is what
+    // makes this session supersedable — and what protects it until then.
+    if (req.body?.method === 'notifications/initialized' && sessions[sessionId]) {
+      sessions[sessionId].ready = true;
+    }
   } else {
     // The body decides, not the header, and that order is the fix rather than a
     // tidy-up. An `initialize` IS the request to start a new session, so a stale
@@ -247,6 +274,9 @@ app.post('/mcp', async (req, res) => {
           last_seen: now,
           inflight: 1,       // this initialize request; markIdle clears it
           streaming: false,  // true while an SSE GET stream is open
+          // Set by the `notifications/initialized` that closes the handshake.
+          // Until then this session is not a candidate for supersede: see there.
+          ready: false,
         };
         sessionStats.opened++;
         supersede(sid, context.channel, context.agent);

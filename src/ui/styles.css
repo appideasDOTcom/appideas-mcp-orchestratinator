@@ -1181,6 +1181,24 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* An error borrowed the label. Muted grey small-caps is the wrong voice for it,
    and the sentence is not an action, so drop the shouting with the colour. */
 .p-link.flashed { color: var(--block); text-transform: none; letter-spacing: 0; }
+/* Waiting for the host to move the conversation. The link is still a button and
+   still focusable — disabling it would throw the keyboard's place away mid-move
+   — so the click is refused in the handler and the cursor says why. */
+.p-link[data-busy] { cursor: progress; }
+.p-link[data-busy]:hover { color: var(--muted); }
+/* Sized to the line it replaces, so the strip does not change height when the
+   text goes away. */
+.pspin {
+  display: inline-block; width: 11px; height: 11px; vertical-align: -1px;
+  border: 2px solid color-mix(in srgb, var(--muted) 30%, transparent);
+  border-top-color: var(--busy);
+  border-radius: 50%;
+  animation: pspin .7s linear infinite;
+}
+@keyframes pspin { to { transform: rotate(360deg); } }
+/* Still a ring, still where the link was, just not turning: the shape alone
+   says "in progress", which is the part that matters. */
+@media (prefers-reduced-motion: reduce) { .pspin { animation: none; } }
 
 @media (max-width: 900px) {
   .floor-body { flex-direction: column; }
