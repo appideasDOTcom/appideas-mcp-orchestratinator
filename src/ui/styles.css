@@ -1332,6 +1332,29 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* A permission prompt the floor can answer. The buttons sit inside the alert
    because the decision and its reason belong in one glance. */
 .p-alert-ask { display: flex; flex-direction: column; gap: 6px; }
+/* The three that are always there, in one row, in the order a person decides in:
+   yes, no, and get me out of this. */
+.p-decide { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Everything else the window offered — "yes, and don't ask again for similar
+   commands in <a long path>" and its like. One per row and full width, because
+   the text is the button: shortening it to fit beside another one would hide
+   exactly the part that distinguishes it from Approve. */
+.p-more { display: flex; flex-direction: column; gap: 4px; }
+.p-choice {
+  width: 100%; text-align: left; white-space: normal;
+  font-size: 11.5px; line-height: 1.35; padding: 5px 8px;
+  display: block;
+}
+/* The clamp goes on an inner box, not on the button. On the button its own
+   padding is outside the clamped area, so the element ends up taller than the
+   two lines it is showing and the third line bleeds through underneath.
+   Two lines, then an ellipsis: past that it is a paragraph, and the whole of it
+   is on the button's tooltip anyway. */
+.p-choice > span {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.p-more-why { font-size: 11px; }
 /* The alert is a row in the compose stack now, so it takes the stack's gap and
    needs no margin of its own. */
 .p-compose > .p-alert-slot:empty { display: none; }

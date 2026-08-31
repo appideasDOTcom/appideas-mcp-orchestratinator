@@ -118,6 +118,74 @@ async function main() {
        'nor the MCP approval');
     eq(W.composerOf('nothing on screen at all'), null, 'and a screen with no box at all is null, so the caller falls back to it');
 
+    // Telling a live prompt from a conversation that is talking about one.
+    //
+    // Both of these are real captures of this repo's own window. The first is a
+    // permission prompt actually waiting. The second is the transcript a minute
+    // later, showing a message that quoted that prompt — and menuOf reads the
+    // quotation as a menu, because as text it is one. Answering on that basis
+    // reported an approve as failed when it had not been, and would have typed
+    // a bare "1" into the composer. The composer is the difference: while the
+    // window holds a question there is nowhere to type.
+    const LIVE_PROMPT = [
+      "  Ran 1 shell command",
+      "\u23fa Capturing. Now a prompt to look at \u2014 give it about five seconds before you",
+      "  answer, so the capture catches it. Answer however you like.",
+      "\u23fa Running 1 shell command\u2026",
+      "  \u23bf  $ touch /Users/costmo/Documents/orch-menu-probe.tmp && rm -f",
+      "     /Users/costmo/Documents/orch-menu-probe.tmp && echo done",
+      "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      " Bash command",
+      "   touch /Users/costmo/Documents/orch-menu-probe.tmp && rm -f",
+      "   /Users/costmo/Documents/orch-menu-probe.tmp && echo done",
+      "   Create and remove a scratch file outside the working directory",
+      " Do you want to proceed?",
+      " \u276f 1. Yes",
+      "   2. Yes, and don't ask again for similar commands in /Users/costmo/Documents/d",
+      "      ev/appideas/appideas.com/appideas-site-dev/appideas-mcp-orchestratinator",
+      "   3. No",
+      " Esc to cancel \u00b7 Tab to amend \u00b7 ctrl+e to explain",
+    ].join('\n');
+    const QUOTED_PROMPT = [
+      "  Ran 3 shell commands",
+      "\u23fa That's the whole picture. The real prompt:",
+      "   Bash command",
+      "     touch \u2026 && rm -f \u2026 && echo done",
+      "   Do you want to proceed?",
+      "   \u276f 1. Yes",
+      "     2. Yes, and don't ask again for similar commands in",
+      "  /Users/costmo/Documents/d",
+      "        ev/appideas/appideas.com/appideas-site-dev/appideas-mcp-orchestratinator",
+      "     3. No",
+      "   Esc to cancel \u00b7 Tab to amend \u00b7 ctrl+e to explain",
+      "  Three findings that change the work:",
+      "  Your model is right, and our current Deny is wrong. 1. Yes, 3. No and Esc to",
+      "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "\u276f",
+      "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "  \u23f8 manual mode on \u00b7 esc to interrupt \u00b7 \u2190 for agents                        /rc",
+    ].join('\n');
+    eq(W.composerOf(LIVE_PROMPT), null, 'a window holding a question has no composer');
+    assert(W.composerOf(QUOTED_PROMPT) !== null, 'a window that has answered and is waiting for you does');
+    assert(W.menuOf(QUOTED_PROMPT).at >= 0,
+           'and menuOf alone cannot tell them apart — the quoted options really are numbered rows, which is why the composer has to be checked');
+    assert(W.menuOf(LIVE_PROMPT).at >= 0, 'while the live one is a menu by both measures');
+
+    // Reading what the window is offering.
+    //
+    // No hook carries the choices — the board learns them only by looking. The
+    // wrap matters: "don't ask again for similar commands in <path>" is longer
+    // than the window is wide, and a plain capture hands back the two halves
+    // split at whatever column the break fell on, mid-path.
+    eq(W.promptOptions(LIVE_PROMPT).map((o) => o.n), [1, 2, 3], 'every numbered choice is found');
+    eq(W.promptOptions(LIVE_PROMPT)[0].text, 'Yes', 'with its text, and without its number or cursor');
+    eq(W.promptOptions('nothing numbered here').length, 0, 'and a screen with no list yields none');
+    // The joined form is what readPrompt actually reads; this is the same option
+    // as tmux -J returns it.
+    eq(W.promptOptions("   2. Yes, and don't ask again for similar commands in /Users/costmo/x")[0].text,
+       "Yes, and don't ask again for similar commands in /Users/costmo/x",
+       'a long choice comes back whole');
+
     // Whether an answer took.
     //
     // The floor drops a desk's prompt as soon as the operator decides, so the
@@ -420,6 +488,41 @@ async function main() {
     const nothing = await W.answerPrompt(quiet, '1');
     eq(nothing.ok, false, 'a window with no prompt on it is not answered at all');
     eq(nothing.code, 'no_prompt', 'and says so, rather than pressing 1 into the composer');
+
+    // The one that got through in the wild: a window sitting at its composer with
+    // a menu quoted in the conversation above it. menuOf sees a menu; there is
+    // nothing to answer.
+    const talking = await pane('talking',
+      `printf '%s\\n' '  Here is what the prompt looked like:'`,
+      `printf '%s\\n' '  \u276f 1. Yes'`,
+      `printf '%s\\n' '    2. Yes, and do not ask again'`,
+      `printf '%s\\n' '    3. No'`,
+      `printf '%s\\n' ${JSON.stringify(RULE60)}`,
+      `printf '%s\\n' '\u276f '`,
+      `printf '%s\\n' ${JSON.stringify(RULE60)}`,
+      'sleep 30');
+    const quoting = await W.answerPrompt(talking, '1');
+    eq(quoting.ok, false, 'a window talking about a prompt is not answered');
+    eq(quoting.code, 'no_prompt', 'it is back at its composer, so there is no question to answer');
+
+    // Reading the options off a real pane, wrap and all. The line is longer than
+    // the pane is wide on purpose: that is the case tmux -J exists for, and the
+    // case a plain capture gets wrong.
+    const LONG = "Yes, and don't ask again for similar commands in /Users/costmo/Documents/dev/appideas/appideas.com/appideas-site-dev";
+    const offering = await pane('offering',
+      `printf '%s\\n' '  Do you want to proceed?'`,
+      `printf '%s\\n' '  \u276f 1. Yes'`,
+      `printf '%s\\n' ${JSON.stringify('    2. ' + LONG)}`,
+      `printf '%s\\n' '    3. No'`,
+      `printf '%s\\n' '  Esc to cancel \u00b7 Tab to amend'`,
+      'sleep 30');
+    const read = await W.readPrompt(offering);
+    assert(read.ok, `a window holding a question gives up its choices — ${read.error ?? ''}`);
+    eq(read.options?.map((o) => o.n), [1, 2, 3], 'all of them');
+    eq(read.options?.[1]?.text, LONG, 'including the one that wrapped, rejoined rather than cut at the column');
+
+    const nothingOffered = await W.readPrompt(talking);
+    eq(nothingOffered.code, 'no_prompt', 'a window back at its composer offers nothing, whatever is quoted above it');
 
     const missing = await W.answerPrompt(`${PROMPT_DIR}/never-opened`, '1');
     eq(missing.code, 'no_window', 'and a repo with no window at all is its own answer');

@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -463,7 +463,8 @@ try {
     body: JSON.stringify({ channel: CH, agent: 'halfheard', request_id: half().permission.request_id, decision: 'allow' }),
   });
   eq(halfAnswer.status, 200, 'and the answer is accepted like any other');
-  eq(await takeWork(), ['permission'], 'reaching the host as a keystroke');
+  eq(await takeWork(), ['prompt', 'permission'],
+     'reaching the host as a keystroke — behind the request to go and read what the window is offering');
   fh = await floor();
   eq(half().session.awaiting_kind, null, 'the desk stops asking');
 
@@ -471,6 +472,96 @@ try {
   await post(ev('halfheard', 's-half', 'Notification', { notification_type: 'permission_prompt' }));
   fh = await floor();
   assert(!!half().permission?.summary, 'a notification with no message still gives the operator a sentence, not an empty dash');
+
+  console.log('\nthe window\u2019s own choices');
+  {
+    // Sorting the window's list into the three that always show and the rest.
+    // What "deny" presses comes from here, so the buttons and the endpoint
+    // cannot disagree about it.
+    const real = [
+      { n: 1, text: 'Yes' },
+      { n: 2, text: "Yes, and don't ask again for similar commands in /Users/costmo/x" },
+      { n: 3, text: 'No' },
+    ];
+    const c = promptChoices(real);
+    eq(c.approve, 1, 'approve is the first Yes, not merely the first option');
+    eq(c.deny, 3, 'deny is the No — which is not always 3, and here it is');
+    eq(c.extras.map((o) => o.n), [2], 'and the "don\u2019t ask again" variant gets a row of its own');
+
+    // A two-option menu with no "No" at all — the folder-trust question.
+    const trust = promptChoices([{ n: 1, text: 'Yes, proceed' }, { n: 2, text: 'No, exit' }]);
+    eq(trust.approve, 1, 'a trust question still has an approve');
+    eq(trust.deny, 2, 'and its No, wherever it sits');
+    eq(trust.extras.length, 0, 'with nothing left over');
+
+    // Nothing read off the window yet: the three still have to work.
+    const none = promptChoices(undefined);
+    eq([none.approve, none.deny, none.extras.length], [null, null, 0], 'no list is not a crash, it is no list');
+
+    // A menu whose first option is not a Yes at all.
+    const odd = promptChoices([{ n: 1, text: 'Use this MCP server' }, { n: 2, text: 'Continue without it' }]);
+    eq(odd.approve, 1, 'approve falls back to the first option when nothing says Yes');
+    eq(odd.deny, null, 'and deny stays empty rather than guessing at one');
+  }
+
+  console.log('\nanswering with one of them');
+  await register({ channel: CH, agent: 'chooser', cwd: '/repo/chooser', window: '@31' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'chooser', session_id: 's-choose', cwd: '/repo/chooser' }]);
+  await post(ev('chooser', 's-choose', 'SessionStart'));
+  await takeWork();   // whatever the blocks above left queued; this one is about its own
+  await post(ev('chooser', 's-choose', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'touch x' } }));
+  eq(await takeWork(), ['prompt'], 'a prompt opening asks the host what the window is offering');
+
+  let fc = await floor();
+  const chooser = () => deskOf(fc, 'chooser');
+  const reqC = chooser().permission.request_id;
+  eq(chooser().permission.choices.extras.length, 0, 'until it answers, there is nothing extra to show');
+
+  await hostEvents([{
+    type: 'prompt', channel: CH, agent: 'chooser', request_id: reqC,
+    options: [{ n: 1, text: 'Yes' }, { n: 2, text: "Yes, and don't ask again" }, { n: 3, text: 'No' }],
+  }]);
+  fc = await floor();
+  eq(chooser().permission.choices.extras.map((o) => o.text), ["Yes, and don't ask again"],
+     'once it has, the extra choice is on the desk with its own words');
+
+  const choose = (decision) =>
+    fetch(`${HOST}/api/floor/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: CH, agent: 'chooser', request_id: reqC, decision }),
+    });
+
+  eq((await choose('9')).status, 409, 'a choice the window never offered is refused');
+  eq(await takeWork(), [], 'and presses nothing');
+
+  const picked = await choose('2');
+  eq(picked.status, 200, 'one it did offer is accepted');
+  eq((await picked.json()).sent, '2', 'and reaches the host as that option\u2019s own number');
+
+  // Deny presses the No, not Escape — they are different things, and the
+  // prompt's own footer lists them apart.
+  await post(ev('chooser', 's-choose', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'touch y' } }));
+  await takeWork();
+  fc = await floor();
+  const reqD = chooser().permission.request_id;
+  await hostEvents([{ type: 'prompt', channel: CH, agent: 'chooser', request_id: reqD,
+    options: [{ n: 1, text: 'Yes' }, { n: 2, text: 'Yes, and do not ask again' }, { n: 3, text: 'No' }] }]);
+  const denied = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'chooser', request_id: reqD, decision: 'deny' }),
+  });
+  eq((await denied.json()).sent, '3', 'deny presses the window\u2019s own No');
+
+  // Cancel is Escape, which no menu numbers.
+  await post(ev('chooser', 's-choose', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'touch z' } }));
+  await takeWork();
+  fc = await floor();
+  const cancelled = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'chooser', request_id: chooser().permission.request_id, decision: 'cancel' }),
+  });
+  eq(cancelled.status, 200, 'cancel is an answer like the others');
+  eq((await cancelled.json()).sent, 'cancel', 'and stays cancel, for the host to turn into Escape');
 
   console.log('\nanswering a prompt stops the desk asking, now');
   // The indicators the operator is looking at — the alert above the compose box,
@@ -485,6 +576,7 @@ try {
   // this; without it they land on a placeholder row the floor never reads.
   await hostEvents([{ type: 'session', channel: CH, agent: 'asker', session_id: 's-ask', cwd: '/repo/asker' }]);
   await post(ev('asker', 's-ask', 'SessionStart'));
+  await takeWork();   // as above — start from an empty queue
   await post(ev('asker', 's-ask', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }));
 
   let fa = await floor();
@@ -507,7 +599,7 @@ try {
 
   const answered = await answer(reqId, 'allow');
   eq(answered.status, 200, 'the open prompt can be answered');
-  eq(await takeWork(), ['permission'], 'and the host is handed the keystroke');
+  eq(await takeWork(), ['prompt', 'permission'], 'and the host is handed the keystroke');
 
   fa = await floor();
   eq(askerDesk().session.awaiting_kind, null, 'the desk stops asking the moment the operator decides');

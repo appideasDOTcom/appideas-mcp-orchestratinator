@@ -945,6 +945,59 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
  * permission dialog, the Escape that stops a turn. Anything a person would
  * type as a message goes through send(), which pastes it as one block.
  */
+/**
+ * The pane with wrapped lines rejoined.
+ *
+ * Option text is routinely longer than the window is wide — "Yes, and don't ask
+ * again for similar commands in <a long absolute path>" wraps mid-path — and a
+ * plain capture hands back the two halves as two lines, split at whatever
+ * character the column happened to fall on. `-J` is tmux's own answer to that
+ * and gives the line back whole.
+ *
+ * Kept separate from screenOf rather than replacing it: composerOf reads the box
+ * rules, and joining changes what a line is.
+ */
+async function joinedScreenOf(target) {
+  const r = await tmux(['capture-pane', '-p', '-J', '-t', target, '-S', '-12']);
+  return r.ok ? r.out : '';
+}
+
+/** The numbered choices on a screen, in order, with their text. */
+export function promptOptions(screen) {
+  const out = [];
+  for (const line of String(screen ?? '').split('\n')) {
+    const m = /^\s*[\u276f>]?\s*(\d+)\.\s+(.*\S)\s*$/.exec(line);
+    if (m) out.push({ n: Number(m[1]), text: m[2].trim() });
+  }
+  return out;
+}
+
+/**
+ * What the window is asking, and what it will accept as an answer.
+ *
+ * No hook carries this. PermissionRequest says which tool wants permission and
+ * the Notification six seconds later says even less; the choices themselves —
+ * "don't ask again for similar commands in this directory", and whatever else a
+ * particular prompt offers — exist only on the screen. So they are read from it,
+ * once, when the board asks.
+ *
+ * Guarded the same way answerPrompt is, and for the same reason: a conversation
+ * that quotes a menu is not a window offering one, and the composer is what
+ * tells them apart.
+ */
+export async function readPrompt(cwd) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+  if (composerOf(await screenOf(pane.target)) !== null) {
+    return { ok: false, code: 'no_prompt', error: 'the window is back at its composer — nothing is being asked' };
+  }
+  const options = promptOptions(await joinedScreenOf(pane.target));
+  if (!options.length) {
+    return { ok: false, code: 'no_prompt', error: 'the window is waiting on something, but it is not a list of choices' };
+  }
+  return { ok: true, options };
+}
+
 /** How long the window gets to act on an answer before we look at the result. */
 const ANSWER_CONFIRM_MS = Number(process.env.ORCH_ANSWER_CONFIRM_MS ?? 900);
 
@@ -995,7 +1048,28 @@ export async function answerPrompt(cwd, key) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
 
-  const before = menuOf(await screenOf(pane.target));
+  const beforeScreen = await screenOf(pane.target);
+  // A menu on the screen is not the same as a menu waiting to be answered.
+  //
+  // The pane shows the conversation as well as the prompt, and a conversation
+  // about permission prompts contains permission prompts: this very repo's
+  // messages quote "1. Yes / 2. Yes, and don't ask again / 3. No" as prose.
+  // menuOf cannot tell those apart, and read one as live — so an approve was
+  // reported as having failed when it had not, and the guard below would have
+  // typed a bare "1" into the composer it was written to protect.
+  //
+  // What separates them is the composer. While Claude Code is holding a
+  // question there is nowhere to type and composerOf finds no box; the moment
+  // it is answered the box is back. So the box being there means the window is
+  // idle, whatever else is on the screen.
+  if (composerOf(beforeScreen) !== null) {
+    return {
+      ok: false,
+      code: 'no_prompt',
+      error: 'the window is back at its composer, so it is not waiting on a question and nothing was sent',
+    };
+  }
+  const before = menuOf(beforeScreen);
   if (before.at < 0) {
     return {
       ok: false,

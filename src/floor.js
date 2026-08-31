@@ -266,6 +266,44 @@ const placeholderSession = (hostId, channel, agent) => `host:${hostId}:${channel
  * is the useful part — "Bash" tells you nothing, `Bash: npm test` tells you what
  * the agent is actually doing, which is the question the person watching has.
  */
+/**
+ * The window's own list of choices, sorted into the three that are always there
+ * and the rest.
+ *
+ * Approve is the first "Yes", deny the first "No", and everything else — "Yes,
+ * and don't ask again for similar commands in <dir>" and whatever a particular
+ * prompt adds — is offered on its own. Cancel is not in here: it is Escape, which
+ * no menu lists as a number, and the prompt's own footer treats as separate from
+ * "No".
+ *
+ * Derived here rather than in the panel for the usual reason — the endpoint has
+ * to agree with the buttons about which key each one presses, and two
+ * derivations of that eventually disagree.
+ */
+/**
+ * Ask the host to read the choices off the window.
+ *
+ * One capture per prompt, at the moment one opens, rather than polling every
+ * desk's pane forever for something that is almost never there. Only for a desk
+ * this board's host can actually reach — an editor holds its own window and
+ * there is no pane to look at.
+ */
+function askForOptions(store, live, channel, agent, requestId) {
+  if (!requestId) return;
+  let h = null;
+  try { h = store.hostedDesk(channel, agent); } catch { return; }
+  if (!h || h.outside_pid) return;
+  store.enqueueHostWork(h.host_id, channel, agent, 'prompt', { request_id: requestId });
+  live?.wake(h.host_id);
+}
+
+export function promptChoices(options) {
+  const list = Array.isArray(options) ? options.filter((o) => o && Number.isInteger(o.n)) : [];
+  const approve = list.find((o) => /^yes\b/i.test(o.text ?? ''))?.n ?? list[0]?.n ?? null;
+  const deny = list.find((o) => /^no\b/i.test(o.text ?? ''))?.n ?? null;
+  return { approve, deny, extras: list.filter((o) => o.n !== approve && o.n !== deny) };
+}
+
 function toolSummary(toolName, toolInput) {
   const i = toolInput && typeof toolInput === 'object' ? toolInput : {};
   const first =
@@ -418,6 +456,7 @@ export function ingestHookEvent(store, body, live = null) {
       });
       state('awaiting');
       live?.publish(key, { type: 'permission', request: live.pending.get(key) });
+      askForOptions(store, live, channel, agent, live?.pending.get(key)?.request_id);
       break;
     }
 
@@ -453,6 +492,7 @@ export function ingestHookEvent(store, body, live = null) {
           at: new Date().toISOString(),
         });
         live.publish(key, { type: 'permission', request: live.pending.get(key) });
+        askForOptions(store, live, channel, agent, live.pending.get(key).request_id);
       }
       break;
     }
@@ -603,6 +643,22 @@ function applyHostEvent(store, live, hostId, ev) {
       else if (role === 'user' || role === 'assistant') turn(role, ev.text);
       else return false;
       store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd });
+      break;
+    }
+
+    // What the window is offering, read off its pane. Attached to the prompt the
+    // operator is looking at, and only to that one: by the time this arrives the
+    // question may already have been answered and replaced.
+    case 'prompt': {
+      const req = live?.pending.get(key);
+      if (!req) break;
+      const forThis = !str(ev.request_id) || str(ev.request_id) === req.request_id;
+      if (!forThis) break;
+      req.options = Array.isArray(ev.options) ? ev.options.filter((o) => o && Number.isInteger(o.n)) : [];
+      // Why there are none, kept so the panel can say something better than
+      // offering nothing without explanation.
+      req.options_error = req.options.length ? null : (str(ev.reason) ?? null);
+      live.publish(key, { type: 'permission', request: req });
       break;
     }
 
@@ -841,7 +897,12 @@ export function buildFloor(store, live = null, sessions = null) {
             const v = stoppable(h, t, nowMs);
             return v.error ? { ok: false, code: v.code, reason: v.error } : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
           })(),
-          permission: pendingReq,
+          // The prompt, plus which of its choices are the three that always
+          // show and which get a row of their own. Sorted here so the panel and
+          // the endpoint cannot disagree about what "deny" presses.
+          permission: pendingReq
+            ? { ...pendingReq, choices: promptChoices(pendingReq.options) }
+            : null,
           session: s
             ? {
                 session_id: s.session_id,
@@ -1274,8 +1335,14 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const agent = str(req.body?.agent);
     const requestId = str(req.body?.request_id);
     const decision = str(req.body?.decision);
-    if (!channel || !agent || !requestId || !['allow', 'deny'].includes(decision)) {
-      return res.status(400).json({ error: 'channel, agent, request_id and a decision of allow or deny are required' });
+    // Three named answers and, when the board has read the window's list, any
+    // numbered choice on it. The number is validated against that list below
+    // rather than trusted: this ends as a keystroke in somebody's window.
+    const named = ['allow', 'deny', 'cancel'].includes(decision);
+    if (!channel || !agent || !requestId || !(named || /^[1-9]$/.test(decision ?? ''))) {
+      return res.status(400).json({
+        error: 'channel, agent, request_id and a decision of allow, deny, cancel or a choice number are required',
+      });
     }
     const check = hostedOrWhyNot(channel, agent);
     if (check.error) return res.status(409).json(check);
@@ -1283,6 +1350,27 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const pendingReq = live.pending.get(key);
     if (!pendingReq || pendingReq.request_id !== requestId) {
       return res.status(409).json({ error: 'That prompt is no longer open.', code: 'stale_request' });
+    }
+
+    // Turn the answer into the key the window will actually take.
+    //
+    // "No" is not always 3, and Escape is not the same as choosing it — the
+    // prompt's own footer lists them apart. So when the options have been read,
+    // approve and deny become that prompt's own numbers; when they have not,
+    // they fall back to the host's defaults, which is what happened before any
+    // of this existed.
+    const choices = promptChoices(pendingReq.options);
+    let send = decision;
+    if (decision === 'allow' && choices.approve) send = String(choices.approve);
+    else if (decision === 'deny' && choices.deny) send = String(choices.deny);
+    else if (!named) {
+      const known = (pendingReq.options ?? []).some((o) => String(o.n) === decision);
+      if (!known) {
+        return res.status(409).json({
+          error: 'that choice is not on the window any more',
+          code: 'stale_choice',
+        });
+      }
     }
 
     // One decision per prompt, taken here rather than queued once per click.
@@ -1318,11 +1406,17 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
-      request_id: requestId, decision, message: str(req.body?.message), queued_at: Date.now(),
+      request_id: requestId, decision: send, message: str(req.body?.message), queued_at: Date.now(),
     });
     live.wake(check.hosted.host_id);
-    store.logAdmin(channel, `permission.${decision}`, { target: agent, detail: pendingReq.summary });
-    res.json({ ok: true, request_id: requestId, decision });
+    // A row reading "permission.3" tells nobody anything a year later, so a
+    // numbered choice is logged by what it said.
+    const chosen = named ? null : (pendingReq.options ?? []).find((o) => String(o.n) === decision);
+    store.logAdmin(channel, `permission.${named ? decision : 'choice'}`, {
+      target: agent,
+      detail: chosen ? `${chosen.text} — ${pendingReq.summary}` : pendingReq.summary,
+    });
+    res.json({ ok: true, request_id: requestId, decision, sent: send });
   });
 
   /** Stop the current turn on a hosted desk. */

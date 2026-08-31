@@ -1947,16 +1947,27 @@
     // asked for, answered from here.
     const alertSlot = wrap.querySelector('.p-alert-slot');
     const req = canChat ? d.permission : null;
-    const alertSig = s.awaiting_kind ? `${s.awaiting_kind}|${s.awaiting_message ?? ''}|${s.awaiting_since ?? ''}|${req?.request_id ?? ''}` : '';
+    // The choices are part of what this box says, so they belong in the
+    // signature: they arrive a moment after the prompt itself — the host has to
+    // go and read them off the window — and without them here the slot is
+    // already built and never rebuilt, so the extra buttons never appear.
+    const alertSig = s.awaiting_kind
+      ? `${s.awaiting_kind}|${s.awaiting_message ?? ''}|${s.awaiting_since ?? ''}|${req?.request_id ?? ''}` +
+        `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}`
+      : '';
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = s.awaiting_kind
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
              <div><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window is waiting on you — open it to see what it is asking', 200))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
              ${req ? `<div class="p-decide">
-               <button class="btn primary" data-act="permit" data-request="${esc(req.request_id)}">Approve</button>
-               <button class="btn danger" data-act="refuse" data-request="${esc(req.request_id)}">Deny</button>
-             </div>` : ''}
+               <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
+               <button class="btn danger" data-act="decide" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
+               <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
+             </div>
+             ${(req.choices?.extras ?? []).length ? `<div class="p-more">${req.choices.extras.map((o) =>
+               `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(clip(o.text, 200))}</span></button>`).join('')}</div>` : ''}
+             ${req.options_error ? `<div class="p-more-why muted">${esc(req.options_error)}</div>` : ''}` : ''}
            </div>`
         : '';
     }
@@ -2487,18 +2498,24 @@
       render();
     } else if (act.dataset.act === 'send') {
       await sendChat();
-    } else if (act.dataset.act === 'permit' || act.dataset.act === 'refuse') {
+    } else if (act.dataset.act === 'decide') {
       // The panel is the only place these appear now, so the desk is ui.open.
       // The strip used to name its own desk on the button, which is why this
       // read a channel and an agent off the dataset.
-      // Hold the buttons while it is in flight. Clicking again cannot help,
-      // and a prompt that looks unresponsive invites exactly that.
-      const pair = act.parentElement?.querySelectorAll('[data-act="permit"],[data-act="refuse"]') ?? [act];
-      for (const b of pair) b.disabled = true;
+      //
+      // Every answer goes through one branch — the three that always show and
+      // the window's own numbered choices alike. What each one presses is the
+      // server's business, decided from the same list the buttons were drawn
+      // from; this only says which was clicked.
+      //
+      // Hold all of them while it is in flight. Clicking again cannot help, and
+      // a prompt that looks unresponsive invites exactly that.
+      const all = act.closest('.p-alert')?.querySelectorAll('[data-act="decide"]') ?? [act];
+      for (const b of all) b.disabled = true;
       try {
-        await decide(act.dataset.request, act.dataset.act === 'permit' ? 'allow' : 'deny');
+        await decide(act.dataset.request, act.dataset.choice);
       } finally {
-        for (const b of pair) b.disabled = false;
+        for (const b of all) b.disabled = false;
       }
     } else if (act.dataset.act === 'stop') {
       // Ask first. Nothing else in this panel throws work away, and a turn

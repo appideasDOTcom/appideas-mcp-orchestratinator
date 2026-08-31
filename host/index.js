@@ -68,7 +68,11 @@ const REQUEST_TIMEOUT_MS = 5_000;
  * a number is immune to the selection having been moved by whoever is sitting
  * at the window.
  */
-const ANSWER_KEY = { allow: '1', deny: 'Escape' };
+// The three that are always offered. Fallbacks only: when the board has read the
+// window's own list it sends the option's number instead, because "No" is not
+// always 3 and Escape is a different thing from choosing it — the prompt's own
+// footer says so ("3. No" beside "Esc to cancel").
+const ANSWER_KEY = { allow: '1', deny: 'Escape', cancel: 'Escape' };
 
 const log = (...a) => console.log('[host]', ...a);
 const warn = (...a) => console.warn('[host]', ...a);
@@ -212,7 +216,10 @@ class Desk {
   }
 
   async answer(decision) {
-    const key = ANSWER_KEY[decision];
+    // A number is a choice off the window's own list — "2. Yes, and don't ask
+    // again…" and whatever else this particular prompt offers. Approve, deny and
+    // cancel are the three that are always there, so they keep names.
+    const key = /^[1-9]$/.test(String(decision)) ? String(decision) : ANSWER_KEY[decision];
     if (!key) return { ok: false, error: `unknown decision ${decision}` };
     // Not sendKeys: that reports success as soon as tmux takes the key, and the
     // floor now drops a desk's prompt the moment the operator decides. See
@@ -357,6 +364,19 @@ class Host {
             message: `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
           }, true);
         }
+        break;
+      }
+      // What the window is offering. Asked for when a prompt opens rather than
+      // read on a timer: one capture per prompt instead of one per desk per
+      // poll, and it is only ever wanted at that moment.
+      case 'prompt': {
+        const r = await W.readPrompt(desk.cwd);
+        this.emit({
+          type: 'prompt', channel: desk.channel, agent: desk.agent,
+          request_id: item.payload?.request_id ?? null,
+          options: r.ok ? r.options : [],
+          reason: r.ok ? null : r.error,
+        }, true);
         break;
       }
       case 'interrupt':
