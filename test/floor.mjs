@@ -359,6 +359,14 @@ try {
       method: 'POST', headers: HK,
       body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [desk] }),
     });
+  // Applied-count returned, not just the status: this endpoint answers 200 for a
+  // batch it dropped entirely, so a test that read the status would pass on an
+  // event that never landed.
+  const hostEvents = (events) =>
+    fetch(`${HOST}/api/host/events`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-open', events }),
+    }).then((r) => r.json());
   const takeWork = () =>
     fetch(`${HOST}/api/host/work?host_id=h-open&wait=0`, { headers: HK })
       .then((r) => r.json())
@@ -431,6 +439,98 @@ try {
   eq(deskOf(f2, 'runner').working, false, 'when the turn ends the desk says so');
   eq(deskOf(f2, 'runner').stop.ok, false, 'and the sign dims with it');
   eq(deskOf(f2, 'runner').stop.code, 'not_working', 'carrying the reason the endpoint would give');
+
+  console.log('\na prompt announced only by the notification is still answerable');
+  // The state an operator got stuck in: the window was holding a permission
+  // question, the floor knew it, and the alert had no summary and no buttons —
+  // so the desk read as stuck with nothing on screen to do about it, while every
+  // message sent to that window bounced off the standing prompt.
+  //
+  // Two independent hooks announce a prompt. Only the second one arrived.
+  await register({ channel: CH, agent: 'halfheard', cwd: '/repo/halfheard', window: '@21' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'halfheard', session_id: 's-half', cwd: '/repo/halfheard' }]);
+  await post(ev('halfheard', 's-half', 'SessionStart'));
+  await post(ev('halfheard', 's-half', 'Notification', { notification_type: 'permission_prompt', notification_message: 'needs permission to run: git push' }));
+
+  let fh = await floor();
+  const half = () => deskOf(fh, 'halfheard');
+  eq(half().session.awaiting_kind, 'permission_prompt', 'the desk knows it is being asked');
+  assert(!!half().permission?.request_id, 'and has something to answer with, though no PermissionRequest ever arrived');
+  eq(half().permission.summary, 'needs permission to run: git push', 'saying what the window said');
+
+  const halfAnswer = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'halfheard', request_id: half().permission.request_id, decision: 'allow' }),
+  });
+  eq(halfAnswer.status, 200, 'and the answer is accepted like any other');
+  eq(await takeWork(), ['permission'], 'reaching the host as a keystroke');
+  fh = await floor();
+  eq(half().session.awaiting_kind, null, 'the desk stops asking');
+
+  // A notification that carries no words still has to say something.
+  await post(ev('halfheard', 's-half', 'Notification', { notification_type: 'permission_prompt' }));
+  fh = await floor();
+  assert(!!half().permission?.summary, 'a notification with no message still gives the operator a sentence, not an empty dash');
+
+  console.log('\nanswering a prompt stops the desk asking, now');
+  // The indicators the operator is looking at — the alert above the compose box,
+  // the exclamation mark on the desk, the count in the header — are all drawn
+  // from awaiting_kind. That is the hook's word, and the hook does not speak
+  // again until Claude Code has moved on: a host round trip later. Left that
+  // way, an answered prompt goes on looking unanswered, and the next one to
+  // arrive is indistinguishable from the last one you dealt with.
+  await register({ channel: CH, agent: 'asker', cwd: '/repo/asker', window: '@11' });
+  // The host says which conversation it is watching, the way a real one does.
+  // Its later events carry no session id of their own and are filed against
+  // this; without it they land on a placeholder row the floor never reads.
+  await hostEvents([{ type: 'session', channel: CH, agent: 'asker', session_id: 's-ask', cwd: '/repo/asker' }]);
+  await post(ev('asker', 's-ask', 'SessionStart'));
+  await post(ev('asker', 's-ask', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }));
+
+  let fa = await floor();
+  const askerDesk = () => deskOf(fa, 'asker');
+  eq(askerDesk().session.awaiting_kind, 'permission_request', 'the desk is asking');
+  assert(!!askerDesk().permission?.request_id, 'and carries the prompt to answer');
+  assert(fa.queue.some((q) => q.agent === 'asker'), 'and is counted among those blocking on a human');
+  const reqId = askerDesk().permission.request_id;
+
+  const answer = (request_id, decision = 'allow') =>
+    fetch(`${HOST}/api/floor/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: CH, agent: 'asker', request_id, decision }),
+    });
+
+  const wrongId = await answer('not-the-open-one');
+  eq(wrongId.status, 409, 'answering a prompt that is not the open one is refused');
+  fa = await floor();
+  eq(askerDesk().session.awaiting_kind, 'permission_request', 'and a refused answer leaves the desk asking');
+
+  const answered = await answer(reqId, 'allow');
+  eq(answered.status, 200, 'the open prompt can be answered');
+  eq(await takeWork(), ['permission'], 'and the host is handed the keystroke');
+
+  fa = await floor();
+  eq(askerDesk().session.awaiting_kind, null, 'the desk stops asking the moment the operator decides');
+  eq(askerDesk().permission, null, 'the buttons go with it');
+  eq(fa.queue.some((q) => q.agent === 'asker'), false, 'and it leaves the blocked-on-a-human list');
+
+  // Answering twice is a no-op, not a second keystroke into whatever the window
+  // is showing by then.
+  eq((await answer(reqId)).status, 409, 'the same prompt cannot be answered twice');
+  eq(await takeWork(), [], 'and the second click queues nothing');
+
+  // The one risk of clearing early: an answer the host cannot deliver would
+  // leave the window at a question the board has stopped showing. The host says
+  // so, and that puts the desk back up with the reason.
+  const reported = await hostEvents([{
+    type: 'error', channel: CH, agent: 'asker',
+    message: 'the approve never reached the window — no window for /repo/asker',
+  }]);
+  eq(reported.applied, 1, 'the host can report a failed answer');
+  fa = await floor();
+  eq(askerDesk().session.awaiting_kind, 'error', 'an answer that never landed puts the desk back up');
+  assert(String(askerDesk().session.awaiting_message).includes('never reached the window'),
+    'saying what was observed, so the operator knows to go and look');
 
   console.log('\nan interrupt marker is not the operator talking');
   // Claude Code writes `[Request interrupted by user]` into the transcript as a

@@ -1608,39 +1608,12 @@
     }
   }
 
-  /* ---------- the operator queue ---------- */
-
-  function queueHtml() {
-    if (!floor.queue.length) {
-      return '<div class="q-empty">Nobody is waiting on you.</div>';
-    }
-    return floor.queue
-      .map((q) => {
-        const mins = q.waiting_seconds ?? 0;
-        const urgent = mins > 120 ? ' urgent' : '';
-        return `
-          <div class="q-row${urgent}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">
-            <div class="q-who">
-              <span class="q-name">${esc(q.persona)}</span>
-              <span class="q-agent mono">${esc(q.channel)}/${esc(q.agent)}</span>
-            </div>
-            <div class="q-why">
-              <span class="q-kind ${esc(q.kind)}">${esc(q.kind.replace(/_/g, ' '))}</span>
-              ${q.message ? `<span class="q-msg">${esc(clip(q.message, 110))}</span>` : ''}
-            </div>
-            <div class="q-where">
-              <span class="q-win mono" title="${esc(q.cwd ?? '')}">${esc(q.window ?? '—')}</span>
-              <span class="q-age mono">${esc(ago(q.since))}</span>
-            </div>
-            ${q.hosted && q.request_id ? `
-              <button class="btn primary" data-act="permit" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Approve</button>
-              <button class="btn danger" data-act="refuse" data-request="${esc(q.request_id)}" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">Deny</button>`
-              : q.held === 'editor' ? `<span class="q-elsewhere">answer this in your editor</span>` : ''}
-            <button class="btn q-open" data-act="open" data-channel="${esc(q.channel)}" data-agent="${esc(q.agent)}">open</button>
-          </div>`;
-      })
-      .join('');
-  }
+  /* The operator queue used to be drawn here, as a red full-width strip above
+     the floor. It is gone: it sat at the top of the page while the operator's
+     attention is at the bottom, in the conversation, and it repeated an alarm
+     the desk was already raising. `floor.queue` is still on the payload — it is
+     the derived answer to "who is blocking on a human", it is what the header
+     count is counting, and the next thing to surface a prompt will want it. */
 
   /* ---------- markdown ---------- */
 
@@ -1885,9 +1858,14 @@
         <button class="btn" data-act="close-panel" title="Close">✕</button>
       </div>
       <div class="p-meta mono muted"></div>
-      <div class="p-alert-slot"></div>
       <div class="p-turns" id="p-turns"></div>
       <div class="p-compose">
+        <!-- Where the question is, not where the panel begins. It used to sit up
+             here under the meta line, above a scrolling transcript — so on any
+             conversation longer than a screen the thing waiting on you was off
+             the top while your eyes were at the bottom, in the box you type in.
+             It belongs against the box. -->
+        <div class="p-alert-slot"></div>
         <textarea id="p-text" class="input" rows="3"></textarea>
         <div class="p-actions">
           <span class="muted p-hint"></span>
@@ -1973,8 +1951,8 @@
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = s.awaiting_kind
-        ? `<div class="p-alert${req ? ' p-alert-ask' : ''}">
-             <div><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary ?? s.awaiting_message, 200))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
+        ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
+             <div><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window is waiting on you — open it to see what it is asking', 200))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
              ${req ? `<div class="p-decide">
                <button class="btn primary" data-act="permit" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="refuse" data-request="${esc(req.request_id)}">Deny</button>
@@ -2254,7 +2232,6 @@
     }
     // Ages and counts in the open card tick with everything else.
     renderDetails();
-    $('floor-queue').innerHTML = queueHtml();
     const t = floor.totals ?? {};
     $('floor-totals').textContent =
       `${t.channels ?? 0} floor${t.channels === 1 ? '' : 's'} · ${t.desks ?? 0} desk${t.desks === 1 ? '' : 's'} · ${t.live ?? 0} here · ${t.awaiting ?? 0} need you`;
@@ -2511,9 +2488,9 @@
     } else if (act.dataset.act === 'send') {
       await sendChat();
     } else if (act.dataset.act === 'permit' || act.dataset.act === 'refuse') {
-      // From the panel the desk is ui.open; from the queue the row names it.
-      if (act.dataset.channel && act.dataset.agent && !ui.open) ui.open = { channel: act.dataset.channel, agent: act.dataset.agent };
-      else if (act.dataset.channel && act.dataset.agent) ui.open = { channel: act.dataset.channel, agent: act.dataset.agent };
+      // The panel is the only place these appear now, so the desk is ui.open.
+      // The strip used to name its own desk on the button, which is why this
+      // read a channel and an agent off the dataset.
       // Hold the buttons while it is in flight. Clicking again cannot help,
       // and a prompt that looks unresponsive invites exactly that.
       const pair = act.parentElement?.querySelectorAll('[data-act="permit"],[data-act="refuse"]') ?? [act];

@@ -357,6 +357,10 @@ export function ingestHookEvent(store, body, live = null) {
       live.pending.delete(key);
       live.publish(key, { type: 'permission', request: null });
     }
+    // Work happening is the proof an answer landed, so there is nothing left to
+    // put back. Without this an old answered prompt could be resurrected by a
+    // much later failure on the same desk.
+    live?.answered.delete(key);
   }
 
   let recorded = null;
@@ -417,11 +421,41 @@ export function ingestHookEvent(store, body, live = null) {
       break;
     }
 
-    case 'Notification':
-      if (AWAITING_NOTIFICATIONS.has(str(body.notification_type))) {
-        store.setAwaiting(sessionId, body.notification_type, clip(body.notification_message, 500));
+    case 'Notification': {
+      const kind = str(body.notification_type);
+      if (!AWAITING_NOTIFICATIONS.has(kind)) break;
+      const said = clip(body.notification_message, 500);
+      store.setAwaiting(sessionId, kind, said);
+
+      // A permission prompt the floor can see but cannot answer is a dead box.
+      //
+      // Two hooks announce a prompt: PermissionRequest, which carries what is
+      // being asked and is what puts Approve/Deny on the desk, and a
+      // Notification six seconds later, which carries neither. They are
+      // independent, and when only the second arrives the floor drew an alert
+      // with no summary and no buttons — a desk visibly stuck with nothing on
+      // screen to do about it, while the window sat holding the question and
+      // refused every message sent to it.
+      //
+      // The request id exists only to notice an answer arriving for a prompt
+      // that has since closed; answering is a keystroke into the pane and needs
+      // nothing from the hook. So one is made up here. Pressing it when the
+      // window is no longer asking is safe: answerPrompt looks at the pane
+      // before it sends anything and refuses if no question is on screen.
+      if (kind === 'permission_prompt' && live && !live.pending.has(key)) {
+        live.pending.set(key, {
+          request_id: `${sessionId}:notification:${Date.now()}`,
+          tool: null,
+          // Never empty. "permission prompt —" with nothing after it tells the
+          // operator less than the desk already told them.
+          summary: said || 'the window is waiting for a permission decision',
+          message: said,
+          at: new Date().toISOString(),
+        });
+        live.publish(key, { type: 'permission', request: live.pending.get(key) });
       }
       break;
+    }
 
     case 'StopFailure':
       // An API error is not a human-blocking prompt, but it is the other way a
@@ -448,11 +482,18 @@ export function ingestHookEvent(store, body, live = null) {
 export function createLive() {
   const partial = new Map();   // deskKey -> text of the reply so far
   const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
+  // Prompts the operator has answered, kept only until the answer is known to
+  // have landed. The floor drops a desk's prompt the moment a decision is made,
+  // so if the keystroke turns out not to have taken there is nothing left to put
+  // back — unless it was kept here. See the answer_failed case in
+  // applyHostEvent, which is what puts it back.
+  const answered = new Map(); // deskKey -> { request_id, tool, summary, message, at }
   const watchers = new Map();  // deskKey -> Set<fn>
   const waiters = new Map();   // host_id -> wake fn for a held work request
   return {
     partial,
     pending,
+    answered,
     subscribe(key, fn) {
       if (!watchers.has(key)) watchers.set(key, new Set());
       watchers.get(key).add(fn);
@@ -565,11 +606,29 @@ function applyHostEvent(store, live, hostId, ev) {
       break;
     }
 
-    case 'error':
+    case 'error': {
+      // An answer that never took is not just an error to report — the window
+      // is still holding that question, so offer it again rather than leaving
+      // the operator to go and find it. The prompt was kept when they answered;
+      // this is the one thing that asks for it back.
+      const again = str(ev.code) === 'answer_failed' ? live?.answered.get(key) : null;
+      if (again) {
+        live.answered.delete(key);
+        live.pending.set(key, again);
+        live.publish(key, { type: 'permission', request: again });
+      }
       turn('error', str(ev.message) ?? 'the host reported an error');
-      store.setAwaiting(sessionId, 'error', clip(ev.message, 500));
-      state('idle');
+      // By desk, not by `sessionId`. A host event carries no session id, so the
+      // id above is whatever `hosted_desks` happens to hold — and before the
+      // host has reported which conversation it is watching, that is a
+      // placeholder. An error written there is invisible on the floor, which is
+      // the one place it has to show: this is what a decision the host could
+      // not deliver looks like, now that the desk stops asking as soon as the
+      // operator answers.
+      store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(ev.message, 500));
+      state(again ? 'awaiting' : 'idle');
       break;
+    }
 
     default:
       return false;
@@ -1235,6 +1294,28 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // themselves as a message. Clearing the prompt first makes the second
     // click a no-op instead of a stored one.
     live.pending.delete(key);
+    // Kept, not dropped: this is the only copy of the question, and if the host
+    // reports that the keystroke never took it is what gets offered again.
+    live.answered.set(key, pendingReq);
+    // And the desk stops asking, now, rather than when the window gets round to
+    // saying so.
+    //
+    // `awaiting_kind` is the hook's word, and the hook only clears it once
+    // Claude Code has actually moved on — a host round trip and a poll later.
+    // For those seconds the board kept the alert up, the exclamation mark on the
+    // desk, and the count in the header, all describing a decision that had
+    // already been made. With prompts arriving back to back that is worse than
+    // untidy: the indicator for the one you answered is indistinguishable from
+    // the one for the next, so the next goes unnoticed.
+    //
+    // Cleared here rather than in each browser so every watcher agrees, and
+    // because "someone decided" is a fact about the board, not about a tab.
+    //
+    // The risk this takes is that a decision the host cannot deliver goes quiet.
+    // That is covered at the other end: the host reports a failed answer as an
+    // error event, which raises awaiting again with what went wrong (see
+    // host/index.js, case 'permission').
+    store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
       request_id: requestId, decision, message: str(req.body?.message), queued_at: Date.now(),

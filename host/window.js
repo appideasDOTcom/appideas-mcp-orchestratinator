@@ -945,6 +945,81 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
  * permission dialog, the Escape that stops a turn. Anything a person would
  * type as a message goes through send(), which pastes it as one block.
  */
+/** How long the window gets to act on an answer before we look at the result. */
+const ANSWER_CONFIRM_MS = Number(process.env.ORCH_ANSWER_CONFIRM_MS ?? 900);
+
+/**
+ * Two menus are the same question if their options read the same. The cursor is
+ * ignored: answering moves it, and a moved cursor over unchanged options is
+ * still the same question.
+ *
+ * Exported for the same reason plannedAnswer is: this is the decision that
+ * decides whether the board tells the operator their answer failed, and it
+ * should be checkable without a tmux pane.
+ */
+export function sameQuestion(a, b) {
+  if (!a.rows.length || a.rows.length !== b.rows.length) return false;
+  return a.rows.every((line, i) => optionText(line) === optionText(b.rows[i]));
+}
+
+/**
+ * Answer a prompt in this repo's window, and find out whether it took.
+ *
+ * `sendKeys` reports success the moment tmux accepts the keystroke, which says
+ * nothing about the window. That mattered once the floor started clearing a
+ * desk's prompt as soon as the operator decided: an answer that went nowhere
+ * left the window sitting at a question the board had stopped showing, and the
+ * only thing that would raise it again was the operator going to look.
+ *
+ * There is no event to wait for. Measured on a real prompt, a standing
+ * permission request announces itself exactly twice — PermissionRequest, then
+ * one Notification six seconds later — and then says nothing for as long as it
+ * stands (33 seconds, in the run this was built from). And silence afterwards
+ * proves nothing either: PreToolUse fires *before* the decision and PostToolUse
+ * is not among the hooks we ask for, so an approved tool that runs for a minute
+ * is exactly as quiet as an answer that never arrived.
+ *
+ * So the window is asked directly, the same way waitReady asks it. Two looks,
+ * one before and one after:
+ *
+ *   - no menu before  → the prompt has already gone. Nothing is sent, which is
+ *     the point: a bare "1" typed into a composer is how a row of 1s once
+ *     arrived as somebody's message.
+ *   - the same menu after → the key did not take. Said so, with what was seen.
+ *
+ * The one thing it can misread is a window that answers a question and
+ * immediately asks an identical one. That reports a failure that did not
+ * happen, and the cost of that is a prompt offered twice — the safe direction.
+ */
+export async function answerPrompt(cwd, key) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
+
+  const before = menuOf(await screenOf(pane.target));
+  if (before.at < 0) {
+    return {
+      ok: false,
+      code: 'no_prompt',
+      error: 'the window was not showing a prompt any more, so nothing was sent',
+    };
+  }
+
+  const sent = await tmux(['send-keys', '-t', pane.target, key]);
+  if (!sent.ok) return { ok: false, error: sent.error };
+
+  await sleep(ANSWER_CONFIRM_MS);
+  const after = menuOf(await screenOf(pane.target));
+  if (sameQuestion(before, after)) {
+    return {
+      ok: false,
+      code: 'not_taken',
+      error: `the window is still showing the same prompt ${Math.round(ANSWER_CONFIRM_MS / 100) / 10}s after the key was sent — ` +
+        `it still reads "${optionText(before.rows[Math.max(0, before.at)]).slice(0, 60)}"`,
+    };
+  }
+  return { ok: true, target: pane.target };
+}
+
 export async function sendKeys(cwd, ...keys) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };

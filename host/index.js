@@ -214,7 +214,11 @@ class Desk {
   async answer(decision) {
     const key = ANSWER_KEY[decision];
     if (!key) return { ok: false, error: `unknown decision ${decision}` };
-    return W.sendKeys(this.cwd, key);
+    // Not sendKeys: that reports success as soon as tmux takes the key, and the
+    // floor now drops a desk's prompt the moment the operator decides. See
+    // answerPrompt — it looks at the window before and after, so an answer that
+    // went nowhere says so instead of passing.
+    return W.answerPrompt(this.cwd, key);
   }
 
   async interrupt() { return W.interrupt(this.cwd); }
@@ -337,7 +341,22 @@ class Host {
           break;
         }
         const r = await desk.answer(item.payload?.decision);
-        if (!r.ok) warn(`${desk.label}: could not answer the prompt — ${r.error}`);
+        if (!r.ok) {
+          warn(`${desk.label}: could not answer the prompt — ${r.error}`);
+          // Told to the board, not only to this log. The floor now clears a
+          // desk's prompt the moment the operator decides, on the strength of
+          // this keystroke being sent; if it was not sent, the window is still
+          // sitting at a question nobody can see. Reporting it raises the desk
+          // again with the reason, which is the only thing that keeps the early
+          // clear honest.
+          // What was observed, and which decision it was: the desk re-poses on
+          // this, and "your approve did not land, the window still reads X" is
+          // something a person can act on where "failed" is not.
+          this.emit({
+            type: 'error', channel: desk.channel, agent: desk.agent,
+            message: `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
+          }, true);
+        }
         break;
       }
       case 'interrupt':

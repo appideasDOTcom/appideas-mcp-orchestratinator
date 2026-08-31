@@ -855,6 +855,35 @@ export function makeStore(db) {
               updated_at = datetime('now')
         WHERE session_id = @session_id`
     ),
+    // Raise and clear addressed by *desk* rather than by session, for callers
+    // that are not the hook — the operator answering a prompt, and the host
+    // reporting that an answer never landed.
+    //
+    // Both target the newest session for the desk, which is exactly the row the
+    // floor payload reads. A host event carries no session id of its own and
+    // falls back to `hosted_desks.sdk_session_id`, which is set by a different
+    // message than the one that created the session row; when those two have not
+    // met yet it lands on a placeholder, and an error filed there is an error
+    // nobody sees.
+    setDeskAwaiting: db.prepare(
+      `UPDATE agent_sessions
+          SET awaiting_kind    = @kind,
+              awaiting_message = @message,
+              awaiting_since   = CASE WHEN awaiting_kind = @kind AND awaiting_since IS NOT NULL
+                                      THEN awaiting_since ELSE datetime('now') END,
+              updated_at       = datetime('now')
+        WHERE session_id = (SELECT session_id FROM agent_sessions
+                             WHERE channel = @channel AND agent = @agent
+                             ORDER BY updated_at DESC LIMIT 1)`
+    ),
+    clearDeskAwaiting: db.prepare(
+      `UPDATE agent_sessions
+          SET awaiting_kind = NULL, awaiting_message = NULL, awaiting_since = NULL,
+              updated_at = datetime('now')
+        WHERE session_id = (SELECT session_id FROM agent_sessions
+                             WHERE channel = @channel AND agent = @agent
+                             ORDER BY updated_at DESC LIMIT 1)`
+    ),
     endSession: db.prepare(
       `UPDATE agent_sessions
           SET ended_at = datetime('now'), awaiting_kind = NULL, awaiting_message = NULL,
@@ -1366,6 +1395,9 @@ export function makeStore(db) {
     setAwaiting: (sessionId, kind, message = null) =>
       q.setAwaiting.run({ session_id: sessionId, kind, message }).changes,
     clearAwaiting: (sessionId) => q.clearAwaiting.run({ session_id: sessionId }).changes,
+    clearDeskAwaiting: (channel, agent) => q.clearDeskAwaiting.run({ channel, agent }).changes,
+    setDeskAwaiting: (channel, agent, kind, message = null) =>
+      q.setDeskAwaiting.run({ channel, agent, kind, message }).changes,
     endSession: (sessionId) => q.endSession.run({ session_id: sessionId }).changes,
     insertTurn: (t) =>
       n(q.insertTurn.run({

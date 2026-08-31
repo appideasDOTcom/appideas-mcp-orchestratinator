@@ -118,6 +118,38 @@ async function main() {
        'nor the MCP approval');
     eq(W.composerOf('nothing on screen at all'), null, 'and a screen with no box at all is null, so the caller falls back to it');
 
+    // Whether an answer took.
+    //
+    // The floor drops a desk's prompt as soon as the operator decides, so the
+    // only thing standing between "your approve went nowhere" and silence is
+    // this comparison. Measured against a real prompt, nothing re-announces a
+    // standing one — two events six seconds apart and then 33 seconds of
+    // nothing — so there is no event to wait for and the window has to be
+    // looked at.
+    const ask = menu('Do you want to proceed?',
+      '  \u276f 1. Yes',
+      '    2. Yes, and don\u2019t ask again for touch commands',
+      '    3. No, and tell Claude what to do differently (esc)');
+    const m = (screen) => W.menuOf(screen);
+    assert(W.sameQuestion(m(ask), m(ask)), 'the same prompt still on screen is the same question — the answer did not take');
+    assert(!W.sameQuestion(m(ask), m('nothing on screen at all')),
+           'the prompt gone is not the same question — that is what an answer that took looks like');
+    assert(!W.sameQuestion(m(ask), m(box('\u276f '))),
+           'nor is a composer, which is what the window falls back to');
+    assert(!W.sameQuestion(m(ask), m(menu('Do you want to proceed?', '  \u276f 1. Yes', '    2. No'))),
+           'a different set of options is a different question, so the next prompt is not read as a failure');
+    // The cursor moves when you answer even if nothing else does. Reading that
+    // as progress would report success for an answer that only highlighted a
+    // different line — the exact bug that shipped in plannedAnswer's read-back.
+    const moved = menu('Do you want to proceed?',
+      '    1. Yes',
+      '  \u276f 2. Yes, and don\u2019t ask again for touch commands',
+      '    3. No, and tell Claude what to do differently (esc)');
+    assert(W.sameQuestion(m(ask), m(moved)),
+           'a moved cursor over the same options is still the same question, not progress');
+    assert(!W.sameQuestion(m('no menu here'), m('no menu here')),
+           'and two screens with no menu at all are not "the same question" — there is nothing to be the same');
+
     // Answering a startup question on the operator's behalf. The decision is
     // separated from the keystrokes precisely so it can be checked here: this
     // is code that presses Enter in someone's window, and the only thing
@@ -325,9 +357,76 @@ async function main() {
     const torn = await W.readTranscript(t, { after: next.offset });
     eq(torn.turns.length, 0, 'a partially written line is left for the next read');
     eq(torn.offset, next.offset, 'and the offset does not advance past it');
+    // Answering a prompt, against panes that really are showing one.
+    //
+    // The unit assertions above decide what "the same question" means; these
+    // decide whether the host can tell. A stand-in that ignores the key is the
+    // whole point — sendKeys reported success for exactly that case, and the
+    // floor now clears the desk on the strength of it.
+    const PROMPT_DIR = `${FIX}-prompt`;
+    mkdirSync(PROMPT_DIR, { recursive: true });
+    const RULE60 = '\u2500'.repeat(40);
+    const askLines = [
+      `printf '%s\\n' ${JSON.stringify(RULE60)}`,
+      `printf '%s\\n' '  Do you want to proceed?'`,
+      `printf '%s\\n' '  \u276f 1. Yes'`,
+      `printf '%s\\n' '    2. Yes, and do not ask again'`,
+      `printf '%s\\n' '    3. No, and tell Claude what to do differently (esc)'`,
+    ];
+    const pane = async (name, ...body) => {
+      const sh = `${PROMPT_DIR}/${name}.sh`;
+      writeFileSync(sh, ['#!/bin/sh', ...body].join('\n'));
+      chmodSync(sh, 0o755);
+      const dir = `${PROMPT_DIR}/${name}`;
+      mkdirSync(dir, { recursive: true });
+      await run('tmux', ['new-window', '-d', '-t', TMUX_SESSION, '-c', dir, sh]).catch(() => {});
+      await sleep(500);
+      return dir;
+    };
+
+    // Ignores the key entirely: the question is still there afterwards.
+    const deaf = await pane('deaf', ...askLines, 'sleep 30');
+    const notTaken = await W.answerPrompt(deaf, '1');
+    eq(notTaken.ok, false, 'a window that ignores the key does not report success');
+    eq(notTaken.code, 'not_taken', 'it says the answer was not taken');
+    assert(/still showing the same prompt/.test(notTaken.error ?? ''),
+           `and quotes what is on screen rather than guessing why — ${notTaken.error}`);
+
+    // Takes the key and moves on.
+    //
+    // Two things this stand-in has to get right, both learned the hard way.
+    // `stty raw` because the host sends a bare "1" with no Enter, as a person
+    // pressing a key would, and a tty in canonical mode blocks until a newline
+    // that never comes. And the question has to leave the *captured* screen,
+    // which is the last dozen lines — real Claude Code repaints its prompt away
+    // in place, checked directly against a live pane where an answered prompt
+    // left no numbered row anywhere in sixty lines of scrollback. Reproducing
+    // that repaint in a shell script is more fiction than fixture, so this
+    // scrolls it off instead: what is under test is whether the question is
+    // still on screen, not how it stopped being there.
+    const hears = await pane('hears', ...askLines,
+      'stty raw -echo', 'dd bs=1 count=1 >/dev/null 2>&1', 'stty sane',
+      // Enough to clear both halves of what screenOf captures: `-S -12` is
+      // twelve lines of history *plus the whole visible pane*, so a handful of
+      // lines scrolls nothing at all and the question stays in shot.
+      `i=0; while [ $i -lt 60 ]; do printf '%s\\n' '  running your command'; i=$((i+1)); done`,
+      'sleep 30');
+    const took = await W.answerPrompt(hears, '1');
+    assert(took.ok, `a window that acts on the key reports success — ${took.error ?? ''}`);
+
+    // Nothing to answer. Sending the key here types a bare "1" into whatever is
+    // on screen, which is how a row of 1s once arrived as somebody's message.
+    const quiet = await pane('quiet', `printf '%s\\n' ${JSON.stringify(RULE60)}`, `printf '%s\\n' '  \u276f '`, 'sleep 30');
+    const nothing = await W.answerPrompt(quiet, '1');
+    eq(nothing.ok, false, 'a window with no prompt on it is not answered at all');
+    eq(nothing.code, 'no_prompt', 'and says so, rather than pressing 1 into the composer');
+
+    const missing = await W.answerPrompt(`${PROMPT_DIR}/never-opened`, '1');
+    eq(missing.code, 'no_window', 'and a repo with no window at all is its own answer');
   } finally {
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
     rmSync(FIX, { recursive: true, force: true });
+    rmSync(`${FIX}-prompt`, { recursive: true, force: true });
   }
 
   console.log(failures ? `\nwindow: ${failures} failed` : '\nwindow: all passed');

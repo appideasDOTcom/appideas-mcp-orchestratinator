@@ -999,27 +999,7 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .envFlap { fill: none; stroke: var(--accent); stroke-width: 1.2; }
 
 /* ─── the queue ─── */
-.queue { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .q-empty { color: var(--muted); font-size: 12.5px; padding: 10px 2px; }
-.q-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(0, 2.4fr) auto auto;
-  gap: 10px; align-items: center;
-  padding: 8px 10px;
-  background: var(--block-bg);
-  border: 1px solid color-mix(in srgb, var(--block) 35%, transparent);
-  border-radius: 8px;
-}
-.q-row.urgent { border-color: var(--block); }
-.q-who { display: flex; flex-direction: column; min-width: 0; }
-.q-name { font-weight: 600; }
-.q-agent { font-size: 10.5px; color: var(--muted); }
-.q-why { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.q-kind { font-size: 10.5px; font-weight: 600; color: var(--block); text-transform: uppercase; letter-spacing: .3px; }
-.q-msg { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.q-where { display: flex; flex-direction: column; align-items: flex-end; font-size: 11px; }
-.q-win { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.q-age { color: var(--muted); }
 
 /* ─── the desk panel ─── */
 .deskpanel {
@@ -1044,11 +1024,21 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .p-persona::after { content: " \270e"; font-size: 11px; color: var(--muted); visibility: hidden; }
 .p-persona:hover::after, .p-persona:focus-visible::after { visibility: visible; }
 .p-meta { padding: 6px 10px; font-size: 11px; border-bottom: 1px solid var(--border); }
+/* The thing waiting on you, directly above the box you would type in.
+   Amber-bordered on the panel's own ground rather than filled red: it sits in
+   the operator's peripheral vision the whole time a prompt is open, and a red
+   block there reads as something having gone wrong. Nothing has gone wrong —
+   somebody is being asked a question. The border is enough to find it by. */
 .p-alert {
   padding: 8px 10px; font-size: 12px;
-  background: var(--block-bg);
-  border-bottom: 1px solid color-mix(in srgb, var(--block) 35%, transparent);
+  border: 1px solid var(--busy);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--busy) 7%, transparent);
 }
+/* An error is the one case where something has gone wrong, so it keeps the red
+   — a failed answer that looks like an ordinary question is a failed answer you
+   scroll past. */
+.p-alert.p-alert-error { border-color: var(--block); background: color-mix(in srgb, var(--block) 9%, transparent); }
 .p-turns { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
 .t-who { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; display: flex; gap: 6px; }
 .t-when { color: var(--muted); text-transform: none; letter-spacing: 0; }
@@ -1269,8 +1259,6 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 @media (max-width: 900px) {
   .floor-body { flex-direction: column; }
   .deskpanel { flex: 1 1 auto; width: 100%; max-height: 60vh; }
-  .q-row { grid-template-columns: 1fr auto; }
-  .q-why, .q-where { grid-column: 1 / -1; }
 }
 /* Invisible, but the reason a whole desk is clickable and not just its pixels. */
 .deskHit { fill: transparent; pointer-events: all; }
@@ -1333,7 +1321,6 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 
 /* Sent, but not yet in the conversation. It has to read as pending, because
    the whole point is that "accepted" and "delivered" are different things. */
-.q-elsewhere { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .t-pending { opacity: 0.55; }
 .t-pending.stale .t-when { color: var(--bad, #d97070); }
 .t-pending .t-body { border: 1px dashed var(--line); background: transparent; }
@@ -1345,8 +1332,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* A permission prompt the floor can answer. The buttons sit inside the alert
    because the decision and its reason belong in one glance. */
 .p-alert-ask { display: flex; flex-direction: column; gap: 6px; }
+/* The alert is a row in the compose stack now, so it takes the stack's gap and
+   needs no margin of its own. */
+.p-compose > .p-alert-slot:empty { display: none; }
 .p-decide { display: flex; gap: 6px; }
-.q-row .btn.primary, .q-row .btn.danger { padding: 2px 9px; }
 
 /* A hosted desk: the monitor is on, because the floor is what's on it. */
 .desk.hosted .monitor { fill: color-mix(in srgb, var(--accent) 45%, var(--surface)); }
