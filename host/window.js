@@ -554,8 +554,8 @@ async function waitIdle(target, ms = IDLE_TIMEOUT_MS) {
 
 /** What the window looks like right now, for deciding whether it is doing
  *  anything. Short, because this is asked repeatedly. */
-async function screenOf(target) {
-  const r = await tmux(['capture-pane', '-p', '-t', target, '-S', '-12']);
+async function screenOf(target, lines = 12) {
+  const r = await tmux(['capture-pane', '-p', '-t', target, '-S', `-${lines}`]);
   return r.ok ? r.out : '';
 }
 
@@ -988,14 +988,242 @@ export function promptOptions(screen) {
 export async function readPrompt(cwd) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
-  if (composerOf(await screenOf(pane.target)) !== null) {
-    return { ok: false, code: 'no_prompt', error: 'the window is back at its composer — nothing is being asked' };
+  if (!askingOf(await screenOf(pane.target))) {
+    return { ok: false, code: 'no_prompt', error: 'the window is not holding a question — nothing is being asked' };
   }
   const options = promptOptions(await joinedScreenOf(pane.target));
   if (!options.length) {
     return { ok: false, code: 'no_prompt', error: 'the window is waiting on something, but it is not a list of choices' };
   }
   return { ok: true, options };
+}
+
+/**
+ * Whether the window is holding a question, read from the line at the bottom.
+ *
+ * `composerOf` was doing this job and cannot: an AskUserQuestion draws its
+ * cursor as `\u276f 1. Alpha` with a rule below it, which is a composer by every
+ * test that function applies. A driver built on it sat through a question
+ * untouched and then fired its whole key sequence into a permission prompt.
+ *
+ * Claude Code puts a status line at the very bottom of the pane and changes it
+ * to say what the window will accept. Idle it offers to interrupt; holding a
+ * question it offers to select, to cancel, to amend. That line is *positional* —
+ * the last one on the screen — which is what makes it safe: the conversation
+ * above it quotes prompts constantly, and no amount of quoting moves the bottom
+ * line.
+ *
+ * Returns the line itself, so a caller can say what it saw.
+ */
+export function askingOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const foot = lines[lines.length - 1] ?? '';
+  // The composer's own status line. Checked first: it contains "esc", and so do
+  // the ones that mean the opposite.
+  if (/esc to interrupt/i.test(foot)) return null;
+  if (/enter to (select|confirm)|esc to cancel|tab to amend/i.test(foot)) return foot;
+  // The Submit tab has no status line of its own — it ends on its own little
+  // menu. Without this the sequence gave up at exactly the step that lands on
+  // it, which is the one step that must not be skipped, and every retry found
+  // the window already parked there and sent nothing at all.
+  const tail = lines.slice(-6).join('\n');
+  if (/ready to submit your answers/i.test(tail) && /^\s*\d+\.\s*Cancel\s*$/i.test(foot)) return foot;
+  return null;
+}
+
+/**
+ * The question on screen, as a structure.
+ *
+ * An AskUserQuestion is a small form: a strip of tabs across the top with a
+ * box per question showing whether it has been answered, the current question's
+ * text, its choices, and — on a multi-select — a checkbox per choice and a
+ * Submit row beneath them. All of it read off the pane, because no hook carries
+ * any of it.
+ *
+ * One thing is deliberately *not* read: which tab is currently showing. The
+ * active tab is marked by colour alone, and `capture-pane -p` returns none. So
+ * nothing here guesses at it — the caller walks to a known end and counts from
+ * there, which needs no colour and cannot drift.
+ */
+export function questionOf(screen) {
+  const raw = String(screen ?? '').split('\n');
+  const at = raw.findIndex((l) => /^\s*\u2190/.test(l) && /[\u2610\u2612]/.test(l));
+  if (at < 0) return null;
+
+  // `←  ☒ ProbeOne  ☐ ProbeTwo  ✔ Submit  →`, split on the runs of spaces that
+  // separate the tabs. The titles are the question headers and can contain a
+  // single space, which is why this is not a split on whitespace.
+  const tabs = [];
+  for (const piece of raw[at].trim().split(/\s{2,}/)) {
+    const m = /^([\u2610\u2612\u2714])\s*(.+)$/.exec(piece.trim());
+    if (m) tabs.push({ title: m[2].trim(), answered: m[1] === '\u2612', submit: m[1] === '\u2714' });
+  }
+
+  // A single-select draws a preview panel to the right of the choices, so every
+  // line of the list has somebody else's box on the end of it. Cut by *column*,
+  // not by box character: the panel's own text ("Notes: press n to add notes")
+  // sits inside it on lines that carry no border at all, and cutting on the
+  // border alone left that text looking like a choice's description.
+  const rest = raw.slice(at + 1);
+  const edge = rest.reduce((min, l) => {
+    const c = l.search(/[\u250c\u2502\u2514\u2510\u2518]/);
+    return c > 0 && c < min ? c : min;
+  }, Infinity);
+  const body = rest.map((l) => (edge === Infinity ? l : l.slice(0, edge)).replace(/\s+$/, ''));
+  const said = body.filter((l) => l.trim());
+  const question = said[0]?.trim() ?? null;
+
+  // The Submit tab shows what you are about to send rather than a question.
+  if (/ready to submit your answers/i.test(said.join('\n'))) {
+    return { tabs, question: 'Review your answers', kind: 'review', options: [], cursor: -1, submit: false };
+  }
+
+  const options = [];
+  let cursor = -1;
+  let submit = false;
+  let last = null;
+  for (const line of body) {
+    // A description belongs to the choice directly above it. A gap or a rule
+    // ends that — past those the screen has moved on to its own furniture.
+    if (!line.trim()) { last = null; continue; }
+    if (/^\s*[\u2500\u2190]/.test(line)) { last = null; continue; }
+    if (/^\s*Submit\s*$/.test(line)) { submit = true; last = null; continue; }
+    const m = /^(\s*)([\u276f>])?\s*(\d+)\.\s+(.*\S)\s*$/.exec(line);
+    if (m) {
+      const text = m[4].trim();
+      // Claude Code's own last item, an escape hatch into ordinary chat. Not one
+      // of the answers, and offering it as one would send the operator somewhere
+      // they did not ask to go.
+      if (/^chat about this$/i.test(text)) { last = null; continue; }
+      const box = /^\[([\s\u2714x])\]\s*(.*)$/.exec(text);
+      const opt = {
+        n: Number(m[3]),
+        text: (box ? box[2] : text).trim(),
+        checked: box ? box[1].trim() !== '' : null,
+        // The free-text choice. Claude Code always offers one; picking it turns
+        // the row into a field you type into.
+        other: /^type something$/i.test((box ? box[2] : text).trim()),
+      };
+      if (m[2]) cursor = options.length;
+      options.push(opt);
+      last = opt;
+      continue;
+    }
+    // A multi-select prints each choice's description under it. Worth keeping:
+    // it is what the operator reads to choose.
+    if (last && /^\s{2,}\S/.test(line)) {
+      last.detail = `${last.detail ? `${last.detail} ` : ''}${line.trim()}`;
+    }
+  }
+
+  return {
+    tabs,
+    question,
+    kind: options.some((o) => o.checked !== null) ? 'multi' : 'single',
+    options,
+    cursor,
+    submit,
+  };
+}
+
+/**
+ * Every question in the form, by walking the tabs.
+ *
+ * Reading takes keystrokes, because only one question is on screen at a time
+ * and which one is marked by colour the capture does not carry. So this walks:
+ * all the way left to a known end, then one Tab at a time, reading each.
+ * Navigation is the one thing that changes nothing — arrows and Tab move the
+ * view, they do not answer — so a read leaves the form exactly as it found it,
+ * apart from which tab is showing, and it finishes back at the first.
+ *
+ * Bounded by the tab strip's own count, so a strip that stops changing cannot
+ * spin this forever.
+ */
+export async function readQuestions(cwd) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+  if (!askingOf(await screenOf(pane.target))) {
+    return { ok: false, code: 'no_prompt', error: 'the window is not holding a question' };
+  }
+  const first = questionOf(await screenOf(pane.target, 34));
+  // No tab strip: this is a plain menu — a permission prompt — and walking it
+  // with Tab would be pressing keys into somebody else's widget.
+  if (!first) return { ok: false, code: 'not_a_form', error: 'the window is asking, but not with a question form' };
+  // Left as many times as there are tabs: from anywhere in the strip that lands
+  // on the first one, and pressing left at the left end does nothing.
+  for (let i = 0; i < first.tabs.length; i++) {
+    await tmux(['send-keys', '-t', pane.target, 'Left']);
+    await sleep(STEP_MS);
+  }
+  const questions = [];
+  for (let i = 0; i < first.tabs.length; i++) {
+    const q = questionOf(await screenOf(pane.target, 34));
+    if (!q) break;
+    if (q.kind === 'review') break;   // the Submit tab; there is nothing to answer on it
+    // The strip's own label for this question — its `header`, which is what the
+    // window puts on the tab and therefore what the floor should too.
+    questions.push({ ...q, tab: i, tab_title: first.tabs[i]?.title ?? null });
+    await tmux(['send-keys', '-t', pane.target, 'Tab']);
+    await sleep(STEP_MS);
+  }
+  // Back where it started, so the operator's window is not left on a tab they
+  // did not choose.
+  for (let i = 0; i < first.tabs.length; i++) {
+    await tmux(['send-keys', '-t', pane.target, 'Left']);
+    await sleep(STEP_MS);
+  }
+  return { ok: true, tabs: first.tabs, questions };
+}
+
+/** How long each step of a scripted answer is given to land before the next. */
+const STEP_MS = Number(process.env.ORCH_STEP_MS ?? 350);
+
+/**
+ * Play a sequence of keys into a question, checking before every one that the
+ * window is still asking.
+ *
+ * A permission prompt is one keystroke. An AskUserQuestion is not: measured on a
+ * real one, a digit moves the cursor on a single-select and toggles a box on a
+ * multi-select, Enter selects on the first and toggles on the second, tabs move
+ * with arrows, and Submit raises its own confirmation. Answering is a script.
+ *
+ * The check before each step is the whole safety argument. A sequence aimed at a
+ * question that has since been answered would otherwise type its digits into
+ * whatever is there — which is how this repo's own driver put "2113" into the
+ * operator's message and granted a standing permission nobody asked for.
+ */
+export async function answerQuestion(cwd, steps = []) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo', done: [] };
+  const done = [];
+  for (const step of steps) {
+    const asking = askingOf(await screenOf(pane.target));
+    if (!asking) {
+      // Past the point of submitting, the window closing is the *success*. The
+      // confirmation may be taken by the digit or by the Enter after it
+      // depending on where its cursor already sat, so whichever one lands, the
+      // other finds nothing — and that is the answer having gone through, not a
+      // failure to send it.
+      if (step.final) return { ok: true, done, closed: true };
+      return {
+        ok: false,
+        code: 'no_prompt',
+        done,
+        error: `the window stopped asking after ${done.length} of ${steps.length} step${steps.length === 1 ? '' : 's'}` +
+          `, so the rest was not sent`,
+      };
+    }
+    // `-l` sends the string literally; without it tmux reads words like "Enter"
+    // and "Up" as key names, which is right for keys and wrong for an answer
+    // somebody typed.
+    const arg = typeof step.text === 'string' ? ['-l', step.text] : [String(step.key)];
+    if (typeof step.text !== 'string' && !step.key) continue;
+    const r = await tmux(['send-keys', '-t', pane.target, ...arg]);
+    if (!r.ok) return { ok: false, error: r.error, done };
+    await sleep(step.settle ?? STEP_MS);
+    done.push(typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key));
+  }
+  return { ok: true, done, screen: await screenOf(pane.target) };
 }
 
 /** How long the window gets to act on an answer before we look at the result. */
@@ -1058,11 +1286,12 @@ export async function answerPrompt(cwd, key) {
   // reported as having failed when it had not, and the guard below would have
   // typed a bare "1" into the composer it was written to protect.
   //
-  // What separates them is the composer. While Claude Code is holding a
-  // question there is nowhere to type and composerOf finds no box; the moment
-  // it is answered the box is back. So the box being there means the window is
-  // idle, whatever else is on the screen.
-  if (composerOf(beforeScreen) !== null) {
+  // What separates them is the status line at the very bottom of the pane, which
+  // says what the window will accept — see askingOf. It is positional, so no
+  // amount of quoting above it can fake one. The composer was the first attempt
+  // at this test, and it reads an AskUserQuestion as a composer: that menu's own
+  // cursor is a `❯` with a rule below it.
+  if (!askingOf(beforeScreen)) {
     return {
       ok: false,
       code: 'no_prompt',

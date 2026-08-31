@@ -320,6 +320,85 @@ function askForOptions(store, live, channel, agent, requestId) {
   live?.wake(h.host_id);
 }
 
+/**
+ * The keys that turn a filled-in form into an answered one.
+ *
+ * Every mechanic here was measured on a real prompt, and two of them are not
+ * what you would guess:
+ *
+ *   - on a single-select a digit only *moves the cursor*; Enter is what selects,
+ *     and selecting advances to the next tab by itself;
+ *   - on a multi-select a digit *toggles that box outright* and leaves the
+ *     cursor where it was, so choices are pressed by number and Enter is never
+ *     used — there it would toggle whatever the cursor happens to be on.
+ *
+ * Positions are counted from the left end rather than detected: which tab is
+ * showing is marked by colour, and a plain capture has none. So the sequence
+ * starts by walking left past the first tab, which is a no-op once it is there.
+ *
+ * `answers` is one entry per question: { choose: [n, …], text } — the numbers
+ * are the window's own, and `text` is what to type into its free-text choice.
+ */
+export function answerSteps(questions, answers) {
+  const qs = Array.isArray(questions) ? questions : [];
+  const steps = [];
+  // To a known end. One press per tab is always enough, and pressing left at the
+  // left end does nothing.
+  for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Left' });
+
+  qs.forEach((q, i) => {
+    const a = answers?.[i] ?? {};
+    const chosen = (a.choose ?? []).filter((n) => q.options?.some((o) => o.n === n));
+    // Typing into the free-text choice means standing on it first.
+    //
+    // The thing that makes a multi-select answerable at all — a digit toggles
+    // that box and leaves the cursor alone — is exactly what breaks this: the
+    // box gets ticked, the field opens, and the words go wherever the cursor
+    // happens to be. Measured: "5. [✔] Type something" with the field empty and
+    // the cursor still on line 1.
+    //
+    // Where the cursor is cannot be read (it moves as the sequence runs), so it
+    // is normalised the same way the tabs are: to a known end, then down a
+    // counted number of rows. Pressing up at the top does nothing.
+    const wants = typeof a.text === 'string' && a.text.trim() ? a.text.trim() : null;
+    const free = wants ? q.options?.find((o) => o.other && chosen.includes(o.n)) : null;
+    const standOn = (opt) => {
+      const idx = q.options.findIndex((o) => o.n === opt.n);
+      for (let k = 0; k < (q.options?.length ?? 0); k++) steps.push({ key: 'Up' });
+      for (let k = 0; k < idx; k++) steps.push({ key: 'Down' });
+    };
+
+    if (q.kind === 'multi') {
+      for (const n of chosen) steps.push({ key: String(n) });
+      if (free) { standOn(free); steps.push({ text: wants }); }
+      // Enter would toggle the cursor's box, so the way on is Tab.
+      steps.push({ key: 'Tab' });
+    } else {
+      const n = chosen[0];
+      if (n) {
+        steps.push({ key: String(n) });
+        if (free) { standOn(free); steps.push({ text: wants }); }
+        // Selecting moves to the next tab on its own.
+        steps.push({ key: 'Enter' });
+      } else {
+        steps.push({ key: 'Tab' });
+      }
+    }
+  });
+
+  // Whatever the last question did, land on Submit and answer its confirmation.
+  //
+  // Both of the last two are marked final, because the window closes on
+  // whichever of them takes: the confirmation opens with its cursor already on
+  // "Submit answers", so the digit may take it and leave the Enter with nothing
+  // to press, or the digit may only move and the Enter takes it. Either way the
+  // form is gone afterwards, and gone is what success looks like here.
+  for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Tab' });
+  steps.push({ key: '1', final: true });
+  steps.push({ key: 'Enter', final: true });
+  return steps;
+}
+
 export function promptChoices(options) {
   const list = Array.isArray(options) ? options.filter((o) => o && Number.isInteger(o.n)) : [];
   const approve = list.find((o) => /^yes\b/i.test(o.text ?? ''))?.n ?? list[0]?.n ?? null;
@@ -473,6 +552,12 @@ export function ingestHookEvent(store, body, live = null) {
       live?.pending.set(key, {
         request_id: `${sessionId}:${body.tool_name ?? 'tool'}:${Date.parse(new Date().toISOString())}`,
         tool: str(body.tool_name) ?? 'tool',
+        // A question is a form, and the form is on the pane rather than in this
+        // event — the host has to go and read it, which takes a walk of the tabs
+        // and a second or two. Until it comes back there is nothing to show, and
+        // showing Approve/Deny/Cancel in the meantime offered an answer to a
+        // question that was not the one being asked.
+        reading: str(body.tool_name) === 'AskUserQuestion',
         summary: clip(summary, 500),
         message: clip(body.notification_message ?? body.message, 500),
         at: new Date().toISOString(),
@@ -693,10 +778,29 @@ function applyHostEvent(store, live, hostId, ev) {
     // question may already have been answered and replaced.
     case 'prompt': {
       const req = live?.pending.get(key);
-      if (!req) break;
+      if (!req) {
+        console.log(`[orchestratinator] dropped a prompt reading for ${channel}/${agent} — nothing is pending here any more`);
+        break;
+      }
       const forThis = !str(ev.request_id) || str(ev.request_id) === req.request_id;
-      if (!forThis) break;
+      if (!forThis) {
+        console.log(`[orchestratinator] dropped a prompt reading for ${channel}/${agent}` +
+          ` — it names ${String(ev.request_id).slice(-8)}, the open one is ${String(req.request_id).slice(-8)}`);
+        break;
+      }
+      if (Array.isArray(ev.questions) && ev.questions.length) {
+        console.log(`[orchestratinator] ${channel}/${agent}: a form of ${ev.questions.length} question(s) attached to the open prompt`);
+      }
       req.options = Array.isArray(ev.options) ? ev.options.filter((o) => o && Number.isInteger(o.n)) : [];
+      // An AskUserQuestion is a form rather than one menu: a tab per question,
+      // each with its own choices. Carried whole so the panel can draw all of it
+      // and the operator answers once, instead of the floor driving a terminal
+      // widget one keystroke per click.
+      req.questions = Array.isArray(ev.questions) ? ev.questions : null;
+      req.tabs = Array.isArray(ev.tabs) ? ev.tabs : null;
+      // Read, whatever came back. A form that could not be read falls through to
+      // the ordinary buttons rather than spinning for ever.
+      req.reading = false;
       // Why there are none, kept so the panel can say something better than
       // offering nothing without explanation.
       req.options_error = req.options.length ? null : (str(ev.reason) ?? null);
@@ -1459,6 +1563,54 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       detail: chosen ? `${chosen.text} — ${pendingReq.summary}` : pendingReq.summary,
     });
     res.json({ ok: true, request_id: requestId, decision, sent: send });
+  });
+
+  /**
+   * Answer a whole AskUserQuestion form in one go.
+   *
+   * Deliberately not one request per click. Answering a question is a sequence
+   * of keystrokes into a live widget — digits, Tab, Enter, typed text — and
+   * driving that a click at a time would put every intermediate state on the
+   * network, with the window free to move underneath between them. The operator
+   * fills the form in on the floor, presses once, and the host plays the whole
+   * thing with a check before every key.
+   */
+  router.post('/api/floor/answer', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    const requestId = str(req.body?.request_id);
+    const answers = Array.isArray(req.body?.answers) ? req.body.answers : null;
+    if (!channel || !agent || !requestId || !answers) {
+      return res.status(400).json({ error: 'channel, agent, request_id and an answers array are required' });
+    }
+    const check = hostedOrWhyNot(channel, agent);
+    if (check.error) return res.status(409).json(check);
+    const key = deskKey(channel, agent);
+    const pendingReq = live.pending.get(key);
+    if (!pendingReq || pendingReq.request_id !== requestId) {
+      return res.status(409).json({ error: 'That prompt is no longer open.', code: 'stale_request' });
+    }
+    if (!pendingReq.questions?.length) {
+      return res.status(409).json({ error: 'That prompt is not a question form.', code: 'not_a_form' });
+    }
+
+    const steps = answerSteps(pendingReq.questions, answers);
+    live.pending.delete(key);
+    live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
+    store.clearDeskAwaiting(channel, agent);
+    live.publish(key, { type: 'permission', request_id: requestId, decision: 'answered', resolved: true });
+    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'answer', {
+      request_id: requestId, steps, queued_at: Date.now(),
+    });
+    live.wake(check.hosted.host_id);
+    // What was chosen, in the window's own words, so the log is readable later.
+    const said = pendingReq.questions.map((q, i) => {
+      const a = answers[i] ?? {};
+      const picked = (a.choose ?? []).map((n) => q.options?.find((o) => o.n === n)?.text ?? `#${n}`);
+      return `${q.question ?? `question ${i + 1}`}: ${[...picked, a.text].filter(Boolean).join(', ') || '(nothing)'}`;
+    }).join(' · ');
+    store.logAdmin(channel, 'permission.answered', { target: agent, detail: clip(said, 500) });
+    res.json({ ok: true, request_id: requestId, steps: steps.length });
   });
 
   /** Stop the current turn on a hosted desk. */

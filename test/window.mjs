@@ -171,6 +171,116 @@ async function main() {
            'and menuOf alone cannot tell them apart — the quoted options really are numbered rows, which is why the composer has to be checked');
     assert(W.menuOf(LIVE_PROMPT).at >= 0, 'while the live one is a menu by both measures');
 
+    // Is the window holding a question at all?
+    //
+    // This is the test every keystroke is gated on, so it is the one that has to
+    // survive a conversation that quotes prompts — which this repo's does,
+    // constantly. It reads the bottom line, which quoting cannot move.
+    const ASK_SINGLE = [
+      '\u2190  \u2610 ProbeOne  \u2610 ProbeTwo  \u2714 Submit  \u2192',
+      '\u276f 1. Alpha', '  2. Bravo', '  3. Charlie',
+      'Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 n to add notes',
+    ].join('\n');
+    const ASK_MULTI = [
+      '\u2190  \u2612 ProbeOne  \u2610 ProbeTwo  \u2714 Submit  \u2192',
+      '\u276f 1. [ ] Red', '  2. [ ] Green', '  3. [\u2714] Blue', '     Submit',
+      'Enter to select \u00b7 Tab/Arrow keys to navigate \u00b7 Esc to cancel',
+    ].join('\n');
+    assert(!!W.askingOf(ASK_SINGLE), 'a single-select question is a window asking');
+    assert(!!W.askingOf(ASK_MULTI), 'so is a multi-select one');
+    assert(!!W.askingOf(LIVE_PROMPT), 'and so is a permission prompt');
+    eq(W.askingOf(QUOTED_PROMPT), null, 'a transcript quoting one is not, however much of it is on screen');
+    eq(W.askingOf('nothing at all'), null, 'nor is a screen with no status line');
+    // The Submit tab is the exception that broke a real submission: it carries
+    // no status line, ending instead on its own two-item menu. Read as "not
+    // asking", a sequence gives up at the one step that lands on it — and every
+    // retry then finds the window parked there and sends nothing at all.
+    const REVIEW_TAIL = [
+      '\u2190  \u2612 ProbeOne  \u2612 ProbeTwo  \u2714 Submit  \u2192',
+      'Review your answers',
+      ' \u25cf Probe one', '   \u2192 Bravo',
+      'Ready to submit your answers?',
+      '\u276f 1. Submit answers',
+      '  2. Cancel',
+    ].join('\n');
+    assert(!!W.askingOf(REVIEW_TAIL), 'the Submit tab is a window asking, though it has no status line');
+    eq(W.askingOf(['Ready to submit your answers?', '  2. Cancel'].join('\n')) !== null, true,
+       'recognised by what it ends with rather than by a footer it does not have');
+    eq(W.askingOf(['some prose mentioning 2. Cancel in passing', '\u23f8 manual mode on \u00b7 esc to interrupt'].join('\n')), null,
+       'and a composer still wins, whatever is quoted above it');
+    // (composerOf reads a real AskUserQuestion as a composer — its cursor is a
+    // \u276f with a rule below it — which is why this test is positional instead.
+    // Not asserted here: reproducing that needs the whole box, and the fixtures
+    // above are the parts that matter.)
+
+    // The whole form, off the pane. All three of these are real captures of this
+    // repo's own window answering a two-question probe.
+    const Q_SINGLE = [
+      "\u2190  \u2610 ProbeOne  \u2610 ProbeTwo  \u2714 Submit  \u2192",
+      "Probe one \u2014 press 2 on this one, so I can see what a digit does to a single-select.",
+      "  1. Alpha                        \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510",
+      "\u276f 2. Bravo                        \u2502 BRAVO \u2014 press 2 for this                 \u2502",
+      "  3. Charlie                      \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518",
+      "                                  Notes: press n to add notes",
+      "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "  Chat about this",
+      "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 n to add notes \u00b7 Tab to switch questions \u00b7 Esc to cancel",
+    ].join('\n');
+    const Q_MULTI = [
+      "\u2190  \u2612 ProbeOne  \u2610 ProbeTwo  \u2714 Submit  \u2192",
+      "Probe two \u2014 press 1, then 1 again, then 3, then submit.",
+      "\u276f 1. [ ] Red",
+      "  Press 1 twice here. If a digit toggles, this should end up unchecked again.",
+      "  2. [ ] Green",
+      "  Leave this one alone, so an untouched box can be compared against a touched one.",
+      "  3. [ ] Blue",
+      "  Press 3 once. If digits toggle, this should finish checked.",
+      "  4. [ ] Type something",
+      "     Submit",
+      "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "  5. Chat about this",
+    ].join('\n');
+    const Q_REVIEW = [
+      "\u2190  \u2612 ProbeOne  \u2612 ProbeTwo  \u2714 Submit  \u2192",
+      "Review your answers",
+      " \u25cf Probe one \u2014 press 2 on this one, so I can see what a digit does to a single-select.",
+      "   \u2192 Bravo",
+      " \u25cf Probe two \u2014 press 1, then 1 again, then 3, then submit.",
+      "   \u2192 Blue",
+      "Ready to submit your answers?",
+      "\u276f 1. Submit answers",
+      "  2. Cancel",
+    ].join('\n');
+
+    const qs = W.questionOf(Q_SINGLE);
+    eq(qs.kind, 'single', 'a question with no checkboxes is a single-select');
+    eq(qs.tabs.map((t) => `${t.title}${t.answered ? '\u2713' : ''}${t.submit ? '*' : ''}`), ['ProbeOne', 'ProbeTwo', 'Submit*'],
+       'the tab strip is read, with which questions are answered and which one submits');
+    eq(qs.options.map((o) => o.text), ['Alpha', 'Bravo', 'Charlie'], 'the choices, without their numbers');
+    eq(qs.cursor, 1, 'and where the cursor is sitting');
+    eq(qs.submit, false, 'a single-select has no Submit row of its own');
+    // The preview panel to the right, and Claude Code's own trailing item, are
+    // furniture rather than choices. Both used to arrive attached to Charlie.
+    assert(qs.options.every((o) => !o.detail), 'nothing from the preview panel is mistaken for a choice\u2019s description');
+    assert(!qs.options.some((o) => /chat about this/i.test(o.text)), 'and "Chat about this" is not offered as an answer');
+
+    const qm = W.questionOf(Q_MULTI);
+    eq(qm.kind, 'multi', 'checkboxes make it a multi-select');
+    eq(qm.options.map((o) => [o.n, o.text, o.checked]),
+       [[1, 'Red', false], [2, 'Green', false], [3, 'Blue', false], [4, 'Type something', false]],
+       'every box is read with its number and its state');
+    eq(qm.options.filter((o) => o.other).map((o) => o.n), [4], 'the free-text choice is marked as such rather than left looking ordinary');
+    eq(qm.submit, true, 'and the Submit row is seen');
+    assert(/digit toggles/.test(qm.options[0].detail ?? ''), 'a choice keeps the description printed under it');
+    eq(qs.tabs[0].answered, false, 'an unanswered question reads unanswered');
+    eq(qm.tabs[0].answered, true, 'and an answered one reads answered');
+
+    const qr = W.questionOf(Q_REVIEW);
+    eq(qr.kind, 'review', 'the Submit tab is a review, not a question');
+    eq(qr.options.length, 0, 'with nothing to choose on it');
+
+    eq(W.questionOf('no tab strip here'), null, 'and a screen that is not a question at all is null');
+
     // Reading what the window is offering.
     //
     // No hook carries the choices — the board learns them only by looking. The
@@ -440,6 +550,11 @@ async function main() {
       `printf '%s\\n' '  \u276f 1. Yes'`,
       `printf '%s\\n' '    2. Yes, and do not ask again'`,
       `printf '%s\\n' '    3. No, and tell Claude what to do differently (esc)'`,
+      // The status line Claude Code keeps at the bottom of the pane. Not
+      // decoration: it is how askingOf tells a window holding a question from
+      // one idling under a transcript that quotes one, and a fixture without it
+      // is a window that does not exist.
+      `printf '%s\\n' '  Esc to cancel \u00b7 Tab to amend \u00b7 ctrl+e to explain'`,
     ];
     const pane = async (name, ...body) => {
       const sh = `${PROMPT_DIR}/${name}.sh`;
@@ -515,7 +630,10 @@ async function main() {
       `printf '%s\\n' ${JSON.stringify('    2. ' + LONG)}`,
       `printf '%s\\n' '    3. No'`,
       `printf '%s\\n' '  Esc to cancel \u00b7 Tab to amend'`,
-      'sleep 30');
+      // No echo, because Claude Code has none: a cooked tty prints every key
+      // back onto the pane, which moves the bottom line and makes the window
+      // look like it stopped asking half way through a sequence.
+      'stty raw -echo', 'sleep 30');
     const read = await W.readPrompt(offering);
     assert(read.ok, `a window holding a question gives up its choices — ${read.error ?? ''}`);
     eq(read.options?.map((o) => o.n), [1, 2, 3], 'all of them');
@@ -523,6 +641,29 @@ async function main() {
 
     const nothingOffered = await W.readPrompt(talking);
     eq(nothingOffered.code, 'no_prompt', 'a window back at its composer offers nothing, whatever is quoted above it');
+
+    // Playing a sequence, and refusing to play one into a window that stopped
+    // asking part way through. A permission prompt is one keystroke; a question
+    // is a script, and a script aimed at the wrong moment types its digits into
+    // whatever is there.
+    const seq = await W.answerQuestion(offering, [{ key: '2' }, { key: '3' }]);
+    assert(seq.ok, `a live question takes a sequence — ${seq.error ?? ''}`);
+    eq(seq.done, ['2', '3'], 'and reports what it pressed, in order');
+
+    const intoNothing = await W.answerQuestion(talking, [{ key: '1' }, { key: 'Enter' }]);
+    eq(intoNothing.ok, false, 'a window that is not asking takes nothing');
+    eq(intoNothing.done, [], 'not even the first step');
+    eq(intoNothing.code, 'no_prompt', 'and says why');
+
+    // Past the point of submitting, the window closing is success rather than
+    // failure: the confirmation may be taken by the digit or by the Enter after
+    // it, and whichever lands, the other finds nothing.
+    const closes = await W.answerQuestion(talking, [{ key: '1', final: true }, { key: 'Enter', final: true }]);
+    assert(closes.ok, 'a final step meeting a closed window is the answer having gone through');
+    eq(closes.closed, true, 'and says so, rather than reporting what it did not press');
+
+    const nowhere = await W.answerQuestion(`${PROMPT_DIR}/never-opened`, [{ key: '1' }]);
+    eq(nowhere.code, 'no_window', 'and a repo with no window is its own answer');
 
     const missing = await W.answerPrompt(`${PROMPT_DIR}/never-opened`, '1');
     eq(missing.code, 'no_window', 'and a repo with no window at all is its own answer');

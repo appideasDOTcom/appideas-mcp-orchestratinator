@@ -844,7 +844,16 @@ export function makeStore(db) {
       `UPDATE agent_sessions
           SET awaiting_kind    = @kind,
               awaiting_message = @message,
-              awaiting_since   = CASE WHEN awaiting_kind = @kind AND awaiting_since IS NOT NULL
+              -- One prompt announces itself twice under two different names —
+              -- PermissionRequest, then a permission_prompt notification about
+              -- six seconds later — and counting those as two waits restarted
+              -- the clock, so every prompt's age read six seconds short. Same
+              -- wait, so same start.
+              awaiting_since   = CASE WHEN awaiting_since IS NOT NULL AND (
+                                        awaiting_kind = @kind
+                                        OR (awaiting_kind IN ('permission_request', 'permission_prompt')
+                                            AND @kind IN ('permission_request', 'permission_prompt'))
+                                      )
                                       THEN awaiting_since ELSE datetime('now') END,
               updated_at       = datetime('now')
         WHERE session_id = @session_id`
@@ -869,7 +878,16 @@ export function makeStore(db) {
       `UPDATE agent_sessions
           SET awaiting_kind    = @kind,
               awaiting_message = @message,
-              awaiting_since   = CASE WHEN awaiting_kind = @kind AND awaiting_since IS NOT NULL
+              -- One prompt announces itself twice under two different names —
+              -- PermissionRequest, then a permission_prompt notification about
+              -- six seconds later — and counting those as two waits restarted
+              -- the clock, so every prompt's age read six seconds short. Same
+              -- wait, so same start.
+              awaiting_since   = CASE WHEN awaiting_since IS NOT NULL AND (
+                                        awaiting_kind = @kind
+                                        OR (awaiting_kind IN ('permission_request', 'permission_prompt')
+                                            AND @kind IN ('permission_request', 'permission_prompt'))
+                                      )
                                       THEN awaiting_since ELSE datetime('now') END,
               updated_at       = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions

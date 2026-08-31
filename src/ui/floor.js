@@ -23,6 +23,10 @@
   const SVG = 'http://www.w3.org/2000/svg';
 
   const POLL_MS = 2000;
+  /* How long a question may be "being read" before the panel stops waiting for
+     the host and offers the ordinary buttons instead. Reading walks the window's
+     tabs, which is a second or two; this is generous against that. */
+  const READ_GIVE_UP_MS = 12_000;
   /* Moving a conversation between apps is the host's work, not the POST's. It
      closes a tmux window and opens the editor, or opens a window and waits for
      Claude Code to come up — up to READY_TIMEOUT_MS (45s) on the host — and the
@@ -521,6 +525,88 @@
     const top = below + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 8) : below;
     pop.style.left = `${Math.round(left)}px`;
     pop.style.top = `${Math.round(top)}px`;
+  }
+
+  /* ---------- a question the window is asking ---------- */
+
+  /**
+   * An AskUserQuestion, as a form.
+   *
+   * Every question is drawn at once and all but one hidden, rather than one
+   * rendered at a time. The panel redraws on a poll; a form whose answers lived
+   * in script state would need that state carefully preserved, and a form whose
+   * questions were built on demand would lose the ones not on screen. Built once
+   * and hidden with a class, the operator's ticks live in the DOM, which is
+   * exactly as durable as the box around them.
+   *
+   * Tabs across the top because that is what you asked for and, as it turns out,
+   * what the window itself does — the terminal draws the same strip, so the two
+   * surfaces read the same way.
+   */
+  function askHtml(req) {
+    const qs = req.questions ?? [];
+    const tabs = qs.map((q, i) =>
+      `<button type="button" class="p-tab${i === 0 ? ' on' : ''}" data-act="ask-tab" data-q="${i}">${esc(clip(q.tab_title || q.question || `Question ${i + 1}`, 28))}</button>`).join('');
+    const body = qs.map((q, i) => {
+      const multi = q.kind === 'multi';
+      const opts = (q.options ?? []).map((o) => `
+        <label class="p-opt">
+          <input type="${multi ? 'checkbox' : 'radio'}" name="q${i}" value="${esc(String(o.n))}"${o.other ? ' data-other="1"' : ''}>
+          <span class="p-opt-text">${esc(o.text)}${o.detail ? `<span class="p-opt-detail">${esc(clip(o.detail, 160))}</span>` : ''}</span>
+        </label>`).join('');
+      // The free-text field belongs to the choice that opens it, and is no use
+      // until that choice is ticked — in the window the field does not exist
+      // until then either.
+      const other = (q.options ?? []).some((o) => o.other)
+        ? `<input class="input p-other" type="text" placeholder="Type your own answer\u2026" disabled>`
+        : '';
+      return `<div class="p-q${i === 0 ? '' : ' hidden'}" data-q="${i}">
+        <div class="p-qtext">${esc(q.question ?? '')}</div>
+        ${opts}${other}
+      </div>`;
+    }).join('');
+    return `<div class="p-ask" data-request="${esc(req.request_id)}">
+      <div class="p-tabs">${tabs}</div>
+      ${body}
+      <div class="p-ask-warn hidden">\u26a0 You have not answered all questions</div>
+      <div class="p-ask-foot">
+        <button type="button" class="btn primary" data-act="ask-submit">${qs.length > 1 ? 'Submit all answers' : 'Submit answers'}</button>
+        <button type="button" class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}"
+                title="The same as pressing Escape in the window">Cancel</button>
+      </div>
+    </div>`;
+  }
+
+  /**
+   * The same warning the window gives, in the same words.
+   *
+   * Claude Code's review screen says "You have not answered all questions" and
+   * still lets you submit. Measured, not assumed — a partly-filled form went
+   * through and came back with one answer missing. So the floor warns and does
+   * not block either: matching what an operator is already used to beats being
+   * stricter than the thing we are a second door onto.
+   */
+  function askWarn(form) {
+    const qs = [...form.querySelectorAll('.p-q')];
+    const done = qs.filter((q) => q.querySelector('input:checked')).length;
+    const warn = form.querySelector('.p-ask-warn');
+    if (!warn) return;
+    warn.classList.toggle('hidden', done === qs.length);
+    // Counted, because "you have not answered all questions" under a form
+    // showing one of them does not say which. The button above says it submits
+    // all of them; this says how many of them have anything in them.
+    warn.textContent = `\u26a0 ${done} of ${qs.length} answered \u2014 you can still submit`;
+  }
+
+  /** Read the form back. Only the free text of a choice that was actually ticked. */
+  function askAnswers(form) {
+    return [...form.querySelectorAll('.p-q')].map((q) => {
+      const choose = [...q.querySelectorAll('input[type="radio"]:checked,input[type="checkbox"]:checked')]
+        .map((i) => Number(i.value));
+      const otherBox = q.querySelector('input[data-other="1"]');
+      const text = otherBox?.checked ? (q.querySelector('.p-other')?.value ?? '') : '';
+      return { choose, text };
+    });
   }
 
   /* ---------- saved prompts ---------- */
@@ -1951,16 +2037,40 @@
     // signature: they arrive a moment after the prompt itself — the host has to
     // go and read them off the window — and without them here the slot is
     // already built and never rebuilt, so the extra buttons never appear.
-    const alertSig = s.awaiting_kind
-      ? `${s.awaiting_kind}|${s.awaiting_message ?? ''}|${s.awaiting_since ?? ''}|${req?.request_id ?? ''}` +
-        `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}`
-      : '';
+    // What the box is *for*, not everything currently true about it.
+    //
+    // One prompt announces itself twice, six seconds apart, and the second
+    // announcement changes both the kind and the message. With those in the key,
+    // the box was rebuilt underneath whoever was filling it in and every tick
+    // went with it — once, a few seconds in, which is why a second attempt
+    // always worked. A form is identified by the question it is asking and
+    // nothing else.
+    // Reading is a state with a deadline. A host that never comes back would
+    // otherwise leave a spinner where the answer should be, and no way to say
+    // no — so past this it falls through to the ordinary buttons, which is what
+    // was there before any of this and is at least something to press.
+    const reading = !!req?.reading && Date.now() - Date.parse(req.at ?? 0) < READ_GIVE_UP_MS;
+    const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
+    const alertSig = !s.awaiting_kind
+      ? ''
+      : req?.questions?.length
+        ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
+        : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}`;
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = s.awaiting_kind
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
-             <div><b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window is waiting on you — open it to see what it is asking', 200))} <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
-             ${req ? `<div class="p-decide">
+             <div>${req?.questions?.length
+               // "permission request — AskUserQuestion" is the hook's words for
+               // what the tool is called. What it is, to the person reading it,
+               // is a question.
+               ? `<b>${req.questions.length === 1 ? 'A question for you' : `${req.questions.length} questions for you`}</b>`
+               : `<b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window is waiting on you — open it to see what it is asking', 200))}`
+             } <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
+             ${req?.questions?.length ? askHtml(req) : ''}
+             ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question from the window\u2026</div>` : ''}
+             ${req && !req.questions?.length && !reading ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="decide" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
@@ -2044,6 +2154,8 @@
       .toggle('hidden', toVsc.classList.contains('hidden') && toFloor.classList.contains('hidden'));
     // After setLinkBusy, so the label is back before flash() borrows it.
     if (failed) flash(wrap.querySelector(`[data-act="${pending.act}"]`), failed);
+    const askForm = wrap.querySelector('.p-ask');
+    if (askForm) askWarn(askForm);
     wrap.querySelector('.p-compose').classList.toggle('held', held);
     // The hint says exactly what will happen, because a Send button that
     // sometimes can't is worse than one that says why.
@@ -2498,6 +2610,35 @@
       render();
     } else if (act.dataset.act === 'send') {
       await sendChat();
+    } else if (act.dataset.act === 'ask-tab') {
+      const form = act.closest('.p-ask');
+      const want = act.dataset.q;
+      for (const t of form.querySelectorAll('.p-tab')) t.classList.toggle('on', t.dataset.q === want);
+      for (const q of form.querySelectorAll('.p-q')) q.classList.toggle('hidden', q.dataset.q !== want);
+    } else if (act.dataset.act === 'ask-submit') {
+      const form = act.closest('.p-ask');
+      const answers = askAnswers(form);
+      if (!answers.some((a) => a.choose.length)) {
+        flash(act, 'nothing chosen yet');
+        return;
+      }
+      for (const b of form.querySelectorAll('button')) b.disabled = true;
+      try {
+        const r = await fetch('./api/floor/answer', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...ui.open, request_id: form.dataset.request, answers }),
+        });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          flash(act, String(body.error ?? `that didn't send (${r.status})`).slice(0, 60));
+          for (const b of form.querySelectorAll('button')) b.disabled = false;
+        }
+      } catch (err) {
+        flash(act, String(err.message).slice(0, 60));
+        for (const b of form.querySelectorAll('button')) b.disabled = false;
+      }
+      tick();
     } else if (act.dataset.act === 'decide') {
       // The panel is the only place these appear now, so the desk is ui.open.
       // The strip used to name its own desk on the button, which is why this
@@ -2712,6 +2853,22 @@
     renderPanel();
     flash($('floor-panel').querySelector(`[data-act="${act}"]`), message);
   }
+
+  // The free-text field is only live while the choice that opens it is ticked —
+  // in the window that field does not exist until then either. Delegated,
+  // because the form is rebuilt whenever a new question arrives.
+  document.addEventListener('change', (e) => {
+    const box = e.target.closest?.('.p-q input[type="radio"],.p-q input[type="checkbox"]');
+    if (!box) return;
+    const q = box.closest('.p-q');
+    askWarn(box.closest('.p-ask'));
+    const other = q.querySelector('input[data-other="1"]');
+    const field = q.querySelector('.p-other');
+    if (!field) return;
+    field.disabled = !other?.checked;
+    if (!field.disabled) field.focus();
+    else field.value = '';
+  });
 
   document.addEventListener('keydown', (e) => {
     if (!ui.on) return;

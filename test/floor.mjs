@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -449,6 +449,32 @@ try {
   eq(deskOf(f2, 'runner').stop.ok, false, 'and the sign dims with it');
   eq(deskOf(f2, 'runner').stop.code, 'not_working', 'carrying the reason the endpoint would give');
 
+  console.log('\none prompt, one clock');
+  // A prompt announces itself twice under two names, six seconds apart. Counted
+  // as two waits the clock restarted, so every prompt's age read six seconds
+  // short — which matters because the age is what tells an operator a prompt
+  // has been sitting there.
+  await register({ channel: CH, agent: 'ticker', cwd: '/repo/ticker', window: '@41' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'ticker', session_id: 's-tick', cwd: '/repo/ticker' }]);
+  await post(ev('ticker', 's-tick', 'SessionStart'));
+  await post(ev('ticker', 's-tick', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }));
+  let ft = await floor();
+  const startedAt = deskOf(ft, 'ticker').session.awaiting_since;
+  assert(!!startedAt, 'the wait has a start');
+
+  await sleep(1100);
+  await post(ev('ticker', 's-tick', 'Notification', { notification_type: 'permission_prompt', notification_message: 'still waiting' }));
+  ft = await floor();
+  eq(deskOf(ft, 'ticker').session.awaiting_kind, 'permission_prompt', 'the second announcement changes what it is called');
+  eq(deskOf(ft, 'ticker').session.awaiting_since, startedAt, 'but not when it started — it is the same wait under another name');
+
+  // A genuinely different wait still starts its own clock.
+  await post(ev('ticker', 's-tick', 'StopFailure', { error_message: 'the turn died' }));
+  ft = await floor();
+  eq(deskOf(ft, 'ticker').session.awaiting_kind, 'error', 'a different kind of wait is a different kind');
+  assert(deskOf(ft, 'ticker').session.awaiting_since !== startedAt, 'and starts its own clock');
+  await takeWork();
+
   console.log('\na prompt announced only by the notification is still answerable');
   // The state an operator got stuck in: the window was holding a permission
   // question, the floor knew it, and the alert had no summary and no buttons —
@@ -509,6 +535,63 @@ try {
   eq(half().permission, null, 'nor rebuild the prompt that was just answered');
   eq(await takeWork(), [], 'and it asks the host for nothing');
 
+
+  console.log('\nturning a filled-in form into keystrokes');
+  {
+    // Every mechanic below was measured on a real AskUserQuestion, and two are
+    // the opposite of the obvious guess. On a single-select a digit only moves
+    // the cursor and Enter selects; on a multi-select a digit toggles the box
+    // outright and Enter would toggle whatever the cursor sits on instead.
+    const single = { kind: 'single', question: 'Which one?', options: [{ n: 1, text: 'Alpha' }, { n: 2, text: 'Bravo' }] };
+    const multi = {
+      kind: 'multi', question: 'Which ones?',
+      options: [{ n: 1, text: 'Red' }, { n: 2, text: 'Green' }, { n: 3, text: 'Type something', other: true }],
+    };
+    const keys = (st) => st.map((x) => x.key ?? `text:${x.text}`);
+
+    const one = answerSteps([single], [{ choose: [2] }]);
+    assert(keys(one).slice(0, 2).every((k) => k === 'Left'), 'it walks to a known end first, because which tab is showing is only marked in colour');
+    assert(keys(one).includes('2'), 'the choice is pressed by the window\u2019s own number');
+    assert(keys(one).indexOf('Enter') > keys(one).indexOf('2'), 'and Enter comes after it, because on a single-select the digit only moves the cursor');
+
+    const many = answerSteps([multi], [{ choose: [1, 2] }]);
+    const body = keys(many).filter((k) => k !== 'Left');
+    eq(body.slice(0, 3), ['1', '2', 'Tab'], 'a multi-select presses each box by number and moves on with Tab, never Enter');
+
+    const typed = keys(answerSteps([multi], [{ choose: [3], text: 'something else entirely' }]));
+    assert(typed.includes('text:something else entirely'), 'the free-text choice is followed by the words to type');
+    assert(typed.indexOf('3') < typed.indexOf('text:something else entirely'),
+      'after selecting it, not before — the field does not exist until the box is ticked');
+    // Measured the hard way: a digit ticks the box without moving the cursor, so
+    // the field opens under a cursor that is somewhere else and the words go
+    // wherever it is. It has to be stood on first, and where it is cannot be
+    // read, so it is normalised — up to the top, then down a counted number.
+    const stand = typed.slice(typed.indexOf('3') + 1, typed.indexOf('text:something else entirely'));
+    assert(stand.length > 0, 'the cursor is moved onto the free-text row before anything is typed');
+    assert(stand.filter((k) => k === 'Up').length >= 3, 'walked to the top first, because where the cursor sits cannot be read');
+    eq(stand.filter((k) => k === 'Down').length, 2, 'then down to that row — the third of three');
+
+    // Nothing typed means nothing to stand on.
+    const plain = keys(answerSteps([multi], [{ choose: [1] }]));
+    assert(!plain.includes('Up') && !plain.includes('Down'), 'a choice with no free text moves no cursor at all');
+    // Text without its box ticked is not typed into a field that never opened.
+    const orphan = keys(answerSteps([multi], [{ choose: [1], text: 'stray' }]));
+    assert(!orphan.some((k) => k.startsWith('text:')), 'and text is dropped unless the choice that opens the field was chosen');
+
+    // Submitting is its own confirmation: the Submit tab, then Enter, then "1".
+    const end = answerSteps([single, multi], [{ choose: [1] }, { choose: [2] }]).slice(-2);
+    eq(keys(end), ['1', 'Enter'], 'the sequence ends by confirming on the Submit tab');
+    assert(end.every((st) => st.final), 'and both are marked final, because the window closes on whichever of them takes');
+
+    // A question left unanswered is stepped past rather than guessed at.
+    const skipped = keys(answerSteps([single, multi], [{}, { choose: [1] }]));
+    assert(!skipped.includes('Enter') || skipped.indexOf('Tab') < skipped.indexOf('1'),
+      'an unanswered question is passed over, not answered on the operator\u2019s behalf');
+
+    // A number the window never offered is dropped rather than pressed.
+    const bogus = keys(answerSteps([single], [{ choose: [9] }]));
+    assert(!bogus.includes('9'), 'a choice the window does not have is never pressed');
+  }
 
   console.log('\nthe window\u2019s own choices');
   {

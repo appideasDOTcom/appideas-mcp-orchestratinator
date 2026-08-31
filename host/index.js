@@ -370,13 +370,48 @@ class Host {
       // read on a timer: one capture per prompt instead of one per desk per
       // poll, and it is only ever wanted at that moment.
       case 'prompt': {
-        const r = await W.readPrompt(desk.cwd);
+        // Two shapes arrive here. A permission prompt is one flat menu; an
+        // AskUserQuestion is a form with a tab per question, and only one of
+        // them is on screen at a time. The tab strip is what tells them apart,
+        // and reading a form costs a walk, so it is only done when there is one.
+        const form = await W.readQuestions(desk.cwd);
+        const isForm = form.ok && form.questions?.length;
+        const r = isForm ? form : await W.readPrompt(desk.cwd);
+        // Said out loud, because a form that never reaches the panel is
+        // indistinguishable from one that was never read — and the panel falls
+        // back to Approve/Deny, which looks like a working answer to the wrong
+        // question.
+        log(`${desk.channel}/${desk.agent}: read ${isForm
+          ? `a form of ${form.questions.length} question(s): ${form.questions.map((q) => `${q.tab_title ?? '?'}[${q.kind},${(q.options ?? []).length}]`).join(' ')}`
+          : `${(r.options ?? []).length} option(s)${r.ok ? '' : ` — ${r.error}`}`}`);
         this.emit({
           type: 'prompt', channel: desk.channel, agent: desk.agent,
           request_id: item.payload?.request_id ?? null,
-          options: r.ok ? r.options : [],
+          options: isForm ? [] : (r.ok ? r.options : []),
+          questions: isForm ? form.questions : null,
+          tabs: isForm ? form.tabs : null,
           reason: r.ok ? null : r.error,
         }, true);
+        break;
+      }
+      // A whole form, played as one sequence. The board worked out the keys from
+      // the same reading of the pane the panel was drawn from; the host's job is
+      // to press them and to stop the moment the window is no longer asking.
+      case 'answer': {
+        const steps = Array.isArray(item.payload?.steps) ? item.payload.steps : [];
+        const age = Date.now() - (Number(item.payload?.queued_at) || 0);
+        if (item.payload?.queued_at && age > ANSWER_TTL_MS) {
+          warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old answer — the question is long gone`);
+          break;
+        }
+        const r = await W.answerQuestion(desk.cwd, steps);
+        if (!r.ok) {
+          warn(`${desk.label}: could not answer the question — ${r.error}`);
+          this.emit({
+            type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed',
+            message: `your answers did not land — ${r.error}`,
+          }, true);
+        }
         break;
       }
       case 'interrupt':
