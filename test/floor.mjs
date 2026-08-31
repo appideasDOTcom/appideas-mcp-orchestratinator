@@ -116,6 +116,15 @@ try {
   await post(ev('pro', 's2', 'Notification', { notification_type: 'auth_success', notification_message: 'signed in' }));
   eq((await floor()).queue.length, 0, 'and news that is not a blocker stays out of the queue');
 
+  // An idle composer is not a question. Claude Code says so after sixty seconds
+  // of quiet, which is the resting state of every agent waiting to be told what
+  // is next — so it lit the desk and put an alert above the compose box with
+  // nothing on it to press, and read as a desk that was stuck.
+  await post(ev('pro', 's2', 'Notification', { notification_type: 'idle_prompt', notification_message: 'Claude is waiting for your input' }));
+  f = await floor();
+  eq(f.queue.length, 0, 'an agent idling with nothing to do is not blocked on a human');
+  eq(deskOf(f, 'pro').session.awaiting_kind, null, 'and its desk raises nothing');
+
   await post(ev('pro', 's2', 'Notification', { notification_type: 'permission_prompt', notification_message: 'needs permission to run: git push' }));
   f = await floor();
   eq(f.queue.length, 1, 'a permission prompt puts exactly one person in the queue');

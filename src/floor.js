@@ -101,7 +101,19 @@ const CHAT_MAX = 20_000;
  * dialog closing — is news, not a queue item, and putting it in the operator's
  * list would train them to ignore the list.
  */
-const AWAITING_NOTIFICATIONS = new Set(['permission_prompt', 'idle_prompt']);
+/**
+ * Notifications that mean a human is the blocker.
+ *
+ * `idle_prompt` used to be in here and is not a blocker: Claude Code fires it
+ * after sixty seconds of an idle composer, which is the resting state of every
+ * agent that has finished and is waiting to be told what is next. Treated as a
+ * prompt it lit the desk, raised the alert above the compose box, and offered
+ * nothing to press — a question mark over a desk that had simply gone quiet
+ * while somebody read it. There is nothing to answer and nowhere to go; the
+ * composer immediately below the alert is the answer, and the desk's own idle
+ * state and speech bubble already say the agent is waiting.
+ */
+const AWAITING_NOTIFICATIONS = new Set(['permission_prompt']);
 
 /**
  * Events that prove a human is no longer the blocker, because work happened.
