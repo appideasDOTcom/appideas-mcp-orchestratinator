@@ -477,10 +477,38 @@ try {
   fh = await floor();
   eq(half().session.awaiting_kind, null, 'the desk stops asking');
 
-  // A notification that carries no words still has to say something.
-  await post(ev('halfheard', 's-half', 'Notification', { notification_type: 'permission_prompt' }));
+  // A notification that carries no words still has to say something. On a desk
+  // of its own: after an answer, a notification on the same desk is an echo and
+  // is deliberately ignored, which is the next thing tested below.
+  await register({ channel: CH, agent: 'wordless', cwd: '/repo/wordless', window: '@23' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'wordless', session_id: 's-word', cwd: '/repo/wordless' }]);
+  await post(ev('wordless', 's-word', 'SessionStart'));
+  await post(ev('wordless', 's-word', 'Notification', { notification_type: 'permission_prompt' }));
   fh = await floor();
-  assert(!!half().permission?.summary, 'a notification with no message still gives the operator a sentence, not an empty dash');
+  assert(!!deskOf(fh, 'wordless').permission?.summary,
+    'a notification with no message still gives the operator a sentence, not an empty dash');
+  await takeWork();
+
+  // The echo. Claude Code announces one prompt twice, about six seconds apart,
+  // and answering promptly means the second announcement lands after the answer.
+  // Treated as new it rebuilt the prompt that had just been dealt with, and the
+  // operator clicked a ghost.
+  await post(ev('halfheard', 's-half', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }));
+  await takeWork();
+  fh = await floor();
+  await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'halfheard', request_id: half().permission.request_id, decision: 'allow' }),
+  });
+  await takeWork();   // the keystroke this answer queued; this block is about what comes after
+  fh = await floor();
+  eq(half().session.awaiting_kind, null, 'answered, so the desk is clear');
+  await post(ev('halfheard', 's-half', 'Notification', { notification_type: 'permission_prompt', notification_message: 'needs permission to run: git push' }));
+  fh = await floor();
+  eq(half().session.awaiting_kind, null, 'and the late notification for it does not raise the desk again');
+  eq(half().permission, null, 'nor rebuild the prompt that was just answered');
+  eq(await takeWork(), [], 'and it asks the host for nothing');
+
 
   console.log('\nthe window\u2019s own choices');
   {

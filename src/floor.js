@@ -116,6 +116,17 @@ const CHAT_MAX = 20_000;
 const AWAITING_NOTIFICATIONS = new Set(['permission_prompt']);
 
 /**
+ * How long after a decision a permission notification is treated as its echo
+ * rather than as a new question.
+ *
+ * The gap between Claude Code's two announcements of one prompt was measured at
+ * six seconds. This is generous against that and short enough that a genuinely
+ * new prompt, which announces itself with a PermissionRequest of its own, is
+ * never mistaken for an echo — only the notification-only path is affected.
+ */
+const ANSWER_ECHO_MS = 15_000;
+
+/**
  * Events that prove a human is no longer the blocker, because work happened.
  *
  * PreToolUse is in here and PostToolUse is not, which halves how often the hook
@@ -476,6 +487,25 @@ export function ingestHookEvent(store, body, live = null) {
       const kind = str(body.notification_type);
       if (!AWAITING_NOTIFICATIONS.has(kind)) break;
       const said = clip(body.notification_message, 500);
+      const open = live?.pending.get(key);
+
+      // A notification that is only the tail of a prompt already answered.
+      //
+      // Claude Code announces a prompt twice: PermissionRequest, then this,
+      // about six seconds later. Answer inside those six seconds — which is
+      // what answering promptly looks like — and this arrives for a question
+      // that is no longer being asked. It used to re-light the desk and, worse,
+      // rebuild the prompt below (there is no request outstanding, so the
+      // synthesis fired), putting a phantom back on screen seconds after the
+      // operator had dealt with the real one. Clicking it earned an error
+      // saying the answer had not landed, which was true and thoroughly
+      // misleading.
+      //
+      // A decision this recent, with nothing outstanding, means this is that
+      // echo. Ignored entirely — not merely left without buttons.
+      const echo = !open ? live?.answered.get(key) : null;
+      if (echo && Date.now() - (echo.answered_at ?? 0) < ANSWER_ECHO_MS) break;
+
       store.setAwaiting(sessionId, kind, said);
 
       // A permission prompt the floor can see but cannot answer is a dead box.
@@ -493,7 +523,7 @@ export function ingestHookEvent(store, body, live = null) {
       // nothing from the hook. So one is made up here. Pressing it when the
       // window is no longer asking is safe: answerPrompt looks at the pane
       // before it sends anything and refuses if no question is on screen.
-      if (kind === 'permission_prompt' && live && !live.pending.has(key)) {
+      if (kind === 'permission_prompt' && live && !open) {
         live.pending.set(key, {
           request_id: `${sessionId}:notification:${Date.now()}`,
           tool: null,
@@ -1396,7 +1426,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     live.pending.delete(key);
     // Kept, not dropped: this is the only copy of the question, and if the host
     // reports that the keystroke never took it is what gets offered again.
-    live.answered.set(key, pendingReq);
+    live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
     // And the desk stops asking, now, rather than when the window gets round to
     // saying so.
     //
