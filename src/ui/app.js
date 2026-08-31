@@ -644,6 +644,7 @@ const NUDGE_BLOCKED = {
   held_by_editor: 'the floor needs this conversation — close it in your editor, or move it back with “Open in VS Code”.',
   host_offline: 'that desk’s host is offline, so nothing can be typed into its window.',
   not_hosted: 'no host is running this repo, so this desk has no window to type into.',
+  no_window: 'nothing is running at that desk. Send a message instead — that opens a window; a nudge cannot.',
 };
 
 /**

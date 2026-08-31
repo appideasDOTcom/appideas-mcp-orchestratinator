@@ -4,7 +4,7 @@ import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
-import { createFloorRouter, deliverable } from './floor.js';
+import { createFloorRouter, deliverable, nudgeable } from './floor.js';
 // The same derivation the store uses, so a row for an agent with no persona row
 // yet shows the name it is about to be given rather than a raw id for one poll.
 import { humanName } from './db.js';
@@ -135,9 +135,10 @@ function buildState(store, sessions, sessionStats, meta) {
           skin: profiles[a.agent]?.skin ?? DEFAULT_SKIN,
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
           // Whether the operator can nudge this agent — the same verdict the
-          // chat endpoint enforces, so the button and the server agree.
+          // floor's bell shows, so the two nudge surfaces agree. Stricter than
+          // the chat endpoint on purpose: see nudgeable().
           nudge: (() => {
-            const v = deliverable(hostedByAgent.get(k), nowMs);
+            const v = nudgeable(hostedByAgent.get(k), nowMs);
             return v.error
               ? { ok: false, code: v.code, reason: v.error }
               : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };

@@ -57,6 +57,9 @@
      half the leading plus a guessed ascent and produced 7.2 above the text
      against 9.0 below, which is the same lopsidedness BUBBLE_PAD exists to fix.
      With these, both margins are BUBBLE_PAD by arithmetic rather than by luck. */
+  /* What a desk says between hearing something and answering it. Ellipsis
+     rather than three dots so it cannot be mistaken for the thought trail. */
+  const THINKING = 'Thinking…';
   const BUBBLE_ASCENT = 10.4;
   const BUBBLE_DESCENT = 2.4;
   /** How tall a bubble holding n lines is: the text's box, plus BUBBLE_PAD both sides. */
@@ -140,6 +143,12 @@
      bubble was back inside the band with nothing on screen saying the constant
      had stopped being true. Tied to the band and the bubble, it cannot drift
      again: whatever the header comes to hold, the desks move to clear it. */
+  /* Where the avatar sits in its cell. A constant because the bell is now
+     positioned from it: the same 66 written in two places would drift the first
+     time the figure moved. */
+  const PERSON_X = 66;
+  const PERSON_Y = 22;
+
   const HEAD_AIR = 6;                    // band to bubble, so they never just touch
   const HEAD_H = HEAD_BAND + HEAD_AIR + BUBBLE_ABOVE - PAD;
 
@@ -168,6 +177,65 @@
      rather than trimmed to it. */
   const SCREEN_CHARS = 22;
   const SCREEN_TICK_MS = 45;     // one character per tick: ~1s to type a line
+
+  /* The service bell.
+     -----------------
+     Sits on the desk opposite the monitor and nudges the agent when clicked —
+     the same word the board's dialog types, sent to the same endpoint, so the
+     two ways of nudging cannot come to mean different things.
+
+     Where it goes is not a free choice. The avatar owns x 46–86 at the
+     shoulders and the monitor owns x 100–142, so the bell has the strip left of
+     x 46 and nothing else. It sits centred in that strip at x 23, spanning
+     15.6–30.4, with the widest arc reaching x 33.3 — clear of the shoulders,
+     and clear of the desk's own edge, which it looked ready to fall off when it
+     was set against it. */
+  /* The dome is a third of the avatar's shoulders, and every other part is a
+     ratio of the dome, so "in proportion" is arithmetic rather than five
+     numbers that have to be kept in step by hand. A real service bell is far
+     smaller than this against a person — but scaled honestly it stops being a
+     recognisable object at floor zoom, and this is the size at which it still
+     reads as a bell. It used to stand as tall as the monitor, which is what
+     made it look wrong. */
+  const BODY_R = 20;             // half the avatar body path's width at the shoulders
+  const DOME_R = BODY_R * 0.33;
+  const BASE_W = DOME_R * 2.23;
+  const BASE_H = DOME_R * 0.46;
+  const POST_W = DOME_R * 0.2;
+  const POST_H = DOME_R * 0.54;
+  const KNOB_RX = DOME_R * 0.37;
+  const KNOB_RY = DOME_R * 0.18;
+  const BELL_FOOT = 64;          // base sits on the same line as the monitor's foot
+  const DOME_TOP = BELL_FOOT - BASE_H - DOME_R;
+  const POST_TOP = DOME_TOP - POST_H;
+  /* Centred in the gap between the desk's edge and the avatar's shoulders,
+     rather than measured from either one. The person is drawn at PERSON_X and
+     is BODY_R wide either side, so the free strip is 0 to PERSON_X - BODY_R and
+     the bell sits in the middle of it. */
+  const BELL_CX = Math.round((PERSON_X - BODY_R) / 2);
+  /* Sound. Three arcs a side, struck from just below the plunger, because that
+     is where the noise comes from and an arc centred lower reads as a shadow.
+     The angles keep the arcs off the vertical — a bar straight up the middle
+     looks like an antenna, not a ring.
+
+     They are shorter and lower than they first were, and the reason is the
+     thought-dot trail: it runs from the bubble's bottom-left diagonally down to
+     the head, through exactly this corner, and the first cut had the middle dot
+     sitting on the outer right arc with no gap at all. A working agent being
+     nudged is not a rare case, so the two have to share the corner. These
+     numbers put the outer arc's top at y 28.6 against a trail that bottoms out
+     at 18.7 with the narrowest bubble — the case that brings the dots lowest
+     and furthest right, and so the one to measure against. Change any of them
+     and check that gap again. */
+  const RING_CY = POST_TOP + 2;
+  /* Sound is not part of the object, so it is proportional to the bell rather
+     than strictly to scale: at strict scale the arcs are under 5 units across
+     and stop registering as anything at floor zoom. */
+  const RING_R = DOME_R * 0.85;  // the innermost arc
+  const RING_GAP = DOME_R * 0.42;
+  const RINGS = 3;
+  const RING_A0 = 38;            // degrees from vertical: where each arc starts
+  const RING_A1 = 68;            // and ends
 
   /** How long a sent message may sit unrecorded before it says so. */
   const SENDING_GRACE_MS = 30_000;
@@ -205,6 +273,12 @@
     // text node would be thrown away several times a second.
     screens: new Map(),
     typer: null,         // the interval driving all of them
+    // When each desk's bell was struck, keyed by desk. Out of the DOM for the
+    // third time and the same reason: the ring lasts 1.33s and rooms rebuild
+    // every 2, so a ring living in a class on a node would be thrown away
+    // mid-peal about half the time. It is also what rejects a second click —
+    // the timestamp outlives the node, so the guard does too.
+    rings: new Map(),
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -238,17 +312,21 @@
     const words = String(text ?? '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
     const lines = [];
     let line = '';
+    // Count what actually landed rather than measure the result. Measuring it
+    // meant stripping a trailing ellipsis to see how much was real text — which
+    // is right for one this function added and wrong for one the agent typed,
+    // so any message ending in … was read as truncated and got a second one.
+    let placed = 0;
     for (const w of words) {
       const next = line ? `${line} ${w}` : w;
       if (next.length <= per) { line = next; continue; }
-      if (line) lines.push(line);
+      if (line) { lines.push(line); placed += line.split(' ').length; }
       // A single word longer than the line gets cut rather than widening the box.
       line = w.length > per ? `${w.slice(0, per - 1)}…` : w;
       if (lines.length === max) break;
     }
-    if (line && lines.length < max) lines.push(line);
-    const used = lines.join(' ').replace(/…$/, '').length;
-    if (used < words.join(' ').length && lines.length) {
+    if (line && lines.length < max) { lines.push(line); placed += line.split(' ').length; }
+    if (placed < words.length && lines.length) {
       const last = lines[lines.length - 1];
       lines[lines.length - 1] = last.length >= per ? `${last.slice(0, per - 1)}…` : `${last}…`;
     }
@@ -461,6 +539,229 @@
       // ending in a band of empty carpet that reads as "somebody is missing".
       h: PAD * 2 + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW,
     };
+  }
+
+  /* ---------- the service bell ---------- */
+
+  const ringKey = (channel, agent) => `${channel}|${agent}`;
+
+  /**
+   * Why this desk cannot be nudged, or null if it can.
+   *
+   * The server decides; this only reads the answer. It was derived here at
+   * first, from `hosted`, and that lasted a day: reading `held` treated "no
+   * window open at all" as no different from "our own window has it", so a desk
+   * whose session had ended the previous evening showed a live bell offering to
+   * nudge nobody. The board's button had always asked the server. Now both do,
+   * and there is one place left where the answer can be wrong.
+   */
+  const nudgeBlock = (d) => (d?.nudge?.ok ? null : d?.nudge?.reason ?? 'Nothing is known about this desk yet.');
+
+  /* How long one peal lasts, read from the stylesheet rather than repeated
+     here. CSS owns the timing — the same arrangement --thought-ms has, and for
+     the same reason: two numbers that must agree should be one number. */
+  let ringMs = null;
+  function ringPeriod() {
+    if (ringMs === null) {
+      const cs = getComputedStyle(document.documentElement);
+      const num = (name, fallback) => {
+        const v = parseFloat(cs.getPropertyValue(name));
+        return Number.isFinite(v) && v > 0 ? v : fallback;
+      };
+      // The last arc starts (RINGS - 1) steps in and runs a full duration, so
+      // that is when the peal is over.
+      ringMs = num('--ring-step', 180) * (RINGS - 1) + num('--ring-dur', 970);
+    }
+    return ringMs;
+  }
+
+  /** How long a refused bell stays marked before it goes back to normal. */
+  const REFUSED_MS = 2500;
+
+  const deskBell = (channel, agent) =>
+    document.querySelector(`.desk[data-channel="${CSS.escape(channel)}"][data-agent="${CSS.escape(agent)}"] .bell`);
+
+  /**
+   * Put a bell into (or out of) its peal.
+   *
+   * Called from two places for one reason: a room is only rebuilt when its
+   * signature changes, and striking a bell changes nothing the signature is
+   * made of — so waiting for the rebuild meant the first ring after a quiet
+   * spell never appeared at all. bell() calls this at build time so a peal
+   * survives a rebuild; ring() calls it on the live node so a peal starts
+   * without one.
+   */
+  function paintRing(node, since) {
+    if (!node) return;
+    node.classList.toggle('ringing', !!since);
+    node.classList.remove('refused');
+    if (since) node.style.setProperty('--ring-phase', `${-(Date.now() - since)}ms`);
+    else node.style.removeProperty('--ring-phase');
+  }
+
+  const ringingSince = (k) => {
+    const at = ui.rings.get(k);
+    if (at === undefined) return null;
+    if (Date.now() - at < ringPeriod()) return at;
+    ui.rings.delete(k);
+    return null;
+  };
+
+  /**
+   * Strike a desk's bell: deliver the nudge, then ring.
+   *
+   * In that order, and it matters. The ring is the operator's evidence that
+   * something was sent, so it must not play for a nudge the board refused —
+   * a bell that rings whatever happened is a bell that means nothing. The wait
+   * is one round trip to localhost, and the plunger is what covers it.
+   */
+  async function strike(channel, agent) {
+    const k = ringKey(channel, agent);
+    if (ringingSince(k)) return;              // already pealing; the click is rejected
+    try {
+      const r = await fetch('./api/floor/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ channel, agent, text: 'nudge' }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error ?? `nudge failed (${r.status})`);
+    } catch (err) {
+      // Quote what came back rather than guessing at a cause: a bell that
+      // refuses for its own reasons and a bell repeating the board's are
+      // different things, and only one of them tells you where to look.
+      const node = deskBell(channel, agent);
+      if (node) {
+        const tip = node.querySelector('title');
+        const was = tip?.textContent;
+        node.classList.add('refused');
+        if (tip) tip.textContent = String(err.message).slice(0, 140);
+        setTimeout(() => {
+          node.classList.remove('refused');
+          if (tip && was != null) tip.textContent = was;
+        }, REFUSED_MS);
+      }
+      return;
+    }
+    ring(channel, agent);
+  }
+
+  /** Start a peal on a desk, whoever asked for it. */
+  function ring(channel, agent) {
+    const k = ringKey(channel, agent);
+    const at = Date.now();
+    ui.rings.set(k, at);
+    paintRing(deskBell(channel, agent), at);
+    tick();
+    // A ring that ends between two rebuilds would otherwise keep its class
+    // until the next one. That is not cosmetic: under `prefers-reduced-motion`
+    // the arcs are held up by the class rather than by an animation, so a bell
+    // left marked is a bell left ringing on screen forever. Clear it on the
+    // peal's own clock, off the node as well as out of the map.
+    setTimeout(() => {
+      if (ui.rings.get(k) !== at) return;      // struck again since; that peal owns it now
+      ui.rings.delete(k);
+      paintRing(deskBell(channel, agent), null);
+    }, ringPeriod() + 60);
+  }
+
+  /** One sound arc: `i` counts outward from the bell, `side` is -1 left, +1 right. */
+  function ringArc(side, i) {
+    const r = RING_R + i * RING_GAP;
+    const at = (deg) => {
+      const a = (deg * Math.PI) / 180;
+      return `${(BELL_CX + side * r * Math.sin(a)).toFixed(2)} ${(RING_CY - r * Math.cos(a)).toFixed(2)}`;
+    };
+    return `M ${at(RING_A0)} A ${r} ${r} 0 0 ${side > 0 ? 1 : 0} ${at(RING_A1)}`;
+  }
+
+  /**
+   * The bell itself: base, dome, plunger, and six arcs of sound.
+   *
+   * The three parts are three shades of the desk's own furniture colour rather
+   * than three colours, so the bell reads as one object made of one material —
+   * and each part is a clear step from the one it touches, which is the only
+   * way a solid shape this small stays legible at floor zoom.
+   */
+  function bell(d, channel) {
+    const blocked = nudgeBlock(d);
+    const k = ringKey(channel, d.agent);
+    const since = ringingSince(k);
+    const g = el('g', {
+      class: `bell${blocked ? ' blocked' : ''}`,
+      'data-act': 'nudge',
+      'data-channel': channel,
+      'data-agent': d.agent,
+      role: 'button',
+      tabindex: blocked ? null : '0',
+      'aria-disabled': blocked ? 'true' : null,
+      'aria-label': blocked ? `Cannot nudge ${d.persona}` : `Nudge ${d.persona}`,
+    });
+    // SVG has no title attribute — the tooltip is a child element. The reason
+    // comes from the same three cases the server refuses with, so hovering a
+    // dead bell says what the dialog's disabled button would have said.
+    const tip = el('title');
+    tip.textContent = blocked ?? `Nudge ${d.persona}`;
+    g.appendChild(tip);
+    // How far the plunger travels. Geometry, so it is set here and not in the
+    // stylesheet, and it is half the post rather than a fixed distance: at the
+    // bell's true proportions a fixed 3 units was most of the post's visible
+    // height, and the knob drove itself into the dome.
+    g.style.setProperty('--press-depth', `${(POST_H / 2).toFixed(2)}px`);
+
+    // A rebuilt node restarts its animation at 0%, which for a one-shot peal
+    // means starting over — the same fault the thought dots had, fixed the same
+    // way: the animation is anchored to the wall clock, so a bell rebuilt
+    // two-thirds of the way through a ring picks up two-thirds of the way in.
+    paintRing(g, since);
+
+    // Sound first, so the bell is drawn over it: arcs struck from behind the
+    // plunger read as leaving it, arcs on top read as lying across it.
+    const sound = el('g', { class: 'bellSound' });
+    for (let i = 0; i < RINGS; i += 1) {
+      for (const side of [-1, 1]) {
+        const arc = el('path', { d: ringArc(side, i), class: 'bellRing' });
+        arc.style.setProperty('--ring-i', String(i));
+        sound.appendChild(arc);
+      }
+    }
+    g.appendChild(sound);
+
+    // The plunger is one group so the press moves post and knob together.
+    const plunger = el('g', { class: 'bellPlunger' });
+    plunger.appendChild(el('rect', {
+      // Two units longer than it looks: the tail runs into the dome, so the
+      // press has somewhere to go without opening a gap under the knob.
+      x: BELL_CX - POST_W / 2, y: POST_TOP, width: POST_W, height: POST_H + 2, class: 'bellPost',
+    }));
+    plunger.appendChild(el('ellipse', { cx: BELL_CX, cy: POST_TOP, rx: KNOB_RX, ry: KNOB_RY, class: 'bellKnob' }));
+    g.appendChild(plunger);
+
+    const domeY = BELL_FOOT - BASE_H;
+    g.appendChild(el('path', {
+      d: `M ${BELL_CX - DOME_R} ${domeY} A ${DOME_R} ${DOME_R} 0 0 1 ${BELL_CX + DOME_R} ${domeY} Z`,
+      class: 'bellDome',
+    }));
+    g.appendChild(el('rect', {
+      x: BELL_CX - BASE_W / 2, y: domeY, width: BASE_W, height: BASE_H, rx: BASE_H / 2, class: 'bellBase',
+    }));
+
+    // The pad goes last, over the painted parts, for the reason the nameplate's
+    // does: a click that lands on a glyph or a stroke reports that shape, and
+    // routing up from whatever was hit is what sent clicks to the wrong desk
+    // before. One target, no walk.
+    //
+    // Deliberately larger than the bell, and it does not shrink with it. At the
+    // proportions a bell actually has against a person, the object is a few
+    // units across — accurate, and much too small to aim at. The pad is sized
+    // for the pointer instead, filling the strip the bell sits in without
+    // reaching the avatar's shoulders at PERSON_X - BODY_R.
+    const padW = Math.max(BASE_W + 16, 30);
+    const padTop = POST_TOP - KNOB_RY - 8;
+    g.appendChild(el('rect', {
+      x: BELL_CX - padW / 2, y: padTop, width: padW, height: BELL_FOOT + 2 - padTop, class: 'bellHit',
+    }));
+    return g;
   }
 
   /* ---------- the monitor ---------- */
@@ -806,7 +1107,7 @@
     // desk occludes them from the chest down, which is what "sitting at a desk"
     // looks like. Drawn the other way round they float in front of the monitor.
     const p = person(state, d.seat, d);
-    p.setAttribute('transform', 'translate(66 22)');
+    p.setAttribute('transform', `translate(${PERSON_X} ${PERSON_Y})`);
     g.appendChild(p);
 
     // The counter. A nested <svg> so the blind is clipped by the counter's own
@@ -907,6 +1208,11 @@
     // the flicker the state exists to avoid.
     paintScreen(g, feedScreen(screenKey(channel, d.agent), d.commands, state === 'working'));
 
+    // The bell, on the far side of the desk from the monitor. Drawn after the
+    // counter so its foot sits on the counter's top edge exactly as the
+    // monitor's does — both are objects standing on the desk, not beside it.
+    g.appendChild(bell(d, channel));
+
     // Nameplate. The persona leads because that is what people will say out
     // loud; the real agent name follows because that is what the .mcp.json says
     // and someone will eventually need to match the two up.
@@ -982,8 +1288,15 @@
     // operator is least likely to need at a glance. It also meant the bubble
     // changed on every tool call, which is many times a minute. Commands have
     // their own home now: the monitor types them out (see screenLines).
-    if (d.last_message) {
-      const lines = wrap(d.last_message.text, PER_LINE, BUBBLE_LINES);
+    //
+    // A desk that has just been spoken to says so, whatever it said last. An
+    // agent can take minutes to get its first words out, and for all of those
+    // minutes the bubble was still showing its answer to the previous
+    // question — so a desk given new work looked exactly like one that had not
+    // heard you. This is the one case where the bubble is not a quotation.
+    const said = d.heard ? THINKING : d.last_message?.text;
+    if (said) {
+      const lines = wrap(said, PER_LINE, BUBBLE_LINES);
       if (lines.length) {
         const w = Math.min(BUBBLE_W, Math.max(BUBBLE_MIN_W, Math.max(...lines.map((l) => l.length)) * CHAR_W + 16));
         const h = bubbleHeight(lines.length);
@@ -1429,6 +1742,7 @@
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn" data-act="stop" title="Stop the current turn">stop</button>
+          <button class="btn" data-act="openhere" title="Open a window for this conversation on this machine">Open on the floor</button>
           <button class="btn" data-act="handback" title="Open this conversation in VS Code">Open in VS Code</button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
@@ -1478,6 +1792,8 @@
     // it and can move it, but cannot type into it — a different thing from a
     // desk that is offline, and it needs to read that way.
     const held = h?.held === 'editor';
+    // Deliberately looser than the bell: a message may open a window, so a desk
+    // with none is still worth typing into. See nudgeable() on the server.
     const canChat = !!h?.live && !held;
     const presence = h
       ? (h.live ? `on ${h.host}${h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
@@ -1515,6 +1831,11 @@
     wrap.querySelector('[data-act="send"]').disabled = !canChat;
     wrap.querySelector('[data-act="stop"]').classList.toggle('hidden', !(canChat && h.state === 'working'));
     wrap.querySelector('[data-act="handback"]').classList.toggle('hidden', !h?.live);
+    // Offered only when the desk has no window and no editor on it. With an
+    // editor holding it this would open a second process on one transcript,
+    // which is the thing handback closes its own window to avoid; with a floor
+    // window already up there is nothing to do.
+    wrap.querySelector('[data-act="openhere"]').classList.toggle('hidden', !(h?.live && !h.held));
     wrap.querySelector('.p-compose').classList.toggle('held', held);
     // The hint says exactly what will happen, because a Send button that
     // sometimes can't is worse than one that says why.
@@ -1793,6 +2114,7 @@
     clearInterval(ui.typer);
     ui.typer = null;
     ui.screens.clear();
+    ui.rings.clear();
   }
 
   /* ---------- events ---------- */
@@ -1891,6 +2213,18 @@
     // Any other click dismisses it, then goes on to do whatever it was for.
     if (ui.details) { ui.details = null; renderDetails(); }
 
+    // The bell rings the agent without opening anything. Ahead of the desk test
+    // for the same reason the pills are — it sits inside the cell — and it
+    // returns even when it refuses, so a click on a bell that cannot ring does
+    // not fall through and open the conversation instead.
+    const bellEl = e.target.closest?.('svg.room .bell');
+    if (bellEl && ui.on) {
+      if (!bellEl.classList.contains('blocked') && !bellEl.closest('svg.room.collapsed')) {
+        strike(bellEl.dataset.channel, bellEl.dataset.agent);
+      }
+      return;
+    }
+
     // Before the desk test, because a pill sits inside the desk group and the
     // desk would otherwise swallow the click and just open the panel.
     const pill = e.target.closest?.('svg.room .pill[data-act]');
@@ -1948,6 +2282,8 @@
       await interruptDesk();
     } else if (act.dataset.act === 'handback') {
       await handBack(act);
+    } else if (act.dataset.act === 'openhere') {
+      await openHere(act);
     } else if (act.dataset.act === 'rename') {
       // app.js owns the dialogs on this page — same reason the pills call into
       // it rather than growing a second implementation. A `prompt()` used to do
@@ -1986,6 +2322,10 @@
    * it: the board accepting the word is not the window having recorded it.
    */
   window.floorNudged = (channel, agent, text) => {
+    // Whichever surface sent it, the desk rings. The board's dialog has already
+    // had its "ok" from the same endpoint strike() posts to, so the evidence
+    // the ring stands for is the same evidence either way.
+    ring(channel, agent);
     if (ui.open && ui.open.channel === channel && ui.open.agent === agent) {
       ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
       ui.stick = true;
@@ -2069,6 +2409,33 @@
     }
   }
 
+  /**
+   * Open a window for this conversation here — the other direction of handBack.
+   *
+   * The host does the work and reports what happened through the desk's own
+   * state, so there is nothing to confirm here: the button goes away when the
+   * desk turns up holding a floor window, which is the only evidence worth
+   * showing anyway.
+   */
+  async function openHere(btn) {
+    if (!ui.open) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch('./api/floor/open', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(ui.open),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        flash(btn, String(body.error ?? `couldn't open it (${r.status})`).slice(0, 60));
+      }
+    } finally {
+      btn.disabled = false;
+      tick();
+    }
+  }
+
   async function interruptDesk() {
     if (!ui.open) return;
     await fetch('./api/floor/interrupt', {
@@ -2099,6 +2466,12 @@
     if (arrowEl) {
       e.preventDefault();
       arrowEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return;
+    }
+    const bellEl = document.activeElement?.closest?.('svg.room .bell');
+    if (bellEl) {
+      e.preventDefault();
+      bellEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       return;
     }
     const deskEl = document.activeElement?.closest?.('svg.room .desk');

@@ -7,6 +7,15 @@
      can read it and do arithmetic with it — see --thought-phase. */
   --thought-ms: 1600;
 
+  /* One peal of a desk's service bell, in milliseconds and unitless so
+     floor.js can add them up — see ringPeriod(). Every arc runs --ring-dur and
+     neighbours start --ring-step apart, so the whole ring is
+     --ring-step * (arcs - 1) + --ring-dur: 1330ms as set here, which is 0.5s
+     of arcs arriving, 0.33s with all three up, and 0.5s of them leaving. */
+  --ring-dur: 900;
+  --ring-step: 215;
+  --press-ms: 340;
+
   --bg:        #f6f7f9;
   --surface:   #ffffff;
   --surface-2: #f0f2f5;
@@ -739,6 +748,100 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    growing by a character, not a property @media can reach, so the check lives
    next to typeTick() in floor.js. Under `reduce` each command lands complete. */
 
+/* The service bell.
+   Three shades of one material rather than three colours: the bell has to read
+   as a single solid object at floor zoom, and each part still has to separate
+   from the one it touches. The steps are against --text, so the whole thing
+   inverts with the theme the way .monitor and .deskTop do — a fixed grey would
+   be furniture in one theme and a hole in the other. The dome deliberately
+   sits a step off .monitor (30%) so the two objects on the desk are not the
+   same shade of the same nothing. */
+.bellBase    { fill: color-mix(in srgb, var(--text) 48%, var(--surface)); }
+.bellDome    { fill: color-mix(in srgb, var(--text) 34%, var(--surface)); }
+.bellPost,
+.bellKnob    { fill: color-mix(in srgb, var(--text) 62%, var(--surface)); }
+.bellHit     { fill: transparent; }
+.bell        { cursor: pointer; }
+.bell:not(.blocked):hover .bellDome { fill: color-mix(in srgb, var(--accent) 55%, var(--surface)); }
+.bell:not(.blocked):hover .bellBase { fill: color-mix(in srgb, var(--accent) 75%, var(--surface)); }
+.bell:not(.blocked):hover .bellPost,
+.bell:not(.blocked):hover .bellKnob { fill: var(--accent); }
+/* Both rules, the way .desk, .pill and .plate have them. Only the
+   :focus-visible one was here, and that is not the one a mouse triggers: a
+   click sets :focus, the UA draws its ring around the group's bounding box, and
+   the ding arrives inside a rectangle. Keyboard focus still marks the base. */
+.bell:focus { outline: none; }
+.bell:focus-visible .bellBase { stroke: var(--accent); stroke-width: 2; }
+
+/* A desk with nowhere to deliver to keeps its bell and loses its ring — the
+   same choice the board's dialog makes with its Nudge button, which greys out
+   rather than disappearing. A bell that vanishes tells you nothing; a dim one
+   with the server's reason on hover tells you what to go fix. */
+.bell.blocked { cursor: default; opacity: .3; }
+
+/* In the building, a desk is scenery: the whole storey is one button to the
+   floor it depicts, so nothing inside it operates. */
+.rooms.building .bell { display: none; }
+
+/* Sound.
+   ------
+   Six arcs, struck in pairs from the middle outward and let go in the same
+   order. Every bar has the identical animation and differs only in when it
+   starts, which is what keeps the two halves of the peal symmetrical: with
+   --ring-step between neighbours, the arcs arrive over one --ring-step * 2 and
+   leave over the same, whatever the numbers are changed to.
+
+   --ring-phase is negative and set by floor.js from the wall clock, so a room
+   rebuilt mid-peal resumes rather than starting the ring again. Rooms are
+   rebuilt about every two seconds and a peal lasts 1.33, so that is not an
+   edge case — it is most rings. */
+.bellRing {
+  opacity: 0;
+  fill: none;
+  stroke: var(--busy);
+  /* Scaled with the bell. At 2.4 against arcs a third of their old radius the
+     stroke was thicker than the gaps between them and they read as a blob. */
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.bell.ringing .bellRing {
+  animation: bell-ring calc(var(--ring-dur) * 1ms) linear both;
+  animation-delay: calc(var(--ring-phase, 0ms) + var(--ring-i) * var(--ring-step) * 1ms);
+}
+.bell.ringing .bellPlunger {
+  animation: bell-press calc(var(--press-ms) * 1ms) ease-out both;
+  animation-delay: var(--ring-phase, 0ms);
+}
+/* Each arc: in fast, hold, out fast. 7.8% of 900ms is the ~70ms fade that
+   makes an arc appear rather than grow. */
+@keyframes bell-ring {
+  0%    { opacity: 0; }
+  7.8%  { opacity: 1; }
+  92.2% { opacity: 1; }
+  100%  { opacity: 0; }
+}
+/* Struck and released — down fast, back slower, which is what a hand does. */
+@keyframes bell-press {
+  0%   { transform: translateY(0); }
+  18%  { transform: translateY(var(--press-depth, 2px)); }
+  60%  { transform: translateY(0); }
+  100% { transform: translateY(0); }
+}
+
+/* The board would not take it. Says so on the bell for a moment, and the
+   reason itself is on the tooltip — this only draws the eye to it. */
+.bell.refused .bellBase,
+.bell.refused .bellDome,
+.bell.refused .bellPost,
+.bell.refused .bellKnob { fill: var(--block); }
+
+@media (prefers-reduced-motion: reduce) {
+  /* The arcs still say a nudge went out — they simply arrive and leave
+     together instead of rippling. The peal keeps its length, so the click
+     guard and what is on screen still agree. */
+  .bell.ringing .bellRing { animation: none; opacity: 1; }
+  .bell.ringing .bellPlunger { animation: none; }
+}
 /* Hair is one colour in both themes, and it is a warm brown rather than the
    near-black it started as.
  

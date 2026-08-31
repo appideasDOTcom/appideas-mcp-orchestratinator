@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
+import { deliverable, nudgeable } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -286,6 +287,82 @@ try {
      'and the avatar travels with the agent for the same reason the name does');
   eq(deskOf(f, 'pro', 'other-floor').hair, deskOf(f, 'pro', CH).hair,
      'colours travel too — one agent, one appearance, whichever room you are looking at');
+
+  console.log('\nwho can be nudged, which is a stricter question than who can be messaged');
+  // Plain objects rather than a seeded desk: these are the shapes the two
+  // callers actually hand in, and one of them is the shape that broke.
+  const fresh = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const live = { state: 'idle', host_seen: fresh, host_name: 'boxy', window_id: 'w1', outside_pid: null };
+  assert(!deliverable(live).error, 'a hosted desk with a live host takes messages');
+  assert(!nudgeable(live).error, 'and can be nudged');
+
+  const noWindow = { ...live, window_id: null };
+  assert(!deliverable(noWindow).error,
+         'a desk with no window still takes a message — sending one is what opens the window');
+  eq(nudgeable(noWindow).code, 'no_window',
+     'but it cannot be nudged: a nudge means "something is waiting on your channel", which is nothing to say to an empty desk');
+
+  eq(nudgeable({ ...live, outside_pid: 4242 }).code, 'held_by_editor', 'nor can one an editor is holding');
+  eq(nudgeable(null).code, 'not_hosted', 'nor one no host is running');
+
+  // The regression that sent this looking: buildFloor hands over a desk whose
+  // host_seen it has ALREADY converted to ISO. iso() ran over it a second time
+  // and produced a trailing ZZ; Date.parse said NaN; `NaN >= TTL` is false; and
+  // a host ten minutes dead was reported as ready to nudge.
+  const stale = new Date(Date.now() - 10 * 60_000).toISOString().replace('T', ' ').slice(0, 19);
+  eq(nudgeable({ ...live, host_seen: stale }).code, 'host_offline', 'a stale host is offline');
+  eq(nudgeable({ ...live, host_seen: `${stale.replace(' ', 'T')}Z` }).code, 'host_offline',
+     'and is still offline when the timestamp arrives already converted — the double conversion that used to read as live');
+  eq(nudgeable({ ...live, host_seen: 'not a date' }).code, 'host_offline',
+     'a timestamp that makes no sense fails closed, because the one thing it must never do is make a desk look alive');
+
+  console.log('\nputting a conversation back on the floor');
+  // The direction that was missing. handback moves a conversation into the
+  // editor; nothing moved it the other way, so a desk whose editor had let go
+  // sat with no window and no way to be given one. The host could always do it
+  // — its `case 'open'` was simply unreachable.
+  const HK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+  const register = (desk) =>
+    fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [desk] }),
+    });
+  const takeWork = () =>
+    fetch(`${HOST}/api/host/work?host_id=h-open&wait=0`, { headers: HK })
+      .then((r) => r.json())
+      .then((b) => (b.work ?? []).map((i) => i.kind));
+  const askOpen = () =>
+    fetch(`${HOST}/api/floor/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: CH, agent: 'wanderer' }),
+    });
+
+  // No window and no editor: what closing a VS Code chat leaves behind.
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer' });
+  let opened = await askOpen();
+  eq(opened.status, 200, 'a desk with no window can be asked to open one');
+  eq(await takeWork(), ['open'], 'and the host is handed exactly that work');
+
+  // An editor still has it. Opening here would put two processes on one
+  // transcript, which is the thing handback closes its own window to avoid.
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', outside_pid: 4242 });
+  opened = await askOpen();
+  eq(opened.status, 409, 'refused while an editor holds it');
+  eq((await opened.json()).code, 'held_by_editor', 'and says which of the two apps to close');
+  eq(await takeWork(), [], 'a refused open queues nothing — the host is never asked to make a second copy');
+
+  // Already on the floor: nothing to do, and saying so is not an error.
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', window: '@7' });
+  opened = await askOpen();
+  eq(opened.status, 200, 'asking for a window that is already open is not a failure');
+  eq((await opened.json()).already, true, 'it says the window was already there');
+  eq(await takeWork(), [], 'and queues nothing');
+
+  const nowhere = await fetch(`${HOST}/api/floor/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }),
+  });
+  eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
 
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();

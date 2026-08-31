@@ -217,7 +217,7 @@ export function openDb(path) {
       host_id     TEXT NOT NULL,
       channel     TEXT NOT NULL,
       agent       TEXT NOT NULL,
-      kind        TEXT NOT NULL,              -- chat | permission | interrupt
+      kind        TEXT NOT NULL,              -- chat | permission | interrupt | handback | open
       payload     TEXT NOT NULL,              -- JSON
       created_at  TEXT NOT NULL DEFAULT (datetime('now')),
       taken_at    TEXT
@@ -901,6 +901,17 @@ export function makeStore(db) {
           AND text IS NOT NULL AND text != ''
         ORDER BY id DESC LIMIT ?`
     ),
+    /* The newest thing the operator said, whoever they said it through — the
+       floor's compose box, the bell, or the keyboard at the window itself.
+       Compared against deskLastMessage to answer one question: has the agent
+       said anything since it was spoken to? Same seek off idx_turns_agent as
+       its two neighbours, for the reason written above them. */
+    deskLastUserTurn: db.prepare(
+      `SELECT id, created_at
+         FROM turns
+        WHERE channel = ? AND agent = ? AND role = 'user'
+        ORDER BY id DESC LIMIT 1`
+    ),
     listPersonas: db.prepare(
       `SELECT p.channel, p.agent, n.persona AS persona, p.seat
          FROM personas p LEFT JOIN agent_profile n ON n.agent = p.agent`
@@ -1301,6 +1312,7 @@ export function makeStore(db) {
     // Reversed here rather than in SQL: the screen types them in the order they
     // happened, and LIMIT has to keep the newest end.
     deskCommands: (channel, agent, n) => q.deskCommands.all(channel, agent, n).reverse(),
+    deskLastUserTurn: (channel, agent) => q.deskLastUserTurn.get(channel, agent) ?? null,
     // Names filled in here rather than in SQL: the derivation is JavaScript, and
     // duplicating it as SQL string surgery is exactly how two answers to "what
     // is this agent called" start to disagree.

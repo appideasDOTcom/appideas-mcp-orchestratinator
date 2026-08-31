@@ -122,8 +122,20 @@ const clip = (v, max = TEXT_MAX) => {
   if (s === null || s === undefined) return null;
   return s.length > max ? `${s.slice(0, max)}\n… [truncated at ${max} characters]` : s;
 };
-const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
-const secondsSince = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) / 1000 : Infinity);
+/* SQLite's datetime to ISO. Idempotent: the floor's view of a host carries an
+   already-converted timestamp, and running this over it a second time used to
+   append a second Z. Date.parse said NaN to that, NaN failed every comparison
+   it was put in, and a host ten minutes dead reported as live. */
+const iso = (s) => (s ? `${String(s).replace(' ', 'T').replace(/Z*$/, '')}Z` : null);
+/* Fails closed. An unparseable timestamp used to make this NaN, and every
+   `secondsSince(...) < TTL` test it fed then answered false — so the one thing
+   a bad clock value must never do, which is make something look alive, is
+   exactly what it did. No timestamp and no sense are both "infinitely long
+   ago". */
+const secondsSince = (isoStr, nowMs) => {
+  const at = isoStr ? Date.parse(isoStr) : NaN;
+  return Number.isFinite(at) ? (nowMs - at) / 1000 : Infinity;
+};
 /* How many recent tool calls a desk carries for its monitor. A shade more than
    the four lines the screen shows, so a browser that missed a poll still has
    the run to type rather than a gap. */
@@ -159,6 +171,33 @@ export function deliverable(h, nowMs = Date.now()) {
     };
   }
   return { hosted: h };
+}
+
+/**
+ * Whether this desk can be *nudged*, which is a stricter question than whether
+ * it can be sent a message.
+ *
+ * Chat may open a window: you are starting a conversation, and the host will
+ * make somewhere for it to happen. A nudge cannot, because a nudge is not
+ * content — it means "there is something waiting on your channel, go and
+ * look", and that is meaningless said to a desk with nobody at it. Sent to a
+ * desk with no window, it would silently spin up a whole session to deliver
+ * one word.
+ *
+ * So `window_id` is the extra condition: something has to already be running
+ * for a nudge to reach. This is the gate both nudge surfaces use — the board's
+ * button and the floor's bell — while the compose box keeps deliverable().
+ */
+export function nudgeable(h, nowMs = Date.now()) {
+  const can = deliverable(h, nowMs);
+  if (can.error) return can;
+  if (!h.window_id) {
+    return {
+      error: 'No window is open for this desk, so there is no one to nudge. Send a message instead — that opens one.',
+      code: 'no_window',
+    };
+  }
+  return can;
 }
 
 /**
@@ -581,6 +620,14 @@ export function buildFloor(store, live = null, sessions = null) {
         // Said and did, kept apart, and looked up per desk — see the note on
         // deskLastMessage in db.js for why these are not one query each.
         const m = store.deskLastMessage(channel, p.agent);
+        // Has the agent said anything since it was last spoken to? The bubble
+        // shows the newest thing an agent said, and between a request landing
+        // and the agent's first words there can be minutes — during which the
+        // bubble still shows the answer to the *previous* question, so a desk
+        // that has just been given new work is indistinguishable from one still
+        // grinding on the old. A fact, reported here; the floor picks the words.
+        const u = store.deskLastUserTurn(channel, p.agent);
+        const heard = !!u && (!m || u.id > m.id);
         const awaitingSince = iso(s?.awaiting_since);
         // Live means "heard from recently", never "still open" — see
         // SESSION_STALE_MINUTES for why both halves of that matter. The one
@@ -664,6 +711,15 @@ export function buildFloor(store, live = null, sessions = null) {
                 held_pid: h.outside_pid ?? null,
               }
             : null,
+          // Whether the bell on this desk rings, decided here rather than on
+          // the floor. A client-side re-derivation of this drifted within a
+          // day: it read `held` and so treated "no window at all" as no
+          // different from "our own window", and offered to nudge an agent
+          // whose session had ended the day before.
+          nudge: (() => {
+            const v = nudgeable(h, nowMs);
+            return v.error ? { ok: false, code: v.code, reason: v.error } : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+          })(),
           permission: pendingReq,
           session: s
             ? {
@@ -688,6 +744,8 @@ export function buildFloor(store, live = null, sessions = null) {
           // Separate from last_turn, which stays because it is what tells the
           // floor whether the desk is mid-tool-call and therefore working.
           last_message: m ? { text: m.text, at: iso(m.created_at), id: m.id } : null,
+          // Spoken to, and not yet answered.
+          heard: heard ? { at: iso(u.created_at), id: u.id } : null,
           // The last few tool calls, oldest first — the desk's monitor types
           // them out. Ids travel with them so the browser can tell a command it
           // has already typed from one that has just arrived.
@@ -1047,6 +1105,39 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const h = store.hostedDesk(channel, agent);
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
     store.enqueueHostWork(h.host_id, channel, agent, 'handback', {});
+    live.wake(h.host_id);
+    res.json({ ok: true });
+  });
+
+
+  /**
+   * Move this desk's conversation onto the floor: open a window for it here.
+   *
+   * The other half of handback, and it was missing. The host has always known
+   * how to do this — `case 'open'` opens the window and waits for it to come
+   * up — but nothing ever asked, so the only way back from an editor was to
+   * close the tab and then say something, because delivering a message opens a
+   * window as a side effect. That left a desk sitting with no window and no way
+   * to be given one, which reads as the floor having lost it.
+   *
+   * Refused while an editor still holds it. A conversation is one process, and
+   * opening a window for one the editor has open is how you get two live copies
+   * of the same transcript — the thing handback closes its own window to avoid.
+   */
+  router.post('/api/floor/open', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const h = store.hostedDesk(channel, agent);
+    if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
+    if (h.outside_pid) {
+      return res.status(409).json({
+        error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.',
+        code: 'held_by_editor',
+      });
+    }
+    if (h.window_id) return res.json({ ok: true, already: true });
+    store.enqueueHostWork(h.host_id, channel, agent, 'open', {});
     live.wake(h.host_id);
     res.json({ ok: true });
   });
