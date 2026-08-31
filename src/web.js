@@ -396,6 +396,52 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     res.json({ ok: true, channel, deleted, sessions_closed: closed });
   });
 
+  /* ---------- saved prompts ---------- */
+
+  /**
+   * The operator's own library of messages, board-wide.
+   *
+   * Two rules and no more, because that is what was asked for: a title and a
+   * body that are not empty, and no two prompts sharing a title. Nothing here
+   * inspects the content — it is a message someone means to send, and a server
+   * that second-guesses it would be wrong more often than it was right.
+   *
+   * Not written to admin_events: that table is channel-scoped (`channel NOT
+   * NULL`) and a prompt belongs to no channel. Inventing one to satisfy the
+   * column would put a lie in the audit trail to make a log line.
+   */
+  const promptFields = (req) => ({ title: str(req.body?.title), content: str(req.body?.content) });
+
+  router.post('/prompt/create', (req, res) => {
+    const { title, content } = promptFields(req);
+    if (!title || !content) return bad(res, 'title and content are both required');
+    if (store.savedPromptByTitle(title)) return bad(res, `a prompt called "${title}" already exists`);
+    const id = store.createSavedPrompt(title, content);
+    res.json({ ok: true, id, title });
+  });
+
+  router.post('/prompt/update', (req, res) => {
+    const id = Number(req.body?.id);
+    const { title, content } = promptFields(req);
+    if (!Number.isInteger(id)) return bad(res, 'an integer id is required');
+    if (!title || !content) return bad(res, 'title and content are both required');
+    if (!store.getSavedPrompt(id)) return missing(res, `no saved prompt #${id}`);
+    // Excluding itself, or renaming a prompt to the name it already has would
+    // collide with itself and read as somebody else's.
+    if (store.savedPromptByTitle(title, id)) return bad(res, `a prompt called "${title}" already exists`);
+    store.updateSavedPrompt(id, title, content);
+    res.json({ ok: true, id, title });
+  });
+
+  router.post('/prompt/delete', (req, res) => {
+    const id = Number(req.body?.id);
+    if (!Number.isInteger(id)) return bad(res, 'an integer id is required');
+    const row = store.getSavedPrompt(id);
+    if (!row) return missing(res, `no saved prompt #${id}`);
+    store.deleteSavedPrompt(id);
+    res.json({ ok: true, id, title: row.title });
+  });
+
   /* ---------- server-wide actions ---------- */
 
   /**
@@ -481,6 +527,14 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
 
   router.get('/api/state', (_req, res) => {
     res.json(buildState(store, sessions, sessionStats, meta));
+  });
+
+  // Read here rather than on /api/state: prompts change when an operator edits
+  // one, which is rarely, and /api/state is polled every two seconds by both
+  // surfaces. The picker fetches this when it opens and after the manager
+  // changes something — the two moments the answer can actually differ.
+  router.get('/api/prompts', (_req, res) => {
+    res.json({ prompts: store.listSavedPrompts() });
   });
 
   router.get('/api/activity', (req, res) => {

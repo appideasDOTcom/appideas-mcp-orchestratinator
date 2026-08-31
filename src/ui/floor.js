@@ -263,6 +263,16 @@
      for a rare action. The shape still carries the whole message, so it is
      drawn the same way: flat top, not vertex up, because the flat edge is most
      of what makes an octagon read as a road sign rather than a gem. */
+  /* The saved-prompts glyph: a caret and an underscore in a rounded box, which
+     is Bootstrap's `terminal`. Drawn rather than imported — this page loads no
+     icon font, and pulling one in for a single 16px mark is a page-weight bill
+     for one glyph. Same 0..2 unit box as the stop sign so the two marks agree
+     about how big "an icon in this row" is. */
+  const PROMPT_GLYPH =
+    '<rect x="0.12" y="0.28" width="1.76" height="1.44" rx="0.28" />' +
+    '<polyline points="0.52,0.78 0.84,1.0 0.52,1.22" />' +
+    '<line x1="1.02" y1="1.26" x2="1.46" y2="1.26" />';
+
   const STOP_PTS = Array.from({ length: 8 }, (_, k) => {
     const a = (Math.PI / 8) + (k * Math.PI) / 4;
     return `${(1 + Math.cos(a)).toFixed(3)},${(1 + Math.sin(a)).toFixed(3)}`;
@@ -315,6 +325,14 @@
     // you switch desks, and a spinner has to outlive both the poll that redraws
     // it and a trip to another desk and back.
     moving: null,
+    // The saved-prompt picker: { rect } while its menu is open, anchored to
+    // where the button was at click time — the same trick the nameplate popover
+    // uses, and for the same reason.
+    prompts: null,
+    // The library itself, kept between openings so the menu draws immediately
+    // rather than after a round trip. Re-read every time it is opened, because
+    // the manager may have changed it since.
+    promptList: [],
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -504,6 +522,93 @@
     pop.style.left = `${Math.round(left)}px`;
     pop.style.top = `${Math.round(top)}px`;
   }
+
+  /* ---------- saved prompts ---------- */
+
+  /**
+   * The operator's own library, on the compose row.
+   *
+   * A body-level popover rather than a node inside the panel: the panel scrolls
+   * and clips, and a menu that has to fit inside it would be a menu the tenth
+   * prompt falls out of. Anchored to the button's rectangle as it was at click
+   * time, like the nameplate card — by the time this draws, a poll may already
+   * have redrawn the row.
+   */
+  function renderPromptMenu() {
+    let menu = document.getElementById('prompt-menu');
+    const btn = document.querySelector('[data-act="prompts"]');
+    btn?.setAttribute('aria-expanded', ui.prompts ? 'true' : 'false');
+    if (!ui.prompts) { menu?.remove(); return; }
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'prompt-menu';
+      menu.setAttribute('role', 'menu');
+      document.body.appendChild(menu);
+    }
+    // An empty library says so. A menu holding nothing but "Manage" reads as a
+    // feature that failed to load rather than one you have not used yet.
+    const rows = ui.promptList.length
+      ? ui.promptList.map((p) =>
+          `<button type="button" class="pm-item" role="menuitem" data-pick="${esc(String(p.id))}" title="${esc(clip(p.content, 400))}">${esc(p.title)}</button>`).join('')
+      : '<div class="pm-empty">No saved prompts yet</div>';
+    menu.innerHTML = `${rows}<div class="pm-sep"></div><button type="button" class="pm-item pm-manage" role="menuitem" data-pick="manage">Manage…</button>`;
+
+    const r = ui.prompts.rect;
+    const w = menu.offsetWidth;
+    const h = menu.offsetHeight;
+    // Right-aligned to the button and above it by preference: the compose row
+    // sits at the bottom of the panel, so below is usually off-screen.
+    const left = Math.max(8, Math.min(r.left + r.width - w, window.innerWidth - w - 8));
+    const above = r.top - 6 - h;
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(above < 8 ? Math.min(r.bottom + 6, window.innerHeight - h - 8) : above)}px`;
+  }
+
+  /** Open the picker: re-read the library, then draw it where the button is. */
+  async function openPromptMenu(btn) {
+    const rect = btn.getBoundingClientRect();
+    try {
+      const r = await fetch('./api/prompts', { headers: { accept: 'application/json' } });
+      if (r.ok) ui.promptList = (await r.json()).prompts ?? [];
+    } catch { /* keep whatever was last read; the menu still opens */ }
+    ui.prompts = { rect };
+    renderPromptMenu();
+  }
+
+  function closePromptMenu() {
+    if (!ui.prompts) return;
+    ui.prompts = null;
+    renderPromptMenu();
+  }
+
+  /**
+   * Put a prompt in the box, as though it had been typed.
+   *
+   * At the cursor, not over the top: an operator who has half a sentence typed
+   * and reaches for a saved paragraph means to have both. With an empty box —
+   * which is most of the time — this is indistinguishable from filling it.
+   */
+  function insertPrompt(text) {
+    const ta = $('p-text');
+    if (!ta) return;
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? start;
+    ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+    const at = start + text.length;
+    ta.focus();
+    ta.setSelectionRange(at, at);
+    // Nothing is sent. The whole point of a template is the edit you make to it
+    // before it goes.
+  }
+
+  /** Re-read the library from wherever it was changed — the manager calls this. */
+  window.floorPromptsChanged = async () => {
+    try {
+      const r = await fetch('./api/prompts', { headers: { accept: 'application/json' } });
+      if (r.ok) ui.promptList = (await r.json()).prompts ?? [];
+    } catch { /* the next open re-reads anyway */ }
+    if (ui.prompts) renderPromptMenu();
+  };
 
   /** The counts the board puts in the same row, as a tray of buttons. */
   function signPills(d) {
@@ -1787,6 +1892,7 @@
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="0 0 2 2" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
+          <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="0 0 2 2" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
         <div class="p-links">
@@ -1812,6 +1918,10 @@
       wrap.classList.add('hidden');
       wrap.innerHTML = '';
       ui.panelFor = null;
+      // The menu lives on the body, not in the panel, so emptying the panel does
+      // not take it with it — it would be left floating over the floor, pointing
+      // at a compose box that is no longer there.
+      closePromptMenu();
       closeStream();
       return;
     }
@@ -1826,6 +1936,9 @@
     if (ui.panelFor !== forKey) {
       panelShell(wrap, channel, agent);
       ui.panelFor = forKey;
+      // Same reason, one desk over: the menu was anchored to the button in the
+      // row that has just been replaced.
+      closePromptMenu();
     }
     wrap.classList.remove('hidden');
 
@@ -1876,6 +1989,13 @@
       ? `${d.persona}’s conversation is open in your editor…`
       : `${d.persona}’s machine isn’t reachable right now…`;
     wrap.querySelector('[data-act="send"]').disabled = !canChat;
+    // Gated with Send, not with the stop sign: a prompt is something to send, so
+    // offering the library for a box that cannot deliver is the same drift the
+    // composer's own gating exists to prevent.
+    const promptBtn = wrap.querySelector('[data-act="prompts"]');
+    promptBtn.disabled = !canChat;
+    promptBtn.title = canChat ? 'Saved prompts' : 'Nothing typed here can be delivered right now.';
+    if (!canChat) closePromptMenu();
     // The stop sign. It used to hide itself when there was nothing to stop,
     // which is most of the time — so the row it sits in changed width whenever
     // an agent started or finished, and the control you wanted was the one that
@@ -2236,9 +2356,35 @@
   // scroll leaves it pointing at nothing. Closing beats chasing.
   window.addEventListener('scroll', () => {
     if (ui.details) { ui.details = null; renderDetails(); }
+    // Same reason: it is placed against a rectangle captured at click time.
+    closePromptMenu();
   }, true);
 
   document.addEventListener('click', async (e) => {
+    // The prompt menu's own clicks, and the click that dismisses it.
+    //
+    // Handled before anything else so a pick cannot also register as a click on
+    // whatever the menu is covering. The button itself is left to the panel's
+    // handler, which toggles — catching it here as "outside" would close the
+    // menu and immediately reopen it.
+    if (ui.prompts) {
+      const item = e.target.closest?.('#prompt-menu [data-pick]');
+      if (item) {
+        const pick = item.dataset.pick;
+        closePromptMenu();
+        if (pick === 'manage') {
+          // app.js owns the dialogs on this page, the same arrangement the pills
+          // and the stop sign use. With the board half missing, do nothing
+          // rather than half-open a manager.
+          window.promptManager?.();
+        } else {
+          const p = ui.promptList.find((x) => String(x.id) === pick);
+          if (p) insertPrompt(p.content);
+        }
+        return;
+      }
+      if (!e.target.closest?.('#prompt-menu') && !e.target.closest?.('[data-act="prompts"]')) closePromptMenu();
+    }
     // The card's own clicks. Everything else inside it is text, so anything not
     // named here is deliberately swallowed rather than falling through to the
     // desk handlers underneath and re-opening the thing you clicked out of.
@@ -2391,6 +2537,11 @@
           ?.desks.find((x) => x.agent === ui.open.agent);
         window.stopDialog(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent);
       }
+    } else if (act.dataset.act === 'prompts') {
+      // A toggle: the second click on the button closes it, which is what a
+      // menu button does everywhere else.
+      if (ui.prompts) closePromptMenu();
+      else await openPromptMenu(act);
     } else if (act.dataset.act === 'handback' || act.dataset.act === 'openhere') {
       await moveSeat(act.dataset.act);
     } else if (act.dataset.act === 'rename') {
@@ -2574,6 +2725,13 @@
     if (e.target?.id === 'p-text' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendChat();
+      return;
+    }
+    // The menu first, then the panel. One Escape should undo one thing, and the
+    // menu is the thing most recently opened.
+    if (e.key === 'Escape' && ui.prompts) {
+      closePromptMenu();
+      document.querySelector('[data-act="prompts"]')?.focus();
       return;
     }
     if (e.key === 'Escape' && ui.open) {

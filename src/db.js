@@ -223,6 +223,26 @@ export function openDb(path) {
       taken_at    TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_host_outbox_pending ON host_outbox(host_id, taken_at, id);
+
+    -- ─── Operator furniture ───────────────────────────────────────────────────
+    -- The handful of messages an operator sends over and over, kept so they can
+    -- be picked instead of retyped. Board-wide rather than per-channel: there
+    -- are about ten of them and they are the operator's, not a channel's, so
+    -- scoping them per channel would mean saving the same text four times.
+    --
+    -- The unique index is the duplicate-title rule. Enforced here rather than
+    -- only in the form because the form is one of two ways in — the other is a
+    -- restored backup — and a rule that lives in one caller is not a rule.
+    -- NOCASE so "Deploy" and "deploy" collide, which is what a person means by
+    -- "no duplicate titles".
+    CREATE TABLE IF NOT EXISTS saved_prompts (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      title      TEXT NOT NULL,
+      content    TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_prompts_title ON saved_prompts(title COLLATE NOCASE);
   `);
 
   // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
@@ -531,6 +551,7 @@ export const BACKUP_TABLES = [
   'admin_events',
   'personas',
   'agent_profile',
+  'saved_prompts',
 ];
 
 /**
@@ -652,6 +673,25 @@ export function makeStore(db) {
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
     listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
+
+    // Saved prompts. Ordered here rather than in the picker: two surfaces list
+    // them (the compose menu and the manager) and an order decided twice is an
+    // order that eventually disagrees with itself. NOCASE so the list reads
+    // alphabetically to a person rather than to ASCII, which would file every
+    // lower-case title after every upper-case one.
+    listSavedPrompts: db.prepare(
+      `SELECT id, title, content, created_at, updated_at
+         FROM saved_prompts ORDER BY title COLLATE NOCASE`
+    ),
+    getSavedPrompt: db.prepare(`SELECT id, title, content FROM saved_prompts WHERE id = ?`),
+    savedPromptByTitle: db.prepare(`SELECT id FROM saved_prompts WHERE title = ? COLLATE NOCASE`),
+    insertSavedPrompt: db.prepare(
+      `INSERT INTO saved_prompts (title, content) VALUES (?, ?)`
+    ),
+    updateSavedPrompt: db.prepare(
+      `UPDATE saved_prompts SET title = ?, content = ?, updated_at = datetime('now') WHERE id = ?`
+    ),
+    deleteSavedPrompt: db.prepare(`DELETE FROM saved_prompts WHERE id = ?`),
 
     // --- dashboard reads (see src/web.js) -----------------------------------
     listAllAgents: db.prepare(
@@ -1262,6 +1302,22 @@ export function makeStore(db) {
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),
     listChannelFlags: () => q.listChannelFlags.all(),
+
+    // --- saved prompts --------------------------------------------------------
+    // The duplicate-title check is a read the caller makes before writing, and
+    // the unique index behind it is what makes that safe: this is one process,
+    // so nothing can slip between the two, and if anything ever does the write
+    // fails rather than quietly making a second "Deploy".
+    listSavedPrompts: () => q.listSavedPrompts.all(),
+    getSavedPrompt: (id) => q.getSavedPrompt.get(id) ?? null,
+    /** The prompt holding this title, if any — `exceptId` skips the row being edited. */
+    savedPromptByTitle: (title, exceptId = null) => {
+      const row = q.savedPromptByTitle.get(title);
+      return row && row.id !== exceptId ? row : null;
+    },
+    createSavedPrompt: (title, content) => n(q.insertSavedPrompt.run(title, content).lastInsertRowid),
+    updateSavedPrompt: (id, title, content) => q.updateSavedPrompt.run(title, content, id).changes,
+    deleteSavedPrompt: (id) => q.deleteSavedPrompt.run(id).changes,
     boardTasks: () => q.boardTasks.all(),
     listAllChannels: () => q.listAllChannels.all().map((r) => r.channel),
     channelStats: () => ({

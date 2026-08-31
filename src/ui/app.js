@@ -60,6 +60,11 @@ const ui = {
   showRetired: false,
   showArchived: false,
   state: null,   // the most recent /api/state, so a dialog can read live counts
+  // The saved-prompt library while its manager is open, and which row is being
+  // edited — an id, 'new', or null for the plain list. Outside the dialog's DOM
+  // because every save redraws the whole thing.
+  promptRows: [],
+  promptEdit: null,
 };
 
 /* ---------- formatting ---------- */
@@ -589,8 +594,10 @@ function refreshDialog() {
   if (!el.dlg.open || !ui.dlgCtx) return;
   const { channel, agent, kind } = ui.dlgCtx;
   // Not every dialog is a list. A rename has no count behind it and nothing to
-  // redraw, so leave it exactly as the operator is using it.
-  if (kind === 'rename') return;
+  // redraw, so leave it exactly as the operator is using it. The prompt manager
+  // is the same: it reads its own endpoint and redraws after each change, and a
+  // poll-driven redraw would throw away whatever is half-typed in it.
+  if (kind === 'rename' || kind === 'prompts') return;
   if (agent) {
     const a = findAgent(channel, agent);
     const left = !a ? 0
@@ -881,6 +888,114 @@ function stopDialog(channel, agent, persona) {
     <div class="dlg-foot">
       <button type="button" class="btn" data-do="cancel">Cancel</button>
       <button type="button" class="btn danger" data-do="stop-desk" data-channel="${esc(channel)}" data-agent="${esc(agent)}">Stop ${esc(who)}</button>
+    </div>
+  `);
+}
+
+/**
+ * The saved-prompt library: list, add, edit, delete.
+ *
+ * Board-wide, so it takes no channel and no agent — an operator's ten prompts
+ * are the operator's, not a channel's. Opened from the floor's compose row,
+ * which is the only place a prompt can be used; app.js owns it for the same
+ * reason it owns every other dialog on this page.
+ *
+ * One dialog that redraws itself rather than a stack of them. `ui.promptEdit`
+ * is which row is open for editing — an id, the string 'new', or null for the
+ * plain list — and it lives outside the DOM because every save redraws the lot.
+ *
+ * Split in two, and the split is load-bearing. A top-level `function foo` in a
+ * classic script IS `window.foo`, so a later `window.foo = () => …` does not
+ * publish an entry point beside it — it replaces the declaration, and every
+ * internal call to `foo` follows. Written that way, the loader called the entry
+ * point, which called the loader, forever: no error, no dialog, and a fetch
+ * every round. The drawing keeps its own name and the exported one only opens.
+ */
+function renderPromptManager() {
+  ui.dlgCtx = { kind: 'prompts' };
+  const editing = ui.promptEdit ?? null;
+  const rows = ui.promptRows ?? [];
+  const current = editing !== null && editing !== 'new' ? rows.find((p) => p.id === editing) : null;
+
+  // Plain buttons in the rows; the red one is on the confirmation, which is the
+  // click that actually destroys something. A column of red Deletes makes a list
+  // you keep prompts in look like a list you empty.
+  const list = rows.length
+    ? `<ul class="dlg-list prompt-list">${rows.map((p) => `
+        <li class="prompt-row${p.id === editing ? ' editing' : ''}">
+          <span class="prompt-title">${esc(p.title)}</span>
+          <span class="prompt-preview mono">${esc(clip(p.content, 60))}</span>
+          <span class="prompt-acts">
+            <button type="button" class="btn" data-do="prompt-edit" data-id="${p.id}">Edit</button>
+            <button type="button" class="btn" data-do="prompt-ask-delete" data-id="${p.id}">Delete</button>
+          </span>
+        </li>`).join('')}</ul>`
+    : '<p class="dlg-sub">Nothing saved yet. Add the first one below.</p>';
+
+  const form = editing === null ? '' : `
+    <div class="prompt-form">
+      <label class="field">
+        <span>Title</span>
+        <input id="prompt-title" class="input" type="text" autocomplete="off" spellcheck="false"
+               value="${esc(current?.title ?? '')}" placeholder="What you would call it">
+      </label>
+      <label class="field">
+        <span>Content</span>
+        <textarea id="prompt-content" class="input" rows="6"
+                  placeholder="The message this puts in the box">${esc(current?.content ?? '')}</textarea>
+      </label>
+    </div>`;
+
+  openDialog(`
+    <div class="dlg-head"><h3>Saved prompts</h3></div>
+    <p class="dlg-sub">Shared by every desk on this board. Picking one puts its content in the compose box, where you can edit it before sending.</p>
+    ${list}
+    ${form}
+    <div class="dlg-foot">
+      ${editing === null
+        ? `<button type="button" class="btn" data-do="cancel">Close</button>
+           <button type="button" class="btn primary" data-do="prompt-new">New prompt</button>`
+        : `<button type="button" class="btn" data-do="prompt-cancel-edit">Cancel</button>
+           <button type="button" class="btn primary" data-do="prompt-save"${editing === 'new' ? '' : ` data-id="${editing}"`}>Save</button>`}
+    </div>
+  `);
+  const title = el.dlgBody.querySelector('#prompt-title');
+  title?.focus();
+  title?.select();
+}
+
+/** Read the library, then draw the manager. Every change comes back through here. */
+async function loadPrompts({ edit } = {}) {
+  const res = await fetch('./api/prompts', { headers: { accept: 'application/json' } });
+  ui.promptRows = res.ok ? ((await res.json()).prompts ?? []) : [];
+  if (edit !== undefined) ui.promptEdit = edit;
+  renderPromptManager();
+  // The floor's picker holds its own copy so it can draw without waiting; tell
+  // it the library moved rather than letting it show yesterday's list.
+  window.floorPromptsChanged?.();
+}
+
+/** What the floor's "Manage…" calls. Declared, not assigned — see above. */
+function promptManager() {
+  ui.promptEdit = null;
+  loadPrompts();
+}
+
+/**
+ * Confirm a deletion. Its own dialog rather than a state inside the manager:
+ * the manager is a list you scan, and a confirmation you can scroll away from
+ * is one you answer without reading. Cancel goes back to the list.
+ */
+function promptDeleteDialog(id) {
+  const p = (ui.promptRows ?? []).find((x) => x.id === id);
+  if (!p) return;
+  openDialog(`
+    <h3>Delete “${esc(p.title)}”?</h3>
+    <p class="dlg-sub">${esc(clip(p.content, 200))}</p>
+    <p class="dlg-note">There is no undo, and nothing else keeps a copy — a backup taken before now would still have it.</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="prompt-cancel-delete">Cancel</button>
+      <button type="button" class="btn danger" data-do="prompt-delete" data-id="${p.id}">Delete</button>
     </div>
   `);
 }
@@ -1300,6 +1415,45 @@ el.dlgBody.addEventListener('click', (e) => {
   switch (d.do) {
     case 'cancel':
       closeDialog();
+      break;
+    // --- saved prompts. The list is already in hand, so moving between the list
+    // and the form is a redraw, not a fetch; only a write re-reads.
+    case 'prompt-new':
+      ui.promptEdit = 'new';
+      renderPromptManager();
+      break;
+    case 'prompt-edit':
+      ui.promptEdit = Number(d.id);
+      renderPromptManager();
+      break;
+    case 'prompt-cancel-edit':
+      ui.promptEdit = null;
+      renderPromptManager();
+      break;
+    case 'prompt-save': {
+      // Deliberately not checked here first. "Not empty" and "no duplicate
+      // title" are the server's rules — it has the unique index behind it — and
+      // a copy in the form would be a second place for them to drift. A refusal
+      // arrives in .dlg-err with whatever the operator typed still in the boxes.
+      const title = el.dlgBody.querySelector('#prompt-title')?.value ?? '';
+      const content = el.dlgBody.querySelector('#prompt-content')?.value ?? '';
+      const id = d.id ? Number(d.id) : null;
+      act(() => (id === null
+        ? admin('prompt/create', { title, content })
+        : admin('prompt/update', { id, title, content })
+      ).then(() => loadPrompts({ edit: null })), { keepOpen: true });
+      break;
+    }
+    case 'prompt-ask-delete':
+      promptDeleteDialog(Number(d.id));
+      break;
+    case 'prompt-cancel-delete':
+      ui.promptEdit = null;
+      loadPrompts();
+      break;
+    case 'prompt-delete':
+      act(() => admin('prompt/delete', { id: Number(d.id) })
+        .then(() => loadPrompts({ edit: null })), { keepOpen: true });
       break;
     case 'advance':
       act(() => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }));

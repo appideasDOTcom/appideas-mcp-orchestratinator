@@ -326,6 +326,65 @@ try {
     assert(!feed.some((r) => r.kind === 'message' && r.channel === CHANNEL), 'while the channel\'s messages are really gone');
   }
 
+  console.log('\nsaved prompts');
+  {
+    const prompts = () => fetch(`${HOST}/api/prompts`).then((r) => r.json()).then((j) => j.prompts);
+    const titles = async () => (await prompts()).map((p) => p.title);
+
+    eq((await prompts()).length, 0, 'the library starts empty');
+
+    const made = await postJson('prompt/create', { title: 'Deploy', content: 'run the deploy and report back' });
+    eq(made.status, 200, 'a prompt with a title and a body is saved');
+    assert(Number.isInteger(made.json.id), 'and comes back with an id to edit it by');
+
+    // The two rules, and only the two rules.
+    eq((await postJson('prompt/create', { title: 'Deploy', content: 'something else' })).status, 400,
+      'a second prompt with the same title is refused');
+    eq((await postJson('prompt/create', { title: 'DEPLOY', content: 'something else' })).status, 400,
+      'and case is not a difference — "DEPLOY" is the same title');
+    eq((await postJson('prompt/create', { title: '   ', content: 'body' })).status, 400, 'an empty title is refused');
+    eq((await postJson('prompt/create', { title: 'Blank', content: '   ' })).status, 400, 'so is an empty body');
+    eq((await prompts()).length, 1, 'and none of those left a row behind');
+
+    // Nothing else about the content is anyone's business.
+    const odd = await postJson('prompt/create', { title: 'Odd', content: '<script>ok</script> {{not a placeholder}} \u00e9\u00e8' });
+    eq(odd.status, 200, 'content is stored verbatim, whatever is in it');
+    eq((await prompts()).find((p) => p.title === 'Odd')?.content, '<script>ok</script> {{not a placeholder}} \u00e9\u00e8',
+      'and comes back exactly as it went in');
+
+    await postJson('prompt/create', { title: 'apply', content: 'a' });
+    await postJson('prompt/create', { title: 'Zebra', content: 'z' });
+    eq((await titles()).join(','), 'apply,Deploy,Odd,Zebra',
+      'the list is alphabetical by title, ignoring case — not ASCII order');
+
+    // Editing.
+    const id = made.json.id;
+    eq((await postJson('prompt/update', { id, title: 'Deploy', content: 'changed' })).status, 200,
+      'a prompt can keep its own title while its body changes');
+    eq((await prompts()).find((p) => p.id === id)?.content, 'changed', 'and the new body is what comes back');
+    eq((await postJson('prompt/update', { id, title: 'Zebra', content: 'x' })).status, 400,
+      'but it cannot take a title another prompt already has');
+    eq((await postJson('prompt/update', { id, title: 'Ship it', content: 'x' })).status, 200, 'a free title is fine');
+    eq((await postJson('prompt/update', { id: 9999, title: 't', content: 'c' })).status, 404, 'editing one that is gone → 404');
+
+    // Deleting.
+    const gone = await postJson('prompt/delete', { id });
+    eq(gone.status, 200, 'a prompt can be deleted');
+    eq(gone.json.title, 'Ship it', 'and says which one it was, for the confirmation that asked');
+    eq((await titles()).join(','), 'apply,Odd,Zebra', 'the list no longer holds it');
+    eq((await postJson('prompt/delete', { id })).status, 404, 'deleting it twice → 404');
+
+    // A title is only taken while a prompt holds it.
+    eq((await postJson('prompt/create', { title: 'Ship it', content: 'again' })).status, 200,
+      'and its title is free again afterwards');
+
+    // The prompt library is the operator's, not a channel's: destroying a
+    // channel must not take it with them.
+    const survived = (await titles()).length;
+    await postJson('channel/delete', { channel: 'no-such-channel', confirm: 'no-such-channel' });
+    eq((await titles()).length, survived, 'prompts belong to no channel, so a channel delete leaves them alone');
+  }
+
   console.log('\naudit trail');
   {
     const rows = (await activity()).rows.filter((r) => r.kind.startsWith('admin.'));

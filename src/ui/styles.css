@@ -1181,6 +1181,72 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* An error borrowed the label. Muted grey small-caps is the wrong voice for it,
    and the sentence is not an action, so drop the shouting with the colour. */
 .p-link.flashed { color: var(--block); text-transform: none; letter-spacing: 0; }
+/* The saved-prompts button. Same 26x24 hit area and the same no-chrome treatment
+   as the stop sign beside it: two marks in one row read as one control each only
+   if neither of them is wearing a box the other isn't. */
+.btn.promptbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 24px; padding: 0; border-color: transparent; background: none;
+}
+.promptGlyph { width: 16px; height: 16px; display: block; overflow: visible; }
+/* Stroked, not filled — the stop sign is an outline and this sits next to it.
+   non-scaling-stroke so the 0..2 unit box does not multiply the line weight. */
+.promptGlyph rect, .promptGlyph polyline, .promptGlyph line {
+  fill: none; stroke: var(--muted); stroke-width: 1.6px;
+  stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke;
+}
+.btn.promptbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.promptbtn:hover:not(:disabled) .promptGlyph rect,
+.btn.promptbtn:hover:not(:disabled) .promptGlyph polyline,
+.btn.promptbtn:hover:not(:disabled) .promptGlyph line { stroke: var(--busy); }
+.btn.promptbtn:focus { outline: none; }
+.btn.promptbtn:focus-visible .promptGlyph rect,
+.btn.promptbtn:focus-visible .promptGlyph polyline,
+.btn.promptbtn:focus-visible .promptGlyph line { stroke: var(--accent); stroke-width: 2px; }
+.btn.promptbtn:disabled { opacity: .32; }
+.btn.promptbtn[aria-expanded="true"] .promptGlyph rect,
+.btn.promptbtn[aria-expanded="true"] .promptGlyph polyline,
+.btn.promptbtn[aria-expanded="true"] .promptGlyph line { stroke: var(--busy); }
+
+/* The picker. On the body rather than inside the panel, which scrolls and clips;
+   positioned from script, so only the look is here. */
+#prompt-menu {
+  position: fixed; z-index: 60; min-width: 190px; max-width: 320px;
+  max-height: 60vh; overflow-y: auto;
+  padding: 4px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+}
+.pm-item {
+  display: block; width: 100%; text-align: left;
+  padding: 6px 10px; border: 0; border-radius: 5px; background: none;
+  font: 500 12.5px/1.35 var(--sans); color: var(--text); cursor: pointer;
+  /* A long title shortens rather than widening the menu or wrapping to three
+     lines. The whole title is on the row's tooltip either way. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pm-item:hover, .pm-item:focus-visible { background: color-mix(in srgb, var(--busy) 16%, transparent); outline: none; }
+.pm-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.pm-manage { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.pm-empty { padding: 6px 10px; color: var(--muted); font: 12.5px/1.35 var(--sans); }
+
+/* The manager's list: title, a peek at the body, and its two buttons.
+   .dlg-list is indented for the bulleted prose lists it was built for; this one
+   is a table of rows, and inheriting that indent pushed every title a finger's
+   width right of the heading above it. */
+.prompt-list { display: flex; flex-direction: column; gap: 2px; margin-left: 0; padding-left: 0; list-style: none; }
+.prompt-row {
+  display: grid; grid-template-columns: minmax(90px, auto) 1fr auto;
+  align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px;
+}
+.prompt-row.editing { background: color-mix(in srgb, var(--busy) 12%, transparent); }
+.prompt-title { font-weight: 600; }
+/* The preview is a hint, not the content — one line, always, however long the
+   prompt is. */
+.prompt-preview { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prompt-acts { display: flex; gap: 6px; }
+.prompt-form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.prompt-form textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+
 /* Waiting for the host to move the conversation. The link is still a button and
    still focusable — disabling it would throw the keyboard's place away mid-move
    — so the click is refused in the handler and the cursor says why. */
