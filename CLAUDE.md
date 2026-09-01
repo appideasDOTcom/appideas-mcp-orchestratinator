@@ -210,6 +210,9 @@ real.
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the
 conversation keeps relaying. Most of its assertions are about what is *not* sent.
+It drives `hooks.json`'s own shell line under real `sh` too, and asserts all
+eight events carry the identical command — editing one and not the rest is the
+drift it guards against.
 Its fixture lives in `tmpdir()`, not `data/`: the hook walks six levels up
 looking for `.mcp.json`, and a fixture inside the repo reaches this repo's own —
 so the "outside a repo" cases resolve against the real board and post to the
