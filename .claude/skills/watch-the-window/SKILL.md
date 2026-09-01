@@ -125,3 +125,35 @@ session memo now fixes.
 
 `http://10.0.42.120:8787` and `https://appideas-mcp.ngrok.dev` are not ours.
 Every recorder here names `localhost:8787` on purpose — do not repoint them.
+
+## Answering the form yourself
+
+A prompt raised by `AskUserQuestion` goes to whoever holds the conversation, so
+it looks as though only the operator can answer it. **He cannot be the harness.**
+Asked to answer the same form five times while nothing changed between rounds, he
+said so — and every round cost him a switch between VS Code and the floor.
+
+[`answer-the-form.mjs`](answer-the-form.mjs) closes the loop instead. Start it
+*before* the tool call; it polls `/api/floor` for the standing request, POSTs
+`/api/floor/answer` exactly as the browser does, and records every pane change
+beside it.
+
+```bash
+nohup node .claude/skills/watch-the-window/answer-the-form.mjs "$SP/run.log" last &
+# then raise the AskUserQuestion, and read $SP/run.log afterwards
+```
+
+Its third argument picks the answers: `last` takes the final real option on each
+question (and the last two on a multi-select), `free` takes the free-text row on
+the first single-select and supplies words.
+
+**Answer with a non-first option.** The bug this was built to find substituted
+option 1 for every choice after the first, so every round that had chosen option
+1 passed while broken. A test that cannot fail is not a test — pick option 3 and
+say in advance what should come back.
+
+**Do not rebuild the stack while a form is standing.** The host loses the server,
+retries the work item, and plays the whole key sequence into the pane twice.
+
+**Get him out of the floor first.** Every Bash command you run raises a
+permission prompt there, and those land in the middle of what you are measuring.

@@ -552,7 +552,11 @@ try {
     const one = answerSteps([single], [{ choose: [2] }]);
     assert(keys(one).slice(0, 2).every((k) => k === 'Left'), 'it walks to a known end first, because which tab is showing is only marked in colour');
     assert(keys(one).includes('2'), 'the choice is pressed by the window\u2019s own number');
-    assert(keys(one).indexOf('Enter') > keys(one).indexOf('2'), 'and Enter comes after it, because on a single-select the digit only moves the cursor');
+    // One key, not two. Recorded off a real form: the digit selects and the tab
+    // advances by itself, so an Enter after it answers the *next* question with
+    // whatever is highlighted there — always its first option. That silently
+    // overwrote the operator's choice on every tab after the first.
+    assert(!keys(one).includes('Enter'), 'and nothing follows it — the digit selects, it does not merely move the cursor');
 
     const many = answerSteps([multi], [{ choose: [1, 2] }]);
     const body = keys(many).filter((k) => k !== 'Left');
@@ -571,6 +575,16 @@ try {
     assert(stand.filter((k) => k === 'Up').length >= 3, 'walked to the top first, because where the cursor sits cannot be read');
     eq(stand.filter((k) => k === 'Down').length, 2, 'then down to that row — the third of three');
 
+    // Typing into a multi-select's field is not finished by moving on. The field
+    // keeps focus and the row grows a "Next" under it, so Tab there is a
+    // character rather than navigation — recorded as the whole sequence playing
+    // out with the form still on tab one and every later tab unreached.
+    eq(typed.slice(-2), ['Down', 'Enter'], 'a multi-select with typed words is walked off the field onto "Next"');
+    assert(!typed.slice(typed.indexOf('text:something else entirely')).includes('Tab'),
+      'and never Tab, which the focused field swallows along with Enter');
+    const plainMulti = keys(answerSteps([multi], [{ choose: [1] }]));
+    eq(plainMulti.slice(-1), ['Tab'], 'while a multi-select with nothing typed still moves on with Tab');
+
     // Nothing typed means nothing to stand on.
     const plain = keys(answerSteps([multi], [{ choose: [1] }]));
     assert(!plain.includes('Up') && !plain.includes('Down'), 'a choice with no free text moves no cursor at all');
@@ -578,10 +592,20 @@ try {
     const orphan = keys(answerSteps([multi], [{ choose: [1], text: 'stray' }]));
     assert(!orphan.some((k) => k.startsWith('text:')), 'and text is dropped unless the choice that opens the field was chosen');
 
-    // Submitting is its own confirmation: the Submit tab, then Enter, then "1".
-    const end = answerSteps([single, multi], [{ choose: [1] }, { choose: [2] }]).slice(-2);
-    eq(keys(end), ['1', 'Enter'], 'the sequence ends by confirming on the Submit tab');
-    assert(end.every((st) => st.final), 'and both are marked final, because the window closes on whichever of them takes');
+    // Submitting is NOT walked to. Recorded off a real window: answering the last
+    // question advances to Submit on its own and the review screen opens with
+    // "1. Submit answers" already under the cursor. The walk that used to follow
+    // started from there instead of arriving, and an odd number of Tabs on a
+    // two-entry screen lands on "2. Cancel" — so the Enter meant to submit threw
+    // every answer away. "User declined to answer questions", one frame after
+    // "Ready to submit your answers?".
+    const end = answerSteps([single, multi], [{ choose: [1] }, { choose: [2] }]);
+    assert(!end.some((st) => st.key === 'Tab' && st.final), 'nothing is walked to Submit after the last answer');
+    eq(keys(end).slice(-1), ['Tab'], 'the sequence ends where the last question left it — a multi moves on with Tab');
+    const endSingles = answerSteps([single, single], [{ choose: [1] }, { choose: [2] }]);
+    eq(keys(endSingles).slice(-2), ['1', '2'], 'and a run of single-selects is one key each, in order');
+    assert(!keys(endSingles).slice(3).includes('Tab'),
+      'with no blind tab walk behind it — that walk is what pressed Cancel');
 
     // A question left unanswered is stepped past rather than guessed at.
     const skipped = keys(answerSteps([single, multi], [{}, { choose: [1] }]));
@@ -603,8 +627,13 @@ try {
     };
     const clar = answerSteps([singleFree, multi], [{ choose: [3], text: 'none of these' }, { choose: [1] }]);
     const ck = keys(clar).filter((k) => k !== 'Left');
-    eq(ck, ['3', 'Enter', 'text:none of these', 'Enter'],
-      'the digit stands on the row, Enter opens the field, then the words, then the Enter that ends it');
+    // No field is opened and nothing is typed here. Recorded: the form is on
+    // screen with the free-text row under the cursor, and 318ms after the Enter
+    // the pane reads "User declined to answer questions" above a composer. The
+    // words are sent afterwards, as an ordinary message.
+    eq(ck, ['3', 'Enter'], 'the digit stands on the row and Enter withdraws the form — that is all it can do');
+    assert(!ck.some((k) => k.startsWith('text:')),
+      'the words are not keystrokes in a form that no longer exists by the time they would be typed');
     assert(!ck.includes('Up') && !ck.includes('Down'),
       'and no cursor walk, because on a single-select the digit is what moves the cursor');
     const last = clar[clar.length - 1];
@@ -622,7 +651,7 @@ try {
     // with no text is an ordinary answer and must keep the ordinary ending.
     const stillNormal = answerSteps([singleFree], [{ choose: [3] }]);
     assert(!stillNormal.some((st) => st.clarify), 'choosing that row without typing is not a clarification');
-    eq(keys(stillNormal).slice(-2), ['1', 'Enter'], 'and it still ends on the Submit tab');
+    eq(keys(stillNormal).slice(-1), ['3'], 'and it still ends on its own answer, with nothing walked to Submit');
   }
 
   console.log('\nthe window\u2019s own choices');
@@ -775,6 +804,58 @@ try {
   eq(askerDesk().session.awaiting_kind, 'error', 'an answer that never landed puts the desk back up');
   assert(String(askerDesk().session.awaiting_message).includes('never reached the window'),
     'saying what was observed, so the operator knows to go and look');
+
+  // A form that fails to land comes back as a form.
+  //
+  // Untested until now, and the gap showed on the floor: the operator answered
+  // an AskUserQuestion, the answer was reported as failed, and what came back
+  // was the Approve/Deny/Cancel panel — because the panel draws a form only
+  // when `questions` is present. Cancelling that closed the form the window was
+  // still holding, which is how one prompt became "I received the form twice".
+  await post(ev('asker', 's-ask', 'PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: {} }));
+  await takeWork();
+  fa = await floor();
+  const formId = askerDesk().permission.request_id;
+  const QS = [
+    { kind: 'single', tab_title: 'One', question: 'Which one?', options: [{ n: 1, text: 'Alpha' }, { n: 2, text: 'Bravo' }] },
+    { kind: 'single', tab_title: 'Two', question: 'And which?', options: [{ n: 1, text: 'Red' }, { n: 2, text: 'Green' }] },
+  ];
+  await hostEvents([{ type: 'prompt', channel: CH, agent: 'asker', request_id: formId, options: [], questions: QS, tabs: ['One', 'Two'] }]);
+  fa = await floor();
+  eq(askerDesk().permission?.questions?.length, 2, 'the form reaches the panel');
+
+  const sentForm = await fetch(`${HOST}/api/floor/answer`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'asker', request_id: formId, answers: [{ choose: [1] }, { choose: [2] }] }),
+  });
+  eq(sentForm.status, 200, 'the form can be answered');
+  await takeWork();
+
+  await hostEvents([{
+    type: 'error', code: 'answer_failed', channel: CH, agent: 'asker',
+    message: 'your answers did not land — the window stopped asking after 6 of 12 steps',
+  }]);
+  fa = await floor();
+  eq(askerDesk().permission?.request_id, formId, 'a failed answer puts the same request back up');
+  eq(askerDesk().permission?.questions?.length, 2,
+    'and it comes back as the form, not as Approve/Deny — the panel has no other way to know it is one');
+
+  // Once. A failure that is itself mistaken would otherwise put the form back
+  // the instant it is answered, and answering is then the one thing that cannot
+  // end it.
+  await fetch(`${HOST}/api/floor/answer`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'asker', request_id: formId, answers: [{ choose: [1] }, { choose: [2] }] }),
+  });
+  await takeWork();
+  await hostEvents([{
+    type: 'error', code: 'answer_failed', channel: CH, agent: 'asker',
+    message: 'your answers did not land — again',
+  }]);
+  fa = await floor();
+  eq(askerDesk().permission, null, 'the second failure does not offer it a third time');
+  assert(String(askerDesk().session.awaiting_message).includes('not being offered again'),
+    'and says so, rather than leaving the operator wondering where the form went');
 
   console.log('\nan interrupt marker is not the operator talking');
   // Claude Code writes `[Request interrupted by user]` into the transcript as a

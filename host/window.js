@@ -620,6 +620,15 @@ export function composerOf(screen) {
     if (/^\s*[❯>]/.test(lines[n])) { at = n; break; }
   }
   if (at < 0) return null;
+  // A numbered row under the cursor is a menu choice, not something typed.
+  //
+  // The rule below the cursor was supposed to tell those apart — "a menu has no
+  // rule under it" — and an AskUserQuestion breaks that: its free-text row sits
+  // directly above a rule with another choice beneath it. Measured, this
+  // returned " 4. Type something." as the contents of the composer, which is
+  // how a form standing in plain sight was reported as "the window is back at
+  // its composer, so there is no question standing".
+  if (/^\s*[❯>]\s*\d+\.\s/.test(lines[at])) return null;
   const body = [lines[at].replace(/^\s*[❯>]/, '')];
   let closed = false;
   for (let n = at + 1; n < lines.length; n++) {
@@ -1034,10 +1043,25 @@ export async function readPrompt(cwd) {
 export function askingOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
   const foot = lines[lines.length - 1] ?? '';
+  // The footer wraps, so it is read as the last few lines rejoined rather than
+  // as the last one.
+  //
+  // Measured: at 160 columns "Enter to select · Tab/Arrow keys to navigate ·
+  // ctrl+g to edit in Vim · Esc to cancel" is one line and every match here
+  // works. Attach a client at 80 and the same footer becomes two, the last of
+  // which is the single word "cancel" — so a form plainly on screen read as no
+  // question at all, the sequence gave up mid-answer, and the operator was told
+  // the window was "back at its composer". Pane width is set by whoever is
+  // attached, which made this look like a fault that came and went.
+  const foots = lines.slice(-3).join(' ').replace(/\s+/g, ' ');
   // The composer's own status line. Checked first: it contains "esc", and so do
   // the ones that mean the opposite.
+  // Still the last line alone. "esc to interrupt" is the status line of a
+  // window that is working, and it sits at the very bottom; looking for it in
+  // the rejoined tail finds the previous frame's status line above a question
+  // that has since opened, and calls a live prompt busy.
   if (/esc to interrupt/i.test(foot)) return null;
-  if (/enter to (select|confirm)|esc to cancel|tab to amend/i.test(foot)) return foot;
+  if (/enter to (select|confirm)|esc to cancel|tab to amend/i.test(foots)) return foot;
   // The Submit tab has no status line of its own — it ends on its own little
   // menu. Without this the sequence gave up at exactly the step that lands on
   // it, which is the one step that must not be skipped, and every retry found
@@ -1203,6 +1227,36 @@ export async function readQuestions(cwd) {
 
 /** How long each step of a scripted answer is given to land before the next. */
 const STEP_MS = Number(process.env.ORCH_STEP_MS ?? 350);
+/**
+ * How long to wait for the pane to react to a key before moving on, and how
+ * often to look while waiting.
+ *
+ * A fixed sleep is a guess, and the race it loses is visible on the floor: a key
+ * pressed while the window was still redrawing the previous one is applied to
+ * whatever state arrives next. Measured as "the window stopped asking after 6 of
+ * 12 steps", with the digit that had nowhere to go turning up in the operator's
+ * own message as a turn reading "1".
+ *
+ * Not every step is meant to change anything — the leading Lefts walk to the
+ * left end of a tab strip that may already be there — so a screen that never
+ * moves is a wait that ends, not a failure.
+ */
+const STEP_SETTLE_MS = Number(process.env.ORCH_STEP_SETTLE_MS ?? 1000);
+const STEP_POLL_MS = Number(process.env.ORCH_STEP_POLL_MS ?? 100);
+
+async function reacted(target, before) {
+  const stop = Date.now() + STEP_SETTLE_MS;
+  let last = null;
+  while (Date.now() < stop) {
+    await sleep(STEP_POLL_MS);
+    const now = await screenOf(target);
+    // Changed *and* held still: caught mid-redraw, the next key would land in a
+    // half-drawn state exactly as it does now.
+    if (now !== before && now === last) return true;
+    last = now;
+  }
+  return false;
+}
 
 /**
  * Play a sequence of keys into a question, checking before every one that the
@@ -1251,7 +1305,8 @@ export async function answerQuestion(cwd, steps = []) {
     if (typeof step.text !== 'string' && !step.key) continue;
     const r = await tmux(['send-keys', '-t', pane.target, ...arg]);
     if (!r.ok) return { ok: false, error: r.error, done };
-    await sleep(step.settle ?? STEP_MS);
+    if (typeof step.settle === 'number') await sleep(step.settle);
+    else await reacted(pane.target, seen);
     done.push(typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key));
   }
 

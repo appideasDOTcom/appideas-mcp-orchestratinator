@@ -371,50 +371,84 @@ export function answerSteps(questions, answers) {
 
     if (q.kind === 'multi') {
       for (const n of chosen) steps.push({ key: String(n) });
-      if (free) { standOn(free); steps.push({ text: wants }); }
-      // Enter would toggle the cursor's box, so the way on is Tab.
-      steps.push({ key: 'Tab' });
+      if (free) {
+        standOn(free);
+        steps.push({ text: wants });
+        // The field keeps focus once words are in it, and the row grows a "Next"
+        // row beneath itself. Neither Tab nor Enter leaves it — both are
+        // swallowed, and anything after them is typed into the words. Recorded
+        // twice: "❯ 4. [✔] typed into a multi select" with the sequence's Tab
+        // gone, and then "typed into a multi select3" where the next question's
+        // digit had been appended to the operator's own sentence.
+        //
+        // So it is walked off: Down onto Next, and Enter to take it.
+        steps.push({ key: 'Down' });
+        steps.push({ key: 'Enter' });
+      } else {
+        // Enter would toggle the cursor's box, so the way on is Tab.
+        steps.push({ key: 'Tab' });
+      }
     } else if (free) {
       // The free-text row on a single-select is not a fourth answer. It is
       // Claude Code's clarify hatch: taking it withdraws the whole form and
       // sends the words back as a clarification, so nothing after it can be
       // played and no later tab gets answered.
       //
-      // Getting there is not the multi-select's sequence either. A digit only
-      // *moves* the cursor on a single-select — Enter is what selects, and
-      // selecting this row is what opens its field. Typing before that Enter
-      // put the words nowhere and then submitted an empty clarification;
-      // measured, twice, as "(No answer provided)" on every question with no
-      // text attached, and reported here as "the window stopped asking after
-      // 13 of 20 steps". So the digit stands on the row, Enter opens it, the
-      // words go in, and the second Enter is what ends the form.
+      // Selecting it opens no field. Recorded frame by frame: the form is on
+      // screen with "❯ 4. Type something." under the cursor, and 318ms after
+      // the Enter the pane reads "User declined to answer questions" with a
+      // composer cursor beneath it. There is nothing left to type into, which
+      // is why typing the words here as further keystrokes could not work —
+      // and why the sequence died on the step after this one, every time.
+      //
+      // So this stops at the decline, and the words go down the ordinary chat
+      // path afterwards, where a paste is confirmed and a submission is proven.
+      // The operator gets what they asked for either way: the form withdrawn
+      // and their sentence in the conversation.
       steps.push({ key: String(free.n) });
-      steps.push({ key: 'Enter' });
-      steps.push({ text: wants });
       steps.push({ key: 'Enter', final: true, clarify: true });
       return steps;
     } else {
       const n = chosen[0];
       if (n) {
+        // One key. The digit *selects* on a single-select — it does not merely
+        // move the cursor — and selecting advances to the next tab by itself.
+        //
+        // There used to be an Enter after it, on the measured-once belief that
+        // the digit only moved. Recorded frame by frame, that Enter lands on the
+        // tab the digit already advanced to and answers *that* question with
+        // whatever sits highlighted there, which is always its first option. So
+        // the sequence answered question 2 for the operator before reaching it,
+        // and the only rounds that ever looked correct were the ones where the
+        // operator had chosen option 1 anyway. The visible half was the last key
+        // having nothing to press: "the window stopped asking after 6 of 7
+        // steps", reported while the form had in fact submitted.
         steps.push({ key: String(n) });
-        // Selecting moves to the next tab on its own.
-        steps.push({ key: 'Enter' });
       } else {
         steps.push({ key: 'Tab' });
       }
     }
   }
 
-  // Whatever the last question did, land on Submit and answer its confirmation.
+  // Nothing. Answering the last question is what lands on Submit.
   //
-  // Both of the last two are marked final, because the window closes on
-  // whichever of them takes: the confirmation opens with its cursor already on
-  // "Submit answers", so the digit may take it and leave the Enter with nothing
-  // to press, or the digit may only move and the Enter takes it. Either way the
-  // form is gone afterwards, and gone is what success looks like here.
-  for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Tab' });
-  steps.push({ key: '1', final: true });
-  steps.push({ key: 'Enter', final: true });
+  // This used to walk there — `qs.length + 1` Tabs, then "1", then Enter — on
+  // the theory that the form had to be driven to its Submit tab. Recorded off a
+  // real window, it does not: selecting the last answer advances to Submit by
+  // itself and the review screen opens with "1. Submit answers" already under
+  // the cursor. The walk therefore started from Submit rather than reaching it,
+  // and with two entries on that screen an odd number of Tabs lands on
+  // "2. Cancel" — so the Enter meant to submit the form cancelled it instead.
+  //
+  // Frame before: "Ready to submit your answers? / 1. Submit answers / 2.
+  // Cancel". Frame after: "User declined to answer questions". Every answer the
+  // operator sent was thrown away at the final keystroke, and the floor reported
+  // it as "your answers did not land" without being able to say why.
+  //
+  // Submitting is left to the confirm loop in answerQuestion, which presses
+  // Enter only while the pane is actually showing that question. A form that is
+  // somewhere else — a question was skipped, say — then goes unsubmitted and is
+  // reported as unconfirmed, which is recoverable. Cancelling is not.
   return steps;
 }
 
@@ -876,8 +910,12 @@ function applyHostEvent(store, live, hostId, ev) {
         live.pending.set(key, again);
         live.publish(key, { type: 'permission', request: again });
       }
-      turn('error', (str(ev.message) ?? 'the host reported an error') +
-        (failed && !again ? ' — this is the second time, so the form is not being offered again. Open the window to see what it is holding.' : ''));
+      // One message, said in both places. The chat row and the desk's own
+      // awaiting line are read by different people at different moments, and a
+      // note that only reaches one of them is a note the operator can miss.
+      const said = (str(ev.message) ?? 'the host reported an error') +
+        (failed && !again ? ' — this is the second time, so the form is not being offered again. Open the window to see what it is holding.' : '');
+      turn('error', said);
       // By desk, not by `sessionId`. A host event carries no session id, so the
       // id above is whatever `hosted_desks` happens to hold — and before the
       // host has reported which conversation it is watching, that is a
@@ -885,7 +923,7 @@ function applyHostEvent(store, live, hostId, ev) {
       // the one place it has to show: this is what a decision the host could
       // not deliver looks like, now that the desk stops asking as soon as the
       // operator answers.
-      store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(ev.message, 500));
+      store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
       state(again ? 'awaiting' : 'idle');
       break;
     }
@@ -1678,6 +1716,12 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // answering it, so this is a different event from an answer and is recorded
     // as one — the choices on the other tabs were never delivered.
     const clarify = steps.some((st) => st.clarify);
+    // Queued after the answer, and read in order by the host, so the words
+    // arrive at a composer that the decline has just put there.
+    if (clarify) {
+      const words = answers.map((a) => (typeof a?.text === 'string' ? a.text.trim() : '')).find(Boolean);
+      if (words) store.enqueueHostWork(check.hosted.host_id, channel, agent, 'chat', { text: clip(words, 4000) });
+    }
     store.logAdmin(channel, clarify ? 'permission.clarified' : 'permission.answered',
       { target: agent, detail: clip(said, 500) });
     res.json({ ok: true, request_id: requestId, steps: steps.length, clarify });
