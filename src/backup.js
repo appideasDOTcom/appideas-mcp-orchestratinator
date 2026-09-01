@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { BACKUP_TABLES } from './db.js';
+import { BACKUP_TABLES, CAST, humanName } from './db.js';
 
 /**
  * Export and restore the whole board as one JSON file.
@@ -130,6 +130,30 @@ export function snapshotBeforeRestore({ store, meta, env = process.env }) {
 }
 
 /**
+ * Names a legacy backup kept on desks, worth carrying into the profile.
+ *
+ * Before names were global, `personas` had a `persona` column per (channel,
+ * agent). A file from then restores through the generic path with that column
+ * skipped — the live table no longer has it — which would silently drop every
+ * name an operator chose. Migrations never run against a file, only against a
+ * live database, so applyBackup has to do here what migratePersonas did there,
+ * and by the same rules: a cast name and a derived default are not choices, and
+ * where two desks named one agent differently the most recent choice stands.
+ */
+function legacyNamesIn(personas) {
+  if (!Array.isArray(personas)) return [];
+  const cast = new Set(CAST);
+  const chosen = new Map();
+  for (const r of personas) {
+    if (typeof r?.persona !== 'string' || !r.persona) continue;
+    if (cast.has(r.persona) || r.persona === humanName(r.agent)) continue;
+    const prev = chosen.get(r.agent);
+    if (!prev || String(r.assigned_at ?? '') >= String(prev.assigned_at ?? '')) chosen.set(r.agent, r);
+  }
+  return [...chosen.values()].map((r) => ({ agent: r.agent, persona: r.persona }));
+}
+
+/**
  * Load a validated backup over the top of the current board.
  *
  * Only the tables in BACKUP_TABLES are written; anything else in the file is
@@ -156,6 +180,30 @@ export function applyBackup({ store, doc }) {
   if (missing.length) notes.push(`left untouched (absent from the backup): ${missing.join(', ')}`);
 
   const report = store.restoreBackup(tables);
+
+  // After the restore, not inside it: the file's own tables land whole either
+  // way, and a fault here must read as a note on a finished restore, never as
+  // a reason to roll one back.
+  const legacy = legacyNamesIn(doc.tables.personas);
+  if (legacy.length) {
+    try {
+      const { adopted, kept } = store.adoptNames(legacy);
+      if (adopted) {
+        notes.push(
+          `adopted ${adopted} agent name${adopted === 1 ? '' : 's'} from the backup's personas table — ` +
+          'this file is from before names were global'
+        );
+      }
+      if (kept) {
+        notes.push(
+          `kept this board's name for ${kept} agent${kept === 1 ? '' : 's'} the backup names differently — ` +
+          'a name already here wins over a per-desk one from the file'
+        );
+      }
+    } catch (e) {
+      notes.push(`could not carry the backup's per-desk agent names over: ${String(e.message ?? e)}`);
+    }
+  }
 
   return {
     report,

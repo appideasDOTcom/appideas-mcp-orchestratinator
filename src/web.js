@@ -489,11 +489,30 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     if (problem) return bad(res, problem);
 
     const snapshot = snapshotBeforeRestore({ store, meta: { ...meta, authMode: auth.mode } });
-    // Every live MCP session refers to channels and agents that are about to be
-    // replaced. An unknown session id answers 404, which the spec tells clients to
-    // re-initialise on, so a window that's still alive rejoins the restored board.
+
+    // validateBackup's structural checks can't rule out a row the live schema
+    // refuses — a duplicate key, or data that predates a constraint this build
+    // added (the format's whole job is to load across versions, so that case
+    // is expected, not hand-edited). The restore is one transaction, so a
+    // refused row rolls the whole thing back; answer with which row was
+    // refused and the fact that nothing changed, because a bare 500 reads as
+    // "the board might be half of each" — the exact fear a restoring operator
+    // already has.
+    let applied;
+    try {
+      applied = applyBackup({ store, doc });
+    } catch (e) {
+      return bad(res, `nothing was restored — the board is as it was. ${String(e.message ?? e)}`);
+    }
+
+    // Every live MCP session refers to channels and agents that were just
+    // replaced. An unknown session id answers 404, which the spec tells clients
+    // to re-initialise on, so a window that's still alive rejoins the restored
+    // board. Closed after the apply, not before: applyBackup is one synchronous
+    // transaction in a single-threaded process, so no request can slip between
+    // the commit and this line — and closing first meant a restore refused
+    // above bounced every live session over a board that never changed.
     const closed = closeSessionsFor({ all: true });
-    const applied = applyBackup({ store, doc });
 
     // Logged after the restore, never before: the restore wipes admin_events, so a
     // row written first would be destroyed by the thing it was recording.

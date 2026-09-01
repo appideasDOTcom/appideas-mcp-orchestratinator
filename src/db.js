@@ -1050,6 +1050,12 @@ export function makeStore(db) {
          assigned_at = datetime('now')`
     ),
     getName: db.prepare(`SELECT persona FROM agent_profile WHERE agent = ?`),
+    // The name-shaped twin of setShirtIfUnset: fills a blank, never overwrites.
+    setNameIfUnset: db.prepare(
+      `INSERT INTO agent_profile (agent, persona) VALUES (@agent, @persona)
+       ON CONFLICT(agent) DO UPDATE SET
+         persona = COALESCE(persona, excluded.persona), updated_at = datetime('now')`
+    ),
     listProfiles: db.prepare(`SELECT agent, persona, gender, shirt, hair, skin FROM agent_profile`),
     getShirt: db.prepare(`SELECT shirt FROM agent_profile WHERE agent = ?`),
     setShirtIfUnset: db.prepare(
@@ -1253,7 +1259,17 @@ export function makeStore(db) {
           `INSERT INTO ${table} (${use.join(', ')}) VALUES (${use.map((c) => `@${c}`).join(', ')})`
         );
         for (const row of rows) {
-          stmt.run(Object.fromEntries(use.map((c) => [c, bindable(row?.[c])])));
+          try {
+            stmt.run(Object.fromEntries(use.map((c) => [c, bindable(row?.[c])])));
+          } catch (err) {
+            // A row this schema refuses — a duplicate key, a constraint added
+            // since the file was written. The transaction rolls the whole
+            // restore back; what the caller needs from here is *which table and
+            // row*, because "UNIQUE constraint failed" alone sends someone
+            // grepping a file that may hold a hundred thousand rows.
+            err.message = `"${table}" row ${inserted + 1} of ${rows.length} was refused: ${err.message}`;
+            throw err;
+          }
           inserted++;
         }
       }
@@ -1363,6 +1379,27 @@ export function makeStore(db) {
     dumpTable: (table) => tableInfo(table).selectAll.all(),
     countTable: (table) => tableInfo(table).count.get().n,
     restoreBackup,
+    /**
+     * Take on names a legacy backup kept per desk — see applyBackup, which is
+     * the only caller and holds the reasoning. A name already on this board
+     * wins over the file's, the same rule migratePersonas applied to a live
+     * database: the file is the past, and the board may have been renamed
+     * since. Returns what happened rather than a row count, because "kept"
+     * only matters when the two disagreed.
+     */
+    adoptNames: db.transaction((rows) => {
+      let adopted = 0, kept = 0;
+      for (const r of rows) {
+        const standing = q.getName.get(r.agent)?.persona ?? null;
+        if (standing) {
+          if (standing !== r.persona) kept++;
+          continue;
+        }
+        q.setNameIfUnset.run({ agent: r.agent, persona: r.persona });
+        adopted++;
+      }
+      return { adopted, kept };
+    }),
 
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),
