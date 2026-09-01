@@ -10,7 +10,17 @@ can still be wrong on the page. The only honest test is the real page against a
 real server. This is how to get one in about a minute, and — more importantly —
 the specific ways this has produced a **false pass**.
 
-## Five ways a green result has lied here
+## Six ways a green result has lied here
+
+**Probing the panel before it has caught up.** Clicking a desk renders its
+panel *asynchronously* — `openDesk()` fetches turns first, then renders — and
+"the panel is visible" was already true from the previous desk. A probe waited
+on visibility, read desk A's buttons against desk B's name, and reported two
+gating states swapped; the assertions were right and the fixture was right,
+and the read was still of the wrong desk. The panel now says whose it is:
+**wait on `#floor-panel` having `dataset.agent === '<agent>'`**, which is set
+in the same synchronous pass that gates the links, so once it matches, the
+strip is that desk's.
 
 **Testing one of two entry points.** The same dialog opens from the board and
 from the floor, and they do not share a path: floor pills call
@@ -180,6 +190,8 @@ whole question.
 | board task pills | `[data-act="tasks"][data-kind="assigned"\|"claimed"]` |
 | floor pills | `.desk[data-agent="…"] .pill[data-kind="unread"\|"assigned"\|"claimed"]` |
 | floor — open the chat panel | `.desk[data-agent="…"] .deskHit` |
+| floor — whose panel is open | `#floor-panel` `dataset.channel`/`dataset.agent` — wait on this, not on visibility |
+| floor — the panel's link strip | `#floor-panel [data-act="openhere"\|"handback"\|"attach"\|"claude"]` |
 | floor — details popover | `.faceHit` (the sign), `.plateHit` (the nameplate) |
 | in-dialog actions | `#dlg [data-do="…"]`, Nudge is `#dlg .nudge` |
 | dialog error | `#dlg .dlg-err:not([hidden])` |

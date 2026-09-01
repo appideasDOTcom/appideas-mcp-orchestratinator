@@ -11,6 +11,18 @@ document two windows can share. The floor shows who holds a desk, and moving it
 is an explicit handoff: your editor's tab closes, the host opens a tmux window
 with `claude --resume <session>`, and "Open in VS Code" reverses it.
 
+**"Open in Claude" is deliberately not a third seat.** The floor's window
+already *is* claude CLI, so there is nothing to hand off in that direction: the
+button opens the desk's window if the floor has none and lands a terminal on
+it (`case 'claude'` in [`host/index.js`](host/index.js)). The version that
+mirrors the VS Code handoff — a bare `claude --resume` in the operator's own
+terminal — was considered and rejected, and the reason is the failure mode, not
+taste: closing an attached terminal is a detach and the desk carries on;
+closing a bare one SIGHUPs the conversation dead, for the exact audience
+(partners dropping in to run a slash command and leave) this button exists
+for. Validated round-trip on the live board 2026-09-01. Do not re-propose the
+handoff version as backlog.
+
 **Nothing enforces this.** It is a rule the UI expresses, not a lock, and it is
 worth knowing exactly how it fails before proposing to relax it. Two processes
 can both `--resume` one session id and both run — measured 2026-09-01, along with
