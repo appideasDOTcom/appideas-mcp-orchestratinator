@@ -1,6 +1,6 @@
 {
   "name": "orchestratinator-host",
-  "version": "0.1.0",
+  "version": "0.9.1",
   "private": true,
   "type": "module",
   "description": "Runs each desk's Claude Code in a tmux pane and connects it to the orchestratinator floor, so a desk on the floor is a real chat you can also sit at yourself.",

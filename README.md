@@ -500,6 +500,23 @@ count on screen (`1 retired`, `2 archived channels`) that reveals them again.
 Silently omitting a row would make the board lie, which is the one thing it must
 not do.
 
+The floor says the same thing in its own vocabulary. A channel put away — by
+archiving it, or by minimizing it — is not a storey in the building, but it
+keeps its chip in the floor picker, moved to the end behind a `·`, so the room
+is still somewhere you can walk into. Both stay board controls; there is nothing
+on the floor that sets either.
+
+Where the two differ is the numbers, and the difference is the one between them:
+
+- **Archived** is a shared statement, so it is out of the floor's totals and out
+  of the operator queue. The count of floors in this building is the same number
+  for everyone looking at it, and a prompt in a room the team has put away
+  should not read as "1 need you".
+- **Minimized** is one browser tidying up, so it changes nothing but what is
+  drawn. The totals stay put — as they do on the board, where minimizing a card
+  does not move them either — because a fold in one browser must not make
+  "4 floors" mean something different in another.
+
 Deleting a channel removes it from the board but **not** from the activity log:
 `admin_events` is deliberately not swept, because an audit trail you can erase by
 deleting the thing it describes isn't one. The log goes on saying you deleted it,
@@ -640,6 +657,25 @@ npm install
 npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
 ```
+
+### Bumping the version
+
+**One command, because three files carry it.** The server package, the host
+package and the Claude Code plugin manifest each hold a number, and none of them
+can read another at install time — Claude Code parses the manifest straight off
+disk, so its version has to be a literal.
+
+```bash
+npm run set-version 0.9.2
+docker compose up -d --build     # the dashboard's number comes from the server
+```
+
+The dashboard header shows the *server's* version and gets it by reading
+`package.json` at startup rather than carrying a copy, so that half cannot drift.
+The other half is enforced: `npm run smoke` asserts all three files agree and
+that `/health` and `/api/state` report the same number. Bump one on its own — the
+plugin used to be bumped alone every time a hook changed — and the suite goes red
+instead of the board quietly advertising a build nobody has.
 
 Environment variables (see `.env.example`):
 `ORCH_AUTH_TOKEN` (the shared secret; empty disables auth),
@@ -876,6 +912,8 @@ src/
   backup.js   Export and restore the whole board as one JSON document
   ui/         The dashboard page (no build step, no external assets)
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
+scripts/
+  set-version.mjs   Writes the version into all three files that carry one
 test/
   smoke.mjs   End-to-end self-test: coordination + dashboard reads (npm run smoke)
   admin.mjs   End-to-end self-test: operator actions + their guards (npm run test:admin)

@@ -49,7 +49,11 @@ was named `deskside`, which failed instantly and correctly.
 
 **Measuring the container instead of the contents.** `getBoundingClientRect()`
 includes padding, so "is there padding?" answered itself wrongly. Read computed
-styles, or measure the child. Related: `color-mix()` computes to
+styles, or measure the child. On an **SVG shape it is the fill box and excludes
+the stroke** — a 16px-tall octagon in a 16px box measures 14.78, and its visible
+edge is another half a stroke beyond that. To check what a mark looks aligned
+*to*, add `stroke-width / 2` at each edge; comparing raw rects will say a glyph
+overflows its button when it sits exactly on the line. Related: `color-mix()` computes to
 `color(srgb 0..1)` floats while a hex literal computes to `rgb(0..255)` — compare
 those directly and a darker colour reports as lighter. Convert before comparing.
 
@@ -129,32 +133,44 @@ or age it deliberately between rendering a dialog and clicking its button.
 
 ## Driving the page
 
-Headless Chrome over CDP. `node --experimental-websocket` needs no dependencies.
-
-```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
-  --remote-debugging-port=9222 --disable-gpu --no-first-run \
-  --user-data-dir="$SP/cprof" --window-size=1400,1000 about:blank &
-```
-
-Then `Runtime.evaluate` with `returnByValue: true`. Two things worth building in
-from the start: **surface `exceptionDetails`** — a thrown handler otherwise reads
-as a silent no-op and looks like "the click did nothing" — and return state as a
-`JSON.stringify` blob so one call answers the whole question.
-
-Put injected browser code in its own file. Nested backticks inside a heredoc
-inside a shell command will break it in ways that look like a page bug.
-
-Which view loads is `localStorage`, set before navigating — but **not from
-`about:blank`**, which has no origin and answers `SecurityError: Access is
-denied for this document`. Navigate to the board first, set it, navigate again:
+**Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
+dependencies — it launches the browser if one is not already up, and a whole
+check is about ten lines:
 
 ```js
-await navigate(BOARD);                        // get onto the board's origin
-localStorage.setItem('orch.view','floor');    // or 'board'
-localStorage.setItem('orch.floor','<channel>');
-await navigate(BOARD);                        // now it opens in that view
+// check.mjs — run with: node --experimental-websocket check.mjs
+import { open } from '<repo>/.claude/skills/verify-ui-change/drive.mjs';
+
+const page = await open({ base: 'http://localhost:8905', view: 'floor', floor: '', minimized: ['beta'] });
+console.log(await page.probe('probe.js'));            // a file of browser code
+await page.click('#floor-pick .chip.folded');
+await page.waitFor(`document.querySelectorAll('#floor-rooms .room').length === 1`);
+console.log(await page.probe('probe.js'));
+await page.shot('out.png', '#floor-pick');            // a PNG of one element
+await page.close();
 ```
+
+It exists because the same thirty lines were written from scratch six times in
+one session. Four things are built into it, and they are the four that have
+cost rounds here — worth knowing even if you hand-roll something else:
+
+- **`exceptionDetails` is surfaced, as a throw.** A handler that threw otherwise
+  reads exactly like a handler that ran and did nothing, and "the click did
+  nothing" is a much more interesting-looking bug than the real one.
+- **The localStorage dance.** Which view loads is `localStorage` — but it cannot
+  be set from `about:blank`, which has no origin and answers `SecurityError:
+  Access is denied for this document`. `open()` navigates to get an origin,
+  writes, and navigates again.
+- **`waitFor(expr)` rather than sleeps.** A fixed sleep is either slower than it
+  needs to be or shorter — and the short one is indistinguishable from a broken
+  feature. Wait on the thing you expect to become true.
+- **`click()` dispatches a bubbling `MouseEvent`.** Floor pills are delegated and
+  read the event target; a bare `.click()` on some of them does nothing.
+
+Put injected browser code in its own file and pass its path to `probe()`. Nested
+backticks inside a heredoc inside a shell command will break it in ways that look
+like a page bug. Return state as a `JSON.stringify` blob so one call answers the
+whole question.
 
 ### Where to click
 
@@ -194,7 +210,7 @@ either. Match on the script:
 ```bash
 for p in $(ps -Ao pid,command | grep "[s]rc/server.js" | awk '{print $1}'); do kill $p; done
 rm -f ./data/scratch.db ./data/scratch.db-wal ./data/scratch.db-shm
-pkill -f "cprof"          # the browser profile dir
+pkill -f "orch-cdp"       # drive.mjs's browser (profiles live in tmpdir)
 ```
 
 Deleting the DB while the server holds it frees nothing — kill first, then

@@ -659,7 +659,11 @@ body.view-floor main > .panel:not(.panel-floor) { display: none; }
 .panel-floor > .queue,
 .panel-floor > .chips,
 .panel-floor > .floor-body { padding-inline: 14px; }
-.panel-floor > .queue { padding-top: 10px; }
+/* And off the rule under the head, for the same reason and with the same
+   number: the picker was the first thing below it once the queue strip went,
+   and a row of chips flush against a border reads as part of the border. */
+.panel-floor > .queue,
+.panel-floor > .chips { padding-top: 10px; }
 .panel-floor > .floor-body { padding-bottom: 14px; }
 
 .floor-body { display: flex; gap: 14px; align-items: flex-start; }
@@ -1383,8 +1387,23 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor. */
-#floor-pick { margin-bottom: 12px; flex-wrap: wrap; }
+#floor-pick { margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
 #floor-pick:empty { display: none; }
+/* The mark between the floors in the building and the ones put away. A dot and
+   nothing else: a word ("archived") would be read as a chip and clicked, and a
+   rule would divide a row that wraps into two rows divided in the wrong place. */
+.pick-sep { color: var(--muted); opacity: .6; padding: 0 2px; user-select: none; }
+/* A floor that has been put away. Dimmed to the same degree as its card on the
+   board, because it is the same fact — and still a full chip rather than a
+   ghost: it is the only way into that room from here, so it has to look
+   pressable. The dashes are archiving's alone: past the dot both are put away,
+   and the difference between "I folded this" and "we archived this" is the one
+   the border carries.
+   Selected, either goes back to being an ordinary chip — you are standing in
+   that room, and a dashed outline around where you are reads as a fault. */
+#floor-pick .chip.folded, #floor-pick .chip.archived { opacity: .72; }
+#floor-pick .chip.archived { border-style: dashed; }
+#floor-pick .chip.folded.on, #floor-pick .chip.archived.on { opacity: 1; border-style: solid; }
 
 /* A desk the board knows but no window has reported from. Dimmed like "away"
    (it inherits that) but the nameplate carries the reason, in the warning tone

@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
+import { VERSIONED, versionIn } from '../scripts/set-version.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
@@ -248,6 +249,30 @@ try {
   const ghost1 = await rawInitialize(PORT, 'ghost');
   const ghost2 = await rawInitialize(PORT, 'ghost');
   assert(!!ghost1 && !!ghost2 && ghost1 !== ghost2, 'two throwaway sessions really are distinct');
+
+  console.log('\none version, everywhere');
+  {
+    // The number in the dashboard header is the server's, and the server reads
+    // it out of package.json rather than carrying a copy — so that half cannot
+    // drift. What could, and did, is the other two: the plugin was bumped on
+    // its own whenever a hook changed and the host was never bumped at all, so
+    // three parts of one product claimed 0.9.0, 0.6.0 and 0.1.0 while the page
+    // confidently reported the first of them as "the version".
+    //
+    // There is no way to make them read each other — Claude Code parses the
+    // plugin manifest off disk, so its number has to be a literal — so this is
+    // the enforcement: `npm run set-version` writes all three, and a bump that
+    // misses one fails here instead of shipping.
+    const want = versionIn('package.json');
+    for (const file of VERSIONED) {
+      assert(versionIn(file) === want, `${file} is ${want}`);
+    }
+    const h = await (await fetch(`http://localhost:${PORT}/health`)).json();
+    const st = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+    assert(h.version === want, `and /health reports it (${h.version})`);
+    assert(st.server?.version === want,
+           `as does /api/state, which is the number the dashboard header prints (${st.server?.version})`);
+  }
 
   const health = await (await fetch(`http://localhost:${PORT}/health`)).json();
   assert(health.session_stats.superseded >= 1, 'the abandoned session is superseded, not leaked');

@@ -47,6 +47,18 @@ function saveMinimized() {
   try { localStorage.setItem(MIN_KEY, JSON.stringify([...ui.minimized])); } catch { /* not worth failing over */ }
 }
 
+/**
+ * Which channels this browser has folded away — the floor's copy of the same
+ * fact, so a channel minimized here is not a storey there either.
+ *
+ * A function, because `ui` is a top-level `const` and so is not on `window` at
+ * all; a top-level `function` in a classic script is. A copy of the names
+ * rather than the Set itself, because handing the other surface the live one
+ * makes it possible to minimize a channel from the floor by accident — and
+ * minimizing stays a board control. floor.js only ever asks.
+ */
+function minimizedChannels() { return [...ui.minimized]; }
+
 const ui = {
   limit: PAGE,
   minimized: loadMinimized(),

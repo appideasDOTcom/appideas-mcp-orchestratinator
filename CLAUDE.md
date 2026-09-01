@@ -207,6 +207,15 @@ operator's live floor.
 
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
+- **The version lives in three files, so bump it with one command.**
+  `npm run set-version <x.y.z>` writes `package.json`, `host/package.json` and
+  `plugin/.claude-plugin/plugin.json`. They must agree — `npm run smoke` asserts
+  it, along with `/health` and `/api/state` — because they did not: the plugin
+  was bumped alone every time a hook changed and reached 0.6.0 while the header
+  said 0.9.0. There is no way to make them read each other; Claude Code parses
+  the plugin manifest off disk, so its number has to be a literal. The
+  dashboard's number is the server's and comes from reading `package.json` at
+  startup, so a bump needs `docker compose up -d --build` to show up.
 - **You are an agent on this board, not only its author.** The protocol you are
   building is one you are also subject to:
   [`docs/multi-agent-team-playbook.md`](docs/multi-agent-team-playbook.md).

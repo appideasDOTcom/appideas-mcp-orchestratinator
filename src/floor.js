@@ -1133,7 +1133,14 @@ export function buildFloor(store, live = null, sessions = null) {
   // board and one desk in the room is a room that lies about who works there.
   // The desks without a session are drawn as not reporting, which also happens
   // to be the clearest possible reminder of who still needs the plugin.
-  // Retired agents and archived channels stay off, matching the board's default.
+  // Retired agents stay off, matching the board's default. Archived channels do
+  // not — they are carried with a flag and left out of the building by the page.
+  // Dropping them here is what this used to do, and it took the way back in with
+  // them: a channel absent from the payload has no chip in the floor picker
+  // either, so an archived room could be hidden and then never visited again.
+  // Hidden is the whole of what archiving claims to do. What archived channels
+  // are kept out of is everything that counts as work — the queue and the
+  // totals, both below.
   const archived = new Set(store.listChannelFlags().filter((f) => f.archived_at).map((f) => f.channel));
   // The board's row for each agent, kept rather than discarded: the desk's sign
   // shows what the board shows, and that comes off these same columns. A desk
@@ -1141,7 +1148,7 @@ export function buildFloor(store, live = null, sessions = null) {
   // ever called an MCP tool — and then there is simply no sign to paint.
   const agentRows = new Map();
   for (const a of store.listAllAgents()) {
-    if (a.retired_at || archived.has(a.channel)) continue;
+    if (a.retired_at) continue;
     agentRows.set(key(a.channel, a.agent), a);
     store.ensurePersona(a.channel, a.agent);
   }
@@ -1157,13 +1164,13 @@ export function buildFloor(store, live = null, sessions = null) {
   const byChannel = new Map();
   const profiles = store.listProfiles();
   for (const p of store.listPersonas()) {
-    if (archived.has(p.channel)) continue;
     if (!byChannel.has(p.channel)) byChannel.set(p.channel, []);
     byChannel.get(p.channel).push(p);
   }
 
   const queue = [];
   const channels = [...byChannel.keys()].sort().map((channel) => {
+    const shelved = archived.has(channel);
     const desks = byChannel
       .get(channel)
       .slice()
@@ -1201,7 +1208,12 @@ export function buildFloor(store, live = null, sessions = null) {
         const live_ = h ? h.live : hookLive;
         const pendingReq = live ? live.pending.get(k) ?? null : null;
 
-        if (live_ && s?.awaiting_kind) {
+        // An archived room does not ask for anything. The desks in it are drawn
+        // exactly as they are — an agent on an archived channel keeps working,
+        // which is a promise the board already makes — but a prompt in a room
+        // the operator has put away is not "N need you" on a floor they are
+        // looking at, and counting it there is how a queue stops being a queue.
+        if (live_ && s?.awaiting_kind && !shelved) {
           queue.push({
             channel,
             agent: p.agent,
@@ -1374,6 +1386,9 @@ export function buildFloor(store, live = null, sessions = null) {
 
     return {
       channel,
+      // Hidden from the building, still reachable by name. The page decides
+      // what that means; this only says which channels it is true of.
+      archived: shelved,
       desks,
       live: desks.filter((d) => d.live).length,
       awaiting: desks.filter((d) => d.live && d.session?.awaiting_kind).length,
@@ -1401,13 +1416,24 @@ export function buildFloor(store, live = null, sessions = null) {
     queue,
     hosts,
     cast: CAST,
-    totals: {
-      channels: channels.length,
-      desks: channels.reduce((n, c) => n + c.desks.length, 0),
-      live: channels.reduce((n, c) => n + c.live, 0),
-      awaiting: queue.length,
-      hosted: channels.reduce((n, c) => n + c.desks.filter((d) => d.hosted?.live).length, 0),
-    },
+    // The totals line describes the building, so it counts the floors in it —
+    // archived channels are excluded here exactly as they are from the board's
+    // own totals. A footer reading "5 floors" over a building with four is the
+    // kind of small lie that gets someone hunting for a room that is not there.
+    totals: (() => {
+      const onFloor = channels.filter((c) => !c.archived);
+      return {
+        channels: onFloor.length,
+        desks: onFloor.reduce((n, c) => n + c.desks.length, 0),
+        live: onFloor.reduce((n, c) => n + c.live, 0),
+        awaiting: queue.length,
+        hosted: onFloor.reduce((n, c) => n + c.desks.filter((d) => d.hosted?.live).length, 0),
+        // What the picker's tail holds, said by the payload rather than counted
+        // in the page: the same number the board's "N archived channels" chip
+        // shows, from the same flag.
+        archived: channels.length - onFloor.length,
+      };
+    })(),
   };
 }
 

@@ -1629,7 +1629,46 @@
    * hide desks behind a scroll arrow with no chip anywhere offering the way
    * back out.
    */
-  function inBuilding() { return !ui.floorFilter && (floor.channels?.length ?? 0) > 1; }
+  function inBuilding() { return !ui.floorFilter && onFloor().length > 1; }
+
+  /* The channels the building is made of, and the ones put away.
+
+     Two ways to put one away, and they are not the same kind of statement.
+     **Archived** is shared, audited and on the server; **minimized** is this
+     browser tidying up and never leaves it. Both are the board's controls —
+     there is nothing on the floor that sets either, deliberately, because a
+     room you have to walk into to put away is a worse place to put it away
+     from than the list of rooms.
+
+     What the floor does with both is the same: refuse to build with them. A
+     channel that is put away is not a storey — and it keeps its chip, at the
+     end of the picker, so the room is still somewhere you can go and look.
+
+     Where they differ is the totals, and that difference is on purpose:
+
+     - Archived is out of them, decided on the server, because the count of
+       floors in this building is the same number for everyone looking at it.
+     - Minimized is NOT. It is one person's fold, and it would make "4 floors"
+       mean something different in two browsers looking at one board. The board
+       does not move its own totals for a minimized card either; this is that
+       rule, not a second one. The chips at the tail are where the rest went.
+
+     So the totals stay the server's, in one place, rather than being
+     re-derived here from the same rows by different code. */
+  const foldedNow = () => new Set(window.minimizedChannels?.() ?? []);
+  const onFloor = () => {
+    const m = foldedNow();
+    return (floor.channels ?? []).filter((c) => !c.archived && !m.has(c.channel));
+  };
+  /* The tail, in the order they were put away in: minimized first, archived
+     after it. Both are behind the same separator — one mark saying "past here
+     is put away" reads faster than two saying which kind. */
+  const shelved = () => {
+    const m = foldedNow();
+    return (floor.channels ?? [])
+      .filter((c) => c.archived || m.has(c.channel))
+      .sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0) || a.channel.localeCompare(b.channel));
+  };
 
   function room(c) {
     const collapsed = inBuilding();
@@ -2583,17 +2622,38 @@
     // The floor picker. A floor is a channel, so this is how you walk from one
     // room to another; "all floors" is the stacked view. Only offered once there
     // are two, because a picker with one choice is furniture.
+    const here = onFloor();
+    const away = shelved();
     const names = floor.channels.map((c) => c.channel);
     if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
-    const pickSig = JSON.stringify([names, ui.floorFilter]);
+    const pickSig = JSON.stringify([here.map((c) => c.channel), away.map((c) => c.channel), ui.floorFilter]);
     if (pickSig !== ui.pickSig) {
       ui.pickSig = pickSig;
-      $('floor-pick').innerHTML = names.length < 2 ? '' : [
+      const chip = (n, cls = '', title = '') =>
+        `<button class="chip${cls}${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}"${title ? ` title="${esc(title)}"` : ''}>${esc(n)}</button>`;
+      // Why this chip is in the tail, on the chip. Archived wins when a channel
+      // is both: it is the one of the two that other people can see.
+      const put = (c) => c.archived
+        ? [' archived', 'Archived on the board — kept out of "all floors". Restore it from the board view.']
+        : [' folded', 'Minimized on the board, in this browser only — kept out of "all floors". Restore it from the board view.'];
+      // A picker with one choice is furniture — but an archived channel makes a
+      // second choice out of a single floor, because "all floors" no longer
+      // contains it and there would otherwise be nothing offering the way in.
+      const worth = names.length > 1 || away.length > 0;
+      $('floor-pick').innerHTML = !worth ? '' : [
         `<button class="chip${ui.floorFilter ? '' : ' on'}" data-floor="">all floors</button>`,
-        ...names.map((n) => `<button class="chip${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}">${esc(n)}</button>`),
+        ...here.map((c) => chip(c.channel)),
+        // The tail, and why it is a tail. Archived rooms sort after everything
+        // else behind a mark rather than being dropped or greyed in place: a
+        // list that reorders itself around a flag reads as a list in an order,
+        // which is the one thing it must not be mistaken for.
+        ...(away.length ? ['<span class="pick-sep" aria-hidden="true">·</span>'] : []),
+        ...away.map((c) => chip(c.channel, ...put(c))),
       ].join('');
     }
-    const shown = ui.floorFilter ? floor.channels.filter((c) => c.channel === ui.floorFilter) : floor.channels;
+    // "all floors" means the floors in the building. Named, it is whichever one
+    // you named, archived or not — the chip is an offer to go and look.
+    const shown = ui.floorFilter ? floor.channels.filter((c) => c.channel === ui.floorFilter) : here;
 
     // Stacked floors are drawn inside a building; one floor on its own is just
     // that floor. The class carries the whole difference in the stylesheet.
@@ -2603,8 +2663,17 @@
     if (sig !== ui.roomsSig) {
       ui.roomsSig = sig;
       if (!shown.length) {
-        rooms.innerHTML =
-          '<div class="q-empty">No desks yet. An agent gets a seat the moment it appears on the board or its window posts a hook event.</div>';
+        // Two different empties. "Nothing here yet" is wrong when there are
+        // rooms and every one of them has been put away — that sends someone
+        // looking for a bug in the hook plugin over a decision they made
+        // themselves on the board. It names which decision, because minimized
+        // and archived are undone in different places.
+        const arc = away.filter((c) => c.archived).length;
+        const how = [(away.length - arc) && `${away.length - arc} minimized`, arc && `${arc} archived`]
+          .filter(Boolean).join(' and ');
+        rooms.innerHTML = away.length
+          ? `<div class="q-empty">Every floor is put away — ${how}, on the chips above. Nothing is deleted: pick a chip to look at one, or bring it back from the board view.</div>`
+          : '<div class="q-empty">No desks yet. An agent gets a seat the moment it appears on the board or its window posts a hook event.</div>';
       } else {
         rooms.replaceChildren(...shown.map(room));
       }

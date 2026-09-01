@@ -927,6 +927,57 @@ try {
   eq(await spoke('marks'), true,
      'but the marker with a message after it does — that one is the operator, interrupting by typing');
 
+  // Archiving is the board's control and it hides a channel from the board. The
+  // floor has to mean the same thing by it without being a second place to set
+  // it — and the failure worth testing is not "the room disappeared", it is the
+  // two halves disagreeing: a room out of the building but still in the totals,
+  // or out of both but also out of the picker, which is hidden with no way back.
+  console.log('\nan archived channel is put away, not deleted');
+  {
+    const before = await floor();
+    const wasChannels = before.totals.channels;
+    const wasDesks = before.totals.desks;
+    const shelvedDesks = before.channels.find((c) => c.channel === 'other-floor').desks.length;
+    // Waiting on a human, in the room about to be put away.
+    await post({ ...ev('free', 's9', 'Notification', { notification_type: 'permission_prompt', notification_message: 'may I?' }), channel: 'other-floor' });
+    eq((await floor()).queue.some((q) => q.channel === 'other-floor'), true,
+       'first: that desk is in the queue, so its absence below means something');
+
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    // A desk here that the *board* knows too. Every other desk in this suite was
+    // made by hook events alone, and those legitimately have no sign to paint —
+    // so without this the sign assertion below would pass on a null it was never
+    // testing.
+    db.prepare(`INSERT OR REPLACE INTO agents (channel, agent, last_seen)
+                VALUES ('other-floor', 'pro', datetime('now'))`).run();
+    db.prepare(`INSERT OR REPLACE INTO channel_flags (channel, archived_at, archived_by)
+                VALUES ('other-floor', datetime('now'), 'operator')`).run();
+    db.close();
+
+    f = await floor();
+    const shelved = f.channels.find((c) => c.channel === 'other-floor');
+    assert(!!shelved, 'the channel is still in the payload — dropping it would take its chip in the floor picker with it, and a room you cannot reach is not archived, it is gone');
+    eq(shelved.archived, true, 'flagged, so the page can leave it out of the building and still offer the way in');
+    eq(shelved.desks.length, shelvedDesks, 'with every desk still on it — an agent on an archived channel keeps working, which the board already promises');
+    assert(!!shelved.desks.find((d) => d.agent === 'pro')?.board,
+       'and a desk the board knows keeps its sign, so the room is drawn whole when somebody does walk into it rather than as a row of blank desks');
+    eq(f.totals.channels, wasChannels - 1, 'the totals line describes the building, and this floor is not in it');
+    eq(f.totals.desks, wasDesks - shelvedDesks, 'nor are its desks');
+    eq(f.totals.archived, 1, 'counted separately instead, the same way the board counts them');
+    eq(f.queue.some((q) => q.channel === 'other-floor'), false,
+       'and a prompt in a room the operator put away does not page them from it');
+
+    const db2 = new Database(DB_PATH);
+    db2.prepare(`UPDATE channel_flags SET archived_at = NULL WHERE channel = 'other-floor'`).run();
+    db2.close();
+    f = await floor();
+    eq(f.channels.find((c) => c.channel === 'other-floor').archived, false, 'restoring puts it back');
+    eq([f.totals.channels, f.totals.archived], [wasChannels, 0], 'totals and all');
+    eq(f.queue.some((q) => q.channel === 'other-floor'), true, 'and the desk that was waiting is waiting on the floor again');
+    await post({ ...ev('free', 's9', 'UserPromptSubmit', { message: 'yes' }), channel: 'other-floor' });
+  }
+
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();
   const tables = Object.keys(backup.tables ?? {});
