@@ -346,7 +346,8 @@ export function answerSteps(questions, answers) {
   // left end does nothing.
   for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Left' });
 
-  qs.forEach((q, i) => {
+  for (let i = 0; i < qs.length; i++) {
+    const q = qs[i];
     const a = answers?.[i] ?? {};
     const chosen = (a.choose ?? []).filter((n) => q.options?.some((o) => o.n === n));
     // Typing into the free-text choice means standing on it first.
@@ -373,18 +374,36 @@ export function answerSteps(questions, answers) {
       if (free) { standOn(free); steps.push({ text: wants }); }
       // Enter would toggle the cursor's box, so the way on is Tab.
       steps.push({ key: 'Tab' });
+    } else if (free) {
+      // The free-text row on a single-select is not a fourth answer. It is
+      // Claude Code's clarify hatch: taking it withdraws the whole form and
+      // sends the words back as a clarification, so nothing after it can be
+      // played and no later tab gets answered.
+      //
+      // Getting there is not the multi-select's sequence either. A digit only
+      // *moves* the cursor on a single-select — Enter is what selects, and
+      // selecting this row is what opens its field. Typing before that Enter
+      // put the words nowhere and then submitted an empty clarification;
+      // measured, twice, as "(No answer provided)" on every question with no
+      // text attached, and reported here as "the window stopped asking after
+      // 13 of 20 steps". So the digit stands on the row, Enter opens it, the
+      // words go in, and the second Enter is what ends the form.
+      steps.push({ key: String(free.n) });
+      steps.push({ key: 'Enter' });
+      steps.push({ text: wants });
+      steps.push({ key: 'Enter', final: true, clarify: true });
+      return steps;
     } else {
       const n = chosen[0];
       if (n) {
         steps.push({ key: String(n) });
-        if (free) { standOn(free); steps.push({ text: wants }); }
         // Selecting moves to the next tab on its own.
         steps.push({ key: 'Enter' });
       } else {
         steps.push({ key: 'Tab' });
       }
     }
-  });
+  }
 
   // Whatever the last question did, land on Submit and answer its confirmation.
   //
@@ -402,8 +421,17 @@ export function answerSteps(questions, answers) {
 export function promptChoices(options) {
   const list = Array.isArray(options) ? options.filter((o) => o && Number.isInteger(o.n)) : [];
   const approve = list.find((o) => /^yes\b/i.test(o.text ?? ''))?.n ?? list[0]?.n ?? null;
-  const deny = list.find((o) => /^no\b/i.test(o.text ?? ''))?.n ?? null;
-  return { approve, deny, extras: list.filter((o) => o.n !== approve && o.n !== deny) };
+  const denyOpt = list.find((o) => /^no\b/i.test(o.text ?? '')) ?? null;
+  const deny = denyOpt?.n ?? null;
+  // Whether refusing invites a sentence, or just refuses.
+  //
+  // Only some prompts spell it "No, and tell Claude what to do differently", and
+  // only that one opens a field to type into. Measured across a day of real
+  // captures: every Bash prompt here offered a plain "No", and none offered the
+  // other. Showing the operator a reason box for those would be asking them to
+  // type into a window with nowhere to put it.
+  const denyAsks = /tell claude/i.test(denyOpt?.text ?? '');
+  return { approve, deny, denyAsks, extras: list.filter((o) => o.n !== approve && o.n !== deny) };
 }
 
 function toolSummary(toolName, toolInput) {
@@ -788,6 +816,18 @@ function applyHostEvent(store, live, hostId, ev) {
           ` — it names ${String(ev.request_id).slice(-8)}, the open one is ${String(req.request_id).slice(-8)}`);
         break;
       }
+      // The host looked and there is nothing on the pane to answer. That is not
+      // an unreadable prompt, it is a prompt that is over — and treating the two
+      // alike is what put the could-not-read buttons up straight after a form
+      // that had just been answered 12 of 12. Pressing one of them then reported
+      // "that did not land" about an answer that had landed perfectly.
+      if (str(ev.code) === 'no_prompt' && !(Array.isArray(ev.questions) && ev.questions.length)) {
+        live.pending.delete(key);
+        store.clearDeskAwaiting(channel, agent);
+        live.publish(key, { type: 'permission', request_id: req.request_id, decision: 'gone', resolved: true });
+        console.log(`[orchestratinator] ${channel}/${agent}: nothing is being asked — clearing the alert rather than offering a guess at it`);
+        break;
+      }
       if (Array.isArray(ev.questions) && ev.questions.length) {
         console.log(`[orchestratinator] ${channel}/${agent}: a form of ${ev.questions.length} question(s) attached to the open prompt`);
       }
@@ -804,6 +844,13 @@ function applyHostEvent(store, live, hostId, ev) {
       // Why there are none, kept so the panel can say something better than
       // offering nothing without explanation.
       req.options_error = req.options.length ? null : (str(ev.reason) ?? null);
+      // The host has now looked. Until this arrives, "no choices" means nobody
+      // has read the window yet — not that the window offered nothing. Without
+      // the distinction the panel showed its could-not-read buttons for the
+      // second or two every ordinary prompt spends waiting to be read, and an
+      // operator who pressed one got a blind keystroke aimed at a prompt the
+      // board had not seen.
+      req.read = true;
       live.publish(key, { type: 'permission', request: req });
       break;
     }
@@ -813,13 +860,24 @@ function applyHostEvent(store, live, hostId, ev) {
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
       // this is the one thing that asks for it back.
-      const again = str(ev.code) === 'answer_failed' ? live?.answered.get(key) : null;
+      const failed = str(ev.code) === 'answer_failed' ? live?.answered.get(key) : null;
+      // Re-offering is right once — an answer that genuinely did not take leaves
+      // the window still holding the question. It is wrong twice. A failure that
+      // is itself mistaken puts the same form back the instant it is answered,
+      // and answering is then the one thing that cannot end it: measured as an
+      // unbroken "your answers did not land" loop whose only exit was restarting
+      // the server. After one go the error stands on its own and the operator is
+      // told where to look, which is worse than a working form and far better
+      // than a trap.
+      const again = failed && (failed.reoffers ?? 0) < 1 ? failed : null;
       if (again) {
+        again.reoffers = (again.reoffers ?? 0) + 1;
         live.answered.delete(key);
         live.pending.set(key, again);
         live.publish(key, { type: 'permission', request: again });
       }
-      turn('error', str(ev.message) ?? 'the host reported an error');
+      turn('error', (str(ev.message) ?? 'the host reported an error') +
+        (failed && !again ? ' — this is the second time, so the form is not being offered again. Open the window to see what it is holding.' : ''));
       // By desk, not by `sessionId`. A host event carries no session id, so the
       // id above is whatever `hosted_desks` happens to hold — and before the
       // host has reported which conversation it is watching, that is a
@@ -1616,8 +1674,13 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       const picked = (a.choose ?? []).map((n) => q.options?.find((o) => o.n === n)?.text ?? `#${n}`);
       return `${q.question ?? `question ${i + 1}`}: ${[...picked, a.text].filter(Boolean).join(', ') || '(nothing)'}`;
     }).join(' · ');
-    store.logAdmin(channel, 'permission.answered', { target: agent, detail: clip(said, 500) });
-    res.json({ ok: true, request_id: requestId, steps: steps.length });
+    // Taking a single-select's free-text row withdraws the form rather than
+    // answering it, so this is a different event from an answer and is recorded
+    // as one — the choices on the other tabs were never delivered.
+    const clarify = steps.some((st) => st.clarify);
+    store.logAdmin(channel, clarify ? 'permission.clarified' : 'permission.answered',
+      { target: agent, detail: clip(said, 500) });
+    res.json({ ok: true, request_id: requestId, steps: steps.length, clarify });
   });
 
   /** Stop the current turn on a hosted desk. */

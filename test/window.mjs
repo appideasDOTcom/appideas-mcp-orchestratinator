@@ -717,6 +717,26 @@ async function main() {
     eq(stuck.done.filter((d) => d === 'Enter(confirm)').length, 3,
       'having pressed it more than once, in case the first arrived mid-redraw');
 
+    // Busy is not stopped, and the difference cost a whole form.
+    //
+    // A sequence is a dozen keystrokes and the window works between them. When
+    // the gap was read as "it stopped asking", the run was abandoned part way
+    // and what had already been typed went in as the answer: measured on a real
+    // form, "the window stopped asking after 13 of 28 steps — the window is
+    // busy". So a busy window is waited for; a closed one still is not.
+    const busyThenAsking = await pane('busy-then-asking',
+      `printf '%s\\n' '  Do you want to proceed?'`,
+      `printf '%s\\n' '  \u276f 1. Yes'`,
+      `printf '%s\\n' '    2. No'`,
+      // Busy first, and only then the line that says it will take an answer.
+      `printf '%s\\n' '  esc to interrupt'`,
+      'stty raw -echo', 'sleep 1',
+      `printf '%s\\n' '  Esc to cancel \u00b7 Tab to amend'`,
+      'sleep 30');
+    const waited = await W.answerQuestion(busyThenAsking, [{ key: '1' }]);
+    assert(waited.ok, `a window that is merely busy is waited for, not abandoned — ${waited.error ?? ''}`);
+    eq(waited.done, ['1'], 'and the step is played once it is asking again');
+
     // Refusing with a reason is two acts, and the guard belongs on the first.
     // The words are typed only after the digit has been accepted by a window
     // that was demonstrably asking — otherwise a refusal aimed at a prompt that

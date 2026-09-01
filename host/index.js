@@ -400,6 +400,11 @@ class Host {
           questions: isForm ? form.questions : null,
           tabs: isForm ? form.tabs : null,
           reason: r.ok ? null : r.error,
+          // The prose above is for the operator; this is for the board. "There
+          // is no question on this pane" and "there is a question I could not
+          // parse" need opposite handling, and only one of them should ever put
+          // guess buttons in front of somebody.
+          code: r.ok ? null : (r.code ?? null),
         }, true);
         break;
       }
@@ -430,6 +435,15 @@ class Host {
         // are what the operator chose, the confirm presses are the host getting
         // the window to take them. "22 of 21" was the first version of this line.
         const confirms = r.done.filter((d) => d === 'Enter(confirm)').length;
+        // A form taken by its free-text row was not answered — it was withdrawn,
+        // and the words went back as a clarification. Same success, different
+        // event, and saying "answered" for it is how the operator comes to
+        // expect a reply to choices that were never delivered.
+        if (steps.some((st) => st.clarify)) {
+          log(`${desk.label}: withdrew the form and sent the words back as a clarification` +
+            ` — ${r.done.slice(-3).join(' ')}`);
+          break;
+        }
         log(`${desk.label}: answered with ${r.done.length - confirms} of ${steps.length} step(s)` +
           `${confirms ? `, confirmed after ${confirms} press${confirms === 1 ? '' : 'es'}` : ''}` +
           `${r.closed ? ' (the form was gone before the end)' : ''} — ${r.done.slice(-4).join(' ')}`);

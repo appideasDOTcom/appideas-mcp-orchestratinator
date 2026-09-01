@@ -591,6 +591,38 @@ try {
     // A number the window never offered is dropped rather than pressed.
     const bogus = keys(answerSteps([single], [{ choose: [9] }]));
     assert(!bogus.includes('9'), 'a choice the window does not have is never pressed');
+
+    // The free-text row on a single-select is not a fourth answer. Taking it
+    // withdraws the whole form and sends the words back as a clarification,
+    // which is a different event with a different sequence — and getting it
+    // wrong is what produced "the window stopped asking after 13 of 20 steps"
+    // twice, with the operator's words landing nowhere.
+    const singleFree = {
+      kind: 'single', question: 'Which one?',
+      options: [{ n: 1, text: 'Alpha' }, { n: 2, text: 'Bravo' }, { n: 3, text: 'Type something.', other: true }],
+    };
+    const clar = answerSteps([singleFree, multi], [{ choose: [3], text: 'none of these' }, { choose: [1] }]);
+    const ck = keys(clar).filter((k) => k !== 'Left');
+    eq(ck, ['3', 'Enter', 'text:none of these', 'Enter'],
+      'the digit stands on the row, Enter opens the field, then the words, then the Enter that ends it');
+    assert(!ck.includes('Up') && !ck.includes('Down'),
+      'and no cursor walk, because on a single-select the digit is what moves the cursor');
+    const last = clar[clar.length - 1];
+    assert(last.clarify === true, 'the closing Enter is marked as a clarification, not an answer');
+    assert(last.final === true, 'and final, because the form being gone afterwards is the success');
+    eq(clar.filter((st) => st.clarify).length, 1, 'exactly one step ends the form');
+
+    // Nothing can follow it: the form is withdrawn, so the second question is
+    // never reached and there is no Submit tab left to confirm on.
+    assert(!keys(clar).slice(keys(clar).indexOf('3')).includes('Tab'),
+      'no later tab is walked to, because the form is gone');
+    eq(clar.length, keys(clar).lastIndexOf('Enter') + 1, 'the sequence stops at the Enter that withdraws the form');
+
+    // Only when the words are actually going somewhere. A single-select choice
+    // with no text is an ordinary answer and must keep the ordinary ending.
+    const stillNormal = answerSteps([singleFree], [{ choose: [3] }]);
+    assert(!stillNormal.some((st) => st.clarify), 'choosing that row without typing is not a clarification');
+    eq(keys(stillNormal).slice(-2), ['1', 'Enter'], 'and it still ends on the Submit tab');
   }
 
   console.log('\nthe window\u2019s own choices');

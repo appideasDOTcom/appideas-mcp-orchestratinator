@@ -2086,7 +2086,12 @@
     // Before this, that state rendered buttons saying Approve and Deny, which
     // claim an understanding nobody has. The window might be asking something
     // else entirely.
-    const unreadable = !!req && !req.questions?.length
+    // `req.read` is the difference between "the host looked and found nothing"
+    // and "nobody has looked yet". Without it this fired for the second or two
+    // every ordinary prompt spends being read, replacing Approve and Deny with
+    // guess buttons — and a Yes pressed in that window is a blind keystroke at a
+    // prompt the board never saw. Measured live: four of them in a row.
+    const unreadable = !!req && !!req.read && !req.questions?.length
       && !req.choices?.approve && !req.choices?.deny && !(req.choices?.extras ?? []).length;
     const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
     const alertSig = sendingAnswers
@@ -2129,16 +2134,16 @@
              </div>` : ''}
              ${req && !req.questions?.length && !reading && !unreadable ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
-               <button class="btn danger" data-act="deny-open" data-request="${esc(req.request_id)}">Deny</button>
+               <button class="btn danger" data-act="${req.choices?.denyAsks ? 'deny-open' : 'decide'}" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
              </div>
-             <div class="p-why hidden">
+             ${req.choices?.denyAsks ? `<div class="p-why hidden">
                <input class="input p-why-text" type="text" placeholder="What should Claude do instead? (optional)" maxlength="2000">
                <div class="p-why-row">
                  <button class="btn danger" data-act="decide" data-choice="deny" data-request="${esc(req.request_id)}">Send refusal</button>
                  <button class="btn" data-act="deny-cancel">Back</button>
                </div>
-             </div>
+             </div>` : ''}
              ${(req.choices?.extras ?? []).length ? `<div class="p-more">${req.choices.extras.map((o) =>
                `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(clip(o.text, 200))}</span></button>`).join('')}</div>` : ''}
              ${req.options_error ? `<div class="p-more-why muted">${esc(req.options_error)}</div>` : ''}` : ''}
@@ -2795,9 +2800,11 @@
       try {
         // Empty is a decision too, and is sent as one: the operator opened the
         // box, chose to say nothing, and the window still needs its Enter.
-        const why = act.dataset.choice === 'deny'
-          ? (act.closest('.p-alert')?.querySelector('.p-why-text')?.value ?? '')
-          : null;
+        // Only when a box was actually offered. A prompt whose refusal is a plain
+        // "No" has nowhere to put a sentence, and sending an empty one would ask
+        // the host to press Enter at a prompt that has already closed.
+        const box = act.closest('.p-alert')?.querySelector('.p-why-text');
+        const why = act.dataset.choice === 'deny' && box ? box.value : null;
         await decide(act.dataset.request, act.dataset.choice, why);
       } finally {
         for (const b of all) b.disabled = false;

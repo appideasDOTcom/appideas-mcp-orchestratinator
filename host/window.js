@@ -923,16 +923,32 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     }
   }
 
+  // Running out of presses is not running out of time. The loop above stops
+  // after SUBMIT_ATTEMPTS, and its inner wait gives up on four still samples —
+  // one second — so a twenty-second budget was being spent in about three, and
+  // every message on a long session was reported lost while arriving perfectly.
+  // Measured: the transcript line was already written 2.5s before the error.
+  //
+  // Nothing more is pressed here. The message is in, the Enters have gone; what
+  // is left is waiting for the write to show up.
+  while (!sent && Date.now() < stop) {
+    await sleep(250);
+    sent = await landed(path, before, text);
+  }
+
   if (!sent) {
+    // Say which of the two this is instead of asserting the one that reads
+    // worse. The text still being in the composer is checkable, and when it is
+    // gone the honest report is that the confirmation did not arrive — not that
+    // the window never took it.
+    const stuck = (composerOf(await screenOf(pane.target)) ?? '').includes(text.trim().split('\n')[0].slice(0, 40));
     return {
       ok: false,
       code: 'not_delivered',
       target: pane.target,
-      // This now says something it can back up. The text was seen in the
-      // composer before Enter was pressed, so "took it but did not submit it"
-      // is an observation rather than the only remaining guess, and the message
-      // really is still sitting there for you to send by hand.
-      error: `the window took the message but never submitted it — it is still in the composer, not in the conversation. Attach with \`tmux attach -t ${SESSION}\` and press Enter to send it.`,
+      error: stuck
+        ? `the window took the message but never submitted it — it is still in the composer, not in the conversation. Attach with \`tmux attach -t ${SESSION}\` and press Enter to send it.`
+        : `the message went in but the conversation did not confirm it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer, so it may well have been sent. Check the window before retyping it.`,
     };
   }
   return { ok: true, target: pane.target, confirmed: true };
@@ -1208,7 +1224,7 @@ export async function answerQuestion(cwd, steps = []) {
   const done = [];
   let closed = false;
   for (const step of steps) {
-    const asking = askingOf(await screenOf(pane.target));
+    const { asking, screen: seen } = await askingSoon(pane.target);
     if (!asking) {
       // Past the point of submitting, the window closing is the *success*. The
       // confirmation may be taken by the digit or by the Enter after it
@@ -1225,7 +1241,7 @@ export async function answerQuestion(cwd, steps = []) {
         code: 'no_prompt',
         done,
         error: `the window stopped asking after ${done.length} of ${steps.length} step${steps.length === 1 ? '' : 's'}` +
-          ` — ${whyNotAsking(await screenOf(pane.target))}`,
+          ` — ${whyNotAsking(seen)}`,
       };
     }
     // `-l` sends the string literally; without it tmux reads words like "Enter"
@@ -1282,6 +1298,10 @@ const CONFIRM_TRIES = Number(process.env.ORCH_CONFIRM_TRIES ?? 3);
 
 /** How long the window gets to act on an answer before we look at the result. */
 const ANSWER_CONFIRM_MS = Number(process.env.ORCH_ANSWER_CONFIRM_MS ?? 900);
+/** How long a step waits for a busy window before calling it stopped. Generous
+ *  against a tool call finishing mid-sequence; short of the operator noticing. */
+const BUSY_WAIT_MS = Number(process.env.ORCH_BUSY_WAIT_MS ?? 20_000);
+const BUSY_POLL_MS = Number(process.env.ORCH_BUSY_POLL_MS ?? 250);
 
 /**
  * Two menus are the same question if their options read the same. The cursor is
@@ -1396,9 +1416,39 @@ export async function pressBlind(cwd, key) {
  * because it is not a failure at all — it is an answer that arrived while the
  * last one was still being carried out.
  */
-export function whyNotAsking(screen) {
+/** The bottom line of the pane, which is the only line that says what the window
+ *  will accept. Positional, so no amount of quoting above it can fake one. */
+function footOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
-  const foot = (lines[lines.length - 1] ?? '').trim().slice(0, 90);
+  return (lines[lines.length - 1] ?? '').trim();
+}
+
+/** Part way through carrying something out. Not a refusal, not a closed prompt —
+ *  a window that will be asking again in a moment. */
+const isBusy = (screen) => /esc to interrupt/i.test(footOf(screen));
+
+/**
+ * Wait for the window to be asking, if the only thing wrong is that it is busy.
+ *
+ * A sequence is a dozen keystrokes and the window works between them. Treating
+ * the gap as "it stopped asking" abandoned the run part way and submitted a
+ * half-filled form: measured, "the window stopped asking after 13 of 28 steps —
+ * the window is busy". Anything else — a composer, a screen with no status line
+ * — returns immediately, because those do not resolve by waiting.
+ */
+async function askingSoon(target) {
+  const stop = Date.now() + BUSY_WAIT_MS;
+  for (;;) {
+    const screen = await screenOf(target);
+    const asking = askingOf(screen);
+    if (asking) return { asking, screen };
+    if (!isBusy(screen) || Date.now() >= stop) return { asking: null, screen };
+    await sleep(BUSY_POLL_MS);
+  }
+}
+
+export function whyNotAsking(screen) {
+  const foot = footOf(screen).slice(0, 90);
   if (/esc to interrupt/i.test(foot)) {
     return `the window is busy — its status line reads "${foot}"`;
   }
@@ -1412,7 +1462,7 @@ export async function answerPrompt(cwd, key) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
 
-  const beforeScreen = await screenOf(pane.target);
+  const { screen: beforeScreen } = await askingSoon(pane.target);
   // A menu on the screen is not the same as a menu waiting to be answered.
   //
   // The pane shows the conversation as well as the prompt, and a conversation
