@@ -126,6 +126,11 @@ class Desk {
     this.lastSessionId = null;
     this.holder = null;      // 'floor' | 'editor' | null, as last reported
     this.offset = 0;         // bytes of that transcript already sent up
+    // When this desk started watching. What it separates is a conversation that
+    // began after we were here — genuinely new, and read from its first word —
+    // from one that was already running, which is joined at its current end so
+    // that hours of history are not replayed onto the floor.
+    this.since = Date.now();
   }
 
   get label() { return `${this.channel}/${this.agent}`; }
@@ -147,18 +152,37 @@ class Desk {
    * watch interval; the next tick then moves the offset past it and the floor
    * never sees the message it just sent.
    */
-  async follow(id) {
+  async follow(id, fromStart = false) {
     this.lastSessionId = id;
-    this.offset = id ? await W.transcriptSize(W.transcriptPath(this.cwd, id)) : 0;
+    if (!id) { this.offset = 0; return; }
+    this.offset = fromStart ? 0 : await W.transcriptSize(W.transcriptPath(this.cwd, id));
   }
 
   async watch(live = [], paneByPid = new Map()) {
-    // The conversation this desk is. Pinned on first sight and kept: a desk
-    // does not change conversation because a window closed, or because another
-    // one in the same folder happens to be newer.
-    if (!this.lastSessionId && live.length) {
+    // The conversation this desk is. Kept while it is still running — a desk
+    // does not change conversation because another window in the same folder
+    // happens to be newer, or because a tab was closed and will be reopened.
+    //
+    // But it is not kept for ever. `lastSessionId` used to be set once and never
+    // reassigned, which made the pin outlive everything: the operator closed
+    // every window, opened a new conversation, said "Good morning", and the
+    // floor went on relaying the old transcript. Measured — the new sessions
+    // registered with zero turns, because nothing was reading them. The only
+    // way out was restarting the host, which is a terminal command, which is
+    // the thing the floor exists to avoid.
+    //
+    // So: adopt the newest live conversation whenever the pinned one has
+    // stopped running. Which is what the paragraph above follow() has always
+    // claimed happens — "a conversation that changes underneath is not a
+    // handoff to negotiate; it is simply the conversation now".
+    const pinnedLive = this.lastSessionId && live.some((x) => x.sessionId === this.lastSessionId);
+    if (!pinnedLive && live.length) {
       const newest = live.reduce((a, b) => ((b.startedAt ?? 0) > (a.startedAt ?? 0) ? b : a));
-      await this.follow(newest.sessionId);
+      if (newest.sessionId !== this.lastSessionId) {
+        // Read from the first word if it began after we got here, and from the
+        // current end if it was already going. See `since`.
+        await this.follow(newest.sessionId, (newest.startedAt ?? 0) >= this.since);
+      }
     }
     const session = this.lastSessionId
       ? live.find((x) => x.sessionId === this.lastSessionId) ?? null
