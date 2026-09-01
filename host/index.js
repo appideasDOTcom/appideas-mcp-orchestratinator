@@ -220,7 +220,7 @@ class Desk {
     return r;
   }
 
-  async answer(decision) {
+  async answer(decision, reason = null) {
     // A number is a choice off the window's own list — "2. Yes, and don't ask
     // again…" and whatever else this particular prompt offers. Approve, deny and
     // cancel are the three that are always there, so they keep names.
@@ -230,6 +230,10 @@ class Desk {
     // floor now drops a desk's prompt the moment the operator decides. See
     // answerPrompt — it looks at the window before and after, so an answer that
     // went nowhere says so instead of passing.
+    // A refusal with something to say is two acts, not one: the choice opens a
+    // field, the words go in it. Only deny carries one — approve and cancel have
+    // nothing to explain.
+    if (typeof reason === 'string') return W.denyWithReason(this.cwd, key, reason);
     return W.answerPrompt(this.cwd, key);
   }
 
@@ -352,7 +356,7 @@ class Host {
           warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
           break;
         }
-        const r = await desk.answer(item.payload?.decision);
+        const r = await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
         if (!r.ok) {
           warn(`${desk.label}: could not answer the prompt — ${r.error}`);
           // Told to the board, not only to this log. The floor now clears a

@@ -253,6 +253,33 @@ async function main() {
       "  2. Cancel",
     ].join('\n');
 
+    // The dialog a Write under .claude/skills/ raises, captured off a real pane.
+    // It is here because the refusal it produced said "the window is back at its
+    // composer" while composerOf returned null — a message naming a cause nobody
+    // had looked for, which sent two people hunting the wrong thing.
+    const Q_SKILL = [
+      "\u254c".repeat(80),
+      " Do you want to create probe-note.md?",
+      " \u276f 1. Yes",
+      "   2. Yes, and allow Claude to edit its own settings for this session",
+      "   3. No",
+      "",
+      " Esc to cancel \u00b7 Tab to amend",
+    ].join('\n');
+    assert(W.askingOf(Q_SKILL), 'the skill-write dialog is a live question — its footer says what it takes');
+    eq(W.composerOf(Q_SKILL), null, 'and it is not a composer, whatever the refusal used to claim');
+    eq(W.menuOf(Q_SKILL).rows.length, 3, 'its three choices are readable');
+
+    // What the refusal says now: observed, never guessed.
+    const BUSY = ['\u2500'.repeat(60), '\u23fa Running 1 shell command\u2026', '  esc to interrupt'].join('\n');
+    assert(/busy/.test(W.whyNotAsking(BUSY)), 'a window part way through a tool is called busy, not "back at its composer"');
+    assert(/esc to interrupt/.test(W.whyNotAsking(BUSY)), 'and quotes the status line it read that from');
+    const COMPOSER = ['\u2500'.repeat(60), '\u276f ', '\u2500'.repeat(60), '  auto mode on'].join('\n');
+    assert(/back at its composer/.test(W.whyNotAsking(COMPOSER)), 'an actual composer is still named as one');
+    const ODD = ['\u2500'.repeat(60), '  Something nobody has seen before', '  press F to pay respects'].join('\n');
+    assert(/not offering anything to answer/.test(W.whyNotAsking(ODD)), 'and anything else says so rather than inventing a reason');
+    assert(/press F to pay respects/.test(W.whyNotAsking(ODD)), 'quoting the line it actually saw');
+
     const qs = W.questionOf(Q_SINGLE);
     eq(qs.kind, 'single', 'a question with no checkboxes is a single-select');
     eq(qs.tabs.map((t) => `${t.title}${t.answered ? '\u2713' : ''}${t.submit ? '*' : ''}`), ['ProbeOne', 'ProbeTwo', 'Submit*'],
@@ -689,6 +716,16 @@ async function main() {
       `and quotes the screen rather than guessing why — ${stuck.error ?? ''}`);
     eq(stuck.done.filter((d) => d === 'Enter(confirm)').length, 3,
       'having pressed it more than once, in case the first arrived mid-redraw');
+
+    // Refusing with a reason is two acts, and the guard belongs on the first.
+    // The words are typed only after the digit has been accepted by a window
+    // that was demonstrably asking — otherwise a refusal aimed at a prompt that
+    // has gone types a sentence into somebody's message box.
+    const denyGone = await W.denyWithReason(talking, '3', 'use the staging bucket');
+    eq(denyGone.ok, false, 'a reasoned refusal is not typed into a window that has stopped asking');
+    eq(denyGone.code, 'no_prompt', 'it fails on the same guard a bare answer does');
+    const denyNoWindow = await W.denyWithReason(`${PROMPT_DIR}/never-opened`, '3', 'anything');
+    eq(denyNoWindow.code, 'no_window', 'and a repo with no window never gets as far as the words');
 
     const nowhere = await W.answerQuestion(`${PROMPT_DIR}/never-opened`, [{ key: '1' }]);
     eq(nowhere.code, 'no_window', 'and a repo with no window is its own answer');

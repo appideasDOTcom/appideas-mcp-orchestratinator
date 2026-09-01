@@ -10,7 +10,7 @@ can still be wrong on the page. The only honest test is the real page against a
 real server. This is how to get one in about a minute, and — more importantly —
 the specific ways this has produced a **false pass**.
 
-## Three ways a green result has lied here
+## Four ways a green result has lied here
 
 **Testing one of two entry points.** The same dialog opens from the board and
 from the floor, and they do not share a path: floor pills call
@@ -23,6 +23,18 @@ points before testing, and drive each one.**
 the new one died on `EADDRINUSE` and the results being read came from the old
 process against a different DB. Everything looked plausible and none of it was
 the code under test. Confirm the thing answering is the thing you just started.
+
+**Asserting the fixture instead of the feature.** A probe that sets up the wrong
+state passes or fails for reasons that have nothing to do with the change. Two
+real cases, one after the other: a check for "the desk is still awaiting" failed
+because `/api/floor/answer` clears awaiting the instant it queues work — the
+assertion was backwards, not the code. And a fallback was probed with an
+`idle_prompt`, which correctly raises nothing, so the feature looked broken when
+the fixture was simply inert. **Before believing a FAIL, print the state you
+built and confirm it is the state you meant.** Read `/api/floor` directly; the
+payload shape is not what you assume either — an alert hangs off
+`channels[].desks[].permission`, and a `permission_prompt` notification creates
+one of those with every choice `null`.
 
 **Measuring the container instead of the contents.** `getBoundingClientRect()`
 includes padding, so "is there padding?" answered itself wrongly. Read computed

@@ -1225,7 +1225,7 @@ export async function answerQuestion(cwd, steps = []) {
         code: 'no_prompt',
         done,
         error: `the window stopped asking after ${done.length} of ${steps.length} step${steps.length === 1 ? '' : 's'}` +
-          `, so the rest was not sent`,
+          ` — ${whyNotAsking(await screenOf(pane.target))}`,
       };
     }
     // `-l` sends the string literally; without it tmux reads words like "Enter"
@@ -1382,6 +1382,32 @@ export async function pressBlind(cwd, key) {
  * immediately asks an identical one. That reports a failure that did not
  * happen, and the cost of that is a prompt offered twice — the safe direction.
  */
+/**
+ * Why the window is not taking an answer, in terms of what is on it.
+ *
+ * `askingOf` returns null for reasons that are nothing like each other — the
+ * window is part way through running a tool, or it is at its composer, or it is
+ * showing something with no status line at all. All three used to be reported as
+ * "the window is back at its composer", which named a cause nobody had looked
+ * for: measured on the dialog that produced that message, `composerOf` returned
+ * null. Two people then went looking for a composer that was not there.
+ *
+ * So this says what was seen and stops. A busy window is worth naming separately
+ * because it is not a failure at all — it is an answer that arrived while the
+ * last one was still being carried out.
+ */
+export function whyNotAsking(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const foot = (lines[lines.length - 1] ?? '').trim().slice(0, 90);
+  if (/esc to interrupt/i.test(foot)) {
+    return `the window is busy — its status line reads "${foot}"`;
+  }
+  if (composerOf(screen) !== null) {
+    return 'the window is back at its composer, so there is no question standing';
+  }
+  return `the window is not offering anything to answer — its last line reads "${foot}"`;
+}
+
 export async function answerPrompt(cwd, key) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, error: 'no Claude Code window is open for this repo', code: 'no_window' };
@@ -1405,7 +1431,7 @@ export async function answerPrompt(cwd, key) {
     return {
       ok: false,
       code: 'no_prompt',
-      error: 'the window is back at its composer, so it is not waiting on a question and nothing was sent',
+      error: `${whyNotAsking(beforeScreen)}, so nothing was sent`,
     };
   }
   const before = menuOf(beforeScreen);
@@ -1431,6 +1457,56 @@ export async function answerPrompt(cwd, key) {
     };
   }
   return { ok: true, target: pane.target };
+}
+
+/**
+ * Deny, and say why.
+ *
+ * Choosing "No, and tell Claude what to do differently" does not answer the
+ * prompt — it opens a field. The floor has been picking that option for every
+ * Deny since deny stopped meaning Escape, which left the window holding an empty
+ * box that only somebody at the keyboard could close. The reason is the missing
+ * half of a decision the operator has already made.
+ *
+ * The digit goes through `answerPrompt`, so it keeps every guard that path has:
+ * the window must be asking, and the menu must actually change. Only then is
+ * anything typed, and only if the window is still holding something afterwards —
+ * a prompt whose "No" was a plain no is already answered by the digit, and there
+ * is nothing left to say to it.
+ */
+export async function denyWithReason(cwd, key, reason) {
+  const first = await answerPrompt(cwd, key);
+  if (!first.ok) return first;
+
+  const pane = await paneFor(cwd);
+  if (!pane) return first;
+  const opened = await screenOf(pane.target);
+  // Already answered by the digit alone. Not a failure: some prompts spell their
+  // refusal as a plain "No" with nothing to fill in.
+  if (!askingOf(opened)) return { ...first, said: 0, plain: true };
+
+  const text = String(reason ?? '').trim();
+  if (text) {
+    const typed = await tmux(['send-keys', '-t', pane.target, '-l', text]);
+    if (!typed.ok) return { ok: false, code: 'send_failed', error: typed.error };
+    await sleep(STEP_MS);
+  }
+  // Submitted either way. An empty reason is still a decision — leaving the box
+  // open would put the window back in the state this exists to end.
+  const sent = await tmux(['send-keys', '-t', pane.target, 'Enter']);
+  if (!sent.ok) return { ok: false, code: 'send_failed', error: sent.error };
+  await sleep(ANSWER_CONFIRM_MS);
+
+  const after = await screenOf(pane.target);
+  if (after === opened) {
+    const foot = String(after).split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).pop() ?? '';
+    return {
+      ok: false,
+      code: 'not_taken',
+      error: `the reason was typed but the window did not take it — it still reads "${foot.trim().slice(0, 80)}"`,
+    };
+  }
+  return { ok: true, said: text.length, plain: false };
 }
 
 export async function sendKeys(cwd, ...keys) {

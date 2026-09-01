@@ -1379,6 +1379,12 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
   width: 100%; text-align: left; white-space: normal;
   font-size: 11.5px; line-height: 1.35; padding: 5px 8px;
   display: block;
+  /* A stronger edge than --border, which all but vanishes against the alert's
+     amber wash — these read as text floating in the panel rather than as things
+     to press. Mixed from --text rather than named as a grey so it stays a light
+     edge on the dark theme and a dark one on the light theme; a literal
+     near-white would disappear on white. */
+  border-color: color-mix(in srgb, var(--text) 38%, transparent);
 }
 /* The clamp goes on an inner box, not on the button. On the button its own
    padding is outside the clamped area, so the element ends up taller than the
@@ -1389,6 +1395,23 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* The way out of the prompt — Cancel here, Interrupt on one nobody could read.
+   Coloured like the two beside it rather than left as a default button: primary
+   takes the accent, danger takes the red, and this one was the only decision
+   with no colour of its own, which is what made it look like it was sitting in a
+   void. Amber is already the alert's own border, so it belongs to this box. */
+.p-decide .btn:not(.primary):not(.danger) { border-color: var(--busy); color: var(--busy); }
+.p-decide .btn:not(.primary):not(.danger):hover { background: var(--busy); color: var(--surface); }
+
+/* Deny's second half. It replaces the three buttons rather than appearing under
+   them, because the decision has already been made by the time it opens — what
+   is left is what to say, and leaving Approve on screen beside it invites a
+   click that would undo the choice. */
+.p-why { display: flex; flex-direction: column; gap: 6px; }
+.p-why.hidden { display: none; }
+.p-why-text { width: 100%; font-size: 12px; }
+.p-why-row { display: flex; gap: 6px; }
+
 .p-more-why { font-size: 11px; }
 /* The prompt nobody could read. Deliberately quieter than an error — nothing has
    gone wrong, the board simply does not recognise what the window is asking, and

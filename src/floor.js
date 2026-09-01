@@ -1481,6 +1481,13 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const agent = str(req.body?.agent);
     const requestId = str(req.body?.request_id);
     const decision = str(req.body?.decision);
+    // Only a refusal carries one, and only up to a length a terminal will take
+    // in one paste. Null and empty are different: null is "no box was opened",
+    // empty is "the operator opened it and sent nothing", and both must still
+    // submit — a reason box left standing is the state this exists to end.
+    const reason = decision === 'deny' && typeof req.body?.reason === 'string'
+      ? clip(req.body.reason, 2000)
+      : null;
     // Three named answers and, when the board has read the window's list, any
     // numbered choice on it. The number is validated against that list below
     // rather than trusted: this ends as a keystroke in somebody's window.
@@ -1552,7 +1559,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
-      request_id: requestId, decision: send, message: str(req.body?.message), queued_at: Date.now(),
+      request_id: requestId, decision: send, message: str(req.body?.message), reason, queued_at: Date.now(),
     });
     live.wake(check.hosted.host_id);
     // A row reading "permission.3" tells nobody anything a year later, so a

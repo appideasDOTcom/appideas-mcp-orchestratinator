@@ -2129,8 +2129,15 @@
              </div>` : ''}
              ${req && !req.questions?.length && !reading && !unreadable ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
-               <button class="btn danger" data-act="decide" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
+               <button class="btn danger" data-act="deny-open" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
+             </div>
+             <div class="p-why hidden">
+               <input class="input p-why-text" type="text" placeholder="What should Claude do instead? (optional)" maxlength="2000">
+               <div class="p-why-row">
+                 <button class="btn danger" data-act="decide" data-choice="deny" data-request="${esc(req.request_id)}">Send refusal</button>
+                 <button class="btn" data-act="deny-cancel">Back</button>
+               </div>
              </div>
              ${(req.choices?.extras ?? []).length ? `<div class="p-more">${req.choices.extras.map((o) =>
                `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(clip(o.text, 200))}</span></button>`).join('')}</div>` : ''}
@@ -2312,7 +2319,24 @@
   function settle(rows) {
     if (!ui.sending.length) return;
     const arrived = rows.filter((r) => r.role === 'user').map((r) => squash(r.text));
-    if (rows.some((r) => r.role === 'error')) return void (ui.sending = []);
+    // A refused send used to end here, and that was the whole of it: the pending
+    // bubble went, and with it the only copy of what the operator had typed. The
+    // wait before a refusal is minutes long, so what gets thrown away is usually
+    // a paragraph somebody sat and wrote.
+    //
+    // The words go back where they came from. Prepended rather than assigned,
+    // because clobbering whatever is in the box now would be the same mistake in
+    // the other direction.
+    if (rows.some((r) => r.role === 'error')) {
+      const lost = ui.sending.map((pnd) => pnd.text).filter(Boolean).join('\n\n');
+      ui.sending = [];
+      const box = $('p-text');
+      if (lost && box) {
+        box.value = box.value.trim() ? `${lost}\n\n${box.value}` : lost;
+        box.focus();
+      }
+      return;
+    }
     if (!arrived.length) return;
     ui.sending = ui.sending.filter((p) => !arrived.some((a) => a.includes(squash(p.text))));
   }
@@ -2714,6 +2738,20 @@
         for (const b of form.querySelectorAll('button')) b.disabled = false;
       }
       tick();
+    } else if (act.dataset.act === 'deny-open') {
+      // Deny does not refuse on its own any more: it opens the box. The window's
+      // own "No, and tell Claude what to do differently" is what the floor has
+      // been pressing all along, and that choice does not answer the prompt — it
+      // asks for the rest of the sentence. Sending nothing left the window
+      // holding an empty field.
+      const alert = act.closest('.p-alert');
+      alert?.querySelector('.p-why')?.classList.remove('hidden');
+      alert?.querySelector('.p-decide')?.classList.add('hidden');
+      alert?.querySelector('.p-why-text')?.focus();
+    } else if (act.dataset.act === 'deny-cancel') {
+      const alert = act.closest('.p-alert');
+      alert?.querySelector('.p-why')?.classList.add('hidden');
+      alert?.querySelector('.p-decide')?.classList.remove('hidden');
     } else if (act.dataset.act === 'press') {
       // Hold all three while it is in flight, for the same reason `decide` does:
       // a prompt that looks unresponsive is one that gets clicked again, and
@@ -2755,7 +2793,12 @@
       const all = act.closest('.p-alert')?.querySelectorAll('[data-act="decide"]') ?? [act];
       for (const b of all) b.disabled = true;
       try {
-        await decide(act.dataset.request, act.dataset.choice);
+        // Empty is a decision too, and is sent as one: the operator opened the
+        // box, chose to say nothing, and the window still needs its Enter.
+        const why = act.dataset.choice === 'deny'
+          ? (act.closest('.p-alert')?.querySelector('.p-why-text')?.value ?? '')
+          : null;
+        await decide(act.dataset.request, act.dataset.choice, why);
       } finally {
         for (const b of all) b.disabled = false;
       }
@@ -2866,12 +2909,13 @@
     }
   }
 
-  async function decide(requestId, decision) {
+  async function decide(requestId, decision, reason = null) {
     if (!ui.open || !requestId) return;
     const r = await fetch('./api/floor/permission', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...ui.open, request_id: requestId, decision }),
+      body: JSON.stringify({ ...ui.open, request_id: requestId, decision,
+        ...(typeof reason === 'string' ? { reason } : {}) }),
     });
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));

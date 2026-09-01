@@ -88,13 +88,22 @@ ways a green result has lied here.
 
 ## Tests
 
-`npm test` runs six suites. `test:host` and `test:window` are not unit tests:
+`npm test` runs eight suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
 `claude` (a `.cjs`, because this package is `"type": "module"`). They use their
 own tmux session names and ports, so they are safe to run beside a live host —
 but a suite killed halfway leaves a server on port 8896 and fixtures in `data/`,
 which will poison the next run. Check for both before concluding a failure is
 real.
+
+`test:plugin` covers the floor hook, which is the one part built to fail in
+silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
+a fault there shows up as prompts quietly never reaching the floor while the
+conversation keeps relaying. Most of its assertions are about what is *not* sent.
+Its fixture lives in `tmpdir()`, not `data/`: the hook walks six levels up
+looking for `.mcp.json`, and a fixture inside the repo reaches this repo's own —
+so the "outside a repo" cases resolve against the real board and post to the
+operator's live floor.
 
 ## Conventions
 
