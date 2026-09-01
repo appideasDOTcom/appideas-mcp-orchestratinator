@@ -1095,7 +1095,14 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .t-tool .t-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-compose { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); }
-.p-actions { display: flex; align-items: center; gap: 8px; }
+/* One height for every control in the row, said once. Send's height used to be
+   whatever its text and padding came to (28px), and the two glyph buttons were
+   given 24px by hand — so the marks sat two pixels inside the button they stood
+   next to, which is exactly the misalignment nobody can name but everybody
+   sees. Declared here and applied to all three, so the glyphs cannot drift from
+   Send without Send taking them with it. */
+.p-actions { display: flex; align-items: center; gap: 8px; --p-ctl-h: 28px; }
+.p-actions .btn { height: var(--p-ctl-h); }
 .p-hint { font-size: 10.5px; flex: 1 1 auto; line-height: 1.35; }
 
 /* The stop sign, in the row it belongs to rather than on every desk.
@@ -1104,20 +1111,31 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    though — fully transparent read as a hole punched in the button — it is the
    barest wash of the same red.
 
-   Square, so the octagon is an octagon: the row's other buttons are sized by
-   their words, and a shape stretched to a word's width is a different shape.
-   The height is matched to Send rather than guessed, so the row still sits on
-   one line. */
+   Sized by its height, never by a width: the row's other buttons are as wide as
+   their words, and a shape stretched to a word's width is a different shape. It
+   takes the row's control height and whatever width that height gives it, which
+   for a regular octagon is the same number. */
 .btn.stopbtn {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 24px; padding: 0;
+  width: auto; height: var(--p-ctl-h); padding: 0;
   /* No border of its own. A .btn's rounded rectangle around an octagon is two
      competing shapes at the same size, and the outer one wins — the sign stops
      reading as a sign. The octagon IS the control, the way the bell is. */
   border-color: transparent;
   background: none;
 }
-.stopGlyph { width: 16px; height: 16px; display: block; overflow: visible; }
+/* The stroke straddles the path, so half of it lies outside the viewBox: a box
+   drawn at the full control height would put the sign's outer edge half a
+   stroke past Send's border. Subtracting the weight is what makes the drawn
+   edges land ON the border, top and bottom. It also means the weight has to be
+   one number — hence --sw, read here for the box and below for the stroke, so
+   the thicker hover and focus lines thicken inwards instead of growing the
+   mark. Width is left to the viewBox's own ratio. */
+.stopGlyph {
+  --sw: 1.7px;
+  height: calc(var(--p-ctl-h) - var(--sw)); width: auto;
+  display: block; overflow: visible;
+}
 .stopGlyph polygon {
   fill: color-mix(in srgb, var(--block) 12%, var(--surface));
   stroke: var(--block);
@@ -1127,18 +1145,19 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
      non-scaling-stroke makes it pixels: 1.7 is the weight the sign carried when
      it stood on the desk. */
   vector-effect: non-scaling-stroke;
-  stroke-width: 1.7px;
+  stroke-width: var(--sw);
 }
 /* Hover lands on the glyph, not on a box drawn around it — same as .pencil. */
 .btn.stopbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.stopbtn:hover:not(:disabled) .stopGlyph { --sw: 2.2px; }
 .btn.stopbtn:hover:not(:disabled) .stopGlyph polygon {
   fill: color-mix(in srgb, var(--block) 32%, var(--surface));
-  stroke-width: 2.2px;
 }
 /* Keyboard focus still needs a mark, and the glyph is what to mark — a ring
    round the button's box would put back the rectangle removed above. */
 .btn.stopbtn:focus { outline: none; }
-.btn.stopbtn:focus-visible .stopGlyph polygon { stroke: var(--accent); stroke-width: 2.4px; }
+.btn.stopbtn:focus-visible .stopGlyph { --sw: 2.4px; }
+.btn.stopbtn:focus-visible .stopGlyph polygon { stroke: var(--accent); }
 /* Dimmed in place rather than hidden, exactly like .bell.blocked: most of the
    time nothing is running, and that is this control's resting state, not a
    fault. The reason it cannot be pressed is on hover. */
@@ -1189,18 +1208,26 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
   color: var(--block);
   user-select: text;
 }
-/* The saved-prompts button. Same 26x24 hit area and the same no-chrome treatment
-   as the stop sign beside it: two marks in one row read as one control each only
-   if neither of them is wearing a box the other isn't. */
+/* The saved-prompts button. Same height-first sizing and the same no-chrome
+   treatment as the stop sign beside it: two marks in one row read as one control
+   each only if neither of them is wearing a box the other isn't. Wider than the
+   sign, because its box is wider than it is tall and the height is what the two
+   share — matching their widths instead would draw one of them at the wrong
+   proportions. */
 .btn.promptbtn {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 24px; padding: 0; border-color: transparent; background: none;
+  width: auto; height: var(--p-ctl-h); padding: 0; border-color: transparent; background: none;
 }
-.promptGlyph { width: 16px; height: 16px; display: block; overflow: visible; }
+/* Same stroke arithmetic as .stopGlyph, and for the same reason. */
+.promptGlyph {
+  --sw: 1.6px;
+  height: calc(var(--p-ctl-h) - var(--sw)); width: auto;
+  display: block; overflow: visible;
+}
 /* Stroked, not filled — the stop sign is an outline and this sits next to it.
-   non-scaling-stroke so the 0..2 unit box does not multiply the line weight. */
+   non-scaling-stroke so the unit box does not multiply the line weight. */
 .promptGlyph rect, .promptGlyph polyline, .promptGlyph line {
-  fill: none; stroke: var(--muted); stroke-width: 1.6px;
+  fill: none; stroke: var(--muted); stroke-width: var(--sw);
   stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke;
 }
 .btn.promptbtn:hover:not(:disabled) { border-color: transparent; background: none; }
@@ -1208,9 +1235,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .btn.promptbtn:hover:not(:disabled) .promptGlyph polyline,
 .btn.promptbtn:hover:not(:disabled) .promptGlyph line { stroke: var(--busy); }
 .btn.promptbtn:focus { outline: none; }
+.btn.promptbtn:focus-visible .promptGlyph { --sw: 2px; }
 .btn.promptbtn:focus-visible .promptGlyph rect,
 .btn.promptbtn:focus-visible .promptGlyph polyline,
-.btn.promptbtn:focus-visible .promptGlyph line { stroke: var(--accent); stroke-width: 2px; }
+.btn.promptbtn:focus-visible .promptGlyph line { stroke: var(--accent); }
 .btn.promptbtn:disabled { opacity: .32; }
 .btn.promptbtn[aria-expanded="true"] .promptGlyph rect,
 .btn.promptbtn[aria-expanded="true"] .promptGlyph polyline,

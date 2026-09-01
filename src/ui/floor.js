@@ -290,18 +290,33 @@
      of what makes an octagon read as a road sign rather than a gem. */
   /* The saved-prompts glyph: a caret and an underscore in a rounded box, which
      is Bootstrap's `terminal`. Drawn rather than imported — this page loads no
-     icon font, and pulling one in for a single 16px mark is a page-weight bill
-     for one glyph. Same 0..2 unit box as the stop sign so the two marks agree
-     about how big "an icon in this row" is. */
+     icon font, and pulling one in for a single mark is a page-weight bill for
+     one glyph. */
   const PROMPT_GLYPH =
     '<rect x="0.12" y="0.28" width="1.76" height="1.44" rx="0.28" />' +
     '<polyline points="0.52,0.78 0.84,1.0 0.52,1.22" />' +
     '<line x1="1.02" y1="1.26" x2="1.46" y2="1.26" />';
 
+  /* The octagon circumscribes the unit box rather than being inscribed in it:
+     dividing by cos(22.5°) pushes the flat top and bottom out to y=0 and y=2,
+     so the shape's edges are the viewBox's edges. That is what lets CSS set the
+     mark's height and get the mark, not the mark plus a margin — an inscribed
+     octagon in a 2×2 box is 92% of the height it is given, which read on the
+     page as a sign two pixels short of the button beside it. */
   const STOP_PTS = Array.from({ length: 8 }, (_, k) => {
     const a = (Math.PI / 8) + (k * Math.PI) / 4;
-    return `${(1 + Math.cos(a)).toFixed(3)},${(1 + Math.sin(a)).toFixed(3)}`;
+    const r = 1 / Math.cos(Math.PI / 8);
+    return `${(1 + r * Math.cos(a)).toFixed(3)},${(1 + r * Math.sin(a)).toFixed(3)}`;
   }).join(' ');
+
+  /* Each glyph's viewBox is its own ink, so `height` in CSS means the height of
+     the shape. They are not the same proportion — a regular octagon is square,
+     a terminal box is wider than it is tall — and they used to share a 2×2 box,
+     which sized the *boxes* alike and so the marks inside them differently.
+     Cropped to the ink, one height in the row governs both and each takes the
+     width that height gives it. PROMPT_BOX is the rect above, exactly. */
+  const STOP_BOX = '0 0 2 2';
+  const PROMPT_BOX = '0.12 0.28 1.76 1.44';
 
   /**
    * How long a sent message may sit unrecorded before it says so.
@@ -1995,8 +2010,8 @@
         <textarea id="p-text" class="input" rows="3"></textarea>
         <div class="p-actions">
           <span class="muted p-hint"></span>
-          <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="0 0 2 2" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
-          <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="0 0 2 2" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
+          <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
+          <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="${PROMPT_BOX}" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
         <div class="p-links">
