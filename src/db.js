@@ -314,6 +314,16 @@ export function openDb(path) {
   // an editor's own panel, with no stdin to type into — this is the pid of it,
   // so the floor can say so and say what to do instead of failing on send.
   addColumn(db, 'hosted_desks', 'outside_pid', 'INTEGER');
+  // A tmux window in this desk's repo, whether or not a session has registered
+  // in it yet — deliberately not `window_id`, which means "a window the floor
+  // can type into". They differ throughout Claude Code's startup.
+  addColumn(db, 'hosted_desks', 'window_open', 'TEXT');
+  // How many live processes claim this desk's conversation. Normally 1.
+  addColumn(db, 'hosted_desks', 'holders', 'INTEGER');
+  // Terminals attached to the host's tmux session. A property of the session
+  // rather than of this desk, carried per desk because that is the row the
+  // floor already reads. It is the receipt an attach spins against.
+  addColumn(db, 'hosted_desks', 'clients', 'INTEGER');
 
   migratePersonas(db);
   migrateAgentNames(db);
@@ -1001,8 +1011,13 @@ export function makeStore(db) {
        bracket has to close for the line to be only the marker: interrupting by
        typing leaves the marker with the real message after it, and that one IS
        the operator speaking. */
+    /* The text comes back as well as the id. Both callers want a different half
+       of the same row: the queue asks "has this desk been spoken to since it
+       last spoke", which is an id comparison, and the delivery note asks "is
+       the message I am about to say is queued already in the conversation",
+       which can only be answered by the words. */
     deskLastUserTurn: db.prepare(
-      `SELECT id, created_at
+      `SELECT id, text, created_at
          FROM turns
         WHERE channel = ? AND agent = ? AND role = 'user'
           AND NOT (text LIKE '[Request interrupted%' AND text LIKE '%]')
@@ -1079,17 +1094,20 @@ export function makeStore(db) {
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
-      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, state, updated_at)
-       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, 'idle', datetime('now'))
+      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, window_open, holders, state, updated_at)
+       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, @window_open, @holders, 'idle', datetime('now'))
        ON CONFLICT(channel, agent) DO UPDATE SET
          host_id = excluded.host_id, cwd = excluded.cwd,
          window_id = excluded.window_id, outside_pid = excluded.outside_pid,
+         window_open = excluded.window_open, holders = excluded.holders,
          state = 'idle', updated_at = datetime('now')`
     ),
     setHostedHolder: db.prepare(
       // Only who is holding the desk. Deliberately not the upsert: that resets
       // state to 'idle', and the holder changes while a turn is running.
-      `UPDATE hosted_desks SET window_id = @window_id, outside_pid = @outside_pid, updated_at = datetime('now')
+      `UPDATE hosted_desks SET window_id = @window_id, outside_pid = @outside_pid,
+              window_open = @window_open, holders = @holders, clients = @clients,
+              updated_at = datetime('now')
         WHERE channel = @channel AND agent = @agent`
     ),
     setHostedSession: db.prepare(
@@ -1108,14 +1126,14 @@ export function makeStore(db) {
     ),
     listHostedDesks: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
-              d.window_id, d.outside_pid,
+              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
     hostedDesk: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
-              d.window_id, d.outside_pid,
+              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id
@@ -1474,11 +1492,12 @@ export function makeStore(db) {
       q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession }).changes,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
     listHosts: () => q.listHosts.all(),
-    setHostedHolder: (channel, agent, { windowId = null, outsidePid = null } = {}) =>
-      q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid }).changes,
-    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null } = {}) =>
+    setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>
+      q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid, window_open: windowOpen, holders, clients }).changes,
+    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null, windowOpen = null, holders = 0 } = {}) =>
       q.upsertHostedDesk.run({
         channel, agent, host_id: hostId, cwd, window_id: windowId, outside_pid: outsidePid,
+        window_open: windowOpen, holders,
       }).changes,
     setHostedSession: (channel, agent, sdkSessionId) =>
       q.setHostedSession.run({ channel, agent, sdk_session_id: sdkSessionId }).changes,

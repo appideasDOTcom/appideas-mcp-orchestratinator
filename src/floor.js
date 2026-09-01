@@ -95,6 +95,17 @@ const WORK_WAIT_MAX_MS = 25_000;
 const CHAT_MAX = 20_000;
 
 /**
+ * How long a "queued" note may stand before it is assumed to have been missed.
+ *
+ * A backstop, not the mechanism: what retires a note is its message becoming a
+ * turn. This is only for the note whose turn never arrives at all — the host
+ * was restarted while a message sat in the queue, the window was closed on top
+ * of it. Long, because a message queued behind a genuinely long turn is a real
+ * thing to be waiting on and the honest thing to say about it is "queued".
+ */
+const DELIVERY_STALE_MS = 10 * 60_000;
+
+/**
  * The notification types that mean a human is the blocker.
  *
  * Everything else Claude Code notifies about — auth success, an elicitation
@@ -139,6 +150,11 @@ const ANSWER_ECHO_MS = 15_000;
 const CLEARS_AWAITING = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'PreToolUse']);
 
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+/* Whitespace is not meaningful when matching a message against the turn it
+   became: a composer rewraps, and a transcript records what was submitted
+   rather than how it was typed. The same rule the host and the browser use, so
+   all three agree about when a queued message has arrived. */
+const squash = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
 const clip = (v, max = TEXT_MAX) => {
   if (v === null || v === undefined) return null;
   const s = typeof v === 'string' ? v : JSON.stringify(v);
@@ -221,6 +237,56 @@ export function nudgeable(h, nowMs = Date.now()) {
     };
   }
   return can;
+}
+
+/**
+ * Can the host open a terminal already attached to this desk's window?
+ *
+ * The same conditions as a nudge — something has to be running in tmux for
+ * there to be anything to attach to — but every sentence is re-worded, because
+ * of who is reading it. This is the escape hatch: the person clicking it has
+ * usually already decided the floor is not telling them the truth about their
+ * window. "Send a message instead — that opens one" is the worst possible
+ * advice at that moment, since sending a message is the thing they have just
+ * stopped believing in.
+ *
+ * So each refusal ends with the command, and the machine to run it on. The
+ * point of this button is to get somebody to a real prompt; when it cannot do
+ * that itself, the next best thing it can do is say how.
+ */
+export function attachable(h, nowMs = Date.now()) {
+  const cmd = `tmux attach -t ${h?.host_tmux ?? 'orch'}`;
+  const where = h?.host_name ?? h?.host_id ?? 'the host machine';
+  if (!h) {
+    return { error: 'No host on this board is running that repo, so there is no tmux session to attach to.', code: 'not_hosted' };
+  }
+  const can = deliverable(h, nowMs);
+  if (can.error && can.code === 'host_offline') {
+    // The one refusal that is not really a refusal. The host is a separate
+    // process from the windows it opened — killing it deliberately leaves them
+    // running — so the session is very likely still there and still attachable.
+    // Nothing here can reach out and prove that, and the sentence must not
+    // claim it: it says what is known, and hands over the command.
+    return {
+      error: `The host for this desk (${where}) is offline, so it cannot open a terminal for you. Its tmux session outlives it, so run \`${cmd}\` on ${where} yourself.`,
+      code: 'host_offline',
+      cmd,
+    };
+  }
+  if (can.error && can.code === 'held_by_editor') {
+    return {
+      error: 'This conversation is open in your editor, not in tmux, so there is no window to attach to. Close it there, or move it to the floor first.',
+      code: 'held_by_editor',
+    };
+  }
+  if (can.error) return { ...can, cmd };
+  if (!h.window_id) {
+    return {
+      error: 'No tmux window is open for this desk, so there is nothing to attach to yet. Open it on the floor first.',
+      code: 'no_window',
+    };
+  }
+  return { hosted: h, cmd };
 }
 
 /**
@@ -717,12 +783,24 @@ export function createLive() {
   // back — unless it was kept here. See the answer_failed case in
   // applyHostEvent, which is what puts it back.
   const answered = new Map(); // deskKey -> { request_id, tool, summary, message, at }
+  /**
+   * Messages a window has taken but not yet turned into a turn.
+   *
+   * A desk that is working queues what you send it and reads it at its next
+   * step. Between those two moments the message exists — the window has it,
+   * the transcript says so — but it is not in the conversation, so nothing the
+   * board draws from turns can show it. Kept here so the composer can say
+   * "queued" for those few seconds instead of counting to thirty and calling
+   * it lost. Dropped the moment the real turn arrives; see the `turn` case.
+   */
+  const delivery = new Map(); // deskKey -> { state, text, at, held }
   const watchers = new Map();  // deskKey -> Set<fn>
   const waiters = new Map();   // host_id -> wake fn for a held work request
   return {
     partial,
     pending,
     answered,
+    delivery,
     subscribe(key, fn) {
       if (!watchers.has(key)) watchers.set(key, new Set());
       watchers.get(key).add(fn);
@@ -792,6 +870,12 @@ function applyHostEvent(store, live, hostId, ev) {
       store.setHostedHolder(channel, agent, {
         windowId: ev.holder === 'floor' ? (str(ev.window) ?? null) : null,
         outsidePid: ev.holder === 'editor' ? (Number(ev.pid) || null) : null,
+        // Not conditioned on `holder`: a window with nobody registered in it
+        // has no holder at all, and that is exactly the case these two exist
+        // to describe.
+        windowOpen: str(ev.window_open) ?? null,
+        holders: Number(ev.holders) || 0,
+        clients: Number(ev.clients) || 0,
       });
       break;
     }
@@ -831,7 +915,56 @@ function applyHostEvent(store, live, hostId, ev) {
       if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name));
       else if (role === 'user' || role === 'assistant') turn(role, ev.text);
       else return false;
+      // A queued message stops being queued when it becomes a turn.
+      //
+      // Matched on the text, for the same reason the browser retires its
+      // pending bubble on the text: this turn is the window saying "this is in
+      // the conversation now", and that is the only thing that should end the
+      // wait. Anything else — a timer, the desk going idle — would clear the
+      // note while the message was still sitting in the queue.
+      if (role === 'user') {
+        const q = live.delivery.get(key);
+        if (q && squash(ev.text).includes(squash(q.text))) {
+          live.delivery.delete(key);
+          live.publish(key, { type: 'delivery', delivery: null });
+        }
+      }
       store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd });
+      break;
+    }
+
+    /**
+     * The window has the message; the conversation does not have it yet.
+     *
+     * Only ever said about a message that was *queued* — one that went straight
+     * in needs nothing said about it, because the turn itself arrives a moment
+     * later and says it better. This exists for the gap, which on a desk part
+     * way through a long turn is the whole of what the operator can see.
+     */
+    case 'delivery': {
+      const text = str(ev.text);
+      if (!text) return false;
+      // The turn may already have beaten this here, and often does.
+      //
+      // Two loops run in the host and neither waits for the other: the relay
+      // reads the transcript every 700ms, the work loop delivers. A queued
+      // message is written down the instant Enter lands, so the relay can
+      // publish it as a turn before send() has finished confirming it and said
+      // "queued". Handling only the other order left the note standing for ever
+      // over a message that was already in the conversation — measured on the
+      // real board, and the reason this looks for it rather than assuming.
+      const already = store.deskLastUserTurn(channel, agent);
+      if (already && squash(already.text).includes(squash(text))) {
+        if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
+        break;
+      }
+      live.delivery.set(key, {
+        state: str(ev.state) ?? 'queued',
+        text,
+        held: !!ev.held,
+        at: now,
+      });
+      live.publish(key, { type: 'delivery', delivery: live.delivery.get(key) });
       break;
     }
 
@@ -890,6 +1023,11 @@ function applyHostEvent(store, live, hostId, ev) {
     }
 
     case 'error': {
+      // Whatever else this is, nothing is quietly on its way any more. Leaving
+      // the note up would have the desk showing "queued" beside the error
+      // explaining that it was not — and the browser hands the words back to
+      // the compose box on an error turn, so the message is not lost by this.
+      if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
       // An answer that never took is not just an error to report — the window
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
@@ -977,6 +1115,16 @@ export function buildFloor(store, live = null, sessions = null) {
       // typed into from here.
       window_id: h.window_id ?? null,
       outside_pid: h.outside_pid ?? null,
+      // A window exists in that repo, registered session or not. Distinct from
+      // window_id, which means "a window the floor can type into".
+      window_open: h.window_open ?? null,
+      holders: h.holders ?? 0,
+      clients: h.clients ?? 0,
+      // The host's tmux session, carried so the floor can name the command to
+      // attach to it. This projection is hand-picked, so a column the query
+      // selects is not a column the page gets — which is exactly how this one
+      // arrived as null while sitting in the database the whole time.
+      host_tmux: h.host_tmux ?? null,
     });
   }
 
@@ -1117,6 +1265,27 @@ export function buildFloor(store, live = null, sessions = null) {
                 // a message it cannot deliver.
                 held: h.outside_pid ? 'editor' : (h.window_id ? 'floor' : null),
                 held_pid: h.outside_pid ?? null,
+                // Whether a window is sitting in that repo at all. `held` says
+                // null all through Claude Code's startup — nothing can be typed
+                // into a window still asking whether it may use an MCP server —
+                // and the floor used that to offer opening a window that was
+                // already on screen. This is the fact that tells them apart.
+                window_open: !!h.window_open,
+                // Terminals attached to that host's tmux session. The floor
+                // spins its attach link until this rises, so the spinner ends
+                // on a terminal really appearing rather than on a clock.
+                clients: h.clients ?? 0,
+                // Live processes claiming this conversation. More than one is
+                // not prevented anywhere; it is simply not survivable, so the
+                // floor says so rather than picking one quietly.
+                holders: h.holders ?? 0,
+                // The session to attach to, as the host itself reported it.
+                // Named rather than assumed: ORCH_TMUX_SESSION moves it, and a
+                // page that tells someone to run `tmux attach -t orch` against
+                // a host whose session is called something else has sent them
+                // to a "no such session" at the exact moment they are already
+                // convinced this thing is lying to them.
+                tmux: h.host_tmux ?? null,
               }
             : null,
           // Whether the bell on this desk rings, decided here rather than on
@@ -1145,6 +1314,25 @@ export function buildFloor(store, live = null, sessions = null) {
           permission: pendingReq
             ? { ...pendingReq, choices: promptChoices(pendingReq.options) }
             : null,
+          // A message the window has taken but not yet read. Carried on the
+          // desk so a page that arrives mid-queue is in the same state as one
+          // that watched it happen — the stream event alone would leave a
+          // reload showing "sending…" for something already delivered.
+          //
+          // Aged out as a backstop, not as the mechanism. What ends a note is
+          // the message becoming a turn; this only catches the note whose turn
+          // never came — a host restarted mid-queue, a window closed on top of
+          // it. Without it one such note sat on a desk indefinitely, describing
+          // a message from a run that had long finished. Generous on purpose: a
+          // queue behind a genuinely long turn is a real thing to be waiting on,
+          // and saying so for ten minutes is better than lying after one.
+          delivery: (() => {
+            const q = live ? live.delivery.get(k) ?? null : null;
+            if (!q) return null;
+            if (nowMs - Date.parse(q.at) < DELIVERY_STALE_MS) return q;
+            live.delivery.delete(k);
+            return null;
+          })(),
           session: s
             ? {
                 session_id: s.session_id,
@@ -1279,6 +1467,8 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       store.hostDesk(channel, agent, hostId, cwd, {
         windowId: str(d?.window),
         outsidePid: Number(d?.outside_pid) || null,
+        windowOpen: str(d?.window_open),
+        holders: Number(d?.holders) || 0,
       });
       store.ensurePersona(channel, agent);
       const row = store.hostedDesk(channel, agent);
@@ -1405,6 +1595,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // next event to learn there is a reply mid-stream or a prompt open.
     if (live.partial.get(key)) send({ type: 'partial', text: live.partial.get(key) });
     if (live.pending.get(key)) send({ type: 'permission', request: live.pending.get(key) });
+    if (live.delivery.get(key)) send({ type: 'delivery', delivery: live.delivery.get(key) });
 
     const unsubscribe = live.subscribe(key, send);
     const heartbeat = setInterval(() => { try { res.write(': hb\n\n'); } catch { /* closed */ } }, 15_000);
@@ -1564,6 +1755,39 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.enqueueHostWork(h.host_id, channel, agent, 'open', {});
     live.wake(h.host_id);
     res.json({ ok: true });
+  });
+
+  /**
+   * Open a terminal on the host, already attached to its tmux session.
+   *
+   * The escape hatch. Every other control on this page works by the floor
+   * reading a pane and typing into it, which means every one of them fails the
+   * same way: when the parse is wrong, the page is confidently wrong, and there
+   * is no way from here to see what is actually on screen. This is that way.
+   *
+   * Deliberately *not* a seat change, and this is the whole design of it.
+   * `open` and `handback` move which app holds the conversation, because a
+   * conversation is one process and only its holder can type. Attaching moves
+   * nothing: tmux is built for many clients on one session, so this adds a
+   * second pair of eyes on the window the floor already holds. `held` does not
+   * change, no window is opened or closed, and nothing in the UI waits for a
+   * seat that is never going to move.
+   *
+   * It also does not stop being useful when the rest of this does. The refusals
+   * carry the command precisely so a 409 here still gets somebody to a prompt.
+   */
+  router.post('/api/floor/attach', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const can = attachable(store.hostedDesk(channel, agent));
+    if (can.error) return res.status(409).json({ error: can.error, code: can.code, cmd: can.cmd ?? null });
+    store.enqueueHostWork(can.hosted.host_id, channel, agent, 'attach', {});
+    live.wake(can.hosted.host_id);
+    // Queued, and said as queued. The host opens the terminal on its next poll;
+    // if that fails it says so in its own error turn on this desk, which is the
+    // only place that can honestly report it.
+    res.json({ ok: true, queued: true, cmd: can.cmd });
   });
 
   /**

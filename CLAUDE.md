@@ -9,9 +9,16 @@ that are easy to get wrong and expensive to re-learn.
 **A conversation is one `claude` process, so one app holds it at a time.** Not a
 document two windows can share. The floor shows who holds a desk, and moving it
 is an explicit handoff: your editor's tab closes, the host opens a tmux window
-with `claude --resume <session>`, and "Open in VS Code" reverses it. Anything
-proposing to have both live at once is re-litigating a question that has already
-been answered the hard way.
+with `claude --resume <session>`, and "Open in VS Code" reverses it.
+
+**Nothing enforces this.** It is a rule the UI expresses, not a lock, and it is
+worth knowing exactly how it fails before proposing to relax it. Two processes
+can both `--resume` one session id and both run — measured 2026-09-01, along with
+why it is not survivable: resume *reopens* rather than forks, so both append to
+one transcript while neither re-reads it, and their contexts diverge silently.
+The board now reports `holders` and says so on the desk rather than picking one
+quietly. So: not "impossible", but "diverges without telling you", which is
+worse. Do not design against it as a guarantee.
 
 State lives in three places, and they must agree:
 
@@ -22,7 +29,19 @@ State lives in three places, and they must agree:
 | Who the board thinks holds it | the server | `curl -s localhost:8787/api/floor` |
 
 `holderOf()` in [`host/window.js`](host/window.js) is the join of the first two:
-a session in the roster with no pane means an editor has it.
+a session in the roster with no pane means an editor has it. It reports three
+more things, and they exist because `held` on its own is ambiguous:
+
+- **`window_open`** — a pane in that repo, found by *directory*, whether or not a
+  session has registered in it. The roster and tmux answer different questions
+  and disagree for the whole of Claude Code's startup: a window stopped on the
+  folder-trust or MCP question has written no session file, so `held` is null
+  while a window sits on screen. `held: null` + `window_open: true` means
+  **starting, not absent** — go and read the pane.
+- **`holders`** — live processes claiming this conversation. Above 1, see above.
+- **`clients`** — terminals attached to the tmux session, from
+  `tmux list-clients` (~7ms). The floor's attach spinner settles on this rising,
+  because opening a terminal changes nothing else the board can see.
 
 ## Three boards, one of them ours
 
@@ -51,6 +70,14 @@ and a running process older than the file is the most common reason a fix
 "didn't work". Compare `ps -o lstart=` against the file's mtime rather than
 assuming.
 
+**The server is the other half, and it goes stale independently.** `src/` is
+baked into the image (`build: .`; only `/data` is a volume), so a change there
+needs `docker compose up -d --build` — and that printing `Container … Running`
+instead of `Recreated` means it did *not* take your change. Restart each in its
+own command and then check both against the file mtimes. Chaining them behind
+`npm test` once exceeded a seven-minute timeout and left a stale container **and**
+a stale host while the suite reported green.
+
 Two loops run side by side in [`host/index.js`](host/index.js): `watchLoop()`
 relays the conversation, `run()` handles work. Keep them apart. When they shared
 one loop, delivering a message blocked the relay for up to a minute — the floor
@@ -68,7 +95,7 @@ Submit tab is arrived at by answering the last question rather than walked to. A
 day was spent proving each of those; do not adjust `answerSteps()` in
 [`src/floor.js`](src/floor.js) from first principles.
 
-Two consequences worth knowing before touching `host/window.js`:
+Three consequences worth knowing before touching `host/window.js`:
 
 - **Pane width is set by whoever is attached.** A footer that fits on one line at
   160 columns wraps at 80, which broke `askingOf` and made a real fault look
@@ -77,9 +104,55 @@ Two consequences worth knowing before touching `host/window.js`:
   `N of M steps` as failure said "your answers did not land" about answers that
   had landed — and, worse, said success about a sequence whose last key pressed
   Cancel. Finish by reading the pane.
+- **`-S -N` is not "the last N lines".** It is N lines of scrollback *plus the
+  whole visible pane*, so anything that greps a capture is grepping the
+  conversation too. `busy()` did, and a window whose transcript said the words
+  "esc to interrupt" read as busy for ever. Status is positional: `footOf` reads
+  the bottom line, and nothing quoted above it can fake one.
 
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
+
+## A message to a desk that is working
+
+**Type into it. Do not wait for the turn to end.** This is the one place the
+floor used to differ from every other client, and the difference was the whole
+of what made it feel broken: your message was held while the agent worked, and
+the page gave up on it long before the window saw it.
+
+The paragraph that used to be here said a paste into a running turn "is not
+queued, it is dropped — it was losing two messages in three". **That is false**,
+and it is worth knowing what replaced it, because the correction is what the
+current design rests on. Measured against a live window on 2.1.220:
+
+| | |
+|---|---|
+| five messages pasted into one running turn | five arrived, five queued, five recorded **in order**, none dropped |
+| a desk doing ordinary multi-step work | enqueue → the agent reads it **0.8s**; → it answers **2.3s**, mid-task, and the original work carries on |
+
+Claude Code writes the receipt down as it happens, which is what lets `send()`
+say "delivered" without waiting for "answered":
+
+```
+{"type":"queue-operation","operation":"enqueue","content":"<the message>"}
+{"type":"attachment","attachment":{"type":"queued_command","prompt":"<the message>"}}
+```
+
+Two things follow, and both were bugs before they were rules:
+
+- **A queued message has two possible records, and you get exactly one.**
+  Drained at the end of a turn it becomes an ordinary `user` record, *at
+  consumption*. Injected mid-turn it is only ever the `attachment` — there is no
+  `user` record, ever. `readTranscript` skipped attachments, so once mid-turn
+  delivery became the common case the floor showed the agent answering a
+  question nobody could see being asked.
+- **Delivered and recorded are different moments, and the board says which.**
+  `send()` returns `queued`, the host emits a `delivery` event, and the composer
+  shows "queued — the desk is working" instead of counting to thirty and saying
+  "not recorded — send again" about a message that arrived in under a second.
+  The note is retired by the message *becoming a turn* — and by that in either
+  order, because the host's two loops do not wait for each other and the relay
+  genuinely does publish the turn first sometimes. It did, on the real board.
 
 ## The two surfaces
 
@@ -146,3 +219,14 @@ operator's live floor.
   not on screen while the real prompt sat there unread. Quote the pane.
 - Comments here explain *why*, especially where the obvious approach was tried
   and failed. Several say so outright. Preserve that when editing near them.
+- **A deliberate omission needs its reasoning written down, or it reads as
+  backlog.** This is the one that costs the most, because it costs it again
+  every session: an agent meets a gap, makes the same reasonable guess about
+  why it is there, and offers to fill it. Saying "this is deliberate" is not
+  enough — what stops the question is showing that the failure mode being
+  imagined does not occur. `ANSWERS` in [`host/window.js`](host/window.js) is
+  the worked example: it says both why the host will not answer a trust
+  question *and* why no desk is ever left stranded on one. Write the second
+  half. If you find yourself asking "is now the time to do this?" about
+  something with no note beside it, the answer may well be no — and the fix is
+  a paragraph, not a feature.

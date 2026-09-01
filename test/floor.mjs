@@ -413,6 +413,49 @@ try {
   });
   eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
 
+  /* A message the desk took while it was working.
+   *
+   * The window queues it and reads it at its next step, so for a few seconds it
+   * exists without being a turn. The note is what the composer says "queued"
+   * from, and the only thing that matters about it is that it goes away again —
+   * a note that stands for ever is the "not recorded — send again" lie in a
+   * nicer font.
+   *
+   * Both orders are tested because both happen. Two loops run in the host and
+   * neither waits for the other: the relay reads the transcript every 700ms and
+   * the work loop delivers, so the turn genuinely can arrive first. It did, on
+   * the real board, and the note it left behind outlived the run that made it.
+   */
+  console.log('\na message queued behind a running turn');
+  const noteOn = async (agent) => deskOf(await floor(), agent)?.delivery ?? null;
+  const QUEUED = 'have a look at the auth path while you are in there';
+
+  await register({ channel: CH, agent: 'queueing', cwd: '/repo/queueing', window: '@11' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'queueing', session_id: 's-queue', cwd: '/repo/queueing' }]);
+
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'queueing', state: 'queued', text: QUEUED }]);
+  eq((await noteOn('queueing'))?.state, 'queued', 'the desk says the window is holding the message');
+  eq((await noteOn('queueing'))?.text, QUEUED, 'and which message it is holding');
+
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'queueing', role: 'user', text: QUEUED }]);
+  eq(await noteOn('queueing'), null, 'and stops saying so once it becomes a turn');
+
+  // The other order: the turn is already in the conversation when the host gets
+  // round to reporting the delivery. Nothing should be put back.
+  await register({ channel: CH, agent: 'racer', cwd: '/repo/racer', window: '@12' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'racer', session_id: 's-race', cwd: '/repo/racer' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'racer', role: 'user', text: QUEUED }]);
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'racer', state: 'queued', text: QUEUED }]);
+  eq(await noteOn('racer'), null,
+     'a delivery reported after its own turn leaves no note — the message is already in the conversation');
+
+  // A different message is not that one. Without this the note would be retired
+  // by whatever the desk happened to say next.
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'racer', state: 'queued', text: 'and this one is still waiting' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'racer', role: 'assistant', text: 'working on it' }]);
+  eq((await noteOn('racer'))?.text, 'and this one is still waiting',
+     "another turn does not retire a queued message that is still queued");
+
   console.log('\nstopping a turn');
   // End to end this time, because the interesting part is that the endpoint and
   // the sign refuse on the same facts. The desk is driven into `working` by a

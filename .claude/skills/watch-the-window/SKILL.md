@@ -5,6 +5,14 @@ description: Measure what a window and the floor actually do over time — recor
 
 # Watching, rather than guessing
 
+> **Two skills, two questions.** This one watches a window that already exists,
+> which is what you want when a *desk* is misbehaving. When the question is
+> "what does Claude Code actually do when…", stand up a throwaway one instead
+> and read its transcript — see
+> [`measure-a-real-window`](../measure-a-real-window/SKILL.md). Guessing at that
+> question from the code is how a false claim about dropped pastes survived in
+> `CLAUDE.md` long enough to shape the design.
+
 Nearly every hard bug in this repo has been a **timing** question — did the key
 land, did the prompt arrive, how long did the operator stare at nothing — and a
 single `capture-pane` cannot answer any of them. It shows you one moment, and

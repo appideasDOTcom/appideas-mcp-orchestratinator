@@ -49,9 +49,17 @@
      and says what it saw, rather than turning forever; comfortably past the
      host's own timeout so a slow open is a slow open and not a lie. */
   const MOVE_MS = 90_000;
+  // How long a refused attach keeps its sentence on screen. Longer than a
+  // flash, because that sentence usually carries the command the person now has
+  // to type somewhere else, and it should not vanish while they read it.
+  const TMUX_NOTE_MS = 25_000;
+  // How long to wait for a terminal to turn up before saying it did not. Well
+  // past a cold iTerm start; the spinner normally ends in about a second, when
+  // the host's next watch tick reports the new client.
+  const ATTACH_MS = 20_000;
   /* The links' labels, here as well as in the markup, because the spinner takes
      one over and something has to put it back. */
-  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code' };
+  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code', attach: 'Open in tmux' };
   /* Which seat each link is asking for. That seat arriving is what "done" means
      — the POST returning only means the host has been told. Note this is not
      the same as the link going away: handback stays offered while the editor
@@ -295,7 +303,15 @@
     return `${(1 + Math.cos(a)).toFixed(3)},${(1 + Math.sin(a)).toFixed(3)}`;
   }).join(' ');
 
-  /** How long a sent message may sit unrecorded before it says so. */
+  /**
+   * How long a sent message may sit unrecorded before it says so.
+   *
+   * Only ever applied to a message nothing has vouched for. A desk that is
+   * working takes your message and reads it at its next step, and the host says
+   * so — see `ui.delivery` — so the clock has nothing to do with those: it used
+   * to tell somebody to send again while the window was holding the message,
+   * about to answer it. This is now the deadline for silence alone.
+   */
   const SENDING_GRACE_MS = 30_000;
 
   const ui = {
@@ -303,6 +319,8 @@
     open: null,          // { channel, agent } whose chat panel is showing
     turns: [],
     sending: [],         // messages accepted but not yet seen in the conversation
+    delivery: null,      // { state, text, held } — a message the window has but has not read
+
     sinceTurn: 0,
     lastActivityId: 0,
     primed: false,       // first activity poll only records the high-water mark
@@ -342,6 +360,15 @@
     // you switch desks, and a spinner has to outlive both the poll that redraws
     // it and a trip to another desk and back.
     moving: null,
+    // Why the last attach was refused: { channel, agent, text, since }. Out
+    // here rather than written to the node, because renderPanel runs every poll
+    // and would wipe a message written straight into the DOM within two seconds.
+    tmuxNote: null,
+    // An attach in flight: { channel, agent, since, from }. `from` is the
+    // attached-terminal count at click time — the number a new terminal has to
+    // beat — because "a client is attached" is already true whenever you are
+    // watching, and only a *rise* means this click did something.
+    attaching: null,
     // The saved-prompt picker: { rect } while its menu is open, anchored to
     // where the button was at click time — the same trick the nameplate popover
     // uses, and for the same reason.
@@ -1975,6 +2002,13 @@
         <div class="p-links">
           <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">${LINK_LABEL.openhere}</button>
           <button class="p-link" data-act="handback" title="Open this conversation in VS Code">${LINK_LABEL.handback}</button>
+          <!-- Beneath the other two, not beside them: it is not a third place to
+               put the conversation, it is the way out of this page. -->
+          <button class="p-link" data-act="attach">${LINK_LABEL.attach}</button>
+          <!-- Shown only when the button cannot fire. Text, not a second
+               mechanism — the one thing still useful when the host that would
+               have opened the terminal is itself what is down. -->
+          <div class="p-tmux mono hidden"></div>
         </div>
       </div>`;
     ui.stick = true;
@@ -2009,6 +2043,12 @@
       wrap.classList.add('hidden');
       return;
     }
+    // A message the window is holding, from the poll rather than the stream.
+    // Gated on there being no stream for the same reason `partial` is: the
+    // stream is two seconds fresher and says the same thing, and letting a
+    // stale poll write over it would put a delivery note back seconds after
+    // the turn that ended it.
+    if (!ui.stream) ui.delivery = d.delivery ?? null;
     const forKey = `${channel}|${agent}`;
     if (ui.panelFor !== forKey) {
       panelShell(wrap, channel, agent);
@@ -2180,6 +2220,8 @@
     stopBtn.setAttribute('aria-label', cannotStop ? `Cannot stop ${d.persona}` : `Stop ${d.persona}`);
     const toVsc = wrap.querySelector('[data-act="handback"]');
     const toFloor = wrap.querySelector('[data-act="openhere"]');
+    const toTmux = wrap.querySelector('[data-act="attach"]');
+    const tmuxCmd = wrap.querySelector('.p-tmux');
     // A move in flight is settled here, against the payload, because the
     // payload is the only thing that knows. The POST is answered the moment the
     // work is queued; the seat changes when the host has actually done it, and
@@ -2198,37 +2240,119 @@
         ui.moving = null;
       }
     }
+    // An attach in flight, settled against the payload for the same reason a
+    // move is: the POST is answered when the work is queued, and the thing
+    // actually being waited for happens later, on another machine. `clients`
+    // rising is that thing. Ending the spinner on a timer instead would be a
+    // spinner that stops meaning anything the moment it is wrong.
+    let attachFailed = null;
+    let attachDone = false;
+    const attachPending = ui.attaching && ui.attaching.channel === channel && ui.attaching.agent === agent ? ui.attaching : null;
+    if (attachPending) {
+      if ((h?.clients ?? 0) > attachPending.from) { ui.attaching = null; attachDone = true; }
+      else if (Date.now() - attachPending.since > ATTACH_MS) {
+        // What was seen, not why. If the host failed to open anything it has
+        // already said so in its own error turn, right above this.
+        attachFailed = `no new terminal after ${ATTACH_MS / 1000}s`;
+        ui.attaching = null;
+      }
+    }
+    const attaching = ui.attaching === attachPending ? attachPending : null;
     const move = ui.moving === pending ? pending : null;
     toVsc.classList.toggle('hidden', !h?.live);
     // Offered only when the desk has no window and no editor on it. With an
     // editor holding it this would open a second process on one transcript,
     // which is the thing handback closes its own window to avoid; with a floor
     // window already up there is nothing to do.
-    toFloor.classList.toggle('hidden', !(h?.live && !h.held));
+    // ...and not when a window is already sitting in that repo. `held` alone
+    // was the test, and `held` is null for the whole of Claude Code's startup:
+    // a window stopped on the folder-trust or MCP question has registered no
+    // session, so nothing holds it, so the floor offered to open one — with the
+    // window already on screen, waiting for a keypress. Reproduced on the qa
+    // desk: pane alive, held null, "New MCP server found in this project" on
+    // the pane. `window_open` is the fact that separates starting from absent.
+    toFloor.classList.toggle('hidden', !(h?.live && !h.held && !h.window_open));
     // Mid-move the strip shows the clicked link, spinning, and nothing else.
     // Leaving the other one up offers the opposite seat while the host is on
     // its way to this one, and it makes the strip change height twice — once
     // for the spinner and again when the move lands. Hiding it puts the strip
     // straight into the shape it will finish in.
+    // The escape hatch, offered whenever this conversation is in a tmux window
+    // — including while the host is offline. The host is a separate process
+    // from the windows it opened and killing it leaves them running, so the
+    // session normally outlives it, and a dead host is precisely the state
+    // somebody needs a way in from. Hiding this there would remove the hatch at
+    // the only moment it is the last one.
+    //
+    // What an offline host takes away is the ability to open the terminal for
+    // you, not the ability to say how. So the row stays, the button goes flat,
+    // and the command appears under it.
+    const inTmux = h?.held === 'floor';
+    const canSpawn = !!(inTmux && h?.live);
+    toTmux.classList.toggle('hidden', !inTmux);
+    toTmux.disabled = !canSpawn;
+    // Only the reason that is actually true. The offline sentence used to be
+    // the whole else-branch, which put "livebox is offline" on a button whose
+    // host was perfectly alive and which was hidden for a different reason
+    // entirely. Nobody could see it — and a false sentence in the DOM is still
+    // a false sentence, waiting for the change that reveals this element.
+    toTmux.title = canSpawn
+      ? `Open a terminal on ${h.host}, attached to tmux`
+      : inTmux
+        ? `${h?.host ?? 'That host'} is offline and cannot open a terminal — run the command below on it yourself`
+        : '';
+    // Named by the host, not assumed: ORCH_TMUX_SESSION moves it, and sending
+    // someone to `tmux attach -t orch` on a host that calls it something else
+    // is a "no such session" at the worst possible moment.
+    // A refusal from the last click outranks the command, and ages out on its
+    // own. Settled here, against state, for the same reason a move is: this is
+    // the function that runs on every poll, so it is the only one that can.
+    const note = ui.tmuxNote
+      && ui.tmuxNote.channel === channel && ui.tmuxNote.agent === agent
+      && Date.now() - ui.tmuxNote.since < TMUX_NOTE_MS
+      ? ui.tmuxNote : null;
+    if (ui.tmuxNote && !note) ui.tmuxNote = null;
+    tmuxCmd.textContent = note ? note.text : `tmux attach -t ${h?.tmux ?? 'orch'}`;
+    tmuxCmd.classList.toggle('tmux-why', !!note);
+    tmuxCmd.classList.toggle('hidden', !(inTmux && (note || !canSpawn)));
     if (move) {
       (move.act === 'handback' ? toVsc : toFloor).classList.remove('hidden');
       (move.act === 'handback' ? toFloor : toVsc).classList.add('hidden');
+      // A seat move decides whether there is a tmux window at all, so the hatch
+      // is not offered while one is in flight — same reason the opposite seat's
+      // link goes away, and the same rule: the strip finishes in one shape.
+      toTmux.classList.add('hidden');
+      tmuxCmd.classList.add('hidden');
     }
     setLinkBusy(toVsc, move?.act === 'handback');
     setLinkBusy(toFloor, move?.act === 'openhere');
+    setLinkBusy(toTmux, !!attaching);
     // Hiding both links is not the same as hiding the strip: an empty flex
     // column is zero-height but still counts as a row, so .p-compose's gap
     // leaves a blank line where the links were.
     wrap.querySelector('.p-links').classList
-      .toggle('hidden', toVsc.classList.contains('hidden') && toFloor.classList.contains('hidden'));
+      .toggle('hidden', toVsc.classList.contains('hidden')
+        && toFloor.classList.contains('hidden')
+        && toTmux.classList.contains('hidden'));
     // After setLinkBusy, so the label is back before flash() borrows it.
     if (failed) flash(wrap.querySelector(`[data-act="${pending.act}"]`), failed);
+    // "attached", not "asked" — this one has been observed now.
+    if (attachDone) flash(toTmux, 'terminal attached');
+    if (attachFailed) flash(toTmux, attachFailed);
     const askForm = wrap.querySelector('.p-ask');
     if (askForm) askWarn(askForm);
     wrap.querySelector('.p-compose').classList.toggle('held', held);
     // The hint says exactly what will happen, because a Send button that
     // sometimes can't is worse than one that says why.
-    wrap.querySelector('.p-hint').innerHTML = held
+    // Two copies is the first thing worth saying, because everything else the
+    // hint could say is about a conversation the words assume is in one place.
+    // Nothing prevents this — two processes may resume one session id, and they
+    // append to one transcript while keeping separate context — so the honest
+    // report is the count, not a guess at which one you are looking at.
+    const holders = h?.holders ?? 0;
+    wrap.querySelector('.p-hint').innerHTML = holders > 1
+      ? `<b>${holders} processes hold this conversation.</b> They share its transcript but not their context, and the floor types into whichever it found first. Close all but one.`
+      : held
       ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the link below — one app holds a conversation at a time.`
       : canChat
       ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
@@ -2261,12 +2385,21 @@
     for (const p of ui.sending) {
       const node = document.createElement('div');
       node.className = 't t-user t-pending';
-      // A message stops claiming to be on its way once it plainly is not.
-      // Nothing here can prove it failed — only that it has not been recorded —
-      // so it says that, rather than spinning forever or vanishing.
-      const stale = Date.now() - (p.at ?? 0) > SENDING_GRACE_MS;
+      // Three states, and the difference between them is who has the message.
+      //
+      // `queued` is the window's own word: it took the message while it was
+      // working and will read it at its next step. That is a delivery, not a
+      // delay, so it never goes stale — the desk is holding it and has said so.
+      // Everything the operator does next depends on telling that apart from
+      // silence, which is what the third state is.
+      const queued = deliveredNow(p.text);
+      const stale = !queued && Date.now() - (p.at ?? 0) > SENDING_GRACE_MS;
       node.classList.toggle('stale', stale);
-      node.innerHTML = `<div class="t-who">you<span class="t-when mono">${stale ? 'not recorded — send again' : 'sending…'}</span></div>` +
+      node.classList.toggle('queued', !!queued);
+      const said = queued
+        ? (queued.held ? 'queued — the window took it once it was free' : 'queued — the desk is working')
+        : (stale ? 'not recorded — send again' : 'sending…');
+      node.innerHTML = `<div class="t-who">you<span class="t-when mono">${said}</span></div>` +
         ' <div class="t-body"></div>';
       node.querySelector('.t-body').textContent = p.text;
       box.insertBefore(node, partialNode);
@@ -2321,6 +2454,21 @@
    * thing that should retire the "sending" state.
    */
   const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+
+  /**
+   * Has the window vouched for this pending message?
+   *
+   * Returns the delivery note when the desk has said it holds this exact text,
+   * which is what stops the grace clock running on it. Matched on the words for
+   * the same reason `settle` matches on them: there is no id to match: the host
+   * reports what it typed in, and this is the copy that was typed.
+   */
+  function deliveredNow(text) {
+    const d = ui.delivery;
+    if (!d || !text) return null;
+    return squash(d.text).includes(squash(text)) ? d : null;
+  }
+
   function settle(rows) {
     if (!ui.sending.length) return;
     const arrived = rows.filter((r) => r.role === 'user').map((r) => squash(r.text));
@@ -2385,6 +2533,13 @@
         renderPanel();
       } else if (ev.type === 'partial') {
         ui.partial = ev.text ?? '';
+        renderPanel();
+      } else if (ev.type === 'delivery') {
+        // The window has the message, or has just stopped having it. Straight
+        // to the panel rather than through tick(): this is what the pending
+        // bubble is waiting to hear, and two seconds of "sending…" over a
+        // message already delivered is the whole complaint this answers.
+        ui.delivery = ev.delivery ?? null;
         renderPanel();
       } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session') {
         // Both change what the desk and the queue say; the cheapest correct
@@ -2491,7 +2646,8 @@
       if (filter !== ui.filterWas) {
         ui.filterWas = filter;
         ui.turns = [];
-    ui.sending = [];
+        ui.sending = [];
+        ui.delivery = null;
         ui.sinceTurn = 0;
         ui.renderedTurn = 0;
         $('p-turns')?.replaceChildren();
@@ -2528,6 +2684,10 @@
     ui.open = { channel, agent };
     ui.turns = [];
     ui.sending = [];
+    // Per desk, like everything else here. A note about a message one desk is
+    // holding would otherwise be read against the pending message of the next
+    // desk opened, and label it queued on the strength of somebody else's.
+    ui.delivery = null;
     ui.sinceTurn = 0;
     ui.partial = '';
     ui.filterWas = sessionFilter();
@@ -2830,6 +2990,8 @@
       else await openPromptMenu(act);
     } else if (act.dataset.act === 'handback' || act.dataset.act === 'openhere') {
       await moveSeat(act.dataset.act);
+    } else if (act.dataset.act === 'attach') {
+      await attachTmux();
     } else if (act.dataset.act === 'rename') {
       // app.js owns the dialogs on this page — same reason the pills call into
       // it rather than growing a second implementation. A `prompt()` used to do
@@ -2993,6 +3155,63 @@
       }
     } catch (err) {
       failMove(act, String(err.message).slice(0, 60));
+    }
+    tick();
+  }
+
+  /**
+   * Ask the host to open a terminal attached to its tmux session.
+   *
+   * Deliberately none of moveSeat's machinery, because this is not a move. A
+   * seat change is settled by watching `held` flip, since that is the
+   * observable fact it produces. Attaching produces no fact on this board at
+   * all — the result is a window on somebody's desktop, which the floor cannot
+   * see and must not pretend to.
+   *
+   * So the spinner ends when the POST is answered, and the receipt says only
+   * what is actually known: that the host was asked. If opening the terminal
+   * then fails, the host says so in its own error turn on this desk, which is
+   * the only place that can honestly report it.
+   */
+  async function attachTmux() {
+    if (!ui.open) return;
+    const { channel, agent } = ui.open;
+    const btn = $('floor-panel').querySelector('[data-act="attach"]');
+    if (!btn || btn.disabled) return;
+    // One at a time, like a seat move: the spinner is the receipt for the click,
+    // and a second click while it turns would queue a second terminal.
+    if (ui.attaching && ui.attaching.channel === channel && ui.attaching.agent === agent) return;
+    ui.tmuxNote = null;
+    // The count to beat, read before the request. Somebody clicking this often
+    // already has a terminal attached, so the test is a rise, not a presence.
+    const now = floor?.channels?.find((c) => c.channel === channel)?.desks?.find((x) => x.agent === agent);
+    ui.attaching = { channel, agent, since: Date.now(), from: now?.hosted?.clients ?? 0 };
+    // Before the fetch, not after — the click is acknowledged while the request
+    // is still open, same as moveSeat.
+    renderPanel();
+    try {
+      const r = await fetch('./api/floor/attach', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ channel, agent }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        // Refused outright: stop waiting now rather than spinning out the full
+        // deadline for a terminal nothing ever went to open.
+        ui.attaching = null;
+        renderPanel();
+        // The refusals are sentences carrying the command, so they go in the
+        // line beneath rather than the label — flashing one into a 10px
+        // uppercase link truncates the only part worth reading.
+        flash(btn, 'could not open a terminal');
+        ui.tmuxNote = { channel, agent, text: String(body.error ?? `the board refused it (${r.status})`), since: Date.now() };
+      }
+    } catch (err) {
+      ui.attaching = null;
+      renderPanel();
+      flash(btn, 'could not reach the board');
+      ui.tmuxNote = { channel, agent, text: String(err.message), since: Date.now() };
     }
     tick();
   }

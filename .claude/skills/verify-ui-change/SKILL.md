@@ -10,7 +10,7 @@ can still be wrong on the page. The only honest test is the real page against a
 real server. This is how to get one in about a minute, and — more importantly —
 the specific ways this has produced a **false pass**.
 
-## Four ways a green result has lied here
+## Five ways a green result has lied here
 
 **Testing one of two entry points.** The same dialog opens from the board and
 from the floor, and they do not share a path: floor pills call
@@ -35,6 +35,17 @@ built and confirm it is the state you meant.** Read `/api/floor` directly; the
 payload shape is not what you assume either — an alert hangs off
 `channels[].desks[].permission`, and a `permission_prompt` notification creates
 one of those with every choice `null`.
+
+**A fallback that happens to match the fixture.** A new payload field was read
+in the page as `` `tmux attach -t ${h?.tmux ?? 'orch'}` ``. The probe showed
+`tmux attach -t orch`, which was the right answer — arriving entirely from the
+`?? 'orch'` default, because the field was `null` the whole time. The query
+selected the column; the hand-picked projection that builds `hosted` in
+`src/floor.js` silently dropped it, and **a column the query selects is not a
+column the page gets.** Two lessons: read a new field's value out of
+`/api/floor` before trusting anything drawn from it, and **seed a fixture whose
+value cannot equal the fallback** — the second run used a host whose tmux session
+was named `deskside`, which failed instantly and correctly.
 
 **Measuring the container instead of the contents.** `getBoundingClientRect()`
 includes padding, so "is there padding?" answered itself wrongly. Read computed
@@ -68,6 +79,29 @@ const Database = require('better-sqlite3');
 Seed `agents` and `personas` for board rows, `messages`/`tasks` for pill counts.
 Check the result through `/api/state` and `/api/floor` before opening a browser —
 if the payload is wrong the page cannot be right, and the API says so faster.
+
+**Read the schema rather than this file.** `personas` is
+`(channel, agent, seat, assigned_at)` — there is no `persona` column, because the
+name is derived from the agent id rather than stored. Any column list written
+down here is one migration from being a lie that costs a round:
+
+```bash
+node -e 'const r=require("module").createRequire(process.cwd()+"/package.json");
+  const db=new (r("better-sqlite3"))("./data/scratch.db",{readonly:true});
+  for (const t of ["personas","hosts","hosted_desks"])
+    console.log(t, db.prepare(`PRAGMA table_info(${t})`).all().map(c=>c.name).join(", "));'
+```
+
+**Some state has no table at all.** Anything on `live` in `src/floor.js` — the
+streaming reply, a held permission prompt, the "queued" delivery note — is in
+memory and cannot be seeded with SQL. Put it there the way a host would, through
+`/api/host/events` with the shared key, which also exercises the path under test:
+
+```bash
+curl -s -X POST localhost:8905/api/host/events -H 'content-type: application/json' \
+  -H 'x-orchestratinator-key: k' \
+  -d '{"host_id":"h1","events":[{"type":"delivery","channel":"…","agent":"…","state":"queued","text":"…"}]}'
+```
 
 ## Making a desk chattable or nudgeable
 
@@ -111,11 +145,15 @@ as a silent no-op and looks like "the click did nothing" — and return state as
 Put injected browser code in its own file. Nested backticks inside a heredoc
 inside a shell command will break it in ways that look like a page bug.
 
-Which view loads is `localStorage`, set before navigating:
+Which view loads is `localStorage`, set before navigating — but **not from
+`about:blank`**, which has no origin and answers `SecurityError: Access is
+denied for this document`. Navigate to the board first, set it, navigate again:
 
 ```js
-localStorage.setItem('orch.view','floor');   // or 'board'
+await navigate(BOARD);                        // get onto the board's origin
+localStorage.setItem('orch.view','floor');    // or 'board'
 localStorage.setItem('orch.floor','<channel>');
+await navigate(BOARD);                        // now it opens in that view
 ```
 
 ### Where to click

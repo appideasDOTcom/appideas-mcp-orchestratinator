@@ -31,12 +31,27 @@ import json,sys
 for c in json.load(sys.stdin).get('channels',[]):
     for k in c.get('desks',[]):
         h=k.get('hosted')
-        if h: print(c['channel'], k['agent'], h.get('held'), h.get('held_pid'), h.get('session_id'))"
+        if h: print(c['channel'], k['agent'], h.get('held'), h.get('window_open'), h.get('holders'), h.get('clients'), h.get('session_id'))"
 ```
 
 A session in the roster with **no matching pane** is read as an editor holding
 it, and the floor will refuse to send. That is correct when an editor really has
 it — and a trap in tests, where a killed stand-in leaves its roster entry behind.
+
+Read `held` together with the three fields beside it, because `held` alone is
+ambiguous and each pairing means something different:
+
+| `held` | `window_open` | what it is |
+|---|---|---|
+| `null` | `false` | nothing running — the floor correctly offers to open one |
+| `null` | `true` | **a window that has not registered** — almost always stopped on a startup question. Go straight to step 4 |
+| `'floor'` / `'editor'` | — | a registered session; `holders` says how many processes claim it |
+
+`holders > 1` is two live copies of one conversation. Nothing prevents it, they
+share a transcript and not their context, and `holderOf` reports the first one it
+finds — so a desk that flips between `'floor'` and `'editor'` between polls is
+not a glitch, it is two processes. `clients` is terminals attached to the host's
+tmux session, and is what the attach spinner settles against.
 
 ## 3. Is the relay actually live, or batching?
 
@@ -55,6 +70,28 @@ Several turns sharing one `created_at` to the second means something blocked
 the floor is the same fault seen from the other end: the floor's pending grace is
 30s, so anything that stalls the echo longer than that looks like a failed send.
 
+**A desk that is working is not a reason for a message to be late.** The floor
+types into a running turn on purpose — the window queues it and reads it at its
+next step, in about a second — so "it was busy" no longer explains anything.
+Check what the desk says it did with the message:
+
+```bash
+curl -s localhost:8787/api/floor | python3 -c "
+import json,sys
+for c in json.load(sys.stdin).get('channels',[]):
+    for k in c.get('desks',[]):
+        if k.get('delivery'): print(c['channel'], k['agent'], k['delivery'])"
+grep 'queued a message' ~/.orchestratinator/log/host.log | tail
+```
+
+A `delivery` note standing for more than a few seconds means the message is in
+the window's queue and the turn it is behind has not reached a step boundary —
+which for one long uninterrupted reply is genuinely possible. A note standing for
+*minutes*, with the desk idle, is a bug: what retires one is the message becoming
+a turn, and `readTranscript` has to see it to do that. Compare against the
+transcript directly, and remember a mid-turn message is written down **only** as
+`attachment.queued_command` — never as a `user` record.
+
 ## 4. What is on the window's screen?
 
 The single highest-value step, and the one that is skipped. A window that is up
@@ -64,10 +101,33 @@ but never registers is *waiting for an answer* — and which answer matters.
 tmux capture-pane -p -t <session>:<window> -S -50 | grep -v '^$' | tail -30
 ```
 
+This is not hypothetical and the cost of skipping it is measured: on 2026-09-01 a
+desk sat at `held: null` with a live pane for over a minute while the floor
+offered to open a window that was already on screen. The pane said
+`New MCP server found in this project` the entire time. Reasoning from the code
+produced two wrong theories first; one `capture-pane` ended it.
+
 Seen in practice: `New MCP server found in this project` (after a server is
 enabled or first added — approving it once writes `enabledMcpjsonServers` into
 `.claude/settings.local.json`, which is **not committed**, so every machine hits
 it), and the folder-trust dialog. Do not guess between them. Look.
+
+**Either of those on a desk that already has a conversation is a symptom, not a
+missing feature.** The host answers only the resume-mode question, on purpose,
+and that is not a gap waiting to be filled: a desk reaches the board only
+because some client bootstrapped it, and bootstrapping is what writes the
+approval to disk. So the approval should already be there. Check, rather than
+proposing to auto-answer it:
+
+```bash
+cat <desk repo>/.claude/settings.local.json     # expect enabledMcpjsonServers
+```
+
+Missing, on a desk that has been talking to the board, means the file was
+removed after the fact — it is gitignored, so a fresh clone or `git clean -x`
+takes it. Answer the dialog once by hand and the desk is well again. The
+reasoning for keeping `ANSWERS` one question long is written where the change
+would be made, beside `ANSWERS` in [`host/window.js`](../../../host/window.js).
 
 ## 5. Is the running host even the code you edited?
 

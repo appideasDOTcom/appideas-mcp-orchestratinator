@@ -1171,6 +1171,24 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* An error borrowed the label. Muted grey small-caps is the wrong voice for it,
    and the sentence is not an action, so drop the shouting with the colour. */
 .p-link.flashed { color: var(--block); text-transform: none; letter-spacing: 0; }
+/* The command, under a hatch that cannot fire it. `user-select: all` so one
+   click takes the whole line: the entire point is to get it into a terminal,
+   and this is being read by someone who has already decided the page is not
+   helping them. */
+.p-tmux {
+  font: 10.5px/1.6 var(--mono);
+  color: var(--muted);
+  user-select: all;
+  overflow-wrap: anywhere;
+  max-width: 46ch;
+}
+/* Same line, borrowed for a refusal. A sentence is not a command — drop the
+   mono and the one-click select, or it invites being pasted into a shell. */
+.p-tmux.tmux-why {
+  font-family: var(--sans);
+  color: var(--block);
+  user-select: text;
+}
 /* The saved-prompts button. Same 26x24 hit area and the same no-chrome treatment
    as the stop sign beside it: two marks in one row read as one control each only
    if neither of them is wearing a box the other isn't. */
@@ -1359,6 +1377,15 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .t-pending { opacity: 0.55; }
 .t-pending.stale .t-when { color: var(--bad, #d97070); }
 .t-pending .t-body { border: 1px dashed var(--line); background: transparent; }
+/* Queued is a delivery, not a delay: the window has the message and will read
+   it at its next step. Drawn nearer to a real turn than to a pending one —
+   solid rather than dashed, and barely faded — because the doubt the pending
+   style expresses does not apply to it. In --busy, which is the colour the
+   desk itself is wearing at that moment: the message is waiting on the work,
+   and those are the same fact said in two places. */
+.t-pending.queued { opacity: 0.8; }
+.t-pending.queued .t-when { color: var(--busy); }
+.t-pending.queued .t-body { border-style: solid; }
 .t-partial .t-body { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
 .t-partial .t-body::after { content: '▍'; color: var(--accent); animation: caret 1s steps(2) infinite; }
 @keyframes caret { 50% { opacity: 0; } }

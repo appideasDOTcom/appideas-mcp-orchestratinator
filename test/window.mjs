@@ -118,6 +118,46 @@ async function main() {
        'nor the MCP approval');
     eq(W.composerOf('nothing on screen at all'), null, 'and a screen with no box at all is null, so the caller falls back to it');
 
+    /* The composer once a message is queued behind a running turn.
+     *
+     * Claude Code puts its own prompt where the caret would be, and read as
+     * contents it says the exact opposite of the truth: the box is empty, which
+     * is what proves the message left it. Left unhandled, send() reported "it
+     * is still in the composer" about a message already queued and answered.
+     */
+    const QUEUED_BOX = [
+      '  ❯ the message that was queued a moment ago',
+      RULE,
+      '❯ Press up to edit queued messages',
+      RULE,
+      '  auto mode on · esc to interrupt',
+    ].join('\n');
+    eq(W.composerOf(QUEUED_BOX), '', 'the queue placeholder reads as an empty composer, not as typed text');
+    eq(W.queueing(QUEUED_BOX), true, 'and the window is reported as holding a queue');
+    eq(W.queueing(box('❯ hello there')), false, 'an ordinary composer is not');
+
+    /* The status line is positional, and that is load-bearing.
+     *
+     * `busy` used to grep the capture — and `-S -6` is six lines of scrollback
+     * plus the whole visible pane, so the conversation was in scope. A window
+     * whose transcript happened to contain "esc to interrupt" read as busy for
+     * ever; back when a send waited on that, the message waited out the full
+     * five minutes and was refused as "working for too long". This repo's own
+     * window is the one that hit it.
+     */
+    const QUOTES_BUSY = [
+      '  ❯ why does it say esc to interrupt when nothing is running?',
+      '  ⏺ Because that string is how the host decides a window is working.',
+      RULE,
+      '❯ ',
+      RULE,
+      '  auto mode on (shift+tab to cycle)',
+    ].join('\n');
+    assert(!/esc to interrupt/i.test(W.footOf(QUOTES_BUSY)),
+           'a window merely talking about "esc to interrupt" is not working');
+    assert(/esc to interrupt/i.test(W.footOf(QUEUED_BOX)),
+           'and one whose status line says it is, is');
+
     // Telling a live prompt from a conversation that is talking about one.
     //
     // Both of these are real captures of this repo's own window. The first is a
@@ -522,6 +562,103 @@ async function main() {
     const arrived = await landing;
     assert(arrived.ok && arrived.confirmed === true,
       `a message found in the transcript is confirmed${arrived.ok ? '' : ` — ${arrived.error}`}`);
+    eq(arrived.queued, false, 'and it is not reported as queued — it went straight in');
+
+    /* A message sent to a desk that is working.
+     *
+     * This is the case the floor exists for and the one it used to refuse: you
+     * type while the agent is mid-task, exactly as you would in any other
+     * client. Claude Code takes it and reads it at its next step, and writes
+     * the receipt down as it happens — so "delivered" no longer has to mean
+     * "already answered", which on a long turn is a minute away.
+     *
+     * Both record shapes are here because Claude Code writes both, and a
+     * confirmation that only knows one of them is one release away from
+     * reporting every queued message as lost. Measured on 2.1.220:
+     *   {"type":"queue-operation","operation":"enqueue","content":"…"}
+     *   {"type":"attachment","attachment":{"type":"queued_command","prompt":"…"}}
+     */
+    console.log('\n  a message sent to a desk that is working');
+    const queuedText = 'this one is queued behind a running turn';
+    const queueingSend = W.send(FIX, queuedText);
+    await sleep(1000);
+    appendFileSync(jsonl, `${JSON.stringify({
+      type: 'queue-operation', operation: 'enqueue', content: queuedText,
+    })}\n`);
+    const wasQueued = await queueingSend;
+    assert(wasQueued.ok, `an enqueue receipt is a delivery${wasQueued.ok ? '' : ` — ${wasQueued.error}`}`);
+    eq(wasQueued.queued, true, 'and it is reported as queued rather than as a turn');
+
+    const attachText = 'this one is queued and only the attachment says so';
+    const viaAttachment = W.send(FIX, attachText);
+    await sleep(1000);
+    appendFileSync(jsonl, `${JSON.stringify({
+      type: 'attachment', uuid: 'q2',
+      attachment: { type: 'queued_command', prompt: attachText, origin: { kind: 'human' } },
+    })}\n`);
+    const attached = await viaAttachment;
+    assert(attached.ok && attached.queued === true,
+      `the queued_command attachment is the same receipt${attached.ok ? '' : ` — ${attached.error}`}`);
+
+    // Somebody else's queued message is not this one's receipt. Without this,
+    // any queue traffic at all would confirm whatever send happened to be
+    // waiting — the same mistake as watching the transcript merely grow.
+    const mine = W.send(FIX, 'this one is never queued');
+    for (let i = 0; i < 4; i++) {
+      await sleep(400);
+      appendFileSync(jsonl, `${JSON.stringify({
+        type: 'queue-operation', operation: 'enqueue', content: `something else #${i}`,
+      })}\n`);
+    }
+    eq((await mine).code, 'not_delivered', "another message's queue record is not delivery");
+
+    /* And the window is not waited for.
+     *
+     * send() used to hold a message until the turn ended — up to five minutes —
+     * which is what made the floor feel unlike every other client. This desk's
+     * status line says it is working for as long as it lives, so under the old
+     * code this call could not return inside the test's patience at all.
+     */
+    console.log('\n  a working window is typed into, not waited for');
+    const busyDir = `${FIX}/busy-desk`;
+    mkdirSync(busyDir, { recursive: true });
+    // The status line is the last line of the pane, which is where footOf reads
+    // it. Everything after this is echoed input, so the footer is last exactly
+    // while the decision is being made.
+    writeFileSync(`${FIX}/busy-stand-in.sh`,
+      `#!/bin/sh\n` +
+      `if [ "$1" = "agents" ]; then cat ${JSON.stringify(`${FIX}/roster.json`)}; exit 0; fi\n` +
+      `printf '\\033[?2004h'\n` +
+      `printf 'Cooking… (12s) esc to interrupt\\n'\n` +
+      `exec cat >> "$PWD/received.txt"\n`);
+    chmodSync(`${FIX}/busy-stand-in.sh`, 0o755);
+    const wasClaude = process.env.ORCH_HOST_CLAUDE;
+    process.env.ORCH_HOST_CLAUDE = `${FIX}/busy-stand-in.sh`;
+    const busyPane = await W.open(busyDir);
+    assert(busyPane.ok, 'a window that reports itself working is open');
+    const busyJsonl = W.transcriptPath(W.canonical(busyDir), 'busy-test');
+    mkdirSync(dirname(busyJsonl), { recursive: true });
+    writeFileSync(busyJsonl, '');
+    writeFileSync(`${CLAUDE_HOME}/sessions/${busyPane.pid}.json`,
+      JSON.stringify({ pid: busyPane.pid, sessionId: 'busy-test', cwd: busyDir, kind: 'interactive', startedAt: Date.now() }));
+
+    const busyText = 'typed in while the desk was working';
+    const startedAt = Date.now();
+    const intoBusy = W.send(busyDir, busyText);
+    await sleep(1200);
+    appendFileSync(busyJsonl, `${JSON.stringify({
+      type: 'queue-operation', operation: 'enqueue', content: busyText,
+    })}\n`);
+    const tookIt = await intoBusy;
+    const tookMs = Date.now() - startedAt;
+    process.env.ORCH_HOST_CLAUDE = wasClaude;
+    assert(tookIt.ok && tookIt.queued === true,
+      `a working window takes the message${tookIt.ok ? '' : ` — ${tookIt.error}`}`);
+    assert(await until(() => clean(readAt(busyDir)).includes(busyText)),
+      'and the text really arrived in the window rather than being reported in');
+    // The old code waited ORCH_IDLE_TIMEOUT_MS — five minutes — before typing a
+    // character. Anything near that is the wait having come back.
+    assert(tookMs < 30_000, `and did not wait out the turn to do it — ${(tookMs / 1000).toFixed(1)}s`);
 
     // The failure a person is most likely to actually hit: `claude` is not on
     // PATH, or whatever runs in its place dies on its first line. That used to
@@ -556,6 +693,28 @@ async function main() {
     ].join('\n'));
     const first = await W.readTranscript(t);
     eq(first.turns.map((x) => `${x.role}:${x.text}`), ['user:first', 'assistant:reply'], 'transcript yields both sides and skips subagent/system noise');
+
+    /* A message the agent read mid-turn is a turn, and it has only one record.
+     *
+     * Claude Code writes a queued message as a `user` record when it drains at
+     * the end of a turn, and as this attachment when it is injected mid-turn —
+     * one or the other, never both. Skipping the attachment is how the floor
+     * came to show an answer to a question nobody could see being asked.
+     */
+    const queuedT = `${CLAUDE_HOME}/projects/queued-shape/q.jsonl`;
+    mkdirSync(dirname(queuedT), { recursive: true });
+    writeFileSync(queuedT, [
+      JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: 'steer me' }),
+      JSON.stringify({ type: 'attachment', uuid: 'qa1', isSidechain: false, attachment: { type: 'queued_command', prompt: 'steer me', origin: { kind: 'human' } } }),
+      JSON.stringify({ type: 'queue-operation', operation: 'remove', content: 'steer me' }),
+      JSON.stringify({ type: 'assistant', uuid: 'qa2', message: { content: [{ type: 'text', text: 'steering' }] } }),
+      // Any other attachment is not a turn — an image or a file is part of the
+      // message it hangs off, not a thing somebody said.
+      JSON.stringify({ type: 'attachment', uuid: 'qa3', attachment: { type: 'image', path: '/tmp/shot.png' } }),
+    ].join('\n') + '\n');
+    const queuedRead = await W.readTranscript(queuedT);
+    eq(queuedRead.turns.map((x) => `${x.role}:${x.text}`), ['user:steer me', 'assistant:steering'],
+       'a mid-turn message is a user turn, and other attachments are not turns at all');
 
     // Tailing: read from the offset, get only what is new.
     const empty = await W.readTranscript(t, { after: first.offset });

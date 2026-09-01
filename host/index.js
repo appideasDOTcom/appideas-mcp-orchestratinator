@@ -125,6 +125,9 @@ class Desk {
     // a fresh one. Closing an editor tab is not the end of a conversation.
     this.lastSessionId = null;
     this.holder = null;      // 'floor' | 'editor' | null, as last reported
+    this.paneWindow = null;  // a tmux window in this repo, registered session or not
+    this.holders = 0;        // live processes claiming this conversation
+    this.clients = 0;        // terminals attached to the tmux session
     this.offset = 0;         // bytes of that transcript already sent up
     // When this desk started watching. What it separates is a conversation that
     // began after we were here — genuinely new, and read from its first word —
@@ -158,7 +161,7 @@ class Desk {
     this.offset = fromStart ? 0 : await W.transcriptSize(W.transcriptPath(this.cwd, id));
   }
 
-  async watch(live = [], paneByPid = new Map()) {
+  async watch(live = [], paneByPid = new Map(), allPanes = [], clients = 0) {
     // The conversation this desk is. Kept while it is still running — a desk
     // does not change conversation because another window in the same folder
     // happens to be newer, or because a tab was closed and will be reopened.
@@ -201,11 +204,31 @@ class Desk {
     // Who has it: a pane we opened, an editor we cannot type into, or nobody.
     const pane = session ? paneByPid.get(session.pid) ?? null : null;
     const holder = session ? (pane ? 'floor' : 'editor') : null;
-    if (holder !== this.holder) {
+    // A window in this repo whether or not a session has registered in it yet,
+    // and how many live processes claim this conversation. Neither changes who
+    // holds it; both are things the board could not otherwise tell apart from
+    // nothing being there. See holderOf().
+    const paneHere = W.paneIn(allPanes, this.cwd);
+    const holders = this.lastSessionId
+      ? live.filter((x) => x.sessionId === this.lastSessionId).length
+      : 0;
+    // Attached terminals ride along on this event rather than getting one of
+    // their own. It is a property of the tmux session, not of a desk, so it is
+    // the same number on every desk of this host — but this is the only channel
+    // that reports within a watch tick, and the floor needs it within one to
+    // settle a spinner on it. The register heartbeat is a minute apart.
+    if (holder !== this.holder
+        || (paneHere?.window ?? null) !== this.paneWindow
+        || holders !== this.holders
+        || clients !== this.clients) {
       this.holder = holder;
+      this.paneWindow = paneHere?.window ?? null;
+      this.holders = holders;
+      this.clients = clients;
       this.host.emit({
         type: 'holder', channel: this.channel, agent: this.agent,
         holder, window: pane?.window ?? null, pid: session?.pid ?? null,
+        window_open: this.paneWindow, holders, clients,
       }, true);
     }
     // Keep reading the desk's conversation even with no window open on it.
@@ -240,6 +263,20 @@ class Desk {
       // does not pass silently either, because silence is how messages got
       // lost in the first place.
       warn(`${this.label}: typed the message in, but there is no session to confirm it landed`);
+    } else if (r.queued) {
+      // Queued behind a running turn: the window has it, the conversation has
+      // not recorded it yet, and it will be read at the desk's next step.
+      //
+      // Reported because those two facts look identical from the board, and
+      // the difference is what the page is about to tell somebody. Without
+      // this the composer has nothing to go on but a clock, and a clock said
+      // "not recorded — send again" about a message that was delivered in
+      // under a second and answered a second later.
+      this.host.emit({
+        type: 'delivery', channel: this.channel, agent: this.agent,
+        state: 'queued', text, held: !!r.held,
+      }, true);
+      log(`${this.label}: queued a message behind the running turn${r.held ? ' (after waiting for the window to take it)' : ''}`);
     }
     return r;
   }
@@ -318,6 +355,8 @@ class Host {
         session_id: d.lastSessionId,
         window: held?.where === 'floor' ? held.window : null,
         outside_pid: held?.where === 'editor' ? held.pid : null,
+        window_open: held?.paneWindow ?? null,
+        holders: held?.holders ?? 0,
       });
     }
     const reply = await this.request('/api/host/register', {
@@ -355,9 +394,12 @@ class Host {
     // conversation changes the moment somebody closes a tab, and a minute-old
     // answer is worse than none: the floor offers a composer that cannot
     // deliver, which is the failure this whole design exists to avoid.
-    const paneByPid = new Map((await W.panes()).map((p) => [p.pid, p]));
+    const allPanes = await W.panes();
+    const paneByPid = new Map(allPanes.map((p) => [p.pid, p]));
+    // Once per tick, not once per desk: it is one number for the whole session.
+    const clients = await W.clientCount().catch(() => 0);
     for (const desk of this.desks.values()) {
-      try { await desk.watch(byCwd.get(desk.cwd) ?? [], paneByPid); } catch (err) { warn(`${desk.label}: ${err.message}`); }
+      try { await desk.watch(byCwd.get(desk.cwd) ?? [], paneByPid, allPanes, clients); } catch (err) { warn(`${desk.label}: ${err.message}`); }
     }
   }
 
@@ -527,6 +569,17 @@ class Host {
           for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
           if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
         }
+        break;
+      }
+      case 'attach': {
+        // The escape hatch, and the only work item that changes nothing. It
+        // opens a terminal in front of the operator; the window keeps running
+        // and the floor keeps driving it, because tmux allows both.
+        const r = await W.attachTerminal();
+        if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
+        // Said on the machine that did it, because this is the one action whose
+        // result appears somewhere the board cannot see — a window on a desktop.
+        log(`${desk.channel}/${desk.agent}: opened ${r.app} attached with \`${r.cmd}\``);
         break;
       }
       default:

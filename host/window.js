@@ -258,6 +258,30 @@ export async function sessionFor(cwd) {
  * things from one dialog to the next — on the trust question "2" is "No, exit" —
  * so a host that learned to press a number would eventually press it at the
  * wrong screen.
+ *
+ * ── and the reason this list does not need to grow ──
+ *
+ * The obvious objection is that a desk opened from the floor will sit for ever
+ * on `New MCP server found in this project`, with nobody there to answer it. It
+ * will not, and the reason is worth knowing before proposing to automate it:
+ * **a desk cannot arrive here cold.** A desk exists on the board only because a
+ * client bootstrapped it — that is what registers the channel and agent — and
+ * bootstrapping is exactly what writes `enabledMcpjsonServers` into
+ * `.claude/settings.local.json`. By the time the floor opens a window for a
+ * conversation, the approval is already on disk for this machine, and Claude
+ * Code does not ask again. The same goes for folder trust.
+ *
+ * So a window that *is* stopped on one of these is evidence, not a missing
+ * feature: something removed that file after the fact — it is gitignored, so a
+ * fresh clone or a `git clean -x` loses it — or the repo genuinely has never
+ * been opened here. Both are worth seeing. Auto-answering would paper over the
+ * first and make the second silent, which is the opposite of what this repo
+ * does with unexpected state.
+ *
+ * Measured 2026-09-01: the qa desk was found sitting on that prompt and it read
+ * as a design gap. It was not. That desk had been calling MCP tools since
+ * 29 August, so it plainly had the approval; its settings file had gone missing
+ * in between. One anomaly, generalised into an argument for widening this list.
  */
 const ANSWERS = [
   {
@@ -437,6 +461,23 @@ export function windowName(cwd) {
   return basename(cwd).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) || 'desk';
 }
 
+/**
+ * How many terminals are attached to our session right now.
+ *
+ * The receipt for `attachTerminal`. Opening a terminal changes nothing else the
+ * board can see — no seat moves, no window opens — so without this the floor
+ * has to either spin on a timer or say nothing, and a spinner that ends on a
+ * clock is a spinner that lies. A client appearing is the actual event somebody
+ * is waiting for, and tmux answers in about seven milliseconds.
+ *
+ * Zero when tmux has no server or no such session: both mean nobody is looking.
+ */
+export async function clientCount() {
+  const r = await tmux(['list-clients', '-t', SESSION, '-F', '#{client_name}']);
+  if (!r.ok || !r.out) return 0;
+  return r.out.split('\n').filter(Boolean).length;
+}
+
 /** Every live pane in our tmux session. */
 export async function panes() {
   // The directory goes last and takes everything after the third separator: it
@@ -482,10 +523,13 @@ async function windowNames() {
  * a second window — visible, and recoverable — rather than quietly typing into
  * the wrong one.
  */
-export async function paneFor(cwd) {
+export function paneIn(all, cwd) {
   const here = canonical(cwd);
-  const all = await panes();
   return all.find((p) => canonical(p.cwd) === here) ?? null;
+}
+
+export async function paneFor(cwd) {
+  return paneIn(await panes(), cwd);
 }
 
 /**
@@ -518,14 +562,38 @@ export async function outsideTmux(cwd) {
  * conversation on screen was in an editor tab it could never reach.
  */
 export async function holderOf(cwd, sessionId) {
-  if (!sessionId) return { where: null, pid: null, window: null };
   const [r, all] = await Promise.all([roster(), panes()]);
-  if (!r.ok) return { where: null, pid: null, window: null };
-  const live = r.sessions.find((x) => x.sessionId === sessionId);
-  if (!live) return { where: null, pid: null, window: null };
+  // A pane for this repo, found by *directory* rather than by pid.
+  //
+  // This answers a different question from the roster — "is there a window
+  // here", not "is a session registered here" — and the two disagree for the
+  // whole of Claude Code's startup. A window sitting on the folder-trust or MCP
+  // question has written no session file yet, so the roster does not know it
+  // exists, and `where` below is correctly null: nothing can be typed into it.
+  //
+  // But it is still a window. Reporting only `where` made "starting up" and
+  // "nothing here at all" the same answer, and the floor offered to open a
+  // window that was already on screen waiting for a keypress. Measured on the
+  // qa desk: pane alive, `held` null for 60s, the pane showing the MCP prompt.
+  const paneHere = paneIn(all, cwd);
+  const nothing = { where: null, pid: null, window: null, paneWindow: paneHere?.window ?? null, holders: 0 };
+  if (!sessionId || !r.ok) return nothing;
+  // Every live process claiming this conversation, not the first one found.
+  // `find()` picked one silently, so two copies — an editor and a tmux window,
+  // which nothing prevents — made `held` a coin flip that could change between
+  // polls in either direction. Counting them decides nothing differently; it
+  // stops the board stating one of them with the confidence of a fact.
+  const mine = r.sessions.filter((x) => x.sessionId === sessionId);
+  if (!mine.length) return nothing;
+  const live = mine[0];
   const pane = all.find((p) => p.pid === live.pid);
-  if (pane) return { where: 'floor', pid: live.pid, window: pane.window };
-  return { where: 'editor', pid: live.pid, window: null };
+  return {
+    where: pane ? 'floor' : 'editor',
+    pid: live.pid,
+    window: pane ? pane.window : null,
+    paneWindow: paneHere?.window ?? null,
+    holders: mine.length,
+  };
 }
 
 /**
@@ -533,13 +601,21 @@ export async function holderOf(cwd, sessionId) {
  *
  * Claude Code offers `esc to interrupt` exactly while it is working, so that
  * is the signal. It is a string on a screen, which nobody promised to keep —
- * but it is only ever used to decide to *wait longer*, and nothing is believed
- * because of it. If the wording ever changes this reads as idle and the send
- * behaves as it would have anyway, verification and all.
+ * but nothing is believed because of it: a send no longer waits on this, and a
+ * wrong answer here costs a line in a report rather than a message.
+ *
+ * Read from the status line only, via footOf, and that is not tidiness. This
+ * used to grep the capture — and `-S -6` is not "the last six lines", it is six
+ * lines of scrollback *plus the whole visible pane*, so every word of the
+ * conversation was in scope. A window whose transcript happened to show the
+ * phrase "esc to interrupt" — this repo's own, discussing this function —
+ * read as permanently busy, and back when a send waited on that, its message
+ * waited out the full five minutes and was refused as "working for too long".
+ * The status line is positional; nothing quoted above it can fake one.
  */
 async function busy(target) {
-  const r = await tmux(['capture-pane', '-p', '-t', target, '-S', '-6']);
-  return r.ok && /esc to interrupt/i.test(r.out);
+  const r = await tmux(['capture-pane', '-p', '-t', target]);
+  return r.ok && isBusy(r.out);
 }
 
 /** Wait for a turn to finish. Resolves false if it simply never does. */
@@ -636,8 +712,23 @@ export function composerOf(screen) {
     body.push(lines[n]);
   }
   if (!closed) return null;
-  return body.join('\n').replace(/\s+$/, '');
+  const text = body.join('\n').replace(/\s+$/, '');
+  // The queue placeholder is the box's own prompt, not something somebody
+  // typed. Claude Code puts "Press up to edit queued messages" where the
+  // caret would be once a message has been queued behind a running turn, and
+  // read as contents it says the exact opposite of the truth: the composer is
+  // empty, which is what proves the message left it. Left unhandled, send()
+  // reported "the window took the message but never submitted it — it is still
+  // in the composer" about a message that had been queued and answered.
+  return QUEUE_PLACEHOLDER.test(text) ? '' : text;
 }
+
+/** The composer's own prompt once something is queued behind a running turn. */
+const QUEUE_PLACEHOLDER = /press up to edit queued messages/i;
+
+/** Whether the window is holding queued messages, as the composer reports it.
+ *  A receipt worth reading, but never the only one — see deliveryOf. */
+export const queueing = (screen) => QUEUE_PLACEHOLDER.test(String(screen ?? ''));
 
 /** What to compare before and after a paste: the composer when there is one,
  *  the whole screen when there is not. */
@@ -687,7 +778,14 @@ async function pasteInto(target, text) {
     // Never paste into a window that is still painting: that is when it drops
     // them. Not settling is not fatal — the paste is verified either way — but
     // it is worth waiting for while there is budget left.
-    await settled(target);
+    //
+    // Except on a window that is working, where there is no stillness to wait
+    // for: a turn printing its way down the screen redraws until it ends, so
+    // the full budget here is eight seconds spent per attempt to conclude what
+    // was already known. Measured, a paste into a heavily printing window
+    // arrives anyway — five for five — so this takes a short look and gets on
+    // with it. What proves the paste is the composer changing, either way.
+    await settled(target, (await busy(target)) ? { quiet: 1, tries: 3 } : {});
     const before = await inputState(target);
 
     const set = await tmux(['set-buffer', '-b', buffer, '--', text]);
@@ -738,11 +836,64 @@ async function pasteInto(target, text) {
  *  records what was submitted rather than how it was typed. */
 const squash = (t) => t.replace(/\s+/g, ' ').trim();
 
-/** Whether this exact message is in the conversation yet. */
-async function landed(path, after, text) {
+/**
+ * What became of this message: `'sent'`, `'queued'`, or null for neither yet.
+ *
+ * Two receipts, because Claude Code has two answers and only one of them used
+ * to be read. An idle window turns a message into a user turn straight away.
+ * A *working* window queues it — and that is not a failure mode, it is the
+ * behaviour every other client has: your message goes in while the agent is
+ * mid-task and is picked up at the next step, seconds later, without waiting
+ * for the work to finish.
+ *
+ * The queue is written down as it happens. Measured on a live window, all three
+ * of these land in the transcript within the same millisecond as the keypress:
+ *
+ *   {"type":"queue-operation","operation":"enqueue","content":"<the message>"}
+ *   {"type":"attachment","attachment":{"type":"queued_command","prompt":"…"}}
+ *   …and later {"operation":"remove"} when the agent reads it
+ *
+ * `readTranscript` keeps only `user` and `assistant`, so none of this was
+ * visible to the host: the only receipt it could see was the user turn, which
+ * for a queued message is not written until the message is *consumed*. On a
+ * long turn that is a minute away, so a message delivered perfectly in under a
+ * second was reported as never confirmed. Reading the enqueue is what makes
+ * "delivered" mean delivered rather than "already answered".
+ *
+ * Parsed off the raw JSONL rather than through readTranscript, deliberately:
+ * that function's job is the conversation, and a queued message is not a turn
+ * in it until Claude Code says so. Filing it as one would put the operator's
+ * message on the floor twice — once here and once when it is really recorded.
+ */
+async function deliveryOf(path, after, text) {
   const want = squash(text);
-  const t = await readTranscript(path, { after });
-  return t.turns.some((x) => x.role === 'user' && squash(x.text).includes(want));
+  if (!existsSync(path)) return null;
+  const { readFile, stat } = await import('node:fs/promises');
+  const { size } = await stat(path);
+  if (size <= after) return null;
+  const buf = await readFile(path);
+  // Never mid-line: a JSONL file being appended to can be read between the
+  // write and its newline. Same rule as readTranscript, same reason.
+  const complete = buf.subarray(after).toString('utf8').split('\n').slice(0, -1);
+  let queued = null;
+  for (const line of complete) {
+    if (!line.trim()) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    // The real thing: it is a turn in the conversation now.
+    if (d.type === 'user' && !d.isMeta && !d.isSidechain) {
+      if (squash(textOf(d.message?.content)).includes(want)) return 'sent';
+      continue;
+    }
+    // Queued, and the window has said so. Not returned immediately — a `sent`
+    // later in the same slice is the better answer, and on a fast turn both
+    // are written before anyone reads them.
+    if (d.type === 'queue-operation' && d.operation === 'enqueue'
+        && squash(String(d.content ?? '')).includes(want)) queued = 'queued';
+    if (d.type === 'attachment' && d.attachment?.type === 'queued_command'
+        && squash(String(d.attachment.prompt ?? '')).includes(want)) queued = 'queued';
+  }
+  return queued;
 }
 /**
  * Open this repo's Claude Code in a pane, or hand back the one already there.
@@ -857,22 +1008,30 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     ?? null;
   const path = live?.sessionId ? transcriptPath(here, live.sessionId) : null;
 
-  // Wait for the window to finish what it is doing before typing into it.
+  // A working window is typed into, not waited for.
   //
-  // A message pasted into a running turn is not queued, it is dropped: the
-  // composer is empty afterwards and the text is simply gone. That is the
-  // ordinary case from the floor rather than an edge one — a person types
-  // while the agent is working — and it was losing two messages in three.
-  // Waiting is what someone at the keyboard would do.
-  if (!(await waitIdle(pane.target))) {
-    return { ok: false, code: 'busy', error: 'the window has been working for too long to take a message — nothing was typed in' };
-  }
+  // This used to wait for the turn to end, on the grounds that "a message
+  // pasted into a running turn is not queued, it is dropped — it was losing two
+  // messages in three". That is not true of Claude Code, and holding a message
+  // for a working desk is the single thing that made the floor feel unlike
+  // every other client: your message sat here while the agent worked, and the
+  // page gave up on it long before the window ever saw it.
+  //
+  // Measured against a live window (2.1.220), five messages pasted into one
+  // running turn: five arrived in the composer, five queued, five recorded in
+  // order, none dropped. And on a window doing ordinary multi-step work the
+  // queue is not a wait at all — enqueue to the agent reading it was 0.8s, to
+  // it answering 2.3s, mid-task, with the original work carrying on afterwards.
+  //
+  // So: paste now, and let deliveryOf say which of the two receipts came back.
+  // `wasBusy` is only for the sentence at the end — nothing branches on it.
+  const wasBusy = await busy(pane.target);
 
   // Where the transcript stood before anything was typed. Taken here rather
   // than after the paste because getting the text in can itself take a while
   // on a window that is still starting, and a turn written during that would
-  // then be behind the offset and invisible to landed() — the message would be
-  // in the conversation and still reported lost.
+  // then be behind the offset and invisible to deliveryOf() — the message would
+  // be in the conversation and still reported lost.
   const before = path ? await transcriptSize(path) : null;
 
   // Get the text into the composer, and confirm it is there before pressing
@@ -903,12 +1062,17 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // A stand-in that just reads stdin cannot reproduce any of this — it accepts
   // the Enter a TUI drops — so the tests cannot prove it. It was found by
   // watching a real window, and it is verified there.
-  await settled(pane.target);
+  //
+  // Barely settle at all on a working window. A turn that is printing never
+  // stops redrawing, so waiting for stillness there is waiting for the turn to
+  // end under another name — the very thing this stopped doing. The paste is
+  // already in and confirmed by now; this is only guarding the Enter.
+  await settled(pane.target, wasBusy ? { quiet: 1, tries: 3 } : {});
 
-  let sent = false;
+  let got = null;                 // 'sent' | 'queued', once the window says so
   let last = await screenOf(pane.target);
   const stop = Date.now() + LAND_TIMEOUT_MS;
-  for (let press = 0; press < SUBMIT_ATTEMPTS && !sent && Date.now() < stop; press++) {
+  for (let press = 0; press < SUBMIT_ATTEMPTS && !got && Date.now() < stop; press++) {
     const enter = await tmux(['send-keys', '-t', pane.target, 'Enter']);
     if (!enter.ok) return { ok: false, error: enter.error };
     // Nothing to check against: the pane is running something with no Claude
@@ -921,11 +1085,15 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     // Enter that Claude Code reads as part of the paste becomes a newline in
     // the composer, so a message once arrived carrying the eight carriage
     // returns of the eight retries that "delivered" it.
+    //
+    // A working window never goes still, so it is never pressed twice — which
+    // is right, and not by accident: its receipt is the enqueue, and that is
+    // written in the same millisecond as the keypress.
     let frozen = 0;
-    while (!sent && Date.now() < stop && frozen < 4) {
+    while (!got && Date.now() < stop && frozen < 4) {
       await sleep(250);
-      sent = await landed(path, before, text);
-      if (sent) break;
+      got = await deliveryOf(path, before, text);
+      if (got) break;
       const now = await screenOf(pane.target);
       if (now === last) frozen++;
       else { frozen = 0; last = now; }
@@ -940,17 +1108,40 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   //
   // Nothing more is pressed here. The message is in, the Enters have gone; what
   // is left is waiting for the write to show up.
-  while (!sent && Date.now() < stop) {
+  while (!got && Date.now() < stop) {
     await sleep(250);
-    sent = await landed(path, before, text);
+    got = await deliveryOf(path, before, text);
   }
 
-  if (!sent) {
+  if (!got) {
+    // The text is still in the composer, so the window never took the Enter.
+    //
+    // This is the one case left that waiting can fix, and it is why waitIdle
+    // still exists. Something on screen is swallowing the keystroke — a menu
+    // standing over the composer is the usual one — so the message is held
+    // here rather than handed back, and goes in when the window frees up.
+    // Nothing is re-pasted: the text is already in the box, and pasting again
+    // is how one message becomes two.
+    const stuck = (composerOf(await screenOf(pane.target)) ?? '').includes(text.trim().split('\n')[0].slice(0, 40));
+    if (stuck && await waitIdle(pane.target)) {
+      const held = Date.now() + LAND_TIMEOUT_MS;
+      for (let press = 0; press < SUBMIT_ATTEMPTS && !got && Date.now() < held; press++) {
+        await tmux(['send-keys', '-t', pane.target, 'Enter']);
+        while (!got && Date.now() < held) {
+          await sleep(250);
+          got = await deliveryOf(path, before, text);
+          if (got) break;
+        }
+      }
+      // Said as held, not merely as sent. A message that arrived a minute late
+      // is not the same event as one that went straight through, and the
+      // operator watching the desk is entitled to know which they got.
+      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued', held: true };
+    }
     // Say which of the two this is instead of asserting the one that reads
     // worse. The text still being in the composer is checkable, and when it is
     // gone the honest report is that the confirmation did not arrive — not that
     // the window never took it.
-    const stuck = (composerOf(await screenOf(pane.target)) ?? '').includes(text.trim().split('\n')[0].slice(0, 40));
     return {
       ok: false,
       code: 'not_delivered',
@@ -960,7 +1151,10 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
         : `the message went in but the conversation did not confirm it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer, so it may well have been sent. Check the window before retyping it.`,
     };
   }
-  return { ok: true, target: pane.target, confirmed: true };
+  // `queued` is the honest word for what happened, and the floor says it: the
+  // window has the message and will read it at its next step, which is not the
+  // same as it already being a turn in the conversation.
+  return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued' };
 }
 
 /**
@@ -1473,7 +1667,7 @@ export async function pressBlind(cwd, key) {
  */
 /** The bottom line of the pane, which is the only line that says what the window
  *  will accept. Positional, so no amount of quoting above it can fake one. */
-function footOf(screen) {
+export function footOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
   return (lines[lines.length - 1] ?? '').trim();
 }
@@ -1655,6 +1849,108 @@ export async function openInEditor({ sessionId = null, text = null } = {}) {
 }
 
 /**
+ * A string as AppleScript source. Backslash first, or the escape of the quote
+ * gets escaped in turn and the script ends mid-literal.
+ */
+const osaString = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+/**
+ * The terminals this knows how to open, and how to tell each one to run a
+ * command in a new window.
+ *
+ * Two of them, and the choice is not cosmetic. This button exists for the
+ * moment somebody has stopped trusting what the floor is showing them; opening
+ * Terminal.app in front of a person who lives in iTerm adds one more unfamiliar
+ * thing to a screen that has already confused them once.
+ */
+const TERMINALS = {
+  iterm: {
+    app: 'iTerm',
+    path: '/Applications/iTerm.app',
+    script: (cmd) => [
+      'tell application "iTerm"',
+      '  activate',
+      '  set w to (create window with default profile)',
+      `  tell current session of w to write text ${osaString(cmd)}`,
+      'end tell',
+    ].join('\n'),
+  },
+  terminal: {
+    app: 'Terminal',
+    path: '/System/Applications/Utilities/Terminal.app',
+    script: (cmd) => [
+      'tell application "Terminal"',
+      `  do script ${osaString(cmd)}`,
+      '  activate',
+      'end tell',
+    ].join('\n'),
+  },
+};
+
+/** Which one to open: what ORCH_TERMINAL names, else whichever is installed. */
+function pickTerminal() {
+  const want = (process.env.ORCH_TERMINAL ?? '').trim().toLowerCase();
+  // Set but unrecognised is an error, not a reason to quietly open the other
+  // one. Someone who wrote a terminal's name in a config file will not be
+  // looking for the reason a different terminal opened.
+  if (want) return TERMINALS[want] ?? null;
+  for (const t of [TERMINALS.iterm, TERMINALS.terminal]) if (existsSync(t.path)) return t;
+  return TERMINALS.terminal;
+}
+
+/**
+ * Open a terminal on this machine, already attached to our tmux session.
+ *
+ * The escape hatch, and the one thing here that deliberately does not go
+ * through a pane. Everything else in this file works by capturing text and
+ * sending keys, so everything else fails the same way: when a capture parses
+ * wrong, the floor is confidently wrong and there is no way from the browser to
+ * see what is really on screen. Attaching is that way — it hands the person the
+ * actual window instead of this file's opinion of it.
+ *
+ * Nothing is moved, closed or typed. tmux is built for several clients on one
+ * session, so this is an extra pair of eyes on a window the floor keeps right
+ * on driving. That is why the command stays plain `attach` with no `-d`:
+ * detaching whoever else is looking is the opposite of the point.
+ *
+ * The command is returned on both paths. When this fails it is usually macOS
+ * refusing the Apple event, which is a per-machine permission a person has to
+ * grant in System Settings — so the failure has to leave them able to do the
+ * thing by hand.
+ */
+export async function attachTerminal() {
+  const cmd = `${TMUX} attach -t ${SESSION}`;
+  const term = pickTerminal();
+  if (!term) {
+    return {
+      ok: false,
+      cmd,
+      error: `ORCH_TERMINAL is set to "${process.env.ORCH_TERMINAL}", which this host has no script for. Set it to "iterm" or "terminal", or run \`${cmd}\` yourself.`,
+    };
+  }
+  // Checked here as well as on the server, because the two know different
+  // things: the board knows a window was reported, this knows whether tmux on
+  // this machine will actually answer to that name right now.
+  const has = await tmux(['has-session', '-t', SESSION]);
+  if (!has.ok) {
+    return {
+      ok: false,
+      cmd,
+      error: has.missing
+        ? 'tmux is not installed on this machine, so there is nothing to attach to.'
+        : `tmux has no session called ${SESSION} on this machine: ${has.error}`,
+    };
+  }
+  try {
+    await run('osascript', ['-e', term.script(cmd)], { timeout: 15_000 });
+    return { ok: true, app: term.app, cmd };
+  } catch (err) {
+    const why = (err?.stderr || err?.message || String(err)).trim();
+    return { ok: false, cmd, error: `could not open ${term.app}: ${why}. Run \`${cmd}\` on this machine yourself.` };
+  }
+}
+
+/**
  * Close the window the floor has been driving.
  *
  * Handing a conversation to the editor means giving it up here: two processes
@@ -1765,6 +2061,38 @@ export async function readTranscript(path, { after = 0 } = {}) {
     if (!line.trim()) continue;
     let d;
     try { d = JSON.parse(line); } catch { continue; }
+
+    /* A message read while the agent was working.
+     *
+     * This is a user turn by every measure that matters — a person typed it,
+     * the agent answered it — and it is the only record of one. Claude Code
+     * writes a queued message down in one of two shapes, and which one you get
+     * depends on when it was picked up:
+     *
+     *   drained at the end of a turn → a `user` record, at consumption
+     *   injected mid-turn           → this `attachment`, and nothing else
+     *
+     * Measured, both ways, on 2.1.220. The second shape is now the common one,
+     * because the floor stopped holding messages for a working desk — and
+     * skipping it meant the operator's own message never appeared in the
+     * conversation at all. Seen end to end on the real board: the agent
+     * answered "MIDTURN-PROOF-SEEN" six seconds after it was sent, and the
+     * floor showed the reply to a question nobody could see being asked.
+     *
+     * Not deduplicated against the `user` shape, deliberately. The two are
+     * exclusive — the same message is never written both ways — and matching
+     * on text across reads to guard against it would swallow the case where
+     * somebody really does send the same words twice, which on this board is
+     * an ordinary thing to do: "nudge" is a word people send repeatedly. If
+     * that exclusivity ever stops holding, a message appears twice, which is
+     * visible and fixable; the other mistake is silent.
+     */
+    if (d.type === 'attachment' && d.attachment?.type === 'queued_command' && !d.isSidechain) {
+      const queued = String(d.attachment.prompt ?? '');
+      if (queued.trim()) turns.push({ role: 'user', text: queued, at: d.timestamp ?? null, uuid: d.uuid ?? null });
+      continue;
+    }
+
     if (d.type !== 'user' && d.type !== 'assistant') continue;
     // Sidechain is a subagent's own conversation; it belongs inside the tool
     // call that owns it, not beside the turns of the session that spawned it.
