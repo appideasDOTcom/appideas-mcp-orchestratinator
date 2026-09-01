@@ -56,6 +56,31 @@ relays the conversation, `run()` handles work. Keep them apart. When they shared
 one loop, delivering a message blocked the relay for up to a minute — the floor
 went silent mid-conversation and then dumped the backlog in one batch.
 
+## Driving a window
+
+Everything the host knows about a window is a text capture of its pane, and
+**every rule for typing into one was measured, not reasoned**. They are recorded
+in [`.claude/skills/watch-the-window`](.claude/skills/watch-the-window/SKILL.md),
+and the obvious guess is wrong in all four cases: on an AskUserQuestion a digit
+*selects* on a single-select, *toggles* on a multi-select, the free-text row
+*withdraws the form* on a single-select but *opens a field* on a multi, and the
+Submit tab is arrived at by answering the last question rather than walked to. A
+day was spent proving each of those; do not adjust `answerSteps()` in
+[`src/floor.js`](src/floor.js) from first principles.
+
+Two consequences worth knowing before touching `host/window.js`:
+
+- **Pane width is set by whoever is attached.** A footer that fits on one line at
+  160 columns wraps at 80, which broke `askingOf` and made a real fault look
+  intermittent. Read footers as the last few lines rejoined.
+- **A step count is a fact about the script, not the window.** Reporting
+  `N of M steps` as failure said "your answers did not land" about answers that
+  had landed — and, worse, said success about a sequence whose last key pressed
+  Cancel. Finish by reading the pane.
+
+`answer-the-form.mjs` in that skill answers a floor form and records the pane, so
+none of this needs the operator to sit and click.
+
 ## The two surfaces
 
 One page draws two views. `index.html` loads `app.js` then `floor.js`, and
