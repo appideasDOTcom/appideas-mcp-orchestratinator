@@ -1917,9 +1917,21 @@ function pickTerminal() {
  * refusing the Apple event, which is a per-machine permission a person has to
  * grant in System Settings — so the failure has to leave them able to do the
  * thing by hand.
+ *
+ * `target` lands the new terminal on a particular desk's window rather than
+ * whichever happens to be active. It is a select-window run after the attach,
+ * so a stale target still leaves the person attached — worse aimed, not shut
+ * out. One honest caveat: tmux clients on one session share a current window,
+ * so this switches every terminal already attached, not only the new one.
+ * That is the trade "open THIS desk" makes, and with the usual zero or one
+ * other clients it is the right one.
  */
-export async function attachTerminal() {
-  const cmd = `${TMUX} attach -t ${SESSION}`;
+export async function attachTerminal({ target = null } = {}) {
+  // select-window wants a window, and open()'s targets name a pane. The pane
+  // suffix is always tmux's own `%N` id here, never typed by anyone, so
+  // stripping it is safe where parsing a human-named window would not be.
+  const win = target ? String(target).replace(/\.%\d+$/, '') : null;
+  const cmd = `${TMUX} attach -t ${SESSION}` + (win ? ` \\; select-window -t '${win}'` : '');
   const term = pickTerminal();
   if (!term) {
     return {

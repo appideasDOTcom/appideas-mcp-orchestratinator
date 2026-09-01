@@ -59,7 +59,7 @@
   const ATTACH_MS = 20_000;
   /* The links' labels, here as well as in the markup, because the spinner takes
      one over and something has to put it back. */
-  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code', attach: 'Open in tmux' };
+  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code', attach: 'Open in tmux', claude: 'Open in Claude' };
   /* Which seat each link is asking for. That seat arriving is what "done" means
      — the POST returning only means the host has been told. Note this is not
      the same as the link going away: handback stays offered while the editor
@@ -2028,6 +2028,13 @@
    * Neither node is ever created twice for the same desk.
    */
   function panelShell(wrap, channel, agent) {
+    // Whose panel this is, as a DOM fact. The shell is rebuilt in the same
+    // synchronous pass that gates the links beneath it, so anything reading
+    // the strip can wait on this instead of racing openDesk's async render —
+    // which is exactly how a headless check read one desk's buttons against
+    // the next desk's name.
+    wrap.dataset.channel = channel;
+    wrap.dataset.agent = agent;
     wrap.innerHTML = `
       <div class="p-head">
         <div class="p-id">
@@ -2056,6 +2063,12 @@
         <div class="p-links">
           <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">${LINK_LABEL.openhere}</button>
           <button class="p-link" data-act="handback" title="Open this conversation in VS Code">${LINK_LABEL.handback}</button>
+          <!-- Not a seat move, though it stands with one: the window stays on
+               the floor, which keeps driving it. The terminal lands ON that
+               window, so closing it is a detach and never kills the
+               conversation — the reason this is not a hand-off to a bare
+               claude process. -->
+          <button class="p-link" data-act="claude" title="Open this conversation in claude CLI — a terminal on this desk's own window">${LINK_LABEL.claude}</button>
           <!-- Beneath the other two, not beside them: it is not a third place to
                put the conversation, it is the way out of this page. -->
           <button class="p-link" data-act="attach">${LINK_LABEL.attach}</button>
@@ -2275,6 +2288,7 @@
     const toVsc = wrap.querySelector('[data-act="handback"]');
     const toFloor = wrap.querySelector('[data-act="openhere"]');
     const toTmux = wrap.querySelector('[data-act="attach"]');
+    const toClaude = wrap.querySelector('[data-act="claude"]');
     const tmuxCmd = wrap.querySelector('.p-tmux');
     // A move in flight is settled here, against the payload, because the
     // payload is the only thing that knows. The POST is answered the moment the
@@ -2301,8 +2315,13 @@
     // spinner that stops meaning anything the moment it is wrong.
     let attachFailed = null;
     let attachDone = false;
+    // Two buttons share this flow — "Open in tmux" and "Open in Claude" both
+    // end in a terminal attaching — so the act rides along, and the flash
+    // lands on the button that was clicked.
+    let attachAct = 'attach';
     const attachPending = ui.attaching && ui.attaching.channel === channel && ui.attaching.agent === agent ? ui.attaching : null;
     if (attachPending) {
+      attachAct = attachPending.act ?? 'attach';
       if ((h?.clients ?? 0) > attachPending.from) { ui.attaching = null; attachDone = true; }
       else if (Date.now() - attachPending.since > ATTACH_MS) {
         // What was seen, not why. If the host failed to open anything it has
@@ -2345,6 +2364,11 @@
     const canSpawn = !!(inTmux && h?.live);
     toTmux.classList.toggle('hidden', !inTmux);
     toTmux.disabled = !canSpawn;
+    // "Open in Claude" wants a live host (it may have to open the window, and
+    // only the host can) and a conversation not held elsewhere. No window is
+    // fine — opening one is half of what the button does. When the host is
+    // dead the tmux hatch above stays, so hiding this removes no last exit.
+    toClaude.classList.toggle('hidden', !(h?.live && h?.held !== 'editor'));
     // Only the reason that is actually true. The offline sentence used to be
     // the whole else-branch, which put "livebox is offline" on a button whose
     // host was perfectly alive and which was hidden for a different reason
@@ -2368,7 +2392,11 @@
     if (ui.tmuxNote && !note) ui.tmuxNote = null;
     tmuxCmd.textContent = note ? note.text : `tmux attach -t ${h?.tmux ?? 'orch'}`;
     tmuxCmd.classList.toggle('tmux-why', !!note);
-    tmuxCmd.classList.toggle('hidden', !(inTmux && (note || !canSpawn)));
+    // A refusal note shows wherever it was earned — a click on "Open in
+    // Claude" with no window can be refused too, and hiding its sentence
+    // because the desk is not in tmux would leave that click answered by
+    // nothing but a flash.
+    tmuxCmd.classList.toggle('hidden', !(note || (inTmux && !canSpawn)));
     if (move) {
       (move.act === 'handback' ? toVsc : toFloor).classList.remove('hidden');
       (move.act === 'handback' ? toFloor : toVsc).classList.add('hidden');
@@ -2376,23 +2404,26 @@
       // is not offered while one is in flight — same reason the opposite seat's
       // link goes away, and the same rule: the strip finishes in one shape.
       toTmux.classList.add('hidden');
+      toClaude.classList.add('hidden');
       tmuxCmd.classList.add('hidden');
     }
     setLinkBusy(toVsc, move?.act === 'handback');
     setLinkBusy(toFloor, move?.act === 'openhere');
-    setLinkBusy(toTmux, !!attaching);
+    setLinkBusy(toTmux, !!attaching && attachAct === 'attach');
+    setLinkBusy(toClaude, !!attaching && attachAct === 'claude');
     // Hiding both links is not the same as hiding the strip: an empty flex
     // column is zero-height but still counts as a row, so .p-compose's gap
     // leaves a blank line where the links were.
     wrap.querySelector('.p-links').classList
       .toggle('hidden', toVsc.classList.contains('hidden')
         && toFloor.classList.contains('hidden')
-        && toTmux.classList.contains('hidden'));
+        && toTmux.classList.contains('hidden')
+        && toClaude.classList.contains('hidden'));
     // After setLinkBusy, so the label is back before flash() borrows it.
     if (failed) flash(wrap.querySelector(`[data-act="${pending.act}"]`), failed);
     // "attached", not "asked" — this one has been observed now.
-    if (attachDone) flash(toTmux, 'terminal attached');
-    if (attachFailed) flash(toTmux, attachFailed);
+    if (attachDone) flash(attachAct === 'claude' ? toClaude : toTmux, 'terminal attached');
+    if (attachFailed) flash(attachAct === 'claude' ? toClaude : toTmux, attachFailed);
     const askForm = wrap.querySelector('.p-ask');
     if (askForm) askWarn(askForm);
     wrap.querySelector('.p-compose').classList.toggle('held', held);
@@ -3074,8 +3105,8 @@
       else await openPromptMenu(act);
     } else if (act.dataset.act === 'handback' || act.dataset.act === 'openhere') {
       await moveSeat(act.dataset.act);
-    } else if (act.dataset.act === 'attach') {
-      await attachTmux();
+    } else if (act.dataset.act === 'attach' || act.dataset.act === 'claude') {
+      await attachTmux(act.dataset.act);
     } else if (act.dataset.act === 'rename') {
       // app.js owns the dialogs on this page — same reason the pills call into
       // it rather than growing a second implementation. A `prompt()` used to do
@@ -3257,24 +3288,25 @@
    * then fails, the host says so in its own error turn on this desk, which is
    * the only place that can honestly report it.
    */
-  async function attachTmux() {
+  async function attachTmux(act = 'attach') {
     if (!ui.open) return;
     const { channel, agent } = ui.open;
-    const btn = $('floor-panel').querySelector('[data-act="attach"]');
+    const btn = $('floor-panel').querySelector(`[data-act="${act}"]`);
     if (!btn || btn.disabled) return;
     // One at a time, like a seat move: the spinner is the receipt for the click,
-    // and a second click while it turns would queue a second terminal.
+    // and a second click while it turns would queue a second terminal. Shared
+    // across both buttons for the same reason — two clicks, two terminals.
     if (ui.attaching && ui.attaching.channel === channel && ui.attaching.agent === agent) return;
     ui.tmuxNote = null;
     // The count to beat, read before the request. Somebody clicking this often
     // already has a terminal attached, so the test is a rise, not a presence.
     const now = floor?.channels?.find((c) => c.channel === channel)?.desks?.find((x) => x.agent === agent);
-    ui.attaching = { channel, agent, since: Date.now(), from: now?.hosted?.clients ?? 0 };
+    ui.attaching = { channel, agent, act, since: Date.now(), from: now?.hosted?.clients ?? 0 };
     // Before the fetch, not after — the click is acknowledged while the request
     // is still open, same as moveSeat.
     renderPanel();
     try {
-      const r = await fetch('./api/floor/attach', {
+      const r = await fetch(act === 'claude' ? './api/floor/claude' : './api/floor/attach', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ channel, agent }),

@@ -290,6 +290,31 @@ export function attachable(h, nowMs = Date.now()) {
 }
 
 /**
+ * Can "Open in Claude" put this desk's window in front of the operator?
+ *
+ * The attach conditions, with one loosened and one re-worded. Loosened:
+ * no_window is not a refusal here, because opening the window is half of what
+ * the button does — the host runs `open` and then attaches. Re-worded: the
+ * held-by-editor sentence, because the process holding it may be an editor OR
+ * a claude CLI outside tmux, and this button is the one a CLI person clicks —
+ * telling them about "your editor" sends them looking for a window that is a
+ * terminal.
+ */
+export function claudeable(h, nowMs = Date.now()) {
+  const base = attachable(h, nowMs);
+  if (!base.error) return base;
+  const cmd = `tmux attach -t ${h?.host_tmux ?? 'orch'}`;
+  if (base.code === 'no_window') return { hosted: h, cmd, opens: true };
+  if (base.code === 'held_by_editor') {
+    return {
+      error: 'This conversation is already open in another app — your editor, or a claude CLI outside tmux. Quit it there first: one app holds a conversation at a time.',
+      code: 'held_by_editor',
+    };
+  }
+  return base;
+}
+
+/**
  * Is a turn actually running at this desk?
  *
  * Two signals, because the hooks and the transcript agree only eventually. The
@@ -1813,6 +1838,28 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // Queued, and said as queued. The host opens the terminal on its next poll;
     // if that fails it says so in its own error turn on this desk, which is the
     // only place that can honestly report it.
+    res.json({ ok: true, queued: true, cmd: can.cmd });
+  });
+
+  /**
+   * Open this desk in claude CLI: a terminal landed on the desk's own window,
+   * opened first if the floor has none.
+   *
+   * Deliberately not a seat change, same as attach — the window stays on the
+   * floor, which keeps driving it, and closing the terminal is always safe
+   * because closing a tmux client is a detach, not an exit. The "hand the
+   * conversation to a bare `claude --resume` outside tmux" version of this
+   * button was considered and rejected: it buys nothing (the floor's window IS
+   * claude CLI) and closing that terminal would SIGHUP the conversation dead.
+   */
+  router.post('/api/floor/claude', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const can = claudeable(store.hostedDesk(channel, agent));
+    if (can.error) return res.status(409).json({ error: can.error, code: can.code, cmd: can.cmd ?? null });
+    store.enqueueHostWork(can.hosted.host_id, channel, agent, 'claude', {});
+    live.wake(can.hosted.host_id);
     res.json({ ok: true, queued: true, cmd: can.cmd });
   });
 

@@ -582,6 +582,36 @@ class Host {
         log(`${desk.channel}/${desk.agent}: opened ${r.app} attached with \`${r.cmd}\``);
         break;
       }
+      case 'claude': {
+        // "Open in Claude": put this desk's real window in front of the
+        // operator, opening one first if the floor has none. Not a seat change
+        // — the window stays here and the floor keeps driving it; the operator
+        // gets a terminal sitting on it, which IS claude CLI under their
+        // fingers. That is the whole feature: the handoff VS Code needs does
+        // not exist in this direction, because the floor's window already is
+        // the CLI.
+        const opened = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+        if (!opened.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true); break; }
+        // Attach BEFORE waiting for readiness. Readiness gates automated
+        // typing, not eyeballs: a window stuck on the trust question is
+        // exactly what the operator should be looking at, and waitReady's own
+        // timeout advice is "attach and reply" — here they already have.
+        const t = await W.attachTerminal({ target: opened.target });
+        if (!t.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: t.error }, true); break; }
+        log(`${desk.channel}/${desk.agent}: opened ${t.app} on ${opened.target} with \`${t.cmd}\``);
+        if (opened.created) {
+          // Same tail as `open`: settle the startup questions the host may
+          // answer, release remain-on-exit, and log any key pressed on the
+          // operator's behalf — they are watching this pane now, so a press
+          // they did not make must be accounted for. answerKnown reads the
+          // screen back before committing, so if the operator answers first
+          // it gives up rather than double-keying.
+          const up = await W.waitReady(desk.cwd, { pid: opened.pid, target: opened.target });
+          for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
+          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
+        }
+        break;
+      }
       default:
         warn(`unknown work kind ${item.kind}`);
     }

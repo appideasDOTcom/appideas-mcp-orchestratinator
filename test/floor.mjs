@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, claudeable } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -356,6 +356,18 @@ try {
   // stop one, and it is the sentence that ends up in the sign's tooltip.
   assert(!/nudge|Send a message/i.test(stoppable({ ...busy, window_id: null }, null).error),
          'and its refusal is written for stopping, not borrowed from the nudge that shares the condition');
+
+  console.log('\nwho can be opened in claude CLI, which is attach with one condition loosened');
+  assert(!claudeable(live).error, 'a desk with a window on a live host can be opened in Claude');
+  const noWin = claudeable({ ...live, window_id: null });
+  assert(!noWin.error && noWin.opens,
+         'and so can one with NO window — opening it is half of what the button does, which is the condition attach refuses on');
+  eq(claudeable({ ...live, outside_pid: 4242 }).code, 'held_by_editor', 'but not one another process holds');
+  assert(/CLI|terminal/i.test(claudeable({ ...live, outside_pid: 4242 }).error),
+         'and that refusal names a CLI as well as an editor — the person clicking this button is the one whose holder IS a terminal');
+  eq(claudeable(null).code, 'not_hosted', 'nor one no host is running');
+  eq(claudeable({ ...live, host_seen: stale }).code, 'host_offline',
+     'nor one whose host is offline — only the host can open the window this button may need to open');
 
   console.log('\nputting a conversation back on the floor');
   // The direction that was missing. handback moves a conversation into the
