@@ -722,6 +722,42 @@
     renderPromptMenu();
   }
 
+  /* ---------- drafts ----------
+     What is in the compose box belongs to the desk, not to the panel.
+
+     The panel's shell — textarea included — is rebuilt whenever a different
+     desk is opened, and emptied when the panel closes. So the ordinary thing:
+     three hundred words into an instruction for one agent, a bell rings on
+     another, click over, answer it, click back — and the three hundred words
+     were gone. Nothing the page does may cost somebody their own writing, so
+     every keystroke is filed under the desk it was typed for, in localStorage
+     rather than in `ui`, so a reload or a closed tab loses nothing either.
+
+     A draft is a message that has not been handed over yet. It goes when the
+     board accepts the send (the text is then a pending bubble, and the window's
+     transcript is what says whether it arrived), or when the person empties
+     the box. A refused send keeps it, and a message the window lost is put
+     back into it — both already the behaviour, both now written down. */
+  const draftKey = (channel, agent) => `orch.draft:${channel}|${agent}`;
+  function saveDraft(channel, agent, text) {
+    try {
+      if (text && text.trim()) localStorage.setItem(draftKey(channel, agent), text);
+      else localStorage.removeItem(draftKey(channel, agent));
+    } catch { /* storage blocked or full: the box still has it until the shell goes */ }
+  }
+  function loadDraft(channel, agent) {
+    try { return localStorage.getItem(draftKey(channel, agent)) ?? ''; } catch { return ''; }
+  }
+  /** File what the box holds now, under the desk whose panel this is. Read
+   *  off the panel's own dataset rather than ui.open, which has already moved
+   *  on by the time the old shell is being replaced. */
+  function stashDraft() {
+    const ta = $('p-text');
+    const wrap = $('floor-panel');
+    if (!ta || !wrap?.dataset.agent) return;
+    saveDraft(wrap.dataset.channel, wrap.dataset.agent, ta.value);
+  }
+
   /**
    * Put a prompt in the box, as though it had been typed.
    *
@@ -738,6 +774,7 @@
     const at = start + text.length;
     ta.focus();
     ta.setSelectionRange(at, at);
+    stashDraft();
     // Nothing is sent. The whole point of a template is the edit you make to it
     // before it goes.
   }
@@ -2065,6 +2102,9 @@
     // the strip can wait on this instead of racing openDesk's async render —
     // which is exactly how a headless check read one desk's buttons against
     // the next desk's name.
+    // The old shell's box goes with the old shell. File it first — under the
+    // desk it was typed for, which is still what the dataset says.
+    stashDraft();
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
     wrap.innerHTML = `
@@ -2126,7 +2166,13 @@
     const wrap = $('floor-panel');
     if (!ui.open) {
       wrap.classList.add('hidden');
+      stashDraft();
       wrap.innerHTML = '';
+      // Nobody's panel now, and said so: the dataset is the DOM's word on
+      // whose panel this is, and a closed panel that still named its last
+      // desk let a probe read "alpha's panel is up" off an empty box.
+      delete wrap.dataset.channel;
+      delete wrap.dataset.agent;
       ui.panelFor = null;
       // The menu lives on the body, not in the panel, so emptying the panel does
       // not take it with it — it would be left floating over the floor, pointing
@@ -2151,6 +2197,8 @@
     const forKey = `${channel}|${agent}`;
     if (ui.panelFor !== forKey) {
       panelShell(wrap, channel, agent);
+      // A new shell, an empty box — unless this desk has something unsent.
+      $('p-text').value = loadDraft(channel, agent);
       ui.panelFor = forKey;
       // Same reason, one desk over: the menu was anchored to the button in the
       // row that has just been replaced.
@@ -2627,6 +2675,7 @@
       if (lost && box) {
         box.value = box.value.trim() ? `${lost}\n\n${box.value}` : lost;
         box.focus();
+        stashDraft();   // a draft again, and kept as one
       }
       return;
     }
@@ -3260,6 +3309,7 @@
       // shows as sending until the window itself reports it.
       ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
       $('p-text').value = '';
+      stashDraft();   // handed over: no longer a draft
       ui.stick = true;
       renderPanel();
       await tick();
@@ -3433,6 +3483,13 @@
     field.disabled = !other?.checked;
     if (!field.disabled) field.focus();
     else field.value = '';
+  });
+
+  // Every keystroke into the box is filed under its desk as it happens, so no
+  // moment — a click on another desk, a reload, a closed tab — can be the one
+  // that loses it. See the drafts note above stashDraft.
+  document.addEventListener('input', (e) => {
+    if (e.target?.id === 'p-text') stashDraft();
   });
 
   document.addEventListener('keydown', (e) => {
