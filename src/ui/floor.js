@@ -840,7 +840,9 @@
    * window open at all" as no different from "our own window has it", so a desk
    * whose session had ended the previous evening showed a live bell offering to
    * nudge nobody. The board's button had always asked the server. Now both do,
-   * and there is one place left where the answer can be wrong.
+   * and there is one place left where the answer can be wrong. (That bell is
+   * live again today, on purpose and labelled — ringing it opens the window
+   * first. See nudgeable() for why, and `wake` in bell() for how it shows.)
    */
   const nudgeBlock = (d) => (d?.nudge?.ok ? null : d?.nudge?.reason ?? 'Nothing is known about this desk yet.');
   /* And whether its turn can be stopped. Same shape, and used the same way: the
@@ -976,23 +978,31 @@
    */
   function bell(d, channel) {
     const blocked = nudgeBlock(d);
+    // A desk with no window keeps a working bell: ringing it opens the window
+    // first — the conversation resumes — and then nudges. It is drawn half-lit
+    // and says so on hover, so nobody opens a session by surprise. The server
+    // decides this too (`opens`), for the reason nudgeBlock() gives.
+    const wakes = !blocked && !!d?.nudge?.opens;
+    const label = blocked ? `Cannot nudge ${d.persona}`
+      : wakes ? `Nudge ${d.persona} — opens their window first`
+      : `Nudge ${d.persona}`;
     const k = ringKey(channel, d.agent);
     const since = ringingSince(k);
     const g = el('g', {
-      class: `bell${blocked ? ' blocked' : ''}`,
+      class: `bell${blocked ? ' blocked' : ''}${wakes ? ' wake' : ''}`,
       'data-act': 'nudge',
       'data-channel': channel,
       'data-agent': d.agent,
       role: 'button',
       tabindex: blocked ? null : '0',
       'aria-disabled': blocked ? 'true' : null,
-      'aria-label': blocked ? `Cannot nudge ${d.persona}` : `Nudge ${d.persona}`,
+      'aria-label': label,
     });
     // SVG has no title attribute — the tooltip is a child element. The reason
     // comes from the same three cases the server refuses with, so hovering a
     // dead bell says what the dialog's disabled button would have said.
     const tip = el('title');
-    tip.textContent = blocked ?? `Nudge ${d.persona}`;
+    tip.textContent = blocked ?? label;
     g.appendChild(tip);
     // How far the plunger travels. Geometry, so it is set here and not in the
     // stylesheet, and it is half the post rather than a fixed distance: at the
@@ -2931,7 +2941,8 @@
     // Any other click dismisses it, then goes on to do whatever it was for.
     if (ui.details) { ui.details = null; renderDetails(); }
 
-    // The bell rings the agent without opening anything. Ahead of the desk test
+    // The bell rings the agent without opening the conversation panel (it may
+    // open the desk's *window*, when there is none). Ahead of the desk test
     // for the same reason the pills are — it sits inside the cell — and it
     // returns even when it refuses, so a click on a bell that cannot ring does
     // not fall through and open the conversation instead.

@@ -297,7 +297,7 @@ try {
   eq(deskOf(f, 'pro', 'other-floor').hair, deskOf(f, 'pro', CH).hair,
      'colours travel too — one agent, one appearance, whichever room you are looking at');
 
-  console.log('\nwho can be nudged, which is a stricter question than who can be messaged');
+  console.log('\nwho can be nudged, which is who can be messaged plus whether the window is still to come');
   // Plain objects rather than a seeded desk: these are the shapes the two
   // callers actually hand in, and one of them is the shape that broke.
   const fresh = new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -308,8 +308,10 @@ try {
   const noWindow = { ...live, window_id: null };
   assert(!deliverable(noWindow).error,
          'a desk with no window still takes a message — sending one is what opens the window');
-  eq(nudgeable(noWindow).code, 'no_window',
-     'but it cannot be nudged: a nudge means "something is waiting on your channel", which is nothing to say to an empty desk');
+  const wake = nudgeable(noWindow);
+  assert(!wake.error && wake.opens,
+         'and can be nudged, with `opens` set: the bell opens the window first — typing "nudge" into the composer did exactly that, so refusing here only moved the tap');
+  assert(!nudgeable(live).opens, 'a desk with a window is nudged without opening anything');
 
   eq(nudgeable({ ...live, outside_pid: 4242 }).code, 'held_by_editor', 'nor can one an editor is holding');
   eq(nudgeable(null).code, 'not_hosted', 'nor one no host is running');

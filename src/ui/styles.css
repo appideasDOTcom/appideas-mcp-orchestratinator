@@ -783,6 +783,12 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    with the server's reason on hover tells you what to go fix. */
 .bell.blocked { cursor: default; opacity: .3; }
 
+/* A desk with no window keeps a working bell, half-lit: ringing it opens the
+   window first (the conversation resumes where it left off) and then nudges.
+   Dim enough to read as asleep, bright enough to read as a control, and the
+   tooltip says which — a session must never be opened by surprise. */
+.bell.wake { opacity: .6; }
+
 /* In the building, a desk is scenery: the whole storey is one button to the
    floor it depicts, so nothing inside it operates. */
 .rooms.building .bell { display: none; }

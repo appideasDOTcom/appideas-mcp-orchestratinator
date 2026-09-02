@@ -213,30 +213,33 @@ export function deliverable(h, nowMs = Date.now()) {
 }
 
 /**
- * Whether this desk can be *nudged*, which is a stricter question than whether
- * it can be sent a message.
+ * Whether this desk can be *nudged* — the same question as whether it can be
+ * sent a message, with one more fact attached: whether ringing will have to
+ * open a window first.
  *
- * Chat may open a window: you are starting a conversation, and the host will
- * make somewhere for it to happen. A nudge cannot, because a nudge is not
- * content — it means "there is something waiting on your channel, go and
- * look", and that is meaningless said to a desk with nobody at it. Sent to a
- * desk with no window, it would silently spin up a whole session to deliver
- * one word.
+ * It used to be stricter. A nudge is not content — it means "there is
+ * something waiting on your channel, go and look" — and the rule was that
+ * saying it to a desk with no window would silently spin up a whole session
+ * to deliver one word, so the bell went dead and said "send a message
+ * instead". Measured on the live board 2026-09-02, that saved nothing: the
+ * operator's next move was to type the word "nudge" into the composer, which
+ * opened the very same window by the very same path (`say()` → `send()` with
+ * `open: true`, resuming the desk's conversation). The rule did not prevent a
+ * session being opened; it moved one tap to a chat box, on the desk the
+ * operator had just been told had work waiting.
  *
- * So `window_id` is the extra condition: something has to already be running
- * for a nudge to reach. This is the gate both nudge surfaces use — the board's
- * button and the floor's bell — while the compose box keeps deliverable().
+ * So the gate is deliverable(), and `opens` says whether the window is still
+ * to come. Both nudge surfaces — the board's button and the floor's bell —
+ * label themselves from it, so a tap is never a silent session: the bell on
+ * an empty desk reads as "opens the window first" before it is pressed. A
+ * nudge to a desk with nobody at it is still meaningless; the point is that a
+ * desk showing waiting work is not nobody, and opening its conversation is
+ * exactly what the operator meant.
  */
 export function nudgeable(h, nowMs = Date.now()) {
   const can = deliverable(h, nowMs);
   if (can.error) return can;
-  if (!h.window_id) {
-    return {
-      error: 'No window is open for this desk, so there is no one to nudge. Send a message instead — that opens one.',
-      code: 'no_window',
-    };
-  }
-  return can;
+  return h.window_id ? can : { ...can, opens: true };
 }
 
 /**
@@ -332,10 +335,11 @@ export function isWorking(h, lastTurn) {
   return h?.state === 'working' || lastTurn?.role === 'tool';
 }
 
-/* Every refusal below is somebody else's sentence, written for sending or for
-   nudging. The conditions are worth sharing — they are the same conditions —
-   but the words are not: "send a message instead" is no help at all to someone
-   trying to stop one. Same verdict, re-worded by its code. */
+/* Every refusal below is somebody else's sentence, written for sending. The
+   conditions are worth sharing — they are the same conditions — but the words
+   are not: "send a message instead" is no help at all to someone trying to
+   stop one. Same verdict, re-worded by its code. `no_window` is stop's own: a
+   nudge opens a window when there is none, a stop cannot. */
 const STOP_WHY = {
   not_hosted: 'No host on this board is running that repo, so there is nothing here to stop.',
   held_by_editor: 'This conversation is open in your editor. Stop it there — one app holds a conversation at a time.',
@@ -346,9 +350,9 @@ const STOP_WHY = {
  * Can this desk's turn be stopped, and if not, why not?
  *
  * Stopping is a keystroke — Escape, the very one a person presses — so it wants
- * what a nudge wants: a window of ours to press it in. Hence nudgeable() rather
- * than deliverable(). Chat is allowed to open a window because chat is content;
- * there is nothing to interrupt in a window that does not exist yet.
+ * a window of ours to press it in, and unlike chat or a nudge it cannot open
+ * one: there is nothing to interrupt in a window that does not exist yet. So
+ * `window_id` is checked here, on top of deliverable().
  *
  * "Nothing is running" is refused here too, and by the endpoint rather than
  * only greyed out in the browser. A confirmation dialog puts a few seconds
@@ -357,8 +361,9 @@ const STOP_WHY = {
  * silently into an idle prompt.
  */
 export function stoppable(h, lastTurn, nowMs = Date.now()) {
-  const can = nudgeable(h, nowMs);
+  const can = deliverable(h, nowMs);
   if (can.error) return { ...can, error: STOP_WHY[can.code] ?? can.error };
+  if (!h.window_id) return { error: STOP_WHY.no_window, code: 'no_window' };
   if (!isWorking(h, lastTurn)) {
     return { error: 'Nothing is running at this desk right now, so there is nothing to stop.', code: 'not_working' };
   }
@@ -1333,10 +1338,14 @@ export function buildFloor(store, live = null, sessions = null) {
           // the floor. A client-side re-derivation of this drifted within a
           // day: it read `held` and so treated "no window at all" as no
           // different from "our own window", and offered to nudge an agent
-          // whose session had ended the day before.
+          // whose session had ended the day before. `opens` carries the
+          // difference now: the bell rings on such a desk on purpose, and says
+          // first that it will open the window — see nudgeable().
           nudge: (() => {
             const v = nudgeable(h, nowMs);
-            return v.error ? { ok: false, code: v.code, reason: v.error } : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+            return v.error
+              ? { ok: false, code: v.code, reason: v.error }
+              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id, opens: !!v.opens };
           })(),
           // Whether a turn is running, said once. The desk is drawn from this
           // and the chat panel's stop sign is lit from it, so they cannot
