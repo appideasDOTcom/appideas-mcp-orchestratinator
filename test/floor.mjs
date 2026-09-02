@@ -407,11 +407,18 @@ try {
   // sat with no window and no way to be given one. The host could always do it
   // — its `case 'open'` was simply unreachable.
   const HK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
-  const register = (desk) =>
-    fetch(`${HOST}/api/host/register`, {
+  // A real host names every desk it has on every registration, and the server
+  // now reads a desk missing from that list as one the host no longer runs. So
+  // this helper accumulates: each call re-sends everything registered so far,
+  // which is what the sections below always assumed a registration meant.
+  const known = new Map();
+  const register = (desk) => {
+    known.set(desk.agent, desk);
+    return fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [desk] }),
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()] }),
     });
+  };
   // Applied-count returned, not just the status: this endpoint answers 200 for a
   // batch it dropped entirely, so a test that read the status would pass on an
   // event that never landed.
@@ -474,7 +481,7 @@ try {
        'so the turns the host relays are the turns the chat panel is scoped to — the empty-panel failure this closes');
   }
   const reregistered = await register({ channel: CH, agent: 'nomad', cwd: '/repo/nomad' }).then((r) => r.json());
-  eq(reregistered.desks[0].sdk_session_id, 'sdk-nomad-1',
+  eq(reregistered.desks.find((d) => d.agent === 'nomad').sdk_session_id, 'sdk-nomad-1',
      'a host that names no session (it just restarted) does not blank the stored one, and is handed it back');
 
   /* A message the desk took while it was working.
@@ -1080,6 +1087,53 @@ try {
   assert(!tables.includes('turns'), 'turns are NOT in a backup — it holds what people typed, and the file is meant to be safe to email yourself');
   assert(!tables.includes('agent_sessions'), 'nor are sessions');
   assert(tables.includes('personas'), 'but names are, because a rename is an operator decision that would otherwise be lost');
+
+  /* ── a host that looks again ────────────────────────────────────────────────
+   * Desks used to be discovered once, when a host started. Binding a repo to
+   * the board afterwards — the most ordinary thing a person does — left the
+   * floor saying "No host on this board is running that repo" until the
+   * service was restarted. Two halves close that: the host rescans, and the
+   * board (a) marks a desk the host stops naming as offline and (b) asks every
+   * host to look when a session starts somewhere none of them runs. Last in
+   * this file on purpose: the asks land in h-open's queue too, and the sections
+   * above read that queue expecting only their own work. */
+  console.log('\na host that looks again');
+  const registerMove = (...desks) =>
+    fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-move', name: 'movebox', tmux: 'orch', desks }),
+    }).then((r) => r.json());
+  const workMove = () =>
+    fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK })
+      .then((r) => r.json())
+      .then((b) => (b.work ?? []).map((i) => i.kind));
+  const moverA = { channel: CH, agent: 'mover-a', cwd: '/repo/mover-a' };
+  const moverB = { channel: CH, agent: 'mover-b', cwd: '/repo/mover-b', session_id: 'sdk-mover-b' };
+  await registerMove(moverA, moverB);
+  await workMove();   // a work poll is what keeps a host counted as here
+  f = await floor();
+  eq([deskOf(f, 'mover-a').hosted.live, deskOf(f, 'mover-b').hosted.live], [true, true], 'two desks named, two hosted');
+  await registerMove(moverA);
+  f = await floor();
+  eq(deskOf(f, 'mover-a').hosted.live, true, 'a desk the host still names stays hosted');
+  eq([deskOf(f, 'mover-b').hosted.state, deskOf(f, 'mover-b').hosted.live], ['offline', false],
+     'a desk the host stopped naming goes offline — its binding was removed or moved, and a row that kept reading hosted took messages nobody would drain');
+  eq(deskOf(f, 'mover-b').hosted.session_id, 'sdk-mover-b', 'keeping the conversation it had, so a return resumes rather than restarts');
+  await registerMove(moverA, moverB);
+  eq(deskOf(await floor(), 'mover-b').hosted.live, true, 'and naming it again brings it back');
+
+  await post(ev('stranger', 's-stranger', 'SessionStart'));
+  eq(await workMove(), ['rescan'], 'a session starting on a desk no host runs asks every host here to look at its roots again');
+  await post(ev('stranger-2', 's-stranger-2', 'SessionStart'));
+  eq(await workMove(), [], 'once per throttle — a machine with no host at all must not keep every other host walking its disk');
+  await post(ev('mover-a', 's-mover-a', 'SessionStart'));
+  eq(await workMove(), [], 'and a session starting on a hosted desk asks nothing');
+  const look = await fetch(`${HOST}/api/floor/rescan`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  eq(look.status, 200, 'the button asks outright');
+  assert((await look.json()).asked >= 1, 'and says how many hosts it asked');
+  eq(await workMove(), ['rescan'], 'past the throttle — one click, one look');
 } catch (err) {
   failures++;
   console.error(`\n  ✗ ${err.stack ?? err}`);

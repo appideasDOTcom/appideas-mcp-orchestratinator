@@ -372,6 +372,57 @@ class Host {
     return reply;
   }
 
+  /**
+   * Look at the roots again, and take up whatever has appeared, moved or gone
+   * since the last look.
+   *
+   * discoverDesks() used to run once, in main(), and the list it returned was
+   * this host's for life. That made the most ordinary thing a person does —
+   * point a repo's .mcp.json at this board, or at a new channel, and open
+   * Claude Code in it — the one thing the floor could not follow: the hooks
+   * reported the desk within a second (they read .mcp.json per event) while
+   * the host went on serving the list it had at boot, and the compose box said
+   * "No host on this board is running that repo" until somebody restarted a
+   * launchd job. Closing the editor, reopening it and reloading the page all
+   * correctly changed nothing. Restarting a service is not an acceptable price
+   * for editing a file, so the host looks again: before every heartbeat on its
+   * own, and on request (a `rescan` work item), which the board sends the
+   * moment a session starts in a repo no host runs. The walk is shallow — see
+   * discoverDesks — and measured at ~200ms over a real projects directory.
+   *
+   * A desk that has moved (same name, different repo) is a different desk and
+   * gets a fresh Desk: it reads its own transcript from its own offset rather
+   * than carrying the old repo's. A desk that is gone is dropped here, and the
+   * next register() — which names every desk this host has, every time — is
+   * how the board learns to mark it offline.
+   */
+  async rescan(reason = 'heartbeat') {
+    const origin = originOf(this.cfg.url);
+    const found = discoverDesks(this.cfg.roots).filter((d) => originOf(d.url) === origin);
+    const seen = new Set();
+    let changed = false;
+    for (const d of found) {
+      const k = `${d.channel}|${d.agent}`;
+      seen.add(k);
+      // A host installed before any repo was bound to its board has no token
+      // to talk with. The first desk that appears is where one comes from —
+      // the same rule main() applies at boot.
+      if (!this.cfg.token && d.key) this.cfg.token = d.key;
+      const have = this.desks.get(k);
+      if (have && have.cwd === W.canonical(d.cwd)) continue;
+      this.desks.set(k, new Desk(this, d));
+      log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${reason})`);
+      changed = true;
+    }
+    for (const [k, desk] of this.desks) {
+      if (seen.has(k)) continue;
+      this.desks.delete(k);
+      log(`dropped desk ${desk.label} — ${desk.cwd} no longer binds it to ${origin}  (${reason})`);
+      changed = true;
+    }
+    return changed;
+  }
+
   /** Re-read the roster and each desk's transcript. This is the whole of how
    *  the floor learns what is happening — no hook has to report a turn. */
   async watch() {
@@ -404,6 +455,17 @@ class Host {
   }
 
   async handle(item) {
+    if (item.kind === 'rescan') {
+      // Asked for rather than scheduled: the board saw a session start on a
+      // desk no host runs, or somebody pressed the button, and this host may
+      // be the one whose roots that repo is under. Before the desk lookup,
+      // because not having the desk is the whole point. Register straight
+      // after a change so the floor hears the answer in this tick rather than
+      // at the next heartbeat.
+      const why = item.payload?.why ?? 'asked';
+      if (await this.rescan(`${why} — ${item.channel}/${item.agent}`)) await this.register();
+      return;
+    }
     const desk = this.desks.get(`${item.channel}|${item.agent}`);
     if (!desk) return warn(`work for a desk this host doesn't have: ${item.channel}/${item.agent}`);
     switch (item.kind) {
@@ -640,13 +702,28 @@ class Host {
   async run() {
     let backoff = 1000;
     let lastRegister = 0;
-    const watching = this.watchLoop();
+    let watching = null;
     while (!this.stopping) {
       try {
         if (Date.now() - lastRegister > HEARTBEAT_MS) {
+          // Look before saying: the heartbeat names every desk this host has,
+          // so a desk bound since the last one is on the board a minute later
+          // at the latest, with nothing restarted. See rescan().
+          await this.rescan('heartbeat');
           await this.register();
           lastRegister = Date.now();
         }
+        // The relay starts only after the first registration has landed, and
+        // that order is not tidiness. A desk's first watch tick reports which
+        // session is live there and who holds it, and the server files both
+        // against a row that register() creates — an event for a desk the
+        // server has never heard of is dropped without a word. Started beside
+        // register(), the first tick won that race on a desk new to this host
+        // (measured 2026-09-02: a session adopted and reported within
+        // milliseconds of boot, invisible on the board for a full heartbeat),
+        // and neither event is ever re-sent, because from the host's side
+        // nothing changed. Still a separate loop once it runs — see watchLoop.
+        watching ??= this.watchLoop();
         // The long poll is the pacing for *work*. The transcripts are read by
         // watchLoop() beside this, not between these lines.
         const reply = await this.request(
@@ -663,7 +740,7 @@ class Host {
         backoff = Math.min(backoff * 2, 30_000);
       }
     }
-    await watching;
+    if (watching) await watching;
   }
 
   async stop() {

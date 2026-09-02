@@ -303,6 +303,34 @@ try {
   assert((started ?? '').includes(`--resume ${SESSION_ID}`),
     `and resumes the same conversation rather than starting a new one — ${JSON.stringify((started ?? '').trim())}`);
 
+  console.log('\na desk that appears after the host started');
+  // Desks used to be discovered once, at boot. Binding a repo to this board
+  // afterwards — the most ordinary thing a person does — left the floor saying
+  // "No host on this board is running that repo" until the service was
+  // restarted, while the hooks were already relaying the conversation. The
+  // host now looks again before each heartbeat and whenever the board asks,
+  // and the board asks the moment a session starts in a repo no host runs.
+  const late = `${FIX}/repo-late`;
+  mkdirSync(late, { recursive: true });
+  writeFileSync(`${late}/.mcp.json`, JSON.stringify({
+    mcpServers: {
+      orchestratinator: {
+        type: 'http', url: `${HOST}/mcp`,
+        headers: { 'X-Channel': CH, 'X-Agent': 'late', 'X-Orchestratinator-Key': KEY },
+      },
+    },
+  }, null, 2));
+  eq(deskOf(await floor(), 'late')?.hosted ?? null, null, 'a repo bound to this board after the host started is not hosted yet');
+  await json('/api/ingest', { channel: CH, agent: 'late', session_id: 'late-1', hook_event_name: 'SessionStart', cwd: late });
+  assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.live === true ? true : null), 10000),
+    'a session starting there is enough: the board asks, the host looks, finds the desk and registers it — nothing restarted');
+  assert(/found desk .*\/late/.test(host.log), 'and the host says so in its log');
+  rmSync(`${late}/.mcp.json`);
+  eq((await json('/api/floor/rescan', {})).status, 200, 'the board can also ask outright');
+  assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.state === 'offline' ? true : null), 10000),
+    'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
+  assert(/dropped desk .*late/.test(host.log), 'which the host also says');
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));

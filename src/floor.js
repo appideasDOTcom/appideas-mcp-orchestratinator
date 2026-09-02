@@ -626,6 +626,13 @@ export function ingestHookEvent(store, body, live = null) {
   const hosted = store.hostedDesk(channel, agent);
   const mirrored = !!hosted && secondsSince(iso(hosted.host_seen), Date.now()) < HOST_STALE_SECONDS;
 
+  // A session starting in a repo no host runs is the moment one might be able
+  // to: the binding that names this desk was most likely just written. Ask
+  // every host here to look — once per throttle window, see askRescan.
+  if (event === 'SessionStart' && !mirrored && live) {
+    askRescan(store, live, { channel, agent, why: 'a session started on a desk no host runs' });
+  }
+
   const key = deskKey(channel, agent);
   const state = (s) => {
     if (!hosted) return;
@@ -839,12 +846,14 @@ export function createLive() {
   const sentAfter = new Map(); // deskKey -> id of the last user turn when the send was accepted
   const watchers = new Map();  // deskKey -> Set<fn>
   const waiters = new Map();   // host_id -> wake fn for a held work request
+  const rescanAsked = new Map(); // host_id -> ms when it was last asked to look at its roots
   return {
     partial,
     pending,
     answered,
     delivery,
     sentAfter,
+    rescanAsked,
     subscribe(key, fn) {
       if (!watchers.has(key)) watchers.set(key, new Set());
       watchers.get(key).add(fn);
@@ -865,6 +874,39 @@ export function createLive() {
       waiters.get(hostId)?.();
     },
   };
+}
+
+/**
+ * Ask every host that is here to look at its roots again.
+ *
+ * A host learns its desks by walking the filesystem, and until 2026-09-02 it
+ * did that once, at boot. So the most ordinary thing a person does — point a
+ * repo's .mcp.json at this board, or at a new channel, and open Claude Code
+ * there — left the compose box saying "No host on this board is running that
+ * repo" until a launchd job was restarted, while the hooks (which read the file
+ * per event) were already relaying the conversation. Hosts now look again
+ * before every heartbeat on their own; this is how to make one look sooner. The
+ * board does not know whose roots a repo is under, so it asks every host that
+ * is here, and each answers by registering again with what it found.
+ *
+ * Throttled per host unless forced. A session starting in a repo on a machine
+ * with no host at all would otherwise have every host walking its disk on
+ * every start, for a desk none of them can ever find. Forced is the button:
+ * one click, one look, no waiting to learn whether the throttle ate it.
+ */
+const RESCAN_MIN_MS = 15_000;
+export function askRescan(store, live, { channel, agent, why, force = false }) {
+  const now = Date.now();
+  const asked = [];
+  for (const h of store.listHosts()) {
+    if (secondsSince(iso(h.last_seen), now) >= HOST_STALE_SECONDS) continue;
+    if (!force && now - (live.rescanAsked.get(h.host_id) ?? 0) < RESCAN_MIN_MS) continue;
+    live.rescanAsked.set(h.host_id, now);
+    store.enqueueHostWork(h.host_id, channel, agent, 'rescan', { why });
+    live.wake(h.host_id);
+    asked.push(h.name ?? h.host_id);
+  }
+  return asked;
 }
 
 /**
@@ -1594,6 +1636,26 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       });
     }
 
+    // What the host did not name, it no longer runs. A host names every desk
+    // it has on every heartbeat, so a desk missing from the list has had its
+    // binding removed or moved — a repo re-pointed at another channel, or at
+    // another board. The row stays, as the last thing known about that desk
+    // and the session id a return resumes with, but it goes offline exactly
+    // as unregister would take it. Left as it was, it read as hosted and live
+    // for as long as the host kept heartbeating, so a message sent there was
+    // accepted into a queue no desk would ever drain. Only this host's rows:
+    // another host's claim on the same name is that host's to keep.
+    const named = new Set(accepted.map((a) => deskKey(a.channel, a.agent)));
+    for (const d of store.listHostedDesks()) {
+      if (d.host_id !== hostId || d.state === 'offline') continue;
+      const k = deskKey(d.channel, d.agent);
+      if (named.has(k)) continue;
+      store.setHostedState(d.channel, d.agent, 'offline');
+      live.pending.delete(k);
+      live.partial.delete(k);
+      live.publish(k, { type: 'state', state: 'offline' });
+    }
+
     for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
       applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' });
     }
@@ -1875,6 +1937,29 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.enqueueHostWork(h.host_id, channel, agent, 'open', {});
     live.wake(h.host_id);
     res.json({ ok: true });
+  });
+
+  /**
+   * Make every host here look at its roots again, now.
+   *
+   * The button behind "No host on this board is running that repo". Hosts
+   * look on their own — before each heartbeat, and when a session starts on a
+   * desk none of them runs — so this exists for the person who would rather
+   * not wait a minute to learn whether that worked. Forced past the throttle
+   * for the same reason. The answer arrives as a re-registration, which the
+   * floor's next poll shows; the count here only says who was asked.
+   */
+  router.post('/api/floor/rescan', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel) ?? '*';
+    const agent = str(req.body?.agent) ?? '*';
+    const asked = askRescan(store, live, { channel, agent, why: 'asked from the floor', force: true });
+    if (!asked.length) {
+      return res.status(409).json({
+        error: 'No host is registered on this board right now, so there is nobody to ask. Start one and it will find the repo on its own.',
+        code: 'no_host',
+      });
+    }
+    res.json({ ok: true, asked: asked.length, hosts: asked });
   });
 
   /**

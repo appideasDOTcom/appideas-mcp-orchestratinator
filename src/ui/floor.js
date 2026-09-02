@@ -2475,7 +2475,14 @@
       ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
       : h
         ? `The host for this desk (${esc(h.host)}) is offline, so nothing sent here can reach it. Start it on that machine and this works again.`
-        : `No host on this board is running that repo, so there is nowhere to send this yet.`;
+        // Hosts look for a newly bound repo on their own — before each
+        // heartbeat, and the moment a session starts in it — so this says so,
+        // and offers the look now for anyone who would rather not wait a
+        // minute to find out. What the button heard back is kept in ui rather
+        // than flashed onto it, because this hint is rewritten every poll.
+        : `No host on this board is running that repo yet. Hosts look for it again every minute, and the moment a session starts in it. `
+          + `<button class="btn" data-act="rescan">Look now</button>`
+          + (ui.rescanSaid && Date.now() - ui.rescanSaid.at < 8000 ? ` <span class="muted">${esc(ui.rescanSaid.text)}</span>` : '');
 
     // Turns are appended, never re-rendered. A row already on screen stays
     // exactly where it is, which is what makes reading upward possible. The
@@ -3147,6 +3154,26 @@
           ?.desks.find((x) => x.agent === ui.open.agent);
         window.stopDialog(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent);
       }
+    } else if (act.dataset.act === 'rescan') {
+      // One click, one look, by every host on the board. The result is a
+      // re-registration the next poll shows; what is said here is only who was
+      // asked, or why nobody could be.
+      act.disabled = true;
+      try {
+        const r = await fetch('./api/floor/rescan', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ channel: ui.open?.channel, agent: ui.open?.agent }),
+        });
+        const body = await r.json().catch(() => ({}));
+        ui.rescanSaid = {
+          at: Date.now(),
+          text: r.ok ? `asked ${body.asked} host${body.asked === 1 ? '' : 's'} — looking…` : (body.error ?? `failed (${r.status})`),
+        };
+      } catch (err) {
+        ui.rescanSaid = { at: Date.now(), text: err.message };
+      }
+      act.disabled = false;
+      renderPanel();
     } else if (act.dataset.act === 'prompts') {
       // A toggle: the second click on the button closes it, which is what a
       // menu button does everywhere else.
