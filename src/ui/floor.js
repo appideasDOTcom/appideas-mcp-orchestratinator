@@ -870,6 +870,8 @@
 
   /** How long a refused bell stays marked before it goes back to normal. */
   const REFUSED_MS = 2500;
+  /** The word a bell types. One literal, because the bubble is matched on it. */
+  const NUDGE_WORD = 'nudge';
 
   const deskBell = (channel, agent) =>
     document.querySelector(`.desk[data-channel="${CSS.escape(channel)}"][data-agent="${CSS.escape(agent)}"] .bell`);
@@ -901,12 +903,20 @@
   };
 
   /**
-   * Strike a desk's bell: deliver the nudge, then ring.
+   * Strike a desk's bell: deliver the nudge, then ring — and show it as
+   * sending in the panel, if that desk's is open, exactly as the board's
+   * Nudge button does through floorNudged().
    *
    * In that order, and it matters. The ring is the operator's evidence that
    * something was sent, so it must not play for a nudge the board refused —
    * a bell that rings whatever happened is a bell that means nothing. The wait
    * is one round trip to localhost, and the plunger is what covers it.
+   *
+   * The bubble used to be missing here. The bell rang and that was all, so on
+   * a desk mid-turn — where the word sits queued until the next step — nothing
+   * on screen said the nudge was in line, and the operator was left trusting
+   * the ring against a chat panel that showed nothing. The ring says "sent";
+   * the amber bubble is what says "the desk has it".
    */
   async function strike(channel, agent) {
     const k = ringKey(channel, agent);
@@ -915,7 +925,7 @@
       const r = await fetch('./api/floor/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ channel, agent, text: 'nudge' }),
+        body: JSON.stringify({ channel, agent, text: NUDGE_WORD }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error ?? `nudge failed (${r.status})`);
@@ -936,7 +946,7 @@
       }
       return;
     }
-    ring(channel, agent);
+    window.floorNudged(channel, agent, NUDGE_WORD);
   }
 
   /** Start a peal on a desk, whoever asked for it. */
@@ -2490,26 +2500,18 @@
     // than as a turn: it is not one until the window says so.
     for (const stale of box.querySelectorAll('.t-pending')) stale.remove();
     for (const p of ui.sending) {
-      const node = document.createElement('div');
-      node.className = 't t-user t-pending';
-      // Three states, and the difference between them is who has the message.
-      //
-      // `queued` is the window's own word: it took the message while it was
-      // working and will read it at its next step. That is a delivery, not a
-      // delay, so it never goes stale — the desk is holding it and has said so.
-      // Everything the operator does next depends on telling that apart from
-      // silence, which is what the third state is.
       const queued = deliveredNow(p.text);
       const stale = !queued && Date.now() - (p.at ?? 0) > SENDING_GRACE_MS;
-      node.classList.toggle('stale', stale);
-      node.classList.toggle('queued', !!queued);
-      const said = queued
-        ? (queued.held ? 'queued — the window took it once it was free' : 'queued — the desk is working')
-        : (stale ? 'not recorded — send again' : 'sending…');
-      node.innerHTML = `<div class="t-who">you<span class="t-when mono">${said}</span></div>` +
-        ' <div class="t-body"></div>';
-      node.querySelector('.t-body').textContent = p.text;
-      box.insertBefore(node, partialNode);
+      box.insertBefore(pendingNode(p.text, queued, stale), partialNode);
+    }
+    // A queued message this browser did not send — the bell struck with the
+    // panel shut, the board's Nudge button, another tab, a reload — is still
+    // the operator's, and the desk has said it holds it. Nothing in
+    // `ui.sending` stands for it, so it is drawn from the server's note
+    // instead: the same bubble, already queued, and gone the moment the note
+    // is — a turn retires it there, exactly as a turn retires the others here.
+    if (ui.delivery && !ui.sending.some((p) => deliveredNow(p.text))) {
+      box.insertBefore(pendingNode(ui.delivery.text, ui.delivery, false), partialNode);
     }
 
     if (ui.partial) {
@@ -2574,6 +2576,30 @@
     const d = ui.delivery;
     if (!d || !text) return null;
     return squash(d.text).includes(squash(text)) ? d : null;
+  }
+
+  /**
+   * One pending bubble. Three states, and the difference between them is who
+   * has the message.
+   *
+   * `queued` is the window's own word: it took the message while it was
+   * working and will read it at its next step. That is a delivery, not a
+   * delay, so it never goes stale — the desk is holding it and has said so.
+   * Everything the operator does next depends on telling that apart from
+   * silence, which is what the third state is.
+   */
+  function pendingNode(text, queued, stale) {
+    const node = document.createElement('div');
+    node.className = 't t-user t-pending';
+    node.classList.toggle('stale', stale);
+    node.classList.toggle('queued', !!queued);
+    const said = queued
+      ? (queued.held ? 'queued — the window took it once it was free' : 'queued — the desk is working')
+      : (stale ? 'not recorded — send again' : 'sending…');
+    node.innerHTML = `<div class="t-who">you<span class="t-when mono">${said}</span></div>` +
+      ' <div class="t-body"></div>';
+    node.querySelector('.t-body').textContent = text;
+    return node;
   }
 
   function settle(rows) {
@@ -3163,7 +3189,9 @@
    * in a dialog the board owns, so nothing here would otherwise know it had
    * happened until the window echoed the turn back — a poll and a host
    * round-trip later, by which time the operator has clicked something else and
-   * credits that instead.
+   * credits that instead. The floor's own bell comes through here too
+   * (strike()), so a nudge shows as sending, then queued, then a turn,
+   * whichever surface struck it.
    *
    * Shown as sending rather than as a turn, for the same reason `sendChat` does
    * it: the board accepting the word is not the window having recorded it.

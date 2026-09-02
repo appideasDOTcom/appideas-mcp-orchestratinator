@@ -482,6 +482,26 @@ try {
   eq((await noteOn('racer'))?.text, 'and this one is still waiting',
      'and a context turn retires no queued note — only the person becoming a turn does that');
 
+  // A repeat. The desk's last user turn already says the same words — the
+  // operator nudged earlier and is nudging again — but that turn is from
+  // BEFORE this send, so it is not this message arriving. Matching on the
+  // words alone dropped the note here every time, and "nudge" is the most
+  // repeated message on the board.
+  await register({ channel: CH, agent: 'repeater', cwd: '/repo/repeater', window: '@13' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'repeater', session_id: 's-repeat', cwd: '/repo/repeater' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'repeater', role: 'user', text: 'nudge' }]);
+  const again = await fetch(`${HOST}/api/floor/chat`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'repeater', text: 'nudge' }),
+  });
+  eq(again.status, 200, 'the second nudge is accepted');
+  eq(await takeWork(), ['chat'], 'and queued for the host');
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'repeater', state: 'queued', text: 'nudge' }]);
+  eq((await noteOn('repeater'))?.text, 'nudge',
+     'a delivery matching a turn from before the send is not that turn arriving — the note stands');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'repeater', role: 'user', text: 'nudge' }]);
+  eq(await noteOn('repeater'), null, 'and the turn recorded after the send retires it');
+
   console.log('\nstopping a turn');
   // End to end this time, because the interesting part is that the endpoint and
   // the sign refuse on the same facts. The desk is driven into `working` by a

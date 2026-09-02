@@ -824,6 +824,19 @@ export function createLive() {
    * it lost. Dropped the moment the real turn arrives; see the `turn` case.
    */
   const delivery = new Map(); // deskKey -> { state, text, at, held }
+  /**
+   * Where the conversation stood when the operator's message was accepted:
+   * the id of the desk's last user turn at that moment, per desk.
+   *
+   * The `delivery` case has to tell "the turn beat the note here" from "an
+   * older turn happens to say the same words". Text alone cannot: the most
+   * repeated message on this board is the one word "nudge", so a second nudge
+   * always finds the first as the desk's last user turn, and matching on words
+   * dropped its note every time — the bubble sat on "sending…" and then said
+   * "not recorded" about a message the window was holding. A turn counts as
+   * this message arriving only if it was recorded after the send.
+   */
+  const sentAfter = new Map(); // deskKey -> id of the last user turn when the send was accepted
   const watchers = new Map();  // deskKey -> Set<fn>
   const waiters = new Map();   // host_id -> wake fn for a held work request
   return {
@@ -831,6 +844,7 @@ export function createLive() {
     pending,
     answered,
     delivery,
+    sentAfter,
     subscribe(key, fn) {
       if (!watchers.has(key)) watchers.set(key, new Set());
       watchers.get(key).add(fn);
@@ -987,8 +1001,13 @@ function applyHostEvent(store, live, hostId, ev) {
       // "queued". Handling only the other order left the note standing for ever
       // over a message that was already in the conversation — measured on the
       // real board, and the reason this looks for it rather than assuming.
+      //
+      // And only a turn recorded since the send counts as that. The desk's
+      // last user turn saying the same words is, more often than not, the
+      // previous nudge — see `sentAfter`.
       const already = store.deskLastUserTurn(channel, agent);
-      if (already && squash(already.text).includes(squash(text))) {
+      const mark = live.sentAfter.get(key) ?? 0;
+      if (already && already.id > mark && squash(already.text).includes(squash(text))) {
         if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
         break;
       }
@@ -1765,6 +1784,10 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // The host does the delivery: it types this into the desk's window, the
     // same window the person's own terminal is attached to. Nothing has to be
     // handed over first, so there is nothing to say here about whose turn it is.
+    //
+    // Mark where the conversation stood, so the delivery report can tell this
+    // message's turn from an older one that says the same words — see sentAfter.
+    live.sentAfter.set(deskKey(channel, agent), store.deskLastUserTurn(channel, agent)?.id ?? 0);
     store.enqueueHostWork(h.host_id, channel, agent, 'chat', { text });
     live.wake(h.host_id);
     res.json({ ok: true, host: h.host_name ?? h.host_id });
