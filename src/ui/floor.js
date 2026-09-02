@@ -3429,7 +3429,10 @@
   });
 
   try { ui.floorFilter = localStorage.getItem('orch.floor') || null; } catch { /* default: all floors */ }
-  let initial = 'board';
-  try { initial = localStorage.getItem('orch.view') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
+  /* First visit lands on the floor, all floors — the less technical face of the
+     board. A stored choice (either one) always wins; only the absence of a
+     choice defaults here. */
+  let initial = 'floor';
+  try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
   setView(initial);
 })();

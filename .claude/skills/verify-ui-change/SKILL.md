@@ -170,7 +170,11 @@ cost rounds here — worth knowing even if you hand-roll something else:
 - **The localStorage dance.** Which view loads is `localStorage` — but it cannot
   be set from `about:blank`, which has no origin and answers `SecurityError:
   Access is denied for this document`. `open()` navigates to get an origin,
-  writes, and navigates again.
+  writes, and navigates again. The inverse — a first visit, where a key must be
+  *absent* — is not a parameter: `open({ view: null })`, then
+  `evalJs("localStorage.clear()")` and `goto(base)` again. The headless Chrome
+  is reused across checks, so without the clear a "fresh" run inherits whatever
+  the last check stored.
 - **`waitFor(expr)` rather than sleeps.** A fixed sleep is either slower than it
   needs to be or shorter — and the short one is indistinguishable from a broken
   feature. Wait on the thing you expect to become true.
@@ -231,8 +235,13 @@ leaves a server on **8896** and fixtures in `data/`; check for both before
 believing a later failure is real.
 
 Finish by rebuilding the live stack, since `:8787` serves from the image and not
-from `src/`:
+from `src/`. Do not chain a single curl onto it — `Started` prints before the
+server binds, and the immediate probe answers `000` about a container that is
+fine (measured 2026-09-01; it answers about two seconds later). Poll, then read
+one fact out of the new image to prove it is the one serving:
 
 ```bash
-docker compose up -d --build && curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/health
+docker compose up -d --build          # must print Recreated, not Running
+for i in $(seq 1 40); do curl -sf localhost:8787/health >/dev/null && break; sleep 0.5; done
+curl -s localhost:8787/health
 ```
