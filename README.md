@@ -63,9 +63,19 @@ board. Those are the three things the next section installs.
 
 ## Install
 
+**The easiest path: have an AI agent do it.** This is a several-part
+installation — a server, a plugin, a host — so clone the repo, open a session
+in it from Claude Code or VS Code, and say *"install the orchestratinator by
+following the README."* Everything below is the manual path, and exactly what
+the agent will follow.
+
 Everything here is done once per machine. You need **Docker**, **tmux**,
-**Node 20+**, and **Claude Code** installed and signed in — the host runs the
-same `claude` binary your terminal does, with your login.
+**Node 20+**, and **Claude Code** (the `claude` command) installed and signed
+in — the host runs desks with it even if you only ever work from VS Code.
+Where you *work* is your choice: start sessions from Claude Code in a
+terminal, from VS Code, or both. The floor doesn't replace either — it hands
+any conversation back to them whenever you want a feature its chat doesn't
+provide.
 
 **1. Get the code and make a shared secret.**
 
@@ -122,7 +132,10 @@ to the whole system.
 
 **4. Install the plugin** — this is what puts each session on the floor.
 
-In a **Claude Code CLI** session (a terminal), from the clone:
+One install covers the whole machine: Claude Code and VS Code share it, so do
+this from whichever you work in.
+
+**From Claude Code** (a terminal session), from the clone:
 
 ```
 /plugin marketplace add .
@@ -131,7 +144,7 @@ In a **Claude Code CLI** session (a terminal), from the clone:
 
 From any other directory, give the full path to the clone instead of `.`.
 
-In **VS Code**, the `/plugin` command doesn't take arguments — it answers
+**From VS Code**, the `/plugin` command doesn't take arguments — it answers
 *"/plugin isn't available in this environment."* Type `/plugin` on its own and
 use the menu: add the marketplace by directory, then install
 **orchestratinator-floor** from it (it sits at the bottom of the list, below
@@ -161,7 +174,9 @@ right; every desk you wired up should be there.
 ## Day to day
 
 A conversation is one `claude` process, so **one app holds it at a time**. The
-floor always says who holds each desk, and moving it is deliberate:
+floor always says who holds each desk, and moving it is deliberate — hand a
+conversation back to VS Code or your terminal whenever you need something the
+floor chat doesn't provide:
 
 - **Your editor holds it:** the floor shows the conversation read-only and the
   composer is greyed. Close the tab in your editor and the floor picks it up a

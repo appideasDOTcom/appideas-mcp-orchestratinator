@@ -56,6 +56,29 @@ how to reshoot. Delete this file when we're done.
   should read livelier *at rest*, that's a product CSS change, not a
   screenshot change — flagged, not taken.
 
+## Round 4
+
+- **Install steps validated against the code**, not memory: compose really does
+  publish `8787:8787` on every interface (the warning stands); the root
+  `.claude-plugin/marketplace.json` serves `orchestratinator-floor` from
+  `./plugin`, so `/plugin marketplace add .` + install are right;
+  `host/install.sh [--url <board>] <dirs…>` matches, enforces tmux and a
+  signed-in `claude` on PATH itself, and prints `tmux attach -t orch`; the
+  `.mcp.json` header names match what the server binds. Nothing in steps 1–6
+  was stale. (`.env.example` was left unread — the deny on it is the
+  anti-leak guard — but compose names both variables the README uses.)
+- Install now opens with the agent-led path ("clone, open a session, say
+  'install the orchestratinator by following the README'"); prereqs say
+  plainly that `claude` is required because the host runs desks with it, while
+  sessions may start from Claude Code, VS Code, or both; step 4 notes one
+  plugin install covers both surfaces; Day to day frames hand-back as "when
+  you need a feature the floor chat doesn't provide".
+- The working tree had the round-3 room caption reverted to the round-2 text
+  while every other round-3 change survived — HEAD ("README updates, part 3")
+  carries the round-3 caption, so it read as a stale editor buffer saving over
+  it, and the committed caption was restored. If the revert was deliberate,
+  say so and it goes back.
+
 ## Where every old README section went
 
 Nothing was dropped. The mapping, old → new:
