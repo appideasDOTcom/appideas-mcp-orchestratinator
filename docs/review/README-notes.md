@@ -79,6 +79,16 @@ how to reshoot. Delete this file when we're done.
   it, and the committed caption was restored. If the revert was deliberate,
   say so and it goes back.
 
+## Round 5
+
+- Day to day rewritten as a linear, numbered daily loop (open a project →
+  start a session → open the floor → click into a room → answer what needs
+  you → ring the bell → type from the floor → take it back). Every warning
+  from the old bullets is folded into the step where it bites: the first-run
+  MCP approval in step 2, answer-where-the-conversation-is in step 5,
+  close-the-tab-first and resume semantics in step 7, the three ways back in
+  step 8.
+
 ## Where every old README section went
 
 Nothing was dropped. The mapping, old → new:

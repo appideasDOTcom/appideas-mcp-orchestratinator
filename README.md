@@ -173,29 +173,41 @@ right; every desk you wired up should be there.
 
 ## Day to day
 
-A conversation is one `claude` process, so **one app holds it at a time**. The
-floor always says who holds each desk, and moving it is deliberate — hand a
-conversation back to VS Code or your terminal whenever you need something the
-floor chat doesn't provide:
+One rule underneath everything: a conversation is one `claude` process, so
+**one app holds it at a time**. The floor always says who holds each desk. The
+daily loop:
 
-- **Your editor holds it:** the floor shows the conversation read-only and the
-  composer is greyed. Close the tab in your editor and the floor picks it up a
-  second or two later — if no window is open, the host opens one and *resumes
-  the same conversation*, history intact.
-- **Take it back with "Open in VS Code."** The host closes its own window
-  first, then opens the conversation in your editor with everything you did
-  from the floor already in it.
-- **Prefer a terminal?** Every window the floor opens is a window in one tmux
-  session: `tmux attach -t orch` and type there — same conversation, and the
-  floor keeps showing it. **"Open in Claude"** on any desk lands a terminal on
-  that desk's window for you.
-- **Answer permission prompts where the conversation is.** If your editor holds
-  the desk, the floor shows the prompt but no buttons — it says *"answer this
-  in your editor"* instead of offering a button that cannot work.
-- **The first window the floor opens for a new repo may stop and ask.** Claude
-  Code approves an MCP server once per project, so a repo you've never opened
-  yourself waits on *"New MCP server found in this project."* Answer it once
-  (`tmux attach -t orch`) and that repo is settled for good.
+**1. Open a project** in VS Code or Claude Code — any repo you made a desk
+with its `.mcp.json` (step 3 above).
+
+**2. Start a session and work as you always have.** The desk comes alive on
+its floor: your conversation, state, and prompts appear as they happen. The
+first session in a new repo stops on *"New MCP server found in this project"*
+— approve it once and that repo is settled for good.
+
+**3. Open the floor** — <http://localhost:8787/>. Glance at the building; the
+header counts who's here and who needs you. Go where it points.
+
+**4. Click into a room, then a desk,** to read that agent's conversation live.
+
+**5. Answer what needs you.** If the floor holds the desk, permission prompts
+have **Approve / Deny** buttons right on it. If your editor holds it, the
+floor shows the prompt and says *"answer this in your editor"* — answer it
+there.
+
+**6. Ring the service bell** on any desk whose tray shows waiting messages or
+tasks. The agent picks them up.
+
+**7. Type to a desk from the floor** by first closing that conversation's tab
+in your editor — one app at a time. The composer comes alive a second or two
+later; if no window is open at all, the host opens one and *resumes the same
+conversation*, history intact.
+
+**8. Take a conversation back whenever you want** — for any feature the floor
+chat doesn't provide. **Open in VS Code** moves it to your editor with
+everything you did from the floor already in it; **Open in Claude** lands a
+terminal on the desk's tmux window; or `tmux attach -t orch` and sit at any
+desk the host runs.
 
 ## Useful commands
 
