@@ -47,6 +47,18 @@ function saveMinimized() {
   try { localStorage.setItem(MIN_KEY, JSON.stringify([...ui.minimized])); } catch { /* not worth failing over */ }
 }
 
+/**
+ * Which channels this browser has folded away — the floor's copy of the same
+ * fact, so a channel minimized here is not a storey there either.
+ *
+ * A function, because `ui` is a top-level `const` and so is not on `window` at
+ * all; a top-level `function` in a classic script is. A copy of the names
+ * rather than the Set itself, because handing the other surface the live one
+ * makes it possible to minimize a channel from the floor by accident — and
+ * minimizing stays a board control. floor.js only ever asks.
+ */
+function minimizedChannels() { return [...ui.minimized]; }
+
 const ui = {
   limit: PAGE,
   minimized: loadMinimized(),
@@ -60,6 +72,11 @@ const ui = {
   showRetired: false,
   showArchived: false,
   state: null,   // the most recent /api/state, so a dialog can read live counts
+  // The saved-prompt library while its manager is open, and which row is being
+  // edited — an id, 'new', or null for the plain list. Outside the dialog's DOM
+  // because every save redraws the whole thing.
+  promptRows: [],
+  promptEdit: null,
 };
 
 /* ---------- formatting ---------- */
@@ -108,6 +125,22 @@ function pretty(raw) {
 
 const clip = (s, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
+/**
+ * A message body as one readable line.
+ *
+ * Bodies are JSON-encoded and may be a string or a structured object, so the
+ * raw column is quoted or braced and reads badly in a list. Unwrap a plain
+ * string; leave anything else as compact JSON rather than guessing at a shape.
+ */
+function excerpt(body, n = 90) {
+  let text = String(body ?? '');
+  try {
+    const v = JSON.parse(text);
+    text = typeof v === 'string' ? v : JSON.stringify(v);
+  } catch { /* not JSON — show it as it is */ }
+  return clip(text.replace(/\s+/g, ' ').trim(), n) || '(empty)';
+}
+
 /* ---------- channels & agents ---------- */
 
 const TONE_CLASS = { busy: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
@@ -145,8 +178,21 @@ function agentSub(a, channel) {
     bits.push(actionable(
       `${a.assigned_open} assigned`,
       'tasks',
-      { channel, agent: a.agent },
+      { channel, agent: a.agent, kind: 'assigned' },
       `close or reassign ${a.agent}'s open tasks`
+    ));
+  }
+  // Work the agent is holding, not merely work pointed at it. Without this it
+  // shows up only in the derived state label — which a live self-reported
+  // status suppresses — so an agent that reports diligently while holding three
+  // claimed tasks said nothing about them anywhere on this row. The dialog
+  // behind it already listed them: taskDialog filters on claimed_by too.
+  if (a.claimed_tasks?.length) {
+    bits.push(actionable(
+      `${a.claimed_tasks.length} claimed`,
+      'tasks',
+      { channel, agent: a.agent, kind: 'claimed' },
+      `${a.agent} is holding ${a.claimed_tasks.length} claimed task${a.claimed_tasks.length === 1 ? '' : 's'}`
     ));
   }
   return bits.join('  ·  ');
@@ -166,6 +212,30 @@ function stateChip(a) {
   return `<span class="state ${tone}" title="${esc(title)}">${esc(a.state.label)} · ${age(a.reported_at)}</span>`;
 }
 
+/**
+ * An agent's name, the id underneath it, and the way to change the name.
+ *
+ * Both are shown because they answer different questions: the name is what
+ * people say out loud, the id is what routes a message and what appears in
+ * `.mcp.json`. Showing only the name would repeat the mistake this replaced —
+ * an arbitrary label standing in for an identifier — and showing only the id
+ * makes the board a wall of slugs.
+ *
+ * The pencil is hidden until the name is hovered. It is a real button rather
+ * than a click handler on the name itself so it reaches the keyboard, and it
+ * carries the agent's *current* name so the dialog can open already filled in.
+ */
+function nameplate(channel, a) {
+  const name = a.persona ?? a.agent;
+  return `<span class="named">
+            <span class="agent-name">${esc(name)}</span>
+            <button type="button" class="pencil" data-act="rename"
+                    data-channel="${esc(channel)}" data-agent="${esc(a.agent)}" data-persona="${esc(name)}"
+                    title="Rename ${esc(name)}" aria-label="Rename ${esc(name)}">\u270e</button>
+          </span>
+          <span class="agent-id mono" title="X-Agent — what routes messages to this desk">${esc(a.agent)}</span>`;
+}
+
 /** One agent row. `retired` rows get a restore button instead of a trash can. */
 function agentRow(c, a) {
   const at = `data-channel="${esc(c.channel)}" data-agent="${esc(a.agent)}"`;
@@ -178,7 +248,7 @@ function agentRow(c, a) {
               <span class="dot ${PRESENCE_DOT[a.presence]}" title="${esc(a.presence)} · last seen ${esc(absTime(a.last_seen))}"></span>
               <div>
                 <div class="agent-line">
-                  <span class="agent-name">${esc(a.agent)}</span>
+                  ${nameplate(c.channel, a)}
                   <span class="presence" title="${a.sessions} live MCP session${a.sessions === 1 ? '' : 's'}">${esc(a.presence)}${a.sessions > 1 ? ` ×${a.sessions}` : ''}</span>
                   ${a.retired ? `<span class="state off" title="retired by the operator ${esc(absTime(a.retired_at))} — it returns by itself if it calls a tool">retired</span>` : stateChip(a)}
                 </div>
@@ -325,6 +395,7 @@ const KIND_LABEL = {
   'admin.unretire': ['agent restored', 'admin'],
   'admin.task.close': ['task closed', 'admin'],
   'admin.task.reassign': ['task reassigned', 'admin'],
+  'admin.message.reassign': ['message re-addressed', 'admin'],
   'admin.channel.archive': ['channel archived', 'admin'],
   'admin.channel.unarchive': ['channel restored', 'admin'],
   'admin.channel.delete': ['channel deleted', 'admin'],
@@ -424,6 +495,22 @@ function renderLog(rows) {
  * No credential to attach: the server's only check is that the request is
  * same-origin, which a fetch from this page satisfies by construction.
  */
+/**
+ * The floor's endpoints, from the board. Same origin, so the same guard lets it
+ * through — the board is nudging into a window the floor owns, which is exactly
+ * the kind of thing only the operator should be able to do.
+ */
+async function floorPost(path, body) {
+  const res = await fetch(`./api/floor/${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json;
+}
+
 async function admin(path, body) {
   const res = await fetch(`./api/admin/${path}`, {
     method: 'POST',
@@ -434,6 +521,22 @@ async function admin(path, body) {
   if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
   return json;
 }
+
+/**
+ * What to call an agent, and how to write it where the id also matters.
+ *
+ * `personas` ships per channel rather than only on agent rows, because a task's
+ * requester may have no row here — retired, or on a channel the board is not
+ * showing. Falling back to the id is correct rather than defensive: an agent
+ * with no persona row yet genuinely has no name but its own.
+ */
+const nameOf = (channel, agent) =>
+  (agent ? findChannel(channel)?.personas?.[agent] : null) ?? agent ?? '';
+/** "Appideas Qa (appideas-qa)" — collapses to one when the name adds nothing. */
+const nameAndId = (channel, agent) => {
+  const name = nameOf(channel, agent);
+  return !agent || name === agent ? String(agent ?? '') : `${name} (${agent})`;
+};
 
 const findChannel = (name) => (ui.state?.channels ?? []).find((c) => c.channel === name) ?? null;
 const findAgent = (channel, agent) => {
@@ -486,9 +589,50 @@ function notify(message, { error = true } = {}) {
  * Returns whether it succeeded, so a caller keeping the dialog open knows whether
  * it's safe to re-render over the error message.
  */
+/**
+ * Re-draw whichever dialog is open — or close it, if what it was showing is gone.
+ *
+ * Every one of these dialogs is opened from a count on the board, so when that
+ * count reaches zero the pill that opened it has gone too and there is nothing
+ * left in here to act on. Closing is not just tidier than an empty list: it
+ * removes the state where a re-render is skipped and the dialog is left showing
+ * rows that have already moved somewhere else, which is exactly what reassigning
+ * the last message used to do.
+ *
+ * The channel-scoped list has no count behind it, so it stays open and says it
+ * is empty.
+ */
+function refreshDialog() {
+  if (!el.dlg.open || !ui.dlgCtx) return;
+  const { channel, agent, kind } = ui.dlgCtx;
+  // Not every dialog is a list. A rename has no count behind it and nothing to
+  // redraw, so leave it exactly as the operator is using it. The prompt manager
+  // is the same: it reads its own endpoint and redraws after each change, and a
+  // poll-driven redraw would throw away whatever is half-typed in it.
+  if (kind === 'rename' || kind === 'prompts') return;
+  if (agent) {
+    const a = findAgent(channel, agent);
+    const left = !a ? 0
+      : kind === 'unread' ? a.unread
+      : kind === 'claimed' ? (a.claimed_tasks?.length ?? 0)
+      : kind === 'assigned' ? a.assigned_open
+      : 1;
+    if (!left) { closeDialog(); return; }
+  }
+  if (kind === 'unread') backlogDialog(channel, agent);
+  else taskDialog(channel, agent, kind);
+}
+
 async function act(fn, { keepOpen = false } = {}) {
   const scoped = el.dlg.open;
-  const toggle = (disabled) => el.dlgBody.querySelectorAll('button, select, input').forEach((b) => { b.disabled = disabled; });
+  // Only the controls this call actually disabled are re-enabled afterwards.
+  // A blanket re-enable switches on anything that was disabled deliberately —
+  // the Nudge button on a desk with no window to type into, for one — and it
+  // survives whenever the re-draw that would have rebuilt it is skipped.
+  const held = scoped
+    ? [...el.dlgBody.querySelectorAll('button, select, input')].filter((b) => !b.disabled)
+    : [];
+  const toggle = (disabled) => held.forEach((b) => { b.disabled = disabled; });
   if (scoped) toggle(true);
   try {
     await fn();
@@ -513,24 +657,186 @@ async function act(fn, { keepOpen = false } = {}) {
  * agent is never going to answer. Nothing here talks to the agent — the board has
  * no way to make another window take a turn, and no longer pretends to.
  */
+// What the operator is told when the button cannot be pressed. The full
+// sentence is on the button's tooltip; this is the version that fits a line.
+const NUDGE_BLOCKED = {
+  held_by_editor: 'the floor needs this conversation — close it in your editor, or move it back with “Open in VS Code”.',
+  host_offline: 'that desk’s host is offline, so nothing can be typed into its window.',
+  not_hosted: 'no host is running this repo, so this desk has no window to type into.',
+  no_window: 'nothing is running at that desk. Send a message instead — that opens a window; a nudge cannot.',
+};
+
+/**
+ * "Nudge agent" — types the word into the desk's own window, which is the thing
+ * the operator would otherwise go and do by hand.
+ *
+ * Disabled in fact and not only in appearance: `disabled` on the button, so a
+ * click cannot fire at all. The reason comes from the server, computed by the
+ * same function the chat endpoint refuses with, so the greyed-out state and the
+ * refusal can never tell different stories.
+ */
+function nudgeHead(channel, agent, a) {
+  if (!agent) return { button: '', note: '' };
+  const n = a?.nudge ?? { ok: false, code: 'not_hosted', reason: 'Nothing is known about this desk yet.' };
+  const at = `data-channel="${esc(channel)}" data-agent="${esc(agent)}"`;
+  const title = n.ok ? `Types “nudge” into ${agent}'s window on ${n.host}` : n.reason;
+  return {
+    button: `<button type="button" class="btn nudge" data-do="nudge" ${at}${n.ok ? '' : ' disabled'} title="${esc(title)}">Nudge agent</button>`,
+    note: n.ok ? '' : `<p class="dlg-note nudge-why">Can’t nudge — ${esc(NUDGE_BLOCKED[n.code] ?? n.reason)}</p>`,
+  };
+}
+
 function backlogDialog(channel, agent) {
   const a = findAgent(channel, agent);
   if (!a || !a.unread) return;
   const upTo = a.unread_max_id ?? 0;
   const at = `data-channel="${esc(channel)}" data-agent="${esc(agent)}"`;
   const n = (count) => (count === 1 ? '' : 's');
+  ui.dlgCtx = { channel, agent, kind: 'unread' };
+  const c = findChannel(channel);
+  const names = (c?.agents ?? []).map((x) => x.agent);
+  const who = nameAndId(channel, agent);
+  const list = a.unread_list ?? [];
+
+  const rows = list.length ? list.map((m) => `
+    <div class="task-row">
+      <div>
+        <span class="ref">#${m.id}</span> <span class="title">${esc(excerpt(m.body))}</span>
+        <span class="badge ${m.to ? 'opened' : 'claimed'}">${m.to ? 'direct' : 'broadcast'}</span>
+        <div class="muted mono tiny">sent by ${esc(nameOf(channel, m.from))} · ${age(m.created_at)}</div>
+      </div>
+      <div class="task-acts">
+        <select class="input" data-reassign-msg="${m.id}" title="point this message at someone else">
+          <option value="">— everyone —</option>
+          ${names.map((x) => `<option value="${esc(x)}"${m.to === x ? ' selected' : ''}>${esc(nameAndId(channel, x))}</option>`).join('')}
+        </select>
+        <button type="button" class="btn" data-do="read-to" data-channel="${esc(channel)}" data-agent="${esc(agent)}" data-up-to="${m.id}"
+          title="marks this one read, and anything older — read is a single cursor, not a per-message flag">close</button>
+      </div>
+    </div>`).join('') : '<div class="empty">nothing unread here</div>';
+
+  const nudge = nudgeHead(channel, agent, a);
   openDialog(`
-    <h3>${esc(agent)} · ${a.unread} unread</h3>
+    <div class="dlg-head"><h3>Unread messages · ${esc(who)}</h3>${nudge.button}</div>
+    ${nudge.note}
     <p class="dlg-sub">
-      on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}
+      on <span class="mono">${esc(channel)}</span> · ${esc(a.presence)}${a.sessions ? ` · ${a.sessions} live session${n(a.sessions)}` : ''} · seen ${age(a.last_seen)}${a.unread > list.length ? ` · showing ${list.length} of ${a.unread}` : ''}
     </p>
-    <div class="dlg-choice">
-      <button type="button" class="btn primary" data-do="advance" data-up-to="${upTo}" ${at}>Mark read (operator)</button>
-      <p>Moves the cursor to #${upTo}. ${esc(agent)} never sees these ${a.unread} message${n(a.unread)}, and the board stops counting them.</p>
+    <div class="task-list">${rows}</div>
+    <p class="dlg-note">
+      Whether an agent has seen a message is one cursor, not a flag per message — so <b>close</b> marks that
+      message read <b>and anything older than it</b>. Closing the top row is the same as marking all read.
+      Either way ${esc(nameOf(channel, agent))} never sees them, and the log keeps the record. Changing the dropdown re-addresses
+      the message immediately.
+    </p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="advance" data-up-to="${upTo}" ${at}>Mark all read (operator)</button>
     </div>
-    <p class="dlg-note">To get ${esc(agent)}'s attention, type in its own window, or put it on <span class="mono">/loop</span> so it polls this board itself.</p>
-    <div class="dlg-foot"><button type="button" class="btn" data-do="cancel">Cancel</button></div>
   `);
+}
+
+/**
+ * Rename an agent.
+ *
+ * The name is an operator decision stored on the server, so everyone looking at
+ * this board sees the same one — it is not a per-browser nickname. Deliberately
+ * unguarded: no uniqueness check, and no protection against overwriting a name
+ * somebody else chose. Both were considered and refused. A guard could only
+ * refuse the operator something they asked for on purpose, and the id under the
+ * name is what actually distinguishes two desks.
+ *
+ * Clearing the field restores the derived default rather than leaving a desk
+ * blank, which is the only reason this needs a note at all.
+ */
+const GENDERS = [
+  ['neutral', 'Neutral', 'no hair — the figure as it has always been drawn'],
+  ['male', 'Male', 'a short, swept cut'],
+  ['female', 'Female', 'long hair, past the shoulders'],
+];
+
+/**
+ * One colour choice: the current value as a swatch, and the choices behind it.
+ *
+ * The grid is in the markup from the start rather than built on demand, hidden
+ * until asked for. It means the chosen value lives in the DOM the whole time —
+ * `aria-checked` on a radio — so saving reads the same place whether or not the
+ * operator ever opened the picker, and there is no state to keep in step.
+ *
+ * No contrast rule between the three. An operator may put brown hair on a brown
+ * shirt; that is their business, and a picker that refuses combinations is
+ * harder to explain than one that does not.
+ */
+function swatchRow(kind, label, current) {
+  const choices = ui.state?.palette?.[kind] ?? [];
+  const value = choices.includes(current) ? current : (choices[0] ?? '#888888');
+  return `
+    <div class="swatch-row" data-kind="${esc(kind)}">
+      <span class="swatch-label">${esc(label)}</span>
+      <button type="button" class="swatch current" data-do="open-swatches"
+              style="--c:${esc(value)}" aria-expanded="false"
+              aria-label="${esc(label)} colour, ${esc(value)} — choose another"></button>
+      <div class="swatches" role="radiogroup" aria-label="${esc(label)} colour" hidden>
+        ${choices.map((c) => `
+          <button type="button" class="swatch" role="radio" data-do="pick-swatch" data-color="${esc(c)}"
+                  aria-checked="${c === value}" style="--c:${esc(c)}"
+                  title="${esc(c)}" aria-label="${esc(c)}"></button>`).join('')}
+      </div>
+    </div>`;
+}
+
+function renameDialog(channel, agent) {
+  ui.dlgCtx = { channel, agent, kind: 'rename' };
+  const current = nameOf(channel, agent);
+  const a = findAgent(channel, agent);
+  const gender = a?.gender ?? 'neutral';
+  openDialog(`
+    <div class="dlg-head"><h3>${esc(current)}</h3></div>
+    <p class="dlg-sub">on <span class="mono">${esc(channel)}</span> · <span class="mono">${esc(agent)}</span></p>
+    <label class="field">
+      <span>Display name</span>
+      <input id="persona-name" class="input" type="text" maxlength="40" value="${esc(current)}"
+             placeholder="${esc(agent)}" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="field">
+      <span>Avatar</span>
+      <select id="persona-gender" class="input">
+        ${GENDERS.map(([v, label, why]) =>
+          `<option value="${esc(v)}"${gender === v ? ' selected' : ''}>${esc(label)} — ${esc(why)}</option>`).join('')}
+      </select>
+      ${swatchRow('shirt', 'Shirt', a?.shirt)}
+      ${swatchRow('hair', 'Hair', a?.hair)}
+      ${swatchRow('skin', 'Skin', a?.skin)}
+    </div>
+    <p class="dlg-note">
+      Everyone sees all of this, and it follows <span class="mono">${esc(agent)}</span> everywhere on the board
+      and the floor — the id itself never changes, so messages and tasks keep routing exactly as they do now.
+      Leave the name empty to go back to <b>${esc(defaultName(agent))}</b>. Hair and skin show on the floor's
+      figures; a neutral avatar has no hair to colour.
+    </p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="rename-save"
+              data-channel="${esc(channel)}" data-agent="${esc(agent)}">Save</button>
+    </div>
+  `);
+  const input = el.dlgBody.querySelector('#persona-name');
+  input?.focus();
+  input?.select();
+  // Enter saves, because a one-field dialog that needs a mouse is a chore.
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); el.dlgBody.querySelector('[data-do="rename-save"]')?.click(); }
+  });
+}
+
+/**
+ * The name an agent gets when nobody has chosen one — the same derivation the
+ * server does in `humanName`. Duplicated here only so the dialog can *name* the
+ * default it is offering to restore; the server remains the one that assigns it.
+ */
+function defaultName(agent) {
+  const words = String(agent ?? '').split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  return words.length ? words.map((w) => w[0].toUpperCase() + w.slice(1)).join(' ') : String(agent ?? '');
 }
 
 function retireDialog(channel, agent) {
@@ -552,35 +858,200 @@ function retireDialog(channel, agent) {
   `);
 }
 
-function taskDialog(channel, agent) {
+/**
+ * The task list behind a count pill.
+ *
+ * `kind` is which pill was clicked, and it decides both the heading and the
+ * rows. It used to decide neither: one list matched `assignee === agent ||
+ * claimed_by === agent` under a single "Unfinished tasks" heading, so an agent
+ * holding one of each got both in one list under a title true of neither, and
+ * the dialog's contents did not match the number on the pill that opened it.
+ *
+ * The filters below are deliberately the same conditions `agentTaskLoad` counts
+ * on the server — assigned means open-and-assigned, claimed means claimed-by.
+ * A dialog that disagreed with the pill you pressed to reach it is worse than
+ * no dialog.
+ */
+/**
+ * Confirm stopping a turn. Opened from the stop sign in the floor's chat panel,
+ * which is the only caller — but it lives here because app.js owns the dialogs
+ * on this page, the same reason the desk pills call in rather than growing a
+ * second copy.
+ *
+ * It says what Escape does, because "stop" is vaguer than what happens: the
+ * turn ends where it is, the work already done stays done, and the conversation
+ * is still there to carry on from. Nobody should have to find that out by
+ * trying it on an agent they care about.
+ *
+ * `persona` is passed in rather than looked up: the floor opened this from a
+ * desk it is drawing right now, so it holds the better name.
+ */
+function stopDialog(channel, agent, persona) {
+  const who = persona || nameOf(channel, agent);
+  openDialog(`
+    <h3>Stop ${esc(who)}?</h3>
+    <p class="dlg-sub">on <span class="mono">${esc(channel)}</span></p>
+    <ul class="dlg-list">
+      <li>presses <span class="mono">Escape</span> in its window — the same key you would</li>
+      <li>ends the turn where it is; anything already written or run stays</li>
+      <li>leaves the conversation open, so you can say what to do instead</li>
+    </ul>
+    <p class="dlg-note">Claude Code records this in the transcript as <span class="mono">[Request interrupted by user]</span>, so the agent can see it was stopped rather than that it finished.</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn danger" data-do="stop-desk" data-channel="${esc(channel)}" data-agent="${esc(agent)}">Stop ${esc(who)}</button>
+    </div>
+  `);
+}
+
+/**
+ * The saved-prompt library: list, add, edit, delete.
+ *
+ * Board-wide, so it takes no channel and no agent — an operator's ten prompts
+ * are the operator's, not a channel's. Opened from the floor's compose row,
+ * which is the only place a prompt can be used; app.js owns it for the same
+ * reason it owns every other dialog on this page.
+ *
+ * One dialog that redraws itself rather than a stack of them. `ui.promptEdit`
+ * is which row is open for editing — an id, the string 'new', or null for the
+ * plain list — and it lives outside the DOM because every save redraws the lot.
+ *
+ * Split in two, and the split is load-bearing. A top-level `function foo` in a
+ * classic script IS `window.foo`, so a later `window.foo = () => …` does not
+ * publish an entry point beside it — it replaces the declaration, and every
+ * internal call to `foo` follows. Written that way, the loader called the entry
+ * point, which called the loader, forever: no error, no dialog, and a fetch
+ * every round. The drawing keeps its own name and the exported one only opens.
+ */
+function renderPromptManager() {
+  ui.dlgCtx = { kind: 'prompts' };
+  const editing = ui.promptEdit ?? null;
+  const rows = ui.promptRows ?? [];
+  const current = editing !== null && editing !== 'new' ? rows.find((p) => p.id === editing) : null;
+
+  // Plain buttons in the rows; the red one is on the confirmation, which is the
+  // click that actually destroys something. A column of red Deletes makes a list
+  // you keep prompts in look like a list you empty.
+  const list = rows.length
+    ? `<ul class="dlg-list prompt-list">${rows.map((p) => `
+        <li class="prompt-row${p.id === editing ? ' editing' : ''}">
+          <span class="prompt-title">${esc(p.title)}</span>
+          <span class="prompt-preview mono">${esc(clip(p.content, 60))}</span>
+          <span class="prompt-acts">
+            <button type="button" class="btn" data-do="prompt-edit" data-id="${p.id}">Edit</button>
+            <button type="button" class="btn" data-do="prompt-ask-delete" data-id="${p.id}">Delete</button>
+          </span>
+        </li>`).join('')}</ul>`
+    : '<p class="dlg-sub">Nothing saved yet. Add the first one below.</p>';
+
+  const form = editing === null ? '' : `
+    <div class="prompt-form">
+      <label class="field">
+        <span>Title</span>
+        <input id="prompt-title" class="input" type="text" autocomplete="off" spellcheck="false"
+               value="${esc(current?.title ?? '')}" placeholder="What you would call it">
+      </label>
+      <label class="field">
+        <span>Content</span>
+        <textarea id="prompt-content" class="input" rows="6"
+                  placeholder="The message this puts in the box">${esc(current?.content ?? '')}</textarea>
+      </label>
+    </div>`;
+
+  openDialog(`
+    <div class="dlg-head"><h3>Saved prompts</h3></div>
+    <p class="dlg-sub">Shared by every desk on this board. Picking one puts its content in the compose box, where you can edit it before sending.</p>
+    ${list}
+    ${form}
+    <div class="dlg-foot">
+      ${editing === null
+        ? `<button type="button" class="btn" data-do="cancel">Close</button>
+           <button type="button" class="btn primary" data-do="prompt-new">New prompt</button>`
+        : `<button type="button" class="btn" data-do="prompt-cancel-edit">Cancel</button>
+           <button type="button" class="btn primary" data-do="prompt-save"${editing === 'new' ? '' : ` data-id="${editing}"`}>Save</button>`}
+    </div>
+  `);
+  const title = el.dlgBody.querySelector('#prompt-title');
+  title?.focus();
+  title?.select();
+}
+
+/** Read the library, then draw the manager. Every change comes back through here. */
+async function loadPrompts({ edit } = {}) {
+  const res = await fetch('./api/prompts', { headers: { accept: 'application/json' } });
+  ui.promptRows = res.ok ? ((await res.json()).prompts ?? []) : [];
+  if (edit !== undefined) ui.promptEdit = edit;
+  renderPromptManager();
+  // The floor's picker holds its own copy so it can draw without waiting; tell
+  // it the library moved rather than letting it show yesterday's list.
+  window.floorPromptsChanged?.();
+}
+
+/** What the floor's "Manage…" calls. Declared, not assigned — see above. */
+function promptManager() {
+  ui.promptEdit = null;
+  loadPrompts();
+}
+
+/**
+ * Confirm a deletion. Its own dialog rather than a state inside the manager:
+ * the manager is a list you scan, and a confirmation you can scroll away from
+ * is one you answer without reading. Cancel goes back to the list.
+ */
+function promptDeleteDialog(id) {
+  const p = (ui.promptRows ?? []).find((x) => x.id === id);
+  if (!p) return;
+  openDialog(`
+    <h3>Delete “${esc(p.title)}”?</h3>
+    <p class="dlg-sub">${esc(clip(p.content, 200))}</p>
+    <p class="dlg-note">There is no undo, and nothing else keeps a copy — a backup taken before now would still have it.</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="prompt-cancel-delete">Cancel</button>
+      <button type="button" class="btn danger" data-do="prompt-delete" data-id="${p.id}">Delete</button>
+    </div>
+  `);
+}
+
+function taskDialog(channel, agent, kind = null) {
   const c = findChannel(channel);
   if (!c) return;
   // Remembered so an action that keeps the dialog open can rebuild it against
   // the refreshed state instead of leaving a stale row on screen.
-  ui.dlgCtx = { channel, agent: agent ?? null };
+  ui.dlgCtx = { channel, agent: agent ?? null, kind };
   const all = c.task_list ?? [];
-  const list = agent ? all.filter((t) => t.assignee === agent || t.claimed_by === agent) : all;
+  const mine = kind === 'claimed'
+    ? (t) => t.claimed_by === agent
+    : kind === 'assigned'
+      ? (t) => t.assignee === agent && t.status === 'open'
+      : (t) => t.assignee === agent || t.claimed_by === agent;
+  const list = agent ? all.filter(mine) : all;
   const names = (c.agents ?? []).map((a) => a.agent);
   const rows = list.length ? list.map((t) => `
     <div class="task-row">
       <div>
         <span class="ref">#${t.id}</span> <span class="title">${esc(t.title)}</span>
         <span class="badge ${t.status === 'claimed' ? 'claimed' : 'opened'}">${esc(t.status)}</span>
-        <div class="muted mono tiny">${t.claimed_by ? `claimed by ${esc(t.claimed_by)}` : t.assignee ? `assigned to ${esc(t.assignee)}` : 'unassigned'} · ${age(t.updated_at)}</div>
+        <!-- Who asked for it. "assigned to X" restated the dropdown sitting
+             beside it, and "claimed by X" under a heading about claims read as
+             a riddle. Neither told you the one thing the row could not
+             otherwise show. -->
+        <div class="muted mono tiny">${t.created_by ? `requested by ${esc(nameOf(channel, t.created_by))}` : 'no requester recorded'} · ${age(t.updated_at)}</div>
       </div>
       <div class="task-acts">
         <select class="input" data-reassign="${t.id}" title="reassign">
           <!-- "no assignee" rather than "unassigned": a claimed task has no
                assignee but is very much someone's, and the row says who. -->
           <option value="">— no assignee —</option>
-          ${names.map((n) => `<option value="${esc(n)}"${t.assignee === n ? ' selected' : ''}>${esc(n)}</option>`).join('')}
+          ${names.map((n) => `<option value="${esc(n)}"${t.assignee === n ? ' selected' : ''}>${esc(nameAndId(channel, n))}</option>`).join('')}
         </select>
         <button type="button" class="btn" data-do="close-task" data-channel="${esc(channel)}" data-id="${t.id}">close</button>
       </div>
-    </div>`).join('') : '<div class="empty">nothing unfinished here</div>';
+    </div>`).join('') : `<div class="empty">${kind === 'claimed' ? 'nothing claimed here' : kind === 'assigned' ? 'nothing assigned here' : 'nothing unfinished here'}</div>`;
 
+  const nudge = nudgeHead(channel, agent, agent ? findAgent(channel, agent) : null);
   openDialog(`
-    <h3>Unfinished tasks${agent ? ` · ${esc(agent)}` : ''}</h3>
+    <div class="dlg-head"><h3>${kind === 'claimed' ? 'Pending claims' : kind === 'assigned' ? 'Pending tasks' : 'Unfinished tasks'}${agent ? ` · ${esc(nameAndId(channel, agent))}` : ''}</h3>${nudge.button}</div>
+    ${nudge.note}
     <p class="dlg-sub">on <span class="mono">${esc(channel)}</span>${c.task_list_total > all.length ? ` · showing ${all.length} of ${c.task_list_total}` : ''}</p>
     <div class="task-list">${rows}</div>
     <p class="dlg-note">Closing marks the task done with a note attributed to <span class="mono">operator</span> — it is not deleted, and the log keeps the record. Changing the dropdown reassigns immediately.</p>
@@ -938,7 +1409,8 @@ el.channels.addEventListener('click', (e) => {
   }
 
   if (action === 'unread') backlogDialog(channel, agent);
-  else if (action === 'tasks') taskDialog(channel, agent ?? null);
+  else if (action === 'tasks') taskDialog(channel, agent ?? null, btn.dataset.kind ?? null);
+  else if (action === 'rename') renameDialog(channel, agent);
   else if (action === 'retire') retireDialog(channel, agent);
   else if (action === 'channel') channelDialog(channel);
   // Restoring is trivially reversible and self-explanatory, so it skips the
@@ -950,11 +1422,50 @@ el.dlgBody.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-do]');
   if (!btn) return;
   const d = btn.dataset;
-  const reRender = (ok) => { if (ok && el.dlg.open && ui.dlgCtx) taskDialog(ui.dlgCtx.channel, ui.dlgCtx.agent); };
+  const reRender = (ok) => { if (ok) refreshDialog(); };
 
   switch (d.do) {
     case 'cancel':
       closeDialog();
+      break;
+    // --- saved prompts. The list is already in hand, so moving between the list
+    // and the form is a redraw, not a fetch; only a write re-reads.
+    case 'prompt-new':
+      ui.promptEdit = 'new';
+      renderPromptManager();
+      break;
+    case 'prompt-edit':
+      ui.promptEdit = Number(d.id);
+      renderPromptManager();
+      break;
+    case 'prompt-cancel-edit':
+      ui.promptEdit = null;
+      renderPromptManager();
+      break;
+    case 'prompt-save': {
+      // Deliberately not checked here first. "Not empty" and "no duplicate
+      // title" are the server's rules — it has the unique index behind it — and
+      // a copy in the form would be a second place for them to drift. A refusal
+      // arrives in .dlg-err with whatever the operator typed still in the boxes.
+      const title = el.dlgBody.querySelector('#prompt-title')?.value ?? '';
+      const content = el.dlgBody.querySelector('#prompt-content')?.value ?? '';
+      const id = d.id ? Number(d.id) : null;
+      act(() => (id === null
+        ? admin('prompt/create', { title, content })
+        : admin('prompt/update', { id, title, content })
+      ).then(() => loadPrompts({ edit: null })), { keepOpen: true });
+      break;
+    }
+    case 'prompt-ask-delete':
+      promptDeleteDialog(Number(d.id));
+      break;
+    case 'prompt-cancel-delete':
+      ui.promptEdit = null;
+      loadPrompts();
+      break;
+    case 'prompt-delete':
+      act(() => admin('prompt/delete', { id: Number(d.id) })
+        .then(() => loadPrompts({ edit: null })), { keepOpen: true });
       break;
     case 'advance':
       act(() => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }));
@@ -965,6 +1476,80 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'close-task':
       act(() => admin('task/close', { channel: d.channel, id: Number(d.id) }), { keepOpen: true }).then(reRender);
       break;
+    // The word, into the window, via the host — the same path the floor's own
+    // compose box uses. Not typed into a textarea and submitted: that would
+    // depend on a panel being open and would fail in ways the endpoint does not.
+    //
+    // Unlike every other action in here, this one closes the dialog on success
+    // rather than re-rendering it. Nudging changes nothing the dialog is
+    // showing, so a dialog left open after the click is a dialog that looks
+    // like it did nothing: the operator clicks Nudge, sees no change, clicks
+    // Done, and the floor updates as they land back on it — which reads as
+    // though Done is what sent it. Closing is the acknowledgement. A nudge that
+    // is refused keeps the dialog, because then there is a reason to show.
+    case 'nudge':
+      act(() => floorPost('chat', { channel: d.channel, agent: d.agent, text: 'nudge' }))
+        .then((ok) => { if (ok) window.floorNudged?.(d.channel, d.agent, 'nudge'); });
+      break;
+    // Escape, into the window, via the host. Closes on success like the nudge
+    // above and for the same reason — the change it makes is on the floor
+    // behind this dialog, not in it. A refusal keeps it open: by the time the
+    // prompt has been read the turn may simply have ended, and "nothing is
+    // running at this desk right now" is the answer, not an error to swallow.
+    case 'stop-desk':
+      act(() => floorPost('interrupt', { channel: d.channel, agent: d.agent }));
+      break;
+    // Same endpoint as "Mark all read", a different cursor. Closing one row is
+    // "read to here", which is the only thing a single cursor can mean.
+    case 'read-to':
+      act(
+        () => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }),
+        { keepOpen: true }
+      ).then(reRender);
+      break;
+    // An empty field means "give it back the derived name" rather than "leave it
+    // blank" — the endpoint requires a non-empty persona, so send the default.
+    // Opening one picker closes any other: two grids open at once in a dialog
+    // this size pushes the buttons off the bottom.
+    case 'open-swatches': {
+      const row = btn.closest('.swatch-row');
+      const grid = row.querySelector('.swatches');
+      const opening = grid.hidden;
+      for (const g of el.dlgBody.querySelectorAll('.swatches')) g.hidden = true;
+      for (const b of el.dlgBody.querySelectorAll('[data-do="open-swatches"]')) b.setAttribute('aria-expanded', 'false');
+      grid.hidden = !opening;
+      btn.setAttribute('aria-expanded', String(opening));
+      if (opening) grid.querySelector('[aria-checked="true"]')?.focus();
+      break;
+    }
+    case 'pick-swatch': {
+      const row = btn.closest('.swatch-row');
+      for (const b of row.querySelectorAll('[data-do="pick-swatch"]')) b.setAttribute('aria-checked', 'false');
+      btn.setAttribute('aria-checked', 'true');
+      const swatch = row.querySelector('.swatch.current');
+      swatch.style.setProperty('--c', btn.dataset.color);
+      swatch.setAttribute('aria-expanded', 'false');
+      row.querySelector('.swatches').hidden = true;
+      swatch.focus();
+      break;
+    }
+    case 'rename-save': {
+      const typed = (el.dlgBody.querySelector('#persona-name')?.value ?? '').trim();
+      const persona = typed || defaultName(d.agent);
+      const gender = el.dlgBody.querySelector('#persona-gender')?.value ?? 'neutral';
+      const colour = (kind) =>
+        el.dlgBody.querySelector(`.swatch-row[data-kind="${kind}"] [aria-checked="true"]`)?.dataset.color;
+      const patch = { channel: d.channel, agent: d.agent, persona, gender };
+      // Only fields with a value are sent — omitting one means "leave it", and
+      // sending undefined would be the same as sending nothing anyway.
+      for (const kind of ['shirt', 'hair', 'skin']) {
+        const c = colour(kind);
+        if (c) patch[kind] = c;
+      }
+      // One request, so a dialog that changed several things cannot half-succeed.
+      act(() => floorPost('profile', patch));
+      break;
+    }
     case 'archive':
       act(() => admin('channel/archive', { channel: d.channel }));
       break;
@@ -986,13 +1571,24 @@ el.dlgBody.addEventListener('click', (e) => {
 // Reassign applies on change rather than behind a save button: there's one field,
 // and the log records every move.
 el.dlgBody.addEventListener('change', (e) => {
+  if (!ui.dlgCtx) return;
+  const { channel, agent, kind } = ui.dlgCtx;
+
+  const msg = e.target.closest('[data-reassign-msg]');
+  if (msg) {
+    act(
+      () => admin('message/reassign', { channel, id: Number(msg.dataset.reassignMsg), to: msg.value || null }),
+      { keepOpen: true }
+    ).then(reassigned => { if (reassigned) refreshDialog(); });
+    return;
+  }
+
   const sel = e.target.closest('[data-reassign]');
-  if (!sel || !ui.dlgCtx) return;
-  const { channel, agent } = ui.dlgCtx;
+  if (!sel) return;
   act(
     () => admin('task/reassign', { channel, id: Number(sel.dataset.reassign), assignee: sel.value || null }),
     { keepOpen: true }
-  ).then((ok) => { if (ok && el.dlg.open) taskDialog(channel, agent); });
+  ).then((ok) => { if (ok) refreshDialog(); });
 });
 
 // Clicking the backdrop closes. <dialog> already handles Esc.

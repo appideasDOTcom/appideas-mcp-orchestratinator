@@ -1,434 +1,124 @@
-# appideas-mcp-orchestratinator
+# APP(ideas) MCP Orchestratinator
 
-A tiny, self-hosted **MCP coordination server** that lets Claude Code agents
-living in **separate VS Code windows** work together — without opening a shared
-parent folder and without merging their scopes.
+**Human-Agent Teams, with the human in the middle.**
 
-Each agent stays in its own repo/window as usual. They share one thing: this
-server, running in Docker, which gives them a common **mailbox**, a set of
-shared **contracts** (the agreed interface between two plugins), and a lightweight
-**task** board. One container serves any number of plugin pairs.
+Introducing **Human-Agent Teams — HATs**. A HAT is a team of specialized,
+well-trained, focused AI agents, orchestrated, monitored, and controlled by the
+ever-important human in the middle. The APP(ideas) MCP Orchestratinator gives
+that human a friendly, manageable space to run the work.
 
----
+## What it is
 
-## Simplest use case
-- On the Pro plugin chat window
-```
-/loop 60s Poll the orchestratinator: list_tasks status=open, and poll_messages.
-Claim and handle anything for pro per CLAUDE.md, then complete_task.
-If nothing is pending, report idle and do nothing else.
-```
-- Chat from the Free window. Try to be clear about Pro implementation vs. Free
-- Stop the loop when done
+The Orchestratinator is a small, self-hosted server and a single web page that
+enables you to manage the workplace. Work exactly as you always have — nothing
+about your editor or your agents changes. The floor is where you go to run the
+team:
 
-## Some useful commands
-In a terminal:
-```
-docker compose up -d                       // start (add --build after code changes)
-docker compose down                        // stop; data kept in the volume
-docker compose logs -f orchestratinator    // tail
-curl -s localhost:8787/health              // is it up?
-open http://localhost:8787/                // the dashboard — who's connected, what they're doing
-npm test                                   // all three suites: coordination, operator actions, the doors
-```
-In a chat window:
-```
-whoami                                     // confirm channel/agent wiring
-list_tasks status=open                     // what's pending for me
-list_tasks status=claimed                  // in-progress claims (stale ones auto-reopen)
-get_contract                               // read the whole agreed interface
-```
+**A building.** Every project is a floor. One glance tells you where work is
+happening across all of your agent teams — and where nothing is. The header
+counts who's here and who needs you; go where it points.
 
-## The one concept that shapes everything: it's pull, not push
+![The building — one floor per project](docs/images/building.png)
 
-MCP is client-initiated. This server can **hold** shared state and messages, but
-it **cannot wake an idle agent** in another window and make it act. An agent only
-sees new messages/tasks when it calls a tool to check. So coordination is a
-cooperative protocol, not remote control. In practice you bridge that gap one of
-three ways:
+**The building.** One glance at everything happening in your company: each
+floor is a project, each desk an agent. Here the TrailTracker mobile app is in
+a launch push with six agents seated and one needing an answer; the Bookinator
+WordPress-plugin team is running quietly; Ledgerino, between releases, is dark.
+Agents can hold desks on more than one floor — this Project Manager is driving
+the TrailTracker launch while standing by on Bookinator.
 
-1. **Type into the other window.** Simplest, and the only one that is immediate.
-2. **Poll on a loop** — have the consuming agent run `poll_messages` / `list_tasks`
-   every N minutes (e.g. Claude Code's `/loop`). This is the one that lets you
-   leave something on the board and have it picked up without you being there.
-3. **Poll at boundaries** — a Stop/PostToolUse hook that checks the board when the
-   agent finishes a step.
+**A room per project.** Walk into a floor and every agent on that project sits
+at a desk: what they're thinking, what they're running, and a badge you can't
+miss when one of them needs a human. Read any desk's conversation, type to it,
+answer its permission prompts.
 
-Use #2. The dashboard deliberately has no button that claims to wake an agent:
-the server cannot make another window take a turn, and a button that pretends
-otherwise is worse than not having one.
+![A room — every agent at its desk](docs/images/room.png)
 
----
+**Click the service bell when an agent has messages or tasks to pick up** —
+it's how you tell one "you've got work" without typing a word, and here the QA
+Engineer's bell is mid-ring for the task waiting in its tray. Thought bubbles
+show what each agent just said, the desk signs show what they're doing, and
+the red badge marks the one that needs you. The panel on the right is that
+desk's live conversation — read it, type into it, and answer the permission
+prompt with a click.
 
-## Channels: one server, many plugin pairs
+**A board, for the details.** When you want rows, counts and logs instead of
+rooms, flip the switch top right.
 
-Everything is scoped by a **channel**. A channel is one coordination space —
-normally one free/pro plugin pair. Adding a new pair later needs **no server or
-Docker change**: the two new agents simply use a new channel name in their
-`.mcp.json`. The `appideas-site-syncinator` pair uses channel
-`appideas-site-syncinator`; a future pair just picks its own.
+![The board — the same server, denser](docs/images/board.png)
 
-Identity (channel + who you are) is bound **per connection via HTTP headers** set
-in each repo's `.mcp.json`:
+**The board.** The same building in a more compact (and more technical) format:
+presence, self-reported status with its age, unread and task counts, and the
+full activity log — every message, task, and contract change, newest first.
+Operator controls live here too: mark mail read, close or reassign tasks,
+archive channels.
 
-- `X-Channel` — which coordination space this repo belongs to.
-- `X-Agent` — this repo's role on that channel (`free` / `pro`).
-- `X-Orchestratinator-Key` — the shared secret, same for every client. See
-  [The shared secret](#the-shared-secret).
+Under the page sit three small parts: an MCP coordination server (Docker) that
+gives agents on a project a shared mailbox, task list and agreed contracts; a
+plugin for Claude Code or Visual Studio Code — either one, or both — that lets
+each session report what it's doing; and a host
+service that can run any desk's window for you in `tmux`. Agents keep their own
+repos and their own boundaries — nothing merges, nothing is shared but the
+board. Those are the three things the next section installs.
 
-Because identity rides on the connection, the agent almost never has to pass
-`channel`/`agent` to a tool — but every tool accepts them as an override.
+## Install
 
----
+**The easiest path: have an AI agent do it.** This is a several-part
+installation — a server, a plugin, a host — so clone the repo, open a session
+in it from Claude Code or VS Code, and say *"install the orchestratinator by
+following the README."* Everything below is the manual path, and exactly what
+the agent will follow.
 
-## The dashboard
+Everything here is done once per machine. You need **Docker**, **tmux**,
+**Node 20+**, and **Claude Code** (the `claude` command) installed and signed
+in — the host runs desks with it even if you only ever work from VS Code.
+Where you *work* is your choice: start sessions from Claude Code in a
+terminal, from VS Code, or both. The floor doesn't replace either — it hands
+any conversation back to them whenever you want a feature its chat doesn't
+provide.
 
-Open **`http://localhost:8787/`** in a browser — or the machine's address on your
-network, if you've published the port beyond loopback. It's a view of the same
-SQLite database the tools write to, refreshing itself every couple of seconds; no
-reload needed. Reading it changes nothing. It can also take a small set of
-deliberate **operator actions** — see *Operator actions* below.
-
-There is no sign-in. The board is open to anything that can reach the port, and
-the only credential in the system guards `/mcp` (see *The shared secret*). That
-is a deliberate trade for one machine on one trusted network: the boundary is the
-network, not a password. Publish the port somewhere less friendly and you have
-handed out the board.
-
-You get three things:
-
-**Channels & agents.** One card per channel, one row per agent, with a presence
-dot: green = a live MCP session, amber = no live session but it called something
-in the last 5 minutes, red = gone.
-
-A caveat worth knowing, because it's an MCP fact rather than a bug here: a
-session ends when the client says so, and clients vary. Some reuse one session
-for the life of the window; others (Claude Code driving a `/loop`, for instance)
-open a fresh session per turn and never tear the old one down. The server
-therefore prunes for them — a new session for a given channel+agent supersedes
-that pair's older idle sessions, and anything untouched for `SESSION_TTL_MINUTES`
-(default 15) is closed. Clients recover silently, since an unknown session id
-answers `404`, which is the spec's cue to re-initialize. The practical
-consequence: green means "we heard from this window recently", and a window you
-closed goes red within the TTL rather than instantly.
-
-**Approximate last-known state.** Each agent gets a state chip. If the agent has
-called `set_status` and that status hasn't expired, its declared state wins and
-is shown with its age — `waiting · 3m ago` — with the detail line beneath
-(`e2e public tier, ~8m`). The four states are `working`, `waiting`, `blocked`
-and `idle`; the chip's colour comes from the state the agent declared, never
-from guessing at its words. Otherwise the state is **derived** from the board: a
-claimed task shows as `working — #12 update consumers…`, pending mail as
-`waiting — 2 unread messages`, assigned-but-unclaimed work as
-`waiting — 1 task assigned`, and nothing pending as `idle`. It's an
-approximation by design — the server can't see inside the agent's turn, only
-what it last told the board (see *it's pull, not push* above).
-
-**A status expires.** Every `set_status` carries a TTL (`ttl_seconds`, default
-900, override with `STATUS_TTL_SECONDS`). Past it the status is treated as
-absent and the chip falls back to a derived state. This is the load-bearing
-part: without it an agent that crashes mid-run leaves `waiting` on the board
-forever and the human keeps trusting it. The displayed age exists for the same
-reason — `waiting · 40m ago` reads as suspect in a way a bare `waiting` cannot.
-
-Note what is deliberately **not** inferred: a long gap since an agent's last
-tool call is never read as "waiting". That gap looks identical whether the agent
-is blocked, crashed, or simply finished and quiet, so only the agent can say —
-which is what `set_status` is for.
-
-**Minimize a channel to change your focus.** The `–` on any channel header folds
-that card into a pill beneath the board; clicking the pill unfolds it, and `show
-all` brings everything back at once. This is *focus*, not a decision: it lives in
-`localStorage` in one browser, so nobody else's board changes, nothing is
-audited, and there's no server round-trip — which is the whole difference from
-archiving a channel, which is a shared and semi-permanent statement (see
-*Operator actions*). A pill keeps the channel's unread count on it, so narrowing
-your focus never hides news.
-
-**Activity log.** Every interesting write — messages, task opened/claimed/done,
-contract versions, and operator actions — merged into one newest-first list,
-filterable by channel, by kind, and by free text. Click any row to expand the
-full stored value (message body, task note, contract JSON).
-
-To make the state chips exact rather than inferred, have the agent call
-`set_status` as it works — e.g. add "call `set_status` when you start and finish
-a step, and always before anything long-running" to the repo's `CLAUDE.md`.
-Setting `ttl_seconds` to roughly how long the work should take is what makes a
-`waiting` chip self-correcting when the agent never comes back.
-
----
-
-## Operator actions
-
-Sooner or later the board shows something only a human can resolve: an agent
-whose window you closed days ago, still holding 139 unread; a task nobody will
-ever claim; a channel you created by typo. Hover a row and you get the small set
-of actions for that: unread counts and task counts become clickable, and a trash
-can appears on each agent row (the channel header gets its own).
-
-Nothing here is a new power. `complete_task` has never had an ownership check and
-`poll_messages` has always taken an `agent` override, so any connected agent
-could already close anyone's task and advance anyone's cursor. These buttons make
-that deliberate, attribute it to `operator`, and write it where the log can show
-it.
-
-| Action | What it does |
-| --- | --- |
-| **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
-| **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
-| **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
-| **Archive a channel** | Hides it from the board for everyone, and says so in the log. Nothing is deleted and agents on it keep working. Semi-permanent by intent — if you only want it out of your way for the next hour, minimize it instead (see *The dashboard*). |
-| **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
-
-Two behaviours worth knowing before you use them:
-
-**A removed agent comes back by itself.** Retiring closes its sessions, and an
-unknown session id answers `404` — the spec's cue to re-initialize — so a window
-that is genuinely still alive reconnects and un-retires itself within a turn.
-Only one that is really gone stays gone. This is deliberate: an agent that is
-working while invisible on the board is a worse failure than a cluttered board.
-The flip side is that "remove" is not how you stop an agent; close its window.
-
-**Retired agents and archived channels are hidden, never dropped.** Both keep a
-count on screen (`1 retired`, `2 archived channels`) that reveals them again.
-Silently omitting a row would make the board lie, which is the one thing it must
-not do.
-
-Deleting a channel removes it from the board but **not** from the activity log:
-`admin_events` is deliberately not swept, because an audit trail you can erase by
-deleting the thing it describes isn't one. The log goes on saying you deleted it,
-and what it contained.
-
-### What guards them
-
-One thing, and it isn't authentication: **`/api/admin/*` refuses a request that
-came from another site.** A foreign `Origin` or `Sec-Fetch-Site: cross-site` is a
-`403`. That is the whole check.
-
-It's worth having even with the board wide open, because "open to this machine"
-and "open to every page this machine's browser happens to load" are very
-different statements and only the first one was intended. Any web page you visit
-can fire a `POST` at `localhost:8787`; none of them may drive your board.
-
-It is explicitly *not* doing the other half of the job. Anything that can reach
-the port and speak HTTP can take any operator action — no key, no cookie, no
-token. On a machine behind a firewall, on a network you control, that's the trade
-this build makes on purpose. It is also what makes the routes trivially
-scriptable:
+**1. Get the code and make a shared secret.**
 
 ```bash
-curl -s -X POST http://localhost:8787/api/admin/agent/advance \
-  -H 'content-type: application/json' \
-  -d '{"channel":"my-channel","agent":"pro","up_to_id":560}'
-```
-
----
-
-## Settings: export and restore
-
-The **⚙** in the top bar opens one panel: export and restore. There is nothing to
-unlock — see *What guards them* above for the only check these routes make.
-
-**Export** downloads the whole board as one JSON file: every message, task,
-contract with its version history, agent, channel flag, and operator-action
-record. JSON rather than a copy of the SQLite file on purpose — it can be opened,
-diffed and grepped, and it loads into a build whose schema has moved on (unknown
-columns are reported and skipped rather than fatal).
-
-One thing is deliberately **not** in it: **the shared MCP secret.** These files
-end up in Downloads folders and cloud drives, and that key is what every agent
-authenticates with — a backup carrying it would turn "a copy of my board" into
-"the key to it". You get a truncated SHA-256 fingerprint instead, which answers
-the only question that actually comes up on the far end ("is this the same key my
-agents already have?").
-
-Everything else in the file is board data. There are no accounts and no password
-hashes in it, because there are none anywhere — see *A note on the sign-in that
-used to be here*.
-
-**Recover from a backup** replaces everything on the board with the file's
-contents. Not a merge: ids are per-board, so blending two histories gives you one
-task `#14` that means two different things. Pick the file — the panel shows you
-when it was taken, from which version, and what's in it, before anything is sent —
-then type `RESTORE`.
-
-Before overwriting, the current board is written next to the database as
-`data/pre-restore-*.json`, so a restore you regret is recoverable. Live MCP
-sessions are closed and reconnect by themselves.
-
-A backup taken by a version that still had dashboard accounts restores fine. Its
-`users` table is ignored rather than written, and the report says so rather than
-dropping it on the floor in silence.
-
-### A note on the sign-in that used to be here
-
-Earlier versions had dashboard accounts: a `users` table of scrypt hashes, login
-cookies in `ui_sessions`, a sign-in page, and a per-process admin token the page
-exchanged its credential for. All of it is gone, and **the first start after
-upgrading drops both tables** — announced in the log, because a migration that
-destroys data silently is one you find out about from its absence.
-
-It was ceremony for the shape this actually runs in: one machine, one person, one
-trusted network. A password in front of a board that only that machine's owner
-can route to was buying nothing and costing a login page, a throttle, a cookie
-policy, and a read-only mode to maintain.
-
-What's left is the honest version of the same boundary. Agents authenticate to
-`/mcp` with the shared secret. The board doesn't authenticate anyone, so operator
-actions in the log are attributed to the literal `operator` — the board knows a
-human did it, and no more than that. If you ever need to hand this to more than
-one person, the sign-in is in the git history rather than in this file.
-
-### Moving to a permanent host
-
-The whole point of the above. On the new host:
-
-1. Copy `docker-compose.yml` and write a `.env` with **the same
-   `ORCH_AUTH_TOKEN`** as the old one — that part does not travel in the backup,
-   and it's what every agent's `.mcp.json` presents. (Or generate a new one and
-   update every `.mcp.json`; the fingerprint in the backup file tells you which
-   situation you're in.)
-2. `docker compose up -d --build` and open the board.
-3. ⚙ → pick the exported file → `RESTORE`.
-4. Point the agents at the new URL. Nothing else in their `.mcp.json` changes.
-
-Both halves are also scriptable, for a cron-driven backup:
-
-```bash
-# export
-curl -s http://localhost:8787/api/admin/backup -o board-$(date +%F).json
-
-# restore — replaces everything; `confirm` must be the literal word
-jq -n --slurpfile b board-2026-07-30.json '{confirm:"RESTORE", backup:$b[0]}' \
-  | curl -s -X POST http://localhost:8787/api/admin/backup/restore \
-      -H 'content-type: application/json' --data-binary @-
-```
-
----
-
-## Run the server (Docker)
-
-```bash
+git clone git@github.com:appideasDOTcom/appideas-mcp-orchestratinator.git
 cd appideas-mcp-orchestratinator
-cp .env.example .env                 # then set ORCH_AUTH_TOKEN — see "The shared secret"
-docker compose up -d --build
-```
-
-Compose reads `.env` (gitignored) and refuses to start without `ORCH_AUTH_TOKEN`,
-rather than quietly bringing up an unlocked server.
-
-MCP clients connect to `http://localhost:8787/mcp`; the dashboard is at
-`http://localhost:8787/`. The SQLite database persists in the named volume
-`orchestratinator-data` (survives rebuilds).
-
-```bash
-curl -s http://localhost:8787/health        # {"ok":true,...}
-docker compose logs -f orchestratinator      # tail logs
-docker compose down                          # stop (data is kept in the volume)
-```
-
-### Run locally without Docker (for hacking on it)
-
-```bash
-npm install
-npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db
-npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
-```
-
-Environment variables (see `.env.example`):
-`ORCH_AUTH_TOKEN` (the shared secret; empty disables auth),
-`ORCH_AUTH_MODE` (`off` / `warn` / `enforce`, default `enforce` when a token is set),
-`PORT` (default `8787`),
-`HOST` (default `0.0.0.0` — must stay that inside Docker. Set `HOST=127.0.0.1`
-when running bare and you want this machine only),
-`DB_PATH` (default `./data/orchestratinator.db`; `/data/...` in Docker),
-`CLAIM_TTL_MINUTES` (default `15`; how long a claim can sit before it auto-reopens),
-`SESSION_TTL_MINUTES` (default `15`; how long an untouched MCP session is kept).
-
-`curl -s localhost:8787/health` reports the live session count and lifetime
-connection churn (`opened` / `superseded` / `expired`) — a large `superseded` just
-means a client opens a session per turn, which is normal and handled.
-
----
-
-## The shared secret
-
-Every MCP client presents one shared key. It's a doorlock, not a security model:
-one static token for all agents, no rotation, and `X-Agent` is still
-self-asserted — anyone holding the key can claim to be anyone. It exists so
-something that stumbles onto the port can't read and write the board. The
-compose file still publishes on `127.0.0.1` only; this is the second lock, not
-a reason to remove the first.
-
-Generate one and put it in `.env` (gitignored, and read by both `docker compose`
-and `npm start`):
-
-```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
+Put the generated value in `.env` at the root of this repo:
+
 ```ini
-# .env
 ORCH_AUTH_TOKEN=<the generated value>
 ORCH_AUTH_MODE=enforce
 ```
 
-Clients send it as `X-Orchestratinator-Key: <token>` (or
-`Authorization: Bearer <token>`). `/health` stays open so the container
-healthcheck keeps working.
+**2. Start the server.**
 
-### Turning it on without interrupting anyone
+```bash
+docker compose up -d
+curl -s localhost:8787/health          # {"ok":true,...}
+```
 
-Restarting straight into `enforce` cuts off every agent whose `.mcp.json` hasn't
-been updated yet — including one that's mid-task. `ORCH_AUTH_MODE=warn` exists
-for that window: a missing or wrong key is logged and **allowed through**.
+Data lives in a Docker volume and survives rebuilds. The port is published on
+**every interface** so other machines on your network can use the board — right
+for a trusted LAN, wrong for anything else. To make it this-machine-only,
+change the port line in `docker-compose.yml` to `"127.0.0.1:8787:8787"`, and
+read [the security model](docs/security.md) before publishing it any wider.
 
-1. Set `ORCH_AUTH_TOKEN` and `ORCH_AUTH_MODE=warn` in `.env`, then
-   `docker compose up -d`.
-2. Add the header to each repo's `.mcp.json` (below) and reload those windows.
-3. Watch `docker compose logs -f orchestratinator` until no `auth WARN` lines
-   appear — that means every live client is sending the key.
-4. Flip to `ORCH_AUTH_MODE=enforce`, `docker compose up -d`.
+**3. Make each repo a desk.**
 
-A rejected client gets `401` with a JSON-RPC error explaining which header to
-set — it never reaches a tool and never appears on the dashboard.
-
-### The dashboard
-
-The secret does not guard it. `/`, `/api/state`, `/api/activity` and every
-`/api/admin/*` route answer anything that can reach the port — no key, no cookie,
-no sign-in. The only refusal is a cross-origin write; see *What guards them*.
-
-So the port is the boundary. `docker-compose.yml` publishes it on every interface
-so other machines on your network can use the board, which is right for a trusted
-LAN and wrong for anything else. Put back the `127.0.0.1:` prefix on the `ports:`
-line to make it this machine only, and don't forward it through a tunnel unless
-you mean to hand out the board.
-
-An earlier version had real dashboard accounts. They're gone on purpose — see
-*A note on the sign-in that used to be here*.
-
----
-
-## Wire up the two plugin repos
-
-Copy the matching file from [`clients/`](clients/) into each repo as
-`.mcp.json` (Claude Code reads project-scoped MCP servers from there — no shared
-parent folder required):
-
-- Free repo  → [`clients/syncinator-free.mcp.json`](clients/syncinator-free.mcp.json)
-- Pro repo   → [`clients/syncinator-pro.mcp.json`](clients/syncinator-pro.mcp.json)
+A repo joins a floor by declaring itself in its own `.mcp.json` — no central
+list, no shared parent folder:
 
 ```jsonc
-// .mcp.json in the FREE plugin repo
 {
   "mcpServers": {
     "orchestratinator": {
       "type": "http",
       "url": "http://localhost:8787/mcp",
       "headers": {
-        "X-Channel": "appideas-site-syncinator",
-        "X-Agent": "free",
+        "X-Channel": "your-project",
+        "X-Agent": "this-repo's-role",
         "X-Orchestratinator-Key": "<the ORCH_AUTH_TOKEN from .env>"
       }
     }
@@ -436,168 +126,128 @@ parent folder required):
 }
 ```
 
-The pro repo is identical except `"X-Agent": "pro"`. Reload each VS Code window
-(or restart the Claude Code session) so it picks up the new server, then ask the
-agent to run `whoami` to confirm it's bound to the right channel/agent.
+Repos sharing an `X-Channel` share a floor, a mailbox, and a task board. The
+`X-Agent` is that repo's seat on it. A directory without this file is invisible
+to the whole system.
 
-The files in `clients/` carry a `PASTE_ORCH_AUTH_TOKEN_HERE` placeholder —
-they're committed, so the real token never goes in them. Each repo's `.mcp.json`
-holds a copy of the secret, so gitignore it there unless the repo is private.
+**4. Install the plugin** — this is what puts each session on the floor.
 
-> If your Claude Code version predates inline `.mcp.json` header support, add it
-> from the CLI instead:
-> `claude mcp add --transport http orchestratinator http://localhost:8787/mcp --header "X-Channel: appideas-site-syncinator" --header "X-Agent: free" --header "X-Orchestratinator-Key: <token>"`
+One install covers the whole machine: Claude Code and VS Code share it, so do
+this from whichever you work in.
 
-Also drop [`clients/CLAUDE.snippet.md`](clients/CLAUDE.snippet.md) into each
-repo's `CLAUDE.md` so the agent knows when to reach for these tools.
-
----
-
-## Adding another plugin pair later
-
-1. Start the server (it's already running — nothing to change).
-2. In the two new repos, add a `.mcp.json` like above with a **new** `X-Channel`
-   (e.g. `my-other-plugin`), `X-Agent` of `free` / `pro`, and the same
-   `X-Orchestratinator-Key` — the key is per-server, not per-channel.
-
-That's it. The channels are isolated; the same container serves them all.
-
----
-
-## Tools
-
-All tools inherit `channel`/`agent` from the connection headers; both can be
-overridden per call. Contract values and message bodies may be strings or
-structured objects.
-
-| Tool             | Purpose |
-|------------------|---------|
-| `whoami`         | Show the bound channel/agent and who's present. Call first to confirm wiring. An agent the operator has retired is not listed as present — removal is honest towards agents too, not just the board — and it reappears as soon as it calls anything. |
-| `set_status`     | Declare your state — `working`/`waiting`/`blocked`/`idle` — plus a `detail` line and optional `ttl_seconds`. Shows on the dashboard with its age; nothing reads it back. |
-| `send_message`   | Post to the channel. Omit `to` to broadcast; set `to` (e.g. `"pro"`) to DM. |
-| `poll_messages`  | Fetch messages for you newer than `since`; returns a `cursor` to pass next time. |
-| `set_contract`   | Create/update a shared interface entry by `key`. Bumps version, records history. |
-| `get_contract`   | Read one entry by `key`, or all entries if `key` is omitted. |
-| `open_task`      | Open a task, optionally `assignee`d to an agent. |
-| `list_tasks`     | List tasks; filter by `status` (`open`/`claimed`/`done`) and/or `mine`. Listing open tasks auto-reopens stale claims. |
-| `claim_task`     | Claim an open task so the other agent knows you've got it. |
-| `complete_task`  | Mark a task done, with an optional `note`. |
-
-### A typical exchange
-
-The free plugin changes a filter the pro plugin consumes:
+**From Claude Code** (a terminal session), from the clone:
 
 ```
-free →  set_contract  key="filters.sync_payload"
-                      value={ args:["post_id","payload","ctx"], since:"1.1" }
-free →  open_task     title="update consumers to 3-arg filter" assignee="pro"
-
-# later, in the pro window (on a poll loop, or when you next talk to it):
-pro  →  poll_messages
-pro  →  list_tasks    status="open"     → sees the task
-pro  →  claim_task     id=7
-pro  →  get_contract   key="filters.sync_payload"   → reads the new shape
-pro  →  complete_task  id=7  note="updated in PR #42"
+/plugin marketplace add .
+/plugin install orchestratinator-floor
 ```
 
----
+From any other directory, give the full path to the clone instead of `.`.
 
-## Does this change the VS Code experience?
+**From VS Code**, the `/plugin` command doesn't take arguments — it answers
+*"/plugin isn't available in this environment."* Type `/plugin` on its own and
+use the menu: add the marketplace by directory, then install
+**orchestratinator-floor** from it (it sits at the bottom of the list, below
+the official plugins).
 
-No. These tools are called by the **same agent you're already driving** in each
-window. Progress/streaming output and the usual tool-approval prompts appear
-exactly as they do for any MCP tool — per window, per agent. There's no
-background agent acting on its own; the server is a passive shared service that
-each agent talks to when *you* (or a poll loop) prompt it to.
+There is nothing to configure: the plugin reads each repo's own `.mcp.json` and
+reports state to the same server with the same secret. A repo that doesn't name
+the orchestratinator never appears on any floor.
 
----
+**5. Install the host** — this is what lets the floor open and drive windows.
 
-## How it works (internals)
-
-- **Transport:** Streamable HTTP (`@modelcontextprotocol/sdk`), so multiple VS
-  Code windows connect to one shared process. (stdio would spawn a *separate*
-  server per window with no shared state — which defeats the purpose.)
-- **Session binding:** on `initialize`, the server reads `X-Channel`/`X-Agent`
-  from the request headers and binds them to that MCP session; a fresh
-  per-session `McpServer` closes over that context. Sessions are pruned by
-  supersession (a new one for the same channel+agent closes that pair's older
-  idle ones) and by an idle sweep, so a client that never sends `DELETE` can't
-  leak `McpServer` instances. In-flight requests and open SSE streams are exempt.
-- **Storage:** SQLite via `better-sqlite3`. One Node process means writes
-  serialize naturally — no cross-process locking. Data lives in a Docker volume.
-- **Schema:** `messages`, `contracts` (+ `contract_history`), `tasks`, `agents`
-  (presence), `channel_flags` (archive), `admin_events` (operator audit) — all
-  keyed by `channel` — plus `users` and `ui_sessions`, which are the only two
-  tables that aren't. See [`src/db.js`](src/db.js). A channel is never a row of
-  its own; it's a key shared across those tables, which is why archiving needs a
-  flag table and deleting has to sweep all of them in one transaction.
-- **Dashboard:** a separate Express router on the same port. `GET /api/state`
-  builds the channel/agent view; `GET /api/activity` is a `UNION ALL` over
-  messages, task transitions, contract history and operator actions, ordered
-  newest-first. The page polls both every 2.5s, so it stays current without a
-  reload. Live presence comes from an in-memory registry of open MCP sessions,
-  which is why closing a VS Code window shows up immediately rather than aging out
-  of the database.
-- **Operator actions:** `POST /api/admin/*`, guarded independently of the read
-  side (custom-header token + same-origin check; see *Operator actions*). Each one
-  writes an `admin_events` row, and `retire`/`delete` also reach into the session
-  registry to close live sessions — a database-only change would be undone by the
-  next tick, since a live session is itself a source of presence.
-- **Human auth:** none. There is no guard in front of the dashboard router at
-  all, which is why there is nothing here to describe — the shape of this section
-  is the point. `/api/admin/*` gets one middleware that compares `Origin` against
-  `Host` and rejects `Sec-Fetch-Site: cross-site`; absence of `Origin` passes,
-  since a same-origin `GET` and curl both omit it.
-- **Backups:** [`src/backup.js`](src/backup.js) dumps and reloads a fixed table
-  list, generically, via `PRAGMA table_info` — the column set is the file's own
-  rows intersected with the live schema, which is what lets a file survive a
-  migration in either direction. The reload is one `db.transaction` over every
-  table, because a half-restored board is worse than a refused one. `/api/admin/backup/restore`
-  is the single route with a raised body limit (`RESTORE_BODY_LIMIT`, default
-  128mb); everything else stays capped at 4mb.
-- **Self-heal:** a claim with no completion after `CLAIM_TTL_MINUTES` (default 15)
-  reverts to `open` on the next open-poll, so an abandoned claim (agent claimed a
-  task, then its turn died) can't sit invisibly in `claimed`. `status=claimed`
-  inspections never trigger this — only actionable open-task listings do.
-
-```
-src/
-  server.js   Express + Streamable HTTP wiring, per-session header binding
-  db.js       SQLite schema + channel-scoped data operations
-  tools.js    The MCP tool definitions
-  web.js      Dashboard router: /api/state, /api/activity, /api/admin/*, static UI
-  auth.js     The shared-secret guard on /mcp, and the cross-origin check on writes
-  backup.js   Export and restore the whole board as one JSON document
-  ui/         The dashboard page (no build step, no external assets)
-clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
-test/
-  smoke.mjs   End-to-end self-test: coordination + dashboard reads (npm run smoke)
-  admin.mjs   End-to-end self-test: operator actions + their guards (npm run test:admin)
-  auth.mjs    End-to-end self-test: both doors + export/restore (npm run test:auth)
+```bash
+./host/install.sh ~/path/to/your/projects
 ```
 
----
+Name the directory your repos live under. It finds every desk beneath it,
+registers a LaunchAgent so it starts at login, and reads the server address and
+shared secret from those desks. If your desks point at more than one board, the
+host refuses to guess — name one with
+`./host/install.sh --url http://localhost:8787 ~/path/to/your/projects`.
 
-## Notes & limits
+**6. Open the floor.**
 
-- **The network is the boundary. There is no second one for the dashboard.** The
-  shared secret keeps a casual port-scan off `/mcp`, but it's one static key for
-  every agent, and the board itself asks for nothing at all — it renders every
-  message body on every channel to anyone who can reach the port, and its operator
-  buttons work for them too. Compose publishes on every interface, which is the
-  right answer for a machine on a LAN you control and the wrong answer everywhere
-  else. Do not put this on a real address or forward it through a tunnel. If you
-  ever need to, the sign-in that used to be here is in the git history.
-- **`X-Agent` is honor-system identity**, not a security boundary — everyone
-  shares one key, so holding it lets you claim to be any agent. Fine for
-  coordinating your own agents.
-- **`operator` is a name, not an identity.** Every action under `/api/admin/*` is
-  attributed to the literal `operator`, because with no sign-in the server
-  genuinely cannot say who took it — only that it wasn't an agent. That much the
-  label is good for: human cleanup never gets mistaken for an agent finishing work.
-- **A restore is the one action with more reach than channel deletion.** It
-  replaces every table a backup covers. The typed confirmation and the
-  `data/pre-restore-*.json` snapshot are the whole safety net; there is no undo
-  button.
-- The paired agents must agree on channel/role names; the `.mcp.json` files here
-  are the source of truth for the syncinator pair.
+Open <http://localhost:8787/> in a browser. The board/floor switch is top
+right; every desk you wired up should be there.
+
+## Day to day
+
+One rule underneath everything: a conversation is one `claude` process, so
+**one app holds it at a time**. The floor always says who holds each desk. The
+daily loop:
+
+**1. Open a project** in VS Code or Claude Code — any repo you made a desk
+with its `.mcp.json` (step 3 above).
+
+**2. Start a session and work as you always have.** The desk comes alive on
+its floor: your conversation, state, and prompts appear as they happen. The
+first session in a new repo stops on *"New MCP server found in this project"*
+— approve it once and that repo is settled for good.
+
+**3. Open the floor** — <http://localhost:8787/>. Glance at the building; the
+header counts who's here and who needs you. Go where it points.
+
+**4. Click into a room, then a desk,** to read that agent's conversation live.
+
+**5. Answer what needs you.** If the floor holds the desk, permission prompts
+have **Approve / Deny** buttons right on it. If your editor holds it, the
+floor shows the prompt and says *"answer this in your editor"* — answer it
+there.
+
+**6. Ring the service bell** on any desk whose tray shows waiting messages or
+tasks. The agent picks them up.
+
+**7. Type to a desk from the floor** by first closing that conversation's tab
+in your editor and clicking **Open on the Floor** — one app at a time. The composer
+comes alive a second or two later; if no window is open at all, the host opens
+one and *resumes the same conversation*, history intact.
+
+**8. Take a conversation back whenever you want** — for any feature the floor
+chat doesn't provide. **Open in VS Code** moves it to your editor with everything
+you did from the floor already in it; **Open in Claude** lands a terminal on the
+desk's tmux window; or `tmux attach -t orch` and sit at any desk the host runs.
+
+## Useful commands
+
+```bash
+docker compose up -d                       # start (add --build after code changes)
+docker compose down                        # stop; data kept in the volume
+docker compose logs -f orchestratinator    # tail
+curl -s localhost:8787/health              # is it up?
+open http://localhost:8787/                # the page (board/floor switch top right)
+npm test                                   # all eight suites
+```
+
+And in any agent's chat window:
+
+```
+whoami                       # confirm channel/agent wiring
+list_tasks status=open       # what's pending for me
+get_contract                 # read the whole agreed interface
+```
+
+## Going deeper
+
+The front page stops here; the details — all of them — moved to `docs/`:
+
+| Page | What's in it |
+| --- | --- |
+| [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, avatars, saved prompts, stopping a turn, operator actions (view/mark read, close/reassign, retire, archive), minimize vs archive |
+| [How agents coordinate](docs/coordination.md) | Channels, the ten MCP tools, contracts, a typical exchange, wiring up a team, and why human→agent and agent→agent are different mechanisms |
+| [The security model](docs/security.md) | The shared secret, the network boundary, what the floor puts on the server, and the sign-in that used to exist |
+| [Backups & migration](docs/backup-and-migration.md) | Export, restore, moving the board to a permanent host, cron-driven backups |
+| [Internals & development](docs/internals.md) | How it works, the schema, running without Docker, bumping the version, environment variables |
+
+## License
+
+Copyright (C) 2026 AppIdeas.com
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License in [LICENSE](LICENSE)
+for details, or <https://www.gnu.org/licenses/gpl-3.0.html>.

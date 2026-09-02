@@ -67,6 +67,21 @@ const header = (req, name) => {
   return Array.isArray(v) ? v[0] : v;
 };
 
+/**
+ * Say when a session is turned away, and for what.
+ *
+ * The server refused a client silently for as long as this has existed. A
+ * window that came up with no tools looked identical on this side to one that
+ * never asked — so the only account of it was the client's one-line error,
+ * which names the code and not the request that earned it. An id is logged by
+ * its first eight characters: enough to pair a refusal with the session it came
+ * from in the same log, not enough to be a credential in a file someone pastes.
+ */
+const refused = (req, sessionId, why) =>
+  console.log(`[orchestratinator] refused ${req.method} /mcp` +
+    ` (${req.method === 'POST' ? (req.body?.method ?? 'no method') : 'stream'})` +
+    ` session=${sessionId ? String(sessionId).slice(0, 8) : 'none'} — ${why}`);
+
 /** Drop a session. Closing the transport fires onclose, which clears both maps. */
 function closeSession(sid) {
   const transport = transports[sid];
@@ -82,15 +97,36 @@ function closeSession(sid) {
  * `McpServer` instances, and the dashboard's connection count all grow forever.
  *
  * A channel+agent pair is one logical identity here, so once a new session
- * claims it, any earlier idle session for it is by definition abandoned. Closing
- * it is safe because an unknown session id now answers 404, which is the spec's
- * "start over" signal — a client that does come back just re-initialises.
+ * claims it, any earlier idle session for it is by definition abandoned.
+ *
+ * Two things that used to be written here are not true, and both cost an
+ * evening:
+ *
+ * "a client that does come back just re-initialises" — it does not.
+ * `Client.connect()` in the MCP SDK returns early when its transport already
+ * carries a session id ("we are trying to reconnect... we don't need to
+ * initialize again"), so a resumed client sends its first real call under the
+ * dead id, takes the 404, and gives up with no tools.
+ *
+ * "still in use" was read from `inflight`, and a session mid-handshake has none.
+ * markIdle clears it in the `finally` of the initialize request, so for the gap
+ * between that response and the `notifications/initialized` that follows it, a
+ * seconds-old session looks abandoned. A client that opens two connections at
+ * once — Claude Code does — had its own first connection culled by its second,
+ * at random, depending on which won the race. That is the whole of why an agent
+ * came back from a handoff with the board's tools missing: not the handshake
+ * being refused, but this, killing the connection that had just made one.
+ *
+ * So a session is only superseded once it has said `notifications/initialized`.
+ * One that never does is left to the idle sweeper, which is the right owner for
+ * a client that connects and then says nothing.
  */
 function supersede(sid, channel, agent) {
   if (!channel || !agent) return;
   for (const [otherId, s] of Object.entries(sessions)) {
     if (otherId === sid || s.channel !== channel || s.agent !== agent) continue;
     if (s.inflight > 0 || s.streaming) continue; // still in use — leave it alone
+    if (!s.ready) continue;                      // still shaking hands — see above
     sessionStats.superseded++;
     closeSession(otherId);
   }
@@ -131,6 +167,27 @@ function sweepIdleSessions() {
 }
 setInterval(sweepIdleSessions, SWEEP_MS).unref();
 
+/**
+ * Trim the floor's stored conversation to the newest turns per desk.
+ *
+ * Unlike the session sweep this is housekeeping on disk, not on memory: turns
+ * arrive at every turn boundary from every window on the network, so without
+ * this the database grows for as long as anyone is working. Run on the same
+ * timer because it is cheap and because a prune that only happens at startup is
+ * a prune that never happens on a server that stays up for months.
+ */
+setInterval(() => {
+  try {
+    const removed = store.pruneTurns();
+    if (removed) console.log(`[orchestratinator] pruned ${removed} old turn${removed === 1 ? '' : 's'}`);
+    // Work a host has already taken is only kept for a day, to answer "did that
+    // message ever get delivered" — after that it is just rows.
+    store.pruneHostWork();
+  } catch (err) {
+    console.warn(`[orchestratinator] turn prune failed: ${err.message}`);
+  }
+}, SWEEP_MS).unref();
+
 const markBusy = (sid) => {
   const s = sid ? sessions[sid] : undefined;
   if (s) { s.inflight++; s.last_seen = new Date().toISOString(); }
@@ -158,17 +215,38 @@ app.post('/mcp', async (req, res) => {
 
   if (transport) {
     markBusy(sessionId);
-  } else {
-    if (sessionId) {
-      // The client knows a session we don't: it expired or was superseded. 404 is
-      // what the spec tells clients to re-initialise on, so this self-heals.
-      return res.status(404).json({
-        jsonrpc: '2.0',
-        id: null,
-        error: { code: -32001, message: 'Session not found' },
-      });
+    // The end of the handshake, and the only signal a client gives that its
+    // connection is actually up. Recorded rather than assumed because it is what
+    // makes this session supersedable — and what protects it until then.
+    if (req.body?.method === 'notifications/initialized' && sessions[sessionId]) {
+      sessions[sessionId].ready = true;
     }
+  } else {
+    // The body decides, not the header, and that order is the fix rather than a
+    // tidy-up. An `initialize` IS the request to start a new session, so a stale
+    // `mcp-session-id` alongside one is a leftover, not a claim — the client is
+    // already asking for exactly what it is about to be given.
+    //
+    // Checking the header first refused that handshake with a 404. The comment
+    // that used to sit here said the spec has clients re-initialise on a 404, so
+    // it self-heals; the spec does, and it did not. Claude Code carries the last
+    // session id across `claude --resume`, so every conversation handed back
+    // from the floor to the editor re-connected with an id whose window had just
+    // closed, was refused, and started with no orchestratinator tools at all —
+    // the agent silently absent from the board it had just been working on.
+    //
+    // A non-initialize request with an unknown id is still a 404: that one has
+    // no handshake in it, and 404 is what tells the client to send one.
     if (!isInitializeRequest(req.body)) {
+      if (sessionId) {
+        refused(req, sessionId, 'unknown session, and no initialize to start a new one');
+        return res.status(404).json({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32001, message: 'Session not found' },
+        });
+      }
+      refused(req, sessionId, 'no session and no initialize');
       return res.status(400).json({
         jsonrpc: '2.0',
         id: null,
@@ -196,6 +274,9 @@ app.post('/mcp', async (req, res) => {
           last_seen: now,
           inflight: 1,       // this initialize request; markIdle clears it
           streaming: false,  // true while an SSE GET stream is open
+          // Set by the `notifications/initialized` that closes the handshake.
+          // Until then this session is not a candidate for supersede: see there.
+          ready: false,
         };
         sessionStats.opened++;
         supersede(sid, context.channel, context.agent);
@@ -232,6 +313,7 @@ async function handleSessionRequest(req, res) {
   const sessionId = header(req, 'mcp-session-id');
   const transport = sessionId ? transports[sessionId] : undefined;
   if (!transport) {
+    refused(req, sessionId, sessionId ? 'unknown session' : 'no session id');
     return res
       .status(sessionId ? 404 : 400)
       .json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } });

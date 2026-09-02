@@ -3,6 +3,19 @@
 :root {
   color-scheme: light dark;
 
+  /* One cycle of a desk's thought dots, in milliseconds. Unitless so floor.js
+     can read it and do arithmetic with it — see --thought-phase. */
+  --thought-ms: 1600;
+
+  /* One peal of a desk's service bell, in milliseconds and unitless so
+     floor.js can add them up — see ringPeriod(). Every arc runs --ring-dur and
+     neighbours start --ring-step apart, so the whole ring is
+     --ring-step * (arcs - 1) + --ring-dur: 1330ms as set here, which is 0.5s
+     of arcs arriving, 0.33s with all three up, and 0.5s of them leaving. */
+  --ring-dur: 900;
+  --ring-step: 215;
+  --press-ms: 340;
+
   --bg:        #f6f7f9;
   --surface:   #ffffff;
   --surface-2: #f0f2f5;
@@ -12,6 +25,10 @@
 
   --accent:    #3b6ef2;
   --busy:      #b7791f;
+  /* The sign face, one step lighter than the desk it is mounted on. It needs a
+     token of its own rather than a color-mix off --text, because "lighter"
+     runs toward white here and toward the text colour in the dark theme. */
+  --sign-face: #ffffff;
   --busy-bg:   #fdf3dd;
   --wait:      #7a5af0;
   --wait-bg:   #efeafe;
@@ -34,6 +51,12 @@
     --border:    #2a3138;
     --text:      #e6e9ed;
     --muted:     #8b95a1;
+
+    /* Lighter than .deskTop, which computes to about rgb(48,52,57) here — the
+       first value picked for this was darker than the desk and the sign read as
+       a recess rather than a panel. Checked against the computed fill, not by
+       eye: --text at 12% over --surface is not obviously a mid-grey. */
+    --sign-face: #3b4149;
 
     --accent:    #7aa2ff;
     --busy:      #e8b339;
@@ -187,7 +210,27 @@ main {
 .agent:first-child { border-top: none; }
 .agent .dot { margin-top: 6px; }
 .agent-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.agent-name { font-family: var(--mono); font-weight: 600; }
+/* The name reads as a name — the id beside it keeps the monospace, so the two
+   are told apart by shape before you have read either. */
+.agent-name { font: 600 13.5px var(--sans); letter-spacing: -.01em; }
+.agent-id { font-size: 11px; color: var(--muted); }
+
+/* Name + pencil, as one hover target: the pencil is only useful while you are
+   looking at the name it would change, and a permanently visible one on every
+   row turns the board into a column of icons. It stays put when hidden
+   (visibility, not display) so nothing reflows on hover — a row that shifts
+   under the pointer is a row you mis-click. */
+.named { display: inline-flex; align-items: center; gap: 3px; }
+.pencil {
+  font: 12px var(--sans); line-height: 1; color: var(--muted);
+  background: none; border: 0; border-radius: 4px; padding: 2px 3px;
+  cursor: pointer; visibility: hidden;
+}
+.named:hover .pencil { visibility: visible; }
+.pencil:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* Reachable without a pointer at all — a hover-only control that cannot be
+   tabbed to is not a control. */
+.pencil:focus-visible { visibility: visible; outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); }
 .agent-sub { font-size: 11.5px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
 
 .presence { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
@@ -411,10 +454,66 @@ pre.raw {
 }
 .dlg::backdrop { background: rgba(8, 10, 13, .48); }
 .dlg h3 { font-size: 15px; }
+/* The heading and its Nudge button share a row. space-between rather than a
+   float, so a long heading wraps beside the button instead of under it. */
+.dlg-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dlg-head h3 { flex: 1 1 auto; min-width: 0; }
+/* Subdued warning, not alarm: nudging is reaching into somebody's window and
+   typing, which is worth a beat of hesitation but is not destructive. Borrows
+   --busy, the same amber the board already uses for "working". */
+.btn.nudge {
+  flex: 0 0 auto;
+  border-color: var(--busy);
+  color: var(--busy);
+  background: color-mix(in srgb, var(--busy) 10%, var(--surface));
+}
+.btn.nudge:hover:not(:disabled) { background: color-mix(in srgb, var(--busy) 22%, var(--surface)); }
+/* Disabled in fact as well as in look — the attribute is what stops the click;
+   this only makes the refusal visible before it is attempted. */
+.btn.nudge:disabled { opacity: .45; cursor: not-allowed; }
+.nudge-why { margin-top: 8px; color: var(--busy); }
 .dlg h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--block); }
 .dlg p { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
 .dlg-sub { margin-top: 2px; font-size: 11.5px; }
 .dlg-note { margin-top: 12px; font-size: 11.5px; }
+.field { display: block; margin-top: 14px; }
+.field > span { display: block; font-size: 10.5px; text-transform: uppercase;
+                letter-spacing: .06em; color: var(--muted); margin-bottom: 5px; }
+.field .input { width: 100%; font-size: 14px; padding: 7px 9px; }
+
+/* The colour rows sit under the gender picker inside the same Avatar field —
+   they are all properties of one thing, so they get one heading between them
+   rather than three. */
+.swatch-row { display: flex; align-items: center; gap: 9px; margin-top: 9px; flex-wrap: wrap; }
+.swatch-label { flex: 0 0 46px; font-size: 11.5px; color: var(--muted); }
+.swatch {
+  width: 22px; height: 22px; flex: 0 0 auto; padding: 0; cursor: pointer;
+  background: var(--c); border: 1px solid rgba(0,0,0,.28); border-radius: 6px;
+}
+.swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swatch.current { width: 26px; height: 26px; border-radius: 7px; }
+/* The whole row of choices, revealed by the current swatch. It takes the full
+   width and wraps, because twenty shirts do not fit on one line at this size. */
+/* A fixed ten columns rather than wrapping on available width: twenty shirts
+   wrapped 18-and-2, which reads as a mistake. Ten and ten is a block; the
+   six-colour rows simply fill the first six cells of one. */
+.swatches {
+  flex: 1 0 100%; display: grid; grid-template-columns: repeat(10, 22px);
+  gap: 6px; justify-content: start;
+  padding: 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2);
+}
+/* Needed, and easy to miss: the browser's own `[hidden] { display: none }` has
+   the same specificity as the rule above and loses to it for coming first, so
+   without this the `hidden` property reads true while the grid stays on screen.
+   A test that asserts the property rather than the computed display sees
+   nothing wrong. */
+.swatches[hidden] { display: none; }
+/* The chosen one, marked by a ring that sits outside the swatch so it does not
+   eat into the colour being judged. */
+.swatches [aria-checked="true"] {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 
 /* An action and the sentence explaining what it will actually do, side by side —
    the explanation is the point, so it sits with the button and not in a tooltip. */
@@ -541,3 +640,868 @@ pre.raw {
   line-height: 1.6;
 }
 .set-done b { display: block; margin-bottom: 3px; }
+
+/* ─── The floor ───────────────────────────────────────────────────────────────
+   A second view of the same data. Everything here is scoped under #floor or
+   body.view-floor so the board's own styles cannot drift as a side effect of
+   changing this — the board works, and is not what we are experimenting on. */
+
+#floor { display: none; }
+body.view-floor #floor { display: block; }
+body.view-floor main > .panel:not(.panel-floor) { display: none; }
+
+/* Everything below the panel head sat flush against the panel border: .panel
+   carries no padding of its own and .panel-head brings its own, so the queue,
+   the floor picker and the rooms each butted up against the edge. Inset them to
+   the head's own 10px/14px rather than inventing a second number — the head is
+   right there on screen to be compared against, and a near-miss would read as a
+   mistake in a way a match cannot. */
+.panel-floor > .queue,
+.panel-floor > .chips,
+.panel-floor > .floor-body { padding-inline: 14px; }
+/* And off the rule under the head, for the same reason and with the same
+   number: the picker was the first thing below it once the queue strip went,
+   and a row of chips flush against a border reads as part of the border. */
+.panel-floor > .queue,
+.panel-floor > .chips { padding-top: 10px; }
+.panel-floor > .floor-body { padding-bottom: 14px; }
+
+.floor-body { display: flex; gap: 14px; align-items: flex-start; }
+.rooms { flex: 1 1 auto; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.rooms > .q-empty { padding: 28px; text-align: center; }
+
+svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margin-inline: auto; }
+
+/* The building.
+   ------------
+   Stacked floors are storeys, so they get drawn inside one. Walls on the left,
+   right and bottom only: a building seen in section has no roof in the way, and
+   the open top is what says "there are more floors than this" without a caption.
+
+   The wall is --text at low alpha rather than a colour per theme. That is
+   white-with-opacity on the dark theme and its only sensible counterpart on the
+   light one, where "lighter than the background" has nowhere to go against a
+   white page — one rule, and it cannot drift out of step the way two literals
+   did. It has to survive both themes because the silhouette is the whole of the
+   depiction: a stark black outline on a near-black page is not a dark building,
+   it is no building.
+
+   Width is fixed, not fluid: every floor is a full floor's width (ROOM_MAX_W,
+   775px) plus these walls and padding. Storeys of different widths do not read
+   as a building, they read as a mistake. */
+.rooms.building {
+  --wall-w: 16px;
+  max-width: calc(775px + var(--wall-w) * 2 + 28px);
+  margin-inline: auto;
+  /* Clear of the floor picker: the chips choose which floor, the building is
+     what they choose from, and they were close enough to read as one control. */
+  margin-top: 1rem;
+  padding: 16px 14px 18px;
+  gap: 18px;
+  border: var(--wall-w) solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+}
+
+/* A storey is one button. The pointer says so, and the carpet lifts under it —
+   the floor you are about to ride to is the whole storey, not the desk you
+   happen to be over. */
+.rooms.building svg.room { cursor: pointer; }
+/* Not while the pointer is on an arrow: the arrow stays on this floor, and
+   lighting the storey under it promises the opposite. */
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover)) .roomName { fill: var(--accent); }
+
+/* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
+   drawn at all: it is anchored to the room's edge rather than to its partner,
+   so hiding one moves nothing, and a floor that fits its desks should not carry
+   two dead controls saying otherwise. */
+.deskTrack { transition: transform .22s ease; }
+.deskArrow { cursor: pointer; }
+.deskArrow .arrowChip {
+  fill: color-mix(in srgb, var(--text) 14%, var(--surface));
+  stroke: var(--border);
+  transition: fill .15s ease;
+}
+.deskArrow .arrowGlyph { fill: none; stroke: var(--text); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.deskArrow:hover .arrowChip { fill: color-mix(in srgb, var(--text) 26%, var(--surface)); }
+.deskArrow:focus-visible .arrowChip { stroke: var(--text); stroke-width: 2; }
+.deskArrow.spent { display: none; }
+
+/* Furniture. Deliberately flat and low-contrast: the room is the backdrop, and
+   anything here that competes with a person or a badge is a bug. */
+.roomFloor { fill: var(--surface-2); stroke: var(--border); }
+.roomWall  { fill: color-mix(in srgb, var(--border) 45%, transparent); stroke: none; }
+.roomName  { fill: var(--text); font: 600 13px var(--sans); }
+.roomMeta  { fill: var(--muted); font: 11px var(--mono); }
+/* The board's channel-header line, on a storey. Same 11px mono, same muted
+   body with the counts picked out — .channel-stats and .channel-stats b are the
+   pair being matched, and matching them is the whole point: an operator reads
+   one line in two places, not two lines that happen to hold the same numbers. */
+.roomStat  { fill: var(--muted); font: 11px var(--mono); }
+.roomStatN { fill: var(--text); font-weight: 600; }
+.deskTop   { fill: color-mix(in srgb, var(--text) 12%, var(--surface)); stroke: var(--border); }
+.monitor   { fill: color-mix(in srgb, var(--text) 30%, var(--surface)); }
+.screen    { fill: var(--off-bg); transition: fill .3s ease; }
+/* Commands, typed onto the glass while work is running. White rather than a
+   theme token because the lit screen is accent-tinted in both themes and this
+   sits on top of it — and because the point is the shape of moving text, not
+   its legibility. It is roughly 4 CSS pixels tall; nobody is reading it. */
+.screenLine { fill: rgba(255, 255, 255, .88); font: 3.4px var(--mono); }
+/* Its reduced-motion guard is not here with the others: the typing is a string
+   growing by a character, not a property @media can reach, so the check lives
+   next to typeTick() in floor.js. Under `reduce` each command lands complete. */
+
+/* The service bell.
+   Three shades of one material rather than three colours: the bell has to read
+   as a single solid object at floor zoom, and each part still has to separate
+   from the one it touches. The steps are against --text, so the whole thing
+   inverts with the theme the way .monitor and .deskTop do — a fixed grey would
+   be furniture in one theme and a hole in the other. The dome deliberately
+   sits a step off .monitor (30%) so the two objects on the desk are not the
+   same shade of the same nothing. */
+.bellBase    { fill: color-mix(in srgb, var(--text) 48%, var(--surface)); }
+.bellDome    { fill: color-mix(in srgb, var(--text) 34%, var(--surface)); }
+.bellPost,
+.bellKnob    { fill: color-mix(in srgb, var(--text) 62%, var(--surface)); }
+.bellHit     { fill: transparent; }
+.bell        { cursor: pointer; }
+.bell:not(.blocked):hover .bellDome { fill: color-mix(in srgb, var(--accent) 55%, var(--surface)); }
+.bell:not(.blocked):hover .bellBase { fill: color-mix(in srgb, var(--accent) 75%, var(--surface)); }
+.bell:not(.blocked):hover .bellPost,
+.bell:not(.blocked):hover .bellKnob { fill: var(--accent); }
+/* Both rules, the way .desk, .pill and .plate have them. Only the
+   :focus-visible one was here, and that is not the one a mouse triggers: a
+   click sets :focus, the UA draws its ring around the group's bounding box, and
+   the ding arrives inside a rectangle. Keyboard focus still marks the base. */
+.bell:focus { outline: none; }
+.bell:focus-visible .bellBase { stroke: var(--accent); stroke-width: 2; }
+
+/* A desk with nowhere to deliver to keeps its bell and loses its ring — the
+   same choice the board's dialog makes with its Nudge button, which greys out
+   rather than disappearing. A bell that vanishes tells you nothing; a dim one
+   with the server's reason on hover tells you what to go fix. */
+.bell.blocked { cursor: default; opacity: .3; }
+
+/* In the building, a desk is scenery: the whole storey is one button to the
+   floor it depicts, so nothing inside it operates. */
+.rooms.building .bell { display: none; }
+
+
+/* Sound.
+   ------
+   Six arcs, struck in pairs from the middle outward and let go in the same
+   order. Every bar has the identical animation and differs only in when it
+   starts, which is what keeps the two halves of the peal symmetrical: with
+   --ring-step between neighbours, the arcs arrive over one --ring-step * 2 and
+   leave over the same, whatever the numbers are changed to.
+
+   --ring-phase is negative and set by floor.js from the wall clock, so a room
+   rebuilt mid-peal resumes rather than starting the ring again. Rooms are
+   rebuilt about every two seconds and a peal lasts 1.33, so that is not an
+   edge case — it is most rings. */
+.bellRing {
+  opacity: 0;
+  fill: none;
+  stroke: var(--busy);
+  /* Scaled with the bell. At 2.4 against arcs a third of their old radius the
+     stroke was thicker than the gaps between them and they read as a blob. */
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.bell.ringing .bellRing {
+  animation: bell-ring calc(var(--ring-dur) * 1ms) linear both;
+  animation-delay: calc(var(--ring-phase, 0ms) + var(--ring-i) * var(--ring-step) * 1ms);
+}
+.bell.ringing .bellPlunger {
+  animation: bell-press calc(var(--press-ms) * 1ms) ease-out both;
+  animation-delay: var(--ring-phase, 0ms);
+}
+/* Each arc: in fast, hold, out fast. 7.8% of 900ms is the ~70ms fade that
+   makes an arc appear rather than grow. */
+@keyframes bell-ring {
+  0%    { opacity: 0; }
+  7.8%  { opacity: 1; }
+  92.2% { opacity: 1; }
+  100%  { opacity: 0; }
+}
+/* Struck and released — down fast, back slower, which is what a hand does. */
+@keyframes bell-press {
+  0%   { transform: translateY(0); }
+  18%  { transform: translateY(var(--press-depth, 2px)); }
+  60%  { transform: translateY(0); }
+  100% { transform: translateY(0); }
+}
+
+/* The board would not take it. Says so on the bell for a moment, and the
+   reason itself is on the tooltip — this only draws the eye to it. */
+.bell.refused .bellBase,
+.bell.refused .bellDome,
+.bell.refused .bellPost,
+.bell.refused .bellKnob { fill: var(--block); }
+
+@media (prefers-reduced-motion: reduce) {
+  /* The arcs still say a nudge went out — they simply arrive and leave
+     together instead of rippling. The peal keeps its length, so the click
+     guard and what is on screen still agree. */
+  .bell.ringing .bellRing { animation: none; opacity: 1; }
+  .bell.ringing .bellPlunger { animation: none; }
+}
+/* Hair is one colour in both themes, and it is a warm brown rather than the
+   near-black it started as.
+ 
+   The near-black it started as scored 1.12:1 against the room (#1e242b) —
+   present in the DOM and invisible on screen. Lightening it was the obvious fix
+   and the wrong one: the room is a cool blue-grey at 212deg, so a brown sits
+   about 173deg away and separates by hue as well as by lightness. This one is
+   only 1.66:1 against the room and still reads clearly, which a grey at the
+   same lightness would not — and staying that dark keeps it twice as far from
+   the skin tone, so it looks like hair rather than a lighter head.
+ 
+   An outline was tried first and backed out: it read as a border, which nothing
+   else in this UI has. */
+/* Every avatar colour is an operator choice now, handed down from the payload
+   as a variable on the group. The fallbacks here are only for a figure drawn
+   before one arrives — the server resolves the real defaults. */
+.person { --shirt: #7aa2ff; --hair: #5a4130; --skin: #a9afb8; }
+.person .shadow { fill: rgba(0,0,0,.10); }
+.person .body   { fill: var(--shirt); transition: fill .3s ease; }
+.person .head   { fill: var(--skin); transition: fill .3s ease; }
+/* Hair is deliberately not a seat colour. Seat colour is identity — it is how a
+   desk stays recognisable after a rename — so painting hair with it would make
+   two agents of the same gender look alike and fight the thing it sits next to.
+
+   Not derived from --text either: that put near-white hair on a near-white head
+   in dark mode. The chosen value and the reasoning behind it are on --hair. */
+.person .hair   { fill: var(--hair); transition: fill .3s ease; }
+
+.plateName { fill: var(--text); font: 600 12px var(--sans); }
+.plateRole { fill: var(--muted); font: 10px var(--mono); }
+
+.bubbleBox  { fill: var(--surface); stroke: var(--border); }
+.bubbleText { fill: var(--text); font: 10.5px var(--sans); }
+
+/* The three dots trailing from the bubble down to the head. Same fill as the
+   box, because they are the same object — a tail drawn as punctuation rather
+   than as a point — but a stronger edge than the box carries. A 158-wide panel
+   reads off its fill; a 3-unit circle has almost no fill to read, so it lives or
+   dies on its outline. --text at 25% over the carpet is lighter than the carpet
+   on the dark theme and darker on the light one, which is what "stands out from
+   the background" means in each. */
+.thoughtDot {
+  fill: var(--surface);
+  stroke: color-mix(in srgb, var(--text) 25%, var(--surface-2));
+  stroke-width: 1;
+}
+
+/* A thought is something happening now, so the trail belongs to work in
+   progress and to nothing else: no dots on a desk that has finished. What stays
+   behind is the plain bubble holding the last thing the agent said. */
+.thought { display: none; }
+.desk.working .thought { display: inline; }
+
+/* While an agent is working the dots run a four-beat cycle: one, two, three,
+   none. Motion on this floor is supposed to mean something (see the counter's
+   blind), and this means exactly one thing — the agent is mid-thought right
+   now. It runs only under .desk.working, so a still desk is genuinely still.
+
+   Three keyframe sets rather than one with delays: the dots accumulate and then
+   clear together, which is not a shifted copy of a single pattern. The doubled
+   stops are deliberate — they make each switch instant instead of a fade. */
+/* The period lives here and only here; floor.js reads it off :root to work out
+   the phase below, so the two cannot drift apart. */
+.desk.working .thoughtDot {
+  animation: thought-1 calc(var(--thought-ms) * 1ms) linear infinite;
+  /* Anchored to the wall clock, not to the node's own birth. Rooms are rebuilt
+     wholesale on every poll that changes anything, which replaces these circles
+     and restarts a from-zero animation — measured, the cycle never got past
+     1.18s of its 1.6s before being reset, so it never completed a loop and read
+     as stopping after a round or two. floor.js sets --thought-phase to a
+     negative offset from the shared clock, so a circle one millisecond old
+     paints exactly where its predecessor left off and the rebuild is invisible. */
+  animation-delay: var(--thought-phase, 0s);
+}
+.desk.working .thoughtDot:nth-child(2) { animation-name: thought-2; }
+.desk.working .thoughtDot:nth-child(3) { animation-name: thought-3; }
+@keyframes thought-1 { 0%, 74.9% { opacity: 1; } 75%, 100% { opacity: 0; } }
+@keyframes thought-2 { 0%, 24.9% { opacity: 0; } 25%, 74.9% { opacity: 1; } 75%, 100% { opacity: 0; } }
+@keyframes thought-3 { 0%, 49.9% { opacity: 0; } 50%, 74.9% { opacity: 1; } 75%, 100% { opacity: 0; } }
+/* Reduced motion keeps all three showing for as long as the work runs. The
+   trail still says "thinking" by being there at all; only the cycling stops. */
+@media (prefers-reduced-motion: reduce) { .desk.working .thoughtDot { animation: none; } }
+
+.desk { cursor: pointer; }
+.desk:focus { outline: none; }
+.desk:focus-visible .deskTop { stroke: var(--accent); stroke-width: 2; }
+.desk:hover .deskTop { stroke: var(--accent); }
+
+/* Shirt colour is identity, not status — it is what makes a desk recognisable
+   from across the room after somebody has been renamed. This used to be five
+   CSS rules keyed on seat; it is now a stored choice per agent, defaulted from
+   the seat so the room looks the same as it did. */
+.desk.away .person .body { fill: var(--off) !important; }
+.desk.away .person .head { fill: var(--off-bg); }
+/* An away figure carries no detail at all. A greyed-out avatar with a haircut
+   read as a rendering fault rather than as a state — the hair kept its shape
+   while everything around it lost its colour, so it looked like the one thing
+   that had failed to dim. Absence is legible; a half-dimmed feature is not. */
+.desk.away .person .hair { display: none; }
+.desk.away { opacity: .55; }
+.desk.away .bubble { display: none; }
+
+.desk.working .screen { fill: color-mix(in srgb, var(--accent) 55%, var(--surface)); }
+.desk.needs-you .screen { fill: color-mix(in srgb, var(--block) 55%, var(--surface)); }
+
+/* The desk front, which is the sign, and the tray of counts under the plate.
+
+   The blind is one tall strip carrying every card; turning it is a transform,
+   which is why a card can change without the room being redrawn. The easing is
+   weighted to the back end on purpose — a roller blind arrives at a stop, it
+   does not glide to one. Under reduced motion the card still changes, it just
+   changes instantly: the information is the point, the movement is the flavour.
+
+   The counter keeps `.deskTop`, so the hover and focus rules below still find
+   it: it is a desk that reads, not a sign that happens to sit where a desk was. */
+.face      { overflow: hidden; }
+.sign      { overflow: hidden; }
+.signFace  { fill: var(--sign-face); }
+.signText  { fill: var(--text); font: 10.5px var(--sans); }
+.blind     { transition: transform .5s cubic-bezier(.55,.06,.18,1); }
+/* The seam. Solid and mid-toned rather than subtle: it is meant to be caught
+   in peripheral vision, which is the whole reason it is here — at desk-across-
+   the-room distance the words are unreadable but a bar sweeping past is not. */
+.stitch    { fill: color-mix(in srgb, var(--text) 42%, var(--sign-face)); }
+.card.derived .signText,
+.card.action  .signText { fill: var(--muted); font-family: var(--mono); font-size: 9.5px; }
+
+/* A count is an operator affordance, so it reads as one: filled rather than
+   outlined, in the accent the rest of the board uses for things you can click.
+   It cannot be exempted from `.desk.away`'s fade — that opacity is on the desk
+   group and group opacity composites, so a child rule claiming to undo it would
+   simply be untrue. */
+.pill { cursor: pointer; }
+.pill:focus { outline: none; }
+.pillBox  { fill: color-mix(in srgb, var(--accent) 16%, var(--surface)); stroke: var(--accent); }
+.pillText { fill: var(--text); font: 600 9.5px var(--mono); }
+.pill:hover .pillBox { fill: color-mix(in srgb, var(--accent) 32%, var(--surface)); }
+.pill:focus-visible .pillBox { stroke-width: 2; }
+.pill.tasks .pillBox { fill: color-mix(in srgb, var(--wait) 18%, var(--surface)); stroke: var(--wait); }
+.pill.tasks:hover .pillBox { fill: color-mix(in srgb, var(--wait) 34%, var(--surface)); }
+/* Held work gets the busy tone — the same colour the state chip uses for
+   "working" — so the tray reads in the same language as the label above it. */
+.pill.claimed .pillBox { fill: color-mix(in srgb, var(--busy) 18%, var(--surface)); stroke: var(--busy); }
+.pill.claimed:hover .pillBox { fill: color-mix(in srgb, var(--busy) 34%, var(--surface)); }
+
+@media (prefers-reduced-motion: reduce) { .blind { transition: none; } }
+
+.needsDot  { fill: var(--block); animation: needsPulse 1.6s ease-in-out infinite; }
+.needsMark { fill: #fff; font: 700 13px var(--sans); }
+@keyframes needsPulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .needsDot { animation: none; } }
+
+.envBody { fill: var(--surface); stroke: var(--accent); }
+.envFlap { fill: none; stroke: var(--accent); stroke-width: 1.2; }
+
+/* ─── the queue ─── */
+.q-empty { color: var(--muted); font-size: 12.5px; padding: 10px 2px; }
+
+/* ─── the desk panel ─── */
+.deskpanel {
+  flex: 0 0 clamp(300px, 34vw, 460px);
+  display: flex; flex-direction: column;
+  max-height: 74vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.p-head { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.p-id { display: flex; align-items: baseline; gap: 8px; margin-right: auto; min-width: 0; }
+.p-persona {
+  font: 600 14px var(--sans); color: var(--text);
+  background: none; border: 1px dashed transparent; border-radius: 5px;
+  padding: 1px 4px; cursor: pointer;
+}
+.p-persona:hover { border-color: var(--border); color: var(--accent); }
+/* The pencil rides along after the name rather than replacing the whole-button
+   hover, which already reads as editable. */
+.p-persona::after { content: " \270e"; font-size: 11px; color: var(--muted); visibility: hidden; }
+.p-persona:hover::after, .p-persona:focus-visible::after { visibility: visible; }
+.p-meta { padding: 6px 10px; font-size: 11px; border-bottom: 1px solid var(--border); }
+/* The thing waiting on you, directly above the box you would type in.
+   Amber-bordered on the panel's own ground rather than filled red: it sits in
+   the operator's peripheral vision the whole time a prompt is open, and a red
+   block there reads as something having gone wrong. Nothing has gone wrong —
+   somebody is being asked a question. The border is enough to find it by. */
+.p-alert {
+  padding: 8px 10px; font-size: 12px;
+  border: 1px solid var(--busy);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--busy) 7%, transparent);
+}
+/* An error is the one case where something has gone wrong, so it keeps the red
+   — a failed answer that looks like an ordinary question is a failed answer you
+   scroll past. */
+.p-alert.p-alert-error { border-color: var(--block); background: color-mix(in srgb, var(--block) 9%, transparent); }
+.p-turns { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
+.t-who { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; display: flex; gap: 6px; }
+.t-when { color: var(--muted); text-transform: none; letter-spacing: 0; }
+.t-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
+.t-user .t-body { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; }
+.t-error .t-body { color: var(--block); }
+
+/* Rendered agent messages. `pre-wrap` above is what makes a plain message keep
+   its shape, so it stays the default and this class turns it off: md() has
+   already turned the line breaks it wants to keep into <br>, and leaving both
+   in place doubles every one of them. Everything here is scoped to .t-md so a
+   turn rendered as plain text — the operator's own, and the reply still
+   streaming in — is untouched. */
+.t-md { white-space: normal; }
+.t-md > :first-child { margin-top: 0; }
+.t-md > :last-child { margin-bottom: 0; }
+.t-md p { margin: 0 0 .5em; }
+.t-md h1, .t-md h2, .t-md h3, .t-md h4, .t-md h5, .t-md h6 {
+  /* A heading in a 12.5px panel earns weight, not size: h1 at its default
+     2em would be twice the height of the message under it. */
+  margin: .7em 0 .3em; font-size: 12.5px; font-weight: 700; color: var(--text);
+}
+.t-md h1, .t-md h2 { font-size: 13.5px; }
+.t-md ul, .t-md ol { margin: .4em 0; padding-left: 1.35em; }
+.t-md li { margin: .15em 0; }
+.t-md li p { margin: .2em 0; }
+.t-md code {
+  font: 11.5px var(--mono); background: var(--surface-2);
+  padding: .1em .3em; border-radius: 4px;
+}
+.t-md pre {
+  margin: .5em 0; padding: 7px 9px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  /* A long line scrolls its own block rather than widening the panel and
+     pushing every other turn out of view with it. */
+  overflow-x: auto;
+}
+.t-md pre code { padding: 0; background: none; font-size: 11px; white-space: pre; }
+.t-md blockquote {
+  margin: .5em 0; padding-left: 9px;
+  border-left: 2px solid var(--border); color: var(--muted);
+}
+.t-md a { color: var(--accent); }
+.t-md hr { border: 0; border-top: 1px solid var(--border); margin: .7em 0; }
+.t-md table { border-collapse: collapse; margin: .5em 0; font-size: 11.5px; display: block; overflow-x: auto; }
+.t-md th, .t-md td { border: 1px solid var(--border); padding: 3px 7px; text-align: left; vertical-align: top; }
+.t-md th { background: var(--surface-2); font-weight: 600; }
+.t-md .md-c { text-align: center; }
+.t-md .md-r { text-align: right; }
+/* Tool calls are one dim line by design — they are the texture of a session,
+   not its content, and a panel that gives them equal weight reads as noise. */
+.t-tool { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.t-tool .t-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.t-tool .t-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-compose { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); }
+/* One height for every control in the row, said once. Send's height used to be
+   whatever its text and padding came to (28px), and the two glyph buttons were
+   given 24px by hand — so the marks sat two pixels inside the button they stood
+   next to, which is exactly the misalignment nobody can name but everybody
+   sees. Declared here and applied to all three, so the glyphs cannot drift from
+   Send without Send taking them with it. */
+.p-actions { display: flex; align-items: center; gap: 8px; --p-ctl-h: 28px; }
+.p-actions .btn { height: var(--p-ctl-h); }
+.p-hint { font-size: 10.5px; flex: 1 1 auto; line-height: 1.35; }
+
+/* The stop sign, in the row it belongs to rather than on every desk.
+   Hollow, because at this size a filled octagon is a red dot and the eight
+   edges are the entire reason anyone recognises it. The fill is not zero
+   though — fully transparent read as a hole punched in the button — it is the
+   barest wash of the same red.
+
+   Sized by its height, never by a width: the row's other buttons are as wide as
+   their words, and a shape stretched to a word's width is a different shape. It
+   takes the row's control height and whatever width that height gives it, which
+   for a regular octagon is the same number. */
+.btn.stopbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: auto; height: var(--p-ctl-h); padding: 0;
+  /* No border of its own. A .btn's rounded rectangle around an octagon is two
+     competing shapes at the same size, and the outer one wins — the sign stops
+     reading as a sign. The octagon IS the control, the way the bell is. */
+  border-color: transparent;
+  background: none;
+}
+/* The stroke straddles the path, so half of it lies outside the viewBox: a box
+   drawn at the full control height would put the sign's outer edge half a
+   stroke past Send's border. Subtracting the weight is what makes the drawn
+   edges land ON the border, top and bottom. It also means the weight has to be
+   one number — hence --sw, read here for the box and below for the stroke, so
+   the thicker hover and focus lines thicken inwards instead of growing the
+   mark. Width is left to the viewBox's own ratio. */
+.stopGlyph {
+  --sw: 1.7px;
+  height: calc(var(--p-ctl-h) - var(--sw)); width: auto;
+  display: block; overflow: visible;
+}
+.stopGlyph polygon {
+  fill: color-mix(in srgb, var(--block) 12%, var(--surface));
+  stroke: var(--block);
+  stroke-linejoin: round;
+  /* The viewBox is two units across, so a plain stroke-width here would be in
+     those units and would have to be re-derived if the glyph ever changed size.
+     non-scaling-stroke makes it pixels: 1.7 is the weight the sign carried when
+     it stood on the desk. */
+  vector-effect: non-scaling-stroke;
+  stroke-width: var(--sw);
+}
+/* Hover lands on the glyph, not on a box drawn around it — same as .pencil. */
+.btn.stopbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.stopbtn:hover:not(:disabled) .stopGlyph { --sw: 2.2px; }
+.btn.stopbtn:hover:not(:disabled) .stopGlyph polygon {
+  fill: color-mix(in srgb, var(--block) 32%, var(--surface));
+}
+/* Keyboard focus still needs a mark, and the glyph is what to mark — a ring
+   round the button's box would put back the rectangle removed above. */
+.btn.stopbtn:focus { outline: none; }
+.btn.stopbtn:focus-visible .stopGlyph { --sw: 2.4px; }
+.btn.stopbtn:focus-visible .stopGlyph polygon { stroke: var(--accent); }
+/* Dimmed in place rather than hidden, exactly like .bell.blocked: most of the
+   time nothing is running, and that is this control's resting state, not a
+   fault. The reason it cannot be pressed is on hover. */
+.btn.stopbtn:disabled { opacity: .32; }
+
+/* The two seat-change actions. They were .btn, and in a panel this narrow each
+   wrapped to three lines — which reads as damage, not as a control. A link is
+   the truer affordance anyway: neither one sends anything or changes the
+   conversation, they move it to a different window. One per line, because side
+   by side is what wrapped in the first place.
+   The caps are a text-transform so the DOM keeps sentence case: flash() swaps
+   the label for an error and puts the original back, and the accessible name
+   should not be shouted. */
+.p-links { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.p-link {
+  background: none; border: 0; padding: 0; margin: 0;
+  font: 600 10.5px/1.5 var(--sans);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+.p-link:hover:not(:disabled) { color: var(--busy); }
+/* Same pairing as .desk/.pill/.plate/.bell: a mouse click must not draw a ring,
+   a keyboard tab must. */
+.p-link:focus { outline: none; }
+.p-link:focus-visible { color: var(--busy); outline: 2px solid color-mix(in srgb, var(--busy) 45%, transparent); outline-offset: 3px; }
+.p-link:disabled { opacity: .5; cursor: default; }
+/* An error borrowed the label. Muted grey small-caps is the wrong voice for it,
+   and the sentence is not an action, so drop the shouting with the colour. */
+.p-link.flashed { color: var(--block); text-transform: none; letter-spacing: 0; }
+/* The command, under a hatch that cannot fire it. `user-select: all` so one
+   click takes the whole line: the entire point is to get it into a terminal,
+   and this is being read by someone who has already decided the page is not
+   helping them. */
+.p-tmux {
+  font: 10.5px/1.6 var(--mono);
+  color: var(--muted);
+  user-select: all;
+  overflow-wrap: anywhere;
+  max-width: 46ch;
+}
+/* Same line, borrowed for a refusal. A sentence is not a command — drop the
+   mono and the one-click select, or it invites being pasted into a shell. */
+.p-tmux.tmux-why {
+  font-family: var(--sans);
+  color: var(--block);
+  user-select: text;
+}
+/* The saved-prompts button. Same height-first sizing and the same no-chrome
+   treatment as the stop sign beside it: two marks in one row read as one control
+   each only if neither of them is wearing a box the other isn't. Wider than the
+   sign, because its box is wider than it is tall and the height is what the two
+   share — matching their widths instead would draw one of them at the wrong
+   proportions. */
+.btn.promptbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: auto; height: var(--p-ctl-h); padding: 0; border-color: transparent; background: none;
+}
+/* Same stroke arithmetic as .stopGlyph, and for the same reason. */
+.promptGlyph {
+  --sw: 1.6px;
+  height: calc(var(--p-ctl-h) - var(--sw)); width: auto;
+  display: block; overflow: visible;
+}
+/* Stroked, not filled — the stop sign is an outline and this sits next to it.
+   non-scaling-stroke so the unit box does not multiply the line weight. */
+.promptGlyph rect, .promptGlyph polyline, .promptGlyph line {
+  fill: none; stroke: var(--muted); stroke-width: var(--sw);
+  stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke;
+}
+.btn.promptbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.promptbtn:hover:not(:disabled) .promptGlyph rect,
+.btn.promptbtn:hover:not(:disabled) .promptGlyph polyline,
+.btn.promptbtn:hover:not(:disabled) .promptGlyph line { stroke: var(--busy); }
+.btn.promptbtn:focus { outline: none; }
+.btn.promptbtn:focus-visible .promptGlyph { --sw: 2px; }
+.btn.promptbtn:focus-visible .promptGlyph rect,
+.btn.promptbtn:focus-visible .promptGlyph polyline,
+.btn.promptbtn:focus-visible .promptGlyph line { stroke: var(--accent); }
+.btn.promptbtn:disabled { opacity: .32; }
+.btn.promptbtn[aria-expanded="true"] .promptGlyph rect,
+.btn.promptbtn[aria-expanded="true"] .promptGlyph polyline,
+.btn.promptbtn[aria-expanded="true"] .promptGlyph line { stroke: var(--busy); }
+
+/* The picker. On the body rather than inside the panel, which scrolls and clips;
+   positioned from script, so only the look is here. */
+#prompt-menu {
+  position: fixed; z-index: 60; min-width: 190px; max-width: 320px;
+  max-height: 60vh; overflow-y: auto;
+  padding: 4px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+}
+.pm-item {
+  display: block; width: 100%; text-align: left;
+  padding: 6px 10px; border: 0; border-radius: 5px; background: none;
+  font: 500 12.5px/1.35 var(--sans); color: var(--text); cursor: pointer;
+  /* A long title shortens rather than widening the menu or wrapping to three
+     lines. The whole title is on the row's tooltip either way. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pm-item:hover, .pm-item:focus-visible { background: color-mix(in srgb, var(--busy) 16%, transparent); outline: none; }
+.pm-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.pm-manage { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.pm-empty { padding: 6px 10px; color: var(--muted); font: 12.5px/1.35 var(--sans); }
+
+/* A question the window is asking, as a form.
+   Tabs across the top, one question showing at a time, and the controls that
+   send it at the bottom — cancel below the choices rather than above them, so
+   the thing that abandons the answer is not the first thing under your cursor. */
+.p-ask { display: flex; flex-direction: column; gap: 8px; }
+.p-tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.p-tab {
+  border: 0; background: none; cursor: pointer;
+  padding: 3px 8px; border-radius: 5px;
+  font: 600 10.5px/1.4 var(--sans); letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.p-tab:hover { color: var(--busy); }
+.p-tab.on { color: var(--text); background: color-mix(in srgb, var(--busy) 18%, transparent); }
+.p-qtext { font-size: 12.5px; font-weight: 600; margin-bottom: 2px; }
+/* The whole row is the target, not just the little circle. */
+.p-opt { display: flex; gap: 8px; align-items: flex-start; padding: 3px 4px; border-radius: 5px; cursor: pointer; }
+.p-opt:hover { background: color-mix(in srgb, var(--busy) 10%, transparent); }
+.p-opt input { margin-top: 2px; flex: 0 0 auto; }
+.p-opt-text { font-size: 12px; line-height: 1.35; }
+/* The description the window prints under a choice. Present, but quieter than
+   the choice itself — it is there to be read second. */
+.p-opt-detail { display: block; color: var(--muted); font-size: 11px; margin-top: 1px; }
+.p-other { width: 100%; font-size: 12px; margin-top: 2px; }
+.p-other:disabled { opacity: .45; }
+.p-ask-foot { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+/* The window's own warning, in the window's own words. Amber like the box it
+   sits in — it is a note, not a refusal; submitting anyway is allowed there and
+   allowed here. */
+.p-ask-warn { font-size: 11.5px; color: var(--busy); }
+/* While the host walks the window's tabs to find out what is being asked. The
+   alternative was Approve/Deny/Cancel over a question — buttons that answer
+   something else, offered for the two seconds before the real ones arrive. */
+.p-reading { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+
+/* The manager's list: title, a peek at the body, and its two buttons.
+   .dlg-list is indented for the bulleted prose lists it was built for; this one
+   is a table of rows, and inheriting that indent pushed every title a finger's
+   width right of the heading above it. */
+.prompt-list { display: flex; flex-direction: column; gap: 2px; margin-left: 0; padding-left: 0; list-style: none; }
+.prompt-row {
+  display: grid; grid-template-columns: minmax(90px, auto) 1fr auto;
+  align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px;
+}
+.prompt-row.editing { background: color-mix(in srgb, var(--busy) 12%, transparent); }
+.prompt-title { font-weight: 600; }
+/* The preview is a hint, not the content — one line, always, however long the
+   prompt is. */
+.prompt-preview { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prompt-acts { display: flex; gap: 6px; }
+.prompt-form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.prompt-form textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+
+/* Waiting for the host to move the conversation. The link is still a button and
+   still focusable — disabling it would throw the keyboard's place away mid-move
+   — so the click is refused in the handler and the cursor says why. */
+.p-link[data-busy] { cursor: progress; }
+.p-link[data-busy]:hover { color: var(--muted); }
+/* Sized to the line it replaces, so the strip does not change height when the
+   text goes away. */
+.pspin {
+  display: inline-block; width: 11px; height: 11px; vertical-align: -1px;
+  border: 2px solid color-mix(in srgb, var(--muted) 30%, transparent);
+  border-top-color: var(--busy);
+  border-radius: 50%;
+  animation: pspin .7s linear infinite;
+}
+@keyframes pspin { to { transform: rotate(360deg); } }
+/* Still a ring, still where the link was, just not turning: the shape alone
+   says "in progress", which is the part that matters. */
+@media (prefers-reduced-motion: reduce) { .pspin { animation: none; } }
+
+@media (max-width: 900px) {
+  .floor-body { flex-direction: column; }
+  .deskpanel { flex: 1 1 auto; width: 100%; max-height: 60vh; }
+}
+/* Invisible, but the reason a whole desk is clickable and not just its pixels. */
+.deskHit { fill: transparent; pointer-events: all; }
+/* Same trick as .deskHit, for the nameplate: a transparent pad is still a
+   painted fill, so it takes the click the glyphs would otherwise drop. */
+.plateHit { fill: transparent; pointer-events: all; }
+.faceHit  { fill: transparent; pointer-events: all; cursor: pointer; }
+.plate { cursor: pointer; }
+.plate:focus { outline: none; }
+.plate:focus-visible .plateName,
+.plate:hover .plateName { fill: var(--accent); }
+
+/* The nameplate popover. Fixed rather than absolute because it is anchored to
+   a rectangle captured at click time, not to a live element — the rooms are
+   rebuilt wholesale and that element is gone by the next tick. */
+#desk-pop {
+  position: fixed; z-index: 60; width: 268px; max-width: calc(100vw - 16px);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35); padding: 10px 12px;
+  font-size: 11.5px; line-height: 1.45; color: var(--text);
+}
+/* Three stacked lines — who this is, which desk it is, and the way to change
+   either. The rule below keeps the divider that used to separate this from the
+   detail rows. */
+.dp-head { display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+           padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.dp-head .dp-dim { font-size: 10px; }
+.dp-row { display: flex; gap: 8px; padding: 2px 0; }
+.dp-k { flex: 0 0 82px; color: var(--muted); font-size: 10px; text-transform: uppercase;
+        letter-spacing: .04em; padding-top: 1px; }
+.dp-v { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.dp-dim { color: var(--muted); }
+.dp-none { color: var(--muted); font-style: italic; }
+.dp-detail { display: block; }
+.dp-foot { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.dp-open { width: 100%; padding: 6px 10px; border-radius: 7px; cursor: pointer;
+           background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+           border: 1px solid var(--accent); color: var(--text);
+           font: 600 11px var(--sans); }
+.dp-open:hover { background: color-mix(in srgb, var(--accent) 34%, var(--surface)); }
+
+
+/* Floor picker — one pill per channel, above the rooms. Empty with one floor. */
+#floor-pick { margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+#floor-pick:empty { display: none; }
+/* The mark between the floors in the building and the ones put away. A dot and
+   nothing else: a word ("archived") would be read as a chip and clicked, and a
+   rule would divide a row that wraps into two rows divided in the wrong place. */
+.pick-sep { color: var(--muted); opacity: .6; padding: 0 2px; user-select: none; }
+/* A floor that has been put away. Dimmed to the same degree as its card on the
+   board, because it is the same fact — and still a full chip rather than a
+   ghost: it is the only way into that room from here, so it has to look
+   pressable. The dashes are archiving's alone: past the dot both are put away,
+   and the difference between "I folded this" and "we archived this" is the one
+   the border carries.
+   Selected, either goes back to being an ordinary chip — you are standing in
+   that room, and a dashed outline around where you are reads as a fault. */
+#floor-pick .chip.folded, #floor-pick .chip.archived { opacity: .72; }
+#floor-pick .chip.archived { border-style: dashed; }
+#floor-pick .chip.folded.on, #floor-pick .chip.archived.on { opacity: 1; border-style: solid; }
+
+/* A desk the board knows but no window has reported from. Dimmed like "away"
+   (it inherits that) but the nameplate carries the reason, in the warning tone
+   rather than the error one: it is a to-do, not a failure. */
+.desk.not-reporting .plateRole { fill: var(--busy); }
+
+/* The copy button after it worked — the one moment it should look different. */
+.btn.primary.done { background: var(--idle-bg); border-color: var(--idle); color: var(--idle); }
+
+/* The reply as it streams in — same shape as a finished turn, a shade quieter,
+   and replaced by the real row the moment the turn ends. */
+/* A conversation an editor is holding. The composer stays visible — you can
+   still read the desk — but it reads as parked rather than broken. */
+.p-compose.held #p-text { opacity: 0.5; }
+
+/* Sent, but not yet in the conversation. It has to read as pending, because
+   the whole point is that "accepted" and "delivered" are different things. */
+.t-pending { opacity: 0.55; }
+.t-pending.stale .t-when { color: var(--bad, #d97070); }
+.t-pending .t-body { border: 1px dashed var(--line); background: transparent; }
+/* Queued is a delivery, not a delay: the window has the message and will read
+   it at its next step. Drawn nearer to a real turn than to a pending one —
+   solid rather than dashed, and barely faded — because the doubt the pending
+   style expresses does not apply to it. In --busy, which is the colour the
+   desk itself is wearing at that moment: the message is waiting on the work,
+   and those are the same fact said in two places. */
+.t-pending.queued { opacity: 0.8; }
+.t-pending.queued .t-when { color: var(--busy); }
+.t-pending.queued .t-body { border-style: solid; }
+.t-partial .t-body { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
+.t-partial .t-body::after { content: '▍'; color: var(--accent); animation: caret 1s steps(2) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .t-partial .t-body::after { animation: none; } }
+
+/* A permission prompt the floor can answer. The buttons sit inside the alert
+   because the decision and its reason belong in one glance. */
+.p-alert-ask { display: flex; flex-direction: column; gap: 6px; }
+/* The three that are always there, in one row, in the order a person decides in:
+   yes, no, and get me out of this. */
+.p-decide { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Everything else the window offered — "yes, and don't ask again for similar
+   commands in <a long path>" and its like. One per row and full width, because
+   the text is the button: shortening it to fit beside another one would hide
+   exactly the part that distinguishes it from Approve. */
+.p-more { display: flex; flex-direction: column; gap: 4px; }
+.p-choice {
+  width: 100%; text-align: left; white-space: normal;
+  font-size: 11.5px; line-height: 1.35; padding: 5px 8px;
+  display: block;
+  /* A stronger edge than --border, which all but vanishes against the alert's
+     amber wash — these read as text floating in the panel rather than as things
+     to press. Mixed from --text rather than named as a grey so it stays a light
+     edge on the dark theme and a dark one on the light theme; a literal
+     near-white would disappear on white. */
+  border-color: color-mix(in srgb, var(--text) 38%, transparent);
+}
+/* The clamp goes on an inner box, not on the button. On the button its own
+   padding is outside the clamped area, so the element ends up taller than the
+   two lines it is showing and the third line bleeds through underneath.
+   Two lines, then an ellipsis: past that it is a paragraph, and the whole of it
+   is on the button's tooltip anyway. */
+.p-choice > span {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* The way out of the prompt — Cancel here, Interrupt on one nobody could read.
+   Coloured like the two beside it rather than left as a default button: primary
+   takes the accent, danger takes the red, and this one was the only decision
+   with no colour of its own, which is what made it look like it was sitting in a
+   void. Amber is already the alert's own border, so it belongs to this box. */
+.p-decide .btn:not(.primary):not(.danger) { border-color: var(--busy); color: var(--busy); }
+.p-decide .btn:not(.primary):not(.danger):hover { background: var(--busy); color: var(--surface); }
+
+/* Deny's second half. It replaces the three buttons rather than appearing under
+   them, because the decision has already been made by the time it opens — what
+   is left is what to say, and leaving Approve on screen beside it invites a
+   click that would undo the choice. */
+.p-why { display: flex; flex-direction: column; gap: 6px; }
+.p-why.hidden { display: none; }
+.p-why-text { width: 100%; font-size: 12px; }
+.p-why-row { display: flex; gap: 6px; }
+
+.p-more-why { font-size: 11px; }
+/* The prompt nobody could read. Deliberately quieter than an error — nothing has
+   gone wrong, the board simply does not recognise what the window is asking, and
+   dressing that in red invites the operator to treat a working session as broken. */
+.p-unknown { display: flex; flex-direction: column; gap: 7px; }
+.p-unknown-why { font-size: 11px; line-height: 1.45; color: var(--muted); }
+/* The alert is a row in the compose stack now, so it takes the stack's gap and
+   needs no margin of its own. */
+.p-compose > .p-alert-slot:empty { display: none; }
+.p-decide { display: flex; gap: 6px; }
+
+/* A hosted desk: the monitor is on, because the floor is what's on it. */
+.desk.hosted .monitor { fill: color-mix(in srgb, var(--accent) 45%, var(--surface)); }
+.desk.hosted .plateRole { fill: var(--accent); }
+.desk.hosted.away .plateRole { fill: var(--block); }
+/* A terminal has the desk: the floor is a window on it, so the plate says so in plain text. */
+
+.btn.done { background: var(--idle-bg); border-color: var(--idle); color: var(--idle); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }

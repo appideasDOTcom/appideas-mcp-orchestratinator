@@ -58,12 +58,13 @@ const rmDb = (p) => { for (const ext of ['', '-wal', '-shm']) { try { rmSync(p +
 
 const json = async (res) => ({ status: res.status, json: await res.json().catch(() => ({})) });
 const get = (path, headers = {}) => fetch(`${HOST}${path}`, { headers });
-const postAdmin = async (path, body, headers = {}) =>
-  json(await fetch(`${HOST}/api/admin/${path}`, {
+const postApi = async (path, body, headers = {}) =>
+  json(await fetch(`${HOST}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   }));
+const postAdmin = (path, body, headers = {}) => postApi(`/api/admin/${path}`, body, headers);
 
 const server = spawn('node', ['src/server.js'], {
   env: {
@@ -136,10 +137,18 @@ try {
   }
 
   console.log('\nseeding a board worth backing up');
+  let promptId;
   {
     await call(alpha.client, 'send_message', { body: 'something for the backup' });
     await call(alpha.client, 'set_contract', { key: 'iface.v1', value: { args: ['a'] } });
     await call(alpha.client, 'open_task', { title: 'work worth backing up' });
+    // The operator's furniture too — a saved prompt and a chosen name — so the
+    // round trip below covers the tables added since the format shipped.
+    const prompt = await postAdmin('prompt/create', { title: 'Deploy checklist', content: 'run the deploy, read the log' });
+    eq(prompt.status, 200, 'a saved prompt is created for the round trip');
+    promptId = prompt.json.id;
+    const profile = await postApi('/api/floor/profile', { channel: CHANNEL, agent: 'alpha', persona: 'Captain Quirk' });
+    eq(profile.status, 200, 'and alpha is given an operator-chosen name');
     const board = await (await get('/api/state')).json();
     assert(board.channels.some((c) => c.channel === CHANNEL), 'the channel is on the board');
   }
@@ -153,6 +162,7 @@ try {
     eq(doc.format, 'orchestratinator-backup', 'and identifies its own format');
     assert(doc.counts.messages > 0 && doc.counts.tasks > 0 && doc.counts.contracts > 0, 'it carries the board (messages, tasks, contracts)');
     assert(doc.counts.contract_history > 0, 'including contract version history');
+    assert(doc.counts.saved_prompts > 0 && doc.counts.agent_profile > 0, 'and the operator\'s furniture (saved prompts, agent profiles)');
 
     // The one thing that must never be in a file that ends up in a Downloads
     // folder: the key every agent authenticates with.
@@ -222,6 +232,91 @@ try {
     // in the per-table report — the note above is what tells you where it went.
     assert(!('users' in done.json.tables), 'the table is never written');
     eq((await get('/api/state')).status, 200, 'the board is still open afterwards');
+  }
+
+  console.log('\nthe newer tables ride the same round trip');
+  {
+    const doc = await (await get('/api/admin/backup')).json();
+
+    // Drift both: the prompt is deleted and alpha renamed, so a successful
+    // restore has to visibly put each of them back.
+    const gone = await postAdmin('prompt/delete', { id: promptId });
+    eq(gone.status, 200, 'the saved prompt is deleted after the export');
+    await postApi('/api/floor/persona', { channel: CHANNEL, agent: 'alpha', persona: 'Renamed' });
+
+    const done = await postAdmin('backup/restore', { backup: doc, confirm: 'RESTORE' });
+    eq(done.status, 200, 'the backup restores');
+    if (done.json.snapshot?.path) snapshots.push(done.json.snapshot.path);
+
+    const prompts = (await (await get('/api/prompts')).json()).prompts ?? [];
+    assert(prompts.some((p) => p.title === 'Deploy checklist'), 'the saved prompt is back');
+    const after = await (await get('/api/admin/backup')).json();
+    assert((after.tables.agent_profile ?? []).some((r) => r.agent === 'alpha' && r.persona === 'Captain Quirk'),
+      'and alpha answers to the name the backup holds');
+  }
+
+  console.log('\na file the live schema refuses');
+  {
+    // Two saved-prompt titles differing only in case collide on the NOCASE
+    // unique index. No shipped build exports such a file today — but the format
+    // exists to load across versions, so any constraint a future build adds
+    // makes this the fate of an older board's honest backup. The refusal has to
+    // say where and promise the board did not change, and it must not bounce
+    // live sessions over a restore that never happened.
+    const doc = await (await get('/api/admin/backup')).json();
+    const beta = await makeClient('beta');
+    eq((await call(beta.client, 'whoami')).agent, 'beta', 'a live session is watching');
+
+    const clash = {
+      ...doc,
+      tables: {
+        ...doc.tables,
+        saved_prompts: [
+          { id: 1, title: 'Deploy', content: 'x' },
+          { id: 2, title: 'deploy', content: 'y' },
+        ],
+      },
+    };
+    const refused = await postAdmin('backup/restore', { backup: clash, confirm: 'RESTORE' });
+    eq(refused.status, 400, 'a row the schema refuses → 400, not a bare 500');
+    assert(/saved_prompts.*row 2 of 2/.test(refused.json.error), 'naming the table and row that was refused');
+    assert(/nothing was restored/.test(refused.json.error), 'and stating that the board did not change');
+
+    const counts = (await (await get('/api/admin/backup')).json()).counts;
+    eq(counts.messages, doc.counts.messages, 'the board is untouched');
+    eq(counts.saved_prompts, doc.counts.saved_prompts, 'including the table whose wipe was rolled back');
+    eq((await call(beta.client, 'whoami')).agent, 'beta', 'and no live session was bounced');
+    await close(beta.transport);
+  }
+
+  console.log('\na backup from the version that kept names on desks');
+  {
+    // Before names were global, `personas` carried them per desk. Such a file
+    // has no agent_profile table and its persona column no longer exists here,
+    // so the generic restore skips it — the operator's chosen names must be
+    // adopted anyway, by the rules migratePersonas applies to a live database:
+    // cast names are not choices, and a name already on this board wins.
+    const doc = await (await get('/api/admin/backup')).json();
+    const legacy = { ...doc, tables: { ...doc.tables } };
+    delete legacy.tables.agent_profile;
+    legacy.tables.personas = [
+      { channel: CHANNEL, agent: 'alpha', seat: 0, assigned_at: '2026-01-01 00:00:00', persona: 'Someone Else' },
+      { channel: CHANNEL, agent: 'gamma', seat: 1, assigned_at: '2026-01-01 00:00:00', persona: 'Old Salt' },
+      { channel: CHANNEL, agent: 'delta', seat: 2, assigned_at: '2026-01-01 00:00:00', persona: 'Ada' },
+    ];
+
+    const done = await postAdmin('backup/restore', { backup: legacy, confirm: 'RESTORE' });
+    eq(done.status, 200, 'it restores');
+    if (done.json.snapshot?.path) snapshots.push(done.json.snapshot.path);
+    assert((done.json.notes ?? []).some((n) => /adopted 1 agent name/.test(n)), 'and says it adopted the name the file chose');
+    assert((done.json.notes ?? []).some((n) => /kept this board's name for 1 agent/.test(n)), 'and that a standing name won over the file');
+
+    const names = Object.fromEntries(
+      ((await (await get('/api/admin/backup')).json()).tables.agent_profile ?? []).map((r) => [r.agent, r.persona])
+    );
+    eq(names.gamma, 'Old Salt', "gamma's operator-chosen name was carried into the profile");
+    eq(names.alpha, 'Captain Quirk', "alpha's standing name was not overwritten");
+    assert(!('delta' in names), 'a cast name from arrival order is not mistaken for a choice');
   }
 
   console.log('\naudit trail');

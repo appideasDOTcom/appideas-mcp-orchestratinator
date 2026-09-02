@@ -4,6 +4,14 @@ import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
+import { createFloorRouter, deliverable, nudgeable } from './floor.js';
+// The same derivation the store uses, so a row for an agent with no persona row
+// yet shows the name it is about to be given rather than a raw id for one poll.
+import { humanName } from './db.js';
+import { PALETTE, SHIRTS, DEFAULT_HAIR, DEFAULT_SKIN } from './palette.js';
+import {
+  agentBoard, agentKey, agentLoadIndex, channelCounts, index, iso, ZERO_COUNTS,
+} from './agent-state.js';
 
 /**
  * The dashboard: a small web UI (served at `/`), the JSON endpoints it polls,
@@ -26,79 +34,14 @@ import {
 
 const UI_DIR = fileURLToPath(new URL('./ui', import.meta.url));
 
-// An agent with no live session but a recent tool call is probably still there
-// (its window is open, it just isn't polling). Past this it's shown as offline.
-const RECENT_MINUTES = 5;
-// Fallback expiry for statuses written before `status_expires_at` existed.
-// Current writes carry their own expiry — see set_status's ttl_seconds.
-const LEGACY_STATUS_TTL_MINUTES = 30;
-
-// The agent told us its state, so map it straight to a chip tone rather than
-// guessing from the words. `blocked` is deliberately distinct from `waiting`:
-// waiting resolves on its own, blocked needs a human.
-const STATE_TONE = { working: 'busy', waiting: 'waiting', blocked: 'blocked', idle: 'idle' };
-
 // How many unfinished tasks per channel /api/state carries in full. The counts
 // are always exact; this bounds only the list the task dialog offers, because
 // this payload is refetched every couple of seconds.
 const TASK_LIST_MAX = 25;
 
-/** SQLite `datetime('now')` is UTC without a zone marker — make it a real ISO string. */
-const iso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
-const ageMinutes = (isoStr, nowMs) => (isoStr ? (nowMs - Date.parse(isoStr)) / 60000 : Infinity);
-
-/** Group rows into a Map keyed by one column. */
-function index(rows, keyFn) {
-  const map = new Map();
-  for (const r of rows) {
-    const k = keyFn(r);
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(r);
-  }
-  return map;
-}
-
-/**
- * Best-effort answer to "what is this agent doing right now?".
- *
- * A live self-reported status (via the `set_status` tool) always wins — only
- * the agent knows whether a quiet stretch is work, a wait, or a crash. Once it
- * expires we treat it as absent and infer from what the agent holds on the task
- * board and what's waiting in its mailbox.
- *
- * Note what is deliberately NOT inferred: nothing here reads a long gap since
- * `last_action` as "waiting". That gap looks identical whether the agent is
- * blocked, crashed, or finished and quiet, so it can only produce a confident
- * wrong answer.
- */
-function deriveState({ reported, reportedDetail, expired, claimed, assignedOpen, unread }) {
-  if (reported && !expired) {
-    return {
-      label: reported,
-      detail: reportedDetail ?? null,
-      tone: STATE_TONE[reported] ?? 'busy',
-      source: 'reported',
-    };
-  }
-  // No age here on purpose: `reported_at` is the fact and the client derives the
-  // age from it. Baking a minute-counter into this payload would change it every
-  // minute and defeat the dashboard's re-render memo.
-  const derived = (label, tone) => ({ label, detail: null, tone, source: 'derived' });
-  if (claimed.length) {
-    const t = claimed[0];
-    return derived(
-      claimed.length > 1 ? `working — ${claimed.length} claimed tasks` : `working — #${t.id} ${t.title}`,
-      'busy'
-    );
-  }
-  if (unread > 0) {
-    return derived(`waiting — ${unread} unread message${unread === 1 ? '' : 's'}`, 'waiting');
-  }
-  if (assignedOpen > 0) {
-    return derived(`waiting — ${assignedOpen} task${assignedOpen === 1 ? '' : 's'} assigned`, 'waiting');
-  }
-  return derived('idle', 'idle');
-}
+// Same idea for a backlog. The count on the pill is always exact; this bounds
+// only the rows the dialog offers to act on.
+const BACKLOG_LIST_MAX = 25;
 
 function buildState(store, sessions, sessionStats, meta) {
   const nowMs = Date.now();
@@ -120,44 +63,33 @@ function buildState(store, sessions, sessionStats, meta) {
   }
 
   const agentRows = store.listAllAgents();
-  const load = store.agentTaskLoad();
-  const claimed = store.claimedTasks();
-  const unread = store.unreadCounts();
-  const stats = store.channelStats();
+  // The backlog dialog lists the messages, not just their number. Board-only:
+  // the floor's pills open this same dialog, and it reads them from here.
+  const backlogByAgent = index(store.unreadMessages(), (m) => agentKey(m.channel, m.agent));
+  // Fetched once and indexed rather than queried per agent: /api/state is polled
+  // every couple of seconds and every desk would otherwise cost a lookup.
+  const hostedByAgent = new Map(store.listHostedDesks().map((h) => [agentKey(h.channel, h.agent), h]));
+  // The per-agent workload the floor draws from too — see agent-state.js.
+  const idx = agentLoadIndex(store);
+  const { unassignedByChannel } = idx;
+  // The five numbers a channel header prints, shaped once — the floor prints the
+  // same line under each storey and imports the same helper.
+  const counts = channelCounts(store);
   const archivedAt = new Map(
     store.listChannelFlags().filter((f) => f.archived_at).map((f) => [f.channel, f.archived_at])
   );
   const tasksByChannel = index(store.boardTasks(), (t) => t.channel);
-  // The same NUL-joined compound key the maps below use — neither a channel nor
-  // an agent name can contain one, so a pair can never collide.
-  const NUL = String.fromCharCode(0);
-  const agentKey = (channel, agent) => [channel, agent].join(NUL);
-  const unreadMaxByAgent = new Map(unread.map((r) => [agentKey(r.channel, r.agent), r.unread_max_id]));
 
-  const claimedByAgent = index(claimed.filter((t) => t.claimed_by), (t) => `${t.channel}\u0000${t.claimed_by}`);
-  const unreadByAgent = new Map(unread.map((r) => [`${r.channel}\u0000${r.agent}`, r.unread]));
-  const assignedByAgent = new Map();
-  const unassignedByChannel = new Map();
-  for (const r of load) {
-    if (r.bucket === 'unassigned') unassignedByChannel.set(r.channel, r.n);
-    else if (r.agent) {
-      const k = `${r.channel}\u0000${r.agent}`;
-      assignedByAgent.set(k, { ...(assignedByAgent.get(k) ?? {}), [r.bucket]: r.n });
-    }
-  }
-
-  const taskCounts = new Map();
-  for (const r of stats.tasks) {
-    const c = taskCounts.get(r.channel) ?? { open: 0, claimed: 0, done: 0 };
-    c[r.status] = r.n;
-    taskCounts.set(r.channel, c);
-  }
-  const messageCounts = new Map(stats.messages.map((r) => [r.channel, r.n]));
-  const contractCounts = new Map(stats.contracts.map((r) => [r.channel, r.n]));
 
   // Channels known to the database, plus any a live session claims but that has
   // yet to write anything.
   const channelNames = new Set(store.listAllChannels());
+
+  // Who each agent is called. One name per agent id, for every channel at once —
+  // read straight from the names table rather than from the per-desk seating
+  // rows, because a name outlives its seats: an agent renamed while working on
+  // one channel must answer to that name on a channel it has never sat down in.
+  const profiles = store.listProfiles();
   for (const s of liveSessions) if (s.channel) channelNames.add(s.channel);
 
   const agentsByChannel = index(agentRows, (r) => r.channel);
@@ -172,53 +104,54 @@ function buildState(store, sessions, sessionStats, meta) {
   }
 
   const channels = [...channelNames].sort().map((channel) => {
+    // Chosen names first, then the derived default for every agent that has not
+    // been renamed. The map has to be *complete*, not merely correct: it is what
+    // resolves a name anywhere the id appears — a task's requester, a reassign
+    // dropdown, a dialog heading — and a half-filled one silently falls back to
+    // raw ids in exactly those places while the agent rows show proper names.
+    const personas = {};
+    for (const a of agentsByChannel.get(channel) ?? []) {
+      personas[a.agent] = profiles[a.agent]?.persona ?? humanName(a.agent);
+    }
     const allAgents = (agentsByChannel.get(channel) ?? [])
       .slice()
       .sort((a, b) => a.agent.localeCompare(b.agent))
       .map((a) => {
-        const k = `${channel}\u0000${a.agent}`;
-        const liveCount = liveByKey.get(k) ?? 0;
-        const lastSeen = iso(a.last_seen);
-        const seenAgeMin = ageMinutes(lastSeen, nowMs);
-        const presence = liveCount > 0 ? 'connected' : seenAgeMin <= RECENT_MINUTES ? 'recent' : 'offline';
-        const mine = claimedByAgent.get(k) ?? [];
-        const reportedAt = iso(a.status_at);
-        const reportedAgeMin = ageMinutes(reportedAt, nowMs);
-        // Prefer the expiry the agent chose; rows predating that column fall
-        // back to the old server-wide window so they still age off.
-        const expiresAt = iso(a.status_expires_at);
-        const expired = expiresAt
-          ? Date.parse(expiresAt) <= nowMs
-          : reportedAgeMin > LEGACY_STATUS_TTL_MINUTES;
-        const state = deriveState({
-          reported: a.status,
-          reportedDetail: a.status_detail,
-          expired,
-          claimed: mine,
-          assignedOpen: assignedByAgent.get(k)?.assigned ?? 0,
-          unread: unreadByAgent.get(k) ?? 0,
-        });
+        const k = agentKey(channel, a.agent);
+        // Presence included: the floor draws it too, and a desk that disagreed
+        // with its own row about whether the agent is connected would be worse
+        // than not showing it at all.
         return {
           agent: a.agent,
-          presence,
-          sessions: liveCount,
-          state,
-          last_seen: lastSeen,
-          last_action: a.last_action,
-          last_action_at: iso(a.last_action_at),
-          reported_status: a.status,
-          reported_detail: a.status_detail ?? null,
-          reported_at: reportedAt,
-          reported_expires_at: expiresAt,
-          reported_expired: !!a.status && expired,
-          unread: unreadByAgent.get(k) ?? 0,
-          // The id "mark read" has to advance to. The browser echoes this back so
-          // a message that arrives between render and click isn't swallowed.
-          unread_max_id: unreadMaxByAgent.get(agentKey(channel, a.agent)) ?? null,
+          // The display name. `agent` stays alongside it everywhere it is shown:
+          // the name is for reading, the id is what routes. Read from the same
+          // map the dialogs use, so a row and a heading cannot disagree.
+          persona: personas[a.agent],
+          // The board draws no avatars, but it is where the dialog that edits
+          // one is opened from, so every current value has to reach it.
+          gender: profiles[a.agent]?.gender ?? 'neutral',
+          shirt: profiles[a.agent]?.shirt ?? SHIRTS[0],
+          hair: profiles[a.agent]?.hair ?? DEFAULT_HAIR,
+          skin: profiles[a.agent]?.skin ?? DEFAULT_SKIN,
+          ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
+          // Whether the operator can nudge this agent — the same verdict the
+          // floor's bell shows, so the two nudge surfaces agree. Stricter than
+          // the chat endpoint on purpose: see nudgeable().
+          nudge: (() => {
+            const v = nudgeable(hostedByAgent.get(k), nowMs);
+            return v.error
+              ? { ok: false, code: v.code, reason: v.error }
+              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+          })(),
+          unread_list: (backlogByAgent.get(k) ?? []).slice(0, BACKLOG_LIST_MAX).map((m) => ({
+            id: m.id,
+            from: m.from,
+            to: m.to,
+            body: m.body,
+            created_at: iso(m.created_at),
+          })),
           retired: !!a.retired_at,
           retired_at: iso(a.retired_at),
-          claimed_tasks: mine.map((t) => ({ id: t.id, title: t.title })),
-          assigned_open: assignedByAgent.get(k)?.assigned ?? 0,
         };
       });
 
@@ -228,10 +161,14 @@ function buildState(store, sessions, sessionStats, meta) {
     const agents = allAgents.filter((a) => !a.retired);
     const retiredAgents = allAgents.filter((a) => a.retired);
 
-    const tasks = taskCounts.get(channel) ?? { open: 0, claimed: 0, done: 0 };
+    const n = counts.get(channel) ?? ZERO_COUNTS;
+    const tasks = { open: n.open, claimed: n.claimed, done: n.done };
     const unfinished = tasksByChannel.get(channel) ?? [];
     return {
       channel,
+      // Every name on this channel, so a dialog can render "requested by
+      // <name>" for an agent that has no row of its own.
+      personas,
       archived: archivedAt.has(channel),
       archived_at: iso(archivedAt.get(channel)),
       connected: agents.filter((a) => a.presence === 'connected').length,
@@ -246,11 +183,14 @@ function buildState(store, sessions, sessionStats, meta) {
         status: t.status,
         assignee: t.assignee,
         claimed_by: t.claimed_by,
+        // Who asked for the work. The dialog leads with this rather than with
+        // the assignee, which the row's own dropdown already shows.
+        created_by: t.created_by,
         updated_at: iso(t.updated_at),
       })),
       task_list_total: unfinished.length,
-      messages: messageCounts.get(channel) ?? 0,
-      contracts: contractCounts.get(channel) ?? 0,
+      messages: n.messages,
+      contracts: n.contracts,
     };
   });
 
@@ -272,6 +212,11 @@ function buildState(store, sessions, sessionStats, meta) {
       now: new Date(nowMs).toISOString(),
     },
     sessions: liveSessions.sort((a, b) => (a.channel ?? '').localeCompare(b.channel ?? '')),
+    // The colours a picker may offer, sent rather than hard-coded in the page:
+    // the endpoint validates against this same list, so a swatch that appears
+    // is a swatch that will save. Static and small — a few hundred bytes on a
+    // payload that already carries every agent on the board.
+    palette: PALETTE,
     channels,
     // Totals describe the board as displayed, so archived channels and retired
     // agents are excluded — a header that counts things you can't see is worse
@@ -371,6 +316,31 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     res.json({ ok: true, channel, agent });
   });
 
+  /**
+   * Point a message at a different agent, or at everyone.
+   *
+   * A message is a record of something said, so this rewrites history in a way
+   * reassigning a task does not — a task changing hands is the normal course of
+   * events, a message changing addressee is not. It is here because the backlog
+   * dialog needs it and the operator is the human in the middle either way; the
+   * admin log keeps who did it, which is the part that makes it recoverable.
+   */
+  router.post('/message/reassign', (req, res) => {
+    const channel = str(req.body?.channel);
+    const id = Number(req.body?.id);
+    const to = str(req.body?.to) || null;
+    if (!channel || !Number.isInteger(id)) return bad(res, 'channel and a numeric id are required');
+    const row = store.messageById(channel, id);
+    if (!row) return missing(res, `no message #${id} on channel "${channel}"`);
+    if (to && !agentRow(channel, to)) return missing(res, `no agent "${to}" on channel "${channel}"`);
+    const changes = store.reassignMessage(channel, id, to);
+    store.logAdmin(channel, 'message.reassign', {
+      target: to ?? '(everyone)',
+      detail: `#${id} was addressed to ${row.to ?? '(everyone)'}`,
+    });
+    res.json({ ok: true, channel, id, to, changes });
+  });
+
   router.post('/task/close', (req, res) => {
     const channel = str(req.body?.channel);
     const id = Number(req.body?.id);
@@ -426,6 +396,52 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     res.json({ ok: true, channel, deleted, sessions_closed: closed });
   });
 
+  /* ---------- saved prompts ---------- */
+
+  /**
+   * The operator's own library of messages, board-wide.
+   *
+   * Two rules and no more, because that is what was asked for: a title and a
+   * body that are not empty, and no two prompts sharing a title. Nothing here
+   * inspects the content — it is a message someone means to send, and a server
+   * that second-guesses it would be wrong more often than it was right.
+   *
+   * Not written to admin_events: that table is channel-scoped (`channel NOT
+   * NULL`) and a prompt belongs to no channel. Inventing one to satisfy the
+   * column would put a lie in the audit trail to make a log line.
+   */
+  const promptFields = (req) => ({ title: str(req.body?.title), content: str(req.body?.content) });
+
+  router.post('/prompt/create', (req, res) => {
+    const { title, content } = promptFields(req);
+    if (!title || !content) return bad(res, 'title and content are both required');
+    if (store.savedPromptByTitle(title)) return bad(res, `a prompt called "${title}" already exists`);
+    const id = store.createSavedPrompt(title, content);
+    res.json({ ok: true, id, title });
+  });
+
+  router.post('/prompt/update', (req, res) => {
+    const id = Number(req.body?.id);
+    const { title, content } = promptFields(req);
+    if (!Number.isInteger(id)) return bad(res, 'an integer id is required');
+    if (!title || !content) return bad(res, 'title and content are both required');
+    if (!store.getSavedPrompt(id)) return missing(res, `no saved prompt #${id}`);
+    // Excluding itself, or renaming a prompt to the name it already has would
+    // collide with itself and read as somebody else's.
+    if (store.savedPromptByTitle(title, id)) return bad(res, `a prompt called "${title}" already exists`);
+    store.updateSavedPrompt(id, title, content);
+    res.json({ ok: true, id, title });
+  });
+
+  router.post('/prompt/delete', (req, res) => {
+    const id = Number(req.body?.id);
+    if (!Number.isInteger(id)) return bad(res, 'an integer id is required');
+    const row = store.getSavedPrompt(id);
+    if (!row) return missing(res, `no saved prompt #${id}`);
+    store.deleteSavedPrompt(id);
+    res.json({ ok: true, id, title: row.title });
+  });
+
   /* ---------- server-wide actions ---------- */
 
   /**
@@ -473,11 +489,30 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     if (problem) return bad(res, problem);
 
     const snapshot = snapshotBeforeRestore({ store, meta: { ...meta, authMode: auth.mode } });
-    // Every live MCP session refers to channels and agents that are about to be
-    // replaced. An unknown session id answers 404, which the spec tells clients to
-    // re-initialise on, so a window that's still alive rejoins the restored board.
+
+    // validateBackup's structural checks can't rule out a row the live schema
+    // refuses — a duplicate key, or data that predates a constraint this build
+    // added (the format's whole job is to load across versions, so that case
+    // is expected, not hand-edited). The restore is one transaction, so a
+    // refused row rolls the whole thing back; answer with which row was
+    // refused and the fact that nothing changed, because a bare 500 reads as
+    // "the board might be half of each" — the exact fear a restoring operator
+    // already has.
+    let applied;
+    try {
+      applied = applyBackup({ store, doc });
+    } catch (e) {
+      return bad(res, `nothing was restored — the board is as it was. ${String(e.message ?? e)}`);
+    }
+
+    // Every live MCP session refers to channels and agents that were just
+    // replaced. An unknown session id answers 404, which the spec tells clients
+    // to re-initialise on, so a window that's still alive rejoins the restored
+    // board. Closed after the apply, not before: applyBackup is one synchronous
+    // transaction in a single-threaded process, so no request can slip between
+    // the commit and this line — and closing first meant a restore refused
+    // above bounced every live session over a board that never changed.
     const closed = closeSessionsFor({ all: true });
-    const applied = applyBackup({ store, doc });
 
     // Logged after the restore, never before: the restore wipes admin_events, so a
     // row written first would be destroyed by the thing it was recording.
@@ -505,9 +540,20 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   const router = express.Router();
 
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
+  // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
+  // ahead of the static handler so /api/floor never falls through to index.html.
+  router.use(createFloorRouter({ store, auth, sessions }));
 
   router.get('/api/state', (_req, res) => {
     res.json(buildState(store, sessions, sessionStats, meta));
+  });
+
+  // Read here rather than on /api/state: prompts change when an operator edits
+  // one, which is rarely, and /api/state is polled every two seconds by both
+  // surfaces. The picker fetches this when it opens and after the manager
+  // changes something — the two moments the answer can actually differ.
+  router.get('/api/prompts', (_req, res) => {
+    res.json({ prompts: store.listSavedPrompts() });
   });
 
   router.get('/api/activity', (req, res) => {

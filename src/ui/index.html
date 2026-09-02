@@ -16,6 +16,16 @@
     </div>
     <div class="topbar-meta muted mono" id="server-meta"></div>
     <div class="topbar-actions">
+      <!--
+        Two views of one server. The board is the original and stays exactly as
+        it was; the floor is for the people who operate this without having
+        built it. The choice is remembered per browser, like minimising a
+        channel is — a view preference, not a statement about the work.
+      -->
+      <div class="chips" id="view-switch">
+        <button class="chip on" data-view="board" title="The board — channels, agents, tasks">board</button>
+        <button class="chip" data-view="floor" title="The floor — one room per channel, one desk per agent">floor</button>
+      </div>
       <span id="admin-state" class="admin-locked mono hidden"></span>
       <label class="switch">
         <input type="checkbox" id="autorefresh" checked>
@@ -27,6 +37,26 @@
   </header>
 
   <main>
+    <!--
+      The floor. Sits alongside the board rather than replacing it: the board is
+      working well and nothing here is allowed to regress it. `body.view-floor`
+      decides which of the two is on screen.
+    -->
+    <section class="panel panel-floor" id="floor">
+      <div class="panel-head">
+        <!-- "Needs you" was this strip's title, and the strip is gone. A desk
+             that wants you says so on the desk, and the count on the right says
+             how many. -->
+        <h2>The floor</h2>
+        <div id="floor-totals" class="muted mono"></div>
+      </div>
+      <div class="chips" id="floor-pick"></div>
+      <div class="floor-body">
+        <div id="floor-rooms" class="rooms"></div>
+        <aside id="floor-panel" class="deskpanel hidden"></aside>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h2>Channels &amp; agents</h2>
@@ -90,5 +120,6 @@
   </dialog>
 
   <script src="./app.js"></script>
+  <script src="./floor.js"></script>
 </body>
 </html>

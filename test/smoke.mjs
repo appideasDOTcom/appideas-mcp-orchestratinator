@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
+import { VERSIONED, versionIn } from '../scripts/set-version.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
@@ -33,12 +34,6 @@ function startServer(port, dbPath, extraEnv = {}) {
       ...process.env,
       PORT: String(port),
       DB_PATH: dbPath,
-      // The server loads ./.env itself, so a developer's own seed account would
-      // otherwise turn every dashboard read in here into a 401. Explicitly empty
-      // wins over the file (node reads it with --env-file semantics), which is
-      // what makes this an override rather than a hope. Sign-in has its own suite.
-      ORCH_ADMIN_USER: '',
-      ORCH_ADMIN_PASSWORD: '',
       ...extraEnv,
     },
     stdio: 'inherit',
@@ -60,10 +55,23 @@ async function makeClient(agent, base, key = KEY) {
   return { client, transport };
 }
 /**
- * Hand-rolled initialize: no notification stream, no DELETE — i.e. what a client
- * that opens a throwaway session per turn leaves behind on the server.
+ * Hand-rolled connect: the handshake and nothing else — no notification stream,
+ * no DELETE — i.e. what a client that opens a throwaway session per turn leaves
+ * behind on the server.
+ *
+ * The closing `notifications/initialized` is part of it because a real client
+ * sends one, and the server now treats it as the moment a session becomes
+ * supersedable. A fixture that skipped it used to stand in for a churning client
+ * and no longer can: it would model a client stuck mid-handshake, which is the
+ * one thing supersede must leave alone.
  */
 async function rawInitialize(port, agent) {
+  const sid = await rawInitializeOnly(port, agent);
+  await rawNotifyInitialized(port, sid);
+  return sid;
+}
+/** The first half only: a connection that has not finished shaking hands yet. */
+async function rawInitializeOnly(port, agent) {
   const res = await fetch(`http://localhost:${port}/mcp`, {
     method: 'POST',
     headers: {
@@ -82,6 +90,19 @@ async function rawInitialize(port, agent) {
   });
   await res.text(); // drain so the response stream doesn't stay open
   return res.headers.get('mcp-session-id');
+}
+/** The second half of the handshake, on its own so a test can withhold it. */
+function rawNotifyInitialized(port, sessionId) {
+  return fetch(`http://localhost:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      'mcp-session-id': sessionId,
+      [AUTH_HEADER]: KEY,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  }).then(async (r) => { await r.text(); return r.status; });
 }
 const rmDb = (p) => { for (const ext of ['', '-wal', '-shm']) { try { rmSync(p + ext); } catch { /* ignore */ } } };
 
@@ -229,6 +250,30 @@ try {
   const ghost2 = await rawInitialize(PORT, 'ghost');
   assert(!!ghost1 && !!ghost2 && ghost1 !== ghost2, 'two throwaway sessions really are distinct');
 
+  console.log('\none version, everywhere');
+  {
+    // The number in the dashboard header is the server's, and the server reads
+    // it out of package.json rather than carrying a copy — so that half cannot
+    // drift. What could, and did, is the other two: the plugin was bumped on
+    // its own whenever a hook changed and the host was never bumped at all, so
+    // three parts of one product claimed 0.9.0, 0.6.0 and 0.1.0 while the page
+    // confidently reported the first of them as "the version".
+    //
+    // There is no way to make them read each other — Claude Code parses the
+    // plugin manifest off disk, so its number has to be a literal — so this is
+    // the enforcement: `npm run set-version` writes all three, and a bump that
+    // misses one fails here instead of shipping.
+    const want = versionIn('package.json');
+    for (const file of VERSIONED) {
+      assert(versionIn(file) === want, `${file} is ${want}`);
+    }
+    const h = await (await fetch(`http://localhost:${PORT}/health`)).json();
+    const st = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
+    assert(h.version === want, `and /health reports it (${h.version})`);
+    assert(st.server?.version === want,
+           `as does /api/state, which is the number the dashboard header prints (${st.server?.version})`);
+  }
+
   const health = await (await fetch(`http://localhost:${PORT}/health`)).json();
   assert(health.session_stats.superseded >= 1, 'the abandoned session is superseded, not leaked');
   assert(health.sessions === 3, `only the live sessions remain (${health.sessions}: free, pro, ghost)`);
@@ -239,6 +284,61 @@ try {
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
   });
   assert(retired.status === 404, 'the superseded session answers 404 so the client re-initializes');
+
+  // ...and re-initializing is allowed to still be carrying the dead id. This is
+  // the case that broke: Claude Code keeps the last session id across
+  // `claude --resume`, so a conversation handed back from the floor to the
+  // editor arrives with an id whose window has just closed. Refusing the
+  // handshake over a leftover header left the agent with no tools at all, on
+  // the board it had been working on a moment earlier. The body says
+  // `initialize`, which is a request for a new session however stale the header.
+  const reinit = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json', accept: 'application/json, text/event-stream',
+      'mcp-session-id': ghost1, 'X-Channel': CHANNEL, 'X-Agent': 'ghost', [AUTH_HEADER]: KEY,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'resumed', version: '0.0.0' } } }),
+  });
+  await reinit.text();
+  const ghost3 = reinit.headers.get('mcp-session-id');
+  assert(reinit.status === 200, 'an initialize carrying a dead session id is honoured rather than refused');
+  assert(!!ghost3 && ghost3 !== ghost1 && ghost3 !== ghost2, 'and it is answered with a new session, not the dead one');
+
+  // The 404 above is still the right answer for a request that carries no
+  // handshake — that is the cue the client acts on, and losing it would leave a
+  // stale client with nothing to react to.
+  const stillGone = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': ghost1, [AUTH_HEADER]: KEY },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+  });
+  assert(stillGone.status === 404, 'while a non-initialize call on a dead id still gets its 404');
+
+  // The connection a client kills by opening its second one.
+  //
+  // Claude Code opens more than one MCP connection at startup, and both carry
+  // the same channel/agent headers. Superseding used to skip a session only
+  // while `inflight > 0`, and a session between its initialize response and its
+  // `notifications/initialized` has none — so whichever connection lost the race
+  // was closed by its sibling, and the client took a 404 on the notification and
+  // came up with no tools. It presented as "the handoff lost the tools", and it
+  // did, about half the time.
+  const twinA = await rawInitializeOnly(PORT, 'twins');
+  const twinB = await rawInitializeOnly(PORT, 'twins');
+  assert(!!twinA && !!twinB && twinA !== twinB, 'two connections opened at once really are distinct');
+  assert(await rawNotifyInitialized(PORT, twinA) === 202,
+    'the first connection can still finish its handshake after the second arrives');
+  assert(await rawNotifyInitialized(PORT, twinB) === 202, 'and so can the second');
+  // Once both have finished, the older one is a candidate again — the leak
+  // protection is deferred, not dropped.
+  const twinC = await rawInitialize(PORT, 'twins');
+  const oldTwin = await fetch(`http://localhost:${PORT}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': twinA, [AUTH_HEADER]: KEY },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  assert(!!twinC && oldTwin.status === 404, 'a handshake that did complete is superseded by the next one');
 
   const after = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
   const agents = after.channels.find((c) => c.channel === CHANNEL).agents;
