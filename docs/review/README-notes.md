@@ -79,6 +79,19 @@ how to reshoot. Delete this file when we're done.
   it, and the committed caption was restored. If the revert was deliberate,
   say so and it goes back.
 
+## Round 7
+
+- docs/operating.md gained five element crops from a fresh seed, each placed
+  beside the paragraph it illustrates and sized below full width: a live
+  channel card (chips/dots/counts), the offline ledgerino card (presence),
+  the full activity log, one alerting desk (badge/bell/tray), and the desk
+  panel with its permission prompt. Captions are one italic line each.
+- "Operating the board" moved to the top of the README's Going deeper table.
+- Fixture lesson recorded: a teardown once ran `rm data/scratch.db` from the
+  scratchpad cwd, so a later seed stacked onto a surviving db and doubled
+  every count (task ids reached #9). Teardowns now use absolute paths; the
+  first crop set was retaken from a clean single seed.
+
 ## Round 6
 
 - docs/coordination.md rewritten from "pairs" to **teams**: a channel is one

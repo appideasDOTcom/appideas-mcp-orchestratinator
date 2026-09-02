@@ -34,6 +34,11 @@ an unknown session id answers `404`, which is the spec's cue to re-initialize.
 The practical consequence: green means "we heard from this window recently",
 and a window you closed goes red within the TTL rather than instantly.
 
+<img src="images/board-offline.png" width="486" alt="An offline channel card: red presence dots, OFFLINE, seen 2d ago">
+
+*A gone team reads as gone: red dots, `seen 2d ago`, and chips fallen back to
+derived `idle`.*
+
 **Approximate last-known state.** Each agent gets a state chip. If the agent
 has called `set_status` and that status hasn't expired, its declared state wins
 and is shown with its age — `waiting · 3m ago` — with the detail line beneath
@@ -46,6 +51,11 @@ a claimed task shows as `working — #12 update consumers…`, pending mail as
 approximation by design — the server can't see inside the agent's turn, only
 what it last told the board (coordination is pull, not push; see
 [how agents coordinate](coordination.md)).
+
+<img src="images/board-card.png" width="486" alt="A live channel card: green presence dots, declared status chips with ages, detail lines, unread and assigned counts">
+
+*A live team: green dots, declared chips with their ages, the detail line
+beneath, and the derived counts (`1 unread · 1 assigned`).*
 
 **A status expires.** Every `set_status` carries a TTL (`ttl_seconds`, default
 900, override with `STATUS_TTL_SECONDS`). Past it the status is treated as
@@ -73,6 +83,8 @@ opened/claimed/done, contract versions, and operator actions — merged into one
 newest-first list, filterable by channel, by kind, and by free text. Click any
 row to expand the full stored value (message body, task note, contract JSON).
 
+![The activity log: messages, task transitions, and contract versions in one newest-first list](images/board-activity.png)
+
 ## The floor
 
 The `board` / `floor` switch gives you the second view: **one room per channel,
@@ -91,6 +103,11 @@ it, a room per channel: each desk shows the person's state, the last thing they
 said or the tool they're running, and a red badge when they need you. Envelopes
 fly desk to desk on real `send_message` rows, never on a timer. Click any desk
 for that agent's conversation, live, with tool calls collapsed to one line.
+
+<img src="images/floor-desk.png" width="264" alt="One desk: thought bubble, red badge, running tool on the monitor, service bell, and tray pills">
+
+*One desk says all of it: the thought bubble, the red badge, the tool on the
+monitor, the service bell, and the tray (2 unread, 1 task).*
 
 **What the floor knows that the board cannot.** The board is pull-based and
 cannot see inside an agent's turn. The floor closes the gap from the other end:
@@ -134,6 +151,12 @@ permission prompt becomes **Approve / Deny** on the desk and in the *Needs you*
 list. The human is still the one deciding — from one screen instead of one per
 agent. Enter sends, Shift+Enter is a new line, **stop** interrupts the turn.
 You can sit in that same window yourself: `tmux attach -t orch`.
+
+<img src="images/floor-panel.png" width="476" alt="The desk panel: the live conversation, a permission request with Approve and Deny, and the composer">
+
+*The desk panel: the conversation as it happens, the permission prompt with
+its real choices, the composer — and the doors back to VS Code, Claude, and
+tmux.*
 
 **Your editor holds it.** The floor still shows the conversation, but the
 composer is greyed and names the pid holding it. Permission prompts appear with
