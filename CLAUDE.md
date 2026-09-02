@@ -90,6 +90,15 @@ own command and then check both against the file mtimes. Chaining them behind
 `npm test` once exceeded a seven-minute timeout and left a stale container **and**
 a stale host while the suite reported green.
 
+Two more facts about that rebuild, both measured 2026-09-01. It blanks
+presence for every desk — presence is an MCP session in the server's memory —
+while the relay rides out the restart on its own retries, so the board shows a
+conversation flowing between desks that look absent. Nothing is broken; one
+MCP tool call per desk brings each back. And the `/data` volume is *named*:
+the repo's own `data/` directory is test leftovers, not the live database, so
+a row repair goes through `docker compose exec -T orchestratinator node` with
+better-sqlite3 at `$DB_PATH`, never through a file in the working tree.
+
 Two loops run side by side in [`host/index.js`](host/index.js): `watchLoop()`
 relays the conversation, `run()` handles work. Keep them apart. When they shared
 one loop, delivering a message blocked the relay for up to a minute — the floor
@@ -183,6 +192,16 @@ different code is precisely the drift to avoid — a desk and its board row must
 not disagree. The same rule put `deliverable()` in `src/floor.js`: one answer to
 "can this desk be typed into", used by the compose box and the Nudge button
 alike.
+
+**A user record is not all the operator, and the split is the relay's job.**
+Claude Code glues machine-injected context — IDE state, slash-command records —
+onto the person's message, and joining the blocks once put
+`<ide_opened_file>…` on the floor as the operator's own words. `readTranscript`
+now splits at the block boundary into `context` turns (tag in `tool_name` as
+the label); the chat panel draws them as quiet labeled lines. Surface, never
+suppress: hiding what the agent read recreates "a reply to a question nobody
+could see being asked", and rendering it as the person is a false record.
+Classify in the relay, not in a view — the derive-once rule again.
 
 The two scripts talk over `window`, in both directions — `app.js` is a classic
 script so its top-level functions are already global, `floor.js` is an IIFE and

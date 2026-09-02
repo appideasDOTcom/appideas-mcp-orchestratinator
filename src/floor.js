@@ -938,6 +938,10 @@ function applyHostEvent(store, live, hostId, ev) {
     case 'turn': {
       const role = str(ev.role);
       if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name));
+      // Machine-injected context riding a user record — IDE state, slash-command
+      // records. Its own role, with the tag in tool_name as the label, so no
+      // surface can attribute the system's words to the person.
+      else if (role === 'context') turn('context', ev.text, str(ev.tool_name));
       else if (role === 'user' || role === 'assistant') turn(role, ev.text);
       else return false;
       // A queued message stops being queued when it becomes a turn.

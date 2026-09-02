@@ -592,9 +592,11 @@ async function main() {
     const attachText = 'this one is queued and only the attachment says so';
     const viaAttachment = W.send(FIX, attachText);
     await sleep(1000);
+    // The block-list prompt shape 2.1.251 writes — the receipt has to read it,
+    // or every mid-turn send on a current build reports as lost.
     appendFileSync(jsonl, `${JSON.stringify({
       type: 'attachment', uuid: 'q2',
-      attachment: { type: 'queued_command', prompt: attachText, origin: { kind: 'human' } },
+      attachment: { type: 'queued_command', prompt: [{ type: 'text', text: attachText }], origin: { kind: 'human' } },
     })}\n`);
     const attached = await viaAttachment;
     assert(attached.ok && attached.queued === true,
@@ -707,14 +709,45 @@ async function main() {
       JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: 'steer me' }),
       JSON.stringify({ type: 'attachment', uuid: 'qa1', isSidechain: false, attachment: { type: 'queued_command', prompt: 'steer me', origin: { kind: 'human' } } }),
       JSON.stringify({ type: 'queue-operation', operation: 'remove', content: 'steer me' }),
+      // By 2.1.251 the prompt is a content-block list and the enqueue carries
+      // no content. Read off a live transcript 2026-09-01, when String() was
+      // putting "[object Object]" on the floor as the operator's own words.
+      JSON.stringify({ type: 'queue-operation', operation: 'enqueue' }),
+      JSON.stringify({ type: 'attachment', uuid: 'qa1b', isSidechain: false, attachment: { type: 'queued_command', prompt: [{ type: 'text', text: 'steer me again' }], origin: { kind: 'human' } } }),
+      JSON.stringify({ type: 'queue-operation', operation: 'remove' }),
       JSON.stringify({ type: 'assistant', uuid: 'qa2', message: { content: [{ type: 'text', text: 'steering' }] } }),
       // Any other attachment is not a turn — an image or a file is part of the
       // message it hangs off, not a thing somebody said.
       JSON.stringify({ type: 'attachment', uuid: 'qa3', attachment: { type: 'image', path: '/tmp/shot.png' } }),
     ].join('\n') + '\n');
     const queuedRead = await W.readTranscript(queuedT);
-    eq(queuedRead.turns.map((x) => `${x.role}:${x.text}`), ['user:steer me', 'assistant:steering'],
-       'a mid-turn message is a user turn, and other attachments are not turns at all');
+    eq(queuedRead.turns.map((x) => `${x.role}:${x.text}`), ['user:steer me', 'user:steer me again', 'assistant:steering'],
+       'a mid-turn message is a user turn in both prompt shapes, and other attachments are not turns at all');
+
+    /* Injected context is the system's words, not the person's. Claude Code
+     * glues IDE state and slash-command records onto user records — a separate
+     * text block beside the message, or a whole record of wrappers. Read from
+     * a live transcript 2026-09-01, when the floor showed "<ide_opened_file>…"
+     * glued to the front of what the operator actually typed, as theirs. */
+    const ctxT = `${CLAUDE_HOME}/projects/context-shape/c.jsonl`;
+    mkdirSync(dirname(ctxT), { recursive: true });
+    writeFileSync(ctxT, [
+      JSON.stringify({ type: 'user', uuid: 'c1', message: { content: [
+        { type: 'text', text: '<ide_opened_file>The user opened the file src/db.js in the IDE.</ide_opened_file>' },
+        { type: 'text', text: 'check our service?' },
+      ] } }),
+      JSON.stringify({ type: 'user', uuid: 'c2', message: { content: '<command-name>/model</command-name>\n<command-message>model</command-message>' } }),
+      JSON.stringify({ type: 'assistant', uuid: 'c3', message: { content: [{ type: 'text', text: 'on it' }] } }),
+    ].join('\n') + '\n');
+    const ctxRead = await W.readTranscript(ctxT);
+    eq(ctxRead.turns.map((x) => `${x.role}:${x.text}`), [
+      'context:<ide_opened_file>The user opened the file src/db.js in the IDE.</ide_opened_file>',
+      'user:check our service?',
+      'context:<command-name>/model</command-name>\n<command-message>model</command-message>',
+      'assistant:on it',
+    ], 'injected context splits into its own turns and the person keeps only their words');
+    eq(ctxRead.turns[0].tool_name, 'ide_opened_file', 'a context turn is labeled by its tag');
+    eq(ctxRead.turns[2].tool_name, 'command-name', 'and by the first tag when a record is several wrappers');
 
     // Tailing: read from the offset, get only what is new.
     const empty = await W.readTranscript(t, { after: first.offset });

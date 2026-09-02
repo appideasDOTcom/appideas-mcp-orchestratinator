@@ -468,6 +468,18 @@ try {
   eq((await noteOn('racer'))?.text, 'and this one is still waiting',
      "another turn does not retire a queued message that is still queued");
 
+  // Injected context the host split off a user record. It must land as its own
+  // role with the tag as its label — not be dropped by the unknown-role guard,
+  // and not retire a queued note the way a person's turn does.
+  const CTX = '<ide_opened_file>opened src/db.js</ide_opened_file>';
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'racer', role: 'context', text: CTX, tool_name: 'ide_opened_file' }]);
+  const ctxRows = (await turns('racer')).rows ?? [];
+  const ctxRow = ctxRows.find((r) => r.role === 'context');
+  eq(ctxRow?.text, CTX, 'a context turn arrives with its text intact');
+  eq(ctxRow?.tool_name, 'ide_opened_file', 'and carries its tag as the label');
+  eq((await noteOn('racer'))?.text, 'and this one is still waiting',
+     'and a context turn retires no queued note — only the person becoming a turn does that');
+
   console.log('\nstopping a turn');
   // End to end this time, because the interesting part is that the endpoint and
   // the sign refuse on the same facts. The desk is driven into `working` by a

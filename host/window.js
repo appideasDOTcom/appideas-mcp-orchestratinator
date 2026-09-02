@@ -853,6 +853,10 @@ const squash = (t) => t.replace(/\s+/g, ' ').trim();
  *   {"type":"attachment","attachment":{"type":"queued_command","prompt":"…"}}
  *   …and later {"operation":"remove"} when the agent reads it
  *
+ * By 2.1.251 the enqueue record carries no `content` and `prompt` is a
+ * content-block list, not a string — so the attachment match below is the one
+ * that fires on current builds, and it goes through textOf like any message.
+ *
  * `readTranscript` keeps only `user` and `assistant`, so none of this was
  * visible to the host: the only receipt it could see was the user turn, which
  * for a queued message is not written until the message is *consumed*. On a
@@ -891,7 +895,7 @@ async function deliveryOf(path, after, text) {
     if (d.type === 'queue-operation' && d.operation === 'enqueue'
         && squash(String(d.content ?? '')).includes(want)) queued = 'queued';
     if (d.type === 'attachment' && d.attachment?.type === 'queued_command'
-        && squash(String(d.attachment.prompt ?? '')).includes(want)) queued = 'queued';
+        && squash(textOf(d.attachment.prompt)).includes(want)) queued = 'queued';
   }
   return queued;
 }
@@ -2029,6 +2033,20 @@ function textOf(content) {
 }
 
 /**
+ * The tag name if this whole string is machine-injected context —
+ * <ide_opened_file>…</ide_opened_file> and kin — else null. Opening and
+ * closing names may differ, because a slash command is recorded as one string
+ * of several wrappers (<command-name>…</command-args>); the label is the
+ * first tag either way. Matched against whole blocks only, never inside one,
+ * so nobody's prose is parsed — the worst case, a person whose entire message
+ * is one tagged block, renders labeled as context: visible, never lost.
+ */
+function contextTagOf(s) {
+  const m = /^\s*<([A-Za-z][\w-]*)>[\s\S]*<\/[A-Za-z][\w-]*>\s*$/.exec(s);
+  return m ? m[1] : null;
+}
+
+/**
  * The only tool_input keys the floor's collapsed line ever reads. A Write of a
  * whole file would otherwise put that file on the network on its way to
  * becoming a one-line summary.
@@ -2091,6 +2109,11 @@ export async function readTranscript(path, { after = 0 } = {}) {
      * answered "MIDTURN-PROOF-SEEN" six seconds after it was sent, and the
      * floor showed the reply to a question nobody could see being asked.
      *
+     * `prompt` was a plain string on 2.1.220 and is a content-block list
+     * ([{type:'text',text:'…'}]) by 2.1.251 — read from a live transcript
+     * 2026-09-01, after String() turned every mid-turn message on the floor
+     * into "[object Object]". textOf handles both, same as a user record.
+     *
      * Not deduplicated against the `user` shape, deliberately. The two are
      * exclusive — the same message is never written both ways — and matching
      * on text across reads to guard against it would swallow the case where
@@ -2100,7 +2123,7 @@ export async function readTranscript(path, { after = 0 } = {}) {
      * visible and fixable; the other mistake is silent.
      */
     if (d.type === 'attachment' && d.attachment?.type === 'queued_command' && !d.isSidechain) {
-      const queued = String(d.attachment.prompt ?? '');
+      const queued = textOf(d.attachment.prompt);
       if (queued.trim()) turns.push({ role: 'user', text: queued, at: d.timestamp ?? null, uuid: d.uuid ?? null });
       continue;
     }
@@ -2113,8 +2136,30 @@ export async function readTranscript(path, { after = 0 } = {}) {
     const uuid = d.uuid ?? null;
 
     if (d.type === 'user') {
-      const text = textOf(d.message?.content);
-      if (text.trim()) turns.push({ role: 'user', text, at, uuid });
+      /* A user record is not all the operator. Claude Code glues injected
+       * context onto the person's message — IDE state, slash-command records —
+       * each as its own content block (or a whole record of them). Joining
+       * every block into one string put that context on the floor as the
+       * operator's own words, tag and all. The block boundary is the
+       * discriminator: context blocks become `context` turns labeled by their
+       * tag, and only the remaining blocks are the person. */
+      const content = d.message?.content;
+      const blocks = typeof content === 'string' ? [content]
+        : Array.isArray(content)
+          ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text)
+          : [];
+      let human = [];
+      const flush = () => {
+        const text = human.join('');
+        if (text.trim()) turns.push({ role: 'user', text, at, uuid });
+        human = [];
+      };
+      for (const s of blocks) {
+        const tag = contextTagOf(s);
+        if (tag) { flush(); turns.push({ role: 'context', text: s.trim(), tool_name: tag, at, uuid }); }
+        else human.push(s);
+      }
+      flush();
       continue;
     }
     const content = d.message?.content;

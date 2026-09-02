@@ -2005,6 +2005,18 @@
       div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span>`;
       return div;
     }
+    if (t.role === 'context') {
+      // The system talking, not the person: IDE state, slash-command records.
+      // Same quiet line as a tool call, labeled by its tag. Every wrapper
+      // token is stripped for display — a context row only exists because its
+      // whole text was wrappers, so none of them is anyone's prose — and the
+      // full stored text stays reachable on hover.
+      const inner = (t.text ?? '').replace(/<\/?[A-Za-z][\w-]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      div.className = 't t-tool t-context';
+      div.title = t.text ?? '';
+      div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.tool_name ? `${t.tool_name} · ` : '')}${esc(inner)}</span>`;
+      return div;
+    }
     const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? 'agent' : t.role;
     div.className = `t t-${esc(t.role)}`;
     // Only the agent's own messages are read as markdown. What the operator

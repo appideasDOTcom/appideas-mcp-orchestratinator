@@ -175,6 +175,46 @@ docker image inspect appideas-mcp-orchestratinator-orchestratinator --format '{{
 docker compose up -d --build   # if src/ is newer
 ```
 
+## Two symptoms with known signatures
+
+Both measured on the live board 2026-09-01. Check these before inventing a
+theory that fits either shape.
+
+**The conversation flows but desks look absent — "thought bubbles and not much
+else".** Presence is an MCP session in the server's memory, so a rebuild or
+restart of the container blanks it for every desk at once, while the relay —
+plain HTTP from the host, with its own retries — carries on. The board looked
+"disconnected" for 40 minutes while relaying perfectly.
+
+```bash
+curl -s localhost:8787/health     # sessions near 0, opened/superseded counters young
+docker ps --format '{{.Names}}\t{{.Status}}' | grep orchestratinator   # "Up N minutes" ≈ when presence died
+```
+
+If the container's age matches when the desks went blank, nothing is broken and
+nothing needs restarting: one MCP tool call per desk brings each back. Do not
+chase the connection.
+
+**A turn's text is mangled — `[object Object]`, or injected context glued to a
+person's words.** That is a transcript record whose shape drifted under its
+reader: Claude Code changes record shapes between releases (2.1.220 wrote
+`queued_command.prompt` as a string; 2.1.251 writes a content-block list, and a
+`String()` in `readTranscript` showed every mid-turn message as
+`[object Object]`). Read the actual record from the session's `.jsonl` and
+compare it with the reader in `host/window.js` before any other theory — the
+fix belongs in the reader (`textOf` handles both shapes; `contextTagOf` splits
+injected context).
+
+Two follow-ons that cost real time: already-relayed rows never self-correct,
+because the relay's offset never re-reads old bytes — and the live database is
+**not** `data/` in the repo (that is test leftovers; the volume is named).
+Repair rows through the container, and expect turn retention to have already
+pruned old ones:
+
+```bash
+docker compose exec -T orchestratinator node < fix.js   # better-sqlite3 at $DB_PATH
+```
+
 ## What not to do
 
 - Do not theorise about environment drift, versions, or infrastructure until
