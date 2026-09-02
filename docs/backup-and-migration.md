@@ -1,5 +1,3 @@
-<!-- DRAFT for review. Final home: docs/backup-and-migration.md -->
-
 # Backups & migration
 
 The **⚙** in the top bar opens one panel: export and restore. There is nothing

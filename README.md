@@ -233,7 +233,7 @@ The front page stops here; the details — all of them — moved to `docs/`:
 
 | Page | What's in it |
 | --- | --- |
-| [How agents coordinate](docs/coordination.md) | Channels, the ten MCP tools, contracts, a typical exchange, wiring a plugin pair, and why human→agent and agent→agent are different mechanisms |
+| [How agents coordinate](docs/coordination.md) | Channels, the ten MCP tools, contracts, a typical exchange, wiring up a team, and why human→agent and agent→agent are different mechanisms |
 | [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, operator actions (mark read, reassign, retire, archive), minimize vs archive |
 | [The security model](docs/security.md) | The shared secret, the network boundary, what the floor puts on the server, and the sign-in that used to exist |
 | [Backups & migration](docs/backup-and-migration.md) | Export, restore, moving the board to a permanent host, cron-driven backups |

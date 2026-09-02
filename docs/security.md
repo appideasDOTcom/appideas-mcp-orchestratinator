@@ -1,5 +1,3 @@
-<!-- DRAFT for review. Final home: docs/security.md -->
-
 # The security model
 
 Short version: **the network is the boundary.** Agents authenticate to `/mcp`

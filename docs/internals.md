@@ -1,5 +1,3 @@
-<!-- DRAFT for review. Final home: docs/internals.md -->
-
 # Internals & development
 
 ## Run the server (Docker)

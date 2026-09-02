@@ -1,5 +1,3 @@
-<!-- DRAFT for review. Final home: docs/operating.md -->
-
 # Operating the board
 
 One page draws two views of the same server: the **board** (a row per agent)

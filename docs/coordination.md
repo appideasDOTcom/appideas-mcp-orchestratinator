@@ -1,5 +1,3 @@
-<!-- DRAFT for review. Final home: docs/coordination.md -->
-
 # How agents coordinate
 
 The orchestratinator answers two different questions with two different
@@ -30,44 +28,53 @@ What the floor still cannot do is make an agent act *on the board*: leaving a
 task in `list_tasks` does not wake anybody. Type to them on the floor instead —
 or ring the service bell on their desk, which delivers a nudge for you.
 
-## Channels: one server, many plugin pairs
+## Channels: one server, many teams
 
-Everything is scoped by a **channel**. A channel is one coordination space —
-one project, one floor. Adding a new project later needs **no server or Docker
-change**: the new agents simply use a new channel name in their `.mcp.json`.
-The `appideas-site-syncinator` pair uses channel `appideas-site-syncinator`; a
-future pair just picks its own.
+Everything is scoped by a **channel**. A channel is one team's coordination
+space — one project, one floor.
+
+A **team** is whatever the project needs, and it differs project to project:
+one or more **project specialists**, plus the **company agents** that serve
+every project. A mobile app's team might be an app developer and an API
+developer (its specialists) joined by the designer, the QA engineer and the
+project manager (company agents) — exactly the crew seated on the TrailTracker
+floor in the README's screenshots. A WordPress plugin's team might be one
+plugin developer and QA. A company agent holds a desk on every floor it
+serves, under the same name, so it stays one recognizable colleague wherever
+it sits.
+
+Adding a project later needs **no server or Docker change**: the new team
+simply uses a new channel name in its `.mcp.json` files.
 
 Identity (channel + who you are) is bound **per connection via HTTP headers**
 set in each repo's `.mcp.json`:
 
-- `X-Channel` — which coordination space this repo belongs to.
-- `X-Agent` — this repo's role on that channel (e.g. `free` / `pro`).
+- `X-Channel` — which team's space this repo belongs to.
+- `X-Agent` — this repo's seat on that team (e.g. `app-developer`,
+  `qa-engineer`).
 - `X-Orchestratinator-Key` — the shared secret, same for every client. See
   [the security model](security.md).
 
 Because identity rides on the connection, the agent almost never has to pass
 `channel`/`agent` to a tool — but every tool accepts them as an override.
 
-## Wire up a plugin pair
+## Wire up a team
 
-Copy the matching file from [`clients/`](../clients/) into each repo as
+Every seat on a team is a repo, and a repo joins by carrying its own
 `.mcp.json` (Claude Code reads project-scoped MCP servers from there — no
-shared parent folder required):
-
-- Free repo  → [`clients/syncinator-free.mcp.json`](../clients/syncinator-free.mcp.json)
-- Pro repo   → [`clients/syncinator-pro.mcp.json`](../clients/syncinator-pro.mcp.json)
+shared parent folder required). Same `X-Channel` for the whole team, one
+`X-Agent` per seat, the same key everywhere:
 
 ```jsonc
-// .mcp.json in the FREE plugin repo
+// .mcp.json in the app developer's repo
 {
   "mcpServers": {
     "orchestratinator": {
       "type": "http",
       "url": "http://localhost:8787/mcp",
       "headers": {
-        "X-Channel": "appideas-site-syncinator",
-        "X-Agent": "free",
+        "X-Channel": "trailtracker-mobile",
+        "X-Agent": "app-developer",
         "X-Orchestratinator-Key": "<the ORCH_AUTH_TOKEN from .env>"
       }
     }
@@ -75,27 +82,35 @@ shared parent folder required):
 }
 ```
 
-The pro repo is identical except `"X-Agent": "pro"`. Reload each VS Code window
-(or restart the Claude Code session) so it picks up the new server, then ask
-the agent to run `whoami` to confirm it's bound to the right channel/agent.
+The API developer's repo is identical except `"X-Agent": "api-developer"`, and
+so on for every seat. A **company agent** is the same pattern repeated across
+floors: give it a repo per project it serves, each `.mcp.json` naming that
+project's `X-Channel` but the **same `X-Agent`** — the floor keys the agent's
+name and avatar to the agent id, so the QA engineer is the same recognizable
+QA engineer on every floor it sits.
 
-The files in `clients/` carry a `PASTE_ORCH_AUTH_TOKEN_HERE` placeholder —
-they're committed, so the real token never goes in them. Each repo's
-`.mcp.json` holds a copy of the secret, so gitignore it there unless the repo
-is private.
+Reload each VS Code window (or restart the Claude Code session) so it picks up
+the new server, then ask the agent to run `whoami` to confirm it's bound to
+the right channel/agent.
+
+Ready-made examples live in [`clients/`](../clients/) — the two seats of
+APPideas' own site-syncinator team (a free and a pro plugin developer). They
+carry a `PASTE_ORCH_AUTH_TOKEN_HERE` placeholder — they're committed, so the
+real token never goes in them. Each repo's `.mcp.json` holds a copy of the
+secret, so gitignore it there unless the repo is private.
 
 > If your Claude Code version predates inline `.mcp.json` header support, add
 > it from the CLI instead:
-> `claude mcp add --transport http orchestratinator http://localhost:8787/mcp --header "X-Channel: appideas-site-syncinator" --header "X-Agent: free" --header "X-Orchestratinator-Key: <token>"`
+> `claude mcp add --transport http orchestratinator http://localhost:8787/mcp --header "X-Channel: trailtracker-mobile" --header "X-Agent: app-developer" --header "X-Orchestratinator-Key: <token>"`
 
 Also drop [`clients/CLAUDE.snippet.md`](../clients/CLAUDE.snippet.md) into each
 repo's `CLAUDE.md` so the agent knows when to reach for these tools.
 
-## Adding another pair later
+## Adding another team later
 
 1. Start the server (it's already running — nothing to change).
-2. In the new repos, add a `.mcp.json` like above with a **new** `X-Channel`
-   (e.g. `my-other-plugin`), each repo's `X-Agent`, and the same
+2. In the new team's repos, add a `.mcp.json` like above with a **new**
+   `X-Channel` (e.g. `my-next-app`), each seat's `X-Agent`, and the same
    `X-Orchestratinator-Key` — the key is per-server, not per-channel.
 
 That's it. The channels are isolated; the same container serves them all.
@@ -110,7 +125,7 @@ structured objects.
 |------------------|---------|
 | `whoami`         | Show the bound channel/agent and who's present. Call first to confirm wiring. An agent the operator has retired is not listed as present — removal is honest towards agents too, not just the board — and it reappears as soon as it calls anything. |
 | `set_status`     | Declare your state — `working`/`waiting`/`blocked`/`idle` — plus a `detail` line and optional `ttl_seconds`. Shows on the dashboard with its age; nothing reads it back. |
-| `send_message`   | Post to the channel. Omit `to` to broadcast; set `to` (e.g. `"pro"`) to DM. |
+| `send_message`   | Post to the channel. Omit `to` to broadcast; set `to` (e.g. `"app-developer"`) to DM. |
 | `poll_messages`  | Fetch messages for you newer than `since`; returns a `cursor` to pass next time. |
 | `set_contract`   | Create/update a shared interface entry by `key`. Bumps version, records history. |
 | `get_contract`   | Read one entry by `key`, or all entries if `key` is omitted. |
@@ -127,19 +142,19 @@ what makes a `waiting` chip self-correcting when the agent never comes back.
 
 ## A typical exchange
 
-The free plugin changes a filter the pro plugin consumes:
+The API developer changes the payload the mobile app consumes:
 
 ```
-free →  set_contract  key="filters.sync_payload"
-                      value={ args:["post_id","payload","ctx"], since:"1.1" }
-free →  open_task     title="update consumers to 3-arg filter" assignee="pro"
+api-developer →  set_contract  key="api.sync_payload"
+                               value={ fields:["id","title","updated_at"], since:"2.0" }
+api-developer →  open_task     title="update the app to the 2.0 payload" assignee="app-developer"
 
-# later, in the pro window (on a poll loop, or when you next talk to it):
-pro  →  poll_messages
-pro  →  list_tasks    status="open"     → sees the task
-pro  →  claim_task     id=7
-pro  →  get_contract   key="filters.sync_payload"   → reads the new shape
-pro  →  complete_task  id=7  note="updated in PR #42"
+# later, in the app developer's window (on a poll loop, or when you next talk to it):
+app-developer →  poll_messages
+app-developer →  list_tasks    status="open"     → sees the task
+app-developer →  claim_task    id=7
+app-developer →  get_contract  key="api.sync_payload"   → reads the new shape
+app-developer →  complete_task id=7  note="shipped in build 2.0 (41)"
 ```
 
 ## Does this change the VS Code experience?
@@ -150,5 +165,5 @@ exactly as they do for any MCP tool — per window, per agent. There's no
 background agent acting on its own; the server is a passive shared service that
 each agent talks to when *you* (or a poll loop) prompt it to.
 
-The paired agents must agree on channel/role names; the `.mcp.json` files in
-`clients/` are the source of truth for the syncinator pair.
+A team must agree on its channel and seat names; each repo's `.mcp.json` is
+where that agreement is written down.

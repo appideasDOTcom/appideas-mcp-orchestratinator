@@ -79,6 +79,22 @@ how to reshoot. Delete this file when we're done.
   it, and the committed caption was restored. If the revert was deliberate,
   say so and it goes back.
 
+## Round 6
+
+- docs/coordination.md rewritten from "pairs" to **teams**: a channel is one
+  team's space; a team = project specialists + company agents, differing per
+  project, with the TrailTracker cast from the screenshots as the worked
+  example (and a WP plugin as the small case). "Wire up a team" shows the
+  generic per-seat `.mcp.json` (trailtracker-mobile / app-developer) and how a
+  company agent repeats the pattern across floors under one `X-Agent`; the
+  `clients/` files are reframed as APPideas' own two-seat example rather than
+  the pattern. "Adding another team later" and the typical exchange
+  (api-developer → app-developer contract/task) recast to match; the
+  send_message DM example and the closing "agree on names" line too. Chris's
+  in-progress `free-developer`/`pro-developer` edits are subsumed by this.
+- README's Going deeper row now says "wiring up a team"; stripped the leftover
+  "DRAFT for review" header comments from all five docs pages.
+
 ## Round 5
 
 - Day to day rewritten as a linear, numbered daily loop (open a project →
