@@ -79,6 +79,19 @@ how to reshoot. Delete this file when we're done.
   it, and the committed caption was restored. If the revert was deliberate,
   say so and it goes back.
 
+## Round 8
+
+- No separate "Extra features" doc: the small features live in operating.md as
+  a new **"The small controls"** section (between Chatting with a desk and
+  Operator actions), written from a sweep of the actual UI actions in
+  src/ui/floor.js and src/ui/app.js rather than memory: the nameplate card,
+  Edit avatar (per-agent, both surfaces), viewing/closing/reassigning pending
+  mail and tasks via the count buttons, saved prompts (insert-at-cursor,
+  Manage…, board-wide, in backups), stop/interrupt (presses Escape; work
+  kept; `[Request interrupted by user]` in the transcript), and Open in tmux.
+  The operator-actions intro now says the counts open the pending items
+  themselves, and the README's operating row names the extras.
+
 ## Round 7
 
 - docs/operating.md gained five element crops from a fresh seed, each placed

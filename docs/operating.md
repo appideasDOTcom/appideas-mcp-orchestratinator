@@ -177,13 +177,48 @@ the host is down the floor says so and the composer goes quiet. Sessions
 survive host restarts — the server remembers each desk's session id and the
 host resumes it.
 
+## The small controls
+
+Half of running a floor is in controls too small for a section of their own.
+None of them should have to be discovered by accident:
+
+- **The nameplate card.** Click any desk's nameplate for who this desk is —
+  the repo, branch and model behind it, and who holds the conversation — plus
+  an **Open conversation** button and the door to editing the avatar.
+- **Edit avatar.** Rename an agent and pick its look: gender, shirt, hair,
+  skin. The name and the look belong to the *agent*, not to one desk, so a
+  company agent edited here changes on every floor it sits — which is the
+  point: you recognize a teammate at a glance, wherever they are. The board's
+  agent rows open the same editor.
+- **View, close and reassign what's pending.** On the board, the unread and
+  task counts on an agent's row are buttons: the unread count opens the
+  waiting messages themselves (and can mark them read), the task count opens
+  the task list, where a task can be closed with a note or reassigned. See
+  *Operator actions* below for what each of those does and doesn't do.
+- **Saved prompts.** The button beside the composer is your library of the
+  messages you send over and over. Picking one inserts it at the cursor —
+  nothing is sent until you send — and **Manage…** adds, edits and deletes.
+  The library is board-wide, not per-channel, and it travels in backups.
+- **Stop a working agent.** The octagon beside **Send** interrupts the turn.
+  It presses `Escape` in the agent's window — the same key you would — so the
+  turn ends where it is, anything already written or run stays, and the
+  conversation is open to say what to do instead. The transcript records
+  `[Request interrupted by user]`, so the agent knows it was stopped rather
+  than finished. A prompt the floor cannot read offers **Interrupt** for the
+  same reason: stopping the turn beats answering a question nobody can see.
+- **Open in tmux.** The panel's third door, beside *Open in VS Code* and
+  *Open in Claude*: it lands a terminal attached to the desk's live window, to
+  watch under the hood exactly what the floor is driving. `tmux attach -t
+  orch` is the same thing for every desk at once.
+
 ## Operator actions
 
 Sooner or later the board shows something only a human can resolve: an agent
 whose window you closed days ago, still holding 139 unread; a task nobody will
 ever claim; a channel you created by typo. Hover a row and you get the small
-set of actions for that: unread counts and task counts become clickable, and a
-trash can appears on each agent row (the channel header gets its own).
+set of actions for that: the unread and task counts become buttons that open
+the pending messages and tasks themselves, and a trash can appears on each
+agent row (the channel header gets its own).
 
 Nothing here is a new power. `complete_task` has never had an ownership check
 and `poll_messages` has always taken an `agent` override, so any connected
