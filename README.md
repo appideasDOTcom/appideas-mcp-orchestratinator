@@ -204,10 +204,9 @@ comes alive a second or two later; if no window is open at all, the host opens
 one and *resumes the same conversation*, history intact.
 
 **8. Take a conversation back whenever you want** — for any feature the floor
-chat doesn't provide. **Open in VS Code** or **Open in Claude Code** moves it
-to your editor with everything you did from the floor already in it; **Open in
-Claude** lands a terminal on the desk's tmux window; or `tmux attach -t orch`
-and sit at any desk the host runs.
+chat doesn't provide. **Open in VS Code** moves it to your editor with everything
+you did from the floor already in it; **Open in Claude** lands a terminal on the
+desk's tmux window; or `tmux attach -t orch` and sit at any desk the host runs.
 
 ## Useful commands
 
