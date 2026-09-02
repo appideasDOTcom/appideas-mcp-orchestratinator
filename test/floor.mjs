@@ -268,6 +268,36 @@ try {
   eq(deskOf(f, 'retiredone'), undefined, 'a retired agent stays off the floor, matching the board');
   eq(f.queue.some((q) => q.agent === 'boardonly'), false, 'and nothing is inferred about it — no session, no queue entry');
 
+  console.log('\nthe trash can on the board empties the desk on the floor');
+  // The case above retires an agent that never had a seat. The one that
+  // matters is an agent that did: its persona already exists, and the floor
+  // used to keep drawing the desk off that row after the board had hidden it.
+  // A desk that is waiting on a human is the strongest version — it was still
+  // being counted in the queue after the operator had removed the agent.
+  const ghostFace = deskOf(f, 'ghost').persona;
+  await post(ev('ghost', 's4', 'Notification', { notification_type: 'permission_prompt', notification_message: 'still here?' }));
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`INSERT OR IGNORE INTO agents (channel, agent) VALUES (?, ?)`).run(CH, 'ghost');
+    db.prepare(`UPDATE agents SET retired_at = datetime('now') WHERE channel = ? AND agent = ?`).run(CH, 'ghost');
+    db.close();
+  }
+  f = await floor();
+  eq(deskOf(f, 'ghost'), undefined, 'an agent removed on the board loses its desk on the floor, seat and all');
+  eq(f.queue.some((q) => q.agent === 'ghost'), false, 'and leaves the queue with it — a prompt nobody can see is not "1 need you"');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`UPDATE agents SET retired_at = NULL WHERE channel = ? AND agent = ?`).run(CH, 'ghost');
+    db.close();
+  }
+  f = await floor();
+  assert(!!deskOf(f, 'ghost'), 'restored on the board, it is back on the floor');
+  eq(deskOf(f, 'ghost').persona, ghostFace, 'in the same chair with the same face — the persona survives retirement, only the desk is withheld');
+  eq(f.queue.some((q) => q.agent === 'ghost'), true, 'and its prompt is back in the queue');
+  await post(ev('ghost', 's4', 'UserPromptSubmit', { message: 'yes' }));
+
   console.log('\nchannels are floors, and stay separate');
   await post({ ...ev('free', 's9', 'SessionStart'), channel: 'other-floor' });
   f = await floor();
@@ -426,6 +456,26 @@ try {
     body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }),
   });
   eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
+
+  console.log('\na host that names the conversation it is following');
+  // The host's one-time `session` event can be lost to its own startup: the
+  // watch loop adopts a session and reports it before the first registration
+  // has created the desk row, and applyHostEvent drops an event for a desk it
+  // does not know. Nothing re-sends it. The heartbeat carries the id every
+  // minute, so registering with one has to be enough on its own.
+  await register({ channel: CH, agent: 'nomad', cwd: '/repo/nomad', session_id: 'sdk-nomad-1' });
+  f = await floor();
+  eq(deskOf(f, 'nomad').hosted.session_id, 'sdk-nomad-1',
+     'a desk registered with a session id adopts it — the session event that normally does this may never have landed');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'nomad', role: 'assistant', text: 'relayed under the real id' }]);
+  {
+    const scoped = await fetch(`${HOST}/api/floor/turns?channel=${CH}&agent=nomad&session=sdk-nomad-1`).then((r) => r.json());
+    eq(scoped.rows.map((t) => t.text), ['relayed under the real id'],
+       'so the turns the host relays are the turns the chat panel is scoped to — the empty-panel failure this closes');
+  }
+  const reregistered = await register({ channel: CH, agent: 'nomad', cwd: '/repo/nomad' }).then((r) => r.json());
+  eq(reregistered.desks[0].sdk_session_id, 'sdk-nomad-1',
+     'a host that names no session (it just restarted) does not blank the stored one, and is handed it back');
 
   /* A message the desk took while it was working.
    *

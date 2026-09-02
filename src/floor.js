@@ -1186,7 +1186,15 @@ export function buildFloor(store, live = null, sessions = null) {
   // board and one desk in the room is a room that lies about who works there.
   // The desks without a session are drawn as not reporting, which also happens
   // to be the clearest possible reminder of who still needs the plugin.
-  // Retired agents stay off, matching the board's default. Archived channels do
+  // Retired agents stay off, matching the board's default — and off means the
+  // desk, not the persona. The persona is kept through retirement on purpose:
+  // it is the chair and the colours, and un-retiring (which any tool call from
+  // a live agent does by itself — see touchAgent) should seat the agent back
+  // where it was, not deal it a new face. So the filter is at the desk, below,
+  // against the same column the board reads. It used to be applied only to the
+  // sign, which hid the trash can's effect from the floor entirely: an agent
+  // removed on the board kept its desk, its bubble and its place in the queue.
+  // Archived channels do
   // not — they are carried with a flag and left out of the building by the page.
   // Dropping them here is what this used to do, and it took the way back in with
   // them: a channel absent from the payload has no chip in the floor picker
@@ -1200,8 +1208,9 @@ export function buildFloor(store, live = null, sessions = null) {
   // can exist without one — a window can post hook events before its agent has
   // ever called an MCP tool — and then there is simply no sign to paint.
   const agentRows = new Map();
+  const retired = new Set();
   for (const a of store.listAllAgents()) {
-    if (a.retired_at) continue;
+    if (a.retired_at) { retired.add(key(a.channel, a.agent)); continue; }
     agentRows.set(key(a.channel, a.agent), a);
     store.ensurePersona(a.channel, a.agent);
   }
@@ -1226,7 +1235,7 @@ export function buildFloor(store, live = null, sessions = null) {
     const shelved = archived.has(channel);
     const desks = byChannel
       .get(channel)
-      .slice()
+      .filter((p) => !retired.has(key(channel, p.agent)))
       .sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0) || a.agent.localeCompare(b.agent))
       .map((p) => {
         const k = key(channel, p.agent);
@@ -1554,6 +1563,30 @@ export function createFloorRouter({ store, auth, sessions = null }) {
         holders: Number(d?.holders) || 0,
       });
       store.ensurePersona(channel, agent);
+      // The conversation the host is following, when it names one. The desk's
+      // `session` event is what normally sets this — but it fires once, when
+      // the host first adopts a session, and the host's watch loop starts
+      // before its first registration. On a desk this host has never registered
+      // (a repo rebound to a new channel, say) that one event reaches
+      // applyHostEvent before the row exists and is dropped without a word,
+      // and nothing re-sends it, because from the host's side nothing changed.
+      // Measured 2026-09-02: the host relayed sixty turns under the real id
+      // while the desk still said the placeholder, so the chat panel — scoped
+      // to the desk's id — showed an empty conversation, and no restart could
+      // fix it because a restart re-runs the same race.
+      //
+      // The heartbeat already carries the id every minute, which makes it the
+      // natural self-heal. Applied through the same handler as the event, so
+      // it upserts the session, rekeys anything filed under the placeholder and
+      // publishes — exactly what the lost event would have done — and only
+      // when the id differs, so a heartbeat is not a minute-by-minute touch on
+      // a conversation whose window may have closed. A host that names none (it
+      // has just restarted) leaves the stored id alone: handing it back is the
+      // reply's job, below.
+      const named = str(d?.session_id);
+      if (named && named !== store.hostedDesk(channel, agent)?.sdk_session_id) {
+        applyHostEvent(store, live, hostId, { type: 'session', channel, agent, session_id: named, cwd });
+      }
       const row = store.hostedDesk(channel, agent);
       accepted.push({
         channel, agent, cwd,
