@@ -9,46 +9,14 @@ that human a friendly, manageable space to run the work.
 
 ## What it is
 
-You already run AI agents — maybe several at once, each working in its own
-project, each in its own window. What's missing is one place to *see* them:
-who is working, who is stuck, who needs an answer, and a way to respond without
-hunting through windows.
+The Orchestratinator is a small, self-hosted server and a single web page that
+enables you to manage the workplace. Work exactly as you always have — nothing
+about your editor or your agents changes. The floor is where you go to run the
+team:
 
-The orchestratinator is a small, self-hosted server and a single web page that
-turn those scattered windows into a workplace:
-
-- **A building.** Every project is a floor. One glance tells you where work is
-  happening across all of your agent teams — and where nothing is.
-- **A room per project.** Walk into a floor and every agent on that project sits
-  at a desk: what they're thinking, what they're running, and a badge you can't
-  miss when one of them needs a human.
-- **One conversation per desk.** Click a desk to read the conversation live,
-  type into it, approve or deny the permission prompt it's holding — the same
-  conversation your editor would show, from one screen instead of one per agent.
-
-Under the page sit three small parts: an MCP coordination server (Docker) that
-gives agents on a project a shared mailbox, task list and agreed contracts; a
-Claude Code plugin that lets each session report what it's doing; and a host
-service that can run any desk's window for you in `tmux`. Agents keep their own
-repos and their own boundaries — nothing merges, nothing is shared but the
-board.
-
-## How you use it
-
-Work exactly as you always have — nothing about your editor or your agents
-changes. The floor is where you go to run the team:
-
-- **Glance at the building.** The header counts who's here and who needs you;
-  go where it points.
-- **Click into a room.** Read any desk's conversation, type to it, answer its
-  permission prompts.
-- **When an agent has messages or tasks waiting, ring the service bell on its
-  desk.** Agents check the channel when nudged — the bell is how you tell one
-  "you've got work" without typing a word.
-- **Move a conversation between the floor and your editor** with one button,
-  whenever you want to take over or hand back.
-
-## The tour
+**A building.** Every project is a floor. One glance tells you where work is
+happening across all of your agent teams — and where nothing is. The header
+counts who's here and who needs you; go where it points.
 
 ![The building — one floor per project](docs/images/building.png)
 
@@ -59,6 +27,11 @@ WordPress-plugin team is running quietly; Ledgerino, between releases, is dark.
 Agents can hold desks on more than one floor — this Project Manager is driving
 the TrailTracker launch while standing by on Bookinator.
 
+**A room per project.** Walk into a floor and every agent on that project sits
+at a desk: what they're thinking, what they're running, and a badge you can't
+miss when one of them needs a human. Read any desk's conversation, type to it,
+answer its permission prompts.
+
 ![A room — every agent at its desk](docs/images/room.png)
 
 **A room.** Click any floor to manage the whole team: thought bubbles show what
@@ -66,7 +39,11 @@ each agent just said, the sign on each desk shows what it's doing, and the red
 badge marks the one that needs you. The panel on the right is that desk's live
 conversation — read it, type into it, and answer the permission prompt with a
 click. When an agent has messages or tasks waiting in its tray, **ring the
-service bell on its desk** and it will pick them up.
+service bell on its desk** and it will pick them up — the bell is how you tell
+one "you've got work" without typing a word.
+
+**A board, for the details.** When you want rows, counts and logs instead of
+rooms, flip the switch top right.
 
 ![The board — the same server, denser](docs/images/board.png)
 
@@ -75,6 +52,13 @@ presence, self-reported status with its age, unread and task counts, and the
 full activity log — every message, task, and contract change, newest first.
 Operator controls live here too: mark mail read, close or reassign tasks,
 archive channels.
+
+Under the page sit three small parts: an MCP coordination server (Docker) that
+gives agents on a project a shared mailbox, task list and agreed contracts; a
+Claude Code plugin that lets each session report what it's doing; and a host
+service that can run any desk's window for you in `tmux`. Agents keep their own
+repos and their own boundaries — nothing merges, nothing is shared but the
+board. Those are the three things the next section installs.
 
 ## Install
 

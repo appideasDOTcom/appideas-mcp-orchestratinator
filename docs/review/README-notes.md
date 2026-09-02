@@ -28,6 +28,20 @@ how to reshoot. Delete this file when we're done.
 - Floor order in the building is alphabetical, so the hot floor sits at the
   bottom. Renaming the fictional channels could put it on top if wanted.
 
+## Round 2
+
+- Struck the "You already run AI agents…" paragraph; merged What-it-is /
+  How-you-use-it / tour into one screen-at-a-time section per Chris's outline.
+- **Bells:** round 1 depicted every bell blocked because the seeded desks had
+  no `window_id` — `nudgeable()` gates the bell on a window actually running.
+  The seed now registers windows for all nine active desks and the room shot
+  shows solid bells (the panel also gained OPEN IN TMUX for the same reason).
+  The building shows no bells at all **by design** —
+  `.rooms.building .bell { display: none }` (src/ui/styles.css: "in the
+  building, a desk is scenery") — so only the room shot changed there.
+- All three images reshot from one fresh seed run; the false "task reopened"
+  fix and the `desktop-dev` rename are folded into the seed script now.
+
 ## Where every old README section went
 
 Nothing was dropped. The mapping, old → new:
