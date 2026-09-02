@@ -42,6 +42,20 @@ how to reshoot. Delete this file when we're done.
 - All three images reshot from one fresh seed run; the false "task reopened"
   fix and the `desktop-dev` rename are folded into the seed script now.
 
+## Round 3
+
+- The plugin is now described as "for Claude Code or Visual Studio Code —
+  either one, or both".
+- The bell instruction leads the room caption, phrased as the direct action
+  ("Click the service bell when an agent has messages or tasks to pick up").
+- **Bell appearance, measured:** the live board at :8787 serves byte-identical
+  bell CSS to the working tree — an active agent's *resting* bell is the same
+  grey in production; only hover, focus, and the peal are livelier. So the
+  room shot now captures the QA Engineer's bell **mid-ring** (a real click on
+  the real page, arcs and all) beside its waiting-task tray. If active bells
+  should read livelier *at rest*, that's a product CSS change, not a
+  screenshot change — flagged, not taken.
+
 ## Where every old README section went
 
 Nothing was dropped. The mapping, old → new:

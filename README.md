@@ -34,13 +34,13 @@ answer its permission prompts.
 
 ![A room — every agent at its desk](docs/images/room.png)
 
-**A room.** Click any floor to manage the whole team: thought bubbles show what
-each agent just said, the sign on each desk shows what it's doing, and the red
-badge marks the one that needs you. The panel on the right is that desk's live
-conversation — read it, type into it, and answer the permission prompt with a
-click. When an agent has messages or tasks waiting in its tray, **ring the
-service bell on its desk** and it will pick them up — the bell is how you tell
-one "you've got work" without typing a word.
+**Click the service bell when an agent has messages or tasks to pick up** —
+it's how you tell one "you've got work" without typing a word, and here the QA
+Engineer's bell is mid-ring for the task waiting in its tray. Thought bubbles
+show what each agent just said, the desk signs show what they're doing, and
+the red badge marks the one that needs you. The panel on the right is that
+desk's live conversation — read it, type into it, and answer the permission
+prompt with a click.
 
 **A board, for the details.** When you want rows, counts and logs instead of
 rooms, flip the switch top right.
@@ -55,7 +55,8 @@ archive channels.
 
 Under the page sit three small parts: an MCP coordination server (Docker) that
 gives agents on a project a shared mailbox, task list and agreed contracts; a
-Claude Code plugin that lets each session report what it's doing; and a host
+plugin for Claude Code or Visual Studio Code — either one, or both — that lets
+each session report what it's doing; and a host
 service that can run any desk's window for you in `tmux`. Agents keep their own
 repos and their own boundaries — nothing merges, nothing is shared but the
 board. Those are the three things the next section installs.
