@@ -226,7 +226,12 @@ meta-less file until the meta arrives, and reads it from its first word then;
 only past `ORCH_SUBAGENT_META_GRACE_MS` (two minutes) does it fall back to the
 id, in case the meta never comes. The cost of waiting is that a subagent's
 first seconds reach the floor late; the cost of not waiting is one
-conversation under two names, which no later tick repairs.
+conversation under two names, which no later tick repairs. So the guarantee
+is exactly "one label unless the meta is later than the grace" — past it the
+split returns, which is the old behaviour and not a new fault. Every delay
+measured was 52 seconds or less against a two-minute grace, so that case is
+outside anything yet observed; if it is ever seen, raise the grace rather than
+teaching turns to relabel.
 
 **Thinking is a turn too, under its own role.** Claude Code writes a
 `thinking` block ahead of most steps and the window draws it in dim text; on

@@ -345,22 +345,34 @@ try {
   eq(viaRows?.find((r) => r.text === 'WebFetch: https://docs.example.test/hooks')?.via, 'Docs lookup', 'and so is each of its tool calls');
   assert(!(viaRows ?? []).some((r) => r.text === 'find the docs'), 'its brief is not filed as anyone speaking');
 
-  // Merged by the clock, not by which file was read first. The session's own
-  // transcript is read before the subagents' each tick, so a subagent line
-  // stamped earlier than a main-thread line written in the same tick must
-  // still land first. Asserted directly: QA's M7 (sort removed) left this
-  // suite green (PR #3 review, 2026-09-03).
-  const later = new Date();
-  const earlier = new Date(later.getTime() - 5000);
-  appendTurn({ type: 'assistant', uuid: 'a-order-main', timestamp: later.toISOString(), message: { content: [{ type: 'text', text: 'ORDER-MAIN said later' }] } });
-  appendFileSync(`${subDir}/agent-sub1.jsonl`, `${JSON.stringify({ type: 'assistant', uuid: 'sa-order', isSidechain: true, agentId: 'sub1', timestamp: earlier.toISOString(), message: { content: [{ type: 'text', text: 'ORDER-SUB thought earlier' }] } })}\n`);
+  /* Merged by the clock, not by which file was read first — and not by string
+   * order either. The session's own transcript is read before the subagents'
+   * each tick, so a subagent line stamped earlier than a main-thread line
+   * written in the same tick must still land first.
+   *
+   * The two stamps deliberately differ in *precision*, which is the whole of
+   * what separates a clock comparison from `localeCompare`. The first version
+   * of this case put them five seconds apart at the same precision, where
+   * string order and clock order agree — so it pinned the sort's existence
+   * (M7 red) while saying nothing about the guard, and restoring
+   * `localeCompare` left it green (QA, PR #3 re-review, 2026-09-03). Here the
+   * subagent's second-precision `…:00Z` sorts *after* the main thread's
+   * `…:00.500Z` as a string, because `.` is below `Z`, and before it by the
+   * clock. Only a real time comparison gets this right.
+   */
+  const base = new Date();
+  base.setMilliseconds(0);
+  const subAt = base.toISOString().replace(/\.\d{3}Z$/, 'Z');    // second precision, earlier
+  const mainAt = new Date(base.getTime() + 500).toISOString();    // millisecond precision, later
+  appendTurn({ type: 'assistant', uuid: 'a-order-main', timestamp: mainAt, message: { content: [{ type: 'text', text: 'ORDER-MAIN said later' }] } });
+  appendFileSync(`${subDir}/agent-sub1.jsonl`, `${JSON.stringify({ type: 'assistant', uuid: 'sa-order', isSidechain: true, agentId: 'sub1', timestamp: subAt, message: { content: [{ type: 'text', text: 'ORDER-SUB thought earlier' }] } })}\n`);
   const ordered = await until(async () => {
     const rows = (await turns('free')).rows ?? [];
     return rows.some((r) => r.text === 'ORDER-MAIN said later') && rows.some((r) => r.text === 'ORDER-SUB thought earlier') ? rows : null;
   });
   const idOf = (text) => ordered?.find((r) => r.text === text)?.id ?? -1;
   assert(idOf('ORDER-SUB thought earlier') < idOf('ORDER-MAIN said later'),
-    'a subagent line stamped earlier is filed before a main-thread line written in the same tick — merged by time, not by file');
+    'a subagent line stamped earlier is filed first even though its stamp sorts later as a string — merged by the clock, not by file order or string order');
 
   console.log('\nswitching apps');
 
