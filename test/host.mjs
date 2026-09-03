@@ -316,6 +316,28 @@ try {
   assert(!((await turns('free')).rows ?? []).some((r) => r.text === 'subagent chatter'),
     "a subagent's own conversation stays inside the tool call that owns it");
 
+  /* A subagent's own file, though, is read — labeled. Claude Code writes each
+   * Agent call's conversation to <session dir>/subagents/agent-<id>.jsonl, and
+   * before this the floor showed the Agent line and then nothing until the
+   * report, while the editor showed every step in between (2026-09-03). */
+  const subDir = `${HOME}/.claude/projects/${slug()}/${SESSION_ID}/subagents`;
+  mkdirSync(subDir, { recursive: true });
+  writeFileSync(`${subDir}/agent-sub1.meta.json`, JSON.stringify({ agentType: 'claude-code-guide', description: 'Docs lookup', toolUseId: 'toolu_x', spawnDepth: 1 }));
+  writeFileSync(`${subDir}/agent-sub1.jsonl`, [
+    JSON.stringify({ type: 'user', uuid: 'su-1', isSidechain: true, agentId: 'sub1', timestamp: new Date().toISOString(), message: { content: 'find the docs' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'sa-1', isSidechain: true, agentId: 'sub1', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: "I'll search the official docs" }] } }),
+    JSON.stringify({ type: 'assistant', uuid: 'sa-2', isSidechain: true, agentId: 'sub1', timestamp: new Date().toISOString(), message: { content: [{ type: 'tool_use', name: 'WebFetch', input: { url: 'https://docs.example.test/hooks' } }] } }),
+    '',
+  ].join('\n'));
+  const viaRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.text === "I'll search the official docs") ? rows : null;
+  });
+  assert(!!viaRows, "a subagent's words appear on the floor, read from its own file");
+  eq(viaRows?.find((r) => r.text === "I'll search the official docs")?.via, 'Docs lookup', 'labeled with the description the caller gave it');
+  eq(viaRows?.find((r) => r.text === 'WebFetch: https://docs.example.test/hooks')?.via, 'Docs lookup', 'and so is each of its tool calls');
+  assert(!(viaRows ?? []).some((r) => r.text === 'find the docs'), 'its brief is not filed as anyone speaking');
+
   console.log('\nswitching apps');
 
   // Closing the window you were typing in does not end the conversation.

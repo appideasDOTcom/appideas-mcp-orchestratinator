@@ -793,6 +793,27 @@ async function main() {
     const first = await W.readTranscript(t);
     eq(first.turns.map((x) => `${x.role}:${x.text}`), ['user:first', 'assistant:reply'], 'transcript yields both sides and skips subagent/system noise');
 
+    /* A subagent writes a transcript of its own beside the session's, and its
+     * words are read from there — labeled, so they are never mistaken for the
+     * desk's own thread. Shape read on a live session, 2.1.258, 2026-09-03. */
+    mkdirSync(`${FIX}/t/subagents`, { recursive: true });
+    writeFileSync(`${FIX}/t/subagents/agent-abc123.meta.json`, JSON.stringify({ agentType: 'claude-code-guide', description: 'Docs lookup', toolUseId: 'toolu_1', spawnDepth: 1 }));
+    writeFileSync(`${FIX}/t/subagents/agent-abc123.jsonl`, [
+      JSON.stringify({ type: 'user', uuid: 'su1', isSidechain: true, agentId: 'abc123', timestamp: '2026-09-03T18:38:22Z', message: { content: 'the brief' } }),
+      JSON.stringify({ type: 'assistant', uuid: 'sa1', isSidechain: true, agentId: 'abc123', timestamp: '2026-09-03T18:38:26Z', message: { content: [{ type: 'text', text: "I'll search the docs" }] } }),
+      JSON.stringify({ type: 'assistant', uuid: 'sa2', isSidechain: true, agentId: 'abc123', timestamp: '2026-09-03T18:38:27Z', message: { content: [{ type: 'tool_use', name: 'WebFetch', input: { url: 'https://example.test/docs' } }] } }),
+      JSON.stringify({ type: 'user', uuid: 'su2', isSidechain: true, agentId: 'abc123', timestamp: '2026-09-03T18:38:36Z', message: { content: [{ type: 'tool_result', content: 'fetched' }] } }),
+      '',
+    ].join('\n'));
+    const subs = await W.subagentTranscripts(t);
+    eq(subs.map((x) => `${x.id}:${x.label}`), ['abc123:Docs lookup'], "a session's subagent files are found beside it, labeled by the description the caller gave");
+    const subRead = await W.readTranscript(subs[0].path, { via: subs[0].label });
+    eq(subRead.turns.map((x) => `${x.role}:${x.via}:${x.text || x.tool_name}`),
+      ["assistant:Docs lookup:I'll search the docs", 'tool:Docs lookup:WebFetch'],
+      "a subagent's words and tool calls are read with its label, and its brief and tool results are not turns");
+    eq((await W.readTranscript(subs[0].path)).turns.length, 0, 'and without a label the same file reads as sidechain noise, as before');
+    eq(await W.subagentTranscripts(`${FIX}/nothing.jsonl`), [], 'a session with no subagents has none');
+
     /* A message the agent read mid-turn is a turn, and it has only one record.
      *
      * Claude Code writes a queued message as a `user` record when it drains at

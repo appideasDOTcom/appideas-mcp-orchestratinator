@@ -657,15 +657,15 @@ export function ingestHookEvent(store, body, live = null) {
     live?.publish(key, { type: 'state', state: s });
   };
 
-  const turn = (role, text, toolName = null) => {
+  const turn = (role, text, toolName = null, via = null) => {
     const clipped = clip(text);
     if (!clipped && !toolName) return 0;
     const id = store.insertTurn({
-      channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName,
+      channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName, via,
     });
     live?.publish(deskKey(channel, agent), {
       type: 'turn',
-      turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, created_at: new Date().toISOString() },
+      turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, via, created_at: new Date().toISOString() },
     });
     return id;
   };
@@ -946,11 +946,11 @@ function applyHostEvent(store, live, hostId, ev) {
   const placeholder = placeholderSession(hostId, channel, agent);
   const sessionId = str(ev.session_id) ?? desk.sdk_session_id ?? placeholder;
   const now = new Date().toISOString();
-  const turn = (role, text, toolName = null) => {
+  const turn = (role, text, toolName = null, via = null) => {
     const clipped = clip(text);
     if (!clipped && !toolName) return 0;
-    const id = store.insertTurn({ channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName });
-    live.publish(key, { type: 'turn', turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, created_at: now } });
+    const id = store.insertTurn({ channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName, via });
+    live.publish(key, { type: 'turn', turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, via, created_at: now } });
     return id;
   };
   const state = (s) => {
@@ -1015,12 +1015,17 @@ function applyHostEvent(store, live, hostId, ev) {
      */
     case 'turn': {
       const role = str(ev.role);
-      if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name));
+      // A turn read from a subagent's own transcript carries that subagent's
+      // description; the desk's own turns carry nothing. Stored as a column
+      // so every surface labels it the same way — see subagentTranscripts in
+      // host/window.js for why those are separate files.
+      const via = str(ev.via) ?? null;
+      if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name), via);
       // Machine-injected context riding a user record — IDE state, slash-command
       // records. Its own role, with the tag in tool_name as the label, so no
       // surface can attribute the system's words to the person.
       else if (role === 'context') turn('context', ev.text, str(ev.tool_name));
-      else if (role === 'user' || role === 'assistant') turn(role, ev.text);
+      else if (role === 'user' || role === 'assistant') turn(role, ev.text, null, via);
       else return false;
       // A queued message stops being queued when it becomes a turn.
       //
@@ -1566,7 +1571,7 @@ export function buildFloor(store, live = null, sessions = null) {
               }
             : null,
           last_turn: t
-            ? { role: t.role, text: t.text, tool_name: t.tool_name, at: iso(t.created_at), id: t.id }
+            ? { role: t.role, text: t.text, tool_name: t.tool_name, via: t.via ?? null, at: iso(t.created_at), id: t.id }
             : null,
           // What this agent last said, which is what its thought bubble shows.
           // Separate from last_turn, which stays because it is what tells the

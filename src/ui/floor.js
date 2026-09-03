@@ -2116,7 +2116,9 @@
     div.dataset.id = t.id;
     if (t.role === 'tool') {
       div.className = 't t-tool';
-      div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span>`;
+      // A subagent's tool call carries the subagent's description — the same
+      // label the chat puts over its words, so the two read as one thread.
+      div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.via ? `${t.via} · ` : '')}${esc(t.text ?? t.tool_name)}</span>`;
       return div;
     }
     if (t.role === 'context' && t.tool_name === 'task-notification') {
@@ -2135,7 +2137,10 @@
       div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.tool_name ? `${t.tool_name} · ` : '')}${esc(inner)}</span>`;
       return div;
     }
-    const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? 'agent' : t.role;
+    // A subagent speaking is labeled as such. Its words are still the desk's —
+    // the editor shows them under the Agent call for the same reason — but
+    // "agent" alone would have the desk appear to change subject mid-thought.
+    const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? (t.via ? `agent · ${t.via}` : 'agent') : t.role;
     div.className = `t t-${esc(t.role)}`;
     // Only the agent's own messages are read as markdown. What the operator
     // typed comes back exactly as typed — the compose box is a plain textarea,

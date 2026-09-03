@@ -133,6 +133,10 @@ class Desk {
     this.holders = 0;        // live processes claiming this conversation
     this.clients = 0;        // terminals attached to the tmux session
     this.offset = 0;         // bytes of that transcript already sent up
+    // The same per subagent file. A conversation's subagents each write their
+    // own transcript (see subagentTranscripts in window.js), and each is tailed
+    // from where it was last read.
+    this.subOffsets = new Map();
     // When this desk started watching. What it separates is a conversation that
     // began after we were here — genuinely new, and read from its first word —
     // from one that was already running, which is joined at its current end so
@@ -161,8 +165,16 @@ class Desk {
    */
   async follow(id, fromStart = false) {
     this.lastSessionId = id;
+    this.subOffsets = new Map();
     if (!id) { this.offset = 0; return; }
-    this.offset = fromStart ? 0 : await W.transcriptSize(W.transcriptPath(this.cwd, id));
+    const path = W.transcriptPath(this.cwd, id);
+    this.offset = fromStart ? 0 : await W.transcriptSize(path);
+    // Subagent files already on disk are joined at their end for the reason
+    // the main transcript is; ones that appear later are new, and are read
+    // from their first word.
+    if (!fromStart) {
+      for (const sub of await W.subagentTranscripts(path)) this.subOffsets.set(sub.path, await W.transcriptSize(sub.path));
+    }
   }
 
   async watch(live = [], paneByPid = new Map(), allPanes = [], clients = 0) {
@@ -268,11 +280,25 @@ class Desk {
     const r = await W.readTranscript(path, { after: this.offset });
     if (!r.ok) return;
     this.offset = r.offset;
-    for (const turn of r.turns) {
+    // The subagents' transcripts too, each labeled with its description — see
+    // subagentTranscripts. Merged with the session's own turns by time when
+    // every turn carries one, so a "Let me search for…" lands between the
+    // Agent call and the report it produced rather than after everything the
+    // main thread said meanwhile.
+    const turns = [...r.turns];
+    for (const sub of await W.subagentTranscripts(path)) {
+      const s = await W.readTranscript(sub.path, { after: this.subOffsets.get(sub.path) ?? 0, via: sub.label });
+      if (!s.ok) continue;
+      this.subOffsets.set(sub.path, s.offset);
+      turns.push(...s.turns);
+    }
+    if (turns.every((t) => t.at)) turns.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    for (const turn of turns) {
       this.host.emit({
         type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,
         role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
         tool_name: turn.tool_name ?? null, tool_input: turn.tool_input ?? null,
+        via: turn.via ?? null,
       });
     }
   }

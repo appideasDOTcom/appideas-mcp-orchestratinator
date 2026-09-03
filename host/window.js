@@ -2269,7 +2269,7 @@ function reduceToolInput(input) {
  * so tailing is a read from where the last one stopped rather than a re-parse
  * of a conversation that may be very long.
  */
-export async function readTranscript(path, { after = 0 } = {}) {
+export async function readTranscript(path, { after = 0, via = null } = {}) {
   if (!existsSync(path)) return { ok: false, error: 'no transcript yet', turns: [], offset: after };
   const { readFile, stat } = await import('node:fs/promises');
   const { size } = await stat(path);
@@ -2366,26 +2366,73 @@ export async function readTranscript(path, { after = 0 } = {}) {
     }
 
     if (d.type !== 'user' && d.type !== 'assistant') continue;
-    // Sidechain is a subagent's own conversation; it belongs inside the tool
-    // call that owns it, not beside the turns of the session that spawned it.
-    if (d.isMeta || d.isSidechain) continue;
+    // Sidechain is a subagent's own conversation. In the session's transcript
+    // it is skipped: it belongs inside the tool call that owns it, not beside
+    // the turns of the session that spawned it. But it is no longer written
+    // there at all — each subagent has a file of its own under
+    // <session dir>/subagents/ (see subagentTranscripts), every record flagged
+    // isSidechain — and those files are read through here with `via` set,
+    // which turns the flag from a filter into a label. Without that the floor
+    // showed "Agent: <description>" and then nothing until the report came
+    // back, while the editor showed every "Let me search for…" in between
+    // (2.1.258, 2026-09-03).
+    if (d.isMeta || (d.isSidechain && !via)) continue;
     const at = d.timestamp ?? null;
     const uuid = d.uuid ?? null;
 
     if (d.type === 'user') {
+      // A subagent's user records are its brief — already on the floor as the
+      // Agent tool line that spawned it — and its tool results. Neither is a
+      // person speaking, so neither is a turn.
+      if (via) continue;
       // A user record is not all the operator — see personTurns.
       personTurns(blocksOf(d.message?.content), at, uuid);
       continue;
     }
     const content = d.message?.content;
     const text = textOf(content);
-    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid });
+    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid, ...(via ? { via } : {}) });
     for (const block of Array.isArray(content) ? content : []) {
       if (block?.type !== 'tool_use') continue;
-      turns.push({ role: 'tool', text: '', tool_name: block.name ?? 'tool', tool_input: reduceToolInput(block.input), at, uuid });
+      turns.push({ role: 'tool', text: '', tool_name: block.name ?? 'tool', tool_input: reduceToolInput(block.input), at, uuid, ...(via ? { via } : {}) });
     }
   }
   return { ok: true, turns, offset: after + consumed };
+}
+
+/**
+ * The subagents of a conversation, each with the transcript it writes.
+ *
+ * The Agent tool does not write into the transcript of the session that
+ * spawned it. Each call gets a file of its own — `<session dir>/subagents/
+ * agent-<id>.jsonl`, beside an `agent-<id>.meta.json` naming its type and the
+ * description the caller gave it — and the session's transcript holds only
+ * the tool_use that started it and the report that came back. Read on a live
+ * session, 2.1.258. `label` is that description, which is the same words the
+ * editor puts over the block: "Usage-limit warning behaviour".
+ *
+ * A readdir per desk per tick. Cheap, and it has to be a scan: a subagent can
+ * start at any moment, and nothing else announces its file.
+ */
+export async function subagentTranscripts(mainPath) {
+  const dir = `${String(mainPath).replace(/\.jsonl$/, '')}/subagents`;
+  if (!existsSync(dir)) return [];
+  const { readdir, readFile } = await import('node:fs/promises');
+  const names = (await readdir(dir).catch(() => [])).filter((n) => /^agent-[^/]+\.jsonl$/.test(n)).sort();
+  const out = [];
+  for (const name of names) {
+    const id = name.slice('agent-'.length, -'.jsonl'.length);
+    let meta = null;
+    // The meta file is written alongside; a moment without it, or a hand-made
+    // one, is not a reason to drop the transcript — the id names it instead.
+    try { meta = JSON.parse(await readFile(join(dir, `agent-${id}.meta.json`), 'utf8')); } catch { /* no meta yet */ }
+    const label = [meta?.description, meta?.agentType].find((v) => typeof v === 'string' && v.trim()) ?? id;
+    out.push({
+      id, path: join(dir, name), label: String(label).trim().slice(0, 120),
+      agentType: meta?.agentType ?? null, toolUseId: meta?.toolUseId ?? null,
+    });
+  }
+  return out;
 }
 
 /** Small stable hash, only used to name a tmux buffer per repo. */

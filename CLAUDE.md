@@ -203,6 +203,19 @@ suppress: hiding what the agent read recreates "a reply to a question nobody
 could see being asked", and rendering it as the person is a false record.
 Classify in the relay, not in a view — the derive-once rule again.
 
+**A subagent's words are in a file of its own.** The Agent tool does not write
+into the transcript that spawned it: each call gets
+`<session dir>/subagents/agent-<id>.jsonl` beside an `agent-<id>.meta.json`
+carrying its description, and the session's transcript holds only the
+`tool_use` and the report. `readTranscript` skipped `isSidechain` from the days
+they were inline, and once they moved out the floor showed "Agent: …" and then
+nothing until the report came back, while the editor showed every "Let me
+search for…" in between (2.1.258, 2026-09-03). The host now tails those files
+too (`subagentTranscripts`), the relay labels each turn `via` the description,
+the server stores that as a column, and the chat and bubble draw from it. The
+subagent's brief and tool results are not turns — the brief is already the
+Agent line on the floor, and neither is a person speaking.
+
 The two scripts talk over `window`, in both directions — `app.js` is a classic
 script so its top-level functions are already global, `floor.js` is an IIFE and
 exposes only what it assigns. Call across with `?.` so either surface loading
