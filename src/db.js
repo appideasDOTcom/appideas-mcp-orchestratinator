@@ -136,7 +136,7 @@ export function openDb(path) {
       channel     TEXT NOT NULL,
       agent       TEXT NOT NULL,
       session_id  TEXT NOT NULL,
-      role        TEXT NOT NULL,            -- user | assistant | tool | error
+      role        TEXT NOT NULL,            -- user | assistant | tool | error | context | thinking
       text        TEXT,
       tool_name   TEXT,
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -976,8 +976,11 @@ export function makeStore(db) {
            ON last.channel = t.channel AND last.agent = t.agent AND last.id = t.id`
     ),
     turnCounts: db.prepare(`SELECT channel, agent, COUNT(*) AS n FROM turns GROUP BY channel, agent`),
-    /* The last thing an agent SAID, and the last few things it DID — the floor's
-       thought bubble draws the first, its monitor types the second. A desk that
+    /* The last thing an agent SAID or THOUGHT, and the last few things it DID —
+       the floor's thought bubble draws the first, its monitor types the second.
+       Thinking counts (2026-09-03, at the operator's ask): a thought bubble is
+       where a thought belongs, and between replies it is the one line that says
+       what the desk is doing. A desk that
        reads "Bash: grep -rn ..." tells an operator what a tool call looked like,
        which is the one thing the chat panel behind it already shows in full;
        what it cannot get anywhere else at a glance is what the agent is telling
@@ -993,7 +996,7 @@ export function makeStore(db) {
     deskLastMessage: db.prepare(
       `SELECT id, text, created_at
          FROM turns
-        WHERE channel = ? AND agent = ? AND role = 'assistant'
+        WHERE channel = ? AND agent = ? AND role IN ('assistant', 'thinking')
           AND text IS NOT NULL AND text != ''
         ORDER BY id DESC LIMIT 1`
     ),

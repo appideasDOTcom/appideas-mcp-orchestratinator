@@ -1025,7 +1025,10 @@ function applyHostEvent(store, live, hostId, ev) {
       // records. Its own role, with the tag in tool_name as the label, so no
       // surface can attribute the system's words to the person.
       else if (role === 'context') turn('context', ev.text, str(ev.tool_name));
-      else if (role === 'user' || role === 'assistant') turn(role, ev.text, null, via);
+      // Thinking is its own role — see readTranscript — and goes in as text,
+      // labeled by the role alone: the panel draws it quietly, apart from what
+      // the agent said, and the bubble quotes it like a reply.
+      else if (role === 'user' || role === 'assistant' || role === 'thinking') turn(role, ev.text, null, via);
       else return false;
       // A queued message stops being queued when it becomes a turn.
       //
@@ -1573,7 +1576,8 @@ export function buildFloor(store, live = null, sessions = null) {
           last_turn: t
             ? { role: t.role, text: t.text, tool_name: t.tool_name, via: t.via ?? null, at: iso(t.created_at), id: t.id }
             : null,
-          // What this agent last said, which is what its thought bubble shows.
+          // What this agent last said or thought, which is what its thought
+          // bubble shows.
           // Separate from last_turn, which stays because it is what tells the
           // floor whether the desk is mid-tool-call and therefore working.
           last_message: m ? { text: m.text, at: iso(m.created_at), id: m.id } : null,

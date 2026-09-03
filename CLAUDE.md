@@ -216,6 +216,18 @@ the server stores that as a column, and the chat and bubble draw from it. The
 subagent's brief and tool results are not turns — the brief is already the
 Agent line on the floor, and neither is a person speaking.
 
+**Thinking is a turn too, under its own role.** Claude Code writes a
+`thinking` block ahead of most steps and the window draws it in dim text; on
+2.1.258 it is a sentence or two of narration, and the operator read one of
+those in the window — "I'll leave the console checkboxes as is since…" — and
+found nothing on the floor (2026-09-03). `readTranscript` files non-empty
+thinking blocks as `role: 'thinking'`; the chat draws each as a thought
+bubble — dotted edge, a trail of dots toward the thinker, no speaker header,
+because with a header they read as a message from somebody called "thinking"
+— and the desk's bubble quotes them like a reply: a thought bubble is where a
+thought belongs, and between replies it is the one line that says what the
+desk is doing. Empty thinking blocks are common and are skipped.
+
 The two scripts talk over `window`, in both directions — `app.js` is a classic
 script so its top-level functions are already global, `floor.js` is an IIFE and
 exposes only what it assigns. Call across with `?.` so either surface loading

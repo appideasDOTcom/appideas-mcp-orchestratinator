@@ -311,6 +311,13 @@ try {
   const tool = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'tool'));
   eq(tool?.text, 'Bash: npm test', 'a tool call becomes its one-line row');
 
+  // What the agent thought before the call is a row too, under its own role —
+  // the operator read one in the window and found nothing on the floor.
+  appendTurn({ type: 'assistant', uuid: 'a-2t', message: { content: [{ type: 'thinking', thinking: 'run the suite before touching anything else', signature: 's' }] } });
+  const thought = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'thinking'));
+  eq(thought?.text, 'run the suite before touching anything else', "the agent's thinking reaches the floor as its own kind of row");
+  eq(deskOf(await floor(), 'free')?.last_message?.text, 'run the suite before touching anything else', 'and the thought bubble picks it up');
+
   appendTurn({ type: 'assistant', uuid: 'a-3', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent chatter' }] } });
   await sleep(600);
   assert(!((await turns('free')).rows ?? []).some((r) => r.text === 'subagent chatter'),

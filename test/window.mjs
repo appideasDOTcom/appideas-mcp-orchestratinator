@@ -785,13 +785,16 @@ async function main() {
     const t = `${FIX}/t.jsonl`;
     writeFileSync(t, [
       JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-08-27T00:00:00Z', message: { content: 'first' } }),
-      JSON.stringify({ type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'reply' }] } }),
+      // A thinking block ahead of the words, as Claude Code writes them — and
+      // an empty one, which it also writes, often.
+      JSON.stringify({ type: 'assistant', uuid: 'a1', message: { content: [{ type: 'thinking', thinking: '', signature: 'x' }, { type: 'thinking', thinking: 'weigh it up first', signature: 'x' }, { type: 'text', text: 'reply' }] } }),
       JSON.stringify({ type: 'assistant', uuid: 'a2', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent noise' }] } }),
       JSON.stringify({ type: 'system', uuid: 's1', message: { content: 'ignored' } }),
       '',
     ].join('\n'));
     const first = await W.readTranscript(t);
-    eq(first.turns.map((x) => `${x.role}:${x.text}`), ['user:first', 'assistant:reply'], 'transcript yields both sides and skips subagent/system noise');
+    eq(first.turns.map((x) => `${x.role}:${x.text}`), ['user:first', 'thinking:weigh it up first', 'assistant:reply'],
+      'transcript yields both sides, the thinking ahead of the reply as its own role, and skips empty thinking and subagent/system noise');
 
     /* A subagent writes a transcript of its own beside the session's, and its
      * words are read from there — labeled, so they are never mistaken for the

@@ -2390,6 +2390,18 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
       continue;
     }
     const content = d.message?.content;
+    // What the agent thought before it spoke — Claude Code's thinking blocks,
+    // which the window draws in dim text ahead of each step. On 2.1.258 they
+    // are a sentence or two of narration ("I'll leave the console checkboxes
+    // as is since FreshBooks already…"; across one working desk the 90th
+    // percentile was under 300 characters), and the operator read exactly
+    // that in the window and found nothing on the floor (2026-09-03). Their
+    // own role, so no surface files them as the agent's words. Empty blocks
+    // are common and are nothing.
+    for (const block of Array.isArray(content) ? content : []) {
+      if (block?.type !== 'thinking' || typeof block.thinking !== 'string' || !block.thinking.trim()) continue;
+      turns.push({ role: 'thinking', text: block.thinking, at, uuid, ...(via ? { via } : {}) });
+    }
     const text = textOf(content);
     if (text.trim()) turns.push({ role: 'assistant', text, at, uuid, ...(via ? { via } : {}) });
     for (const block of Array.isArray(content) ? content : []) {

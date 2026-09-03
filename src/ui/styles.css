@@ -1119,6 +1119,24 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .t-tool { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 .t-tool .t-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
 .t-tool .t-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A thought, drawn as one. The desk's idiom — a bubble whose tail is a trail
+   of dots, not a point — brought into the chat: the dots say the words were
+   thought rather than said, and the dotted edge keeps the box from reading as
+   a message card. No speaker header (see turnNode), muted and italic like the
+   window's own dim thinking line, quieter than anything the agent says. */
+.t-thinking { display: flex; align-items: flex-end; gap: 5px; }
+.t-thought-dots { display: flex; align-items: flex-end; gap: 3px; padding-bottom: 7px; flex: 0 0 auto; }
+.t-thought-dots i { display: block; border-radius: 50%; background: var(--muted); opacity: .6; }
+.t-thought-dots i:nth-child(1) { width: 3px; height: 3px; }
+.t-thought-dots i:nth-child(2) { width: 5px; height: 5px; }
+.t-thought-dots i:nth-child(3) { width: 7px; height: 7px; }
+.t-thought {
+  flex: 1 1 auto; min-width: 0;
+  border: 1px dotted var(--muted); border-radius: 14px;
+  padding: 6px 10px; color: var(--muted); font-style: italic;
+}
+.t-thought .t-body { font-size: 12px; }
+.t-thought-meta { font-size: 10.5px; font-style: normal; margin-top: 3px; opacity: .8; }
 .p-compose { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); }
 /* One height for every control in the row, said once. Send's height used to be
