@@ -333,6 +333,103 @@ async function main() {
        'the free-text choice is spotted even with the full stop a single-select puts on it');
     eq(qs.cursor, 1, 'and where the cursor is sitting');
     eq(qs.submit, false, 'a single-select has no Submit row of its own');
+    eq(qs.strip, true, 'and several questions draw a tab strip to walk');
+
+    // One question draws no strip at all — its header stands alone, no arrows,
+    // no Submit tab. Captured off a real 2.1.258 pane 2026-09-03, after the
+    // floor showed "permission prompt — AskUserQuestion" with the choices and
+    // no question: this returned null, the host fell back to the menu reader,
+    // and the operator inferred the question from its answers.
+    const Q_ONE = [
+      '─'.repeat(80),
+      ' ☐ Routing',
+      'Which routing should I use for the High findings?',
+      '❯ 1. You route it; I hand you the paths only',
+      '     I give you just the file paths for the High findings and you handle routing them from there.',
+      '  2. Post, and open one task per High finding',
+      '     Post the findings and create a separate task for each High finding.',
+      '  3. Hold them for review',
+      '     Keep the High findings in place, unrouted, pending your review.',
+      '  4. Type something.',
+      '─'.repeat(80),
+      '  5. Chat about this',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n');
+    assert(W.askingOf(Q_ONE), 'a one-question form is a live question by its footer');
+    const q1 = W.questionOf(Q_ONE);
+    assert(!!q1, 'and it is read as a form, not left to the permission-prompt reader');
+    eq(q1?.question, 'Which routing should I use for the High findings?', 'with its question — the line the floor was missing');
+    eq(q1?.tabs.map((t) => t.title), ['Routing'], 'one tab, from the lone header');
+    eq(q1?.strip, false, 'and no strip to walk');
+    eq(q1?.options.map((o) => o.text), ['You route it; I hand you the paths only', 'Post, and open one task per High finding', 'Hold them for review', 'Type something.'],
+       'its choices, with "Chat about this" left out as on every form');
+    eq(q1?.kind, 'single', 'a single-select');
+
+    /* The questions Claude Code asks before it has a session. Both captured
+     * raw off a real 2.1.258 pane 2026-09-03 — blank lines and all, because
+     * the blank lines are how the option block is told apart from the prose
+     * above it. Neither is ever answered by the host; both are read so the
+     * floor can offer their rows. */
+    const RAW_TRUST = [
+      '─'.repeat(80),
+      ' Accessing workspace:',
+      '',
+      ' /tmp/somewhere',
+      '',
+      " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this",
+      ' folder first.',
+      '',
+      " Claude Code'll be able to read, edit, and execute files here.",
+      '',
+      ' Security guide',
+      '',
+      ' ❯ No, exit',
+      '   Yes, I trust this folder',
+      '',
+      ' Enter to confirm · Esc to cancel',
+      '',
+    ].join('\n');
+    const RAW_MCP = [
+      '',
+      '─'.repeat(80),
+      '  New MCP server found in this project: orchestratinator',
+      '',
+      '  MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP documentation.',
+      '',
+      '    Use this MCP server',
+      '    Use this and all future MCP servers in this project',
+      '  ❯ Continue without using this MCP server',
+      '',
+      '  Enter to confirm · Esc to cancel',
+      '',
+    ].join('\n');
+    const trust = W.startupQuestionOf(RAW_TRUST);
+    eq(trust?.kind, 'trust', 'the folder-trust dialog is recognised');
+    eq(trust?.options.map((o) => o.text), ['No, exit', 'Yes, I trust this folder'], 'its two rows are read, and "Security guide" above the blank line is not one of them');
+    eq(trust?.at, 0, 'with the cursor on exit — which is why nothing here is ever pressed blind');
+    const mcp = W.startupQuestionOf(RAW_MCP);
+    eq(mcp?.kind, 'mcp', 'the new-MCP-server dialog is recognised');
+    eq(mcp?.asks, 'New MCP server found in this project: orchestratinator', 'and names the server it is asking about');
+    eq(mcp?.options.map((o) => o.text), ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'],
+       'its three rows are read, and the description sentence above them is not one');
+    eq(mcp?.at, 2, 'with the cursor on "continue without" — Enter alone would disable the server');
+    eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
+    eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
+
+    /* answerIsStale: the TTL drop that used to apply to a startup answer too,
+     * on a premise that is false for one — the dialog stands until it is
+     * answered, unlike an ordinary permission prompt. A pure function so this
+     * is checked directly, with a fixed clock, rather than through a real
+     * host racing a real one. */
+    console.log('\n  a queued answer past its TTL');
+    const T0 = 1_000_000;
+    const startupOld = { request_id: 'startup:@9:mcp', queued_at: T0 - 90_000 };
+    eq(W.answerIsStale(startupOld, 30_000, T0), false, 'a startup answer is never dropped for age — the dialog it answers is still standing');
+    const ordinaryOld = { request_id: 's4:AskUserQuestion:123', queued_at: T0 - 90_000 };
+    eq(W.answerIsStale(ordinaryOld, 30_000, T0), true, 'an ordinary permission answer past the TTL is dropped, same as before');
+    const ordinaryFresh = { request_id: 's4:AskUserQuestion:123', queued_at: T0 - 5_000 };
+    eq(W.answerIsStale(ordinaryFresh, 30_000, T0), false, 'and one still inside it is not');
+    eq(W.answerIsStale({ request_id: 's4:AskUserQuestion:123' }, 30_000, T0), false, 'no queued_at at all — an old-shaped payload with nothing to measure age against — is not dropped either');
     // The preview panel to the right, and Claude Code's own trailing item, are
     // furniture rather than choices. Both used to arrive attached to Charlie.
     assert(qs.options.every((o) => !o.detail), 'nothing from the preview panel is mistaken for a choice\u2019s description');
@@ -749,6 +846,23 @@ async function main() {
     eq(ctxRead.turns[0].tool_name, 'ide_opened_file', 'a context turn is labeled by its tag');
     eq(ctxRead.turns[2].tool_name, 'command-name', 'and by the first tag when a record is several wrappers');
 
+    /* Claude Code's own notices come in by the message queue too — a
+     * background command finishing, a subagent's result — as one
+     * <task-notification> block in a queued_command. Read from the qa desk's
+     * live transcript 2026-09-02, when the floor showed "YOU" over fourteen
+     * kilobytes of another agent's report, as plain text. */
+    const noteT = `${CLAUDE_HOME}/projects/note-shape/n.jsonl`;
+    mkdirSync(dirname(noteT), { recursive: true });
+    const notice = '<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n<summary>Agent "review" finished</summary>\n<result>## Findings\n\n**1.** none</result>\n</task-notification>';
+    writeFileSync(noteT, [
+      JSON.stringify({ type: 'attachment', uuid: 'n1', isSidechain: false, attachment: { type: 'queued_command', prompt: [{ type: 'text', text: notice }], origin: { kind: 'system' } } }),
+      JSON.stringify({ type: 'attachment', uuid: 'n2', isSidechain: false, attachment: { type: 'queued_command', prompt: 'and a person is still a person', origin: { kind: 'human' } } }),
+    ].join('\n') + '\n');
+    const noteRead = await W.readTranscript(noteT);
+    eq(noteRead.turns.map((x) => `${x.role}:${x.tool_name ?? ''}`), ['context:task-notification', 'user:'],
+       'a queued notice from Claude Code itself is context labeled by its tag; a queued message from a person is still the person');
+    eq(noteRead.turns[0].text, notice, 'with the whole block kept, result and all, for the panel to draw');
+
     // Tailing: read from the offset, get only what is new.
     const empty = await W.readTranscript(t, { after: first.offset });
     eq(empty.turns.length, 0, 'nothing new is nothing new');
@@ -944,6 +1058,104 @@ async function main() {
 
     const missing = await W.answerPrompt(`${PROMPT_DIR}/never-opened`, '1');
     eq(missing.code, 'no_window', 'and a repo with no window at all is its own answer');
+
+    // The presser that can disable an MCP server, against a real pane.
+    //
+    // Nothing at any tier reached answerStartup before this: the cursor check
+    // it exists for — "under !== want.text", the whole reason nothing here is
+    // ever pressed blind — was provably dead, disabling it left every suite
+    // green. A shell's stty/dd tricks (used above for a single bare digit)
+    // proved fragile for something byte-exact ("was Enter really sent, and
+    // only after the cursor actually got where it was walked to"), so this is
+    // a tiny node stand-in instead: it prints its screen once and never
+    // redraws — indistinguishable, to anything reading the capture, from a
+    // cursor that refuses to move — and notes every Enter it receives to a
+    // marker file regardless of anything else it does or does not do.
+    console.log('\n  answering a startup question, against a real pane');
+    const enterMark = `${PROMPT_DIR}/startup-enter.mark`;
+    const mcpBody = (at) => [
+      '',
+      '─'.repeat(80),
+      '  New MCP server found in this project: orchestratinator',
+      '',
+      '  MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP documentation.',
+      '',
+      ...['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server']
+        .map((t, i) => (i === at ? `  ❯ ${t}` : `    ${t}`)),
+      '',
+      '  Enter to confirm · Esc to cancel',
+      '',
+    ];
+    const spawnStartupPane = async (name, lines) => {
+      const dir = `${PROMPT_DIR}/${name}`;
+      mkdirSync(dir, { recursive: true });
+      const script = `${dir}/run.cjs`;
+      writeFileSync(script, [
+        '#!/usr/bin/env node',
+        `const fs = require('fs');`,
+        ...lines.map((l) => `process.stdout.write(${JSON.stringify(`${l}\n`)});`),
+        `try { fs.unlinkSync(${JSON.stringify(enterMark)}); } catch {}`,
+        `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+        `process.stdin.resume();`,
+        `let resolved = false;`,
+        // CR in raw mode, or LF if something along the way translated it —
+        // either is "Enter arrived", and telling them apart buys nothing here.
+        // The real dialog disappears once answered; answerStartup's own
+        // success check reads exactly that (the question is gone from the
+        // next capture), so a stand-in that never redraws would fail the
+        // presser's positive path for a reason that has nothing to do with
+        // what the path is testing. `-S -30` is not "the last 30 lines" — see
+        // busy()'s own note in host/window.js — it is 30 lines of scrollback
+        // *plus the whole visible pane*, so nothing short of genuinely
+        // scrolling the dialog out of the pane's history defeats it. Printed
+        // once, and generously past any plausible pane height.
+        `process.stdin.on('data', (buf) => {`,
+        `  if (!buf.includes(0x0d) && !buf.includes(0x0a)) return;`,
+        `  fs.appendFileSync(${JSON.stringify(enterMark)}, 'x');`,
+        `  if (resolved) return;`,
+        `  resolved = true;`,
+        `  for (let i = 0; i < 200; i++) process.stdout.write('  \\n');`,
+        `});`,
+      ].join('\n'));
+      chmodSync(script, 0o755);
+      await run('tmux', ['new-window', '-d', '-t', TMUX_SESSION, '-c', dir, script]).catch(() => {});
+      await sleep(500);
+      return dir;
+    };
+
+    // Cursor stuck on "Continue without…" (index 2) — the dialog's real
+    // starting position. answerStartup wants row 1 ("Use this MCP server"),
+    // walks Up twice, and must find the cursor still where it started before
+    // it may press Enter.
+    const cursorStuck = await spawnStartupPane('startup-stuck', mcpBody(2));
+    const stuckResult = await W.answerStartup(cursorStuck, 1);
+    eq(stuckResult.ok, false, 'a cursor that does not move is not pressed past');
+    eq(stuckResult.code, 'not_taken', 'and the reason is that the cursor never got there');
+    assert(/is not on/.test(stuckResult.error ?? ''), `quoting what the window actually reads rather than assuming — ${stuckResult.error}`);
+    assert(!existsSync(enterMark), 'and Enter itself was never sent — the one keystroke here with a cost when wrong');
+
+    // Cursor already on the wanted row (no walk needed) — the positive path,
+    // proving Enter really is sent once the check passes.
+    const there = await spawnStartupPane('startup-there', mcpBody(0));
+    const thereResult = await W.answerStartup(there, 1);
+    eq(thereResult.ok, true, `the presser succeeds once the cursor is confirmed on the right row — ${thereResult.error ?? ''}`);
+    eq(thereResult.chose, 'Use this MCP server', 'and reports which row it took');
+    assert(existsSync(enterMark), 'with Enter actually reaching the window this time');
+
+    // waitReady's early return. A window sitting on this dialog is registered
+    // — it is a live interactive tty — but must never be waited out to the
+    // full timeout: the watch loop has already put the question on the floor,
+    // and sitting here would only delay the operator's own answer reaching it.
+    const askingStill = await spawnStartupPane('startup-waiting', mcpBody(2));
+    const askingPane = await W.paneFor(askingStill);
+    assert(!!askingPane, 'the spawned window is found by its directory');
+    const waitReadyStartedAt = Date.now();
+    const wr = await W.waitReady(askingStill, { timeoutMs: 20_000, target: askingPane.target });
+    const waitedMs = Date.now() - waitReadyStartedAt;
+    eq(wr.ok, false, 'a window on a startup question is not reported ready');
+    eq(wr.code, 'startup_question', 'and says which kind of not-ready this is');
+    assert(/Continue without/.test(wr.error ?? ''), `quoting the dialog rather than saying only "not ready" — ${wr.error}`);
+    assert(waitedMs < 5000, `and returns as soon as the question is seen, not after the full ${20_000}ms timeout — took ${waitedMs}ms`);
   } finally {
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
     rmSync(FIX, { recursive: true, force: true });

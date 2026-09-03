@@ -269,7 +269,12 @@ operator's live floor.
   enough — what stops the question is showing that the failure mode being
   imagined does not occur. `ANSWERS` in [`host/window.js`](host/window.js) is
   the worked example: it says both why the host will not answer a trust
-  question *and* why no desk is ever left stranded on one. Write the second
+  question *and* what happens to a desk stranded on one — since 2026-09-03
+  the question is read off the pane and offered on the floor, row for row,
+  and the host presses only the row the person picked (`startupQuestionOf`,
+  `answerStartup`). Its earlier claim that no desk could arrive cold was
+  wrong twice over (a VS Code session defers the MCP approval; re-pointing
+  `.mcp.json` invalidates it), and the note now says so. Write the second
   half. If you find yourself asking "is now the time to do this?" about
   something with no note beside it, the answer may well be no — and the fix is
   a paragraph, not a feature.

@@ -145,11 +145,50 @@ function fixture() {
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
-    // yet, and send() sits in waitReady. ORCH_TEST_READY_DELAY_MS makes that
-    // window a known length so a test can look at what the host does *during*
-    // it. Unset, it announces immediately, as before.
+    // yet, and send() sits in waitReady. A ready-delay *file* makes that
+    // window a known length so a test can look at what the host does
+    // *during* it. Absent, it announces immediately, as before.
+    //
+    // A file, not an env var — this used to read
+    // process.env.ORCH_TEST_READY_DELAY_MS. Measured directly: `tmux
+    // new-session`/`new-window` on an already-running server gives the new
+    // pane only the environment the server had when it first booted, not the
+    // requesting client's — so on any machine that already has a tmux server
+    // on the default socket for something else (this repo's own live host,
+    // say), that env var silently never arrived and the delay was 0 the
+    // whole time. The one test using it happened to pass regardless, because
+    // its assertions do not strictly require the delay to hold — which is
+    // exactly how this went unnoticed until STARTUP_ASK_FLAG hit the same
+    // wall and needed the delay to actually be there.
     `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
-    `const readyDelay = Number(process.env.ORCH_TEST_READY_DELAY_MS || 0);`,
+    `const READY_DELAY_FLAG = ${JSON.stringify(`${FIX}/ready-delay.flag`)};`,
+    `let readyDelay = 0;`,
+    `try { readyDelay = Number(fs.readFileSync(READY_DELAY_FLAG, 'utf8').trim()) || 0; } catch {}`,
+    // A pane in this repo whose process is not yet in the roster — announcing
+    // late is exactly that — is what the host reads as "booting", and if the
+    // screen looks like a startup dialog it is read and put on the floor (see
+    // Desk.watch in host/index.js). Printed once, before the roster delay, so
+    // a test can prove that emission fires against a real host process rather
+    // than only against a synthetic event handed straight to the server.
+    //
+    // A flag *file*, not an env var: measured directly (tmux new-session on
+    // an already-running server) that tmux does not forward the spawning
+    // client's environment into the pane it creates — a window's env comes
+    // from whenever the tmux *server* itself first started, not from
+    // whichever later process asked for a new window. ROSTER/SINK/TRANSCRIPT
+    // already communicate with this stand-in over the filesystem for exactly
+    // this reason; this follows the same pattern.
+    `const STARTUP_ASK_FLAG = ${JSON.stringify(`${FIX}/startup-ask.flag`)};`,
+    `let startupAsk = '';`,
+    `try { startupAsk = fs.readFileSync(STARTUP_ASK_FLAG, 'utf8').trim(); } catch {}`,
+    `if (startupAsk === 'mcp') {`,
+    `  const mcp = ['', ${JSON.stringify('─'.repeat(80))}, '  New MCP server found in this project: orchestratinator', '', '  MCP servers may execute code or access system resources. All tool calls require approval.', '', '    Use this MCP server', '    Use this and all future MCP servers in this project', '  ❯ Continue without using this MCP server', '', '  Enter to confirm · Esc to cancel', ''];`,
+    `  for (const l of mcp) process.stdout.write(l + '\\n');`,
+    // Forced rather than relying on a caller to also write READY_DELAY_FLAG:
+    // this scenario needs a real window to observe, not a fast one, and the
+    // ask-flag alone should be enough to say so.
+    `  readyDelay = Math.max(readyDelay, 4000);`,
+    `}`,
     `if (readyDelay > 0) setTimeout(announce, readyDelay); else announce();`,
     String.raw`process.stdout.write('\u001b[?2004h');`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
@@ -303,6 +342,34 @@ try {
   assert((started ?? '').includes(`--resume ${SESSION_ID}`),
     `and resumes the same conversation rather than starting a new one — ${JSON.stringify((started ?? '').trim())}`);
 
+  console.log('\na desk that appears after the host started');
+  // Desks used to be discovered once, at boot. Binding a repo to this board
+  // afterwards — the most ordinary thing a person does — left the floor saying
+  // "No host on this board is running that repo" until the service was
+  // restarted, while the hooks were already relaying the conversation. The
+  // host now looks again before each heartbeat and whenever the board asks,
+  // and the board asks the moment a session starts in a repo no host runs.
+  const late = `${FIX}/repo-late`;
+  mkdirSync(late, { recursive: true });
+  writeFileSync(`${late}/.mcp.json`, JSON.stringify({
+    mcpServers: {
+      orchestratinator: {
+        type: 'http', url: `${HOST}/mcp`,
+        headers: { 'X-Channel': CH, 'X-Agent': 'late', 'X-Orchestratinator-Key': KEY },
+      },
+    },
+  }, null, 2));
+  eq(deskOf(await floor(), 'late')?.hosted ?? null, null, 'a repo bound to this board after the host started is not hosted yet');
+  await json('/api/ingest', { channel: CH, agent: 'late', session_id: 'late-1', hook_event_name: 'SessionStart', cwd: late });
+  assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.live === true ? true : null), 10000),
+    'a session starting there is enough: the board asks, the host looks, finds the desk and registers it — nothing restarted');
+  assert(/found desk .*\/late/.test(host.log), 'and the host says so in its log');
+  rmSync(`${late}/.mcp.json`);
+  eq((await json('/api/floor/rescan', {})).status, 200, 'the board can also ask outright');
+  assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.state === 'offline' ? true : null), 10000),
+    'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
+  assert(/dropped desk .*late/.test(host.log), 'which the host also says');
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
@@ -329,7 +396,8 @@ try {
   // the send is refused before any of this is exercised.
   writeFileSync(`${FIX}/roster.json`, '[]');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
-  host = startHost('host-test-1', { ORCH_TEST_READY_DELAY_MS: '6000' });
+  writeFileSync(`${FIX}/ready-delay.flag`, '6000');
+  host = startHost('host-test-1');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
 
@@ -357,6 +425,49 @@ try {
 
   assert(await until(() => (clean(received()).includes('takes a while to go in') ? true : null), 20000),
     'and the message itself still lands once the window finishes starting');
+  rmSync(`${FIX}/ready-delay.flag`, { force: true });
+
+  /* ── a window asking before it starts ─────────────────────────────────────
+   * The host reads a startup dialog off a booting pane — a live interactive
+   * tty whose pid the roster does not know yet — and puts it on the floor as
+   * a prompt, rather than leaving the desk saying only "starting" while
+   * nobody can see what it is asking. Nothing before this proved the
+   * emission fires from a real host process against a real pane; test/floor.mjs
+   * covers the server's handling of the event, handed to it directly. */
+  console.log('\n  a window asking before it starts');
+  // A still-running host from the section above holds no window open on
+  // 'free' right now, but the pane it already spawned there is on a server
+  // whose environment is fixed from further back than either host process —
+  // moot, now that the signal is a file rather than an env var, but the kill
+  // still matters: two host processes registering the same host_id at once
+  // is not a state to add a new scenario on top of.
+  host.kill('SIGTERM');
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+  host = null;
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  writeFileSync(`${FIX}/startup-ask.flag`, 'mcp');
+  host = startHost('host-test-1');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
+    'a host is back and the desk is live again');
+
+  const asked = await chat('free', 'open please');
+  eq(asked.status, 200, 'the floor accepts a message for a desk with no window yet, which is what opens one');
+
+  const asking = await until(async () => {
+    const d = deskOf(await floor(), 'free');
+    return d?.permission?.startup ? d : null;
+  }, 4000);
+  assert(!!asking, 'the desk carries the startup dialog as a prompt while the window is still booting');
+  eq(asking.permission.kind, 'mcp', 'read as the new-MCP-server dialog');
+  eq(asking.permission.options.map((o) => o.text),
+     ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'],
+     'with the dialog’s own rows, not a guess at them');
+  assert(!asking.working, 'a desk asking a startup question is not drawn as working');
+
+  assert(await until(async () => (deskOf(await floor(), 'free')?.permission == null ? true : null), 8000),
+    'and once the window finishes starting — the forced delay elapsing, same as a real one registering — the prompt comes down on its own');
+  rmSync(`${FIX}/startup-ask.flag`, { force: true });
 
   /* ── which board this host serves ───────────────────────────────────────────
    * This used to be `originOf(found[0].url)` — the first desk the filesystem

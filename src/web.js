@@ -135,13 +135,14 @@ function buildState(store, sessions, sessionStats, meta) {
           skin: profiles[a.agent]?.skin ?? DEFAULT_SKIN,
           ...agentBoard(a, idx, nowMs, liveByKey.get(k) ?? 0),
           // Whether the operator can nudge this agent — the same verdict the
-          // floor's bell shows, so the two nudge surfaces agree. Stricter than
-          // the chat endpoint on purpose: see nudgeable().
+          // floor's bell shows, so the two nudge surfaces agree. `opens` says
+          // the desk has no window and the nudge will open one first: see
+          // nudgeable().
           nudge: (() => {
             const v = nudgeable(hostedByAgent.get(k), nowMs);
             return v.error
               ? { ok: false, code: v.code, reason: v.error }
-              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id, opens: !!v.opens };
           })(),
           unread_list: (backlogByAgent.get(k) ?? []).slice(0, BACKLOG_LIST_MAX).map((m) => ({
             id: m.id,

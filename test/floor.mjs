@@ -268,6 +268,36 @@ try {
   eq(deskOf(f, 'retiredone'), undefined, 'a retired agent stays off the floor, matching the board');
   eq(f.queue.some((q) => q.agent === 'boardonly'), false, 'and nothing is inferred about it — no session, no queue entry');
 
+  console.log('\nthe trash can on the board empties the desk on the floor');
+  // The case above retires an agent that never had a seat. The one that
+  // matters is an agent that did: its persona already exists, and the floor
+  // used to keep drawing the desk off that row after the board had hidden it.
+  // A desk that is waiting on a human is the strongest version — it was still
+  // being counted in the queue after the operator had removed the agent.
+  const ghostFace = deskOf(f, 'ghost').persona;
+  await post(ev('ghost', 's4', 'Notification', { notification_type: 'permission_prompt', notification_message: 'still here?' }));
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`INSERT OR IGNORE INTO agents (channel, agent) VALUES (?, ?)`).run(CH, 'ghost');
+    db.prepare(`UPDATE agents SET retired_at = datetime('now') WHERE channel = ? AND agent = ?`).run(CH, 'ghost');
+    db.close();
+  }
+  f = await floor();
+  eq(deskOf(f, 'ghost'), undefined, 'an agent removed on the board loses its desk on the floor, seat and all');
+  eq(f.queue.some((q) => q.agent === 'ghost'), false, 'and leaves the queue with it — a prompt nobody can see is not "1 need you"');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`UPDATE agents SET retired_at = NULL WHERE channel = ? AND agent = ?`).run(CH, 'ghost');
+    db.close();
+  }
+  f = await floor();
+  assert(!!deskOf(f, 'ghost'), 'restored on the board, it is back on the floor');
+  eq(deskOf(f, 'ghost').persona, ghostFace, 'in the same chair with the same face — the persona survives retirement, only the desk is withheld');
+  eq(f.queue.some((q) => q.agent === 'ghost'), true, 'and its prompt is back in the queue');
+  await post(ev('ghost', 's4', 'UserPromptSubmit', { message: 'yes' }));
+
   console.log('\nchannels are floors, and stay separate');
   await post({ ...ev('free', 's9', 'SessionStart'), channel: 'other-floor' });
   f = await floor();
@@ -297,7 +327,7 @@ try {
   eq(deskOf(f, 'pro', 'other-floor').hair, deskOf(f, 'pro', CH).hair,
      'colours travel too — one agent, one appearance, whichever room you are looking at');
 
-  console.log('\nwho can be nudged, which is a stricter question than who can be messaged');
+  console.log('\nwho can be nudged, which is who can be messaged plus whether the window is still to come');
   // Plain objects rather than a seeded desk: these are the shapes the two
   // callers actually hand in, and one of them is the shape that broke.
   const fresh = new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -308,8 +338,10 @@ try {
   const noWindow = { ...live, window_id: null };
   assert(!deliverable(noWindow).error,
          'a desk with no window still takes a message — sending one is what opens the window');
-  eq(nudgeable(noWindow).code, 'no_window',
-     'but it cannot be nudged: a nudge means "something is waiting on your channel", which is nothing to say to an empty desk');
+  const wake = nudgeable(noWindow);
+  assert(!wake.error && wake.opens,
+         'and can be nudged, with `opens` set: the bell opens the window first — typing "nudge" into the composer did exactly that, so refusing here only moved the tap');
+  assert(!nudgeable(live).opens, 'a desk with a window is nudged without opening anything');
 
   eq(nudgeable({ ...live, outside_pid: 4242 }).code, 'held_by_editor', 'nor can one an editor is holding');
   eq(nudgeable(null).code, 'not_hosted', 'nor one no host is running');
@@ -375,11 +407,18 @@ try {
   // sat with no window and no way to be given one. The host could always do it
   // — its `case 'open'` was simply unreachable.
   const HK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
-  const register = (desk) =>
-    fetch(`${HOST}/api/host/register`, {
+  // A real host names every desk it has on every registration, and the server
+  // now reads a desk missing from that list as one the host no longer runs. So
+  // this helper accumulates: each call re-sends everything registered so far,
+  // which is what the sections below always assumed a registration meant.
+  const known = new Map();
+  const register = (desk) => {
+    known.set(desk.agent, desk);
+    return fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [desk] }),
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()] }),
     });
+  };
   // Applied-count returned, not just the status: this endpoint answers 200 for a
   // batch it dropped entirely, so a test that read the status would pass on an
   // event that never landed.
@@ -424,6 +463,26 @@ try {
     body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }),
   });
   eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
+
+  console.log('\na host that names the conversation it is following');
+  // The host's one-time `session` event can be lost to its own startup: the
+  // watch loop adopts a session and reports it before the first registration
+  // has created the desk row, and applyHostEvent drops an event for a desk it
+  // does not know. Nothing re-sends it. The heartbeat carries the id every
+  // minute, so registering with one has to be enough on its own.
+  await register({ channel: CH, agent: 'nomad', cwd: '/repo/nomad', session_id: 'sdk-nomad-1' });
+  f = await floor();
+  eq(deskOf(f, 'nomad').hosted.session_id, 'sdk-nomad-1',
+     'a desk registered with a session id adopts it — the session event that normally does this may never have landed');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'nomad', role: 'assistant', text: 'relayed under the real id' }]);
+  {
+    const scoped = await fetch(`${HOST}/api/floor/turns?channel=${CH}&agent=nomad&session=sdk-nomad-1`).then((r) => r.json());
+    eq(scoped.rows.map((t) => t.text), ['relayed under the real id'],
+       'so the turns the host relays are the turns the chat panel is scoped to — the empty-panel failure this closes');
+  }
+  const reregistered = await register({ channel: CH, agent: 'nomad', cwd: '/repo/nomad' }).then((r) => r.json());
+  eq(reregistered.desks.find((d) => d.agent === 'nomad').sdk_session_id, 'sdk-nomad-1',
+     'a host that names no session (it just restarted) does not blank the stored one, and is handed it back');
 
   /* A message the desk took while it was working.
    *
@@ -479,6 +538,26 @@ try {
   eq(ctxRow?.tool_name, 'ide_opened_file', 'and carries its tag as the label');
   eq((await noteOn('racer'))?.text, 'and this one is still waiting',
      'and a context turn retires no queued note — only the person becoming a turn does that');
+
+  // A repeat. The desk's last user turn already says the same words — the
+  // operator nudged earlier and is nudging again — but that turn is from
+  // BEFORE this send, so it is not this message arriving. Matching on the
+  // words alone dropped the note here every time, and "nudge" is the most
+  // repeated message on the board.
+  await register({ channel: CH, agent: 'repeater', cwd: '/repo/repeater', window: '@13' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'repeater', session_id: 's-repeat', cwd: '/repo/repeater' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'repeater', role: 'user', text: 'nudge' }]);
+  const again = await fetch(`${HOST}/api/floor/chat`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'repeater', text: 'nudge' }),
+  });
+  eq(again.status, 200, 'the second nudge is accepted');
+  eq(await takeWork(), ['chat'], 'and queued for the host');
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'repeater', state: 'queued', text: 'nudge' }]);
+  eq((await noteOn('repeater'))?.text, 'nudge',
+     'a delivery matching a turn from before the send is not that turn arriving — the note stands');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'repeater', role: 'user', text: 'nudge' }]);
+  eq(await noteOn('repeater'), null, 'and the turn recorded after the send retires it');
 
   console.log('\nstopping a turn');
   // End to end this time, because the interesting part is that the endpoint and
@@ -624,6 +703,12 @@ try {
     // whatever is highlighted there — always its first option. That silently
     // overwrote the operator's choice on every tab after the first.
     assert(!keys(one).includes('Enter'), 'and nothing follows it — the digit selects, it does not merely move the cursor');
+
+    // A one-question form has no strip: Left and Tab do nothing there, and the
+    // digit both selects and submits (measured 2026-09-03). So the whole answer
+    // is the one key, and nothing walks first.
+    const alone = answerSteps([{ ...single, strip: false }], [{ choose: [2] }]);
+    eq(keys(alone), ['2'], 'a form with no tab strip is answered with the digit alone — no walk to a known end, nothing after');
 
     const many = answerSteps([multi], [{ choose: [1, 2] }]);
     const body = keys(many).filter((k) => k !== 'Left');
@@ -1008,6 +1093,165 @@ try {
   assert(!tables.includes('turns'), 'turns are NOT in a backup — it holds what people typed, and the file is meant to be safe to email yourself');
   assert(!tables.includes('agent_sessions'), 'nor are sessions');
   assert(tables.includes('personas'), 'but names are, because a rename is an operator decision that would otherwise be lost');
+
+  /* ── a host that looks again ────────────────────────────────────────────────
+   * Desks used to be discovered once, when a host started. Binding a repo to
+   * the board afterwards — the most ordinary thing a person does — left the
+   * floor saying "No host on this board is running that repo" until the
+   * service was restarted. Two halves close that: the host rescans, and the
+   * board (a) marks a desk the host stops naming as offline and (b) asks every
+   * host to look when a session starts somewhere none of them runs. Last in
+   * this file on purpose: the asks land in h-open's queue too, and the sections
+   * above read that queue expecting only their own work. */
+  console.log('\na host that looks again');
+  const registerMove = (...desks) =>
+    fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-move', name: 'movebox', tmux: 'orch', desks }),
+    }).then((r) => r.json());
+  const workMove = () =>
+    fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK })
+      .then((r) => r.json())
+      .then((b) => (b.work ?? []).map((i) => i.kind));
+  const moverA = { channel: CH, agent: 'mover-a', cwd: '/repo/mover-a' };
+  const moverB = { channel: CH, agent: 'mover-b', cwd: '/repo/mover-b', session_id: 'sdk-mover-b' };
+  await registerMove(moverA, moverB);
+  await workMove();   // a work poll is what keeps a host counted as here
+  f = await floor();
+  eq([deskOf(f, 'mover-a').hosted.live, deskOf(f, 'mover-b').hosted.live], [true, true], 'two desks named, two hosted');
+  await registerMove(moverA);
+  f = await floor();
+  eq(deskOf(f, 'mover-a').hosted.live, true, 'a desk the host still names stays hosted');
+  eq([deskOf(f, 'mover-b').hosted.state, deskOf(f, 'mover-b').hosted.live], ['offline', false],
+     'a desk the host stopped naming goes offline — its binding was removed or moved, and a row that kept reading hosted took messages nobody would drain');
+  eq(deskOf(f, 'mover-b').hosted.session_id, 'sdk-mover-b', 'keeping the conversation it had, so a return resumes rather than restarts');
+  await registerMove(moverA, moverB);
+  eq(deskOf(await floor(), 'mover-b').hosted.live, true, 'and naming it again brings it back');
+
+  await post(ev('stranger', 's-stranger', 'SessionStart'));
+  eq(await workMove(), ['rescan'], 'a session starting on a desk no host runs asks every host here to look at its roots again');
+  await post(ev('stranger-2', 's-stranger-2', 'SessionStart'));
+  eq(await workMove(), [], 'once per throttle — a machine with no host at all must not keep every other host walking its disk');
+  await post(ev('mover-a', 's-mover-a', 'SessionStart'));
+  eq(await workMove(), [], 'and a session starting on a hosted desk asks nothing');
+  const look = await fetch(`${HOST}/api/floor/rescan`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  eq(look.status, 200, 'the button asks outright');
+  assert((await look.json()).asked >= 1, 'and says how many hosts it asked');
+  eq(await workMove(), ['rescan'], 'past the throttle — one click, one look');
+
+  /* ── a window asking before it starts ───────────────────────────────────────
+   * Folder trust and "New MCP server found" are asked before a session exists,
+   * so no hook reports them. The host reads them off the pane and says so; the
+   * board offers their rows like any prompt; the answer goes back down the
+   * permission route as a row number. A VS Code session defers the MCP approval
+   * and a re-pointed .mcp.json invalidates it, so this is the first thing a
+   * new user meets — and used to be a desk that said "starting" for ever. */
+  console.log('\na window asking before it starts');
+  const eventsMove = (events) =>
+    fetch(`${HOST}/api/host/events`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-move', events }) }).then((r) => r.json());
+  const moverDesk = () => floor().then((fl) => deskOf(fl, 'mover-a'));
+  const MCP_ROWS = [
+    { n: 1, text: 'Use this MCP server' },
+    { n: 2, text: 'Use this and all future MCP servers in this project' },
+    { n: 3, text: 'Continue without using this MCP server' },
+  ];
+  eq((await eventsMove([{
+    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
+    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
+  }])).applied, 1, 'the host reports a startup question on a desk whose window has not registered');
+  let md = await moverDesk();
+  eq(md.permission?.startup, true, 'and the desk carries it as a prompt of its own kind');
+  eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with the dialog’s own rows');
+
+  // A re-say of the same standing question — nothing chosen, nothing gone in
+  // between — must not reset when it was first seen. The host repeats a
+  // startup question every STARTUP_RESAY_MS while it stands, and the queue's
+  // wait age falls back to this `at` whenever the desk's newest session isn't
+  // the one carrying the awaiting mark (an editor session sharing the desk,
+  // say) — a fresh `at` on every re-say restarted that clock each time.
+  const firstAt = md.permission.at;
+  assert(!!firstAt, 'the pending request carries when it was first seen');
+  await sleep(30);
+  await eventsMove([{
+    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
+    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
+  }]);
+  eq((await moverDesk()).permission?.at, firstAt,
+     'and a re-say of the same standing question keeps it, rather than the moment the host happened to repeat itself');
+
+  // The desk's current session is whichever row was touched last — here the
+  // hook session from the rescan section, and on a real desk an editor whose
+  // hooks keep firing — so the queue must not depend on that row being marked.
+  eq((await floor()).queue.some((q) => q.agent === 'mover-a'), true, 'the desk is in the queue on the strength of the question alone, so "N need you" counts it');
+  eq((await floor()).channels.find((c) => c.channel === CH).awaiting >= 1, true, 'and the floor’s own count agrees');
+  const chose = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
+  });
+  eq(chose.status, 200, 'a row is chosen through the same route as any prompt');
+  const work = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
+  eq(work.work.map((w) => `${w.kind}:${w.payload.decision}:${w.payload.request_id}`), ['permission:1:startup:@9:mcp'],
+     'and reaches the host as that row, on that request — which is what routes it to the startup presser');
+  eq((await moverDesk()).permission ?? null, null, 'the prompt comes down the moment the choice is made');
+  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp', asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS }]);
+  eq((await moverDesk()).permission?.startup, true, 'said again while it stands (a restarted server hears it a minute later)');
+  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
+  md = await moverDesk();
+  eq(md.permission ?? null, null, 'and gone when the host sees the dialog leave');
+  eq((await floor()).queue.some((q) => q.agent === 'mover-a'), false, 'with the desk out of the queue');
+
+  console.log('\na startup answer that fails to land comes back once');
+  // Same shape as the AskUserQuestion re-offer above, for the other kind of
+  // prompt that can now fail to land. Before this it painted the desk red
+  // with "your approve did not land" — wrong verb for a row that was never
+  // approve/deny — and under the old bare `answer_failed`-only gate it never
+  // re-offered at all, so the operator was left at a plain error for up to a
+  // minute even though the dialog was still standing right there.
+  await eventsMove([{
+    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
+    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
+  }]);
+  eq((await moverDesk()).permission?.startup, true, 'raised again for this section');
+  const chose2 = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
+  });
+  eq(chose2.status, 200, 'the row is chosen');
+  await eventsMove([{
+    type: 'error', code: 'startup_answer_failed', channel: CH, agent: 'mover-a',
+    message: 'your choice did not reach the window — no window is open for this repo',
+  }]);
+  md = await moverDesk();
+  eq(md.permission?.request_id, 'startup:@9:mcp', 'a failed startup answer puts the same request back up');
+  eq(md.permission?.startup, true, 'and it comes back as the startup prompt, not as Approve/Deny');
+  eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with its own rows intact');
+
+  // Once, same rule as the form: a mistaken failure must not put the prompt
+  // back the instant it is answered, or answering becomes the one thing that
+  // cannot end it.
+  await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
+  });
+  await eventsMove([{
+    type: 'error', code: 'startup_answer_failed', channel: CH, agent: 'mover-a',
+    message: 'your choice did not reach the window — again',
+  }]);
+  md = await moverDesk();
+  eq(md.permission, null, 'the second failure does not offer it a third time');
+  // Not md.session.awaiting_message: which session is "current" for a desk is
+  // decided by updated_at, which SQLite's datetime('now') only carries to the
+  // second — two rows touched in the same second (the placeholder this error
+  // is marked on, and mover-a's earlier hook session from the rescan section,
+  // both touched within this same fast-running test) tie, and which one wins
+  // the tie is not something to depend on. The error turn is unambiguous:
+  // appended once, read back by id, regardless of any session's timestamp.
+  const moverTurns = (await turns('mover-a')).rows ?? [];
+  assert(String(moverTurns.at(-1)?.text ?? '').includes('not being offered again'),
+    'and says so, rather than leaving the operator wondering where the dialog went');
+  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
 } catch (err) {
   failures++;
   console.error(`\n  ✗ ${err.stack ?? err}`);

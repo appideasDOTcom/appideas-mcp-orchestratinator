@@ -722,6 +722,42 @@
     renderPromptMenu();
   }
 
+  /* ---------- drafts ----------
+     What is in the compose box belongs to the desk, not to the panel.
+
+     The panel's shell — textarea included — is rebuilt whenever a different
+     desk is opened, and emptied when the panel closes. So the ordinary thing:
+     three hundred words into an instruction for one agent, a bell rings on
+     another, click over, answer it, click back — and the three hundred words
+     were gone. Nothing the page does may cost somebody their own writing, so
+     every keystroke is filed under the desk it was typed for, in localStorage
+     rather than in `ui`, so a reload or a closed tab loses nothing either.
+
+     A draft is a message that has not been handed over yet. It goes when the
+     board accepts the send (the text is then a pending bubble, and the window's
+     transcript is what says whether it arrived), or when the person empties
+     the box. A refused send keeps it, and a message the window lost is put
+     back into it — both already the behaviour, both now written down. */
+  const draftKey = (channel, agent) => `orch.draft:${channel}|${agent}`;
+  function saveDraft(channel, agent, text) {
+    try {
+      if (text && text.trim()) localStorage.setItem(draftKey(channel, agent), text);
+      else localStorage.removeItem(draftKey(channel, agent));
+    } catch { /* storage blocked or full: the box still has it until the shell goes */ }
+  }
+  function loadDraft(channel, agent) {
+    try { return localStorage.getItem(draftKey(channel, agent)) ?? ''; } catch { return ''; }
+  }
+  /** File what the box holds now, under the desk whose panel this is. Read
+   *  off the panel's own dataset rather than ui.open, which has already moved
+   *  on by the time the old shell is being replaced. */
+  function stashDraft() {
+    const ta = $('p-text');
+    const wrap = $('floor-panel');
+    if (!ta || !wrap?.dataset.agent) return;
+    saveDraft(wrap.dataset.channel, wrap.dataset.agent, ta.value);
+  }
+
   /**
    * Put a prompt in the box, as though it had been typed.
    *
@@ -738,6 +774,7 @@
     const at = start + text.length;
     ta.focus();
     ta.setSelectionRange(at, at);
+    stashDraft();
     // Nothing is sent. The whole point of a template is the edit you make to it
     // before it goes.
   }
@@ -840,7 +877,9 @@
    * window open at all" as no different from "our own window has it", so a desk
    * whose session had ended the previous evening showed a live bell offering to
    * nudge nobody. The board's button had always asked the server. Now both do,
-   * and there is one place left where the answer can be wrong.
+   * and there is one place left where the answer can be wrong. (That bell is
+   * live again today, on purpose and labelled — ringing it opens the window
+   * first. See nudgeable() for why, and `wake` in bell() for how it shows.)
    */
   const nudgeBlock = (d) => (d?.nudge?.ok ? null : d?.nudge?.reason ?? 'Nothing is known about this desk yet.');
   /* And whether its turn can be stopped. Same shape, and used the same way: the
@@ -868,6 +907,8 @@
 
   /** How long a refused bell stays marked before it goes back to normal. */
   const REFUSED_MS = 2500;
+  /** The word a bell types. One literal, because the bubble is matched on it. */
+  const NUDGE_WORD = 'nudge';
 
   const deskBell = (channel, agent) =>
     document.querySelector(`.desk[data-channel="${CSS.escape(channel)}"][data-agent="${CSS.escape(agent)}"] .bell`);
@@ -899,12 +940,20 @@
   };
 
   /**
-   * Strike a desk's bell: deliver the nudge, then ring.
+   * Strike a desk's bell: deliver the nudge, then ring — and show it as
+   * sending in the panel, if that desk's is open, exactly as the board's
+   * Nudge button does through floorNudged().
    *
    * In that order, and it matters. The ring is the operator's evidence that
    * something was sent, so it must not play for a nudge the board refused —
    * a bell that rings whatever happened is a bell that means nothing. The wait
    * is one round trip to localhost, and the plunger is what covers it.
+   *
+   * The bubble used to be missing here. The bell rang and that was all, so on
+   * a desk mid-turn — where the word sits queued until the next step — nothing
+   * on screen said the nudge was in line, and the operator was left trusting
+   * the ring against a chat panel that showed nothing. The ring says "sent";
+   * the amber bubble is what says "the desk has it".
    */
   async function strike(channel, agent) {
     const k = ringKey(channel, agent);
@@ -913,7 +962,7 @@
       const r = await fetch('./api/floor/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ channel, agent, text: 'nudge' }),
+        body: JSON.stringify({ channel, agent, text: NUDGE_WORD }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error ?? `nudge failed (${r.status})`);
@@ -934,7 +983,7 @@
       }
       return;
     }
-    ring(channel, agent);
+    window.floorNudged(channel, agent, NUDGE_WORD);
   }
 
   /** Start a peal on a desk, whoever asked for it. */
@@ -976,23 +1025,31 @@
    */
   function bell(d, channel) {
     const blocked = nudgeBlock(d);
+    // A desk with no window keeps a working bell: ringing it opens the window
+    // first — the conversation resumes — and then nudges. It is drawn half-lit
+    // and says so on hover, so nobody opens a session by surprise. The server
+    // decides this too (`opens`), for the reason nudgeBlock() gives.
+    const wakes = !blocked && !!d?.nudge?.opens;
+    const label = blocked ? `Cannot nudge ${d.persona}`
+      : wakes ? `Nudge ${d.persona} — opens their window first`
+      : `Nudge ${d.persona}`;
     const k = ringKey(channel, d.agent);
     const since = ringingSince(k);
     const g = el('g', {
-      class: `bell${blocked ? ' blocked' : ''}`,
+      class: `bell${blocked ? ' blocked' : ''}${wakes ? ' wake' : ''}`,
       'data-act': 'nudge',
       'data-channel': channel,
       'data-agent': d.agent,
       role: 'button',
       tabindex: blocked ? null : '0',
       'aria-disabled': blocked ? 'true' : null,
-      'aria-label': blocked ? `Cannot nudge ${d.persona}` : `Nudge ${d.persona}`,
+      'aria-label': label,
     });
     // SVG has no title attribute — the tooltip is a child element. The reason
     // comes from the same three cases the server refuses with, so hovering a
     // dead bell says what the dialog's disabled button would have said.
     const tip = el('title');
-    tip.textContent = blocked ?? `Nudge ${d.persona}`;
+    tip.textContent = blocked ?? label;
     g.appendChild(tip);
     // How far the plunger travels. Geometry, so it is set here and not in the
     // stylesheet, and it is half the post rather than a fixed distance: at the
@@ -1997,6 +2054,63 @@
 
   /* ---------- the chat panel ---------- */
 
+  /**
+   * A task notification: Claude Code telling the agent that something it
+   * started in the background — a command, a subagent — has finished. It
+   * arrives through the message queue, so the relay used to file it as the
+   * operator's words, and this panel drew "YOU" over another agent's whole
+   * report, as plain text, because plain text is what the operator's own
+   * typing is drawn as. It is the system talking, like every other context
+   * turn — but unlike IDE state it carries something worth reading: a status,
+   * a one-line summary, and often the entire result. So it gets a note of its
+   * own. Amber-outlined like the alert box, for the same reason: something
+   * happened, and nothing went wrong. The result is drawn as markdown because
+   * it is an agent's writing, not the person's. The fields are read off the
+   * block's own child elements, so a shape this does not recognise falls
+   * through to the plain context line rather than to nothing.
+   */
+  // The fields read off a live notice (qa desk, 2026-09-02): task-id,
+  // tool-use-id, output-file, status, summary, then for an agent's result a
+  // `note` (Claude Code's aside about when these fire), the `result` itself,
+  // and a `usage` line of nested counters. Everything not named here is
+  // treated as the result and drawn as markdown, so a field this list has
+  // never seen is shown rather than dropped.
+  const NOTE_META = new Set(['task-id', 'tool-use-id', 'output-file', 'status', 'summary', 'note', 'usage']);
+  function noteFields(text) {
+    const inner = String(text ?? '').replace(/^\s*<[A-Za-z][\w-]*>/, '').replace(/<\/[A-Za-z][\w-]*>\s*$/, '');
+    const fields = [];
+    const re = /<([A-Za-z][\w-]*)>([\s\S]*?)<\/\1>/g;
+    let m;
+    while ((m = re.exec(inner))) fields.push([m[1], m[2].trim()]);
+    return fields;
+  }
+  /** `<subagent_tokens>335433</subagent_tokens><tool_uses>50</tool_uses>` →
+   *  "subagent tokens 335433 · tool uses 50". Counters, not prose. */
+  function noteUsage(s) {
+    return noteFields(`<u>${s}</u>`).map(([n, v]) => `${n.replace(/_/g, ' ')} ${v}`).join(' · ');
+  }
+  function noteNode(t) {
+    const f = noteFields(t.text);
+    if (!f.length) return null;
+    const get = (k) => f.find(([n]) => n === k)?.[1] ?? '';
+    const status = get('status');
+    const summary = get('summary');
+    const file = get('output-file');
+    const aside = get('note');
+    const usage = get('usage') ? noteUsage(get('usage')) : '';
+    const body = f.filter(([n]) => !NOTE_META.has(n)).map(([, v]) => v).filter(Boolean).join('\n\n');
+    const div = document.createElement('div');
+    div.dataset.id = t.id;
+    div.className = 't t-note';
+    div.innerHTML = `
+      <div class="t-who">task${status ? ` · ${esc(status)}` : ''}<span class="t-when mono" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
+      ${summary ? `<div class="t-note-summary">${esc(summary)}</div>` : ''}
+      ${body ? `<div class="t-body t-md">${md(body)}</div>` : ''}
+      ${aside ? `<div class="t-note-aside muted" title="${esc(aside)}">${esc(aside)}</div>` : ''}
+      ${file || usage ? `<div class="t-note-file mono muted"${file ? ` title="${esc(file)}"` : ''}>${esc([file ? file.split('/').filter(Boolean).slice(-2).join('/') : '', usage].filter(Boolean).join(' · '))}</div>` : ''}`;
+    return div;
+  }
+
   function turnNode(t) {
     const div = document.createElement('div');
     div.dataset.id = t.id;
@@ -2004,6 +2118,10 @@
       div.className = 't t-tool';
       div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span>`;
       return div;
+    }
+    if (t.role === 'context' && t.tool_name === 'task-notification') {
+      const note = noteNode(t);
+      if (note) return note;
     }
     if (t.role === 'context') {
       // The system talking, not the person: IDE state, slash-command records.
@@ -2045,6 +2163,9 @@
     // the strip can wait on this instead of racing openDesk's async render —
     // which is exactly how a headless check read one desk's buttons against
     // the next desk's name.
+    // The old shell's box goes with the old shell. File it first — under the
+    // desk it was typed for, which is still what the dataset says.
+    stashDraft();
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
     wrap.innerHTML = `
@@ -2106,7 +2227,13 @@
     const wrap = $('floor-panel');
     if (!ui.open) {
       wrap.classList.add('hidden');
+      stashDraft();
       wrap.innerHTML = '';
+      // Nobody's panel now, and said so: the dataset is the DOM's word on
+      // whose panel this is, and a closed panel that still named its last
+      // desk let a probe read "alpha's panel is up" off an empty box.
+      delete wrap.dataset.channel;
+      delete wrap.dataset.agent;
       ui.panelFor = null;
       // The menu lives on the body, not in the panel, so emptying the panel does
       // not take it with it — it would be left floating over the floor, pointing
@@ -2131,6 +2258,8 @@
     const forKey = `${channel}|${agent}`;
     if (ui.panelFor !== forKey) {
       panelShell(wrap, channel, agent);
+      // A new shell, an empty box — unless this desk has something unsent.
+      $('p-text').value = loadDraft(channel, agent);
       ui.panelFor = forKey;
       // Same reason, one desk over: the menu was anchored to the button in the
       // row that has just been replaced.
@@ -2220,14 +2349,17 @@
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${unreadable ? 'unreadable' : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${unreadable ? 'unreadable' : ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
         ? `<div class="p-alert p-alert-ask">
              <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to the window…</div>
            </div>`
-        : s.awaiting_kind
+        // A startup question stands on its own: the window asking it has no
+        // session yet, and an editor session in the same repo may be the
+        // desk's current one and not waiting on anything.
+        : (s.awaiting_kind || req?.startup)
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
              <div>${req?.questions?.length
                // "permission request — AskUserQuestion" is the hook's words for
@@ -2238,8 +2370,13 @@
                // was the whole failure: it told the operator the floor could not
                // help and sent them to a terminal, which is the outcome the
                // floor exists to avoid.
-               : `<b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
-             } <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
+               // A window that has not started yet, asking whether it may. The
+               // question is the dialog's own sentence; the rows below are its
+               // own rows. See startupQuestionOf in host/window.js.
+               : req?.startup
+               ? `<b>Before it can start, the window asks</b> — ${esc(clip(req.summary, 220))}`
+               : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
+             } <span class="mono t-when" data-at="${esc(req?.startup ? (s.awaiting_since ?? req.at ?? '') : s.awaiting_since)}"></span></div>
              ${req?.questions?.length ? askHtml(req) : ''}
              ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question from the window\u2026</div>` : ''}
              ${unreadable && !reading ? `<div class="p-unknown">
@@ -2251,7 +2388,12 @@
                  <button class="btn" data-act="press" data-choice="interrupt" title="Stop the turn instead of answering it">Interrupt</button>
                </div>
              </div>` : ''}
-             ${req && !req.questions?.length && !reading && !unreadable ? `<div class="p-decide">
+             ${req?.startup ? `<div class="p-startup">
+               <div class="p-unknown-why">Nothing here is answered for you. Pick a row and that row is chosen in the window, the same as pressing it there.</div>
+               <div class="p-more">${req.options.map((o) =>
+                 `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(o.text)}</span></button>`).join('')}</div>
+             </div>` : ''}
+             ${req && !req.questions?.length && !reading && !unreadable && !req.startup ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="${req.choices?.denyAsks ? 'deny-open' : 'decide'}" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
@@ -2455,7 +2597,14 @@
       ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
       : h
         ? `The host for this desk (${esc(h.host)}) is offline, so nothing sent here can reach it. Start it on that machine and this works again.`
-        : `No host on this board is running that repo, so there is nowhere to send this yet.`;
+        // Hosts look for a newly bound repo on their own — before each
+        // heartbeat, and the moment a session starts in it — so this says so,
+        // and offers the look now for anyone who would rather not wait a
+        // minute to find out. What the button heard back is kept in ui rather
+        // than flashed onto it, because this hint is rewritten every poll.
+        : `No host on this board is running that repo yet. Hosts look for it again every minute, and the moment a session starts in it. `
+          + `<button class="btn" data-act="rescan">Look now</button>`
+          + (ui.rescanSaid && Date.now() - ui.rescanSaid.at < 8000 ? ` <span class="muted">${esc(ui.rescanSaid.text)}</span>` : '');
 
     // Turns are appended, never re-rendered. A row already on screen stays
     // exactly where it is, which is what makes reading upward possible. The
@@ -2480,26 +2629,18 @@
     // than as a turn: it is not one until the window says so.
     for (const stale of box.querySelectorAll('.t-pending')) stale.remove();
     for (const p of ui.sending) {
-      const node = document.createElement('div');
-      node.className = 't t-user t-pending';
-      // Three states, and the difference between them is who has the message.
-      //
-      // `queued` is the window's own word: it took the message while it was
-      // working and will read it at its next step. That is a delivery, not a
-      // delay, so it never goes stale — the desk is holding it and has said so.
-      // Everything the operator does next depends on telling that apart from
-      // silence, which is what the third state is.
       const queued = deliveredNow(p.text);
       const stale = !queued && Date.now() - (p.at ?? 0) > SENDING_GRACE_MS;
-      node.classList.toggle('stale', stale);
-      node.classList.toggle('queued', !!queued);
-      const said = queued
-        ? (queued.held ? 'queued — the window took it once it was free' : 'queued — the desk is working')
-        : (stale ? 'not recorded — send again' : 'sending…');
-      node.innerHTML = `<div class="t-who">you<span class="t-when mono">${said}</span></div>` +
-        ' <div class="t-body"></div>';
-      node.querySelector('.t-body').textContent = p.text;
-      box.insertBefore(node, partialNode);
+      box.insertBefore(pendingNode(p.text, queued, stale), partialNode);
+    }
+    // A queued message this browser did not send — the bell struck with the
+    // panel shut, the board's Nudge button, another tab, a reload — is still
+    // the operator's, and the desk has said it holds it. Nothing in
+    // `ui.sending` stands for it, so it is drawn from the server's note
+    // instead: the same bubble, already queued, and gone the moment the note
+    // is — a turn retires it there, exactly as a turn retires the others here.
+    if (ui.delivery && !ui.sending.some((p) => deliveredNow(p.text))) {
+      box.insertBefore(pendingNode(ui.delivery.text, ui.delivery, false), partialNode);
     }
 
     if (ui.partial) {
@@ -2566,6 +2707,30 @@
     return squash(d.text).includes(squash(text)) ? d : null;
   }
 
+  /**
+   * One pending bubble. Three states, and the difference between them is who
+   * has the message.
+   *
+   * `queued` is the window's own word: it took the message while it was
+   * working and will read it at its next step. That is a delivery, not a
+   * delay, so it never goes stale — the desk is holding it and has said so.
+   * Everything the operator does next depends on telling that apart from
+   * silence, which is what the third state is.
+   */
+  function pendingNode(text, queued, stale) {
+    const node = document.createElement('div');
+    node.className = 't t-user t-pending';
+    node.classList.toggle('stale', stale);
+    node.classList.toggle('queued', !!queued);
+    const said = queued
+      ? (queued.held ? 'queued — the window took it once it was free' : 'queued — the desk is working')
+      : (stale ? 'not recorded — send again' : 'sending…');
+    node.innerHTML = `<div class="t-who">you<span class="t-when mono">${said}</span></div>` +
+      ' <div class="t-body"></div>';
+    node.querySelector('.t-body').textContent = text;
+    return node;
+  }
+
   function settle(rows) {
     if (!ui.sending.length) return;
     const arrived = rows.filter((r) => r.role === 'user').map((r) => squash(r.text));
@@ -2584,6 +2749,7 @@
       if (lost && box) {
         box.value = box.value.trim() ? `${lost}\n\n${box.value}` : lost;
         box.focus();
+        stashDraft();   // a draft again, and kept as one
       }
       return;
     }
@@ -2931,7 +3097,8 @@
     // Any other click dismisses it, then goes on to do whatever it was for.
     if (ui.details) { ui.details = null; renderDetails(); }
 
-    // The bell rings the agent without opening anything. Ahead of the desk test
+    // The bell rings the agent without opening the conversation panel (it may
+    // open the desk's *window*, when there is none). Ahead of the desk test
     // for the same reason the pills are — it sits inside the cell — and it
     // returns even when it refuses, so a click on a bell that cannot ring does
     // not fall through and open the conversation instead.
@@ -3110,6 +3277,26 @@
           ?.desks.find((x) => x.agent === ui.open.agent);
         window.stopDialog(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent);
       }
+    } else if (act.dataset.act === 'rescan') {
+      // One click, one look, by every host on the board. The result is a
+      // re-registration the next poll shows; what is said here is only who was
+      // asked, or why nobody could be.
+      act.disabled = true;
+      try {
+        const r = await fetch('./api/floor/rescan', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ channel: ui.open?.channel, agent: ui.open?.agent }),
+        });
+        const body = await r.json().catch(() => ({}));
+        ui.rescanSaid = {
+          at: Date.now(),
+          text: r.ok ? `asked ${body.asked} host${body.asked === 1 ? '' : 's'} — looking…` : (body.error ?? `failed (${r.status})`),
+        };
+      } catch (err) {
+        ui.rescanSaid = { at: Date.now(), text: err.message };
+      }
+      act.disabled = false;
+      renderPanel();
     } else if (act.dataset.act === 'prompts') {
       // A toggle: the second click on the button closes it, which is what a
       // menu button does everywhere else.
@@ -3152,7 +3339,9 @@
    * in a dialog the board owns, so nothing here would otherwise know it had
    * happened until the window echoed the turn back — a poll and a host
    * round-trip later, by which time the operator has clicked something else and
-   * credits that instead.
+   * credits that instead. The floor's own bell comes through here too
+   * (strike()), so a nudge shows as sending, then queued, then a turn,
+   * whichever surface struck it.
    *
    * Shown as sending rather than as a turn, for the same reason `sendChat` does
    * it: the board accepting the word is not the window having recorded it.
@@ -3194,6 +3383,7 @@
       // shows as sending until the window itself reports it.
       ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
       $('p-text').value = '';
+      stashDraft();   // handed over: no longer a draft
       ui.stick = true;
       renderPanel();
       await tick();
@@ -3367,6 +3557,13 @@
     field.disabled = !other?.checked;
     if (!field.disabled) field.focus();
     else field.value = '';
+  });
+
+  // Every keystroke into the box is filed under its desk as it happens, so no
+  // moment — a click on another desk, a reload, a closed tab — can be the one
+  // that loses it. See the drafts note above stashDraft.
+  document.addEventListener('input', (e) => {
+    if (e.target?.id === 'p-text') stashDraft();
   });
 
   document.addEventListener('keydown', (e) => {

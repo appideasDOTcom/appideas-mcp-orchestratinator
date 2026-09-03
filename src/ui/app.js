@@ -663,12 +663,13 @@ const NUDGE_BLOCKED = {
   held_by_editor: 'the floor needs this conversation — close it in your editor, or move it back with “Open in VS Code”.',
   host_offline: 'that desk’s host is offline, so nothing can be typed into its window.',
   not_hosted: 'no host is running this repo, so this desk has no window to type into.',
-  no_window: 'nothing is running at that desk. Send a message instead — that opens a window; a nudge cannot.',
 };
 
 /**
  * "Nudge agent" — types the word into the desk's own window, which is the thing
- * the operator would otherwise go and do by hand.
+ * the operator would otherwise go and do by hand. A desk with no window gets
+ * one opened first, resuming its conversation, and the title says so before
+ * the click — see nudgeable() on the server.
  *
  * Disabled in fact and not only in appearance: `disabled` on the button, so a
  * click cannot fire at all. The reason comes from the server, computed by the
@@ -679,7 +680,9 @@ function nudgeHead(channel, agent, a) {
   if (!agent) return { button: '', note: '' };
   const n = a?.nudge ?? { ok: false, code: 'not_hosted', reason: 'Nothing is known about this desk yet.' };
   const at = `data-channel="${esc(channel)}" data-agent="${esc(agent)}"`;
-  const title = n.ok ? `Types “nudge” into ${agent}'s window on ${n.host}` : n.reason;
+  const title = !n.ok ? n.reason
+    : n.opens ? `Opens ${agent}'s window on ${n.host} — resuming its conversation — and types “nudge”`
+    : `Types “nudge” into ${agent}'s window on ${n.host}`;
   return {
     button: `<button type="button" class="btn nudge" data-do="nudge" ${at}${n.ok ? '' : ' disabled'} title="${esc(title)}">Nudge agent</button>`,
     note: n.ok ? '' : `<p class="dlg-note nudge-why">Can’t nudge — ${esc(NUDGE_BLOCKED[n.code] ?? n.reason)}</p>`,

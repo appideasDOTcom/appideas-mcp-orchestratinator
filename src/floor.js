@@ -213,30 +213,33 @@ export function deliverable(h, nowMs = Date.now()) {
 }
 
 /**
- * Whether this desk can be *nudged*, which is a stricter question than whether
- * it can be sent a message.
+ * Whether this desk can be *nudged* — the same question as whether it can be
+ * sent a message, with one more fact attached: whether ringing will have to
+ * open a window first.
  *
- * Chat may open a window: you are starting a conversation, and the host will
- * make somewhere for it to happen. A nudge cannot, because a nudge is not
- * content — it means "there is something waiting on your channel, go and
- * look", and that is meaningless said to a desk with nobody at it. Sent to a
- * desk with no window, it would silently spin up a whole session to deliver
- * one word.
+ * It used to be stricter. A nudge is not content — it means "there is
+ * something waiting on your channel, go and look" — and the rule was that
+ * saying it to a desk with no window would silently spin up a whole session
+ * to deliver one word, so the bell went dead and said "send a message
+ * instead". Measured on the live board 2026-09-02, that saved nothing: the
+ * operator's next move was to type the word "nudge" into the composer, which
+ * opened the very same window by the very same path (`say()` → `send()` with
+ * `open: true`, resuming the desk's conversation). The rule did not prevent a
+ * session being opened; it moved one tap to a chat box, on the desk the
+ * operator had just been told had work waiting.
  *
- * So `window_id` is the extra condition: something has to already be running
- * for a nudge to reach. This is the gate both nudge surfaces use — the board's
- * button and the floor's bell — while the compose box keeps deliverable().
+ * So the gate is deliverable(), and `opens` says whether the window is still
+ * to come. Both nudge surfaces — the board's button and the floor's bell —
+ * label themselves from it, so a tap is never a silent session: the bell on
+ * an empty desk reads as "opens the window first" before it is pressed. A
+ * nudge to a desk with nobody at it is still meaningless; the point is that a
+ * desk showing waiting work is not nobody, and opening its conversation is
+ * exactly what the operator meant.
  */
 export function nudgeable(h, nowMs = Date.now()) {
   const can = deliverable(h, nowMs);
   if (can.error) return can;
-  if (!h.window_id) {
-    return {
-      error: 'No window is open for this desk, so there is no one to nudge. Send a message instead — that opens one.',
-      code: 'no_window',
-    };
-  }
-  return can;
+  return h.window_id ? can : { ...can, opens: true };
 }
 
 /**
@@ -332,10 +335,11 @@ export function isWorking(h, lastTurn) {
   return h?.state === 'working' || lastTurn?.role === 'tool';
 }
 
-/* Every refusal below is somebody else's sentence, written for sending or for
-   nudging. The conditions are worth sharing — they are the same conditions —
-   but the words are not: "send a message instead" is no help at all to someone
-   trying to stop one. Same verdict, re-worded by its code. */
+/* Every refusal below is somebody else's sentence, written for sending. The
+   conditions are worth sharing — they are the same conditions — but the words
+   are not: "send a message instead" is no help at all to someone trying to
+   stop one. Same verdict, re-worded by its code. `no_window` is stop's own: a
+   nudge opens a window when there is none, a stop cannot. */
 const STOP_WHY = {
   not_hosted: 'No host on this board is running that repo, so there is nothing here to stop.',
   held_by_editor: 'This conversation is open in your editor. Stop it there — one app holds a conversation at a time.',
@@ -346,9 +350,9 @@ const STOP_WHY = {
  * Can this desk's turn be stopped, and if not, why not?
  *
  * Stopping is a keystroke — Escape, the very one a person presses — so it wants
- * what a nudge wants: a window of ours to press it in. Hence nudgeable() rather
- * than deliverable(). Chat is allowed to open a window because chat is content;
- * there is nothing to interrupt in a window that does not exist yet.
+ * a window of ours to press it in, and unlike chat or a nudge it cannot open
+ * one: there is nothing to interrupt in a window that does not exist yet. So
+ * `window_id` is checked here, on top of deliverable().
  *
  * "Nothing is running" is refused here too, and by the endpoint rather than
  * only greyed out in the browser. A confirmation dialog puts a few seconds
@@ -357,8 +361,9 @@ const STOP_WHY = {
  * silently into an idle prompt.
  */
 export function stoppable(h, lastTurn, nowMs = Date.now()) {
-  const can = nudgeable(h, nowMs);
+  const can = deliverable(h, nowMs);
   if (can.error) return { ...can, error: STOP_WHY[can.code] ?? can.error };
+  if (!h.window_id) return { error: STOP_WHY.no_window, code: 'no_window' };
   if (!isWorking(h, lastTurn)) {
     return { error: 'Nothing is running at this desk right now, so there is nothing to stop.', code: 'not_working' };
   }
@@ -434,8 +439,13 @@ export function answerSteps(questions, answers) {
   const qs = Array.isArray(questions) ? questions : [];
   const steps = [];
   // To a known end. One press per tab is always enough, and pressing left at the
-  // left end does nothing.
-  for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Left' });
+  // left end does nothing. Only when there is a strip to walk: a one-question
+  // form draws none (`strip: false`, read off the pane), and its digit both
+  // selects and submits, so the walk has nothing to do and the answer is the
+  // one key.
+  if (qs.some((q) => q.strip !== false)) {
+    for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Left' });
+  }
 
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i];
@@ -620,6 +630,13 @@ export function ingestHookEvent(store, body, live = null) {
    */
   const hosted = store.hostedDesk(channel, agent);
   const mirrored = !!hosted && secondsSince(iso(hosted.host_seen), Date.now()) < HOST_STALE_SECONDS;
+
+  // A session starting in a repo no host runs is the moment one might be able
+  // to: the binding that names this desk was most likely just written. Ask
+  // every host here to look — once per throttle window, see askRescan.
+  if (event === 'SessionStart' && !mirrored && live) {
+    askRescan(store, live, { channel, agent, why: 'a session started on a desk no host runs' });
+  }
 
   const key = deskKey(channel, agent);
   const state = (s) => {
@@ -819,13 +836,29 @@ export function createLive() {
    * it lost. Dropped the moment the real turn arrives; see the `turn` case.
    */
   const delivery = new Map(); // deskKey -> { state, text, at, held }
+  /**
+   * Where the conversation stood when the operator's message was accepted:
+   * the id of the desk's last user turn at that moment, per desk.
+   *
+   * The `delivery` case has to tell "the turn beat the note here" from "an
+   * older turn happens to say the same words". Text alone cannot: the most
+   * repeated message on this board is the one word "nudge", so a second nudge
+   * always finds the first as the desk's last user turn, and matching on words
+   * dropped its note every time — the bubble sat on "sending…" and then said
+   * "not recorded" about a message the window was holding. A turn counts as
+   * this message arriving only if it was recorded after the send.
+   */
+  const sentAfter = new Map(); // deskKey -> id of the last user turn when the send was accepted
   const watchers = new Map();  // deskKey -> Set<fn>
   const waiters = new Map();   // host_id -> wake fn for a held work request
+  const rescanAsked = new Map(); // host_id -> ms when it was last asked to look at its roots
   return {
     partial,
     pending,
     answered,
     delivery,
+    sentAfter,
+    rescanAsked,
     subscribe(key, fn) {
       if (!watchers.has(key)) watchers.set(key, new Set());
       watchers.get(key).add(fn);
@@ -846,6 +879,39 @@ export function createLive() {
       waiters.get(hostId)?.();
     },
   };
+}
+
+/**
+ * Ask every host that is here to look at its roots again.
+ *
+ * A host learns its desks by walking the filesystem, and until 2026-09-02 it
+ * did that once, at boot. So the most ordinary thing a person does — point a
+ * repo's .mcp.json at this board, or at a new channel, and open Claude Code
+ * there — left the compose box saying "No host on this board is running that
+ * repo" until a launchd job was restarted, while the hooks (which read the file
+ * per event) were already relaying the conversation. Hosts now look again
+ * before every heartbeat on their own; this is how to make one look sooner. The
+ * board does not know whose roots a repo is under, so it asks every host that
+ * is here, and each answers by registering again with what it found.
+ *
+ * Throttled per host unless forced. A session starting in a repo on a machine
+ * with no host at all would otherwise have every host walking its disk on
+ * every start, for a desk none of them can ever find. Forced is the button:
+ * one click, one look, no waiting to learn whether the throttle ate it.
+ */
+const RESCAN_MIN_MS = 15_000;
+export function askRescan(store, live, { channel, agent, why, force = false }) {
+  const now = Date.now();
+  const asked = [];
+  for (const h of store.listHosts()) {
+    if (secondsSince(iso(h.last_seen), now) >= HOST_STALE_SECONDS) continue;
+    if (!force && now - (live.rescanAsked.get(h.host_id) ?? 0) < RESCAN_MIN_MS) continue;
+    live.rescanAsked.set(h.host_id, now);
+    store.enqueueHostWork(h.host_id, channel, agent, 'rescan', { why });
+    live.wake(h.host_id);
+    asked.push(h.name ?? h.host_id);
+  }
+  return asked;
 }
 
 /**
@@ -982,8 +1048,13 @@ function applyHostEvent(store, live, hostId, ev) {
       // "queued". Handling only the other order left the note standing for ever
       // over a message that was already in the conversation — measured on the
       // real board, and the reason this looks for it rather than assuming.
+      //
+      // And only a turn recorded since the send counts as that. The desk's
+      // last user turn saying the same words is, more often than not, the
+      // previous nudge — see `sentAfter`.
       const already = store.deskLastUserTurn(channel, agent);
-      if (already && squash(already.text).includes(squash(text))) {
+      const mark = live.sentAfter.get(key) ?? 0;
+      if (already && already.id > mark && squash(already.text).includes(squash(text))) {
         if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
         break;
       }
@@ -1051,6 +1122,66 @@ function applyHostEvent(store, live, hostId, ev) {
       break;
     }
 
+    /**
+     * A question the window is asking before it has a session — folder trust,
+     * a new MCP server. Read off the pane by the host (startupQuestionOf in
+     * host/window.js has the measurements, and why it is offered rather than
+     * answered), and put on the desk exactly as a permission prompt is, so the
+     * same buttons, the same decision route and the same keystroke path answer
+     * it. `gone` is the host seeing the dialog leave — answered from here, in
+     * tmux, or by the window registering — and takes the prompt down with it.
+     */
+    case 'startup': {
+      const rid = str(ev.request_id);
+      if (!rid) break;
+      const open = live.pending.get(key);
+      if (ev.gone) {
+        if (open?.request_id === rid) {
+          live.pending.delete(key);
+          live.answered.delete(key);
+          store.clearAwaiting(sessionId);
+          store.clearDeskAwaiting(channel, agent);
+          state('idle');
+          live.publish(key, { type: 'permission', request_id: rid, decision: 'gone', resolved: true });
+        }
+        break;
+      }
+      const options = Array.isArray(ev.options)
+        ? ev.options.filter((o) => o && Number.isInteger(o.n) && typeof o.text === 'string').map((o) => ({ n: o.n, text: clip(o.text, 200) }))
+        : [];
+      if (!options.length) break;
+      const asks = clip(str(ev.asks) ?? 'the window is asking something before it starts', 300);
+      // The desk needs a session row to be marked as waiting on, and a window
+      // that has not registered has none of its own yet. The conversation it
+      // is about to resume, or the placeholder, is that row — the same one a
+      // message sent before the window opened is filed under.
+      store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd, runner: 'host', pid: null });
+      // The same standing question, said again — not a fresh `now`. The host
+      // re-says a startup question every STARTUP_RESAY_MS while it stands, and
+      // the queue's wait age falls back to this `at` whenever an editor
+      // session on the same desk keeps `awaitingSince` moving (see the session
+      // mark note above and the fallback below). A fresh `now` on every re-say
+      // restarted that clock each time — measured: `since` moved forward by
+      // the exact re-say gap while a hook session was live, so "waiting · 40s"
+      // sat over a prompt that had stood twenty minutes. Only a genuinely new
+      // question (a different request_id) starts the clock over.
+      const at = open?.request_id === rid ? open.at : now;
+      live.pending.set(key, {
+        request_id: rid, tool: 'startup', startup: true, kind: str(ev.kind) ?? null,
+        summary: asks, options, read: true, reading: false, at,
+      });
+      // Marked on that row by id, not on "the desk's newest session": a live
+      // editor session in the same repo is newer every time its hooks fire,
+      // and its next tool call would clear a mark put there. The floor does
+      // not rely on this mark for a startup prompt anyway — the request itself
+      // is what puts the desk in the queue (see buildFloor) — so the window
+      // keeps asking on the floor whatever the editor is doing.
+      store.setAwaiting(sessionId, 'permission_request', asks);
+      state('awaiting');
+      live.publish(key, { type: 'permission', request: live.pending.get(key) });
+      break;
+    }
+
     case 'error': {
       // Whatever else this is, nothing is quietly on its way any more. Leaving
       // the note up would have the desk showing "queued" beside the error
@@ -1061,7 +1192,12 @@ function applyHostEvent(store, live, hostId, ev) {
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
       // this is the one thing that asks for it back.
-      const failed = str(ev.code) === 'answer_failed' ? live?.answered.get(key) : null;
+      // Both codes are "the answer never took, and the window is still
+      // holding the question" — a form's own report, and a startup question's
+      // (see host/index.js, case 'permission'). Same re-offer either way: it
+      // is the same map, keyed by desk, and the failure the desk shows back is
+      // whichever kind of prompt was actually standing.
+      const failed = ['answer_failed', 'startup_answer_failed'].includes(str(ev.code)) ? live?.answered.get(key) : null;
       // Re-offering is right once — an answer that genuinely did not take leaves
       // the window still holding the question. It is wrong twice. A failure that
       // is itself mistaken puts the same form back the instant it is answered,
@@ -1090,8 +1226,16 @@ function applyHostEvent(store, live, hostId, ev) {
       // the one place it has to show: this is what a decision the host could
       // not deliver looks like, now that the desk stops asking as soon as the
       // operator answers.
-      store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
-      state(again ? 'awaiting' : 'idle');
+      // Not for a window that is merely asking before it starts. The host's
+      // open or send gives up on such a window with `startup_question`, and
+      // the question is already standing on this desk as a prompt (see the
+      // startup case) — painting the desk red on top of it turned "the window
+      // asks whether it may start" into "something went wrong". The chat line
+      // above still says what happened; the prompt says what to do.
+      if (str(ev.code) !== 'startup_question') {
+        store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
+        state(again ? 'awaiting' : 'idle');
+      }
       break;
     }
 
@@ -1162,7 +1306,15 @@ export function buildFloor(store, live = null, sessions = null) {
   // board and one desk in the room is a room that lies about who works there.
   // The desks without a session are drawn as not reporting, which also happens
   // to be the clearest possible reminder of who still needs the plugin.
-  // Retired agents stay off, matching the board's default. Archived channels do
+  // Retired agents stay off, matching the board's default — and off means the
+  // desk, not the persona. The persona is kept through retirement on purpose:
+  // it is the chair and the colours, and un-retiring (which any tool call from
+  // a live agent does by itself — see touchAgent) should seat the agent back
+  // where it was, not deal it a new face. So the filter is at the desk, below,
+  // against the same column the board reads. It used to be applied only to the
+  // sign, which hid the trash can's effect from the floor entirely: an agent
+  // removed on the board kept its desk, its bubble and its place in the queue.
+  // Archived channels do
   // not — they are carried with a flag and left out of the building by the page.
   // Dropping them here is what this used to do, and it took the way back in with
   // them: a channel absent from the payload has no chip in the floor picker
@@ -1176,8 +1328,9 @@ export function buildFloor(store, live = null, sessions = null) {
   // can exist without one — a window can post hook events before its agent has
   // ever called an MCP tool — and then there is simply no sign to paint.
   const agentRows = new Map();
+  const retired = new Set();
   for (const a of store.listAllAgents()) {
-    if (a.retired_at) continue;
+    if (a.retired_at) { retired.add(key(a.channel, a.agent)); continue; }
     agentRows.set(key(a.channel, a.agent), a);
     store.ensurePersona(a.channel, a.agent);
   }
@@ -1202,7 +1355,7 @@ export function buildFloor(store, live = null, sessions = null) {
     const shelved = archived.has(channel);
     const desks = byChannel
       .get(channel)
-      .slice()
+      .filter((p) => !retired.has(key(channel, p.agent)))
       .sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0) || a.agent.localeCompare(b.agent))
       .map((p) => {
         const k = key(channel, p.agent);
@@ -1242,20 +1395,26 @@ export function buildFloor(store, live = null, sessions = null) {
         // which is a promise the board already makes — but a prompt in a room
         // the operator has put away is not "N need you" on a floor they are
         // looking at, and counting it there is how a queue stops being a queue.
-        if (live_ && s?.awaiting_kind && !shelved) {
+        // A window asking before it starts has no session to be waiting on —
+        // that is what "before it starts" means — so the request itself is
+        // what puts the desk here. Otherwise a person waiting on a trust
+        // dialog would be missing from the one list built to surface them.
+        const booting = pendingReq?.startup ? pendingReq : null;
+        const since = awaitingSince ?? iso(booting?.at);
+        if (live_ && (s?.awaiting_kind || booting) && !shelved) {
           queue.push({
             channel,
             agent: p.agent,
             persona: p.persona,
-            kind: s.awaiting_kind,
-            message: s.awaiting_message,
-            since: awaitingSince,
-            waiting_seconds: awaitingSince ? Math.max(0, Math.round((nowMs - Date.parse(awaitingSince)) / 1000)) : null,
-            cwd: s.cwd,
+            kind: s?.awaiting_kind ?? 'permission_request',
+            message: s?.awaiting_message ?? booting?.summary ?? null,
+            since,
+            waiting_seconds: since ? Math.max(0, Math.round((nowMs - Date.parse(since)) / 1000)) : null,
+            cwd: s?.cwd ?? h?.cwd ?? null,
             // The name of the window to go to. A full path is correct and
             // unreadable; the last segment is what the tab actually says.
-            window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
-            session_id: s.session_id,
+            window: (s?.cwd ?? h?.cwd) ? (s?.cwd ?? h.cwd).split('/').filter(Boolean).pop() : null,
+            session_id: s?.session_id ?? null,
             // A hosted prompt can be answered right here — but only if the
             // floor can reach the window that is asking. Answering means
             // pressing a key in it, and a conversation open in an editor has
@@ -1333,10 +1492,14 @@ export function buildFloor(store, live = null, sessions = null) {
           // the floor. A client-side re-derivation of this drifted within a
           // day: it read `held` and so treated "no window at all" as no
           // different from "our own window", and offered to nudge an agent
-          // whose session had ended the day before.
+          // whose session had ended the day before. `opens` carries the
+          // difference now: the bell rings on such a desk on purpose, and says
+          // first that it will open the window — see nudgeable().
           nudge: (() => {
             const v = nudgeable(h, nowMs);
-            return v.error ? { ok: false, code: v.code, reason: v.error } : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id };
+            return v.error
+              ? { ok: false, code: v.code, reason: v.error }
+              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id, opens: !!v.opens };
           })(),
           // Whether a turn is running, said once. The desk is drawn from this
           // and the chat panel's stop sign is lit from it, so they cannot
@@ -1420,7 +1583,7 @@ export function buildFloor(store, live = null, sessions = null) {
       archived: shelved,
       desks,
       live: desks.filter((d) => d.live).length,
-      awaiting: desks.filter((d) => d.live && d.session?.awaiting_kind).length,
+      awaiting: desks.filter((d) => d.live && (d.session?.awaiting_kind || d.permission?.startup)).length,
       // What the board prints in this channel's header. Same numbers, same
       // source, so the two surfaces cannot report different amounts of work.
       stats: counts.get(channel) ?? ZERO_COUNTS,
@@ -1526,11 +1689,55 @@ export function createFloorRouter({ store, auth, sessions = null }) {
         holders: Number(d?.holders) || 0,
       });
       store.ensurePersona(channel, agent);
+      // The conversation the host is following, when it names one. The desk's
+      // `session` event is what normally sets this — but it fires once, when
+      // the host first adopts a session, and the host's watch loop starts
+      // before its first registration. On a desk this host has never registered
+      // (a repo rebound to a new channel, say) that one event reaches
+      // applyHostEvent before the row exists and is dropped without a word,
+      // and nothing re-sends it, because from the host's side nothing changed.
+      // Measured 2026-09-02: the host relayed sixty turns under the real id
+      // while the desk still said the placeholder, so the chat panel — scoped
+      // to the desk's id — showed an empty conversation, and no restart could
+      // fix it because a restart re-runs the same race.
+      //
+      // The heartbeat already carries the id every minute, which makes it the
+      // natural self-heal. Applied through the same handler as the event, so
+      // it upserts the session, rekeys anything filed under the placeholder and
+      // publishes — exactly what the lost event would have done — and only
+      // when the id differs, so a heartbeat is not a minute-by-minute touch on
+      // a conversation whose window may have closed. A host that names none (it
+      // has just restarted) leaves the stored id alone: handing it back is the
+      // reply's job, below.
+      const named = str(d?.session_id);
+      if (named && named !== store.hostedDesk(channel, agent)?.sdk_session_id) {
+        applyHostEvent(store, live, hostId, { type: 'session', channel, agent, session_id: named, cwd });
+      }
       const row = store.hostedDesk(channel, agent);
       accepted.push({
         channel, agent, cwd,
         sdk_session_id: row?.sdk_session_id ?? null,
       });
+    }
+
+    // What the host did not name, it no longer runs. A host names every desk
+    // it has on every heartbeat, so a desk missing from the list has had its
+    // binding removed or moved — a repo re-pointed at another channel, or at
+    // another board. The row stays, as the last thing known about that desk
+    // and the session id a return resumes with, but it goes offline exactly
+    // as unregister would take it. Left as it was, it read as hosted and live
+    // for as long as the host kept heartbeating, so a message sent there was
+    // accepted into a queue no desk would ever drain. Only this host's rows:
+    // another host's claim on the same name is that host's to keep.
+    const named = new Set(accepted.map((a) => deskKey(a.channel, a.agent)));
+    for (const d of store.listHostedDesks()) {
+      if (d.host_id !== hostId || d.state === 'offline') continue;
+      const k = deskKey(d.channel, d.agent);
+      if (named.has(k)) continue;
+      store.setHostedState(d.channel, d.agent, 'offline');
+      live.pending.delete(k);
+      live.partial.delete(k);
+      live.publish(k, { type: 'state', state: 'offline' });
     }
 
     for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
@@ -1756,6 +1963,10 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // The host does the delivery: it types this into the desk's window, the
     // same window the person's own terminal is attached to. Nothing has to be
     // handed over first, so there is nothing to say here about whose turn it is.
+    //
+    // Mark where the conversation stood, so the delivery report can tell this
+    // message's turn from an older one that says the same words — see sentAfter.
+    live.sentAfter.set(deskKey(channel, agent), store.deskLastUserTurn(channel, agent)?.id ?? 0);
     store.enqueueHostWork(h.host_id, channel, agent, 'chat', { text });
     live.wake(h.host_id);
     res.json({ ok: true, host: h.host_name ?? h.host_id });
@@ -1810,6 +2021,29 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.enqueueHostWork(h.host_id, channel, agent, 'open', {});
     live.wake(h.host_id);
     res.json({ ok: true });
+  });
+
+  /**
+   * Make every host here look at its roots again, now.
+   *
+   * The button behind "No host on this board is running that repo". Hosts
+   * look on their own — before each heartbeat, and when a session starts on a
+   * desk none of them runs — so this exists for the person who would rather
+   * not wait a minute to learn whether that worked. Forced past the throttle
+   * for the same reason. The answer arrives as a re-registration, which the
+   * floor's next poll shows; the count here only says who was asked.
+   */
+  router.post('/api/floor/rescan', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel) ?? '*';
+    const agent = str(req.body?.agent) ?? '*';
+    const asked = askRescan(store, live, { channel, agent, why: 'asked from the floor', force: true });
+    if (!asked.length) {
+      return res.status(409).json({
+        error: 'No host is registered on this board right now, so there is nobody to ask. Start one and it will find the repo on its own.',
+        code: 'no_host',
+      });
+    }
+    res.json({ ok: true, asked: asked.length, hosts: asked });
   });
 
   /**

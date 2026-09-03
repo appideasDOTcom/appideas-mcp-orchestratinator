@@ -45,6 +45,8 @@ const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestrat
 /** How long a queued permission answer stays worth delivering. */
 const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
+/** How often a startup question still on screen is said to the board again. */
+const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
 const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
@@ -126,6 +128,8 @@ class Desk {
     this.lastSessionId = null;
     this.holder = null;      // 'floor' | 'editor' | null, as last reported
     this.paneWindow = null;  // a tmux window in this repo, registered session or not
+    this.startup = null;     // the startup question the window is sitting on, as last reported
+    this.startupSaidAt = 0;
     this.holders = 0;        // live processes claiming this conversation
     this.clients = 0;        // terminals attached to the tmux session
     this.offset = 0;         // bytes of that transcript already sent up
@@ -231,6 +235,30 @@ class Desk {
         window_open: this.paneWindow, holders, clients,
       }, true);
     }
+    // A window here whose process is not in the roster is starting — and one
+    // that stays that way is sitting on a question. Read it and put it on the
+    // floor, so the person waiting on a desk that says "starting" can see what
+    // it wants and answer from where they are. Said again once a minute while
+    // it stands, so a server that restarted meanwhile hears it too. Why the
+    // host reads these and never answers them is beside startupQuestionOf.
+    const booting = paneHere && !live.some((x) => x.pid === paneHere.pid);
+    const q = booting ? await W.startupQuestionAt(paneHere.target) : null;
+    if (q) {
+      const said = `${q.kind}|${q.options.map((o) => o.text).join('|')}`;
+      if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
+        this.startup = { said, request_id: `startup:${paneHere.window}:${q.kind}` };
+        this.startupSaidAt = Date.now();
+        this.host.emit({
+          type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id,
+          kind: q.kind, asks: q.asks, options: q.options, window: paneHere.window,
+        }, true);
+        log(`${this.label}: the window is asking on its way up (${q.kind}): ${q.options.map((o) => o.text).join(' / ')}`);
+      }
+    } else if (this.startup) {
+      this.host.emit({ type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id, gone: true }, true);
+      this.startup = null;
+    }
+
     // Keep reading the desk's conversation even with no window open on it.
     // Closing a tab does not un-say what was said, and the floor should still
     // be showing it when you come back.
@@ -256,7 +284,7 @@ class Desk {
     // switch apps, which is when the floor is used.
     const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId ?? this.lastSessionId });
     if (!r.ok) {
-      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error }, true);
+      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
     } else if (r.unverified) {
       // Delivered, but with no transcript to check it against. The floor is
       // not told a message failed when it may well have arrived — but this
@@ -296,6 +324,14 @@ class Desk {
     // nothing to explain.
     if (typeof reason === 'string') return W.denyWithReason(this.cwd, key, reason);
     return W.answerPrompt(this.cwd, key);
+  }
+
+  /** A startup question is answered by one of its own rows, by number, and
+   *  nothing else: there is no approve or deny on a trust dialog. */
+  async answerStartup(decision) {
+    const n = Number(decision);
+    if (!Number.isInteger(n) || n < 1) return { ok: false, error: `a startup question is answered by choosing one of its rows, not "${decision}"` };
+    return W.answerStartup(this.cwd, n);
   }
 
   async interrupt() { return W.interrupt(this.cwd); }
@@ -372,6 +408,57 @@ class Host {
     return reply;
   }
 
+  /**
+   * Look at the roots again, and take up whatever has appeared, moved or gone
+   * since the last look.
+   *
+   * discoverDesks() used to run once, in main(), and the list it returned was
+   * this host's for life. That made the most ordinary thing a person does —
+   * point a repo's .mcp.json at this board, or at a new channel, and open
+   * Claude Code in it — the one thing the floor could not follow: the hooks
+   * reported the desk within a second (they read .mcp.json per event) while
+   * the host went on serving the list it had at boot, and the compose box said
+   * "No host on this board is running that repo" until somebody restarted a
+   * launchd job. Closing the editor, reopening it and reloading the page all
+   * correctly changed nothing. Restarting a service is not an acceptable price
+   * for editing a file, so the host looks again: before every heartbeat on its
+   * own, and on request (a `rescan` work item), which the board sends the
+   * moment a session starts in a repo no host runs. The walk is shallow — see
+   * discoverDesks — and measured at ~200ms over a real projects directory.
+   *
+   * A desk that has moved (same name, different repo) is a different desk and
+   * gets a fresh Desk: it reads its own transcript from its own offset rather
+   * than carrying the old repo's. A desk that is gone is dropped here, and the
+   * next register() — which names every desk this host has, every time — is
+   * how the board learns to mark it offline.
+   */
+  async rescan(reason = 'heartbeat') {
+    const origin = originOf(this.cfg.url);
+    const found = discoverDesks(this.cfg.roots).filter((d) => originOf(d.url) === origin);
+    const seen = new Set();
+    let changed = false;
+    for (const d of found) {
+      const k = `${d.channel}|${d.agent}`;
+      seen.add(k);
+      // A host installed before any repo was bound to its board has no token
+      // to talk with. The first desk that appears is where one comes from —
+      // the same rule main() applies at boot.
+      if (!this.cfg.token && d.key) this.cfg.token = d.key;
+      const have = this.desks.get(k);
+      if (have && have.cwd === W.canonical(d.cwd)) continue;
+      this.desks.set(k, new Desk(this, d));
+      log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${reason})`);
+      changed = true;
+    }
+    for (const [k, desk] of this.desks) {
+      if (seen.has(k)) continue;
+      this.desks.delete(k);
+      log(`dropped desk ${desk.label} — ${desk.cwd} no longer binds it to ${origin}  (${reason})`);
+      changed = true;
+    }
+    return changed;
+  }
+
   /** Re-read the roster and each desk's transcript. This is the whole of how
    *  the floor learns what is happening — no hook has to report a turn. */
   async watch() {
@@ -404,6 +491,17 @@ class Host {
   }
 
   async handle(item) {
+    if (item.kind === 'rescan') {
+      // Asked for rather than scheduled: the board saw a session start on a
+      // desk no host runs, or somebody pressed the button, and this host may
+      // be the one whose roots that repo is under. Before the desk lookup,
+      // because not having the desk is the whole point. Register straight
+      // after a change so the floor hears the answer in this tick rather than
+      // at the next heartbeat.
+      const why = item.payload?.why ?? 'asked';
+      if (await this.rescan(`${why} — ${item.channel}/${item.agent}`)) await this.register();
+      return;
+    }
     const desk = this.desks.get(`${item.channel}|${item.agent}`);
     if (!desk) return warn(`work for a desk this host doesn't have: ${item.channel}/${item.agent}`);
     switch (item.kind) {
@@ -417,12 +515,18 @@ class Host {
         // there and be delivered later, into whatever window exists by then —
         // as a bare keystroke, to a prompt that is no longer asking. That is how
         // a row of 1s ended up submitted as somebody's message.
-        const age = Date.now() - (Number(item.payload?.queued_at) || 0);
-        if (item.payload?.queued_at && age > ANSWER_TTL_MS) {
+        // A startup question is not a menu: its rows have no numbers and the
+        // cursor starts somewhere dangerous, so it has its own presser.
+        const isStartup = String(item.payload?.request_id ?? '').startsWith('startup:');
+        // See W.answerIsStale for why a startup answer is exempt.
+        if (W.answerIsStale(item.payload, ANSWER_TTL_MS)) {
+          const age = Date.now() - (Number(item.payload?.queued_at) || 0);
           warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
           break;
         }
-        const r = await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
+        const r = isStartup
+          ? await desk.answerStartup(item.payload?.decision)
+          : await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
         if (!r.ok) {
           warn(`${desk.label}: could not answer the prompt — ${r.error}`);
           // Told to the board, not only to this log. The floor now clears a
@@ -433,10 +537,17 @@ class Host {
           // clear honest.
           // What was observed, and which decision it was: the desk re-poses on
           // this, and "your approve did not land, the window still reads X" is
-          // something a person can act on where "failed" is not.
+          // something a person can act on where "failed" is not. A startup
+          // question is answered by a row number, never approve/deny, so it
+          // gets its own wording and its own code — `startup_answer_failed` —
+          // so the floor's re-offer (src/floor.js) fires on it too, rather than
+          // leaving the desk at a bare error for up to a minute.
           this.emit({
             type: 'error', channel: desk.channel, agent: desk.agent,
-            message: `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
+            code: isStartup ? 'startup_answer_failed' : null,
+            message: isStartup
+              ? `your choice did not reach the window — ${r.error}`
+              : `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
           }, true);
         }
         break;
@@ -567,7 +678,7 @@ class Host {
           // predictable — and this is the log they will read when a window came
           // up in a mode they did not choose.
           for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
-          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
+          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error, code: up.code ?? null }, true);
         }
         break;
       }
@@ -608,7 +719,7 @@ class Host {
           // it gives up rather than double-keying.
           const up = await W.waitReady(desk.cwd, { pid: opened.pid, target: opened.target });
           for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
-          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
+          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error, code: up.code ?? null }, true);
         }
         break;
       }
@@ -640,13 +751,28 @@ class Host {
   async run() {
     let backoff = 1000;
     let lastRegister = 0;
-    const watching = this.watchLoop();
+    let watching = null;
     while (!this.stopping) {
       try {
         if (Date.now() - lastRegister > HEARTBEAT_MS) {
+          // Look before saying: the heartbeat names every desk this host has,
+          // so a desk bound since the last one is on the board a minute later
+          // at the latest, with nothing restarted. See rescan().
+          await this.rescan('heartbeat');
           await this.register();
           lastRegister = Date.now();
         }
+        // The relay starts only after the first registration has landed, and
+        // that order is not tidiness. A desk's first watch tick reports which
+        // session is live there and who holds it, and the server files both
+        // against a row that register() creates — an event for a desk the
+        // server has never heard of is dropped without a word. Started beside
+        // register(), the first tick won that race on a desk new to this host
+        // (measured 2026-09-02: a session adopted and reported within
+        // milliseconds of boot, invisible on the board for a full heartbeat),
+        // and neither event is ever re-sent, because from the host's side
+        // nothing changed. Still a separate loop once it runs — see watchLoop.
+        watching ??= this.watchLoop();
         // The long poll is the pacing for *work*. The transcripts are read by
         // watchLoop() beside this, not between these lines.
         const reply = await this.request(
@@ -663,7 +789,7 @@ class Host {
         backoff = Math.min(backoff * 2, 30_000);
       }
     }
-    await watching;
+    if (watching) await watching;
   }
 
   async stop() {

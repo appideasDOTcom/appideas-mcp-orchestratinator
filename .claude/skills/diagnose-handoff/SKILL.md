@@ -112,12 +112,19 @@ enabled or first added — approving it once writes `enabledMcpjsonServers` into
 `.claude/settings.local.json`, which is **not committed**, so every machine hits
 it), and the folder-trust dialog. Do not guess between them. Look.
 
-**Either of those on a desk that already has a conversation is a symptom, not a
-missing feature.** The host answers only the resume-mode question, on purpose,
-and that is not a gap waiting to be filled: a desk reaches the board only
-because some client bootstrapped it, and bootstrapping is what writes the
-approval to disk. So the approval should already be there. Check, rather than
-proposing to auto-answer it:
+**Since 2026-09-03 the floor shows these.** The host reads a startup dialog
+off the pane and the desk carries it as a prompt — "Before it can start, the
+window asks" — with the dialog's own rows as buttons, and the host presses
+only the row the operator picks (`startupQuestionOf` / `answerStartup` in
+[`host/window.js`](../../../host/window.js)). A desk that says "starting" with
+no such prompt is therefore a desk whose host is not running the new code, or
+a dialog the reader does not know; capture the pane and add it there.
+
+**The host still answers only the resume-mode question, on purpose.** A
+VS Code session defers the MCP approval and a re-pointed `.mcp.json`
+invalidates it, so these dialogs are ordinary now — but the answer stays a
+person's. If one stands on a desk that has been talking to the board for
+days, it is still worth checking why the approval went missing:
 
 ```bash
 cat <desk repo>/.claude/settings.local.json     # expect enabledMcpjsonServers
@@ -146,25 +153,31 @@ Also confirm the host picked the right board — `grep '→ http' ~/.orchestrati
 should say `http://localhost:8787`. The log goes quiet after startup, so silence
 proves nothing.
 
-**And check the desks, not just the code.** `discoverDesks()` runs once, in
-`main()`. The host then re-registers that same cached array every minute, so the
-heartbeat is live while the desk list behind it is frozen at boot — a host that
-looks perfectly healthy can be serving an identity the repo abandoned hours ago.
-Compare the host's start time against the *repo's* `.mcp.json`, not only against
-`host/index.js`:
+**And check the desks, not just the code — but a stale list is not a `kickstart`
+matter any more.** `discoverDesks()` used to run once, in `main()`, so a repo
+bound to the board after the host started stayed invisible until a restart.
+Since 2026-09-03 the host rescans its roots before every heartbeat, and the
+server asks every live host to look immediately when a session starts on a
+desk none of them runs (`host/index.js`'s `rescan()`, `askRescan()` in
+`src/floor.js`) — see [[host-desk-rescan-blocks-handoff]]. A binding that has
+genuinely changed therefore self-heals within the heartbeat interval (a
+minute) on its own, and the floor's "No host on this board is running that
+repo" hint carries a **Look now** button (`/api/floor/rescan`) that forces the
+same look immediately, for anyone who would rather not wait. Compare the
+host's start time against the *repo's* `.mcp.json` only to confirm the host
+is actually running the rescanning code, not as the fix itself:
 
 ```bash
 ps -o lstart= -p $(pgrep -f "host/index.js" | head -1)
+ls -lT host/index.js host/window.js   # a process older than these predates the rescan
 ls -lT .mcp.json                      # X-Channel / X-Agent live in here
 grep -A3 '→ http' ~/.orchestratinator/log/host.log | tail -4   # what it actually serves
+grep -E 'found desk|dropped desk' ~/.orchestratinator/log/host.log | tail -8   # what changed, and when
 ```
 
-If the log names a channel the repo no longer declares, that is the bug, and the
-same `kickstart` fixes it. This is worth knowing because of how it presents: a
-stale desk list makes the floor say **"No host on this board is running that
-repo"** — `not_hosted`, decided before the editor is ever consulted — so closing
-the editor, reopening it, and refreshing the page all correctly change nothing.
-Every instinct the message provokes is a dead end.
+A `not_hosted` message that outlives one heartbeat with a current host running
+is the real anomaly — reach for `Look now` before a restart, and restart only
+if the host log shows it predates the rescan code.
 
 ## 6. Is the server the code you edited?
 

@@ -74,11 +74,24 @@ auto-answered** — `ANSWERS` in `host/window.js` is deliberately one question
 long. Answer them yourself:
 
 ```bash
-tmux -L probe send-keys -t p:probe '1'; sleep 1; tmux -L probe send-keys -t p:probe Enter
+# trust dialog: an arrow list with the cursor on "No, exit" — move down, then confirm
+tmux -L probe send-keys -t p:probe Down; sleep 0.5; tmux -L probe send-keys -t p:probe Enter
+# MCP dialog: an arrow list too, cursor starts on "Continue without using this MCP
+# server" — Enter there *disables* the server. Up twice lands on "Use this MCP
+# server"; a digit moves nothing (measured 2026-09-03, see host/window.js's
+# startupQuestionOf).
+tmux -L probe send-keys -t p:probe Up; sleep 0.4; tmux -L probe send-keys -t p:probe Up
+sleep 0.4; tmux -L probe send-keys -t p:probe Enter
 ```
 
 - `Quick safety check: Is this a project you created or one you trust?` — the
-  folder-trust dialog, on any directory Claude Code has not seen.
+  folder-trust dialog, on any directory Claude Code has not seen. On 2.1.258
+  it is `❯ No, exit / Yes, I trust this folder` with the cursor on **exit**:
+  a digit does nothing and Enter alone quits (measured 2026-09-03 — "1 then
+  Enter" exited rc=1 three runs in a row, and every capture afterwards said
+  "no server running", because the pane's exit took the server with it).
+  Run the pane as `claude; echo "[exited $?]"; sleep 900` while measuring, so
+  an exit is something you can read rather than a server that is gone.
 - `New MCP server found in this project` — if the scratch dir is under a repo
   with an `.mcp.json`. Keep the probe dir somewhere with none.
 

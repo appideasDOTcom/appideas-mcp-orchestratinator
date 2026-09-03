@@ -196,7 +196,9 @@ floor shows the prompt and says *"answer this in your editor"* — answer it
 there.
 
 **6. Ring the service bell** on any desk whose tray shows waiting messages or
-tasks. The agent picks them up.
+tasks. The agent picks them up. A desk with no window open shows its bell
+half-lit: ringing it opens the window first — the conversation resumes where
+it left off — and then nudges.
 
 **7. Type to a desk from the floor** by first closing that conversation's tab
 in your editor and clicking **Open on the Floor** — one app at a time. The composer

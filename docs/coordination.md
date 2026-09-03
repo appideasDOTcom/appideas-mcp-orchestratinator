@@ -26,7 +26,8 @@ half-built chat client called `orch` — is gone.
 
 What the floor still cannot do is make an agent act *on the board*: leaving a
 task in `list_tasks` does not wake anybody. Type to them on the floor instead —
-or ring the service bell on their desk, which delivers a nudge for you.
+or ring the service bell on their desk, which delivers a nudge for you — opening
+the desk's window first if none is open.
 
 ## Channels: one server, many teams
 
