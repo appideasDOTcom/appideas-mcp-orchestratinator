@@ -2349,14 +2349,17 @@
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${unreadable ? 'unreadable' : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${unreadable ? 'unreadable' : ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
         ? `<div class="p-alert p-alert-ask">
              <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to the window…</div>
            </div>`
-        : s.awaiting_kind
+        // A startup question stands on its own: the window asking it has no
+        // session yet, and an editor session in the same repo may be the
+        // desk's current one and not waiting on anything.
+        : (s.awaiting_kind || req?.startup)
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
              <div>${req?.questions?.length
                // "permission request — AskUserQuestion" is the hook's words for
@@ -2367,8 +2370,13 @@
                // was the whole failure: it told the operator the floor could not
                // help and sent them to a terminal, which is the outcome the
                // floor exists to avoid.
-               : `<b>${esc(s.awaiting_kind.replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
-             } <span class="mono t-when" data-at="${esc(s.awaiting_since)}"></span></div>
+               // A window that has not started yet, asking whether it may. The
+               // question is the dialog's own sentence; the rows below are its
+               // own rows. See startupQuestionOf in host/window.js.
+               : req?.startup
+               ? `<b>Before it can start, the window asks</b> — ${esc(clip(req.summary, 220))}`
+               : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
+             } <span class="mono t-when" data-at="${esc(req?.startup ? (s.awaiting_since ?? req.at ?? '') : s.awaiting_since)}"></span></div>
              ${req?.questions?.length ? askHtml(req) : ''}
              ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question from the window\u2026</div>` : ''}
              ${unreadable && !reading ? `<div class="p-unknown">
@@ -2380,7 +2388,12 @@
                  <button class="btn" data-act="press" data-choice="interrupt" title="Stop the turn instead of answering it">Interrupt</button>
                </div>
              </div>` : ''}
-             ${req && !req.questions?.length && !reading && !unreadable ? `<div class="p-decide">
+             ${req?.startup ? `<div class="p-startup">
+               <div class="p-unknown-why">Nothing here is answered for you. Pick a row and that row is chosen in the window, the same as pressing it there.</div>
+               <div class="p-more">${req.options.map((o) =>
+                 `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(o.text)}</span></button>`).join('')}</div>
+             </div>` : ''}
+             ${req && !req.questions?.length && !reading && !unreadable && !req.startup ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="${req.choices?.denyAsks ? 'deny-open' : 'decide'}" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>

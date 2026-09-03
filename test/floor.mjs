@@ -1140,6 +1140,50 @@ try {
   eq(look.status, 200, 'the button asks outright');
   assert((await look.json()).asked >= 1, 'and says how many hosts it asked');
   eq(await workMove(), ['rescan'], 'past the throttle — one click, one look');
+
+  /* ── a window asking before it starts ───────────────────────────────────────
+   * Folder trust and "New MCP server found" are asked before a session exists,
+   * so no hook reports them. The host reads them off the pane and says so; the
+   * board offers their rows like any prompt; the answer goes back down the
+   * permission route as a row number. A VS Code session defers the MCP approval
+   * and a re-pointed .mcp.json invalidates it, so this is the first thing a
+   * new user meets — and used to be a desk that said "starting" for ever. */
+  console.log('\na window asking before it starts');
+  const eventsMove = (events) =>
+    fetch(`${HOST}/api/host/events`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-move', events }) }).then((r) => r.json());
+  const moverDesk = () => floor().then((fl) => deskOf(fl, 'mover-a'));
+  const MCP_ROWS = [
+    { n: 1, text: 'Use this MCP server' },
+    { n: 2, text: 'Use this and all future MCP servers in this project' },
+    { n: 3, text: 'Continue without using this MCP server' },
+  ];
+  eq((await eventsMove([{
+    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
+    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
+  }])).applied, 1, 'the host reports a startup question on a desk whose window has not registered');
+  let md = await moverDesk();
+  eq(md.permission?.startup, true, 'and the desk carries it as a prompt of its own kind');
+  eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with the dialog’s own rows');
+  // The desk's current session is whichever row was touched last — here the
+  // hook session from the rescan section, and on a real desk an editor whose
+  // hooks keep firing — so the queue must not depend on that row being marked.
+  eq((await floor()).queue.some((q) => q.agent === 'mover-a'), true, 'the desk is in the queue on the strength of the question alone, so "N need you" counts it');
+  eq((await floor()).channels.find((c) => c.channel === CH).awaiting >= 1, true, 'and the floor’s own count agrees');
+  const chose = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
+  });
+  eq(chose.status, 200, 'a row is chosen through the same route as any prompt');
+  const work = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
+  eq(work.work.map((w) => `${w.kind}:${w.payload.decision}:${w.payload.request_id}`), ['permission:1:startup:@9:mcp'],
+     'and reaches the host as that row, on that request — which is what routes it to the startup presser');
+  eq((await moverDesk()).permission ?? null, null, 'the prompt comes down the moment the choice is made');
+  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp', asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS }]);
+  eq((await moverDesk()).permission?.startup, true, 'said again while it stands (a restarted server hears it a minute later)');
+  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
+  md = await moverDesk();
+  eq(md.permission ?? null, null, 'and gone when the host sees the dialog leave');
+  eq((await floor()).queue.some((q) => q.agent === 'mover-a'), false, 'with the desk out of the queue');
 } catch (err) {
   failures++;
   console.error(`\n  ✗ ${err.stack ?? err}`);

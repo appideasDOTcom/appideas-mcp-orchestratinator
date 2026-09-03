@@ -364,6 +364,57 @@ async function main() {
     eq(q1?.options.map((o) => o.text), ['You route it; I hand you the paths only', 'Post, and open one task per High finding', 'Hold them for review', 'Type something.'],
        'its choices, with "Chat about this" left out as on every form');
     eq(q1?.kind, 'single', 'a single-select');
+
+    /* The questions Claude Code asks before it has a session. Both captured
+     * raw off a real 2.1.258 pane 2026-09-03 — blank lines and all, because
+     * the blank lines are how the option block is told apart from the prose
+     * above it. Neither is ever answered by the host; both are read so the
+     * floor can offer their rows. */
+    const RAW_TRUST = [
+      '─'.repeat(80),
+      ' Accessing workspace:',
+      '',
+      ' /tmp/somewhere',
+      '',
+      " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this",
+      ' folder first.',
+      '',
+      " Claude Code'll be able to read, edit, and execute files here.",
+      '',
+      ' Security guide',
+      '',
+      ' ❯ No, exit',
+      '   Yes, I trust this folder',
+      '',
+      ' Enter to confirm · Esc to cancel',
+      '',
+    ].join('\n');
+    const RAW_MCP = [
+      '',
+      '─'.repeat(80),
+      '  New MCP server found in this project: orchestratinator',
+      '',
+      '  MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP documentation.',
+      '',
+      '    Use this MCP server',
+      '    Use this and all future MCP servers in this project',
+      '  ❯ Continue without using this MCP server',
+      '',
+      '  Enter to confirm · Esc to cancel',
+      '',
+    ].join('\n');
+    const trust = W.startupQuestionOf(RAW_TRUST);
+    eq(trust?.kind, 'trust', 'the folder-trust dialog is recognised');
+    eq(trust?.options.map((o) => o.text), ['No, exit', 'Yes, I trust this folder'], 'its two rows are read, and "Security guide" above the blank line is not one of them');
+    eq(trust?.at, 0, 'with the cursor on exit — which is why nothing here is ever pressed blind');
+    const mcp = W.startupQuestionOf(RAW_MCP);
+    eq(mcp?.kind, 'mcp', 'the new-MCP-server dialog is recognised');
+    eq(mcp?.asks, 'New MCP server found in this project: orchestratinator', 'and names the server it is asking about');
+    eq(mcp?.options.map((o) => o.text), ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'],
+       'its three rows are read, and the description sentence above them is not one');
+    eq(mcp?.at, 2, 'with the cursor on "continue without" — Enter alone would disable the server');
+    eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
+    eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
     // The preview panel to the right, and Claude Code's own trailing item, are
     // furniture rather than choices. Both used to arrive attached to Charlie.
     assert(qs.options.every((o) => !o.detail), 'nothing from the preview panel is mistaken for a choice\u2019s description');

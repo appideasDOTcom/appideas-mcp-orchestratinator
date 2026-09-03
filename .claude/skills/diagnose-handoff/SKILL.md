@@ -112,12 +112,19 @@ enabled or first added — approving it once writes `enabledMcpjsonServers` into
 `.claude/settings.local.json`, which is **not committed**, so every machine hits
 it), and the folder-trust dialog. Do not guess between them. Look.
 
-**Either of those on a desk that already has a conversation is a symptom, not a
-missing feature.** The host answers only the resume-mode question, on purpose,
-and that is not a gap waiting to be filled: a desk reaches the board only
-because some client bootstrapped it, and bootstrapping is what writes the
-approval to disk. So the approval should already be there. Check, rather than
-proposing to auto-answer it:
+**Since 2026-09-02 the floor shows these.** The host reads a startup dialog
+off the pane and the desk carries it as a prompt — "Before it can start, the
+window asks" — with the dialog's own rows as buttons, and the host presses
+only the row the operator picks (`startupQuestionOf` / `answerStartup` in
+[`host/window.js`](../../../host/window.js)). A desk that says "starting" with
+no such prompt is therefore a desk whose host is not running the new code, or
+a dialog the reader does not know; capture the pane and add it there.
+
+**The host still answers only the resume-mode question, on purpose.** A
+VS Code session defers the MCP approval and a re-pointed `.mcp.json`
+invalidates it, so these dialogs are ordinary now — but the answer stays a
+person's. If one stands on a desk that has been talking to the board for
+days, it is still worth checking why the approval went missing:
 
 ```bash
 cat <desk repo>/.claude/settings.local.json     # expect enabledMcpjsonServers

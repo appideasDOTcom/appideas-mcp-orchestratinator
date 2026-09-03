@@ -45,6 +45,8 @@ const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestrat
 /** How long a queued permission answer stays worth delivering. */
 const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
+/** How often a startup question still on screen is said to the board again. */
+const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
 const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
@@ -126,6 +128,8 @@ class Desk {
     this.lastSessionId = null;
     this.holder = null;      // 'floor' | 'editor' | null, as last reported
     this.paneWindow = null;  // a tmux window in this repo, registered session or not
+    this.startup = null;     // the startup question the window is sitting on, as last reported
+    this.startupSaidAt = 0;
     this.holders = 0;        // live processes claiming this conversation
     this.clients = 0;        // terminals attached to the tmux session
     this.offset = 0;         // bytes of that transcript already sent up
@@ -231,6 +235,30 @@ class Desk {
         window_open: this.paneWindow, holders, clients,
       }, true);
     }
+    // A window here whose process is not in the roster is starting — and one
+    // that stays that way is sitting on a question. Read it and put it on the
+    // floor, so the person waiting on a desk that says "starting" can see what
+    // it wants and answer from where they are. Said again once a minute while
+    // it stands, so a server that restarted meanwhile hears it too. Why the
+    // host reads these and never answers them is beside startupQuestionOf.
+    const booting = paneHere && !live.some((x) => x.pid === paneHere.pid);
+    const q = booting ? await W.startupQuestionAt(paneHere.target) : null;
+    if (q) {
+      const said = `${q.kind}|${q.options.map((o) => o.text).join('|')}`;
+      if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
+        this.startup = { said, request_id: `startup:${paneHere.window}:${q.kind}` };
+        this.startupSaidAt = Date.now();
+        this.host.emit({
+          type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id,
+          kind: q.kind, asks: q.asks, options: q.options, window: paneHere.window,
+        }, true);
+        log(`${this.label}: the window is asking on its way up (${q.kind}): ${q.options.map((o) => o.text).join(' / ')}`);
+      }
+    } else if (this.startup) {
+      this.host.emit({ type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id, gone: true }, true);
+      this.startup = null;
+    }
+
     // Keep reading the desk's conversation even with no window open on it.
     // Closing a tab does not un-say what was said, and the floor should still
     // be showing it when you come back.
@@ -256,7 +284,7 @@ class Desk {
     // switch apps, which is when the floor is used.
     const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId ?? this.lastSessionId });
     if (!r.ok) {
-      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error }, true);
+      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
     } else if (r.unverified) {
       // Delivered, but with no transcript to check it against. The floor is
       // not told a message failed when it may well have arrived — but this
@@ -296,6 +324,14 @@ class Desk {
     // nothing to explain.
     if (typeof reason === 'string') return W.denyWithReason(this.cwd, key, reason);
     return W.answerPrompt(this.cwd, key);
+  }
+
+  /** A startup question is answered by one of its own rows, by number, and
+   *  nothing else: there is no approve or deny on a trust dialog. */
+  async answerStartup(decision) {
+    const n = Number(decision);
+    if (!Number.isInteger(n) || n < 1) return { ok: false, error: `a startup question is answered by choosing one of its rows, not "${decision}"` };
+    return W.answerStartup(this.cwd, n);
   }
 
   async interrupt() { return W.interrupt(this.cwd); }
@@ -484,7 +520,11 @@ class Host {
           warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
           break;
         }
-        const r = await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
+        // A startup question is not a menu: its rows have no numbers and the
+        // cursor starts somewhere dangerous, so it has its own presser.
+        const r = String(item.payload?.request_id ?? '').startsWith('startup:')
+          ? await desk.answerStartup(item.payload?.decision)
+          : await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
         if (!r.ok) {
           warn(`${desk.label}: could not answer the prompt — ${r.error}`);
           // Told to the board, not only to this log. The floor now clears a
@@ -629,7 +669,7 @@ class Host {
           // predictable — and this is the log they will read when a window came
           // up in a mode they did not choose.
           for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
-          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
+          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error, code: up.code ?? null }, true);
         }
         break;
       }
@@ -670,7 +710,7 @@ class Host {
           // it gives up rather than double-keying.
           const up = await W.waitReady(desk.cwd, { pid: opened.pid, target: opened.target });
           for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
-          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error }, true);
+          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error, code: up.code ?? null }, true);
         }
         break;
       }

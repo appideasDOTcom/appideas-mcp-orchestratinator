@@ -1122,6 +1122,56 @@ function applyHostEvent(store, live, hostId, ev) {
       break;
     }
 
+    /**
+     * A question the window is asking before it has a session — folder trust,
+     * a new MCP server. Read off the pane by the host (startupQuestionOf in
+     * host/window.js has the measurements, and why it is offered rather than
+     * answered), and put on the desk exactly as a permission prompt is, so the
+     * same buttons, the same decision route and the same keystroke path answer
+     * it. `gone` is the host seeing the dialog leave — answered from here, in
+     * tmux, or by the window registering — and takes the prompt down with it.
+     */
+    case 'startup': {
+      const rid = str(ev.request_id);
+      if (!rid) break;
+      const open = live.pending.get(key);
+      if (ev.gone) {
+        if (open?.request_id === rid) {
+          live.pending.delete(key);
+          live.answered.delete(key);
+          store.clearAwaiting(sessionId);
+          store.clearDeskAwaiting(channel, agent);
+          state('idle');
+          live.publish(key, { type: 'permission', request_id: rid, decision: 'gone', resolved: true });
+        }
+        break;
+      }
+      const options = Array.isArray(ev.options)
+        ? ev.options.filter((o) => o && Number.isInteger(o.n) && typeof o.text === 'string').map((o) => ({ n: o.n, text: clip(o.text, 200) }))
+        : [];
+      if (!options.length) break;
+      const asks = clip(str(ev.asks) ?? 'the window is asking something before it starts', 300);
+      // The desk needs a session row to be marked as waiting on, and a window
+      // that has not registered has none of its own yet. The conversation it
+      // is about to resume, or the placeholder, is that row — the same one a
+      // message sent before the window opened is filed under.
+      store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd, runner: 'host', pid: null });
+      live.pending.set(key, {
+        request_id: rid, tool: 'startup', startup: true, kind: str(ev.kind) ?? null,
+        summary: asks, options, read: true, reading: false, at: now,
+      });
+      // Marked on that row by id, not on "the desk's newest session": a live
+      // editor session in the same repo is newer every time its hooks fire,
+      // and its next tool call would clear a mark put there. The floor does
+      // not rely on this mark for a startup prompt anyway — the request itself
+      // is what puts the desk in the queue (see buildFloor) — so the window
+      // keeps asking on the floor whatever the editor is doing.
+      store.setAwaiting(sessionId, 'permission_request', asks);
+      state('awaiting');
+      live.publish(key, { type: 'permission', request: live.pending.get(key) });
+      break;
+    }
+
     case 'error': {
       // Whatever else this is, nothing is quietly on its way any more. Leaving
       // the note up would have the desk showing "queued" beside the error
@@ -1161,8 +1211,16 @@ function applyHostEvent(store, live, hostId, ev) {
       // the one place it has to show: this is what a decision the host could
       // not deliver looks like, now that the desk stops asking as soon as the
       // operator answers.
-      store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
-      state(again ? 'awaiting' : 'idle');
+      // Not for a window that is merely asking before it starts. The host's
+      // open or send gives up on such a window with `startup_question`, and
+      // the question is already standing on this desk as a prompt (see the
+      // startup case) — painting the desk red on top of it turned "the window
+      // asks whether it may start" into "something went wrong". The chat line
+      // above still says what happened; the prompt says what to do.
+      if (str(ev.code) !== 'startup_question') {
+        store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
+        state(again ? 'awaiting' : 'idle');
+      }
       break;
     }
 
@@ -1322,20 +1380,26 @@ export function buildFloor(store, live = null, sessions = null) {
         // which is a promise the board already makes — but a prompt in a room
         // the operator has put away is not "N need you" on a floor they are
         // looking at, and counting it there is how a queue stops being a queue.
-        if (live_ && s?.awaiting_kind && !shelved) {
+        // A window asking before it starts has no session to be waiting on —
+        // that is what "before it starts" means — so the request itself is
+        // what puts the desk here. Otherwise a person waiting on a trust
+        // dialog would be missing from the one list built to surface them.
+        const booting = pendingReq?.startup ? pendingReq : null;
+        const since = awaitingSince ?? iso(booting?.at);
+        if (live_ && (s?.awaiting_kind || booting) && !shelved) {
           queue.push({
             channel,
             agent: p.agent,
             persona: p.persona,
-            kind: s.awaiting_kind,
-            message: s.awaiting_message,
-            since: awaitingSince,
-            waiting_seconds: awaitingSince ? Math.max(0, Math.round((nowMs - Date.parse(awaitingSince)) / 1000)) : null,
-            cwd: s.cwd,
+            kind: s?.awaiting_kind ?? 'permission_request',
+            message: s?.awaiting_message ?? booting?.summary ?? null,
+            since,
+            waiting_seconds: since ? Math.max(0, Math.round((nowMs - Date.parse(since)) / 1000)) : null,
+            cwd: s?.cwd ?? h?.cwd ?? null,
             // The name of the window to go to. A full path is correct and
             // unreadable; the last segment is what the tab actually says.
-            window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
-            session_id: s.session_id,
+            window: (s?.cwd ?? h?.cwd) ? (s?.cwd ?? h.cwd).split('/').filter(Boolean).pop() : null,
+            session_id: s?.session_id ?? null,
             // A hosted prompt can be answered right here — but only if the
             // floor can reach the window that is asking. Answering means
             // pressing a key in it, and a conversation open in an editor has
@@ -1504,7 +1568,7 @@ export function buildFloor(store, live = null, sessions = null) {
       archived: shelved,
       desks,
       live: desks.filter((d) => d.live).length,
-      awaiting: desks.filter((d) => d.live && d.session?.awaiting_kind).length,
+      awaiting: desks.filter((d) => d.live && (d.session?.awaiting_kind || d.permission?.startup)).length,
       // What the board prints in this channel's header. Same numbers, same
       // source, so the two surfaces cannot report different amounts of work.
       stats: counts.get(channel) ?? ZERO_COUNTS,

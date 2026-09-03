@@ -282,6 +282,17 @@ export async function sessionFor(cwd) {
  * as a design gap. It was not. That desk had been calling MCP tools since
  * 29 August, so it plainly had the approval; its settings file had gone missing
  * in between. One anomaly, generalised into an argument for widening this list.
+ *
+ * ── what changed on 2026-09-02, and what did not ──
+ *
+ * "A desk cannot arrive here cold" has two exceptions, both met on the live
+ * board: a VS Code session defers the MCP approval until a tool is used, so a
+ * desk bootstrapped there has no approval on disk; and re-pointing .mcp.json
+ * at another board invalidates the approval that was there. So a window the
+ * floor opens can indeed sit on one of these. What did not change is this
+ * list: the answer is still a person's. The window's question is now read
+ * off the pane and offered on the floor, row for row, and the host presses
+ * only the row the person picked — see startupQuestionOf and answerStartup.
  */
 const ANSWERS = [
   {
@@ -298,6 +309,116 @@ const ANSWERS = [
  *  matched: the line it had planned for had no cursor, and the line it read
  *  back had one. */
 const optionText = (line) => String(line ?? '').replace(/^\s*[\u276f>]?\s*/, '').trim();
+
+/**
+ * The questions Claude Code asks on its way up, before it has a session at all
+ * \u2014 read so they can be put in front of a person, never answered here.
+ *
+ * ANSWERS above says why the host will not answer these, and it also says a
+ * desk cannot arrive here cold, because whatever bootstrapped it wrote the
+ * approval to disk. That second half turned out to have two holes, both hit
+ * on 2026-09-02: a VS Code session defers the MCP approval until a tool is
+ * used, so a desk bootstrapped there has no approval on disk; and re-pointing
+ * `.mcp.json` at another board invalidates the one that was there. In both, the
+ * window the floor opens sits on a dialog, the floor shows a desk that is
+ * "starting", and the person waits \u2014 until they think to attach to tmux. The
+ * operator did; a partner would not.
+ *
+ * So the dialog is read and offered on the floor, row for row, exactly as a
+ * permission prompt is. The person picks; the host presses. Nothing changes
+ * about who decides.
+ *
+ * Measured on 2.1.258, 2026-09-03, on a throwaway window:
+ *
+ *   Quick safety check: Is this a project you created or one you trust? \u2026
+ *   \u276f No, exit                            <- cursor starts on exit
+ *     Yes, I trust this folder
+ *   Enter to confirm \u00b7 Esc to cancel
+ *
+ *   New MCP server found in this project: orchestratinator
+ *   MCP servers may execute code \u2026 Learn more in the MCP documentation.
+ *     Use this MCP server
+ *     Use this and all future MCP servers in this project
+ *   \u276f Continue without using this MCP server   <- cursor starts on "without"
+ *   Enter to confirm \u00b7 Esc to cancel
+ *
+ * Both are arrow lists with no numbers: a digit does nothing, Up/Down move,
+ * Enter takes the cursor's row. Where the cursor starts is the whole reason
+ * these are never pressed blind \u2014 Enter alone on the MCP dialog *disables* the
+ * server, and wrote `disabledMcpjsonServers` when it was tried. The option
+ * block is found from the footer up: the run of non-blank lines above it, one
+ * of which carries the cursor. Blank lines separate it from the prose above,
+ * so "Security guide" and the description sentence are not read as choices.
+ */
+const STARTUP_ASKS = [
+  { kind: 'trust', asks: /Is this a project you created or one you trust/i },
+  { kind: 'mcp', asks: /New MCP server found in this project/i },
+];
+export function startupQuestionOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  const known = STARTUP_ASKS.find((k) => lines.some((l) => k.asks.test(l)));
+  if (!known) return null;
+  let foot = lines.length - 1;
+  while (foot >= 0 && !lines[foot].trim()) foot--;
+  if (foot < 0 || !/enter to confirm/i.test(lines[foot])) return null;
+  let end = foot - 1;
+  while (end >= 0 && !lines[end].trim()) end--;
+  if (end < 0) return null;
+  let start = end;
+  while (start - 1 >= 0 && lines[start - 1].trim()) start--;
+  const block = lines.slice(start, end + 1);
+  const at = block.findIndex((l) => /^\s*[\u276f>]\s/.test(l));
+  if (at < 0) return null;
+  const options = block.map((l, i) => ({ n: i + 1, text: optionText(l) }));
+  const asks = lines.find((l) => known.asks.test(l))?.trim() ?? known.kind;
+  return { kind: known.kind, asks, options, at };
+}
+
+/** The startup question on a pane, if one is up. Thirty lines: both dialogs
+ *  fit in far fewer, and the footer is read positionally regardless. */
+export async function startupQuestionAt(target) {
+  return startupQuestionOf(await screenOf(target, 30));
+}
+
+/**
+ * Press the row the operator chose on a startup question \u2014 and only that row.
+ *
+ * The same shape as answerKnown: walk the cursor there, read the screen back,
+ * and press Enter only once the cursor is on the words that were asked for.
+ * If the dialog has changed underneath \u2014 answered in tmux, redrawn, gone \u2014
+ * nothing is pressed and the reason is what the pane shows.
+ */
+export async function answerStartup(cwd, n) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+  const q = startupQuestionOf(await screenOf(pane.target, 30));
+  if (!q) return { ok: false, code: 'no_prompt', error: 'the window is not on a startup question any more, so nothing was pressed' };
+  const want = q.options[n - 1];
+  if (!want) return { ok: false, code: 'stale_choice', error: `that dialog offers ${q.options.length} rows, not a row ${n}` };
+  const key = n - 1 > q.at ? 'Down' : 'Up';
+  for (let i = 0; i < Math.abs(n - 1 - q.at); i++) {
+    const moved = await tmux(['send-keys', '-t', pane.target, key]);
+    if (!moved.ok) return { ok: false, error: moved.error };
+    await sleep(80);
+  }
+  const now = startupQuestionOf(await screenOf(pane.target, 30));
+  const under = now?.options[now.at]?.text ?? null;
+  if (!now || under !== want.text) {
+    return {
+      ok: false, code: 'not_taken',
+      error: `the cursor is not on "${want.text}" \u2014 the window reads "${under ?? '(no dialog)'}", so Enter was not pressed`,
+    };
+  }
+  const sent = await tmux(['send-keys', '-t', pane.target, 'Enter']);
+  if (!sent.ok) return { ok: false, error: sent.error };
+  await sleep(ANSWER_CONFIRM_MS);
+  const after = startupQuestionOf(await screenOf(pane.target, 30));
+  const same = (a, b) => a && b && a.kind === b.kind && a.options.map((o) => o.text).join('|') === b.options.map((o) => o.text).join('|');
+  if (same(after, q)) {
+    return { ok: false, code: 'not_taken', error: `the window is still showing the same question after Enter \u2014 it reads "${after.options[after.at]?.text}"` };
+  }
+  return { ok: true, kind: q.kind, chose: want.text };
+}
 
 /** The numbered options on screen, and which one the cursor is on. */
 export function menuOf(screen) {
@@ -407,6 +528,20 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
         answered.push(did);
         await sleep(250);
         continue;                       // let it redraw before judging it ready
+      }
+      // A question this host will not answer. Waiting here helps nobody: the
+      // watch loop has already put it on the floor, and the answer comes back
+      // as work on the same loop this call is holding — so sitting out the
+      // timeout would keep the operator's own answer from being pressed.
+      // Return now, saying what is asked; the window registers on its own once
+      // it is answered, and the watch loop adopts it like any other.
+      const sq = await startupQuestionAt(target);
+      if (sq) {
+        return {
+          ok: false,
+          code: 'startup_question',
+          error: `the window is asking before it starts — ${sq.asks} (${sq.options.map((o) => o.text).join(' / ')}). Answer it on the floor; the window carries on from there.`,
+        };
       }
     }
 
