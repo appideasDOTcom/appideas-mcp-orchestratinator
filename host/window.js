@@ -2087,6 +2087,34 @@ export async function readTranscript(path, { after = 0 } = {}) {
   // two sources would file every turn twice, and the transcript is the one
   // Claude Code writes itself, whoever typed and from wherever.
   const turns = [];
+  /* The text blocks of a message, whichever shape it was written in: a plain
+   * string, or a content-block list with the text blocks picked out. */
+  const blocksOf = (content) => (typeof content === 'string' ? [content]
+    : Array.isArray(content)
+      ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text)
+      : []);
+  /* A message is not all the person. Claude Code glues injected context onto
+   * what somebody typed — IDE state, slash-command records, its own notices —
+   * each as its own block (or a whole message of them). Joining every block
+   * into one string put that context on the floor as the operator's words,
+   * tag and all. The block boundary is the discriminator: a block that is
+   * wholly one tagged wrapper becomes a `context` turn labeled by its tag, and
+   * only the remaining blocks are the person. One rule for every door a
+   * message comes in by — see the two callers. */
+  const personTurns = (blocks, at, uuid) => {
+    let human = [];
+    const flush = () => {
+      const text = human.join('');
+      if (text.trim()) turns.push({ role: 'user', text, at, uuid });
+      human = [];
+    };
+    for (const s of blocks) {
+      const tag = contextTagOf(s);
+      if (tag) { flush(); turns.push({ role: 'context', text: s.trim(), tool_name: tag, at, uuid }); }
+      else human.push(s);
+    }
+    flush();
+  };
   for (const line of complete) {
     if (!line.trim()) continue;
     let d;
@@ -2123,8 +2151,15 @@ export async function readTranscript(path, { after = 0 } = {}) {
      * visible and fixable; the other mistake is silent.
      */
     if (d.type === 'attachment' && d.attachment?.type === 'queued_command' && !d.isSidechain) {
-      const queued = textOf(d.attachment.prompt);
-      if (queued.trim()) turns.push({ role: 'user', text: queued, at: d.timestamp ?? null, uuid: d.uuid ?? null });
+      // Not always a person. Claude Code delivers its own notices through
+      // this same queue — a background command finishing, a subagent's result
+      // — as one <task-notification> block, and this used to file each as the
+      // operator's words: "YOU", over fourteen kilobytes of another agent's
+      // report, drawn as plain text because that is what the operator's own
+      // typing is drawn as (seen on the qa desk, 2026-09-02). The same block
+      // rule a user record gets, so the panel can tell the system from the
+      // person here too.
+      personTurns(blocksOf(d.attachment.prompt), d.timestamp ?? null, d.uuid ?? null);
       continue;
     }
 
@@ -2136,30 +2171,8 @@ export async function readTranscript(path, { after = 0 } = {}) {
     const uuid = d.uuid ?? null;
 
     if (d.type === 'user') {
-      /* A user record is not all the operator. Claude Code glues injected
-       * context onto the person's message — IDE state, slash-command records —
-       * each as its own content block (or a whole record of them). Joining
-       * every block into one string put that context on the floor as the
-       * operator's own words, tag and all. The block boundary is the
-       * discriminator: context blocks become `context` turns labeled by their
-       * tag, and only the remaining blocks are the person. */
-      const content = d.message?.content;
-      const blocks = typeof content === 'string' ? [content]
-        : Array.isArray(content)
-          ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text)
-          : [];
-      let human = [];
-      const flush = () => {
-        const text = human.join('');
-        if (text.trim()) turns.push({ role: 'user', text, at, uuid });
-        human = [];
-      };
-      for (const s of blocks) {
-        const tag = contextTagOf(s);
-        if (tag) { flush(); turns.push({ role: 'context', text: s.trim(), tool_name: tag, at, uuid }); }
-        else human.push(s);
-      }
-      flush();
+      // A user record is not all the operator — see personTurns.
+      personTurns(blocksOf(d.message?.content), at, uuid);
       continue;
     }
     const content = d.message?.content;

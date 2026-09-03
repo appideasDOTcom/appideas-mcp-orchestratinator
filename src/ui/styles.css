@@ -1056,6 +1056,22 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .t-user .t-body { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; }
 .t-error .t-body { color: var(--block); }
 
+/* A task notification — the system saying something the agent started has
+   finished. The alert box's amber, for the alert box's reason: something
+   happened and nothing went wrong. Its result is an agent's writing, so it is
+   drawn like an agent's turn rather than as the wrappers it arrived in. */
+.t-note {
+  border: 1px solid var(--busy);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--busy) 7%, transparent);
+}
+.t-note .t-who { color: var(--busy); }
+.t-note-summary { font-size: 12.5px; margin: 2px 0 0; }
+.t-note .t-body { margin-top: 6px; }
+.t-note-aside { font-size: 11px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t-note-file { font-size: 10.5px; margin-top: 4px; }
+
 /* Rendered agent messages. `pre-wrap` above is what makes a plain message keep
    its shape, so it stays the default and this class turns it off: md() has
    already turned the line breaks it wants to keep into <br>, and leaving both

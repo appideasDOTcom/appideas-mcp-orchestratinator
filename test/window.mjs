@@ -749,6 +749,23 @@ async function main() {
     eq(ctxRead.turns[0].tool_name, 'ide_opened_file', 'a context turn is labeled by its tag');
     eq(ctxRead.turns[2].tool_name, 'command-name', 'and by the first tag when a record is several wrappers');
 
+    /* Claude Code's own notices come in by the message queue too — a
+     * background command finishing, a subagent's result — as one
+     * <task-notification> block in a queued_command. Read from the qa desk's
+     * live transcript 2026-09-02, when the floor showed "YOU" over fourteen
+     * kilobytes of another agent's report, as plain text. */
+    const noteT = `${CLAUDE_HOME}/projects/note-shape/n.jsonl`;
+    mkdirSync(dirname(noteT), { recursive: true });
+    const notice = '<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n<summary>Agent "review" finished</summary>\n<result>## Findings\n\n**1.** none</result>\n</task-notification>';
+    writeFileSync(noteT, [
+      JSON.stringify({ type: 'attachment', uuid: 'n1', isSidechain: false, attachment: { type: 'queued_command', prompt: [{ type: 'text', text: notice }], origin: { kind: 'system' } } }),
+      JSON.stringify({ type: 'attachment', uuid: 'n2', isSidechain: false, attachment: { type: 'queued_command', prompt: 'and a person is still a person', origin: { kind: 'human' } } }),
+    ].join('\n') + '\n');
+    const noteRead = await W.readTranscript(noteT);
+    eq(noteRead.turns.map((x) => `${x.role}:${x.tool_name ?? ''}`), ['context:task-notification', 'user:'],
+       'a queued notice from Claude Code itself is context labeled by its tag; a queued message from a person is still the person');
+    eq(noteRead.turns[0].text, notice, 'with the whole block kept, result and all, for the panel to draw');
+
     // Tailing: read from the offset, get only what is new.
     const empty = await W.readTranscript(t, { after: first.offset });
     eq(empty.turns.length, 0, 'nothing new is nothing new');

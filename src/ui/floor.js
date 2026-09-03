@@ -2054,6 +2054,63 @@
 
   /* ---------- the chat panel ---------- */
 
+  /**
+   * A task notification: Claude Code telling the agent that something it
+   * started in the background — a command, a subagent — has finished. It
+   * arrives through the message queue, so the relay used to file it as the
+   * operator's words, and this panel drew "YOU" over another agent's whole
+   * report, as plain text, because plain text is what the operator's own
+   * typing is drawn as. It is the system talking, like every other context
+   * turn — but unlike IDE state it carries something worth reading: a status,
+   * a one-line summary, and often the entire result. So it gets a note of its
+   * own. Amber-outlined like the alert box, for the same reason: something
+   * happened, and nothing went wrong. The result is drawn as markdown because
+   * it is an agent's writing, not the person's. The fields are read off the
+   * block's own child elements, so a shape this does not recognise falls
+   * through to the plain context line rather than to nothing.
+   */
+  // The fields read off a live notice (qa desk, 2026-09-02): task-id,
+  // tool-use-id, output-file, status, summary, then for an agent's result a
+  // `note` (Claude Code's aside about when these fire), the `result` itself,
+  // and a `usage` line of nested counters. Everything not named here is
+  // treated as the result and drawn as markdown, so a field this list has
+  // never seen is shown rather than dropped.
+  const NOTE_META = new Set(['task-id', 'tool-use-id', 'output-file', 'status', 'summary', 'note', 'usage']);
+  function noteFields(text) {
+    const inner = String(text ?? '').replace(/^\s*<[A-Za-z][\w-]*>/, '').replace(/<\/[A-Za-z][\w-]*>\s*$/, '');
+    const fields = [];
+    const re = /<([A-Za-z][\w-]*)>([\s\S]*?)<\/\1>/g;
+    let m;
+    while ((m = re.exec(inner))) fields.push([m[1], m[2].trim()]);
+    return fields;
+  }
+  /** `<subagent_tokens>335433</subagent_tokens><tool_uses>50</tool_uses>` →
+   *  "subagent tokens 335433 · tool uses 50". Counters, not prose. */
+  function noteUsage(s) {
+    return noteFields(`<u>${s}</u>`).map(([n, v]) => `${n.replace(/_/g, ' ')} ${v}`).join(' · ');
+  }
+  function noteNode(t) {
+    const f = noteFields(t.text);
+    if (!f.length) return null;
+    const get = (k) => f.find(([n]) => n === k)?.[1] ?? '';
+    const status = get('status');
+    const summary = get('summary');
+    const file = get('output-file');
+    const aside = get('note');
+    const usage = get('usage') ? noteUsage(get('usage')) : '';
+    const body = f.filter(([n]) => !NOTE_META.has(n)).map(([, v]) => v).filter(Boolean).join('\n\n');
+    const div = document.createElement('div');
+    div.dataset.id = t.id;
+    div.className = 't t-note';
+    div.innerHTML = `
+      <div class="t-who">task${status ? ` · ${esc(status)}` : ''}<span class="t-when mono" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
+      ${summary ? `<div class="t-note-summary">${esc(summary)}</div>` : ''}
+      ${body ? `<div class="t-body t-md">${md(body)}</div>` : ''}
+      ${aside ? `<div class="t-note-aside muted" title="${esc(aside)}">${esc(aside)}</div>` : ''}
+      ${file || usage ? `<div class="t-note-file mono muted"${file ? ` title="${esc(file)}"` : ''}>${esc([file ? file.split('/').filter(Boolean).slice(-2).join('/') : '', usage].filter(Boolean).join(' · '))}</div>` : ''}`;
+    return div;
+  }
+
   function turnNode(t) {
     const div = document.createElement('div');
     div.dataset.id = t.id;
@@ -2061,6 +2118,10 @@
       div.className = 't t-tool';
       div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span>`;
       return div;
+    }
+    if (t.role === 'context' && t.tool_name === 'task-notification') {
+      const note = noteNode(t);
+      if (note) return note;
     }
     if (t.role === 'context') {
       // The system talking, not the person: IDE state, slash-command records.
