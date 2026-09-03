@@ -123,6 +123,18 @@ const DELIVERY_STALE_MS = 10 * 60_000;
  * while somebody read it. There is nothing to answer and nowhere to go; the
  * composer immediately below the alert is the answer, and the desk's own idle
  * state and speech bubble already say the agent is waiting.
+ *
+ * The usage notice — "You've used 87% of your Fable limit · resets 3am" — is
+ * not a Notification at all. It is Claude Code's own notice bar above the
+ * composer (2.1.258 draws it from 70% utilization, and nothing switches it
+ * off), it fires no hook, and a message pasted while it showed became a turn
+ * in 0.43s with the host's parsers reading the pane as an idle composer at
+ * both 200 and 80 columns (measured 2026-09-03). Nothing to do here. What is
+ * open is 100%: `quota_auto_resume_fired` / `quota_auto_resume_stalled` are
+ * hook notification types, the window waits for the reset on its own
+ * (`autoContinueAtUsageLimit` is on unless a settings file turns it off), and
+ * a desk in that wait currently looks merely idle on the floor. Not measured,
+ * because measuring it means spending the limit.
  */
 const AWAITING_NOTIFICATIONS = new Set(['permission_prompt']);
 
