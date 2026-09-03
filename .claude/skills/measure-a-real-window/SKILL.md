@@ -67,6 +67,34 @@ measured, which read as a phantom keystroke source and cost a round to chase
 down. He is not doing anything wrong; he cannot see a window he was not told
 about. Name it, and give him one you are not using if he wants to play.
 
+## The probe inherits your environment
+
+A fresh `tmux -L probe` server takes its environment from whoever starts it,
+and when that is a Bash tool inside a Claude Code session the pane gets
+`CLAUDECODE=1`, `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, `CLAUDE_CODE_SESSION_ID`
+and a dozen more — a window that is, as far as Claude Code can tell, nested
+inside an IDE session. Read what the pane actually got, not what you exported:
+
+```bash
+ps eww -o command= -p "$(tmux -L probe list-panes -t p:probe -F '#{pane_pid}')" | tr ' ' '\n' | grep '^CLAUDE'
+```
+
+Strip them with a loop under `bash -c`, not with an `env -u` list held in a
+variable: zsh does not word-split `$UNSET`, so `env $UNSET …` hands `env` one
+argument, unsets nothing, and prints no error (measured 2026-09-03).
+
+```bash
+bash -c 'for v in $(env | grep -oE "^CLAUDE[^=]*"); do unset "$v"; done
+         node .claude/skills/measure-a-real-window/probe.mjs up "$1" auto' _ "$SP/probe"
+```
+
+One thing this did not unlock: `CLAUDE_FORCE_DISPLAY_SURVEY=1` never drew the
+"How is Claude doing this session?" survey in a probe on 2.1.258 — three runs,
+stripped or not, watched for over a minute after the turn. Whatever gates it is
+not the environment alone, so the survey is not something a probe can currently
+be made to show; `open()` in `host/window.js` says what was done about it
+instead.
+
 ## Getting a window up
 
 Two dialogs stand between `exec claude` and a usable window, and **neither is

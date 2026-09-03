@@ -1088,7 +1088,30 @@ export async function open(cwd, { resume = null } = {}) {
   const name = taken ? `${windowName(here)}-${(Math.abs(hash(here)) % 65536).toString(16).padStart(4, '0')}` : windowName(here);
   // `claude` is exec'd rather than run from a shell so the pane dies with the
   // session instead of dropping to a prompt that looks like a live window.
-  const cmd = [CLAUDE, ...(resume ? ['--resume', resume] : [])]
+  //
+  // It goes through `env` so the window never draws Claude Code's session
+  // survey — "How is Claude doing this session?  1: Bad  2: Fine  3: Good
+  // 0: Dismiss". CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY is the documented switch
+  // (code.claude.com/docs/en/data-usage#session-quality-surveys), and in
+  // 2.1.258 it is the first thing every survey path checks, so the memory,
+  // plugin, long-context and post-compact surveys go with it; they all sit in
+  // the same slot above the composer. Deliberate, and this is the failure it
+  // removes: the survey is drawn for whoever is sitting at the terminal, and
+  // nobody sits at a floor window. No hook carries it, so the floor cannot
+  // offer it; the host will not press a rating on a person's behalf, because
+  // that is a false record; and what the operator sees is a desk that finished
+  // its turn and then stood on a question the board knows nothing about —
+  // reported on 2026-09-03 as a halted session. `env` rather than tmux's `-e`
+  // because it needs no particular tmux or shell, and it execs `claude` in
+  // place, so the pane pid is still Claude Code's and holderOf's join with the
+  // roster holds.
+  //
+  // Not watched end to end: on 2.1.258 a probe window with
+  // CLAUDE_FORCE_DISPLAY_SURVEY=1 never drew the survey at all (2026-09-03,
+  // see measure-a-real-window), so this rests on the docs and the binary's
+  // check order rather than on seeing it go away. A survey on a floor window
+  // after this is the thing to re-measure.
+  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE, ...(resume ? ['--resume', resume] : [])]
     .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
     .join(' ');
 
