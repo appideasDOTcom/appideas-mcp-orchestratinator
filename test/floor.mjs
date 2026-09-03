@@ -704,6 +704,12 @@ try {
     // overwrote the operator's choice on every tab after the first.
     assert(!keys(one).includes('Enter'), 'and nothing follows it — the digit selects, it does not merely move the cursor');
 
+    // A one-question form has no strip: Left and Tab do nothing there, and the
+    // digit both selects and submits (measured 2026-09-03). So the whole answer
+    // is the one key, and nothing walks first.
+    const alone = answerSteps([{ ...single, strip: false }], [{ choose: [2] }]);
+    eq(keys(alone), ['2'], 'a form with no tab strip is answered with the digit alone — no walk to a known end, nothing after');
+
     const many = answerSteps([multi], [{ choose: [1, 2] }]);
     const body = keys(many).filter((k) => k !== 'Left');
     eq(body.slice(0, 3), ['1', '2', 'Tab'], 'a multi-select presses each box by number and moves on with Tab, never Enter');

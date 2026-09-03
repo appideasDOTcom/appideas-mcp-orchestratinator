@@ -333,6 +333,37 @@ async function main() {
        'the free-text choice is spotted even with the full stop a single-select puts on it');
     eq(qs.cursor, 1, 'and where the cursor is sitting');
     eq(qs.submit, false, 'a single-select has no Submit row of its own');
+    eq(qs.strip, true, 'and several questions draw a tab strip to walk');
+
+    // One question draws no strip at all — its header stands alone, no arrows,
+    // no Submit tab. Captured off a real 2.1.258 pane 2026-09-03, after the
+    // floor showed "permission prompt — AskUserQuestion" with the choices and
+    // no question: this returned null, the host fell back to the menu reader,
+    // and the operator inferred the question from its answers.
+    const Q_ONE = [
+      '─'.repeat(80),
+      ' ☐ Routing',
+      'Which routing should I use for the High findings?',
+      '❯ 1. You route it; I hand you the paths only',
+      '     I give you just the file paths for the High findings and you handle routing them from there.',
+      '  2. Post, and open one task per High finding',
+      '     Post the findings and create a separate task for each High finding.',
+      '  3. Hold them for review',
+      '     Keep the High findings in place, unrouted, pending your review.',
+      '  4. Type something.',
+      '─'.repeat(80),
+      '  5. Chat about this',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n');
+    assert(W.askingOf(Q_ONE), 'a one-question form is a live question by its footer');
+    const q1 = W.questionOf(Q_ONE);
+    assert(!!q1, 'and it is read as a form, not left to the permission-prompt reader');
+    eq(q1?.question, 'Which routing should I use for the High findings?', 'with its question — the line the floor was missing');
+    eq(q1?.tabs.map((t) => t.title), ['Routing'], 'one tab, from the lone header');
+    eq(q1?.strip, false, 'and no strip to walk');
+    eq(q1?.options.map((o) => o.text), ['You route it; I hand you the paths only', 'Post, and open one task per High finding', 'Hold them for review', 'Type something.'],
+       'its choices, with "Chat about this" left out as on every form');
+    eq(q1?.kind, 'single', 'a single-select');
     // The preview panel to the right, and Claude Code's own trailing item, are
     // furniture rather than choices. Both used to arrive attached to Charlie.
     assert(qs.options.every((o) => !o.detail), 'nothing from the preview panel is mistaken for a choice\u2019s description');

@@ -1285,8 +1285,17 @@ export function askingOf(screen) {
  */
 export function questionOf(screen) {
   const raw = String(screen ?? '').split('\n');
-  const at = raw.findIndex((l) => /^\s*\u2190/.test(l) && /[\u2610\u2612]/.test(l));
+  // Two shapes, measured on 2.1.258 (2026-09-03). Several questions draw a
+  // strip \u2014 `\u2190  \u2612 ProbeOne  \u2610 ProbeTwo  \u2714 Submit  \u2192` \u2014
+  // and one question draws its header alone, ` \u2610 Routing`: no arrows, no
+  // Submit tab, and the form submits on the digit. Reading only the strip made
+  // every single-question form invisible here: readQuestions() said "not a
+  // form", the host fell back to the permission-prompt reader, and the floor
+  // drew the choices under a title with no question on it at all. The
+  // operator was left to infer the question from its answers.
+  const at = raw.findIndex((l) => (/^\s*\u2190/.test(l) ? /[\u2610\u2612]/.test(l) : /^\s*[\u2610\u2612]\s+\S/.test(l)));
   if (at < 0) return null;
+  const strip = /^\s*\u2190/.test(raw[at]);
 
   // `←  ☒ ProbeOne  ☐ ProbeTwo  ✔ Submit  →`, split on the runs of spaces that
   // separate the tabs. The titles are the question headers and can contain a
@@ -1313,7 +1322,7 @@ export function questionOf(screen) {
 
   // The Submit tab shows what you are about to send rather than a question.
   if (/ready to submit your answers/i.test(said.join('\n'))) {
-    return { tabs, question: 'Review your answers', kind: 'review', options: [], cursor: -1, submit: false };
+    return { tabs, strip, question: 'Review your answers', kind: 'review', options: [], cursor: -1, submit: false };
   }
 
   const options = [];
@@ -1366,6 +1375,11 @@ export function questionOf(screen) {
 
   return {
     tabs,
+    // Whether there is a tab strip to walk. Without one — a single question —
+    // Left and Tab do nothing (measured), and the digit that selects also
+    // submits, because there is no next tab to advance to. answerSteps reads
+    // this to leave the walk out.
+    strip,
     question,
     kind: options.some((o) => o.checked !== null) ? 'multi' : 'single',
     options,
@@ -1397,6 +1411,12 @@ export async function readQuestions(cwd) {
   // No tab strip: this is a plain menu — a permission prompt — and walking it
   // with Tab would be pressing keys into somebody else's widget.
   if (!first) return { ok: false, code: 'not_a_form', error: 'the window is asking, but not with a question form' };
+  // One question, no strip: the whole form is on screen already, and there is
+  // nothing to walk — Tab was measured to do nothing on it. Pressing keys into
+  // a widget that does not need them is the one way a read can change a form.
+  if (!first.strip) {
+    return { ok: true, tabs: first.tabs, questions: [{ ...first, tab: 0, tab_title: first.tabs[0]?.title ?? null }] };
+  }
   // Left as many times as there are tabs: from anywhere in the strip that lands
   // on the first one, and pressing left at the left end does nothing.
   for (let i = 0; i < first.tabs.length; i++) {

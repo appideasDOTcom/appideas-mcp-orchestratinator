@@ -63,7 +63,18 @@ async function up(dir, mode = 'auto') {
   for (let i = 0; i < 40; i++) {
     await sleep(1000);
     const s = await pane(30);
-    if (/Is this a project you created or one you trust|New MCP server found/i.test(s)) {
+    // The trust dialog is an arrow list with the cursor on "No, exit" (2.1.258,
+    // measured 2026-09-03): a digit does nothing there and Enter alone quits,
+    // so "1 then Enter" exited rc=1 every time and the server went with it.
+    // Down onto "Yes, I trust this folder", then Enter.
+    if (/Is this a project you created or one you trust/i.test(s)) {
+      await tmux(['send-keys', '-t', TARGET, 'Down']);
+      await sleep(400);
+      await tmux(['send-keys', '-t', TARGET, 'Enter']);
+      await sleep(1500);
+      continue;
+    }
+    if (/New MCP server found/i.test(s)) {
       await tmux(['send-keys', '-t', TARGET, '1']);
       await sleep(600);
       await tmux(['send-keys', '-t', TARGET, 'Enter']);

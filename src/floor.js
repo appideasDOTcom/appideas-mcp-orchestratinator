@@ -439,8 +439,13 @@ export function answerSteps(questions, answers) {
   const qs = Array.isArray(questions) ? questions : [];
   const steps = [];
   // To a known end. One press per tab is always enough, and pressing left at the
-  // left end does nothing.
-  for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Left' });
+  // left end does nothing. Only when there is a strip to walk: a one-question
+  // form draws none (`strip: false`, read off the pane), and its digit both
+  // selects and submits, so the walk has nothing to do and the answer is the
+  // one key.
+  if (qs.some((q) => q.strip !== false)) {
+    for (let i = 0; i <= qs.length; i++) steps.push({ key: 'Left' });
+  }
 
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i];
