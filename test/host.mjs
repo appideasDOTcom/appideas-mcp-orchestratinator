@@ -345,6 +345,23 @@ try {
   eq(viaRows?.find((r) => r.text === 'WebFetch: https://docs.example.test/hooks')?.via, 'Docs lookup', 'and so is each of its tool calls');
   assert(!(viaRows ?? []).some((r) => r.text === 'find the docs'), 'its brief is not filed as anyone speaking');
 
+  // Merged by the clock, not by which file was read first. The session's own
+  // transcript is read before the subagents' each tick, so a subagent line
+  // stamped earlier than a main-thread line written in the same tick must
+  // still land first. Asserted directly: QA's M7 (sort removed) left this
+  // suite green (PR #3 review, 2026-09-03).
+  const later = new Date();
+  const earlier = new Date(later.getTime() - 5000);
+  appendTurn({ type: 'assistant', uuid: 'a-order-main', timestamp: later.toISOString(), message: { content: [{ type: 'text', text: 'ORDER-MAIN said later' }] } });
+  appendFileSync(`${subDir}/agent-sub1.jsonl`, `${JSON.stringify({ type: 'assistant', uuid: 'sa-order', isSidechain: true, agentId: 'sub1', timestamp: earlier.toISOString(), message: { content: [{ type: 'text', text: 'ORDER-SUB thought earlier' }] } })}\n`);
+  const ordered = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.text === 'ORDER-MAIN said later') && rows.some((r) => r.text === 'ORDER-SUB thought earlier') ? rows : null;
+  });
+  const idOf = (text) => ordered?.find((r) => r.text === text)?.id ?? -1;
+  assert(idOf('ORDER-SUB thought earlier') < idOf('ORDER-MAIN said later'),
+    'a subagent line stamped earlier is filed before a main-thread line written in the same tick — merged by time, not by file');
+
   console.log('\nswitching apps');
 
   // Closing the window you were typing in does not end the conversation.
@@ -451,6 +468,13 @@ try {
   assert(!clean(received()).includes('takes a while to go in'),
     'and it got there before the message it was queued behind — the relay is not waiting on the delivery');
   assert((heard?.length ?? 0) > turnsBefore, 'the floor gained a turn rather than replaying the transcript');
+  // And the subagent file already on disk was joined at its end, not replayed.
+  // Named directly: QA's M6 (offsets read from 0) turned this suite red only
+  // three sections later, through a desk drawn as working because a replayed
+  // WebFetch row had become its last turn (PR #3 review, 2026-09-03).
+  const everything = (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
+  eq(everything.filter((r) => r.text === 'WebFetch: https://docs.example.test/hooks').length, 1,
+    'a subagent file already on disk is not replayed when the host restarts');
 
   assert(await until(() => (clean(received()).includes('takes a while to go in') ? true : null), 20000),
     'and the message itself still lands once the window finishes starting');

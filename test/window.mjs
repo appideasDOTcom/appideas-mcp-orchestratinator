@@ -63,6 +63,9 @@ function writeFixture() {
   writeFileSync(`${FIX}/stand-in.sh`,
     `#!/bin/sh\n` +
     `if [ "$1" = "agents" ]; then cat ${JSON.stringify(`${FIX}/roster.json`)}; exit 0; fi\n` +
+    // What the pane was started with, for the one assertion the survey switch
+    // can get — see open().
+    `env > "$PWD/env.txt"\n` +
     `printf '\\033[?2004h'\n` +
     `exec cat >> "$PWD/received.txt"\n`);
   chmodSync(`${FIX}/stand-in.sh`, 0o755);
@@ -555,6 +558,12 @@ async function main() {
     const opened = await W.open(FIX);
     assert(opened.ok, `open() starts a window${opened.ok ? '' : ` — ${opened.error}`}`);
     assert(opened.created === true, 'the first open creates the pane');
+    // The survey switch is a line nothing else would notice going missing: the
+    // survey cannot be forced in a probe, so the pane's environment, as the
+    // stand-in dumped it, is the one assertion the mechanism gets. QA's M10
+    // (prefix removed) left this suite green before this (PR #3, 2026-09-03).
+    assert(await until(() => existsSync(`${FIX}/env.txt`) && /^CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1$/m.test(readFileSync(`${FIX}/env.txt`, 'utf8'))),
+      'a pane opened by the host has the session survey switched off in its environment');
     const again = await W.open(FIX);
     eq(again.created, false, 'opening a repo that already has a window reuses it');
     eq(again.target, opened.target, 'and reuses the same pane');
@@ -816,6 +825,18 @@ async function main() {
       "a subagent's words and tool calls are read with its label, and its brief and tool results are not turns");
     eq((await W.readTranscript(subs[0].path)).turns.length, 0, 'and without a label the same file reads as sidechain noise, as before');
     eq(await W.subagentTranscripts(`${FIX}/nothing.jsonl`), [], 'a session with no subagents has none');
+    /* A transcript whose meta has not landed yet is left alone, so its turns are
+     * never filed under the id and then the description. Measured by QA over 50
+     * real pairs: one transcript came 52 s before its meta (PR #3, 2026-09-03).
+     * Only past a long grace is it read under its id, in case the meta never
+     * comes. */
+    writeFileSync(`${FIX}/t/subagents/agent-late.jsonl`, `${JSON.stringify({ type: 'assistant', uuid: 'sl1', isSidechain: true, agentId: 'late', timestamp: '2026-09-03T18:40:00Z', message: { content: [{ type: 'text', text: 'first words' }] } })}\n`);
+    eq((await W.subagentTranscripts(t)).map((s) => s.id), ['abc123'], 'a subagent transcript with no meta beside it is not read yet');
+    eq((await W.subagentTranscripts(t, { metaGraceMs: 0 })).map((s) => `${s.id}:${s.label}`), ['abc123:Docs lookup', 'late:late'],
+      'past the grace it is read under its id, in case the meta never comes');
+    writeFileSync(`${FIX}/t/subagents/agent-late.meta.json`, JSON.stringify({ agentType: 'Explore', description: 'Late arrival' }));
+    eq((await W.subagentTranscripts(t)).map((s) => `${s.id}:${s.label}`), ['abc123:Docs lookup', 'late:Late arrival'],
+      'and once the meta lands it is read from the first word under the description');
 
     /* A message the agent read mid-turn is a turn, and it has only one record.
      *

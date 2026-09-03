@@ -216,6 +216,18 @@ the server stores that as a column, and the chat and bubble draw from it. The
 subagent's brief and tool results are not turns — the brief is already the
 Agent line on the floor, and neither is a person speaking.
 
+**A subagent with no `.meta.json` yet is left unread, on purpose.** The two
+files usually land in the same second, but not always: over 50 real pairs on
+this machine two came meta-first and one transcript came 52 seconds before its
+meta (QA, PR #3, 2026-09-03). Reading it meanwhile filed that subagent's first
+turns under the id and the rest under the description, and **nothing
+relabels** — a stored turn is not revisited. So `subagentTranscripts` skips a
+meta-less file until the meta arrives, and reads it from its first word then;
+only past `ORCH_SUBAGENT_META_GRACE_MS` (two minutes) does it fall back to the
+id, in case the meta never comes. The cost of waiting is that a subagent's
+first seconds reach the floor late; the cost of not waiting is one
+conversation under two names, which no later tick repairs.
+
 **Thinking is a turn too, under its own role.** Claude Code writes a
 `thinking` block ahead of most steps and the window draws it in dim text; on
 2.1.258 it is a sentence or two of narration, and the operator read one of

@@ -292,7 +292,11 @@ class Desk {
       this.subOffsets.set(sub.path, s.offset);
       turns.push(...s.turns);
     }
-    if (turns.every((t) => t.at)) turns.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    // By the clock, not by the string: localeCompare on ISO timestamps is
+    // only an order while every one has the same precision (QA, PR #3 review,
+    // 2026-09-03). A turn without a parseable time leaves the batch in read
+    // order. The sort is stable, so equal times keep it too.
+    if (turns.every((t) => Number.isFinite(Date.parse(t.at)))) turns.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     for (const turn of turns) {
       this.host.emit({
         type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,

@@ -2146,7 +2146,7 @@
       div.className = 't t-thinking';
       div.innerHTML = `
       <span class="t-thought-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-      <div class="t-thought" title="a thought, not something the agent said">
+      <div class="t-thought" role="note" aria-label="${esc(t.via ? `Thought from ${t.via}` : 'Thought')}">
         <div class="t-body">${esc(t.text ?? '')}</div>
         <div class="t-thought-meta mono">${esc(t.via ? `${t.via} · ` : '')}<span class="t-when" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
       </div>`;

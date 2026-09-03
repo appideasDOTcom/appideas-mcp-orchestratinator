@@ -2426,7 +2426,13 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
  * A readdir per desk per tick. Cheap, and it has to be a scan: a subagent can
  * start at any moment, and nothing else announces its file.
  */
-export async function subagentTranscripts(mainPath) {
+/* How long a subagent transcript with no meta file beside it is left unread
+   before it is read under its id. See subagentTranscripts. */
+const SUBAGENT_META_GRACE_MS = Number(process.env.ORCH_SUBAGENT_META_GRACE_MS ?? 120_000);
+/** When each meta-less subagent transcript was first seen, by path. */
+const subagentFirstSeen = new Map();
+
+export async function subagentTranscripts(mainPath, { metaGraceMs = SUBAGENT_META_GRACE_MS } = {}) {
   const dir = `${String(mainPath).replace(/\.jsonl$/, '')}/subagents`;
   if (!existsSync(dir)) return [];
   const { readdir, readFile } = await import('node:fs/promises');
@@ -2434,13 +2440,27 @@ export async function subagentTranscripts(mainPath) {
   const out = [];
   for (const name of names) {
     const id = name.slice('agent-'.length, -'.jsonl'.length);
+    const path = join(dir, name);
     let meta = null;
-    // The meta file is written alongside; a moment without it, or a hand-made
-    // one, is not a reason to drop the transcript — the id names it instead.
     try { meta = JSON.parse(await readFile(join(dir, `agent-${id}.meta.json`), 'utf8')); } catch { /* no meta yet */ }
+    // The meta file usually lands in the same second as the transcript, but
+    // not always: over 50 real pairs on one machine, two came meta-first and
+    // one transcript came 52 seconds before its meta (QA, PR #3 review,
+    // 2026-09-03). Reading it in the meantime filed its first turns under the
+    // id and the rest under the description, and nothing relabels. So a
+    // transcript with no meta is left alone until the meta arrives — its
+    // turns are read then, from the first word — and only after a long grace
+    // is it read under its id, in case the meta never comes.
+    if (!meta) {
+      const seen = subagentFirstSeen.get(path) ?? Date.now();
+      subagentFirstSeen.set(path, seen);
+      if (Date.now() - seen < metaGraceMs) continue;
+    } else {
+      subagentFirstSeen.delete(path);
+    }
     const label = [meta?.description, meta?.agentType].find((v) => typeof v === 'string' && v.trim()) ?? id;
     out.push({
-      id, path: join(dir, name), label: String(label).trim().slice(0, 120),
+      id, path, label: String(label).trim().slice(0, 120),
       agentType: meta?.agentType ?? null, toolUseId: meta?.toolUseId ?? null,
     });
   }
