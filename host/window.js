@@ -420,6 +420,30 @@ export async function answerStartup(cwd, n) {
   return { ok: true, kind: q.kind, chose: want.text };
 }
 
+/**
+ * Whether a queued answer has sat too long to still mean anything, and
+ * should be dropped rather than pressed into a window that may be showing
+ * something else by now.
+ *
+ * A startup dialog (folder trust, a new MCP server) stands until it is
+ * answered — nothing on Claude Code's side times it out — so "the prompt is
+ * long gone" is false for one, and dropping it here only ever loses a real
+ * answer, silently. `answerStartup` already refuses to press when the
+ * dialog has genuinely moved on (`no_prompt`, `stale_choice`, `not_taken`),
+ * which is the real staleness guard for that path.
+ *
+ * A pure function, not inlined in host/index.js's work-handling switch,
+ * because that file executes `main()` on import — nothing in it can be
+ * loaded by a test without also starting a host. This one small decision is
+ * moved here so it can be checked directly, with a fixed `nowMs`, instead of
+ * only through a real host racing a real clock.
+ */
+export function answerIsStale(payload, ttlMs, nowMs = Date.now()) {
+  if (String(payload?.request_id ?? '').startsWith('startup:')) return false;
+  if (!payload?.queued_at) return false;
+  return nowMs - Number(payload.queued_at) > ttlMs;
+}
+
 /** The numbered options on screen, and which one the cursor is on. */
 export function menuOf(screen) {
   const rows = [];

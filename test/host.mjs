@@ -145,11 +145,25 @@ function fixture() {
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
-    // yet, and send() sits in waitReady. ORCH_TEST_READY_DELAY_MS makes that
-    // window a known length so a test can look at what the host does *during*
-    // it. Unset, it announces immediately, as before.
+    // yet, and send() sits in waitReady. A ready-delay *file* makes that
+    // window a known length so a test can look at what the host does
+    // *during* it. Absent, it announces immediately, as before.
+    //
+    // A file, not an env var — this used to read
+    // process.env.ORCH_TEST_READY_DELAY_MS. Measured directly: `tmux
+    // new-session`/`new-window` on an already-running server gives the new
+    // pane only the environment the server had when it first booted, not the
+    // requesting client's — so on any machine that already has a tmux server
+    // on the default socket for something else (this repo's own live host,
+    // say), that env var silently never arrived and the delay was 0 the
+    // whole time. The one test using it happened to pass regardless, because
+    // its assertions do not strictly require the delay to hold — which is
+    // exactly how this went unnoticed until STARTUP_ASK_FLAG hit the same
+    // wall and needed the delay to actually be there.
     `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
-    `let readyDelay = Number(process.env.ORCH_TEST_READY_DELAY_MS || 0);`,
+    `const READY_DELAY_FLAG = ${JSON.stringify(`${FIX}/ready-delay.flag`)};`,
+    `let readyDelay = 0;`,
+    `try { readyDelay = Number(fs.readFileSync(READY_DELAY_FLAG, 'utf8').trim()) || 0; } catch {}`,
     // A pane in this repo whose process is not yet in the roster — announcing
     // late is exactly that — is what the host reads as "booting", and if the
     // screen looks like a startup dialog it is read and put on the floor (see
@@ -170,12 +184,9 @@ function fixture() {
     `if (startupAsk === 'mcp') {`,
     `  const mcp = ['', ${JSON.stringify('─'.repeat(80))}, '  New MCP server found in this project: orchestratinator', '', '  MCP servers may execute code or access system resources. All tool calls require approval.', '', '    Use this MCP server', '    Use this and all future MCP servers in this project', '  ❯ Continue without using this MCP server', '', '  Enter to confirm · Esc to cancel', ''];`,
     `  for (const l of mcp) process.stdout.write(l + '\\n');`,
-    // Forced, not read from ORCH_TEST_READY_DELAY_MS: that env var is exactly
-    // as unreachable here as ORCH_TEST_STARTUP_ASK was — same measured tmux
-    // limitation — so a test relying on it to keep this window "booting" long
-    // enough to observe would be timing-dependent on whether a fresh tmux
-    // server happens to exist. This scenario needs a real window, not a fast
-    // one; the flag already means "give me time to look", so it says so.
+    // Forced rather than relying on a caller to also write READY_DELAY_FLAG:
+    // this scenario needs a real window to observe, not a fast one, and the
+    // ask-flag alone should be enough to say so.
     `  readyDelay = Math.max(readyDelay, 4000);`,
     `}`,
     `if (readyDelay > 0) setTimeout(announce, readyDelay); else announce();`,
@@ -385,7 +396,8 @@ try {
   // the send is refused before any of this is exercised.
   writeFileSync(`${FIX}/roster.json`, '[]');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
-  host = startHost('host-test-1', { ORCH_TEST_READY_DELAY_MS: '6000' });
+  writeFileSync(`${FIX}/ready-delay.flag`, '6000');
+  host = startHost('host-test-1');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
 
@@ -413,6 +425,7 @@ try {
 
   assert(await until(() => (clean(received()).includes('takes a while to go in') ? true : null), 20000),
     'and the message itself still lands once the window finishes starting');
+  rmSync(`${FIX}/ready-delay.flag`, { force: true });
 
   /* ── a window asking before it starts ─────────────────────────────────────
    * The host reads a startup dialog off a booting pane — a live interactive

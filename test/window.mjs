@@ -415,6 +415,21 @@ async function main() {
     eq(mcp?.at, 2, 'with the cursor on "continue without" — Enter alone would disable the server');
     eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
     eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
+
+    /* answerIsStale: the TTL drop that used to apply to a startup answer too,
+     * on a premise that is false for one — the dialog stands until it is
+     * answered, unlike an ordinary permission prompt. A pure function so this
+     * is checked directly, with a fixed clock, rather than through a real
+     * host racing a real one. */
+    console.log('\n  a queued answer past its TTL');
+    const T0 = 1_000_000;
+    const startupOld = { request_id: 'startup:@9:mcp', queued_at: T0 - 90_000 };
+    eq(W.answerIsStale(startupOld, 30_000, T0), false, 'a startup answer is never dropped for age — the dialog it answers is still standing');
+    const ordinaryOld = { request_id: 's4:AskUserQuestion:123', queued_at: T0 - 90_000 };
+    eq(W.answerIsStale(ordinaryOld, 30_000, T0), true, 'an ordinary permission answer past the TTL is dropped, same as before');
+    const ordinaryFresh = { request_id: 's4:AskUserQuestion:123', queued_at: T0 - 5_000 };
+    eq(W.answerIsStale(ordinaryFresh, 30_000, T0), false, 'and one still inside it is not');
+    eq(W.answerIsStale({ request_id: 's4:AskUserQuestion:123' }, 30_000, T0), false, 'no queued_at at all — an old-shaped payload with nothing to measure age against — is not dropped either');
     // The preview panel to the right, and Claude Code's own trailing item, are
     // furniture rather than choices. Both used to arrive attached to Charlie.
     assert(qs.options.every((o) => !o.detail), 'nothing from the preview panel is mistaken for a choice\u2019s description');

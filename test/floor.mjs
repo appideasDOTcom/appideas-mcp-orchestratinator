@@ -1164,6 +1164,23 @@ try {
   let md = await moverDesk();
   eq(md.permission?.startup, true, 'and the desk carries it as a prompt of its own kind');
   eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with the dialog’s own rows');
+
+  // A re-say of the same standing question — nothing chosen, nothing gone in
+  // between — must not reset when it was first seen. The host repeats a
+  // startup question every STARTUP_RESAY_MS while it stands, and the queue's
+  // wait age falls back to this `at` whenever the desk's newest session isn't
+  // the one carrying the awaiting mark (an editor session sharing the desk,
+  // say) — a fresh `at` on every re-say restarted that clock each time.
+  const firstAt = md.permission.at;
+  assert(!!firstAt, 'the pending request carries when it was first seen');
+  await sleep(30);
+  await eventsMove([{
+    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
+    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
+  }]);
+  eq((await moverDesk()).permission?.at, firstAt,
+     'and a re-say of the same standing question keeps it, rather than the moment the host happened to repeat itself');
+
   // The desk's current session is whichever row was touched last — here the
   // hook session from the rescan section, and on a real desk an editor whose
   // hooks keep firing — so the queue must not depend on that row being marked.
@@ -1184,6 +1201,57 @@ try {
   md = await moverDesk();
   eq(md.permission ?? null, null, 'and gone when the host sees the dialog leave');
   eq((await floor()).queue.some((q) => q.agent === 'mover-a'), false, 'with the desk out of the queue');
+
+  console.log('\na startup answer that fails to land comes back once');
+  // Same shape as the AskUserQuestion re-offer above, for the other kind of
+  // prompt that can now fail to land. Before this it painted the desk red
+  // with "your approve did not land" — wrong verb for a row that was never
+  // approve/deny — and under the old bare `answer_failed`-only gate it never
+  // re-offered at all, so the operator was left at a plain error for up to a
+  // minute even though the dialog was still standing right there.
+  await eventsMove([{
+    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
+    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
+  }]);
+  eq((await moverDesk()).permission?.startup, true, 'raised again for this section');
+  const chose2 = await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
+  });
+  eq(chose2.status, 200, 'the row is chosen');
+  await eventsMove([{
+    type: 'error', code: 'startup_answer_failed', channel: CH, agent: 'mover-a',
+    message: 'your choice did not reach the window — no window is open for this repo',
+  }]);
+  md = await moverDesk();
+  eq(md.permission?.request_id, 'startup:@9:mcp', 'a failed startup answer puts the same request back up');
+  eq(md.permission?.startup, true, 'and it comes back as the startup prompt, not as Approve/Deny');
+  eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with its own rows intact');
+
+  // Once, same rule as the form: a mistaken failure must not put the prompt
+  // back the instant it is answered, or answering becomes the one thing that
+  // cannot end it.
+  await fetch(`${HOST}/api/floor/permission`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
+  });
+  await eventsMove([{
+    type: 'error', code: 'startup_answer_failed', channel: CH, agent: 'mover-a',
+    message: 'your choice did not reach the window — again',
+  }]);
+  md = await moverDesk();
+  eq(md.permission, null, 'the second failure does not offer it a third time');
+  // Not md.session.awaiting_message: which session is "current" for a desk is
+  // decided by updated_at, which SQLite's datetime('now') only carries to the
+  // second — two rows touched in the same second (the placeholder this error
+  // is marked on, and mover-a's earlier hook session from the rescan section,
+  // both touched within this same fast-running test) tie, and which one wins
+  // the tie is not something to depend on. The error turn is unambiguous:
+  // appended once, read back by id, regardless of any session's timestamp.
+  const moverTurns = (await turns('mover-a')).rows ?? [];
+  assert(String(moverTurns.at(-1)?.text ?? '').includes('not being offered again'),
+    'and says so, rather than leaving the operator wondering where the dialog went');
+  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
 } catch (err) {
   failures++;
   console.error(`\n  ✗ ${err.stack ?? err}`);

@@ -518,15 +518,9 @@ class Host {
         // A startup question is not a menu: its rows have no numbers and the
         // cursor starts somewhere dangerous, so it has its own presser.
         const isStartup = String(item.payload?.request_id ?? '').startsWith('startup:');
-        // "The prompt is long gone" is the premise for this drop, and it is
-        // false for a startup dialog — that one stands, unlike a permission
-        // prompt, until it is answered. `answerStartup` already refuses to
-        // press when the dialog has genuinely moved (`no_prompt`,
-        // `stale_choice`, `not_taken`), so on this path the TTL can only lose
-        // a real answer, and it dropped it silently: no `emit`, so the board
-        // never learned the click did nothing.
-        const age = Date.now() - (Number(item.payload?.queued_at) || 0);
-        if (!isStartup && item.payload?.queued_at && age > ANSWER_TTL_MS) {
+        // See W.answerIsStale for why a startup answer is exempt.
+        if (W.answerIsStale(item.payload, ANSWER_TTL_MS)) {
+          const age = Date.now() - (Number(item.payload?.queued_at) || 0);
           warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
           break;
         }
