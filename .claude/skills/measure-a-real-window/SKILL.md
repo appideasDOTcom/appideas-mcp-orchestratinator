@@ -76,8 +76,12 @@ long. Answer them yourself:
 ```bash
 # trust dialog: an arrow list with the cursor on "No, exit" — move down, then confirm
 tmux -L probe send-keys -t p:probe Down; sleep 0.5; tmux -L probe send-keys -t p:probe Enter
-# MCP dialog: numbered
-tmux -L probe send-keys -t p:probe '1'; sleep 1; tmux -L probe send-keys -t p:probe Enter
+# MCP dialog: an arrow list too, cursor starts on "Continue without using this MCP
+# server" — Enter there *disables* the server. Up twice lands on "Use this MCP
+# server"; a digit moves nothing (measured 2026-09-03, see host/window.js's
+# startupQuestionOf).
+tmux -L probe send-keys -t p:probe Up; sleep 0.4; tmux -L probe send-keys -t p:probe Up
+sleep 0.4; tmux -L probe send-keys -t p:probe Enter
 ```
 
 - `Quick safety check: Is this a project you created or one you trust?` — the

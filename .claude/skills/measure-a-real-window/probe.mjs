@@ -74,10 +74,17 @@ async function up(dir, mode = 'auto') {
       await sleep(1500);
       continue;
     }
+    // The MCP dialog is an arrow list too, cursor starting on "Continue
+    // without using this MCP server" — Enter there *disables* the server and
+    // writes disabledMcpjsonServers. Measured 2026-09-03: a digit moves
+    // nothing here either. Up twice lands on "Use this MCP server".
     if (/New MCP server found/i.test(s)) {
-      await tmux(['send-keys', '-t', TARGET, '1']);
-      await sleep(600);
+      await tmux(['send-keys', '-t', TARGET, 'Up']);
+      await sleep(300);
+      await tmux(['send-keys', '-t', TARGET, 'Up']);
+      await sleep(300);
       await tmux(['send-keys', '-t', TARGET, 'Enter']);
+      await sleep(600);
       continue;
     }
     if (/shift\+tab to cycle|for shortcuts/i.test(await footer())) break;

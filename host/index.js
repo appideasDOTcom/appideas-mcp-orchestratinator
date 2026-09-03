@@ -515,14 +515,22 @@ class Host {
         // there and be delivered later, into whatever window exists by then —
         // as a bare keystroke, to a prompt that is no longer asking. That is how
         // a row of 1s ended up submitted as somebody's message.
+        // A startup question is not a menu: its rows have no numbers and the
+        // cursor starts somewhere dangerous, so it has its own presser.
+        const isStartup = String(item.payload?.request_id ?? '').startsWith('startup:');
+        // "The prompt is long gone" is the premise for this drop, and it is
+        // false for a startup dialog — that one stands, unlike a permission
+        // prompt, until it is answered. `answerStartup` already refuses to
+        // press when the dialog has genuinely moved (`no_prompt`,
+        // `stale_choice`, `not_taken`), so on this path the TTL can only lose
+        // a real answer, and it dropped it silently: no `emit`, so the board
+        // never learned the click did nothing.
         const age = Date.now() - (Number(item.payload?.queued_at) || 0);
-        if (item.payload?.queued_at && age > ANSWER_TTL_MS) {
+        if (!isStartup && item.payload?.queued_at && age > ANSWER_TTL_MS) {
           warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
           break;
         }
-        // A startup question is not a menu: its rows have no numbers and the
-        // cursor starts somewhere dangerous, so it has its own presser.
-        const r = String(item.payload?.request_id ?? '').startsWith('startup:')
+        const r = isStartup
           ? await desk.answerStartup(item.payload?.decision)
           : await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
         if (!r.ok) {
@@ -535,10 +543,17 @@ class Host {
           // clear honest.
           // What was observed, and which decision it was: the desk re-poses on
           // this, and "your approve did not land, the window still reads X" is
-          // something a person can act on where "failed" is not.
+          // something a person can act on where "failed" is not. A startup
+          // question is answered by a row number, never approve/deny, so it
+          // gets its own wording and its own code — `startup_answer_failed` —
+          // so the floor's re-offer (src/floor.js) fires on it too, rather than
+          // leaving the desk at a bare error for up to a minute.
           this.emit({
             type: 'error', channel: desk.channel, agent: desk.agent,
-            message: `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
+            code: isStartup ? 'startup_answer_failed' : null,
+            message: isStartup
+              ? `your choice did not reach the window — ${r.error}`
+              : `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
           }, true);
         }
         break;

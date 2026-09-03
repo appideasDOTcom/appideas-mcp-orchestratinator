@@ -30,7 +30,7 @@ Seen 2026-09-02, first live use of the floor against the production server:
 this repo's `.mcp.json` pointed at the network board while the host stayed
 pinned to localhost, and the floor reported no host.
 
-## A window stopped on the folder-trust prompt: self-heal, or surface it on the floor
+## A window stopped on the folder-trust prompt: self-heal for the missing trust record
 
 Seen 2026-09-02, first production round trip. "Open on the floor" opened the
 window and it sat on Claude Code's folder-trust dialog ("These will apply
@@ -39,26 +39,24 @@ this folder"). The floor reported it correctly — "has not finished starting,
 something on screen is waiting for an answer", pane quoted — and the operator
 had to open a terminal, `tmux attach -t orch`, and answer it by hand.
 
-The host answers only the resume-mode question, on purpose; the reasoning
-beside `ANSWERS` in `host/window.js` says trust and MCP approval are the
-operator's decisions. That reasoning also says a desk cannot arrive at this
-prompt cold, because bootstrapping writes the approval to disk. What was
-observed disagrees for one case: this desk had been on the board all morning
-from VS Code, and `~/.claude.json` still had `hasTrustDialogAccepted: false`
-for it in every backup from the day. VS Code sessions do not appear to write
-folder trust, so the first time the floor opens such a desk in tmux, the
-prompt is genuinely new.
+**Shipped 2026-09-03: surfacing the prompt.** The host now reads a startup
+dialog (folder trust or a new MCP server) off the pane and the desk carries
+it as a prompt on the floor — "Before it can start, the window asks" — with
+the dialog's own rows as buttons; the host presses only the row the operator
+picks. `startupQuestionOf` / `answerStartup` in `host/window.js`, the
+`startup` host event in `src/floor.js`. The reasoning that used to claim a
+desk could never arrive at this prompt cold was wrong on two counts — a
+VS Code session defers the MCP approval, and re-pointing `.mcp.json`
+invalidates it — and the note beside `ANSWERS` says so now.
 
-Two directions, either would do:
-
-- **Self-heal** where it is safe: detect at open time that the trust record
-  is missing for a repo that is already a desk on this board, and say so
-  before opening — or write the record, if it turns out that is all the
-  dialog checks. Needs measuring (`measure-a-real-window`), not assuming.
-- **Surface the prompt** on the floor: the pane text is already read and
-  quoted in the error; render it as a prompt with its options so the operator
-  can answer from the floor without a terminal. Same rule as any alert the
-  floor cannot parse — never leave the operator without a button.
-
-Whichever, keep the decision the operator's. The fix is a door onto the
-prompt, not an auto-answer.
+**Still open: self-heal where it is safe.** The observation that started this
+still stands: this desk had been on the board all morning from VS Code, and
+`~/.claude.json` still had `hasTrustDialogAccepted: false` for it in every
+backup from the day, so VS Code sessions do not appear to write folder trust.
+Detecting at open time that the trust record is missing for a repo that is
+already a desk on this board, and saying so before opening — or writing the
+record, if it turns out that is all the dialog checks — would close the gap
+before the operator ever sees the prompt. Needs measuring
+(`measure-a-real-window`), not assuming. Keep the decision the operator's:
+this is about not asking a question whose answer is already known, not about
+auto-answering one that isn't.

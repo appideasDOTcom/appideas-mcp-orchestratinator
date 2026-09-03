@@ -1156,9 +1156,19 @@ function applyHostEvent(store, live, hostId, ev) {
       // is about to resume, or the placeholder, is that row — the same one a
       // message sent before the window opened is filed under.
       store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd, runner: 'host', pid: null });
+      // The same standing question, said again — not a fresh `now`. The host
+      // re-says a startup question every STARTUP_RESAY_MS while it stands, and
+      // the queue's wait age falls back to this `at` whenever an editor
+      // session on the same desk keeps `awaitingSince` moving (see the session
+      // mark note above and the fallback below). A fresh `now` on every re-say
+      // restarted that clock each time — measured: `since` moved forward by
+      // the exact re-say gap while a hook session was live, so "waiting · 40s"
+      // sat over a prompt that had stood twenty minutes. Only a genuinely new
+      // question (a different request_id) starts the clock over.
+      const at = open?.request_id === rid ? open.at : now;
       live.pending.set(key, {
         request_id: rid, tool: 'startup', startup: true, kind: str(ev.kind) ?? null,
-        summary: asks, options, read: true, reading: false, at: now,
+        summary: asks, options, read: true, reading: false, at,
       });
       // Marked on that row by id, not on "the desk's newest session": a live
       // editor session in the same repo is newer every time its hooks fire,
@@ -1182,7 +1192,12 @@ function applyHostEvent(store, live, hostId, ev) {
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
       // this is the one thing that asks for it back.
-      const failed = str(ev.code) === 'answer_failed' ? live?.answered.get(key) : null;
+      // Both codes are "the answer never took, and the window is still
+      // holding the question" — a form's own report, and a startup question's
+      // (see host/index.js, case 'permission'). Same re-offer either way: it
+      // is the same map, keyed by desk, and the failure the desk shows back is
+      // whichever kind of prompt was actually standing.
+      const failed = ['answer_failed', 'startup_answer_failed'].includes(str(ev.code)) ? live?.answered.get(key) : null;
       // Re-offering is right once — an answer that genuinely did not take leaves
       // the window still holding the question. It is wrong twice. A failure that
       // is itself mistaken puts the same form back the instant it is answered,

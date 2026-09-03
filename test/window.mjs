@@ -1043,6 +1043,104 @@ async function main() {
 
     const missing = await W.answerPrompt(`${PROMPT_DIR}/never-opened`, '1');
     eq(missing.code, 'no_window', 'and a repo with no window at all is its own answer');
+
+    // The presser that can disable an MCP server, against a real pane.
+    //
+    // Nothing at any tier reached answerStartup before this: the cursor check
+    // it exists for — "under !== want.text", the whole reason nothing here is
+    // ever pressed blind — was provably dead, disabling it left every suite
+    // green. A shell's stty/dd tricks (used above for a single bare digit)
+    // proved fragile for something byte-exact ("was Enter really sent, and
+    // only after the cursor actually got where it was walked to"), so this is
+    // a tiny node stand-in instead: it prints its screen once and never
+    // redraws — indistinguishable, to anything reading the capture, from a
+    // cursor that refuses to move — and notes every Enter it receives to a
+    // marker file regardless of anything else it does or does not do.
+    console.log('\n  answering a startup question, against a real pane');
+    const enterMark = `${PROMPT_DIR}/startup-enter.mark`;
+    const mcpBody = (at) => [
+      '',
+      '─'.repeat(80),
+      '  New MCP server found in this project: orchestratinator',
+      '',
+      '  MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP documentation.',
+      '',
+      ...['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server']
+        .map((t, i) => (i === at ? `  ❯ ${t}` : `    ${t}`)),
+      '',
+      '  Enter to confirm · Esc to cancel',
+      '',
+    ];
+    const spawnStartupPane = async (name, lines) => {
+      const dir = `${PROMPT_DIR}/${name}`;
+      mkdirSync(dir, { recursive: true });
+      const script = `${dir}/run.cjs`;
+      writeFileSync(script, [
+        '#!/usr/bin/env node',
+        `const fs = require('fs');`,
+        ...lines.map((l) => `process.stdout.write(${JSON.stringify(`${l}\n`)});`),
+        `try { fs.unlinkSync(${JSON.stringify(enterMark)}); } catch {}`,
+        `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+        `process.stdin.resume();`,
+        `let resolved = false;`,
+        // CR in raw mode, or LF if something along the way translated it —
+        // either is "Enter arrived", and telling them apart buys nothing here.
+        // The real dialog disappears once answered; answerStartup's own
+        // success check reads exactly that (the question is gone from the
+        // next capture), so a stand-in that never redraws would fail the
+        // presser's positive path for a reason that has nothing to do with
+        // what the path is testing. `-S -30` is not "the last 30 lines" — see
+        // busy()'s own note in host/window.js — it is 30 lines of scrollback
+        // *plus the whole visible pane*, so nothing short of genuinely
+        // scrolling the dialog out of the pane's history defeats it. Printed
+        // once, and generously past any plausible pane height.
+        `process.stdin.on('data', (buf) => {`,
+        `  if (!buf.includes(0x0d) && !buf.includes(0x0a)) return;`,
+        `  fs.appendFileSync(${JSON.stringify(enterMark)}, 'x');`,
+        `  if (resolved) return;`,
+        `  resolved = true;`,
+        `  for (let i = 0; i < 200; i++) process.stdout.write('  \\n');`,
+        `});`,
+      ].join('\n'));
+      chmodSync(script, 0o755);
+      await run('tmux', ['new-window', '-d', '-t', TMUX_SESSION, '-c', dir, script]).catch(() => {});
+      await sleep(500);
+      return dir;
+    };
+
+    // Cursor stuck on "Continue without…" (index 2) — the dialog's real
+    // starting position. answerStartup wants row 1 ("Use this MCP server"),
+    // walks Up twice, and must find the cursor still where it started before
+    // it may press Enter.
+    const cursorStuck = await spawnStartupPane('startup-stuck', mcpBody(2));
+    const stuckResult = await W.answerStartup(cursorStuck, 1);
+    eq(stuckResult.ok, false, 'a cursor that does not move is not pressed past');
+    eq(stuckResult.code, 'not_taken', 'and the reason is that the cursor never got there');
+    assert(/is not on/.test(stuckResult.error ?? ''), `quoting what the window actually reads rather than assuming — ${stuckResult.error}`);
+    assert(!existsSync(enterMark), 'and Enter itself was never sent — the one keystroke here with a cost when wrong');
+
+    // Cursor already on the wanted row (no walk needed) — the positive path,
+    // proving Enter really is sent once the check passes.
+    const there = await spawnStartupPane('startup-there', mcpBody(0));
+    const thereResult = await W.answerStartup(there, 1);
+    eq(thereResult.ok, true, `the presser succeeds once the cursor is confirmed on the right row — ${thereResult.error ?? ''}`);
+    eq(thereResult.chose, 'Use this MCP server', 'and reports which row it took');
+    assert(existsSync(enterMark), 'with Enter actually reaching the window this time');
+
+    // waitReady's early return. A window sitting on this dialog is registered
+    // — it is a live interactive tty — but must never be waited out to the
+    // full timeout: the watch loop has already put the question on the floor,
+    // and sitting here would only delay the operator's own answer reaching it.
+    const askingStill = await spawnStartupPane('startup-waiting', mcpBody(2));
+    const askingPane = await W.paneFor(askingStill);
+    assert(!!askingPane, 'the spawned window is found by its directory');
+    const waitReadyStartedAt = Date.now();
+    const wr = await W.waitReady(askingStill, { timeoutMs: 20_000, target: askingPane.target });
+    const waitedMs = Date.now() - waitReadyStartedAt;
+    eq(wr.ok, false, 'a window on a startup question is not reported ready');
+    eq(wr.code, 'startup_question', 'and says which kind of not-ready this is');
+    assert(/Continue without/.test(wr.error ?? ''), `quoting the dialog rather than saying only "not ready" — ${wr.error}`);
+    assert(waitedMs < 5000, `and returns as soon as the question is seen, not after the full ${20_000}ms timeout — took ${waitedMs}ms`);
   } finally {
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
     rmSync(FIX, { recursive: true, force: true });
