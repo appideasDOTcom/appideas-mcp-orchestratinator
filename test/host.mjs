@@ -311,10 +311,68 @@ try {
   const tool = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'tool'));
   eq(tool?.text, 'Bash: npm test', 'a tool call becomes its one-line row');
 
+  // What the agent thought before the call is a row too, under its own role —
+  // the operator read one in the window and found nothing on the floor.
+  appendTurn({ type: 'assistant', uuid: 'a-2t', message: { content: [{ type: 'thinking', thinking: 'run the suite before touching anything else', signature: 's' }] } });
+  const thought = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'thinking'));
+  eq(thought?.text, 'run the suite before touching anything else', "the agent's thinking reaches the floor as its own kind of row");
+  eq(deskOf(await floor(), 'free')?.last_message?.text, 'run the suite before touching anything else', 'and the thought bubble picks it up');
+
   appendTurn({ type: 'assistant', uuid: 'a-3', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent chatter' }] } });
   await sleep(600);
   assert(!((await turns('free')).rows ?? []).some((r) => r.text === 'subagent chatter'),
     "a subagent's own conversation stays inside the tool call that owns it");
+
+  /* A subagent's own file, though, is read — labeled. Claude Code writes each
+   * Agent call's conversation to <session dir>/subagents/agent-<id>.jsonl, and
+   * before this the floor showed the Agent line and then nothing until the
+   * report, while the editor showed every step in between (2026-09-03). */
+  const subDir = `${HOME}/.claude/projects/${slug()}/${SESSION_ID}/subagents`;
+  mkdirSync(subDir, { recursive: true });
+  writeFileSync(`${subDir}/agent-sub1.meta.json`, JSON.stringify({ agentType: 'claude-code-guide', description: 'Docs lookup', toolUseId: 'toolu_x', spawnDepth: 1 }));
+  writeFileSync(`${subDir}/agent-sub1.jsonl`, [
+    JSON.stringify({ type: 'user', uuid: 'su-1', isSidechain: true, agentId: 'sub1', timestamp: new Date().toISOString(), message: { content: 'find the docs' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'sa-1', isSidechain: true, agentId: 'sub1', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: "I'll search the official docs" }] } }),
+    JSON.stringify({ type: 'assistant', uuid: 'sa-2', isSidechain: true, agentId: 'sub1', timestamp: new Date().toISOString(), message: { content: [{ type: 'tool_use', name: 'WebFetch', input: { url: 'https://docs.example.test/hooks' } }] } }),
+    '',
+  ].join('\n'));
+  const viaRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.text === "I'll search the official docs") ? rows : null;
+  });
+  assert(!!viaRows, "a subagent's words appear on the floor, read from its own file");
+  eq(viaRows?.find((r) => r.text === "I'll search the official docs")?.via, 'Docs lookup', 'labeled with the description the caller gave it');
+  eq(viaRows?.find((r) => r.text === 'WebFetch: https://docs.example.test/hooks')?.via, 'Docs lookup', 'and so is each of its tool calls');
+  assert(!(viaRows ?? []).some((r) => r.text === 'find the docs'), 'its brief is not filed as anyone speaking');
+
+  /* Merged by the clock, not by which file was read first — and not by string
+   * order either. The session's own transcript is read before the subagents'
+   * each tick, so a subagent line stamped earlier than a main-thread line
+   * written in the same tick must still land first.
+   *
+   * The two stamps deliberately differ in *precision*, which is the whole of
+   * what separates a clock comparison from `localeCompare`. The first version
+   * of this case put them five seconds apart at the same precision, where
+   * string order and clock order agree — so it pinned the sort's existence
+   * (M7 red) while saying nothing about the guard, and restoring
+   * `localeCompare` left it green (QA, PR #3 re-review, 2026-09-03). Here the
+   * subagent's second-precision `…:00Z` sorts *after* the main thread's
+   * `…:00.500Z` as a string, because `.` is below `Z`, and before it by the
+   * clock. Only a real time comparison gets this right.
+   */
+  const base = new Date();
+  base.setMilliseconds(0);
+  const subAt = base.toISOString().replace(/\.\d{3}Z$/, 'Z');    // second precision, earlier
+  const mainAt = new Date(base.getTime() + 500).toISOString();    // millisecond precision, later
+  appendTurn({ type: 'assistant', uuid: 'a-order-main', timestamp: mainAt, message: { content: [{ type: 'text', text: 'ORDER-MAIN said later' }] } });
+  appendFileSync(`${subDir}/agent-sub1.jsonl`, `${JSON.stringify({ type: 'assistant', uuid: 'sa-order', isSidechain: true, agentId: 'sub1', timestamp: subAt, message: { content: [{ type: 'text', text: 'ORDER-SUB thought earlier' }] } })}\n`);
+  const ordered = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.text === 'ORDER-MAIN said later') && rows.some((r) => r.text === 'ORDER-SUB thought earlier') ? rows : null;
+  });
+  const idOf = (text) => ordered?.find((r) => r.text === text)?.id ?? -1;
+  assert(idOf('ORDER-SUB thought earlier') < idOf('ORDER-MAIN said later'),
+    'a subagent line stamped earlier is filed first even though its stamp sorts later as a string — merged by the clock, not by file order or string order');
 
   console.log('\nswitching apps');
 
@@ -422,6 +480,13 @@ try {
   assert(!clean(received()).includes('takes a while to go in'),
     'and it got there before the message it was queued behind — the relay is not waiting on the delivery');
   assert((heard?.length ?? 0) > turnsBefore, 'the floor gained a turn rather than replaying the transcript');
+  // And the subagent file already on disk was joined at its end, not replayed.
+  // Named directly: QA's M6 (offsets read from 0) turned this suite red only
+  // three sections later, through a desk drawn as working because a replayed
+  // WebFetch row had become its last turn (PR #3 review, 2026-09-03).
+  const everything = (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
+  eq(everything.filter((r) => r.text === 'WebFetch: https://docs.example.test/hooks').length, 1,
+    'a subagent file already on disk is not replayed when the host restarts');
 
   assert(await until(() => (clean(received()).includes('takes a while to go in') ? true : null), 20000),
     'and the message itself still lands once the window finishes starting');

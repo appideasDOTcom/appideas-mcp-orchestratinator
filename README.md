@@ -203,7 +203,10 @@ it left off — and then nudges.
 **7. Type to a desk from the floor** by first closing that conversation's tab
 in your editor and clicking **Open on the Floor** — one app at a time. The composer
 comes alive a second or two later; if no window is open at all, the host opens
-one and *resumes the same conversation*, history intact.
+one and *resumes the same conversation*, history intact. Windows the host opens
+start with Claude Code's session survey (*"How is Claude doing this session?"*)
+switched off: nobody is sitting at them to answer it, and it looked like a
+desk stuck on a question the floor could not see.
 
 **8. Take a conversation back whenever you want** — for any feature the floor
 chat doesn't provide. **Open in VS Code** moves it to your editor with everything

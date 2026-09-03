@@ -1088,7 +1088,30 @@ export async function open(cwd, { resume = null } = {}) {
   const name = taken ? `${windowName(here)}-${(Math.abs(hash(here)) % 65536).toString(16).padStart(4, '0')}` : windowName(here);
   // `claude` is exec'd rather than run from a shell so the pane dies with the
   // session instead of dropping to a prompt that looks like a live window.
-  const cmd = [CLAUDE, ...(resume ? ['--resume', resume] : [])]
+  //
+  // It goes through `env` so the window never draws Claude Code's session
+  // survey — "How is Claude doing this session?  1: Bad  2: Fine  3: Good
+  // 0: Dismiss". CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY is the documented switch
+  // (code.claude.com/docs/en/data-usage#session-quality-surveys), and in
+  // 2.1.258 it is the first thing every survey path checks, so the memory,
+  // plugin, long-context and post-compact surveys go with it; they all sit in
+  // the same slot above the composer. Deliberate, and this is the failure it
+  // removes: the survey is drawn for whoever is sitting at the terminal, and
+  // nobody sits at a floor window. No hook carries it, so the floor cannot
+  // offer it; the host will not press a rating on a person's behalf, because
+  // that is a false record; and what the operator sees is a desk that finished
+  // its turn and then stood on a question the board knows nothing about —
+  // reported on 2026-09-03 as a halted session. `env` rather than tmux's `-e`
+  // because it needs no particular tmux or shell, and it execs `claude` in
+  // place, so the pane pid is still Claude Code's and holderOf's join with the
+  // roster holds.
+  //
+  // Not watched end to end: on 2.1.258 a probe window with
+  // CLAUDE_FORCE_DISPLAY_SURVEY=1 never drew the survey at all (2026-09-03,
+  // see measure-a-real-window), so this rests on the docs and the binary's
+  // check order rather than on seeing it go away. A survey on a floor window
+  // after this is the thing to re-measure.
+  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE, ...(resume ? ['--resume', resume] : [])]
     .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
     .join(' ');
 
@@ -2246,7 +2269,7 @@ function reduceToolInput(input) {
  * so tailing is a read from where the last one stopped rather than a re-parse
  * of a conversation that may be very long.
  */
-export async function readTranscript(path, { after = 0 } = {}) {
+export async function readTranscript(path, { after = 0, via = null } = {}) {
   if (!existsSync(path)) return { ok: false, error: 'no transcript yet', turns: [], offset: after };
   const { readFile, stat } = await import('node:fs/promises');
   const { size } = await stat(path);
@@ -2343,26 +2366,105 @@ export async function readTranscript(path, { after = 0 } = {}) {
     }
 
     if (d.type !== 'user' && d.type !== 'assistant') continue;
-    // Sidechain is a subagent's own conversation; it belongs inside the tool
-    // call that owns it, not beside the turns of the session that spawned it.
-    if (d.isMeta || d.isSidechain) continue;
+    // Sidechain is a subagent's own conversation. In the session's transcript
+    // it is skipped: it belongs inside the tool call that owns it, not beside
+    // the turns of the session that spawned it. But it is no longer written
+    // there at all — each subagent has a file of its own under
+    // <session dir>/subagents/ (see subagentTranscripts), every record flagged
+    // isSidechain — and those files are read through here with `via` set,
+    // which turns the flag from a filter into a label. Without that the floor
+    // showed "Agent: <description>" and then nothing until the report came
+    // back, while the editor showed every "Let me search for…" in between
+    // (2.1.258, 2026-09-03).
+    if (d.isMeta || (d.isSidechain && !via)) continue;
     const at = d.timestamp ?? null;
     const uuid = d.uuid ?? null;
 
     if (d.type === 'user') {
+      // A subagent's user records are its brief — already on the floor as the
+      // Agent tool line that spawned it — and its tool results. Neither is a
+      // person speaking, so neither is a turn.
+      if (via) continue;
       // A user record is not all the operator — see personTurns.
       personTurns(blocksOf(d.message?.content), at, uuid);
       continue;
     }
     const content = d.message?.content;
+    // What the agent thought before it spoke — Claude Code's thinking blocks,
+    // which the window draws in dim text ahead of each step. On 2.1.258 they
+    // are a sentence or two of narration ("I'll leave the console checkboxes
+    // as is since FreshBooks already…"; across one working desk the 90th
+    // percentile was under 300 characters), and the operator read exactly
+    // that in the window and found nothing on the floor (2026-09-03). Their
+    // own role, so no surface files them as the agent's words. Empty blocks
+    // are common and are nothing.
+    for (const block of Array.isArray(content) ? content : []) {
+      if (block?.type !== 'thinking' || typeof block.thinking !== 'string' || !block.thinking.trim()) continue;
+      turns.push({ role: 'thinking', text: block.thinking, at, uuid, ...(via ? { via } : {}) });
+    }
     const text = textOf(content);
-    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid });
+    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid, ...(via ? { via } : {}) });
     for (const block of Array.isArray(content) ? content : []) {
       if (block?.type !== 'tool_use') continue;
-      turns.push({ role: 'tool', text: '', tool_name: block.name ?? 'tool', tool_input: reduceToolInput(block.input), at, uuid });
+      turns.push({ role: 'tool', text: '', tool_name: block.name ?? 'tool', tool_input: reduceToolInput(block.input), at, uuid, ...(via ? { via } : {}) });
     }
   }
   return { ok: true, turns, offset: after + consumed };
+}
+
+/**
+ * The subagents of a conversation, each with the transcript it writes.
+ *
+ * The Agent tool does not write into the transcript of the session that
+ * spawned it. Each call gets a file of its own — `<session dir>/subagents/
+ * agent-<id>.jsonl`, beside an `agent-<id>.meta.json` naming its type and the
+ * description the caller gave it — and the session's transcript holds only
+ * the tool_use that started it and the report that came back. Read on a live
+ * session, 2.1.258. `label` is that description, which is the same words the
+ * editor puts over the block: "Usage-limit warning behaviour".
+ *
+ * A readdir per desk per tick. Cheap, and it has to be a scan: a subagent can
+ * start at any moment, and nothing else announces its file.
+ */
+/* How long a subagent transcript with no meta file beside it is left unread
+   before it is read under its id. See subagentTranscripts. */
+const SUBAGENT_META_GRACE_MS = Number(process.env.ORCH_SUBAGENT_META_GRACE_MS ?? 120_000);
+/** When each meta-less subagent transcript was first seen, by path. */
+const subagentFirstSeen = new Map();
+
+export async function subagentTranscripts(mainPath, { metaGraceMs = SUBAGENT_META_GRACE_MS } = {}) {
+  const dir = `${String(mainPath).replace(/\.jsonl$/, '')}/subagents`;
+  if (!existsSync(dir)) return [];
+  const { readdir, readFile } = await import('node:fs/promises');
+  const names = (await readdir(dir).catch(() => [])).filter((n) => /^agent-[^/]+\.jsonl$/.test(n)).sort();
+  const out = [];
+  for (const name of names) {
+    const id = name.slice('agent-'.length, -'.jsonl'.length);
+    const path = join(dir, name);
+    let meta = null;
+    try { meta = JSON.parse(await readFile(join(dir, `agent-${id}.meta.json`), 'utf8')); } catch { /* no meta yet */ }
+    // The meta file usually lands in the same second as the transcript, but
+    // not always: over 50 real pairs on one machine, two came meta-first and
+    // one transcript came 52 seconds before its meta (QA, PR #3 review,
+    // 2026-09-03). Reading it in the meantime filed its first turns under the
+    // id and the rest under the description, and nothing relabels. So a
+    // transcript with no meta is left alone until the meta arrives — its
+    // turns are read then, from the first word — and only after a long grace
+    // is it read under its id, in case the meta never comes.
+    if (!meta) {
+      const seen = subagentFirstSeen.get(path) ?? Date.now();
+      subagentFirstSeen.set(path, seen);
+      if (Date.now() - seen < metaGraceMs) continue;
+    } else {
+      subagentFirstSeen.delete(path);
+    }
+    const label = [meta?.description, meta?.agentType].find((v) => typeof v === 'string' && v.trim()) ?? id;
+    out.push({
+      id, path, label: String(label).trim().slice(0, 120),
+      agentType: meta?.agentType ?? null, toolUseId: meta?.toolUseId ?? null,
+    });
+  }
+  return out;
 }
 
 /** Small stable hash, only used to name a tmux buffer per repo. */

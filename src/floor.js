@@ -123,6 +123,18 @@ const DELIVERY_STALE_MS = 10 * 60_000;
  * while somebody read it. There is nothing to answer and nowhere to go; the
  * composer immediately below the alert is the answer, and the desk's own idle
  * state and speech bubble already say the agent is waiting.
+ *
+ * The usage notice — "You've used 87% of your Fable limit · resets 3am" — is
+ * not a Notification at all. It is Claude Code's own notice bar above the
+ * composer (2.1.258 draws it from 70% utilization, and nothing switches it
+ * off), it fires no hook, and a message pasted while it showed became a turn
+ * in 0.43s with the host's parsers reading the pane as an idle composer at
+ * both 200 and 80 columns (measured 2026-09-03). Nothing to do here. What is
+ * open is 100%: `quota_auto_resume_fired` / `quota_auto_resume_stalled` are
+ * hook notification types, the window waits for the reset on its own
+ * (`autoContinueAtUsageLimit` is on unless a settings file turns it off), and
+ * a desk in that wait currently looks merely idle on the floor. Not measured,
+ * because measuring it means spending the limit.
  */
 const AWAITING_NOTIFICATIONS = new Set(['permission_prompt']);
 
@@ -645,15 +657,15 @@ export function ingestHookEvent(store, body, live = null) {
     live?.publish(key, { type: 'state', state: s });
   };
 
-  const turn = (role, text, toolName = null) => {
+  const turn = (role, text, toolName = null, via = null) => {
     const clipped = clip(text);
     if (!clipped && !toolName) return 0;
     const id = store.insertTurn({
-      channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName,
+      channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName, via,
     });
     live?.publish(deskKey(channel, agent), {
       type: 'turn',
-      turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, created_at: new Date().toISOString() },
+      turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, via, created_at: new Date().toISOString() },
     });
     return id;
   };
@@ -934,11 +946,11 @@ function applyHostEvent(store, live, hostId, ev) {
   const placeholder = placeholderSession(hostId, channel, agent);
   const sessionId = str(ev.session_id) ?? desk.sdk_session_id ?? placeholder;
   const now = new Date().toISOString();
-  const turn = (role, text, toolName = null) => {
+  const turn = (role, text, toolName = null, via = null) => {
     const clipped = clip(text);
     if (!clipped && !toolName) return 0;
-    const id = store.insertTurn({ channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName });
-    live.publish(key, { type: 'turn', turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, created_at: now } });
+    const id = store.insertTurn({ channel, agent, session_id: sessionId, role, text: clipped, tool_name: toolName, via });
+    live.publish(key, { type: 'turn', turn: { id, session_id: sessionId, role, text: clipped, tool_name: toolName, via, created_at: now } });
     return id;
   };
   const state = (s) => {
@@ -1003,12 +1015,20 @@ function applyHostEvent(store, live, hostId, ev) {
      */
     case 'turn': {
       const role = str(ev.role);
-      if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name));
+      // A turn read from a subagent's own transcript carries that subagent's
+      // description; the desk's own turns carry nothing. Stored as a column
+      // so every surface labels it the same way — see subagentTranscripts in
+      // host/window.js for why those are separate files.
+      const via = str(ev.via) ?? null;
+      if (role === 'tool') turn('tool', toolSummary(str(ev.tool_name) ?? 'tool', ev.tool_input), str(ev.tool_name), via);
       // Machine-injected context riding a user record — IDE state, slash-command
       // records. Its own role, with the tag in tool_name as the label, so no
       // surface can attribute the system's words to the person.
       else if (role === 'context') turn('context', ev.text, str(ev.tool_name));
-      else if (role === 'user' || role === 'assistant') turn(role, ev.text);
+      // Thinking is its own role — see readTranscript — and goes in as text,
+      // labeled by the role alone: the panel draws it quietly, apart from what
+      // the agent said, and the bubble quotes it like a reply.
+      else if (role === 'user' || role === 'assistant' || role === 'thinking') turn(role, ev.text, null, via);
       else return false;
       // A queued message stops being queued when it becomes a turn.
       //
@@ -1554,9 +1574,10 @@ export function buildFloor(store, live = null, sessions = null) {
               }
             : null,
           last_turn: t
-            ? { role: t.role, text: t.text, tool_name: t.tool_name, at: iso(t.created_at), id: t.id }
+            ? { role: t.role, text: t.text, tool_name: t.tool_name, via: t.via ?? null, at: iso(t.created_at), id: t.id }
             : null,
-          // What this agent last said, which is what its thought bubble shows.
+          // What this agent last said or thought, which is what its thought
+          // bubble shows.
           // Separate from last_turn, which stays because it is what tells the
           // floor whether the desk is mid-tool-call and therefore working.
           last_message: m ? { text: m.text, at: iso(m.created_at), id: m.id } : null,

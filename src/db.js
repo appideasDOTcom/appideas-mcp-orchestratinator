@@ -136,7 +136,7 @@ export function openDb(path) {
       channel     TEXT NOT NULL,
       agent       TEXT NOT NULL,
       session_id  TEXT NOT NULL,
-      role        TEXT NOT NULL,            -- user | assistant | tool | error
+      role        TEXT NOT NULL,            -- user | assistant | tool | error | context | thinking
       text        TEXT,
       tool_name   TEXT,
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -274,6 +274,12 @@ export function openDb(path) {
   // server-wide default instead (see STATUS_TTL_MINUTES in web.js).
   addColumn(db, 'agents', 'status_detail', 'TEXT');                 // the human-readable line
   addColumn(db, 'agents', 'status_expires_at', 'TEXT');
+
+  // Who said a turn, when it was not the desk's own thread: the description of
+  // the subagent (Agent tool) whose transcript it was read from, NULL for the
+  // conversation itself. A column rather than a prefix baked into the text, so
+  // the chat panel can label it and the bubble can still quote it plainly.
+  addColumn(db, 'turns', 'via', 'TEXT');
 
   // Retired = the operator has taken this agent off the board. Deliberately a
   // flag and not a DELETE: the row is recreated by `touchAgent` the moment the
@@ -919,8 +925,8 @@ export function makeStore(db) {
         WHERE session_id = @session_id`
     ),
     insertTurn: db.prepare(
-      `INSERT INTO turns (channel, agent, session_id, role, text, tool_name)
-       VALUES (@channel, @agent, @session_id, @role, @text, @tool_name)`
+      `INSERT INTO turns (channel, agent, session_id, role, text, tool_name, via)
+       VALUES (@channel, @agent, @session_id, @role, @text, @tool_name, @via)`
     ),
     // Keyed by channel+agent rather than session: a resumed session gets a new
     // session_id but it is the same desk, and a chat panel that emptied itself
@@ -930,7 +936,7 @@ export function makeStore(db) {
       // on it, and the panel should show the one you are in. `sessions` is a
       // JSON array rather than one id because a conversation can span ids: a
       // fork carries its parent's history, and the two read as one.
-      `SELECT id, session_id, role, text, tool_name, created_at
+      `SELECT id, session_id, role, text, tool_name, via, created_at
          FROM turns
         WHERE channel = @channel AND agent = @agent AND id > @since
           AND (@sessions IS NULL OR session_id IN (SELECT value FROM json_each(@sessions)))
@@ -962,7 +968,7 @@ export function makeStore(db) {
     ),
     // The newest turn carrying text, per desk — what the avatar's bubble says.
     lastTurns: db.prepare(
-      `SELECT t.channel, t.agent, t.role, t.text, t.tool_name, t.created_at, t.id
+      `SELECT t.channel, t.agent, t.role, t.text, t.tool_name, t.via, t.created_at, t.id
          FROM turns t
          JOIN (SELECT channel, agent, MAX(id) AS id
                  FROM turns WHERE text IS NOT NULL AND text != ''
@@ -970,8 +976,11 @@ export function makeStore(db) {
            ON last.channel = t.channel AND last.agent = t.agent AND last.id = t.id`
     ),
     turnCounts: db.prepare(`SELECT channel, agent, COUNT(*) AS n FROM turns GROUP BY channel, agent`),
-    /* The last thing an agent SAID, and the last few things it DID — the floor's
-       thought bubble draws the first, its monitor types the second. A desk that
+    /* The last thing an agent SAID or THOUGHT, and the last few things it DID —
+       the floor's thought bubble draws the first, its monitor types the second.
+       Thinking counts (2026-09-03, at the operator's ask): a thought bubble is
+       where a thought belongs, and between replies it is the one line that says
+       what the desk is doing. A desk that
        reads "Bash: grep -rn ..." tells an operator what a tool call looked like,
        which is the one thing the chat panel behind it already shows in full;
        what it cannot get anywhere else at a glance is what the agent is telling
@@ -987,7 +996,7 @@ export function makeStore(db) {
     deskLastMessage: db.prepare(
       `SELECT id, text, created_at
          FROM turns
-        WHERE channel = ? AND agent = ? AND role = 'assistant'
+        WHERE channel = ? AND agent = ? AND role IN ('assistant', 'thinking')
           AND text IS NOT NULL AND text != ''
         ORDER BY id DESC LIMIT 1`
     ),
@@ -1027,7 +1036,7 @@ export function makeStore(db) {
        desk's rather than every desk's — see lastTurns above for the bulk form.
        Same shape, same "a turn with no text is not a turn" rule. */
     deskLastTurn: db.prepare(
-      `SELECT id, role, tool_name, created_at
+      `SELECT id, role, tool_name, via, created_at
          FROM turns
         WHERE channel = ? AND agent = ? AND text IS NOT NULL AND text != ''
         ORDER BY id DESC LIMIT 1`
@@ -1480,6 +1489,10 @@ export function makeStore(db) {
         role: t.role,
         text: t.text ?? null,
         tool_name: t.tool_name ?? null,
+        // The statement names every parameter, so a caller that omits one
+        // fails the whole insert — which is what happened the day this column
+        // was added to the statement and not here.
+        via: t.via ?? null,
       }).lastInsertRowid),
     // Oldest-first, because that is the order a conversation is read in.
     recentTurns: (channel, agent, { since = 0, limit = 80, sessions = null } = {}) =>

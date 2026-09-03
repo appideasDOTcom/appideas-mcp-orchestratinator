@@ -2116,7 +2116,9 @@
     div.dataset.id = t.id;
     if (t.role === 'tool') {
       div.className = 't t-tool';
-      div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.text ?? t.tool_name)}</span>`;
+      // A subagent's tool call carries the subagent's description — the same
+      // label the chat puts over its words, so the two read as one thread.
+      div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.via ? `${t.via} · ` : '')}${esc(t.text ?? t.tool_name)}</span>`;
       return div;
     }
     if (t.role === 'context' && t.tool_name === 'task-notification') {
@@ -2135,7 +2137,25 @@
       div.innerHTML = `<span class="t-dot"></span><span class="t-text mono">${esc(t.tool_name ? `${t.tool_name} · ` : '')}${esc(inner)}</span>`;
       return div;
     }
-    const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? 'agent' : t.role;
+    if (t.role === 'thinking') {
+      // What the agent is thinking, drawn as a thought: the desk's own idiom —
+      // a bubble whose tail is a trail of dots rather than a point — brought
+      // into the chat. No speaker header, deliberately: with one, these read
+      // as a message from somebody called "thinking" (the operator said so,
+      // 2026-09-03). Plain text, never markdown, and never the agent's words.
+      div.className = 't t-thinking';
+      div.innerHTML = `
+      <span class="t-thought-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <div class="t-thought" role="note" aria-label="${esc(t.via ? `Thought from ${t.via}` : 'Thought')}">
+        <div class="t-body">${esc(t.text ?? '')}</div>
+        <div class="t-thought-meta mono">${esc(t.via ? `${t.via} · ` : '')}<span class="t-when" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
+      </div>`;
+      return div;
+    }
+    // A subagent speaking is labeled as such. Its words are still the desk's —
+    // the editor shows them under the Agent call for the same reason — but
+    // "agent" alone would have the desk appear to change subject mid-thought.
+    const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? (t.via ? `agent · ${t.via}` : 'agent') : t.role;
     div.className = `t t-${esc(t.role)}`;
     // Only the agent's own messages are read as markdown. What the operator
     // typed comes back exactly as typed — the compose box is a plain textarea,
