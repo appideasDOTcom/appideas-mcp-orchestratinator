@@ -243,7 +243,27 @@ bubble — dotted edge, a trail of dots toward the thinker, no speaker header,
 because with a header they read as a message from somebody called "thinking"
 — and the desk's bubble quotes them like a reply: a thought bubble is where a
 thought belongs, and between replies it is the one line that says what the
-desk is doing. Empty thinking blocks are common and are skipped.
+desk is doing. Empty thinking blocks are common — Claude Code writes one
+ahead of most steps and only about one in five carries any text, so a desk
+working steadily and thinking nothing visible is the normal case, not a
+fault — and they are skipped.
+
+**A new field on a turn crosses eight places, and missing one fails
+silently.** Both `via` and the `thinking` role were added this way
+(2026-09-03), and the chain is worth having in front of you rather than
+rediscovering: `readTranscript` puts it on the turn → the desk watcher's
+`emit` in [`host/index.js`](host/index.js) sends it → `applyHostEvent` reads
+it off the event → **both** `turn()` helpers in
+[`src/floor.js`](src/floor.js) take it (there are two, and updating one is
+the easy miss) → the `INSERT` statement names it **and** `insertTurn`'s
+wrapper passes it → every read query that the panel or the bubble uses
+selects it → the hand-picked projection in the floor payload carries it →
+`turnNode` draws it. Two of those bite without a word: the wrapper names its
+parameters, so a column added to the statement alone makes **every** insert
+throw `Missing named parameter`, and a column the query selects but the
+projection drops simply arrives as `undefined` in the page. The floor suite
+catches the first, nothing catches the second — read the new field out of
+`/api/floor` before trusting anything drawn from it.
 
 The two scripts talk over `window`, in both directions — `app.js` is a classic
 script so its top-level functions are already global, `floor.js` is an IIFE and
