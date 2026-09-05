@@ -32,6 +32,8 @@ import { join } from 'node:path';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const DEBUG_PORT = Number(process.env.ORCH_CDP_PORT ?? 9222);
+/** How long any single CDP command may go unanswered before it throws. See cmd(). */
+const CMD_TIMEOUT_MS = Number(process.env.ORCH_CDP_TIMEOUT_MS ?? 30_000);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -97,9 +99,32 @@ export async function open({
     if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); }
   };
   await new Promise((res) => { ws.onopen = res; });
-  const cmd = (method, params = {}) => new Promise((res) => {
+  /* Every command carries a deadline, because the failure without one is silent
+     and total.
+
+     `evalJs` sends `awaitPromise: true`, so Runtime.evaluate does not answer
+     until the injected expression's promise settles. Injected code that never
+     settles therefore hangs this socket for ever — no error, no output, no
+     exceptionDetails, just a script that never returns. Measured 2026-09-04
+     against a real page: a shot script stubbed `window.fetch` to freeze the
+     poll while it measured element rects, and the overlay it then injected
+     began with `await fetch('./styles.css')`. That deadlock reads exactly like
+     a slow page, and it cost most of an hour and three wrong theories about
+     Chrome before anyone suspected the driver.
+
+     Generous, because a legitimate evaluation may sit on a deliberate settle
+     (`new Promise(r => setTimeout(r, 1800))`) and a navigation may be slow. The
+     point is a floor under "for ever", not a tight bound. */
+  const cmd = (method, params = {}) => new Promise((res, rej) => {
     const i = ++id;
-    waiting.set(i, res);
+    const timer = setTimeout(() => {
+      waiting.delete(i);
+      rej(new Error(
+        `CDP ${method} never answered after ${CMD_TIMEOUT_MS}ms. What is observed is silence, ` +
+        `not a page error. The usual cause is injected code returning a promise that never ` +
+        `settles — check whether the page's fetch/XHR was stubbed before the code that uses it.`));
+    }, CMD_TIMEOUT_MS);
+    waiting.set(i, (m) => { clearTimeout(timer); res(m); });
     ws.send(JSON.stringify({ id: i, method, params }));
   });
 
@@ -143,6 +168,20 @@ export async function open({
     evalJs,
     waitFor,
     goto,
+    /**
+     * Force the viewport size for this tab, whatever the browser was launched with.
+     *
+     * `browser()` reuses any Chrome already on the port, so its `--window-size`
+     * is whoever-got-there-first — fine for a pass/fail check, not fine for a
+     * picture. A documentation shot that needs room (a legend beside the room,
+     * say) must state its own width or it silently composes against someone
+     * else's. Overriding here rather than at launch is what makes that work on
+     * a reused browser.
+     */
+    resize: async (width, height) => {
+      await cmd('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      return { width, height };
+    },
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
     /**
