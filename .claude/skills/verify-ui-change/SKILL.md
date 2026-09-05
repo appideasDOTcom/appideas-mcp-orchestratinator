@@ -10,7 +10,7 @@ can still be wrong on the page. The only honest test is the real page against a
 real server. This is how to get one in about a minute, and — more importantly —
 the specific ways this has produced a **false pass**.
 
-## Six ways a green result has lied here
+## Eight ways a green result has lied here
 
 **Probing the panel before it has caught up.** Clicking a desk renders its
 panel *asynchronously* — `openDesk()` fetches turns first, then renders — and
@@ -56,6 +56,23 @@ column the page gets.** Two lessons: read a new field's value out of
 `/api/floor` before trusting anything drawn from it, and **seed a fixture whose
 value cannot equal the fallback** — the second run used a host whose tmux session
 was named `deskside`, which failed instantly and correctly.
+
+**A page that says "nothing here" while the API says otherwise.** The chat
+panel does not fetch a desk's turns flatly — `sessionFilter()` scopes them to
+`hosted.session_id`, so a fixture whose `turns.session_id` is anything else is
+fetched by nobody. The symptom points away from the cause: `/api/floor/turns`
+with no `session` parameter returns every row, so the API looks perfect while
+the panel draws *"No conversation captured yet."* Seed `hosted_desks.
+sdk_session_id` and the events' `session_id` as the same string, which
+`seed-desk.mjs` below does. The same shape bites anything else scoped by a key
+the fixture does not carry: check what the *page* asks for, not what you can
+get the API to answer.
+
+**Reading the served file from the wrong path.** The UI is served from the
+root — `/floor.js`, `/app.js`, `/styles.css` — because `express.static(UI_DIR)`
+mounts it there, not under `/ui/`. `curl …/ui/floor.js` returns Express's
+404 page, and grepping *that* for your change reports the change missing, which
+reads exactly like a stale container. Fetch `/floor.js`.
 
 **Measuring the container instead of the contents.** `getBoundingClientRect()`
 includes padding, so "is there padding?" answered itself wrongly. Read computed
@@ -141,6 +158,30 @@ setInterval(() => db.prepare(`UPDATE hosts SET last_seen=datetime('now') WHERE h
 That staleness is also the cheapest way to test a *refused* action: let it age,
 or age it deliberately between rendering a dialog and clicking its button.
 
+### seed-desk.mjs — the whole fixture, in one command
+
+Most checks of the chat panel or a desk's bubble need the same thing: a live
+host, a desk it runs, and turns of every kind on it. [`seed-desk.mjs`](seed-desk.mjs)
+builds that, keeps the host's heartbeat going for as long as it runs, and
+prints what the server made of it — so the API has answered before a browser is
+opened.
+
+```bash
+node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8905 &
+# → events: 200 {"ok":true,"applied":8}
+#   turns the panel will fetch (session-scoped): 8
+#   … one row per kind: user, assistant, tool, subagent turns carrying `via`,
+#     a thought from the subagent, a thought from the main thread
+#   bubble  : "I'll leave the console checkboxes as is since…"
+```
+
+Turns go in through `/api/host/events`, never SQL: `applyHostEvent` refuses an
+event whose desk it does not own, so posting them exercises the path a real
+host uses and rows no host could have produced cannot be seeded by accident.
+**`{"ok":true,"applied":0}` is the failure to watch for** — a 200 with every
+event refused, usually a `hosted_desks` row that did not land or names another
+host. It is not an error in any log.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
@@ -217,11 +258,86 @@ A dialog closing is not evidence a message was sent. For anything that queues
 work, read `host_outbox` afterwards and confirm the row — kind, payload, and
 that a *refused* attempt left nothing behind.
 
+## When it hangs instead of failing
+
+**A driver that produces nothing at all is almost always your own injected
+code, not the browser.** `evalJs` sends `awaitPromise: true`, so
+`Runtime.evaluate` does not answer until the expression's promise settles —
+injected code whose promise never settles hangs the run for ever, with no
+error, no output and no `exceptionDetails`.
+
+The measured case (2026-09-04): a shot script stubbed `window.fetch` to freeze
+the page's polling while it measured element rects, and the overlay injected
+straight afterwards opened with `await fetch('./styles.css')`. Self-inflicted
+deadlock. **If you stub `fetch` or XHR to freeze a page, nothing injected after
+it may use them** — read the CSSOM instead, or capture the real `fetch` first.
+
+`cmd()` now carries a 30s deadline (`ORCH_CDP_TIMEOUT_MS`) and throws saying so,
+so this costs seconds rather than the hour it cost once. Worth knowing anyway,
+because the shape invites expensive theories: that hour went on stale Chrome
+processes, a CDP origin flag, and Node's WebSocket — all wrong, all disproved
+afterwards by testing the socket on its own. **Suspect the page-side promise
+first.**
+
+## Two fixture traps specific to this board
+
+Both cost a re-seed before they were understood, and both look like the feature
+is broken rather than the fixture:
+
+- **Deleting a `personas` row does not remove a desk.** `buildFloor` calls
+  `ensurePersona()` for every `agents` row it reads, so the seat is recreated on
+  the very next poll. To take a desk off the floor set `agents.retired_at` —
+  that is the product's own mechanism and the only one that holds.
+- **`working` is the host's state, not a reading of the turns.** `isWorking()`
+  is `hosted_desks.state === 'working' || lastTurn.role === 'tool'`, and a
+  `UserPromptSubmit` ingest sets that state — so a desk stays `working` until a
+  `Stop` arrives, whatever its turns say. Seed the `Stop` when you want a desk
+  merely `here`, or every hosted desk in your fixture animates its thought trail.
+
+## Shooting a documentation image
+
+The labelled floor picture in [`docs/floor-nomenclature.png`](../../../docs/floor-nomenclature.png)
+— the one the team playbook uses — is regenerated by three files here, not by
+hand:
+
+```bash
+PORT=8907 DB_PATH=./data/nomen.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/nomenclature-seed.mjs &   # keeps a heartbeat; leave it up
+node --experimental-websocket .claude/skills/verify-ui-change/nomenclature-shot.mjs
+```
+
+`nomenclature-seed.mjs` builds a four-desk room showing all four desk states at
+once; `nomenclature-overlay.js` measures every labelled part off its own real
+element and draws the numbers and legend; `nomenclature-shot.mjs` sets the
+viewport, injects the overlay and captures at 2×.
+
+Three things in there are deliberate and worth keeping if you edit it. The
+overlay **throws on a part it cannot find**, because a label silently missing
+from a reference image teaches a reader a name for nothing. The shot **refuses
+to write a cropped image** if the legend does not fit the viewport — the failure
+it guards against is real, and it is silent otherwise. And it **states its own
+viewport** with `page.resize()` rather than inheriting whatever the browser was
+launched with, because `browser()` reuses any Chrome already on the port and a
+picture composed against someone else's window size is wrong in a way nothing
+reports.
+
+**These live here rather than in a scratchpad on purpose.** The previous version
+of this pipeline lived in a session scratchpad, was lost, and had to be rebuilt
+from nothing when the image next needed regenerating.
+
 ## Teardown, because leftovers poison the next run
 
 `lsof` is not installed on this machine, and env vars do not appear in `ps`, so a
 server started as `PORT=… DB_PATH=… node src/server.js` cannot be found by
 either. Match on the script:
+
+**And watch what your own command line says while you do it.** `ps | grep
+"[s]rc/server.js"` matches the shell running it if that same command *also*
+mentions `src/server.js` further along — the bracket trick hides the pattern
+from itself, not from the rest of your line. Killing your own shell mid-teardown
+looks like an unexplained exit code 144 and has happened twice here. Write the
+PID to a file when you start the server, or keep the kill in a command that
+mentions nothing else.
 
 ```bash
 for p in $(ps -Ao pid,command | grep "[s]rc/server.js" | awk '{print $1}'); do kill $p; done
