@@ -2205,7 +2205,15 @@ export async function screen(cwd, { lines = 60 } = {}) {
  * anything reporting it.
  */
 export function transcriptPath(cwd, sessionId) {
-  return join(CLAUDE_HOME, 'projects', projectSlug(cwd), `${sessionId}.jsonl`);
+  return join(projectDir(cwd), `${sessionId}.jsonl`);
+}
+
+/** Claude Code's own directory for a working directory: one transcript per
+ *  session, plus a subdirectory per session for its subagents. Exists only
+ *  once Claude Code has opened the folder, which is what the folder list
+ *  reads it for. */
+export function projectDir(cwd) {
+  return join(CLAUDE_HOME, 'projects', projectSlug(cwd));
 }
 
 /**

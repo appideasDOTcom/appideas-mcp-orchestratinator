@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, claudeable } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, claudeable, switchable } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -401,6 +401,17 @@ try {
   eq(claudeable({ ...live, host_seen: stale }).code, 'host_offline',
      'nor one whose host is offline — only the host can open the window this button may need to open');
 
+  // Changing a binding: left, or moved. An editor holding the conversation is
+  // not a refusal when the caller says so — a VS Code chat follows a rebind on
+  // its own next call (measured 2026-09-09) — but working always is.
+  eq(switchable(null).code, 'not_hosted', 'a binding cannot be changed where no host runs the repo');
+  eq(switchable({ ...live, host_seen: stale }).code, 'host_offline', 'nor when its host is offline');
+  eq(switchable({ ...live, outside_pid: 4242 }).code, 'held_by_editor', 'an editor holding it refuses by default');
+  assert(!switchable({ ...live, outside_pid: 4242 }, null, Date.now(), { editorOk: true }).error, 'and is allowed when the caller knows the editor will follow');
+  eq(switchable({ ...live, state: 'working' }).code, 'working', 'a working desk refuses — a rebind mid-turn changes who the agent is');
+  eq(switchable(live, { role: 'tool' }).code, 'working', 'as does one whose last turn is a tool call');
+  assert(!switchable(live, { role: 'assistant' }).error, 'an idle desk may be changed');
+
   console.log('\nputting a conversation back on the floor');
   // The direction that was missing. handback moves a conversation into the
   // editor; nothing moved it the other way, so a desk whose editor had let go
@@ -452,7 +463,9 @@ try {
   eq(await takeWork(), [], 'a refused open queues nothing — the host is never asked to make a second copy');
 
   // Already on the floor: nothing to do, and saying so is not an error.
-  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', window: '@7' });
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', window: '@7', scope: 'project' });
+  eq(deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'wanderer')?.hosted?.scope, 'project',
+     'a registration carries which file the host read the binding from — read off /api/floor, where it once arrived as null');
   opened = await askOpen();
   eq(opened.status, 200, 'asking for a window that is already open is not a failure');
   eq((await opened.json()).already, true, 'it says the window was already there');
@@ -463,6 +476,112 @@ try {
     body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }),
   });
   eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
+
+  console.log('\nthe folders a host offers');
+  // The list the "take a desk" dialog draws. Every value here is one that
+  // cannot be a fallback — a name, a time, a count that nothing on the server
+  // could have made up — so a field that arrives on the page came through the
+  // whole chain (see docs/internals.md) rather than being defaulted into place.
+  const registerWith = (extra) =>
+    fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()], ...extra }),
+    });
+  const folders = () => fetch(`${HOST}/api/floor/folders`).then((r) => r.json());
+  eq((await folders()).hosts.find((h) => h.host_id === 'h-open')?.at ?? null, null,
+    'a host that has never reported folders has a null time — not an empty list, which could mean anything');
+  const offered = [
+    { path: '/repo/zeta-newest', name: 'zeta-newest', depth: 1, bound: null, has_mcp_json: false, other_board: null, trusted: true, last_active: '2026-09-09T01:02:03.000Z', sessions: 7 },
+    { path: '/repo/alpha-older', name: 'alpha-older', depth: 1, bound: { channel: CH, agent: 'alpha', scope: 'local', board: HOST }, has_mcp_json: false, other_board: null, trusted: false, last_active: '2026-09-08T01:02:03.000Z', sessions: 2 },
+    { path: '/repo/elsewhere-bound', name: 'elsewhere-bound', depth: 1, bound: { channel: 'x', agent: 'y', scope: 'project', board: 'http://10.0.0.9:8787' }, has_mcp_json: true, other_board: 'http://10.0.0.9:8787', trusted: false, last_active: null, sessions: 0 },
+    { path: '/etc/not-under-a-root', name: 'not-under-a-root', depth: 1, bound: null },
+    { path: 'relative/nonsense', name: 'nonsense', depth: 1, bound: null },
+  ];
+  await registerWith({ roots: ['/repo'], folders: offered });
+  const mine = (await folders()).hosts.find((h) => h.host_id === 'h-open');
+  eq(mine?.live, true, 'the host is live');
+  eq(mine?.roots, ['/repo'], 'its roots are served');
+  eq(mine?.folders.map((f) => f.name), ['zeta-newest', 'alpha-older', 'elsewhere-bound'],
+    'every folder under its roots is served in the order the host gave, and one outside them — or not a path at all — is dropped');
+  eq(mine?.folders[1].bound, { channel: CH, agent: 'alpha', scope: 'local', board: HOST }, 'a binding crosses whole');
+  eq(mine?.folders[0].last_active, '2026-09-09T01:02:03.000Z', 'so does the activity time');
+  eq(mine?.folders[0].sessions, 7, 'and the session count');
+  eq(mine?.folders[0].trusted, true, 'and the trust mark');
+  eq(mine?.folders[2].other_board, 'http://10.0.0.9:8787', 'and the other-board mark');
+  eq(mine?.folders[2].has_mcp_json, true, 'and whether a .mcp.json entry exists to import');
+  assert(typeof mine?.at === 'string' && mine.at.length > 10, 'with the time the list was reported');
+  const flood = Array.from({ length: 301 }, (_, i) => ({ path: `/repo/f${i}`, name: `f${i}`, depth: 1, bound: null }));
+  await registerWith({ roots: ['/repo'], folders: flood });
+  eq((await folders()).hosts.find((h) => h.host_id === 'h-open')?.folders.length, 300, 'a list is capped at 300 entries');
+  const fl = await (await fetch(`${HOST}/api/floor`)).json();
+  assert(typeof fl.hosts.find((h) => h.host_id === 'h-open')?.folders_at === 'string', '/api/floor carries only when the list was reported, never the list');
+  assert(!('folders' in (fl.hosts.find((h) => h.host_id === 'h-open') ?? {})), 'the list itself stays off the payload every page polls');
+  await registerWith({ roots: ['/repo'], folders: offered });
+
+  /* ── taking a desk ──────────────────────────────────────────────────────────
+   * What the route checks is what the board knows; what the host does is the
+   * host suite's. Every refusal must queue nothing. */
+  console.log('\ntaking a desk from the floor');
+  const takeWorkFull = () =>
+    fetch(`${HOST}/api/host/work?host_id=h-open&wait=0`, { headers: HK }).then((r) => r.json()).then((b) => b.work ?? []);
+  const take = (body) => fetch(`${HOST}/api/floor/desk`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  await takeWork();
+  let rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'has space' });
+  eq(rr.status, 400, 'an agent name that is not a name is refused');
+  eq((await rr.json()).code, 'bad_name', 'with the rule');
+  rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: 'brand new channel', agent: 'fresh' });
+  eq((await rr.json()).code, 'bad_name', 'a typed channel name follows the same rule');
+  rr = await take({ host_id: 'nobody', path: '/repo/zeta-newest', channel: CH, agent: 'fresh' });
+  eq((await rr.json()).code, 'no_host', 'a host the board does not have is refused');
+  rr = await take({ host_id: 'h-open', path: '/repo/not-offered', channel: CH, agent: 'fresh' });
+  eq((await rr.json()).code, 'unknown_folder', 'a folder the host did not offer is refused — the board never sends a path the host did not name');
+  rr = await take({ host_id: 'h-open', path: '/repo/elsewhere-bound', channel: 'x', agent: 'y' });
+  eq((await rr.json()).code, 'other_board', 'a folder bound to another board is refused');
+  rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'wanderer' });
+  eq((await rr.json()).code, 'desk_taken', 'a name already seated live at another folder is refused');
+  rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: CH, agent: 'someone-else' });
+  eq((await rr.json()).code, 'move_unavailable', 'a folder bound as another desk is a move, which says it is not here yet');
+  eq(await takeWork(), [], 'and none of those queued anything');
+
+  rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', persona: 'Fresh Face' });
+  eq(rr.status, 200, 'an unbound folder can be taken');
+  eq((await rr.json()).mode, 'take', 'as a fresh binding');
+  const bindWork = await takeWorkFull();
+  eq(bindWork.map((w) => w.kind), ['bind'], 'the host is handed exactly one bind');
+  eq(bindWork[0]?.payload && { path: bindWork[0].payload.path, channel: bindWork[0].payload.channel, agent: bindWork[0].payload.agent, import: bindWork[0].payload.import, open: bindWork[0].payload.open },
+     { path: '/repo/zeta-newest', channel: CH, agent: 'fresh', import: false, open: true }, 'with the folder, the names, and no key — the host binds with its own');
+  const seated = deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'fresh');
+  eq(seated?.persona, 'Fresh Face', 'the desk is drawn at once with the name it was given');
+  eq(seated?.hosted ?? null, null, 'as not hosted, until the host says otherwise');
+  rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: CH, agent: 'alpha' });
+  eq((await rr.json()).mode, 'import', 'a folder bound in its .mcp.json as these same names is an import');
+  eq((await takeWorkFull()).map((w) => `${w.kind}:${w.payload.import}`), ['bind:true'], 'which the host is told');
+
+  // The host answers with `bound`: a row for a desk that had none.
+  eq((await hostEvents([{ type: 'bound', channel: CH, agent: 'fresh', cwd: '/repo/zeta-newest', scope: 'local', session_id: 'sess-fresh' }])).applied, 1,
+    'a bound event is taken for a desk the host did not have before');
+  const bound = deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'fresh');
+  eq(bound?.hosted?.scope, 'local', 'and the desk is hosted, in local scope');
+  eq(bound?.hosted?.session_id, 'sess-fresh', 'following the session it was given');
+  // Leaving: refused where it should be, queued where it should be.
+  const leave = (body) => fetch(`${HOST}/api/floor/desk/leave`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  rr = await leave({ channel: CH, agent: 'nobody-hosts-me' });
+  eq((await rr.json()).code, 'not_hosted', 'a desk no host runs cannot be left');
+  known.set('fresh', { channel: CH, agent: 'fresh', cwd: '/repo/zeta-newest', outside_pid: 777 });
+  await registerWith({ roots: ['/repo'], folders: offered });
+  rr = await leave({ channel: CH, agent: 'fresh' });
+  eq(rr.status, 200, 'a desk held by an editor can still be left — the editor chat follows the binding by itself');
+  eq(await takeWork(), ['unbind'], 'and the host is handed the unbind');
+  eq((await hostEvents([{ type: 'unbound', channel: CH, agent: 'fresh' }])).applied, 1, 'the host answers with unbound');
+  const gone = deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'fresh');
+  eq(gone?.hosted?.state, 'offline', 'the desk is offline');
+  eq(gone?.persona, 'Fresh Face', 'and the seat stays');
+  known.delete('fresh');
+  await registerWith({ roots: ['/repo'], folders: offered });
 
   console.log('\na host that names the conversation it is following');
   // The host's one-time `session` event can be lost to its own startup: the

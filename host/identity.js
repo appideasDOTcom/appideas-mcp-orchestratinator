@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
+import { projectDir } from './window.js';
 
 /**
  * Find the repos on this machine that belong to an orchestratinator, and which
@@ -35,7 +36,7 @@ const SKIP = new Set(['node_modules', '.git', 'vendor', 'dist', 'build', '.cache
 
 /** Case-insensitive, because a header name in hand-written JSON is whatever the
  *  person typing it felt like that day, and both spellings work over HTTP. */
-function header(headers, name) {
+export function header(headers, name) {
   if (!headers || typeof headers !== 'object') return null;
   const want = name.toLowerCase();
   for (const [k, v] of Object.entries(headers)) {
@@ -127,16 +128,79 @@ export function readDesk(dir, local = readLocalScope()) {
   }
 }
 
+/** Whether a directory's `.mcp.json` carries an orchestratinator entry for
+ *  any board at all — the file the README's step 3 has people write. */
+function hasMcpEntry(dir) {
+  const file = join(dir, '.mcp.json');
+  if (!existsSync(file)) return false;
+  try { return !!deskIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers, dir, {}); } catch { return false; }
+}
+
+/** What Claude Code's own project directory says about a folder: how many
+ *  sessions have been run there and when the newest transcript was last
+ *  written to. Absent for a folder Claude Code has never opened. */
+function activityOf(dir) {
+  let sessions = 0;
+  let last = 0;
+  const pdir = projectDir(dir);
+  let entries;
+  try { entries = readdirSync(pdir, { withFileTypes: true }); } catch { return { opened: false, sessions, last_active: null }; }
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
+    sessions++;
+    try { last = Math.max(last, statSync(join(pdir, e.name)).mtimeMs); } catch { /* being written */ }
+  }
+  return { opened: true, sessions, last_active: last ? new Date(last).toISOString() : null };
+}
+
+/** The most folders a host will ever offer. The list is for a person picking
+ *  one from a dialog, and past a few hundred it is a search, not a list. */
+export const FOLDER_CAP = 300;
+
+const isUnder = (path, root) => path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
+
 /**
- * Walk each root for desks. Shallow on purpose: repos live a few levels under
- * a projects directory, and a host that crawls a home directory looking for
- * them is a host people turn off.
+ * Walk each root for desks, and for the folders that could become one.
+ *
+ * Shallow on purpose: repos live a few levels under a projects directory, and
+ * a host that crawls a home directory looking for them is a host people turn
+ * off. Every directory reached is checked for a binding; it is *offered* as a
+ * folder only when something says a person might mean it — it sits directly
+ * under a root, it is a git checkout, Claude Code has opened it before, or it
+ * is bound already. Everything else is walked through in silence.
+ *
+ * Each folder says what the floor's "take a desk" dialog needs to draw its
+ * row and its confirmation: what it is bound as and from which file, whether a
+ * `.mcp.json` entry exists to import, whether Claude Code trusts it yet (a
+ * fresh window asks otherwise, on the desk), and when it was last worked in —
+ * which is what sorts the list, newest first, so "recently opened" is the top
+ * of it rather than a feature of its own.
  */
-export function discoverDesks(roots, { maxDepth = 4, local = readLocalScope() } = {}) {
-  const found = new Map();
+export function discover(roots, { maxDepth = 4, local = readLocalScope() } = {}) {
+  const desks = new Map();
+  const folders = [];
+  const offered = new Set();
+  const offer = (dir, depth, desk) => {
+    if (offered.has(dir)) return;
+    const git = existsSync(join(dir, '.git'));
+    const act = activityOf(dir);
+    if (!(depth === 1 || git || act.opened || desk)) return;
+    offered.add(dir);
+    folders.push({
+      path: dir,
+      name: basename(dir),
+      depth,
+      bound: desk ? { channel: desk.channel, agent: desk.agent, scope: desk.scope, board: originOf(desk.url) } : null,
+      has_mcp_json: hasMcpEntry(dir),
+      trusted: desk?.trusted ?? local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false,
+      last_active: act.last_active,
+      sessions: act.sessions,
+    });
+  };
   const walk = (dir, depth) => {
     const desk = readDesk(dir, local);
-    if (desk) found.set(`${desk.channel}|${desk.agent}`, desk);
+    if (desk) desks.set(`${desk.channel}|${desk.agent}`, desk);
+    offer(dir, depth, desk);
     // Keep going even after finding one. Desks nest: a workspace directory can
     // be a desk in its own right and still contain the plugin repos that are
     // desks too. Stopping here — which this used to do, on the reasoning that a
@@ -165,11 +229,25 @@ export function discoverDesks(roots, { maxDepth = 4, local = readLocalScope() } 
   // the fence on what this host will ever run.
   for (const [dir, desk] of local.desks) {
     const k = `${desk.channel}|${desk.agent}`;
-    if (found.has(k) || !existsSync(dir)) continue;
+    if (desks.has(k) || !existsSync(dir)) continue;
     const here = real(dir);
-    if (under.some((r) => here === r || here.startsWith(r.endsWith('/') ? r : `${r}/`))) found.set(k, desk);
+    const root = under.find((r) => isUnder(here, r));
+    if (!root) continue;
+    desks.set(k, desk);
+    offer(dir, here.slice(root.length).split('/').filter(Boolean).length, desk);
   }
-  return [...found.values()];
+  // Newest first, never-opened last, then by name — the order a person
+  // looking for "the one I was just in" wants, and a stable one otherwise.
+  folders.sort((a, b) => {
+    if (a.last_active !== b.last_active) return a.last_active ? (b.last_active ? b.last_active.localeCompare(a.last_active) : -1) : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return { desks: [...desks.values()], folders: folders.slice(0, FOLDER_CAP) };
+}
+
+/** The desks alone. */
+export function discoverDesks(roots, opts) {
+  return discover(roots, opts).desks;
 }
 
 /** The origin a desk's board lives on, for matching desks to this host's server. */

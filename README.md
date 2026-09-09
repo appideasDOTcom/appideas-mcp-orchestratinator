@@ -127,8 +127,14 @@ list, no shared parent folder:
 ```
 
 Repos sharing an `X-Channel` share a floor, a mailbox, and a task board. The
-`X-Agent` is that repo's seat on it. A directory without this file is invisible
+`X-Agent` is that repo's seat on it. A directory without a binding is invisible
 to the whole system.
+
+**Or skip the file.** Once the host is installed (step 5), **Take a desk** on
+the floor does this for you: pick the folder, name the floor and the seat, and
+the host binds it in Claude Code's own configuration and opens a window there.
+No approval dialog, and the key never leaves that machine. A folder that
+already has a `.mcp.json` entry is imported the same way.
 
 **4. Install the plugin** — this is what puts each session on the floor.
 
@@ -177,6 +183,13 @@ registers a LaunchAgent so it starts at login, and reads the server address and
 shared secret from those desks. If your desks point at more than one board, the
 host refuses to guess — name one with
 `./host/install.sh --url http://localhost:8787 ~/path/to/your/projects`.
+
+A machine with no hand-bound repo has nothing to read the shared secret from,
+and the host needs one to talk to the board and to bind desks from the floor.
+Give it the value from `.env` with
+`./host/install.sh --token <ORCH_AUTH_TOKEN> ~/path/to/your/projects` (or set
+`ORCH_AUTH_TOKEN` in the host's environment). A repo's own binding always wins
+over both, so a machine with even one `.mcp.json` needs neither.
 
 **6. Open the floor.**
 

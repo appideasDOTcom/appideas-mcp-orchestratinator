@@ -1545,3 +1545,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 
 .btn.done { background: var(--idle-bg); border-color: var(--idle); color: var(--idle); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* The take-a-desk button sits at the head's right edge, beside the totals. */
+#take-desk { margin-left: 10px; flex: 0 0 auto; }
+/* The dialog's folder select carries a long path per row; keep it on one
+   line and let the row say what it is with the name first. */
+#desk-folder, #desk-channel { font-family: var(--mono); font-size: 12.5px; }
+.desk-folder-meta { margin-top: 6px; font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 8px; }

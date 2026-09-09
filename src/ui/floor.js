@@ -2225,6 +2225,10 @@
           <!-- Beneath the other two, not beside them: it is not a third place to
                put the conversation, it is the way out of this page. -->
           <button class="p-link" data-act="attach">${LINK_LABEL.attach}</button>
+          <!-- The reverse of taking a desk: the binding goes, the window
+               closes, the seat stays. Dims rather than vanishes, like the
+               rest of this row, with the server's reason as its title. -->
+          <button class="p-link" data-act="leave-desk" title="Remove this desk's binding and close its window">Leave desk</button>
           <!-- Shown only when the button cannot fire. Text, not a second
                mechanism — the one thing still useful when the host that would
                have opened the terminal is itself what is down. -->
@@ -2464,6 +2468,14 @@
     const toTmux = wrap.querySelector('[data-act="attach"]');
     const toClaude = wrap.querySelector('[data-act="claude"]');
     const tmuxCmd = wrap.querySelector('.p-tmux');
+    const toLeave = wrap.querySelector('[data-act="leave-desk"]');
+    if (toLeave) {
+      const cannotLeave = !h ? 'No host on this board is running that repo, so there is no binding here to remove.'
+        : !h.live ? `The host for this desk (${h.host}) is offline.`
+        : null;
+      toLeave.disabled = !!cannotLeave;
+      toLeave.title = cannotLeave ?? 'Remove this desk\'s binding and close its window';
+    }
     // A move in flight is settled here, against the payload, because the
     // payload is the only thing that knows. The POST is answered the moment the
     // work is queued; the seat changes when the host has actually done it, and
@@ -3326,6 +3338,16 @@
       await moveSeat(act.dataset.act);
     } else if (act.dataset.act === 'attach' || act.dataset.act === 'claude') {
       await attachTmux(act.dataset.act);
+    } else if (act.dataset.act === 'take-desk') {
+      // app.js owns the dialogs on this page. The channel comes from the
+      // button when a room's control opened it, else from the floor being
+      // looked at, else the dialog asks.
+      window.deskDialog?.({ channel: act.dataset.channel ?? (ui.floorFilter || null) });
+    } else if (act.dataset.act === 'leave-desk') {
+      if (!ui.open) return;
+      const open = floor.channels.find((c) => c.channel === ui.open.channel)
+        ?.desks.find((x) => x.agent === ui.open.agent);
+      window.leaveDeskDialog?.(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent, open?.hosted?.scope ?? null);
     } else if (act.dataset.act === 'rename') {
       // app.js owns the dialogs on this page — same reason the pills call into
       // it rather than growing a second implementation. A `prompt()` used to do
@@ -3366,6 +3388,14 @@
    * Shown as sending rather than as a turn, for the same reason `sendChat` does
    * it: the board accepting the word is not the window having recorded it.
    */
+  /** Land on a desk: the floor it is on, and its panel. Called by app.js
+   *  after "Take desk", so the operator watches the desk come up — not
+   *  hosted, then hosted, then its window's first question — rather than
+   *  hunting for it. */
+  window.floorOpenDesk = (channel, agent) => {
+    if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
+    openDesk(channel, agent);
+  };
   window.floorNudged = (channel, agent, text) => {
     // Whichever surface sent it, the desk rings. The board's dialog has already
     // had its "ok" from the same endpoint strike() posts to, so the evidence

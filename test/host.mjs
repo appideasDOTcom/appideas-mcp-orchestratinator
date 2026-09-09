@@ -20,7 +20,7 @@
 //   npm run test:host
 import { spawn, execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
@@ -136,6 +136,18 @@ function fixture() {
     },
   }, null, 2));
 
+  // Folders that are not desks, for the list the host offers: a git checkout
+  // nobody has bound, and a folder Claude Code has opened before — its project
+  // directory holds one transcript, dated to a moment that cannot be "now", so
+  // the time the board serves back is provably the one read off the file.
+  mkdirSync(`${FIX}/plain-git/.git`, { recursive: true });
+  writeFileSync(`${FIX}/plain-git/.git/HEAD`, 'ref: refs/heads/main\n');
+  mkdirSync(`${FIX}/opened`, { recursive: true });
+  const openedProject = `${HOME}/.claude/projects/${`${FIX}/opened`.replace(/[^A-Za-z0-9]/g, '-')}`;
+  mkdirSync(openedProject, { recursive: true });
+  writeFileSync(`${openedProject}/one.jsonl`, '');
+  utimesSync(`${openedProject}/one.jsonl`, new Date('2024-01-02T03:04:05Z'), new Date('2024-01-02T03:04:05Z'));
+
   // The stand-in: a roster on `agents --json`, a Claude Code otherwise.
   //
   // It asks for bracketed paste so a multi-line message is one turn, it
@@ -168,6 +180,36 @@ function fixture() {
     `const SESSION_ID = ${JSON.stringify(SESSION_ID)};`,
     `const ARGV = ${JSON.stringify(`${FIX}/argv.log`)};`,
     `if (process.argv[2] === 'agents') { process.stdout.write(fs.readFileSync(ROSTER, 'utf8')); process.exit(0); }`,
+    // `claude mcp add -s local …` and `claude mcp remove -s local …`, as the
+    // real CLI behaves (measured 2026-09-08/09): a read-modify-write of
+    // $HOME/.claude.json under projects[cwd].mcpServers, "already exists" on
+    // a duplicate add, "No MCP server named" on a missing remove, and the
+    // "File modified:" line on success. HOME is the fixture, so this is the
+    // file the host reads back. Handled before the argv log below: an mcp
+    // call is not a window, and the --resume assertion diffs that log.
+    `if (process.argv[2] === 'mcp') {`,
+    `  const CFG = require('path').join(process.env.HOME, '.claude.json');`,
+    `  let j = {}; try { j = JSON.parse(fs.readFileSync(CFG, 'utf8')); } catch {}`,
+    `  const a = process.argv.slice(3); const sub = a[0];`,
+    `  const scopeAt = a.indexOf('-s'); if (scopeAt >= 0 && a[scopeAt + 1] !== 'local') { process.stderr.write('stand-in: only local scope\\n'); process.exit(2); }`,
+    `  const rest = a.slice(1).filter((x, i, arr) => x !== '-s' && arr[i - 1] !== '-s');`,
+    `  j.projects = j.projects || {}; const dir = process.cwd(); j.projects[dir] = j.projects[dir] || {}; const p = j.projects[dir]; p.mcpServers = p.mcpServers || {};`,
+    `  const done = () => { fs.writeFileSync(CFG, JSON.stringify(j, null, 2)); process.stdout.write('File modified: ' + CFG + ' [project: ' + dir + ']\\n'); process.exit(0); };`,
+    `  if (sub === 'add') {`,
+    `    const t = rest.indexOf('--transport'); const transport = t >= 0 ? rest[t + 1] : 'stdio';`,
+    `    const positional = rest.filter((x, i, arr) => !x.startsWith('-') && arr[i - 1] !== '--transport' && arr[i - 1] !== '-H');`,
+    `    const [name, url] = positional; const headers = {};`,
+    `    rest.forEach((x, i) => { if (x === '-H') { const [k, ...v] = rest[i + 1].split(':'); headers[k.trim()] = v.join(':').trim(); } });`,
+    `    if (p.mcpServers[name]) { process.stderr.write('MCP server ' + name + ' already exists in local config\\n'); process.exit(1); }`,
+    `    p.mcpServers[name] = { type: transport, url, headers }; done();`,
+    `  }`,
+    `  if (sub === 'remove') {`,
+    `    const name = rest[0];`,
+    `    if (!p.mcpServers[name]) { process.stderr.write('No MCP server named "' + name + '" in local scope\\n'); process.exit(1); }`,
+    `    delete p.mcpServers[name]; done();`,
+    `  }`,
+    `  process.stderr.write('stand-in: unknown mcp subcommand\\n'); process.exit(2);`,
+    `}`,
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
@@ -311,6 +353,26 @@ try {
   assert(!deskOf(await floor(), 'both-project'), 'and not as the .mcp.json one');
   assert(!deskOf(await floor(), 'local-else'), 'a local-scope binding to another board is left alone');
   assert(/skipping host-test\/local-else/.test(host.log), 'and named as skipped, like a .mcp.json one');
+
+  console.log('\n  the folders the host offers');
+  const offered = await (await json('/api/floor/folders')).json();
+  const mineF = offered.hosts.find((h) => h.host_id === 'host-test-1');
+  assert(!!mineF?.live && (mineF?.folders?.length ?? 0) > 0, 'the host reports what sits under its roots, and the board serves it back');
+  eq(mineF?.roots, [FIX], 'under the roots it was given');
+  const byName = Object.fromEntries((mineF?.folders ?? []).map((f) => [f.name, f]));
+  eq(byName['repo-a']?.bound, { channel: CH, agent: 'free', scope: 'project', board: HOST }, 'a desk shows its binding, its scope and its board');
+  eq(byName['repo-local']?.bound?.scope, 'local', 'a local-scope desk says so');
+  eq(byName['repo-both']?.has_mcp_json, true, 'and a directory that also has a .mcp.json entry says that too — the import case');
+  eq(byName['repo-elsewhere']?.other_board, 'http://localhost:9', 'a folder bound to another board says which');
+  eq(byName['repo-a']?.other_board ?? null, null, 'and one bound here does not');
+  eq(byName['plain-git']?.bound ?? null, null, 'a git checkout that is not a desk is offered, unbound');
+  eq(byName['opened']?.last_active, '2024-01-02T03:04:05.000Z', 'a folder Claude Code has opened carries the time of its newest transcript');
+  eq(byName['opened']?.sessions, 1, 'and how many sessions it has had');
+  eq(byName['repo-local']?.trusted, true, 'whether Claude Code trusts the folder yet comes from the same file');
+  assert(!byName['src'], 'a plain subdirectory that is none of these is not offered');
+  const order = (mineF?.folders ?? []).map((f) => f.name);
+  assert(order.indexOf('repo-a') < order.indexOf('opened') && order.indexOf('opened') < order.indexOf('plain-git'),
+    `newest activity first, never-opened last — ${order.join(', ')}`);
 
   eq(deskOf(await floor(), 'free')?.hosted?.session_id?.startsWith('host:'), true,
     'with no window open yet, the desk has no conversation — it does not invent one');
@@ -462,6 +524,65 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.state === 'offline' ? true : null), 10000),
     'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
   assert(/dropped desk .*late/.test(host.log), 'which the host also says');
+
+  /* ── taking a desk from the floor ──────────────────────────────────────────
+   * The first door that needs no terminal. The route refuses what the board
+   * can see is wrong; the host binds with `claude mcp add -s local` (the
+   * stand-in above), with its own key, and opens a window. Import takes a
+   * .mcp.json desk into local scope and removes the file's entry, keeping
+   * other servers. Leave is the reverse. */
+  console.log('\ntaking a desk from the floor');
+  const take = (body) => json('/api/floor/desk', body);
+  const localCfg = () => JSON.parse(readFileSync(`${HOME}/.claude.json`, 'utf8'));
+  const argvLog = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'bad name!' })).status, 400, 'an agent name with a space in it is refused');
+  eq((await take({ host_id: 'host-test-1', path: '/nope', channel: CH, agent: 'newbie' })).status, 409, 'a folder the host did not offer is refused');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-elsewhere`, channel: CH, agent: 'newbie' })).status, 409, 'a folder bound to another board is refused');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-a`, channel: CH, agent: 'somebody-else' })).status, 409, 'a folder that already sits at another desk is refused (moving comes later)');
+  const argvBefore = argvLog().length;
+  const took = await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'newbie', persona: 'Newbie Nine' });
+  eq(took.status, 200, 'an unbound git checkout can be taken as a desk');
+  eq((await took.json()).mode, 'take', 'as a fresh binding');
+  eq(deskOf(await floor(), 'newbie')?.persona, 'Newbie Nine', 'the seat is drawn at once, wearing the name it was given');
+  assert(await until(async () => (deskOf(await floor(), 'newbie')?.hosted?.live === true ? true : null), 20000),
+    'and within seconds the host has bound it and registered the desk');
+  eq(deskOf(await floor(), 'newbie')?.hosted?.scope, 'local', 'in local scope');
+  const entry = localCfg().projects?.[`${FIX}/plain-git`]?.mcpServers?.orchestratinator;
+  eq(entry?.headers, { 'X-Channel': CH, 'X-Agent': 'newbie', 'X-Orchestratinator-Key': KEY },
+    'written by `claude mcp add -s local`, with the key the host holds — the board never sent one');
+  eq(entry?.url, `${HOST}/mcp`, 'pointing at this board');
+  assert(/newbie: bound .*plain-git in local scope/.test(host.log), 'and the host log says so');
+  assert(await until(() => (argvLog().length > argvBefore ? true : null), 15000), 'and a window opened there');
+  assert(!argvLog().slice(argvBefore).includes('--resume'), 'a fresh conversation, with nothing to resume');
+  const offeredNow = await (await json('/api/floor/folders')).json();
+  eq(offeredNow.hosts.find((h) => h.host_id === 'host-test-1')?.folders.find((f) => f.name === 'plain-git')?.bound?.agent, 'newbie',
+    'and the folder list now shows it bound');
+
+  // Import: a .mcp.json desk, with another server beside ours, into local scope.
+  writeFileSync(`${REPO}/.mcp.json`, JSON.stringify({
+    mcpServers: {
+      orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'free', 'X-Orchestratinator-Key': KEY } },
+      github: { type: 'http', url: 'http://127.0.0.1:9/mcp' },
+    },
+  }, null, 2));
+  const sidBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
+  const imported = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free', open: false });
+  eq(imported.status, 200, 'a desk bound in its .mcp.json can be brought onto the floor');
+  eq((await imported.json()).mode, 'import', 'as an import');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.scope === 'local' ? true : null), 20000), 'after which it is a local-scope desk');
+  eq(Object.keys(JSON.parse(readFileSync(`${REPO}/.mcp.json`, 'utf8')).mcpServers), ['github'], 'its .mcp.json lost the orchestratinator entry and kept the other server');
+  eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Agent'], 'free', 'and ~/.claude.json gained it');
+  eq(deskOf(await floor(), 'free')?.hosted?.session_id, sidBefore, 'the conversation it was following is the one it still follows');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/opened`, channel: CH, agent: 'newbie' })).status, 409, 'a name already seated at another folder is refused');
+
+  // Leave: the reverse, all the way back to an unbound folder.
+  const left = await json('/api/floor/desk/leave', { channel: CH, agent: 'newbie' });
+  eq(left.status, 200, 'a desk can be left from the floor');
+  assert(await until(async () => (deskOf(await floor(), 'newbie')?.hosted?.state === 'offline' ? true : null), 20000), 'and the desk goes offline once the host has unbound it');
+  eq(localCfg().projects?.[`${FIX}/plain-git`]?.mcpServers?.orchestratinator ?? null, null, 'its local-scope entry is gone');
+  assert(/dropped desk host-test\/newbie/.test(host.log), 'the host dropped the desk');
+  assert(!execFileSync('tmux', ['list-windows', '-t', TMUX_SESSION, '-F', '#{window_name}'], { encoding: 'utf8' }).includes('plain-git'), 'and closed its window');
+  assert(!!deskOf(await floor(), 'newbie'), 'the seat stays on the floor — whether the agent is gone is the board\'s question');
 
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
@@ -651,6 +772,25 @@ try {
   // says "tmux", so that marker would cut the output before any desk is named.
   const moved = await runHost(boards, { CLAUDE_CONFIG_DIR: cfgDir, until: /attach to any of them/ });
   assert(/host-test\/cfg-agent .*\(local scope\)/.test(moved.out), 'a desk bound in local scope under CLAUDE_CONFIG_DIR is found there');
+
+  /* ── where the shared secret comes from ─────────────────────────────────────
+   * A desk's own binding outranks ORCH_AUTH_TOKEN and host.json (the operator's
+   * rule, 2026-09-09): a repo bound by hand says which key this board takes.
+   * The environment and the file are for the machine with no hand-bound repo,
+   * whose every desk will be taken from the floor — which the host can only do
+   * with a key of its own. And the value is never printed. */
+  console.log('\n  where the shared secret comes from');
+  const keyed = await runHost(boards, { ORCH_AUTH_TOKEN: 'env-key-value', until: /shared secret/ });
+  assert(/shared secret: from host-test\/board-a's \.mcp\.json, which overrides ORCH_AUTH_TOKEN/.test(keyed.out),
+    "a desk's own .mcp.json wins over ORCH_AUTH_TOKEN, and the host says so");
+  assert(!/env-key-value|key-board-a/.test(keyed.out), 'without printing either value');
+  const emptyRoot = `${FIX}/empty-root`;
+  mkdirSync(emptyRoot, { recursive: true });
+  const envOnly = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', ORCH_AUTH_TOKEN: 'env-key-value', until: /shared secret/ });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(no desk here carries one\)/.test(envOnly.out), 'with no desk to read one from, the environment supplies it');
+  const none = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', until: /shared secret/ });
+  assert(/no shared secret/.test(none.out) && /install\.sh --token/.test(none.out),
+    'and with nothing at all the host says so, and how to give it one');
 } catch (err) {
   console.error(err);
   failures++;

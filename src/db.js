@@ -330,6 +330,11 @@ export function openDb(path) {
   // rather than of this desk, carried per desk because that is the row the
   // floor already reads. It is the receipt an attach spins against.
   addColumn(db, 'hosted_desks', 'clients', 'INTEGER');
+  // Where the desk's binding was read from: 'local' (Claude Code's own
+  // ~/.claude.json, what the floor writes) or 'project' (the repo's
+  // .mcp.json). Says which file a person should look in, and which one a
+  // leave takes the entry out of.
+  addColumn(db, 'hosted_desks', 'scope', 'TEXT');
 
   migratePersonas(db);
   migrateAgentNames(db);
@@ -1109,12 +1114,15 @@ export function makeStore(db) {
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
-      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, window_open, holders, state, updated_at)
-       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, @window_open, @holders, 'idle', datetime('now'))
+      // scope is kept when a registration does not name one — an older host
+      // sends none — rather than blanked.
+      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, window_open, holders, scope, state, updated_at)
+       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, @window_open, @holders, @scope, 'idle', datetime('now'))
        ON CONFLICT(channel, agent) DO UPDATE SET
          host_id = excluded.host_id, cwd = excluded.cwd,
          window_id = excluded.window_id, outside_pid = excluded.outside_pid,
          window_open = excluded.window_open, holders = excluded.holders,
+         scope = COALESCE(excluded.scope, hosted_desks.scope),
          state = 'idle', updated_at = datetime('now')`
     ),
     setHostedHolder: db.prepare(
@@ -1141,14 +1149,14 @@ export function makeStore(db) {
     ),
     listHostedDesks: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
-              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients,
+              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
     hostedDesk: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
-              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients,
+              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id
@@ -1544,10 +1552,10 @@ export function makeStore(db) {
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>
       q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid, window_open: windowOpen, holders, clients }).changes,
-    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null, windowOpen = null, holders = 0 } = {}) =>
+    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, scope = null } = {}) =>
       q.upsertHostedDesk.run({
         channel, agent, host_id: hostId, cwd, window_id: windowId, outside_pid: outsidePid,
-        window_open: windowOpen, holders,
+        window_open: windowOpen, holders, scope,
       }).changes,
     setHostedSession: (channel, agent, sdkSessionId) =>
       q.setHostedSession.run({ channel, agent, sdk_session_id: sdkSessionId }).changes,

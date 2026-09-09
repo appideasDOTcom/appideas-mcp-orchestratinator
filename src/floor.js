@@ -183,6 +183,40 @@ const iso = (s) => (s ? `${String(s).replace(' ', 'T').replace(/Z*$/, '')}Z` : n
    a bad clock value must never do, which is make something look alive, is
    exactly what it did. No timestamp and no sense are both "infinitely long
    ago". */
+/** The most folders kept per host; the same cap the host applies. */
+const FOLDER_CAP = 300;
+const underRoots = (p, roots) => roots.some((r) => p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`));
+/**
+ * A host's folder list, field by field, in the shape the page reads. Anything
+ * not under the host's own roots is dropped rather than served: the roots are
+ * the fence on what a host will run, and the board should never offer a
+ * folder the host would then refuse.
+ */
+function cleanFolders(list, roots) {
+  const out = [];
+  for (const f of list) {
+    const path = str(f?.path);
+    if (!path || !path.startsWith('/') || !underRoots(path, roots)) continue;
+    const b = f?.bound && typeof f.bound === 'object' ? f.bound : null;
+    const bound = b && str(b.channel) && str(b.agent)
+      ? { channel: str(b.channel), agent: str(b.agent), scope: str(b.scope) === 'local' ? 'local' : 'project', board: str(b.board) }
+      : null;
+    out.push({
+      path,
+      name: str(f?.name) ?? path.split('/').pop(),
+      depth: Number.isInteger(f?.depth) ? f.depth : null,
+      bound,
+      has_mcp_json: f?.has_mcp_json === true,
+      other_board: str(f?.other_board),
+      trusted: f?.trusted === true,
+      last_active: str(f?.last_active),
+      sessions: Number(f?.sessions) || 0,
+    });
+    if (out.length >= FOLDER_CAP) break;
+  }
+  return out;
+}
+
 const secondsSince = (isoStr, nowMs) => {
   const at = isoStr ? Date.parse(isoStr) : NaN;
   return Number.isFinite(at) ? (nowMs - at) / 1000 : Infinity;
@@ -345,6 +379,40 @@ export function claudeable(h, nowMs = Date.now()) {
  */
 export function isWorking(h, lastTurn) {
   return h?.state === 'working' || lastTurn?.role === 'tool';
+}
+
+/**
+ * A name typed into the take-a-desk dialog: a channel or an agent id. Letters,
+ * digits, dots, dashes and underscores, up to 64, starting with a letter or
+ * digit. Only for *typed* names — a channel picked from the list is whatever
+ * it already is, since headers are free-form and always were.
+ */
+export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const NAME_WHY = 'An agent or channel name is letters, digits, dots, dashes and underscores — up to 64, starting with a letter or digit.';
+
+/**
+ * Can this desk's binding be changed — left, or moved — right now?
+ *
+ * deliverable's conditions with one loosened by measurement: an editor holding
+ * the conversation is not a refusal when `editorOk`, because a VS Code chat
+ * follows a rebind by itself on its next tool call (2026-09-09,
+ * docs/desk-from-the-floor.md) — there is nothing to close and nothing lost.
+ * A resume is different (it closes a window the floor must hold), so it does
+ * not pass editorOk. Working is always a refusal: a rebind mid-turn changes
+ * who the agent is halfway through a task.
+ */
+export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false } = {}) {
+  if (!h) return { error: 'No host on this board is running that repo, so there is no binding here to change.', code: 'not_hosted' };
+  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
+  }
+  if (!editorOk && h.outside_pid) {
+    return { error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
+  }
+  if (isWorking(h, lastTurn)) {
+    return { error: `${h.agent} is working — its host says so, or its last turn is a tool call. This closes its window mid-turn. Wait for it to finish, or stop it first.`, code: 'working' };
+  }
+  return { hosted: h };
 }
 
 /* Every refusal below is somebody else's sentence, written for sending. The
@@ -864,8 +932,18 @@ export function createLive() {
   const watchers = new Map();  // deskKey -> Set<fn>
   const waiters = new Map();   // host_id -> wake fn for a held work request
   const rescanAsked = new Map(); // host_id -> ms when it was last asked to look at its roots
+  /**
+   * What each host found under its roots that could become a desk, as it last
+   * reported it — for the floor's "take a desk" dialog. In memory like the
+   * rest of this: a host names the list on every registration, so it is
+   * rebuilt within a minute of a restart and a table would only be a table of
+   * things about to be wrong. Served by its own GET, never in /api/floor,
+   * which every open page polls every couple of seconds.
+   */
+  const folders = new Map(); // host_id -> { at, roots, folders }
   return {
     partial,
+    folders,
     pending,
     answered,
     delivery,
@@ -940,6 +1018,22 @@ function applyHostEvent(store, live, hostId, ev) {
   const agent = str(ev.agent);
   if (!channel || !agent) return false;
   const key = deskKey(channel, agent);
+  // A desk just bound from the floor has no row until this says so — and if
+  // it was another host's before (a folder moved between machines), it is
+  // this host's now. So this one event is taken before the ownership check.
+  if (str(ev.type) === 'bound') {
+    const cwd = str(ev.cwd);
+    if (!cwd) return false;
+    store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
+    store.ensurePersona(channel, agent);
+    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: cwd });
+    const sid = str(ev.session_id);
+    // The conversation it keeps, when it had one (an import). Through the
+    // session case, which is what rekeys the placeholder and publishes.
+    if (sid) applyHostEvent(store, live, hostId, { type: 'session', channel, agent, session_id: sid, cwd });
+    else live.publish(key, { type: 'state', state: 'idle' });
+    return true;
+  }
   const desk = store.hostedDesk(channel, agent);
   if (!desk || desk.host_id !== hostId) return false;
 
@@ -980,6 +1074,19 @@ function applyHostEvent(store, live, hostId, ev) {
         holders: Number(ev.holders) || 0,
         clients: Number(ev.clients) || 0,
       });
+      break;
+    }
+    /**
+     * The binding is gone — taken out by the floor's own leave. The row
+     * stays, offline, as the last thing known about the desk; the seat stays
+     * too, because whether the agent is gone is the board's question.
+     */
+    case 'unbound': {
+      state('offline');
+      live.pending.delete(key);
+      live.partial.delete(key);
+      live.delivery.delete(key);
+      store.logAdmin(channel, 'desk.left', { target: agent, detail: desk.cwd });
       break;
     }
     case 'session': {
@@ -1318,6 +1425,8 @@ export function buildFloor(store, live = null, sessions = null) {
       // selects is not a column the page gets — which is exactly how this one
       // arrived as null while sitting in the database the whole time.
       host_tmux: h.host_tmux ?? null,
+      // Which file the binding lives in — see the column's note in db.js.
+      scope: h.scope ?? null,
     });
   }
 
@@ -1485,6 +1594,11 @@ export function buildFloor(store, live = null, sessions = null) {
                 // a message it cannot deliver.
                 held: h.outside_pid ? 'editor' : (h.window_id ? 'floor' : null),
                 held_pid: h.outside_pid ?? null,
+                // Which file the binding lives in: 'local' (Claude Code's own
+                // ~/.claude.json, what the floor writes) or 'project' (the
+                // repo's .mcp.json). Says which file to look in, and what
+                // leaving takes the entry out of.
+                scope: h.scope ?? null,
                 // Whether a window is sitting in that repo at all. `held` says
                 // null all through Claude Code's startup — nothing can be typed
                 // into a window still asking whether it may use an MCP server —
@@ -1621,6 +1735,10 @@ export function buildFloor(store, live = null, sessions = null) {
     name: h.name,
     last_seen: iso(h.last_seen),
     live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+    // Only *when* the folder list was reported — the list itself is served by
+    // GET /api/floor/folders, on demand. Enough for the page to tell "never
+    // reported" from "reported empty" before it opens the dialog.
+    folders_at: live?.folders?.get(h.host_id)?.at ?? null,
   }));
 
   return {
@@ -1696,6 +1814,16 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const name = str(req.body?.name) ?? hostId;
     store.registerHost(hostId, name, str(req.body?.tmux));
 
+    // The host's candidate folders, kept beside the rest of the live layer.
+    // Validated field by field, and only paths under the roots the host itself
+    // named: a stray or hostile registration must not be able to put an
+    // arbitrary path in front of the operator as one of theirs. A host that
+    // sends no list (an older one) simply has none to serve.
+    if (Array.isArray(req.body?.folders)) {
+      const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && r.startsWith('/'));
+      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots) });
+    }
+
     const desks = Array.isArray(req.body?.desks) ? req.body.desks : [];
     const accepted = [];
     for (const d of desks) {
@@ -1708,6 +1836,12 @@ export function createFloorRouter({ store, auth, sessions = null }) {
         outsidePid: Number(d?.outside_pid) || null,
         windowOpen: str(d?.window_open),
         holders: Number(d?.holders) || 0,
+        // Which file the host read the binding from. Posted with every
+        // registration since 0.10.0 — and dropped here until 0.10.2, when the
+        // live board showed scope: null on every desk while the host suite was
+        // green, because there the field had only ever arrived through the
+        // `bound` event. A field crosses eight places; this was the missed one.
+        scope: str(d?.scope) === 'local' ? 'local' : str(d?.scope) === 'project' ? 'project' : null,
       });
       store.ensurePersona(channel, agent);
       // The conversation the host is following, when it names one. The desk's
@@ -1826,6 +1960,31 @@ export function createFloorRouter({ store, auth, sessions = null }) {
   });
 
   /* ───────────────────── the browser's doors ───────────────────── */
+
+  /**
+   * What each host offers as a place a desk could be taken: the folders under
+   * its roots, newest activity first, each saying whether it is bound already
+   * and from which file. Read by the "take a desk" dialog when it opens, not
+   * by the page's poll — see `folders` in createLive. A host that has not
+   * reported a list has `at: null`, which is not the same thing as an empty
+   * list and is drawn differently.
+   */
+  router.get('/api/floor/folders', (_req, res) => {
+    const nowMs = Date.now();
+    const hosts = store.listHosts().map((h) => {
+      const f = live.folders.get(h.host_id);
+      return {
+        host_id: h.host_id,
+        name: h.name,
+        live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+        tmux: h.tmux_session ?? null,
+        at: f?.at ?? null,
+        roots: f?.roots ?? [],
+        folders: f?.folders ?? [],
+      };
+    });
+    res.json({ now: new Date(nowMs).toISOString(), hosts });
+  });
 
   router.get('/api/floor', (_req, res) => {
     res.json(buildFloor(store, live, sessions));
@@ -2042,6 +2201,95 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.enqueueHostWork(h.host_id, channel, agent, 'open', {});
     live.wake(h.host_id);
     res.json({ ok: true });
+  });
+
+  /**
+   * Take a desk: bind a folder a host offered to a channel and an agent, and
+   * open a window there. The first door onto the floor that needs no
+   * terminal (docs/desk-from-the-floor.md). Three modes from one route,
+   * decided by what the folder is bound as already: `take` (unbound),
+   * `import` (bound as these same names in its .mcp.json — the host moves
+   * the entry into local scope), and `move` (bound as some other desk),
+   * which is not available yet and says so.
+   *
+   * What is checked here is what the board knows: that the folder is one the
+   * host offered (the board never sends a path the host did not name), that
+   * it is on this board, that the names are names, and that the desk is not
+   * already sitting somewhere else. The key is never in the request — the
+   * host binds with its own.
+   */
+  router.post('/api/floor/desk', auth.adminGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    const path = str(req.body?.path);
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!hostId || !path || !channel || !agent) {
+      return res.status(400).json({ error: 'host_id, path, channel and agent are required' });
+    }
+    const known = new Set([...store.listPersonas().map((p) => p.channel), ...store.listAllAgents().map((a) => a.channel)]);
+    if (!NAME_RE.test(agent) || (!known.has(channel) && !NAME_RE.test(channel))) {
+      return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
+    }
+    let persona = null;
+    if (req.body?.persona !== undefined && str(req.body.persona)) {
+      persona = str(req.body.persona);
+      if (persona.length > 40) return res.status(400).json({ error: 'persona must be 40 characters or fewer' });
+    }
+    const nowMs = Date.now();
+    const hostRow = store.listHosts().find((h) => h.host_id === hostId);
+    const offered = live.folders.get(hostId);
+    if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: `The host ${hostRow?.name ?? hostId} is not on this board right now, so there is nobody to bind it.`, code: 'no_host' });
+    }
+    const folder = offered?.folders.find((f) => f.path === path) ?? null;
+    if (!folder) {
+      return res.status(409).json({ error: `That folder is not one ${hostRow.name} offered. Look again — the list is a minute old at most.`, code: 'unknown_folder' });
+    }
+    if (folder.other_board) {
+      return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, not this board. Change it there.`, code: 'other_board' });
+    }
+    const mode = !folder.bound ? 'take'
+      : folder.bound.channel === channel && folder.bound.agent === agent ? 'import'
+      : 'move';
+    if (mode === 'move') {
+      return res.status(409).json({
+        error: `That folder already sits at ${folder.bound.channel}/${folder.bound.agent}. Moving a desk to another floor is not available yet — leave that desk first, then take the folder.`,
+        code: 'move_unavailable',
+      });
+    }
+    const already = store.hostedDesk(channel, agent);
+    if (already && already.state !== 'offline' && already.cwd !== path && secondsSince(iso(already.host_seen), nowMs) < HOST_STALE_SECONDS) {
+      return res.status(409).json({
+        error: `${channel}/${agent} already sits at ${already.cwd} on ${already.host_name ?? already.host_id}. Pick another name, or leave that desk first.`,
+        code: 'desk_taken',
+      });
+    }
+    // The seat exists from this moment, so the desk is drawn — as not hosted —
+    // while the host works, and the name it was given is on it when it comes.
+    store.ensurePersona(channel, agent);
+    if (persona) store.setProfile(channel, agent, { persona });
+    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}` });
+    store.enqueueHostWork(hostId, channel, agent, 'bind', {
+      path, channel, agent, import: mode === 'import', from: null, resume: false,
+      open: req.body?.open !== false, queued_at: new Date(nowMs).toISOString(),
+    });
+    live.wake(hostId);
+    res.json({ ok: true, mode, host: hostRow.name, channel, agent });
+  });
+
+  /** Leave a desk: the reverse of taking one. See the host's unbind. */
+  router.post('/api/floor/desk/leave', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const h = store.hostedDesk(channel, agent);
+    const last = store.lastTurns().find((t) => t.channel === channel && t.agent === agent) ?? null;
+    const check = switchable(h, last, Date.now(), { editorOk: true });
+    if (check.error) return res.status(409).json(check);
+    store.logAdmin(channel, 'desk.leave', { target: agent, detail: h.cwd });
+    store.enqueueHostWork(h.host_id, channel, agent, 'unbind', { queued_at: new Date().toISOString() });
+    live.wake(h.host_id);
+    res.json({ ok: true, host: h.host_name ?? h.host_id });
   });
 
   /**

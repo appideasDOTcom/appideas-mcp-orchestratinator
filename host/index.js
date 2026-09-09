@@ -38,8 +38,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { discoverDesks, originOf } from './identity.js';
+import { discover, originOf } from './identity.js';
 import * as W from './window.js';
+import * as M from './mcp.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
 /** How long a queued permission answer stays worth delivering. */
@@ -98,6 +99,9 @@ function loadConfig() {
     roots,
     url: process.env.ORCH_URL ?? file.url ?? null,
     token: process.env.ORCH_AUTH_TOKEN ?? file.token ?? null,
+    // Where the token came from, for the log and for rescan(): a desk's own
+    // key outranks both of these, and only these — see main().
+    tokenSource: process.env.ORCH_AUTH_TOKEN ? 'ORCH_AUTH_TOKEN' : file.token ? `token in ${CONFIG_FILE}` : null,
     name: process.env.ORCH_HOST_NAME ?? file.name ?? hostname(),
     hostId: process.env.ORCH_HOST_ID ?? file.host_id ?? hostname(),
   };
@@ -378,6 +382,9 @@ class Host {
   constructor(cfg) {
     this.cfg = cfg;
     this.desks = new Map();
+    // What discover() last found under the roots that could become a desk;
+    // posted with every registration. See rescan().
+    this.folders = [];
     this.outbox = [];
     this.flushTimer = null;
     this.stopping = false;
@@ -430,8 +437,18 @@ class Host {
         holders: held?.holders ?? 0,
       });
     }
+    // The folders too, with paths and roots spelled the one way the board
+    // will compare them, and a mark on any bound to some other board — the
+    // origin is this host's to know, not the walk's.
+    const origin = originOf(this.cfg.url);
+    const roots = this.cfg.roots.map((r) => W.canonical(r));
+    const folders = (this.folders ?? []).map((f) => ({
+      ...f,
+      path: W.canonical(f.path),
+      other_board: f.bound && f.bound.board !== origin ? f.bound.board : null,
+    }));
     const reply = await this.request('/api/host/register', {
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession },
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders },
     });
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
@@ -469,16 +486,29 @@ class Host {
    */
   async rescan(reason = 'heartbeat') {
     const origin = originOf(this.cfg.url);
-    const found = discoverDesks(this.cfg.roots).filter((d) => originOf(d.url) === origin);
+    const seenNow = discover(this.cfg.roots);
+    // What is under the roots that could become a desk, for the floor's
+    // "take a desk" dialog. Carried on the next register(): a bind, a move
+    // and a leave each end in a rescan, so the list is fresh within a second
+    // of any change made from here, and the board's "look again" is a rescan.
+    this.folders = seenNow.folders;
+    const found = seenNow.desks.filter((d) => originOf(d.url) === origin);
     const seen = new Set();
     let changed = false;
     for (const d of found) {
       const k = `${d.channel}|${d.agent}`;
       seen.add(k);
-      // A host installed before any repo was bound to its board has no token
-      // to talk with. The first desk that appears is where one comes from —
-      // the same rule main() applies at boot.
-      if (!this.cfg.token && d.key) this.cfg.token = d.key;
+      // A desk's own key outranks the environment and host.json — the rule
+      // main() applies at boot, kept here for a desk bound after it. A host
+      // installed before any repo was bound has no key at all, and the first
+      // desk to appear is where one comes from. Never a second desk's over a
+      // first's: one board takes one key, and flipping between two would make
+      // every other request fail in turn.
+      if (d.key && d.key !== this.cfg.token && this.cfg.tokenSource !== 'a desk') {
+        log(`shared secret: now from ${d.channel}/${d.agent}'s ${d.scope === 'local' ? 'local-scope entry' : '.mcp.json'}${this.cfg.tokenSource ? `, which overrides ${this.cfg.tokenSource}` : ''}  (${reason})`);
+        this.cfg.token = d.key;
+        this.cfg.tokenSource = 'a desk';
+      }
       const have = this.desks.get(k);
       if (have && have.cwd === W.canonical(d.cwd)) {
         // Same repo, same conversation — only where the binding is written
@@ -535,7 +565,115 @@ class Host {
     }
   }
 
+  /**
+   * Take a desk from the floor: bind a folder under this host's roots to a
+   * (channel, agent) in Claude Code's local scope — importing, and removing,
+   * the folder's own .mcp.json entry for this board if it has one — and open
+   * a window there. See host/mcp.js for what "bind" means and why.
+   *
+   * Every step is a line in the log. A window opening in a folder the
+   * operator did not name in a terminal is exactly the kind of surprise this
+   * host is built not to spring, and the log is where they will read what
+   * happened. Refusals go to the desk as an error turn too, quoting the CLI's
+   * own last line rather than a guessed cause.
+   *
+   * Handled before the desk lookup, because until this runs there is no desk.
+   */
+  async bind(item) {
+    const { channel, agent } = item;
+    const p = item.payload ?? {};
+    const path = typeof p.path === 'string' ? p.path : '';
+    const fail = (message, code = 'bind_failed') => {
+      warn(`${channel}/${agent}: ${message}`);
+      return this.emit({ type: 'error', channel, agent, code, message }, true);
+    };
+    // The fence. The board offers only what this host reported, but the board
+    // is open to the network and this is the one place the check has teeth.
+    if (!path || !M.insideRoots(path, this.cfg.roots)) {
+      return fail(`refused: ${path || '(no path)'} is not under this host's roots (${this.cfg.roots.join(', ')})`, 'bind_refused');
+    }
+    if (!existsSync(path)) return fail(`refused: ${path} does not exist`, 'bind_refused');
+    if (!this.cfg.token) {
+      return fail(`this host has no shared secret to bind with — run  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>  on it, or bind one repo by hand`, 'no_key');
+    }
+    const dir = W.canonical(path);
+    const origin = originOf(this.cfg.url);
+    log(`${channel}/${agent}: binding ${dir}${p.import ? ' — importing its .mcp.json entry' : ''}`);
+    // A desk already at this folder — the import case — keeps its conversation:
+    // the Desk object survives the rescan (same cwd), and its pinned id is
+    // handed to the new binding's registration below.
+    const before = [...this.desks.values()].find((d) => d.cwd === dir);
+    const oldLast = before?.lastSessionId ?? null;
+    if (p.import || before) {
+      const rm = await M.mcpRemove(dir);
+      if (!rm.ok) return fail(`could not clear the old local-scope entry in ${dir}: ${rm.error}`);
+      if (rm.removed) log(`${channel}/${agent}: removed the previous local-scope entry in ${dir}`);
+      const dropped = M.dropProjectEntry(dir, { origin });
+      if (!dropped.ok) return fail(`left ${dir}/.mcp.json alone: ${dropped.error}`);
+      if (dropped.removed.length) {
+        log(`${channel}/${agent}: removed ${dropped.removed.join(', ')} from ${dir}/.mcp.json${dropped.kept.length ? ` (kept ${dropped.kept.join(', ')})` : ''}`);
+      }
+      for (const x of dropped.foreign) log(`${channel}/${agent}: left ${x.name} in ${dir}/.mcp.json alone — it points at ${x.board}`);
+    }
+    const added = await M.mcpAdd(dir, { url: `${this.cfg.url}/mcp`, channel, agent, key: this.cfg.token });
+    if (!added.ok) return fail(`could not bind ${dir}: ${added.error}`);
+    log(`${channel}/${agent}: bound ${dir} in local scope`);
+    await this.rescan(`bound from the floor — ${channel}/${agent}`);
+    const desk = this.desks.get(`${channel}|${agent}`);
+    if (!desk) {
+      return fail(`bound ${dir}, but the rescan did not find the desk — is ${dir} under this host's roots (${this.cfg.roots.join(', ')}), and is ${this.cfg.url} the board its entry names?`);
+    }
+    if (oldLast) await desk.follow(oldLast);
+    await this.register();
+    await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: oldLast, from: p.from ?? null }, true);
+    if (p.open === false) return undefined;
+    // Same tail as `open`: a window, its startup questions surfaced on the
+    // floor rather than answered here, and any key pressed on the operator's
+    // behalf said out loud.
+    const r = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+    if (!r.ok) return this.emit({ type: 'error', channel, agent, message: r.error }, true);
+    if (r.created) {
+      const up = await W.waitReady(desk.cwd, { pid: r.pid, target: r.target });
+      for (const a of up.answered ?? []) log(`${channel}/${agent}: answered the ${a.name} question with "${a.chose}"`);
+      if (!up.ok) this.emit({ type: 'error', channel, agent, message: up.error, code: up.code ?? null }, true);
+    }
+    return undefined;
+  }
+
+  /**
+   * Leave a desk: close the floor's window there, take the binding out of
+   * wherever it was read from — the local-scope entry, and the .mcp.json entry
+   * for this board — and let the rescan drop the desk, which the next
+   * registration reports as offline. The seat stays on the floor; whether the
+   * agent is gone is the board's question, not this one's.
+   */
+  async unbind(desk) {
+    const { channel, agent } = desk;
+    const fail = (message) => {
+      warn(`${desk.label}: ${message}`);
+      return this.emit({ type: 'error', channel, agent, code: 'unbind_failed', message }, true);
+    };
+    if (await W.paneFor(desk.cwd)) {
+      const shut = await W.closeWindow(desk.cwd);
+      if (!shut.ok) return fail(`could not close its window: ${shut.error}`);
+      log(`${desk.label}: closed its window`);
+    }
+    const rm = await M.mcpRemove(desk.cwd);
+    if (!rm.ok) return fail(`could not remove the local-scope entry in ${desk.cwd}: ${rm.error}`);
+    if (rm.removed) log(`${desk.label}: removed the local-scope entry in ${desk.cwd}`);
+    const dropped = M.dropProjectEntry(desk.cwd, { origin: originOf(this.cfg.url), channel, agent });
+    if (!dropped.ok) return fail(`left ${desk.cwd}/.mcp.json alone: ${dropped.error}`);
+    if (dropped.removed.length) log(`${desk.label}: removed ${dropped.removed.join(', ')} from ${desk.cwd}/.mcp.json`);
+    await this.rescan(`left from the floor — ${desk.label}`);
+    await this.register();
+    return this.emit({ type: 'unbound', channel, agent, cwd: desk.cwd }, true);
+  }
+
   async handle(item) {
+    if (item.kind === 'bind') {
+      await this.bind(item);
+      return;
+    }
     if (item.kind === 'rescan') {
       // Asked for rather than scheduled: the board saw a session start on a
       // desk no host runs, or somebody pressed the button, and this host may
@@ -727,6 +865,9 @@ class Host {
         }
         break;
       }
+      case 'unbind':
+        await this.unbind(desk);
+        break;
       case 'attach': {
         // The escape hatch, and the only work item that changes nothing. It
         // opens a terminal in front of the operator; the window keeps running
@@ -858,7 +999,7 @@ async function main() {
     process.exit(1);
   }
 
-  const found = discoverDesks(cfg.roots);
+  const { desks: found, folders } = discover(cfg.roots);
   if (!found.length) {
     warn(`no desks found under ${cfg.roots.join(', ')} — a desk is a directory whose .mcp.json carries X-Channel and X-Agent`);
   }
@@ -892,14 +1033,35 @@ async function main() {
   for (const d of found.filter((d) => originOf(d.url) !== origin)) {
     log(`skipping ${d.channel}/${d.agent} — its board is ${originOf(d.url)}, this host serves ${origin}`);
   }
-  // From a desk on the board we actually serve. found[0] was the same bug as
-  // the url: a key from another board authenticates against nothing here.
-  if (!cfg.token && mine.length) cfg.token = mine[0].key;
+  // The shared secret, and where it came from. A desk's own binding wins over
+  // ORCH_AUTH_TOKEN and over host.json (operator's rule, 2026-09-09): a repo
+  // bound by hand is the most direct statement of which key this board takes,
+  // and a machine whose environment carries a stale one should follow its
+  // desks rather than the other way round. The environment and the file exist
+  // for the machine with no hand-bound desk at all — every desk on it taken
+  // from the floor, which the host can only do with a key of its own. From a
+  // desk on the board we actually serve: a key from another board
+  // authenticates against nothing here. The value itself is never logged.
+  const keyed = mine.find((d) => d.key);
+  const bindingOf = (d) => `${d.channel}/${d.agent}'s ${d.scope === 'local' ? 'local-scope entry' : '.mcp.json'}`;
+  if (keyed) {
+    const overrides = cfg.token && cfg.token !== keyed.key ? `, which overrides ${cfg.tokenSource}` : '';
+    log(`shared secret: from ${bindingOf(keyed)}${overrides}`);
+    cfg.token = keyed.key;
+    cfg.tokenSource = 'a desk';
+    const others = mine.filter((d) => d.key && d.key !== keyed.key);
+    if (others.length) warn(`${others.length} desk${others.length === 1 ? '' : 's'} carr${others.length === 1 ? 'ies' : 'y'} a different key from ${keyed.channel}/${keyed.agent}'s — ${others.map((d) => `${d.channel}/${d.agent}`).join(', ')}. One board takes one key; using ${keyed.channel}/${keyed.agent}'s, and the others will be refused by the board.`);
+  } else if (cfg.token) {
+    log(`shared secret: from ${cfg.tokenSource} (no desk here carries one)`);
+  } else {
+    warn(`no shared secret: no desk here carries a key, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
+  }
   if (found.length && !mine.length) {
     warn(`every desk found points at another board — this host serves ${origin} and has nothing to do`);
   }
 
   const host = new Host(cfg);
+  host.folders = folders;
   for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
 
   log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · tmux ${W.tmuxSession} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
