@@ -110,3 +110,23 @@ is true and the event's own session isn't the one the prompt is tracking.
 Needs a real host + real hook traffic to prove, not just synthetic events —
 the interaction is between two *different* sessions reporting to the same
 desk key, which is exactly what a single synthetic event can't reproduce.
+
+## Add a desk from the floor, instead of editing `.mcp.json`
+
+The request heard most often from the people running floors: a `+` on a room,
+an agent name, and a desk appears — and the same for moving an agent to
+another floor. Today both are an edit to a repo's `.mcp.json` followed by
+Claude Code's "New MCP server found" dialog, which re-pointing the file
+re-triggers.
+
+Analysed and measured 2026-09-08, not built: see
+[`desk-from-the-floor.md`](desk-from-the-floor.md). The short version is that
+Claude Code's local scope (`claude mcp add -s local`, stored in
+`~/.claude.json` by directory) binds a desk with **no approval dialog**, a
+switch is remove-then-add plus a `--resume` that keeps the conversation, and
+the key never has to leave the host. Three to five days for one agent, the
+spread being two measurements still owed (VS Code picking up local scope; the
+hook on a moved desk) and a deploy that needs plugin, host and server new
+together. The security boundary is unchanged — the board can already drive
+every desk — but its reach widens to every directory under the host's roots,
+which must be the fence.
