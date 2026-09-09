@@ -28,7 +28,7 @@
  * to talk to its floor. A directory with no such file is not part of this system
  * and is skipped, which is what keeps unrelated projects off the board.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -64,26 +64,72 @@ function header(headers, name) {
   return null;
 }
 
+/** The orchestratinator entry in a set of MCP servers, or null. An entry
+ *  qualifies only if it carries both X-Channel and X-Agent — that pair is the
+ *  orchestratinator's signature, and matching on it rather than on a server
+ *  name means a repo can call the entry whatever it likes. */
+function identityIn(servers) {
+  for (const s of Object.values(servers && typeof servers === 'object' ? servers : {})) {
+    const channel = header(s?.headers, 'X-Channel');
+    const agent = header(s?.headers, 'X-Agent');
+    if (channel && agent && typeof s?.url === 'string') {
+      return { channel, agent, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key') };
+    }
+  }
+  return null;
+}
+
+/** The resolved spelling of a path, or the path itself when it has none.
+ *  Claude Code keys `projects` by the resolved path (a cwd of /tmp/x is filed
+ *  under /private/tmp/x), and the event's cwd may be spelled either way. */
+function real(dir) {
+  try { return realpathSync(dir); } catch { return dir; }
+}
+
 /**
- * Walk up from the session's directory for the `.mcp.json` that names this repo's
- * place on the board. An entry qualifies only if it carries both X-Channel and
- * X-Agent — that pair is the orchestratinator's signature, and matching on it
- * rather than on a server name means a repo can call the entry whatever it likes.
+ * Every directory bound in Claude Code's local scope — `~/.claude.json` →
+ * `projects[dir].mcpServers`, which is what `claude mcp add -s local` writes
+ * and what the floor binds a desk with (docs/desk-from-the-floor.md).
+ * `CLAUDE_CONFIG_DIR` moves the file, so it is honoured. Read once per event;
+ * a file that is absent, mid-rewrite, or broken yields an empty map and the
+ * walk below falls back to `.mcp.json` alone — never half of something.
+ */
+function readLocalScope() {
+  const out = new Map();
+  let projects;
+  try {
+    projects = JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR ?? homedir(), '.claude.json'), 'utf8'))?.projects;
+  } catch {
+    return out;
+  }
+  if (!projects || typeof projects !== 'object') return out;
+  for (const [dir, p] of Object.entries(projects)) {
+    const id = identityIn(p?.mcpServers);
+    if (id) out.set(dir, id);
+  }
+  return out;
+}
+
+/**
+ * Walk up from the session's directory for the binding that names this repo's
+ * place on the board. At each level the local-scope entry is read before the
+ * directory's `.mcp.json`, because that is Claude Code's own precedence: when
+ * both exist, local is the one the window connects with (measured 2026-09-09
+ * — `whoami` answers the local identity whatever the file says). The host's
+ * `readDesk` in host/identity.js applies the same rule; they cannot share
+ * code, so a change here is a change there.
  */
 function findIdentity(startDir) {
+  const local = readLocalScope();
   let dir = resolve(startDir);
   for (let i = 0; i < MAX_LEVELS; i++) {
+    const mine = local.get(dir) ?? local.get(real(dir));
+    if (mine) return { ...mine, root: dir };
     const file = join(dir, '.mcp.json');
     if (existsSync(file)) {
       try {
-        const servers = JSON.parse(readFileSync(file, 'utf8'))?.mcpServers ?? {};
-        for (const s of Object.values(servers)) {
-          const channel = header(s?.headers, 'X-Channel');
-          const agent = header(s?.headers, 'X-Agent');
-          if (channel && agent && typeof s?.url === 'string') {
-            return { channel, agent, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key'), root: dir };
-          }
-        }
+        const id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers);
+        if (id) return { ...id, root: dir };
       } catch {
         // A malformed .mcp.json is already breaking this person's MCP connection
         // and they will hear about it from somewhere that can actually help.

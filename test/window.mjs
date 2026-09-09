@@ -102,6 +102,12 @@ async function main() {
     eq(W.windowName('/a/b/my-repo'), 'my-repo', 'window name is the repo directory');
     eq(W.windowName('/a/b/we:ird name'), 'we-ird-name', 'characters tmux would read as a target are replaced');
 
+    // The transcript lives under Claude Code's own directory name for the cwd,
+    // and that rule is exported so the folder list and the session picker find
+    // a directory's transcripts by the same spelling the tail reads.
+    eq(W.projectSlug('/tmp/a.b/c d'), '-tmp-a-b-c-d', 'the project slug turns every non-alphanumeric character into a dash');
+    eq(W.transcriptPath('/tmp/a.b/c d', 'sid'), `${CLAUDE_HOME}/projects/-tmp-a-b-c-d/sid.jsonl`, 'and the transcript path is built from it');
+
     // Reading the composer, which is how a paste is confirmed to have landed.
     // The case that matters is the one that is NOT a composer: `❯` is also the
     // selection cursor in Claude Code's menus, and a menu mistaken for a

@@ -222,3 +222,74 @@ that one click fewer; it is not in this feature's way.
 session that is already open in a folder cannot be rebound without a restart;
 a binding cannot be made for a machine with no host on this board; and the
 floor cannot learn who pressed the button.
+
+## Measured, slice 0 (2026-09-08/09, Claude Code 2.1.258)
+
+The facts the plan in `~/.claude/plans/` depends on, each run on the
+throwaway server (`127.0.0.1:8899`) and the `-L probe` tmux socket with
+`CLAUDE*` stripped. Nothing here touched the operator's board or session.
+
+**(b) A project entry and a local entry of the same name.** A folder whose
+`.mcp.json` declares `orchestratinator` as `probe/both-project`, plus
+`claude mcp add -s local` declaring it as `probe/both-local`:
+
+| step | what happened |
+|---|---|
+| `claude mcp add -s local` with the project entry present | exit 0 — the "already exists" refusal is scope-specific |
+| `claude mcp get orchestratinator` / `claude mcp list` | local scope, *Connected*, listed once; the project entry is not mentioned |
+| `exec claude` in the folder | trust dialog (new folder), **then "New MCP server found in this project: orchestratinator"** — the project entry's approval is asked even though the local one shadows it |
+| that dialog cancelled (an Esc reached it) | nothing recorded: `enabledMcpjsonServers` and `disabledMcpjsonServers` both `[]`; the window came up anyway |
+| `whoami` | `channel=probe agent=both-local` — **local wins the connection** regardless of the dialog |
+| project entry removed (file left as `{"mcpServers":{}}`) while the window ran, then `claude --resume <id>` | **no dialog of any kind**, ready in 1 s, same transcript continued (50 records, both earlier answers present), `whoami` → `both-local` |
+
+So "import and remove" is not a tidiness choice: a shadowed project entry
+keeps raising the approval dialog on every fresh window until it is approved
+or gone. Removing it is what makes the floor's binding dialog-free. An empty
+`mcpServers` object left behind raises nothing, so `dropProjectEntry` need
+not delete the file.
+
+**(c) CLI facts.**
+
+| fact | measured |
+|---|---|
+| `claude mcp remove -s local orchestratinator` on an absent name | exit 1, stderr `No MCP server named "orchestratinator" in local scope` |
+| `projects[…]` key when cwd is reached through a symlink (`/tmp/x`) | the **resolved** path (`/private/tmp/x`) — look up by `canonical(dir)` |
+| `claude mcp add` via `execFile`, no TTY, `CLAUDE*` stripped | exit 0, ~0.6–0.7 s |
+| the same under a launchd-shaped environment (`HOME` and `PATH` only) | exit 0, ~0.6 s — no shell profile needed |
+| `CLAUDE_CONFIG_DIR=<dir>` set | writes `<dir>/.claude.json` (and a `backups/` beside it); the real `~/.claude.json` is untouched — honour the variable when reading |
+| `add` in a never-opened folder | does **not** write `hasTrustDialogAccepted`; the trust question still comes on first open, and the floor's existing prompt handles it |
+
+The per-call budget the plan assumed (10–30 s, from `claude agents --json`)
+was pessimistic: `mcp add` and `mcp remove` are sub-second here. Keep the
+60 s timeout as a ceiling, not an estimate.
+
+**(a) VS Code and local scope.** A scratch folder outside every root, bound
+with `claude mcp add -s local` as `probe/vsc-a`, then opened in VS Code by
+the operator with a Claude Code chat started in it (2026-09-09):
+
+| step | what happened |
+|---|---|
+| chat opened in the bound folder | **no MCP approval dialog**; the session's own "Session check" reported *agent vsc-a on orchestratinator channel probe* |
+| the throwaway board | one MCP session, `probe/vsc-a`, presence row for `vsc-a` |
+| `~/.claude.json` afterwards | `hasTrustDialogAccepted` still `false` — a VS Code session does not write folder trust, as the backlog already suspected |
+
+So a VS Code window in a floor-bound folder carries the binding, and
+decision 1 (import into local scope, remove from the file) stands as decided.
+The second case, rebinding under an already-open chat, split the two clients:
+
+| client | binding changed with `mcp remove` + `mcp add` while the session ran | `whoami` in that same session afterwards |
+|---|---|---|
+| **VS Code** chat (`vsc-a` → `vsc-a2`) | **followed it** — the same chat answered `vsc-a2` on its next call, and noted itself that it "was vsc-a a moment ago"; a fresh chat answered `vsc-a2` too | the editor re-reads the configuration and reconnects on its own |
+| **CLI** window (`live-1` → `live-2`), both calls verified as real tool calls in the transcript and on the board | **kept `live-1`** | the CLI holds the connection it made at start; a close and `--resume` is what takes the new binding (measured above) |
+
+Two design consequences. A move on a **floor-held** desk is close + `--resume`,
+as planned. A move on an **editor-held** desk needs no refusal: the host
+rebinds the folder, the editor's chat follows on its next tool call, and the
+new desk adopts that live session — the dialog says so rather than refusing.
+The session picker still refuses an editor-held desk, because a resume means
+closing a window the floor does not hold.
+
+Seen in passing, not ours: every fresh window prints a page of
+`Permission allow rule (~/.claude/settings.json): … has a wildcard before the
+rest of the command` warnings above the dialogs. They scroll off and do not
+disturb `startupQuestionOf`, which reads the option block from the footer up.

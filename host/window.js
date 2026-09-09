@@ -2205,8 +2205,18 @@ export async function screen(cwd, { lines = 60 } = {}) {
  * anything reporting it.
  */
 export function transcriptPath(cwd, sessionId) {
-  const slug = cwd.replace(/[^A-Za-z0-9]/g, '-');
-  return join(CLAUDE_HOME, 'projects', slug, `${sessionId}.jsonl`);
+  return join(CLAUDE_HOME, 'projects', projectSlug(cwd), `${sessionId}.jsonl`);
+}
+
+/**
+ * Claude Code's own directory name for a working directory: every character
+ * that is not a letter or digit becomes a dash. Exported because it is the one
+ * place the rule lives — the folder list and the session picker find a
+ * directory's transcripts by it, and two spellings of one rule is how a desk
+ * ends up reading a file that does not exist.
+ */
+export function projectSlug(cwd) {
+  return cwd.replace(/[^A-Za-z0-9]/g, '-');
 }
 
 /**

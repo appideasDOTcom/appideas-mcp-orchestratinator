@@ -150,9 +150,21 @@ use the menu: add the marketplace by directory, then install
 **orchestratinator-floor** from it (it sits at the bottom of the list, below
 the official plugins).
 
-There is nothing to configure: the plugin reads each repo's own `.mcp.json` and
+There is nothing to configure: the plugin reads each repo's own binding — its
+`.mcp.json`, or the local-scope entry `claude mcp add -s local` writes — and
 reports state to the same server with the same secret. A repo that doesn't name
 the orchestratinator never appears on any floor.
+
+**Updating it later.** The marketplace is the clone itself, but what runs is a
+cached copy that does not follow the working tree. After pulling a new
+version:
+
+```
+claude plugin update orchestratinator-floor
+```
+
+(or the same from the `/plugin` menu). Check with `claude plugin list`; the
+number should match the one `/health` reports.
 
 **5. Install the host** — this is what lets the floor open and drive windows.
 

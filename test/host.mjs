@@ -110,6 +110,32 @@ function fixture() {
     },
   }, null, 2));
 
+  // Local scope: desks bound with `claude mcp add -s local`, which lives in
+  // ~/.claude.json rather than in the repo — HOME is the fixture, so this is
+  // the file the host reads. Three cases: a desk bound only there; a directory
+  // bound both ways, where local must win because it is what Claude Code
+  // connects with (measured 2026-09-09); and a local binding to another board,
+  // skipped exactly as a .mcp.json one is.
+  const localScope = (agent, url = `${HOST}/mcp`) => ({
+    mcpServers: { orchestratinator: { type: 'http', url, headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': KEY } } },
+  });
+  for (const d of ['repo-local', 'repo-both', 'repo-localelse']) mkdirSync(`${FIX}/${d}`, { recursive: true });
+  writeFileSync(`${FIX}/repo-both/.mcp.json`, JSON.stringify({
+    mcpServers: {
+      orchestratinator: {
+        type: 'http', url: `${HOST}/mcp`,
+        headers: { 'X-Channel': CH, 'X-Agent': 'both-project', 'X-Orchestratinator-Key': KEY },
+      },
+    },
+  }, null, 2));
+  writeFileSync(`${HOME}/.claude.json`, JSON.stringify({
+    projects: {
+      [`${FIX}/repo-local`]: { ...localScope('local-a'), hasTrustDialogAccepted: true },
+      [`${FIX}/repo-both`]: localScope('both-local'),
+      [`${FIX}/repo-localelse`]: localScope('local-else', 'http://localhost:9/mcp'),
+    },
+  }, null, 2));
+
   // The stand-in: a roster on `agents --json`, a Claude Code otherwise.
   //
   // It asks for bracketed paste so a multi-line message is one turn, it
@@ -276,6 +302,15 @@ try {
   const d0 = deskOf(seen ?? (await floor()), 'free');
   eq(d0?.hosted?.host, 'Test Mac', 'and the floor names the machine it is on');
   assert(!deskOf(await floor(), 'pro'), 'a repo whose .mcp.json names another board is left alone');
+
+  console.log('\n  local scope');
+  assert(!!(await until(async () => (deskOf(await floor(), 'local-a')?.hosted ? true : null))),
+    'a desk bound in Claude Code\'s local scope (~/.claude.json, no .mcp.json in the repo) is found and hosted');
+  assert(/host-test\/local-a .*repo-local .*\(local scope\)/.test(host.log), 'and the host says which scope it read it from');
+  assert(!!deskOf(await floor(), 'both-local')?.hosted, 'a directory bound both ways is hosted as its local-scope desk — the one Claude Code connects with');
+  assert(!deskOf(await floor(), 'both-project'), 'and not as the .mcp.json one');
+  assert(!deskOf(await floor(), 'local-else'), 'a local-scope binding to another board is left alone');
+  assert(/skipping host-test\/local-else/.test(host.log), 'and named as skipped, like a .mcp.json one');
 
   eq(deskOf(await floor(), 'free')?.hosted?.session_id?.startsWith('host:'), true,
     'with no window open yet, the desk has no conversation — it does not invent one');
@@ -598,6 +633,24 @@ try {
   rmSync(`${boards}/two`, { recursive: true, force: true });
   const agreed = await runHost(boards, { until: /tmux/ });
   assert(/→ http:\/\/127\.0\.0\.1:9911/.test(agreed.out), 'desks that agree on one board need no url at all');
+
+  // Local scope can live elsewhere: CLAUDE_CONFIG_DIR moves ~/.claude.json
+  // (measured 2026-09-09), and a host that read only the home file would miss
+  // every desk bound on such a machine.
+  const cfgDir = `${FIX}/cfg`;
+  mkdirSync(cfgDir, { recursive: true });
+  mkdirSync(`${boards}/three`, { recursive: true });
+  writeFileSync(`${cfgDir}/.claude.json`, JSON.stringify({
+    projects: {
+      [`${boards}/three`]: {
+        mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9911/mcp', headers: { 'X-Channel': CH, 'X-Agent': 'cfg-agent', 'X-Orchestratinator-Key': 'key-cfg' } } },
+      },
+    },
+  }));
+  // Resolved on the line printed after the desk list — the startup line itself
+  // says "tmux", so that marker would cut the output before any desk is named.
+  const moved = await runHost(boards, { CLAUDE_CONFIG_DIR: cfgDir, until: /attach to any of them/ });
+  assert(/host-test\/cfg-agent .*\(local scope\)/.test(moved.out), 'a desk bound in local scope under CLAUDE_CONFIG_DIR is found there');
 } catch (err) {
   console.error(err);
   failures++;

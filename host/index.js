@@ -112,10 +112,15 @@ function loadConfig() {
  * turn twice.
  */
 class Desk {
-  constructor(host, { channel, agent, cwd }) {
+  constructor(host, { channel, agent, cwd, scope = 'project' }) {
     this.host = host;
     this.channel = channel;
     this.agent = agent;
+    // Where the binding was read from: 'local' (Claude Code's own
+    // ~/.claude.json, what the floor writes) or 'project' (the repo's
+    // .mcp.json). Reported to the board so the floor can say which file to
+    // look in, and so an unbind knows which one to take the entry out of.
+    this.scope = scope;
     // Canonical, because everything downstream matches this against the cwd
     // Claude Code reports and against the transcript path derived from it, and
     // a repo reached through a symlink is spelled two ways. See canonical().
@@ -417,7 +422,7 @@ class Host {
     for (const d of this.desks.values()) {
       const held = await W.holderOf(d.cwd, d.lastSessionId).catch(() => null);
       desks.push({
-        channel: d.channel, agent: d.agent, cwd: d.cwd,
+        channel: d.channel, agent: d.agent, cwd: d.cwd, scope: d.scope,
         session_id: d.lastSessionId,
         window: held?.where === 'floor' ? held.window : null,
         outside_pid: held?.where === 'editor' ? held.pid : null,
@@ -475,9 +480,19 @@ class Host {
       // the same rule main() applies at boot.
       if (!this.cfg.token && d.key) this.cfg.token = d.key;
       const have = this.desks.get(k);
-      if (have && have.cwd === W.canonical(d.cwd)) continue;
+      if (have && have.cwd === W.canonical(d.cwd)) {
+        // Same repo, same conversation — only where the binding is written
+        // may have changed, which a floor import does (.mcp.json → local
+        // scope). Not a new desk; say where it is bound now and carry on.
+        if (have.scope !== d.scope) {
+          have.scope = d.scope;
+          log(`desk ${d.channel}/${d.agent} is now bound in ${d.scope} scope  (${reason})`);
+          changed = true;
+        }
+        continue;
+      }
       this.desks.set(k, new Desk(this, d));
-      log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${reason})`);
+      log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope, ${reason})`);
       changed = true;
     }
     for (const [k, desk] of this.desks) {
@@ -888,7 +903,7 @@ async function main() {
   for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
 
   log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · tmux ${W.tmuxSession} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
-  for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}`);
+  for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope)`);
   log(`attach to any of them with:  tmux attach -t ${W.tmuxSession}`);
 
   const stop = () => host.stop().finally(() => process.exit(0));
