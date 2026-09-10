@@ -13,7 +13,7 @@
 // program reading the pane. A bracketed paste arrives as one block, which is
 // why send() uses a tmux buffer.
 //   npm run test:window
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, appendFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, appendFileSync, utimesSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -63,9 +63,19 @@ function writeFixture() {
   writeFileSync(`${FIX}/stand-in.sh`,
     `#!/bin/sh\n` +
     `if [ "$1" = "agents" ]; then cat ${JSON.stringify(`${FIX}/roster.json`)}; exit 0; fi\n` +
+    // `claude stop <job>`: records the job, and — unless the job is the one
+    // that will not stop — drops the roster entry the test wrote for itself.
+    `if [ "$1" = "stop" ]; then echo "$2" >> ${JSON.stringify(`${FIX}/stopped.txt`)}; [ "$2" = "stuck-1" ] && exit 1; rm -f ${JSON.stringify(`${CLAUDE_HOME}/sessions/${process.pid}.json`)}; exit 0; fi\n` +
     // What the pane was started with, for the one assertion the survey switch
     // can get — see open().
     `env > "$PWD/env.txt"\n` +
+    // And what it was started with — the one way to see which conversation
+    // open() asked claude to resume.
+    `printf '%s\\n' "$@" > "$PWD/argv.txt"\n` +
+    // A window resuming a conversation registers it, as Claude Code does:
+    // the roster file is what readiness and delivery read. Only on --resume,
+    // so every earlier case still sees a roster with nothing in it.
+    `if [ "$1" = "--resume" ]; then mkdir -p ${JSON.stringify(`${CLAUDE_HOME}/sessions`)}; printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","startedAt":%s}' "$$" "$2" "$PWD" "$(date +%s)000" > ${JSON.stringify(`${CLAUDE_HOME}/sessions`)}/$$.json; fi\n` +
     `printf '\\033[?2004h'\n` +
     `exec cat >> "$PWD/received.txt"\n`);
   chmodSync(`${FIX}/stand-in.sh`, 0o755);
@@ -636,6 +646,136 @@ async function main() {
     assert(!clean(readAt(a)).includes('for the second desk'), "and neither receives the other's");
     assert(!clean(readAt(b)).includes('for the first desk'), 'in either direction');
 
+    // A desk whose folder name begins with the tmux session's name. tmux
+    // resolves new-window's `-t` against window names before session names,
+    // and by prefix — so once a window called `orch-slice1-demo` existed,
+    // `-t orch` named *that window's index* instead of the session, and every
+    // open on the live board failed with `create window failed: index 1 in
+    // use` (2026-09-09). The target carries a trailing colon now; this is the
+    // case that turns red if it ever loses it.
+    console.log('\n  a desk whose folder name starts with the session name');
+    const prefixed = `${FIX}/${TMUX_SESSION}-demo`;
+    const after = `${FIX}/after-prefix`;
+    mkdirSync(prefixed, { recursive: true });
+    mkdirSync(after, { recursive: true });
+    assert(W.windowName(prefixed).startsWith(TMUX_SESSION), 'its window name begins with the session name');
+    const op = await W.open(prefixed);
+    assert(op.ok, `it opens${op.ok ? '' : ` — ${op.error}`}`);
+    const beside = await W.open(after);
+    assert(beside.ok, `and the next desk still opens beside it${beside.ok ? '' : ` — ${beside.error}`}`);
+    eq(beside.created, true, 'in a window of its own');
+    assert(beside.target !== op.target, 'rather than colliding with the prefixed window');
+
+    // A desk pinned to a session that never wrote a transcript. The board's
+    // pin comes from the roster, the roster keeps a process's first id, and a
+    // VS Code tab that resumes another conversation from inside writes every
+    // word under the other id — so the pin can name a file that does not
+    // exist, and `claude --resume` of it exits on its first line (2.1.258,
+    // 2026-09-09: every open of service-developer died this way). open() now
+    // checks the disk and falls back to the conversation with the latest turn.
+    console.log('\n  a desk pinned to a session that never wrote a transcript');
+    const stale = `${FIX}/stale-pin`;
+    mkdirSync(stale, { recursive: true });
+    const pdir = W.projectDir(W.canonical(stale));
+    mkdirSync(pdir, { recursive: true });
+    const rec = (type, ts) => JSON.stringify({ type, uuid: `${type}-${ts}`, timestamp: ts, message: { content: 'hi' } });
+    writeFileSync(`${pdir}/older.jsonl`, [rec('user', '2026-09-08T10:00:00Z'), rec('assistant', '2026-09-08T10:00:05Z'), ''].join('\n'));
+    writeFileSync(`${pdir}/newest.jsonl`, [rec('user', '2026-09-09T15:30:00Z'), rec('assistant', '2026-09-09T15:40:29Z'), ''].join('\n'));
+    // Opened, /resume typed, closed: a command and its output, which the
+    // transcript reader files as context and nobody's words — and the latest
+    // timestamps in the folder, so anything counting records picks it.
+    const cmd = (content, ts) => JSON.stringify({ type: 'user', uuid: `c-${ts}`, timestamp: ts, message: { role: 'user', content } });
+    writeFileSync(`${pdir}/empty.jsonl`, [
+      cmd('<command-name>/resume</command-name>\n<command-message>resume</command-message>\n<command-args></command-args>', '2026-09-09T16:41:03Z'),
+      cmd('<local-command-stdout>Session newest is running as a background session (bg-1234).</local-command-stdout>', '2026-09-09T16:41:03Z'),
+      JSON.stringify({ type: 'bridge-session', sessionId: 'empty' }), '',
+    ].join('\n'));
+    // mtime disagrees with the turns on purpose: a resume appends metadata
+    // without a turn, so the older conversation is the one touched last.
+    const now = Date.now() / 1000;
+    utimesSync(`${pdir}/newest.jsonl`, now - 600, now - 600);
+    utimesSync(`${pdir}/older.jsonl`, now - 1, now - 1);
+    eq(await W.resumable(stale, 'newest'), { id: 'newest', note: null }, 'a pin whose transcript exists is resumed as it is');
+    const pick = await W.resumable(stale, 'never-written');
+    eq(pick.id, 'newest', 'a pin with no transcript falls back to the conversation with the latest turn, not the youngest file');
+    eq((await W.resumable(stale, 'empty')).id, 'newest', 'a pin whose transcript holds only a slash command and its output is not a conversation either');
+    assert(/never-written/.test(pick.note ?? '') && /newest/.test(pick.note ?? ''), `and the note says what was asked for and what was opened — ${pick.note}`);
+    const op2 = await W.open(stale, { resume: 'never-written' });
+    assert(op2.ok, `the window opens${op2.ok ? '' : ` — ${op2.error}`}`);
+    eq(op2.resumed, 'newest', 'on the fallback conversation');
+    assert(await until(() => existsSync(`${stale}/argv.txt`) && /^--resume\nnewest$/m.test(readFileSync(`${stale}/argv.txt`, 'utf8'))),
+      'and claude was started with --resume of that id');
+    const bare = `${FIX}/bare-pin`;
+    mkdirSync(bare, { recursive: true });
+    const none = await W.resumable(bare, 'ghost');
+    eq(none.id, null, 'with nothing on disk there is nothing to resume');
+    assert(/ghost/.test(none.note ?? '') && /new conversation/.test(none.note ?? ''), `and the note says a new one starts — ${none.note}`);
+    eq(await W.resumable(bare, null), { id: null, note: null }, 'no pin at all is no fallback: a fresh desk starts fresh, and silently');
+
+    // A conversation held by a background session. Claude Code's daemon keeps
+    // one running after its tab closes; the roster lists it as kind `bg` with
+    // a job id, and a `--resume` of it exits on its first line. Opening the
+    // desk is the handoff, so the host stops it and resumes it here — and a
+    // desk that said "run `claude stop`" instead stranded a channel (2026-09-09).
+    console.log('\n  a conversation held by a background session');
+    const bgDir = `${FIX}/bg-held`;
+    mkdirSync(bgDir, { recursive: true });
+    mkdirSync(`${CLAUDE_HOME}/sessions`, { recursive: true });
+    const bgFile = `${CLAUDE_HOME}/sessions/${process.pid}.json`;
+    // This process is the "background session": alive, in the roster, in no
+    // pane. `bg` is what the file says; `claude agents --json` says `background`.
+    const bgEntry = (dir, sessionId, job) => JSON.stringify({ pid: process.pid, sessionId, cwd: dir, kind: 'bg', name: 'a label with spaces', jobId: job, startedAt: Date.now() });
+    // The conversation the background session holds has a transcript, as a
+    // real one does — it is what the window resumes.
+    const spoken = (dir, sessionId) => {
+      const path = W.transcriptPath(W.canonical(dir), sessionId);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, [rec('user', '2026-09-09T15:30:00Z'), rec('assistant', '2026-09-09T15:30:05Z'), ''].join('\n'));
+    };
+    spoken(bgDir, 'bg-held');
+    writeFileSync(bgFile, bgEntry(bgDir, 'bg-held', 'bg-1234'));
+    const who = await W.holderOf(bgDir, 'bg-held');
+    eq([who.where, who.kind, who.job], ['editor', 'background', 'bg-1234'], "the holder is reported with its kind, in the CLI's word, and its job id");
+    const stoppedJobs = () => (existsSync(`${FIX}/stopped.txt`) ? readFileSync(`${FIX}/stopped.txt`, 'utf8').trim().split('\n') : []);
+    const bgOpen = await W.open(bgDir, { resume: 'bg-held' });
+    assert(bgOpen.ok, `opening it stops the background session and opens a window${bgOpen.ok ? '' : ` — ${bgOpen.error}`}`);
+    eq(stoppedJobs(), ['bg-1234'], 'by its job id, not its label');
+    eq(existsSync(bgFile), false, 'and only once the roster no longer lists it');
+    eq(bgOpen.resumed, 'bg-held', 'the window resumes the conversation the session held');
+    assert(/bg-held/.test(bgOpen.note ?? '') && /bg-1234/.test(bgOpen.note ?? '') && /stopped/.test(bgOpen.note ?? '') && !/nothing to resume/.test(bgOpen.note ?? ''),
+      `saying so, and only so — ${bgOpen.note}`);
+    assert(await until(() => existsSync(`${bgDir}/argv.txt`) && /^--resume\nbg-held$/m.test(readFileSync(`${bgDir}/argv.txt`, 'utf8'))),
+      'with --resume of that id');
+
+    // A message does the same when it is allowed to open a window. The
+    // stand-in registers but writes no transcript, so the send itself can
+    // only end "not delivered" here — the release, the window and the text
+    // arriving are what this proves; delivery is proved further down.
+    const bgDir2 = `${FIX}/bg-held-2`;
+    mkdirSync(bgDir2, { recursive: true });
+    spoken(bgDir2, 'bg-held-2');
+    writeFileSync(bgFile, bgEntry(bgDir2, 'bg-held-2', 'bg-5678'));
+    const sent = await W.send(bgDir2, 'after the release', { open: true, resume: 'bg-held-2' });
+    assert(sent.ok || sent.code === 'not_delivered', `a message to it stops the session and opens a window${sent.ok || sent.code === 'not_delivered' ? '' : ` — ${sent.error}`}`);
+    assert(stoppedJobs().includes('bg-5678'), 'having stopped it by its job id');
+    assert((await W.paneFor(bgDir2)) !== null, 'and there is a window for it now');
+    assert(/bg-5678/.test(sent.note ?? ''), `and the message's result carries the note for the desk — ${sent.note}`);
+    assert(await until(() => existsSync(`${bgDir2}/received.txt`) && clean(readFileSync(`${bgDir2}/received.txt`, 'utf8')).includes('after the release')), 'and the text arrived in the new window');
+
+    // Stopping can fail, and then it is a refusal that says what happened.
+    const stuckDir = `${FIX}/bg-stuck`;
+    mkdirSync(stuckDir, { recursive: true });
+    writeFileSync(bgFile, bgEntry(stuckDir, 'bg-stuck', 'stuck-1'));
+    const wontStop = await W.open(stuckDir, { resume: 'bg-stuck' });
+    eq(wontStop.code, 'held_by_background', 'a background session that will not stop is a refusal');
+    assert(/claude stop stuck-1/.test(wontStop.error ?? ''), `quoting what was tried — ${wontStop.error}`);
+    eq(await W.paneFor(stuckDir), null, 'and no window was opened for a copy to die in');
+    const tried = stoppedJobs().length;
+    const noLeave = await W.send(stuckDir, 'hello?', { resume: 'bg-stuck' });
+    eq(noLeave.code, 'held_by_background', 'a message with no leave to open a window is refused, not acted on');
+    eq(stoppedJobs().length, tried, 'and did not try the stop itself');
+    rmSync(bgFile);
+
     // Delivery is proved by the message, not by the file moving.
     //
     // Two sends in three were being lost: pasted into a window that was
@@ -953,7 +1093,7 @@ async function main() {
       chmodSync(sh, 0o755);
       const dir = `${PROMPT_DIR}/${name}`;
       mkdirSync(dir, { recursive: true });
-      await run('tmux', ['new-window', '-d', '-t', TMUX_SESSION, '-c', dir, sh]).catch(() => {});
+      await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, sh]).catch(() => {});
       await sleep(500);
       return dir;
     };
@@ -1169,7 +1309,7 @@ async function main() {
         `});`,
       ].join('\n'));
       chmodSync(script, 0o755);
-      await run('tmux', ['new-window', '-d', '-t', TMUX_SESSION, '-c', dir, script]).catch(() => {});
+      await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, script]).catch(() => {});
       await sleep(500);
       return dir;
     };

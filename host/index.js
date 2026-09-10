@@ -316,12 +316,60 @@ class Desk {
     }
   }
 
+  /**
+   * The conversation to hand `--resume`, checked against the disk first.
+   *
+   * The pin is what the board holds for this desk, and it can name a session
+   * that never wrote a transcript — the reasoning is on resumable() in
+   * window.js. When the pin is not the conversation that opens, that is said
+   * here, twice: in this log, and on the floor as a line labeled `host`, so
+   * the desk does not simply appear to have changed its mind about which
+   * conversation it is. Filed under the conversation it leads into.
+   */
+  async resumeId() {
+    // A conversation that is running is the conversation, transcript or not:
+    // a window just opened from the floor has a session and no file yet, and
+    // checking the disk for it would announce a fallback about a desk whose
+    // window is right there. The check is for a pin nothing is running.
+    if (this.sessionId) return this.sessionId;
+    const pinned = this.lastSessionId;
+    const pick = await W.resumable(this.cwd, pinned);
+    if (pick.note) this.told(pick.note, pick.id ?? pinned);
+    // Follow the substitute from here, before its window comes up. Left
+    // pinned to the old id, watch() would adopt the new process as "newest
+    // live" and read its transcript from the first word — every turn of a
+    // conversation the floor relayed hours ago, drawn again with today's
+    // time on it (service-developer, 2026-09-09). Joining at the end here
+    // means the window's first new word is the first thing relayed.
+    if (pick.id && pick.id !== pinned) await this.follow(pick.id);
+    return pick.id;
+  }
+
+  /**
+   * Say on the floor what the host did on the person's behalf — a line
+   * labeled `host` in the desk's own chat, and the same line in this log.
+   * Every one of these is something a person would otherwise have to work
+   * out from a desk that changed under them: a conversation resumed other
+   * than the one the board named, a background session stopped to bring one
+   * here. Filed under the conversation it leads into.
+   */
+  told(text, sessionId) {
+    log(`${this.channel}/${this.agent}: ${text}`);
+    this.host.emit({
+      type: 'turn', channel: this.channel, agent: this.agent, session_id: sessionId ?? this.sessionId ?? this.lastSessionId,
+      role: 'context', text, at: new Date().toISOString(), uuid: null,
+      tool_name: 'host', tool_input: null, via: null,
+    }, true);
+  }
+
   /** Type into this repo's window, opening one if there isn't one. */
   async say(text) {
     // Resume the conversation this desk is, not merely the one that happens to
     // have a window open — those differ for exactly as long as it takes to
     // switch apps, which is when the floor is used.
-    const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId ?? this.lastSessionId });
+    const id = await this.resumeId();
+    const r = await W.send(this.cwd, text, { open: true, resume: id });
+    if (r.note) this.told(r.note, id);
     if (!r.ok) {
       this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
     } else if (r.unverified) {
@@ -848,8 +896,10 @@ class Host {
         break;
       }
       case 'open': {
-        const r = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+        const id = await desk.resumeId();
+        const r = await W.open(desk.cwd, { resume: id });
         if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
+        if (r.note) desk.told(r.note, r.resumed ?? id);
         // Wait for it to actually be running, for two reasons: a window that
         // dies on its first line should say so here rather than look open, and
         // a freshly created window holds its pane after exit until something
@@ -887,8 +937,10 @@ class Host {
         // fingers. That is the whole feature: the handoff VS Code needs does
         // not exist in this direction, because the floor's window already is
         // the CLI.
-        const opened = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+        const id = await desk.resumeId();
+        const opened = await W.open(desk.cwd, { resume: id });
         if (!opened.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true); break; }
+        if (opened.note) desk.told(opened.note, opened.resumed ?? id);
         // Attach BEFORE waiting for readiness. Readiness gates automated
         // typing, not eyeballs: a window stuck on the trust question is
         // exactly what the operator should be looking at, and waitReady's own
