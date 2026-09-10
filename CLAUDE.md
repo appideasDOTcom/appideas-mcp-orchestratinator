@@ -316,6 +316,21 @@ but a suite killed halfway leaves a server on port 8896 and fixtures in `data/`,
 which will poison the next run. Check for both before concluding a failure is
 real.
 
+Two more things about `test:window`, both from 2026-09-09. Its stand-in
+fakes exactly what the host reads and no more: it answers `agents`, it
+answers `stop <job>` by dropping the roster entry the test wrote for itself
+(and refuses job `stuck-1`, for the failure path), and on `--resume` it
+registers its own pid under that id, because readiness and delivery read the
+roster — a case that opens a window from a message needs that, or it waits
+out the 45s readiness timeout on "the roster had nothing at all". It writes
+no transcript, so a send that opens a window can only end `not_delivered`
+there; the case asserts the release, the window and the text arriving, and
+delivery is proved by the section that writes its own transcript. And the
+answer-a-prompt cases read a fixture pane 500ms after creating it: under
+editor load they went red twice with `its last line reads ""` and were green
+on the rerun. That red is a pane not yet drawn, not the code — rerun before
+reading anything into it.
+
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the
