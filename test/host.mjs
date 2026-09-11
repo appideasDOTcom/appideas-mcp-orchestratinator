@@ -548,7 +548,7 @@ try {
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'bad name!' })).status, 400, 'an agent name with a space in it is refused');
   eq((await take({ host_id: 'host-test-1', path: '/nope', channel: CH, agent: 'newbie' })).status, 409, 'a folder the host did not offer is refused');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-elsewhere`, channel: CH, agent: 'newbie' })).status, 409, 'a folder bound to another board is refused');
-  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-a`, channel: CH, agent: 'somebody-else' })).status, 409, 'a folder that already sits at another desk is refused (moving comes later)');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-a`, channel: CH, agent: 'somebody-else' })).status, 400, 'a folder that names its agent cannot be taken under another name');
   const argvBefore = argvLog().length;
   const took = await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'newbie', persona: 'Newbie Nine' });
   eq(took.status, 200, 'an unbound git checkout can be taken as a desk');
@@ -721,6 +721,53 @@ try {
     'and the desk follows the conversation the new window announces');
   const newLine = argvLog().slice(argvAtNew).trim().split('\n').pop() ?? '';
   assert(!newLine.includes('--resume'), `opened with nothing to resume — ${JSON.stringify(newLine)}`);
+
+  /* ── the folder picker, and moving a desk to another floor ────────────────
+   * The host lists one folder at a time, the way a file picker shows it, and
+   * a bound folder taken onto another floor under its own name is moved:
+   * rebound, and its window closed and reopened on the same conversation. */
+  console.log('\nthe folder picker and moving a desk');
+  const CH2 = 'host-test-2';
+  const browsed = (path) => json(`/api/floor/browse?host_id=host-test-1${path ? `&path=${encodeURIComponent(path)}` : ''}`).then((r) => r.json());
+  eq((await json('/api/floor/browse', { host_id: 'host-test-1' })).status, 200, 'the floor can ask the host to list its root');
+  const rootList = await until(async () => { const g = await browsed(); return g.at ? g : null; }, 15000);
+  assert(!!rootList, 'and the host answers');
+  eq(rootList?.path, FIX, 'with the root it was given');
+  const inRoot = Object.fromEntries((rootList?.entries ?? []).map((f) => [f.name, f]));
+  eq(inRoot['repo-a']?.bound?.agent, 'free', 'a folder that is a desk says which');
+  eq(inRoot['repo-elsewhere']?.other_board, 'http://localhost:9', 'one bound to another board says so');
+  eq([inRoot['plain-git']?.bound ?? null, inRoot['plain-git']?.git], [null, true], 'an unbound checkout is plain, and known to be a checkout');
+  assert(!inRoot['.claude'] && !inRoot['home'] === false, 'dotfolders are not listed');
+  eq((await json('/api/floor/browse', { host_id: 'host-test-1', path: `${FIX}/repo-a` })).status, 200, 'and to open a folder inside it');
+  const inner = await until(async () => { const g = await browsed(`${FIX}/repo-a`); return g.at ? g : null; }, 15000);
+  eq([inner?.parent, inner?.self?.bound?.channel, (inner?.entries ?? []).map((f) => f.name)], [FIX, CH, ['src']], 'which says where it is, what it is bound as, and what is inside');
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: '/etc' });
+  const outside = await until(async () => { const g = await browsed('/etc'); return g.at ? g : null; }, 15000);
+  assert(/not under this host's roots/.test(outside?.error ?? ''), `a folder outside the roots is refused, not listed — ${outside?.error}`);
+
+  // Move: free's folder onto another floor, under its own name. The window
+  // is held by the floor and is on SESSION_ID (the fresh conversation from
+  // above), so the move closes it and reopens it there.
+  const sidBeforeMove = deskOf(await floor(), 'free')?.hosted?.session_id;
+  eq(sidBeforeMove, SESSION_ID, 'the desk to move is on a known conversation, in a floor-held window');
+  const argvAtMove = argvLog().length;
+  const movedOut = await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' });
+  eq([movedOut.status, (await movedOut.json()).mode], [200, 'move'], 'taking it onto another floor under its own name is a move');
+  eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'renamed' })).status, 400, 'and under another name is refused — the folder names its agent');
+  const onNewFloor = (f) => f.channels.find((c) => c.channel === CH2)?.desks.find((d) => d.agent === 'free');
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.live ? true : null), 30000), 'the desk appears on the new floor, hosted');
+  assert(/free: bound .*repo-a in local scope/.test(host.log) && /moving it from host-test\/free/.test(host.log), 'the host rebound the folder and said where from');
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'on the same conversation');
+  assert(await until(() => (argvLog().slice(argvAtMove).includes(`--resume ${SESSION_ID}`) ? true : null), 25000),
+    'its window reopened with --resume, because a running window keeps the headers it started with');
+  eq(deskOf(await floor(), 'free') ?? null, null, 'and its seat has left the old floor');
+  eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH2, 'the binding on disk names the new floor');
+
+  // And back, so the sections below find it where they expect it.
+  const back = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free' });
+  eq((await back.json()).mode, 'move', 'moving it back is a move too');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'and it is home, on its conversation');
+  await sleep(WATCH_SETTLE_MS);
 
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');

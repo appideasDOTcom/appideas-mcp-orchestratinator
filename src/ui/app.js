@@ -1477,10 +1477,9 @@ el.dlgBody.addEventListener('click', (e) => {
       break;
     // --- take a desk / leave a desk. See deskDialog below.
     case 'desk-look':
-      // A rescan is answered by re-registration, which the folders GET shows
-      // a moment later; two and a half seconds covers a real host's walk and
-      // its round trip, and the list redraws with the operator's picks kept.
-      act(() => floorPost('rescan', {}).then(() => new Promise((r) => setTimeout(r, 2500))).then(loadFolders), { keepOpen: true });
+      // The folder the picker stands in, listed again by the host.
+      readDeskForm();
+      browseTo(ui.deskForm?.path ?? null);
       break;
     case 'desk-take': {
       readDeskForm();
@@ -1493,6 +1492,28 @@ el.dlgBody.addEventListener('click', (e) => {
     }
     case 'desk-leave':
       act(() => floorPost('desk/leave', { channel: d.channel, agent: d.agent }));
+      break;
+    // --- the session picker. See sessionDialog below. The floor is told the
+    // moment the reopen is queued so its link can spin until the desk's
+    // conversation actually changes — the receipt for the click is there,
+    // not here.
+    case 'session-resume': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      const id = d.id;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: id })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, id, fm.current); }));
+      break;
+    }
+    case 'session-new': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: null })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, null, fm.current); }));
+      break;
+    }
+    case 'session-look':
+      askSessions();
       break;
     // --- the session picker. See sessionDialog below. The floor is told the
     // moment the reopen is queued so its link can spin until the desk's
@@ -1654,40 +1675,118 @@ document.addEventListener('visibilitychange', () => {
 
 tick();
 
-/* ───────────────────────── take a desk / leave a desk ─────────────────────────
- * The first door onto the floor that needs no terminal: pick a folder a host
- * offers, name the channel and the agent, and the host binds it — in Claude
- * Code's local scope, with the host's own key — and opens a window there.
- * The folder's own .mcp.json entry, if it has one for this board, is imported
- * and removed. docs/desk-from-the-floor.md has the measurements this rests on.
+/**
+ * Take a desk: pick the folder the agent lives in, and it becomes a desk on a
+ * floor — no file to edit, no terminal.
+ *
+ * A folder picker, not a list. It opens on the host's projects folder and
+ * shows the folders inside it; you open folders until you are standing in
+ * the agent's, the way a file dialog works. Each level is one round trip to
+ * the host (`POST /api/floor/browse`, then the GET until the host's time on
+ * it moves), because the folders are on the host's disk, not this machine's.
+ * The first version was a flat list of every folder that might be a desk,
+ * by its last path segment — 95 names from nowhere, on the first machine it
+ * ran on (2026-09-10) — and this replaced it.
+ *
+ * The folder you stand in fills the form. A folder that already names its
+ * agent (in its .mcp.json, or in Claude Code's local scope) fixes the agent:
+ * the field is locked, because "my agent lives in this directory" is the
+ * whole idea, and only the floor is yours to choose. Change the floor and
+ * the take becomes a move; keep it and it is an import into local scope; an
+ * unbound folder asks for a name. One dialog, three modes, decided by what
+ * the folder says and what you pick.
  *
  * Drawn by renderDeskDialog and redrawn on every choice, so the operator's
- * picks live in ui.deskForm rather than in the DOM (the draw function and the
- * entry point are named differently on purpose — see renderPromptManager).
- * The poll never redraws it: 'desk' is in refreshDialog's skip list.
+ * picks live in ui.deskForm rather than in the DOM. The poll never redraws
+ * it: 'desk' is in refreshDialog's skip list.
  */
 function deskDialog({ channel = null, hostId = null, path = null } = {}) {
   ui.dlgCtx = { kind: 'desk' };
-  ui.deskForm = { hosts: null, hostId, path, channel, newChannel: '', agent: '', persona: '', error: null };
+  ui.deskForm = {
+    hosts: null, hostId, path, listing: null, waiting: false, seq: 0,
+    wantChannel: channel, channel, newChannel: '', agent: '', persona: '', prefilled: null, error: null,
+  };
   renderDeskDialog();
   loadFolders();
 }
 
-/** The folder list is read when the dialog opens, not from the poll: it is
- *  served by its own endpoint precisely so the page's every-two-seconds
- *  payload does not carry a few hundred paths for a dialog that is rarely open. */
+/** The hosts and their roots, read when the dialog opens: where a picker can start. */
 async function loadFolders() {
+  const fm = ui.deskForm;
+  if (!fm) return;
   try {
     const res = await fetch('./api/floor/folders');
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-    ui.deskForm.hosts = json.hosts ?? [];
-    ui.deskForm.error = null;
+    fm.hosts = json.hosts ?? [];
+    fm.error = null;
   } catch (e) {
-    ui.deskForm.hosts = [];
-    ui.deskForm.error = `Could not read the folder list — ${e.message}`;
+    fm.hosts = [];
+    fm.error = `Could not read the host list — ${e.message}`;
   }
-  if (ui.dlgCtx?.kind === 'desk') renderDeskDialog();
+  if (ui.dlgCtx?.kind !== 'desk' || ui.deskForm !== fm) return;
+  const live = fm.hosts.filter((h) => h.live);
+  if (!fm.hostId || !fm.hosts.some((h) => h.host_id === fm.hostId)) fm.hostId = live[0]?.host_id ?? fm.hosts[0]?.host_id ?? null;
+  const host = fm.hosts.find((h) => h.host_id === fm.hostId) ?? null;
+  renderDeskDialog();
+  if (host?.live) browseTo(fm.path ?? host.roots?.[0] ?? null);
+}
+
+/** Open one folder on the host: ask, then read until the host has answered. */
+async function browseTo(path) {
+  const fm = ui.deskForm;
+  if (!fm || !fm.hostId) return;
+  const seq = ++fm.seq;
+  fm.waiting = true;
+  fm.error = null;
+  fm.path = path;
+  renderDeskDialog();
+  const mine = () => ui.dlgCtx?.kind === 'desk' && ui.deskForm === fm && fm.seq === seq;
+  const read = async () => {
+    const res = await fetch(`./api/floor/browse?host_id=${encodeURIComponent(fm.hostId)}${path ? `&path=${encodeURIComponent(path)}` : ''}`);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    return json;
+  };
+  try {
+    const before = (await read()).at ?? null;
+    await floorPost('browse', { host_id: fm.hostId, ...(path ? { path } : {}) });
+    for (let i = 0; i < 16 && mine(); i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!mine()) return;
+      const got = await read().catch(() => null);
+      if (got && got.at && got.at !== before) {
+        takeListing(fm, got);
+        fm.waiting = false;
+        renderDeskDialog();
+        return;
+      }
+    }
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.error = 'The host did not answer in 8 s.';
+  } catch (e) {
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.error = String(e.message ?? e);
+  }
+  renderDeskDialog();
+}
+
+/** What the host listed, and the form filled from the folder it stands in. */
+function takeListing(fm, got) {
+  fm.listing = got;
+  if (got.path) fm.path = got.path;
+  // Filled once per folder: the folder's own binding fixes the agent and
+  // proposes the floor; an unbound folder asks for a name, on the floor the
+  // dialog was opened from. Typed values survive a redraw, not a new folder.
+  if (fm.prefilled !== fm.path) {
+    const b = got.self?.bound ?? null;
+    fm.agent = b ? b.agent : '';
+    if (b) fm.channel = b.channel;
+    else if (fm.wantChannel) fm.channel = fm.wantChannel;
+    fm.prefilled = fm.path;
+  }
 }
 
 /** Copy what is in the boxes into ui.deskForm, so a redraw keeps it. */
@@ -1696,7 +1795,6 @@ function readDeskForm() {
   if (!fm) return;
   const v = (id) => el.dlgBody.querySelector(`#${id}`)?.value;
   if (v('desk-host') !== undefined) fm.hostId = v('desk-host') || null;
-  if (v('desk-folder') !== undefined) fm.path = v('desk-folder') || null;
   if (v('desk-channel') !== undefined) fm.channel = v('desk-channel') || null;
   if (v('desk-new-channel') !== undefined) fm.newChannel = v('desk-new-channel') ?? '';
   if (v('desk-agent') !== undefined) fm.agent = v('desk-agent') ?? '';
@@ -1712,58 +1810,73 @@ const agoText = (isoStr) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+/** The path from the root to here, one crumb per folder. */
+function crumbsOf(root, path) {
+  const base = root && path.startsWith(root) ? root : path;
+  const rest = path.slice(base.length).split('/').filter(Boolean);
+  const out = [{ name: base.split('/').filter(Boolean).pop() ?? base, path: base }];
+  let p = base;
+  for (const part of rest) {
+    p = `${p}/${part}`;
+    out.push({ name: part, path: p });
+  }
+  return out;
+}
+
 function renderDeskDialog() {
   const fm = ui.deskForm;
   if (!fm) return;
   const hosts = fm.hosts ?? [];
   const liveHosts = hosts.filter((h) => h.live);
-  if (!fm.hostId || !hosts.some((h) => h.host_id === fm.hostId)) fm.hostId = liveHosts[0]?.host_id ?? hosts[0]?.host_id ?? null;
   const host = hosts.find((h) => h.host_id === fm.hostId) ?? null;
-  const folders = host?.folders ?? [];
-  const folder = folders.find((x) => x.path === fm.path) ?? null;
-  // A bound folder prefills its own names once; typing over them is a move,
-  // which the server refuses for now and says so.
-  if (folder?.bound && !fm.prefilled) {
-    fm.channel = folder.bound.channel;
-    fm.agent = folder.bound.agent;
-    fm.prefilled = fm.path;
-  }
-  if (fm.prefilled && fm.prefilled !== fm.path) fm.prefilled = null;
+  const L = fm.listing && !fm.listing.error ? fm.listing : null;
+  const self = L?.self ?? null;
+  const bound = self?.bound ?? null;
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
-  const mode = !folder || !folder.bound ? 'take'
-    : folder.bound.channel === channelNow && folder.bound.agent === fm.agent.trim() ? 'import'
-    : 'move';
+  const mode = !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
   const channels = [...new Set([...(ui.state?.channels ?? []).map((c) => c.channel), ...(fm.channel && fm.channel !== '__new__' ? [fm.channel] : [])])].sort();
   if (!fm.channel && channels.length) fm.channel = channels[0];
+  const crumbs = L ? crumbsOf(L.root, L.path) : [];
+  const dirs = L?.entries ?? [];
 
-  const title = mode === 'import' ? `Bring ${esc(folder.name)} onto the floor` : mode === 'move' ? `Move ${esc(folder.bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
-  const primary = mode === 'import' ? 'Import' : mode === 'move' ? 'Move' : 'Take desk';
-  const folderRow = (f) => {
-    const tag = f.other_board ? ` · on another board (${f.other_board})` : f.bound ? ` · ${f.bound.channel}/${f.bound.agent}` : '';
-    return `<option value="${esc(f.path)}"${f.path === fm.path ? ' selected' : ''}${f.other_board ? ' disabled' : ''}>${esc(f.name)} · ${esc(agoText(f.last_active))}${esc(tag)}</option>`;
+  const title = mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
+  const primary = mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
+  const dirRow = (f) => {
+    const marks = [
+      f.bound && !f.other_board ? `${f.bound.channel} / ${f.bound.agent}` : null,
+      f.other_board ? 'another board' : null,
+      f.sessions > 0 ? 'opened by Claude' : null,
+    ].filter(Boolean);
+    return `<button type="button" class="dir-row" data-go="${esc(f.path)}" title="Open ${esc(f.name)}"><span class="dir-name">${esc(f.name)}</span><span class="dir-marks">${marks.map(esc).join(' · ')}</span></button>`;
   };
+  // What the folder you are standing in says about itself: the sentence the
+  // form is filled from, so the two can never disagree.
+  let here = '';
+  if (self) {
+    const where = bound?.scope === 'project' ? 'its .mcp.json' : "Claude Code's local scope";
+    if (self.other_board) here = `<b>${esc(self.name)}</b> is bound to <span class="mono">${esc(self.other_board)}</span>, not this board. Change it there.`;
+    else if (bound) here = `<b>${esc(self.name)}</b> is <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(bound.channel)}</span>, according to ${where}.`;
+    else here = `<b>${esc(self.name)}</b> is not a desk yet.${self.sessions > 0 ? ` Claude Code has opened it before (${self.sessions} conversation${self.sessions === 1 ? '' : 's'}).` : ''}`;
+  }
   const notes = [];
   if (fm.error) notes.push(`<b>${esc(fm.error)}</b>`);
-  else if (fm.hosts === null) notes.push('Reading the folder list…');
+  else if (fm.hosts === null) notes.push('Reading the host list…');
   else if (!hosts.length) notes.push('No host is registered on this board, so there is nobody to bind a folder. Install the host on a machine that has the repos.');
   else if (!liveHosts.length) notes.push('Every host on this board is offline right now.');
-  else if (host && host.at === null) notes.push(`${esc(host.name)} has not reported its folders yet — it is on an older host build, or has not registered since starting. Look again in a moment.`);
-  else if (host && !folders.length) notes.push(`${esc(host.name)} found nothing under ${esc(host.roots.join(', '))} that looks like a project.`);
-  if (folder) {
+  else if (fm.listing?.error) notes.push(`<b>${esc(fm.listing.error)}</b>`);
+  if (self && !self.other_board) {
     if (mode === 'take') {
-      notes.push(`The host runs <span class="mono">claude mcp add -s local</span> inside <span class="mono">${esc(folder.path)}</span> and opens a window there. The key never leaves that machine.`);
-      if (folder.has_mcp_json) notes.push('Its <span class="mono">.mcp.json</span> names a different desk for this board; that entry is left alone.');
-      if (!folder.trusted) notes.push('Claude Code has not opened this folder before, so its window will ask the folder-trust question — on the desk, for you to answer.');
+      notes.push(`Binds this folder as the agent you name, on the floor you pick, and opens a window there. Nothing in the folder is edited.${self.trusted ? '' : ' Claude Code has not opened it before, so its window will ask the folder-trust question — on the desk, for you to answer.'}`);
     } else if (mode === 'import') {
-      notes.push(`<span class="mono">${esc(folder.path)}/.mcp.json</span> binds it as <span class="mono">${esc(folder.bound.channel)}/${esc(folder.bound.agent)}</span> already. The host imports that into Claude Code's local scope and <b>removes the orchestratinator entry from .mcp.json</b> (other servers stay). Its window, if open, is not touched.`);
+      notes.push(`Brings it onto the floor as it is. The binding moves into Claude Code's local scope${bound.scope === 'project' ? ' and the orchestratinator entry comes out of its .mcp.json (other servers stay)' : ''}. A window already open there is not touched.`);
     } else {
-      notes.push(`<span class="mono">${esc(folder.bound.channel)}/${esc(folder.bound.agent)}</span> sits at this folder now. Moving a desk to another floor is not available yet — leave that desk first, then take the folder.`);
+      notes.push(`Moves it: rebinds the folder as <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(channelNow)}</span>, and if the floor holds its window, closes it and reopens it on the same conversation. Its seat leaves <span class="mono">${esc(bound.channel)}</span>. Refused while a turn is running.`);
     }
   }
-  const canGo = !!(host?.live && folder && !folder.other_board && mode !== 'move' && channelNow && fm.agent.trim());
+  const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting);
   openDialog(`
     <div class="dlg-head"><h3>${title}</h3></div>
-    <p class="dlg-sub">a folder on a host becomes a desk on a floor — no file to edit</p>
+    <p class="dlg-sub">open the folder your agent lives in, then pick its floor</p>
     ${hosts.length > 1 ? `
     <label class="field">
       <span>Host</span>
@@ -1771,32 +1884,34 @@ function renderDeskDialog() {
         ${hosts.map((h) => `<option value="${esc(h.host_id)}"${h.host_id === fm.hostId ? ' selected' : ''}${h.live ? '' : ' disabled'}>${esc(h.name)}${h.live ? '' : ' — offline'}</option>`).join('')}
       </select>
     </label>` : ''}
-    <label class="field">
-      <span>Folder</span>
-      <select id="desk-folder" class="input" size="${Math.min(8, Math.max(3, folders.length))}">
-        ${folders.map(folderRow).join('')}
-      </select>
-    </label>
-    <div class="desk-folder-meta">
-      <span>${host ? `${folders.length} under ${esc(host.roots.join(', '))} · newest first` : ''}</span>
-      <button type="button" class="btn" data-do="desk-look" title="Ask every host to look at its folders again now">Look again</button>
+    <div class="dlg-crumbs" aria-label="Where you are">
+      ${crumbs.map((c, i) => `${i ? '<span class="sep">/</span>' : ''}<button type="button" class="crumb${i === crumbs.length - 1 ? ' here' : ''}"${i === crumbs.length - 1 ? ' disabled' : ` data-go="${esc(c.path)}"`}>${esc(c.name)}</button>`).join('')}
+      ${fm.waiting ? '<span class="muted">· looking…</span>' : ''}
     </div>
+    <div class="dlg-dirs" role="list">
+      ${dirs.length ? dirs.map(dirRow).join('') : `<div class="dir-empty">${fm.listing === null ? (fm.waiting ? 'Asking the host…' : '') : 'No folders inside this one.'}</div>`}
+    </div>
+    <div class="desk-folder-meta">
+      <span>${L ? `${dirs.length} folder${dirs.length === 1 ? '' : 's'} in ${esc(crumbs[crumbs.length - 1]?.name ?? '')}` : ''}</span>
+      <button type="button" class="btn" data-do="desk-look" title="Ask the host to look at this folder again now"${fm.waiting || !host?.live ? ' disabled' : ''}>Look again</button>
+    </div>
+    <p class="dlg-self">${here || '&nbsp;'}</p>
     <label class="field">
-      <span>Channel (the floor)</span>
+      <span>Agent${bound ? ' — set by the folder' : ''}</span>
+      <input id="desk-agent" class="input" type="text" maxlength="64" value="${esc(fm.agent)}" placeholder="developer" autocomplete="off" spellcheck="false"${bound ? ' readonly' : ''}>
+    </label>
+    <label class="field">
+      <span>Floor</span>
       <select id="desk-channel" class="input">
         ${channels.map((c) => `<option value="${esc(c)}"${c === fm.channel ? ' selected' : ''}>${esc(c)}</option>`).join('')}
-        <option value="__new__"${fm.channel === '__new__' ? ' selected' : ''}>new channel…</option>
+        <option value="__new__"${fm.channel === '__new__' ? ' selected' : ''}>new floor…</option>
       </select>
     </label>
     ${fm.channel === '__new__' ? `
     <label class="field">
-      <span>New channel name</span>
+      <span>New floor's name</span>
       <input id="desk-new-channel" class="input" type="text" maxlength="64" value="${esc(fm.newChannel)}" placeholder="my-project" autocomplete="off" spellcheck="false">
     </label>` : ''}
-    <label class="field">
-      <span>Agent (its seat on the floor)</span>
-      <input id="desk-agent" class="input" type="text" maxlength="64" value="${esc(fm.agent)}" placeholder="developer" autocomplete="off" spellcheck="false">
-    </label>
     <label class="field">
       <span>Display name (optional)</span>
       <input id="desk-persona" class="input" type="text" maxlength="40" value="${esc(fm.persona)}" placeholder="what the nameplate says" autocomplete="off">
@@ -1828,12 +1943,29 @@ function leaveDeskDialog(channel, agent, persona, scope) {
   `);
 }
 
-// A choice redraws the take-a-desk dialog (the note and the button depend on
-// it); typing only records itself, so the caret is never taken away mid-word.
+// Opening a folder — a row, or a crumb back up the path.
+el.dlgBody.addEventListener('click', (e) => {
+  if (ui.dlgCtx?.kind !== 'desk') return;
+  const go = e.target.closest('[data-go]');
+  if (!go || go.disabled) return;
+  readDeskForm();
+  browseTo(go.dataset.go);
+});
+// A choice redraws the take-a-desk dialog (the title, the note and the button
+// depend on it); typing only records itself, so the caret is never taken away
+// mid-word. Changing host starts the picker again at that host's root.
 el.dlgBody.addEventListener('change', (e) => {
   if (ui.dlgCtx?.kind !== 'desk') return;
-  if (!e.target.matches('#desk-host, #desk-folder, #desk-channel')) return;
+  if (!e.target.matches('#desk-host, #desk-channel')) return;
   readDeskForm();
+  if (e.target.matches('#desk-host')) {
+    const fm = ui.deskForm;
+    fm.listing = null;
+    fm.prefilled = null;
+    const host = (fm.hosts ?? []).find((h) => h.host_id === fm.hostId);
+    browseTo(host?.roots?.[0] ?? null);
+    return;
+  }
   renderDeskDialog();
 });
 el.dlgBody.addEventListener('input', (e) => {
@@ -1843,7 +1975,7 @@ el.dlgBody.addEventListener('input', (e) => {
   const fm = ui.deskForm;
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   const go = el.dlgBody.querySelector('[data-do="desk-take"]');
-  if (go && !go.dataset.held) go.disabled = !(fm.path && channelNow && fm.agent.trim());
+  if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting);
 });
 
 /**

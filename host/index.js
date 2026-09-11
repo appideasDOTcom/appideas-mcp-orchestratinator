@@ -38,7 +38,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { discover, originOf } from './identity.js';
+import { discover, listFolder, originOf } from './identity.js';
 import * as W from './window.js';
 import * as M from './mcp.js';
 
@@ -699,7 +699,15 @@ class Host {
     }
     const dir = W.canonical(path);
     const origin = originOf(this.cfg.url);
-    log(`${channel}/${agent}: binding ${dir}${p.import ? ' — importing its .mcp.json entry' : ''}`);
+    // A move closes the folder's window and reopens it under the new names,
+    // because a running window keeps the headers it started with (measured
+    // 2026-09-09). Mid-turn it is refused before anything is touched, quoting
+    // the pane rather than guessing why it is busy.
+    if (p.from) {
+      const at = await W.busyAt(dir);
+      if (at.pane && at.busy) return fail(`not moved — the window is still working: ${at.foot}`, 'bind_refused');
+    }
+    log(`${channel}/${agent}: binding ${dir}${p.import ? ' — importing its .mcp.json entry' : ''}${p.from ? ` — moving it from ${p.from.channel}/${p.from.agent}` : ''}`);
     // A desk already at this folder — the import case — keeps its conversation:
     // the Desk object survives the rescan (same cwd), and its pinned id is
     // handed to the new binding's registration below.
@@ -728,6 +736,14 @@ class Host {
     await this.register();
     await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: oldLast, from: p.from ?? null }, true);
     if (p.open === false) return undefined;
+    // A moved desk whose window the floor holds: that window is still on the
+    // old channel, so it is closed and reopened on the same conversation —
+    // the reopen primitive, with nothing replayed. An editor's chat is left
+    // alone; it follows the new binding on its next tool call.
+    if (p.from && (await W.paneFor(desk.cwd))) {
+      await this.reopen(desk, { sessionId: oldLast, known: true });
+      return undefined;
+    }
     // Same tail as `open`: a window, its startup questions surfaced on the
     // floor rather than answered here, and any key pressed on the operator's
     // behalf said out loud.
@@ -818,9 +834,36 @@ class Host {
     return undefined;
   }
 
+  /**
+   * List one folder for the picker. Answered as an event, like the session
+   * list: the work loop is one-way and the board keeps the last folder each
+   * host showed. Marks each folder as bound to this board or another, so the
+   * dialog can say which without a second question.
+   */
+  async browse(item) {
+    const asked = typeof item.payload?.path === 'string' && item.payload.path ? item.payload.path : (this.cfg.roots[0] ?? null);
+    const at = new Date().toISOString();
+    if (!asked) return this.emit({ type: 'browse', path: '(none)', requested: '(none)', at, error: 'this host has no roots to browse' }, true);
+    const r = listFolder(asked, this.cfg.roots);
+    if (!r.ok) {
+      warn(`browse ${asked}: ${r.error}`);
+      return this.emit({ type: 'browse', path: asked, requested: asked, at, error: r.error }, true);
+    }
+    const origin = originOf(this.cfg.url);
+    const mark = (f) => ({ ...f, other_board: f.bound && f.bound.board !== origin ? f.bound.board : null });
+    return this.emit({
+      type: 'browse', requested: asked, path: r.path, root: r.root, parent: r.parent, at,
+      self: mark(r.self), entries: r.entries.map(mark),
+    }, true);
+  }
+
   async handle(item) {
     if (item.kind === 'bind') {
       await this.bind(item);
+      return;
+    }
+    if (item.kind === 'browse') {
+      await this.browse(item);
       return;
     }
     if (item.kind === 'rescan') {

@@ -1577,3 +1577,20 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .sess-title { font-size: 13px; line-height: 1.3; }
 .sess-meta { font-size: 10.5px; color: var(--muted); }
 .sess-empty { padding: 8px 2px; font-size: 11.5px; }
+
+/* The folder picker in Take a desk: the path as crumbs, the folders inside
+   the one you stand in as rows, and the sentence the form is filled from. */
+.dlg-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 12px; font-size: 12px; }
+.dlg-crumbs .crumb { background: none; border: 0; padding: 2px 4px; margin: 0; font: inherit; color: var(--accent); cursor: pointer; border-radius: 4px; }
+.dlg-crumbs .crumb:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.dlg-crumbs .crumb.here { color: inherit; font-weight: 600; cursor: default; }
+.dlg-crumbs .sep { color: var(--muted); padding: 0 1px; }
+.dlg-dirs { margin-top: 6px; max-height: 34vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.dir-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; width: 100%; text-align: left;
+  padding: 6px 9px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.dir-row:last-child { border-bottom: 0; }
+.dir-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.dir-name { font-size: 13px; }
+.dir-marks { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.dir-empty { padding: 8px 9px; font-size: 11.5px; color: var(--muted); }
+.dlg-self { margin-top: 10px; font-size: 12px; }

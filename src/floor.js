@@ -195,26 +195,34 @@ const underRoots = (p, roots) => roots.some((r) => p === r || p.startsWith(r.end
 function cleanFolders(list, roots) {
   const out = [];
   for (const f of list) {
-    const path = str(f?.path);
-    if (!path || !path.startsWith('/') || !underRoots(path, roots)) continue;
-    const b = f?.bound && typeof f.bound === 'object' ? f.bound : null;
-    const bound = b && str(b.channel) && str(b.agent)
-      ? { channel: str(b.channel), agent: str(b.agent), scope: str(b.scope) === 'local' ? 'local' : 'project', board: str(b.board) }
-      : null;
-    out.push({
-      path,
-      name: str(f?.name) ?? path.split('/').pop(),
-      depth: Number.isInteger(f?.depth) ? f.depth : null,
-      bound,
-      has_mcp_json: f?.has_mcp_json === true,
-      other_board: str(f?.other_board),
-      trusted: f?.trusted === true,
-      last_active: str(f?.last_active),
-      sessions: Number(f?.sessions) || 0,
-    });
+    const rec = folderRecordOf(f);
+    if (!rec || !underRoots(rec.path, roots)) continue;
+    out.push(rec);
     if (out.length >= FOLDER_CAP) break;
   }
   return out;
+}
+
+/** One folder as a host described it, field by field, or null without a path. */
+function folderRecordOf(f) {
+  const path = str(f?.path);
+  if (!path || !path.startsWith('/')) return null;
+  const b = f?.bound && typeof f.bound === 'object' ? f.bound : null;
+  const bound = b && str(b.channel) && str(b.agent)
+    ? { channel: str(b.channel), agent: str(b.agent), scope: str(b.scope) === 'local' ? 'local' : 'project', board: str(b.board) }
+    : null;
+  return {
+    path,
+    name: str(f?.name) ?? path.split('/').pop(),
+    depth: Number.isInteger(f?.depth) ? f.depth : null,
+    bound,
+    has_mcp_json: f?.has_mcp_json === true,
+    other_board: str(f?.other_board),
+    trusted: f?.trusted === true,
+    git: f?.git === true,
+    last_active: str(f?.last_active),
+    sessions: Number(f?.sessions) || 0,
+  };
 }
 
 const secondsSince = (isoStr, nowMs) => {
@@ -974,11 +982,15 @@ export function createLive() {
    */
   const sessions = new Map();      // deskKey -> { at, rows }
   const sessionsAsked = new Map(); // deskKey -> ms when the host was last asked to list them
+  /** The folder each host last listed for the picker — one level, with the
+   *  folder itself. In memory like the rest; the picker asks again on open. */
+  const browse = new Map();        // host_id -> { at, requested, path, root, parent, self, entries, error }
   return {
     partial,
     folders,
     sessions,
     sessionsAsked,
+    browse,
     pending,
     answered,
     delivery,
@@ -1053,6 +1065,24 @@ export function askRescan(store, live, { channel, agent, why, force = false }) {
  * `live`.
  */
 function applyHostEvent(store, live, hostId, ev) {
+  // A folder listing is about the host, not a desk: kept per host for the
+  // picker, before the desk checks below, which it has nothing to do with.
+  if (str(ev.type) === 'browse') {
+    const path = str(ev.path);
+    if (!path) return false;
+    const error = str(ev.error);
+    live.browse.set(hostId, {
+      at: str(ev.at) ?? new Date().toISOString(),
+      requested: str(ev.requested) ?? path,
+      path,
+      root: str(ev.root),
+      parent: str(ev.parent),
+      error,
+      self: error ? null : folderRecordOf(ev.self),
+      entries: error || !Array.isArray(ev.entries) ? [] : ev.entries.map(folderRecordOf).filter(Boolean).slice(0, FOLDER_CAP),
+    });
+    return true;
+  }
   const channel = str(ev.channel);
   const agent = str(ev.agent);
   if (!channel || !agent) return false;
@@ -1063,6 +1093,18 @@ function applyHostEvent(store, live, hostId, ev) {
   if (str(ev.type) === 'bound') {
     const cwd = str(ev.cwd);
     if (!cwd) return false;
+    // Moved from another floor: the old seat goes with its hosted row, and
+    // its agent row is retired so the board's own mechanism does not redraw
+    // the seat on the next poll. A live MCP session un-retires itself, which
+    // is right — the editor's chat follows the new binding on its next call
+    // and is that new desk now.
+    const from = ev.from && typeof ev.from === 'object' ? { channel: str(ev.from.channel), agent: str(ev.from.agent) } : null;
+    if (from?.channel && from?.agent && (from.channel !== channel || from.agent !== agent)) {
+      store.unseat(from.channel, from.agent);
+      store.retireAgent(from.channel, from.agent);
+      live.pending.delete(deskKey(from.channel, from.agent));
+      live.publish(deskKey(from.channel, from.agent), { type: 'state', state: 'offline' });
+    }
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
     store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: cwd });
@@ -2292,21 +2334,39 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
       return res.status(409).json({ error: `The host ${hostRow?.name ?? hostId} is not on this board right now, so there is nobody to bind it.`, code: 'no_host' });
     }
-    const folder = offered?.folders.find((f) => f.path === path) ?? null;
+    // The folder as the host last described it: the one the picker is
+    // standing in, one it listed beside it, or — for a caller with the older
+    // flat list — one the host offered. Never a path the board has not seen
+    // the host name; the host fences on its roots again regardless.
+    const shown = live.browse.get(hostId);
+    const fromPicker = shown && !shown.error
+      ? (shown.path === path || shown.requested === path ? shown.self : shown.entries.find((f) => f.path === path)) ?? null
+      : null;
+    const folder = fromPicker ?? offered?.folders.find((f) => f.path === path) ?? null;
     if (!folder) {
-      return res.status(409).json({ error: `That folder is not one ${hostRow.name} offered. Look again — the list is a minute old at most.`, code: 'unknown_folder' });
+      return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
     }
     if (folder.other_board) {
       return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, not this board. Change it there.`, code: 'other_board' });
     }
-    const mode = !folder.bound ? 'take'
-      : folder.bound.channel === channel && folder.bound.agent === agent ? 'import'
-      : 'move';
+    // A folder that names its agent names it: the person picks the floor,
+    // never a new name for an agent that already has one. The dialog locks
+    // the field; this is the same rule for anything else that posts here.
+    if (folder.bound && folder.bound.agent !== agent) {
+      return res.status(400).json({ error: `This folder already names its agent — ${folder.bound.agent}. Only the floor can change.`, code: 'agent_fixed' });
+    }
+    const mode = !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
+    let from = null;
     if (mode === 'move') {
-      return res.status(409).json({
-        error: `That folder already sits at ${folder.bound.channel}/${folder.bound.agent}. Moving a desk to another floor is not available yet — leave that desk first, then take the folder.`,
-        code: 'move_unavailable',
-      });
+      // The old desk's window is closed and reopened by the host, so the
+      // same rule as leaving applies: not mid-turn, and an editor's chat is
+      // fine — it follows the rebind on its own. A binding no host has
+      // registered yet has nothing to close.
+      const old = store.hostedDesk(folder.bound.channel, folder.bound.agent);
+      const last = store.lastTurns().find((t) => t.channel === folder.bound.channel && t.agent === folder.bound.agent) ?? null;
+      const check = switchable(old, last, nowMs, { editorOk: true });
+      if (check.error && check.code !== 'not_hosted') return res.status(409).json(check);
+      from = { channel: folder.bound.channel, agent: folder.bound.agent };
     }
     const already = store.hostedDesk(channel, agent);
     if (already && already.state !== 'offline' && already.cwd !== path && secondsSince(iso(already.host_seen), nowMs) < HOST_STALE_SECONDS) {
@@ -2321,7 +2381,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     if (persona) store.setProfile(channel, agent, { persona });
     store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}` });
     store.enqueueHostWork(hostId, channel, agent, 'bind', {
-      path, channel, agent, import: mode === 'import', from: null, resume: false,
+      path, channel, agent, import: mode !== 'take', from, resume: mode === 'move',
       open: req.body?.open !== false, queued_at: new Date(nowMs).toISOString(),
     });
     live.wake(hostId);
@@ -2341,6 +2401,40 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.enqueueHostWork(h.host_id, channel, agent, 'unbind', { queued_at: new Date().toISOString() });
     live.wake(h.host_id);
     res.json({ ok: true, host: h.host_name ?? h.host_id });
+  });
+
+  /**
+   * The folder picker: ask a host to list one folder, and read the listing
+   * back. Two routes for the same reason the session list has two — the
+   * host answers on its own clock, as an event, and the page polls the GET
+   * until the host's time on the listing moves. `path` omitted means the
+   * host's first root. The board never sends a path the host has not named
+   * except the root it was told, and the host fences on its roots anyway.
+   */
+  router.post('/api/floor/browse', auth.adminGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    const path = str(req.body?.path);
+    if (path && !path.startsWith('/')) return res.status(400).json({ error: 'path must be absolute', code: 'bad_path' });
+    const nowMs = Date.now();
+    const hostRow = store.listHosts().find((h) => h.host_id === hostId);
+    if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: `The host ${hostRow?.name ?? hostId} is not on this board right now, so there is nobody to look.`, code: 'no_host' });
+    }
+    store.enqueueHostWork(hostId, '*', '*', 'browse', { path: path ?? null, queued_at: new Date(nowMs).toISOString() });
+    live.wake(hostId);
+    res.json({ ok: true, host: hostRow.name });
+  });
+
+  router.get('/api/floor/browse', (req, res) => {
+    const hostId = str(req.query.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    const want = str(req.query.path);
+    const held = live.browse.get(hostId) ?? null;
+    const roots = live.folders.get(hostId)?.roots ?? [];
+    const match = held && (!want || held.path === want || held.requested === want);
+    if (!match) return res.json({ host_id: hostId, roots, at: null });
+    res.json({ host_id: hostId, roots, at: held.at, path: held.path, root: held.root, parent: held.parent, self: held.self, entries: held.entries, error: held.error });
   });
 
   /**

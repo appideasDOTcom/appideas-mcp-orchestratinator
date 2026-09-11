@@ -594,8 +594,49 @@ try {
   rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'wanderer' });
   eq((await rr.json()).code, 'desk_taken', 'a name already seated live at another folder is refused');
   rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: CH, agent: 'someone-else' });
-  eq((await rr.json()).code, 'move_unavailable', 'a folder bound as another desk is a move, which says it is not here yet');
+  eq([rr.status, (await rr.json()).code], [400, 'agent_fixed'], 'a folder that names its agent cannot be taken under another name — only the floor can change');
   eq(await takeWork(), [], 'and none of those queued anything');
+
+  /* The picker: the host lists one folder at a time, and a folder it has
+   * shown that way can be taken, whether or not the flat list offered it. */
+  console.log('\nthe folder picker');
+  const browse = (body) => fetch(`${HOST}/api/floor/browse`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const browsed = (path) => fetch(`${HOST}/api/floor/browse?host_id=h-open${path ? `&path=${encodeURIComponent(path)}` : ''}`).then((r) => r.json());
+  eq((await browsed()).at, null, 'before a host has listed anything, there is nothing to show — not an empty folder');
+  eq((await browsed()).roots, ['/repo'], 'but the picker knows where to start');
+  rr = await browse({ host_id: 'h-open' });
+  eq(rr.status, 200, 'the floor can ask a host to list its root');
+  eq(await takeWork(), ['browse'], 'and the host is handed exactly that work');
+  eq((await browse({ host_id: 'nobody' })).status, 409, 'a host the board does not have cannot be asked');
+  eq((await browse({ host_id: 'h-open', path: 'relative/nonsense' })).status, 400, 'nor for a path that is not absolute');
+  const LISTED = '2026-09-10T02:03:04.000Z';
+  eq((await hostEvents([{
+    type: 'browse', requested: '/repo', path: '/repo', root: '/repo', parent: null, at: LISTED,
+    self: { path: '/repo', name: 'repo', depth: 0, bound: null, has_mcp_json: false, other_board: null, trusted: true, git: false, last_active: null, sessions: 0 },
+    entries: [
+      { path: '/repo/gamma-deep', name: 'gamma-deep', depth: 1, bound: null, has_mcp_json: false, other_board: null, trusted: false, git: true, last_active: null, sessions: 0 },
+      { path: '/repo/alpha-older', name: 'alpha-older', depth: 1, bound: { channel: CH, agent: 'alpha', scope: 'local', board: HOST }, has_mcp_json: false, other_board: null, trusted: false, git: true, last_active: '2026-09-08T01:02:03.000Z', sessions: 2 },
+      { name: 'no-path' },
+    ],
+  }])).applied, 1, 'the host answers with the folder and what is inside it');
+  let shown = await browsed('/repo');
+  eq([shown.at, shown.path, shown.parent], [LISTED, '/repo', null], 'served back with the host\'s time, for the path asked');
+  eq(shown.entries.map((f) => f.name), ['gamma-deep', 'alpha-older'], 'every folder with a path, none without');
+  eq([shown.entries[1].bound?.agent, shown.entries[0].git], ['alpha', true], 'with what each is bound as, and whether it is a checkout');
+  eq((await browsed('/repo/somewhere-else')).at, null, 'and nothing for a path the host has not listed');
+  rr = await take({ host_id: 'h-open', path: '/repo/gamma-deep', channel: CH, agent: 'gamma' });
+  eq([rr.status, (await rr.json()).mode], [200, 'take'], 'a folder the picker showed can be taken, though the flat list never offered it');
+  eq((await takeWorkFull()).map((w) => `${w.kind}:${w.payload.path}`), ['bind:/repo/gamma-deep'], 'and the host is handed the bind');
+  rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: 'other-floor', agent: 'alpha' });
+  eq([rr.status, (await rr.json()).mode], [200, 'move'], 'a bound folder taken onto another floor, under its own name, is a move');
+  const moveWork = await takeWorkFull();
+  eq(moveWork.map((w) => `${w.kind}:${w.payload.from?.channel}/${w.payload.from?.agent}:${w.payload.resume}:${w.payload.import}`), [`bind:${CH}/alpha:true:true`],
+    'which the host is told where from, and to resume the conversation');
+  eq((await hostEvents([{ type: 'bound', channel: 'other-floor', agent: 'alpha', cwd: '/repo/alpha-older', scope: 'local', session_id: 'sess-alpha', from: { channel: CH, agent: 'alpha' } }])).applied, 1,
+    'the host answers bound, saying where from');
+  const afterMove = await fetch(`${HOST}/api/floor`).then((x) => x.json());
+  eq(deskOf(afterMove, 'alpha', 'other-floor')?.hosted?.session_id, 'sess-alpha', 'the desk is on the new floor, on its conversation');
+  eq(deskOf(afterMove, 'alpha', CH) ?? null, null, 'and its old seat is gone from the old one');
 
   rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', persona: 'Fresh Face' });
   eq(rr.status, 200, 'an unbound folder can be taken');

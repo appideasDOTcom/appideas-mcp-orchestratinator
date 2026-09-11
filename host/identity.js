@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { projectDir } from './window.js';
 
 /**
@@ -153,6 +153,29 @@ function activityOf(dir) {
   return { opened: true, sessions, last_active: last ? new Date(last).toISOString() : null };
 }
 
+/**
+ * One folder as the floor draws it: what it is bound as and from which file,
+ * whether a `.mcp.json` entry exists to import, whether Claude Code trusts it
+ * yet (a fresh window asks otherwise, on the desk), whether it is a git
+ * checkout, and when it was last worked in. One shape for the candidate walk
+ * and for the picker, so the two can never describe a folder differently.
+ */
+function folderRecord(dir, depth, desk, local) {
+  const act = activityOf(dir);
+  return {
+    path: dir,
+    name: basename(dir),
+    depth,
+    bound: desk ? { channel: desk.channel, agent: desk.agent, scope: desk.scope, board: originOf(desk.url) } : null,
+    has_mcp_json: hasMcpEntry(dir),
+    trusted: desk?.trusted ?? local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false,
+    git: existsSync(join(dir, '.git')),
+    opened: act.opened,
+    last_active: act.last_active,
+    sessions: act.sessions,
+  };
+}
+
 /** The most folders a host will ever offer. The list is for a person picking
  *  one from a dialog, and past a few hundred it is a search, not a list. */
 export const FOLDER_CAP = 300;
@@ -182,20 +205,10 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope() } = {})
   const offered = new Set();
   const offer = (dir, depth, desk) => {
     if (offered.has(dir)) return;
-    const git = existsSync(join(dir, '.git'));
-    const act = activityOf(dir);
-    if (!(depth === 1 || git || act.opened || desk)) return;
+    const rec = folderRecord(dir, depth, desk, local);
+    if (!(depth === 1 || rec.git || rec.opened || desk)) return;
     offered.add(dir);
-    folders.push({
-      path: dir,
-      name: basename(dir),
-      depth,
-      bound: desk ? { channel: desk.channel, agent: desk.agent, scope: desk.scope, board: originOf(desk.url) } : null,
-      has_mcp_json: hasMcpEntry(dir),
-      trusted: desk?.trusted ?? local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false,
-      last_active: act.last_active,
-      sessions: act.sessions,
-    });
+    folders.push(rec);
   };
   const walk = (dir, depth) => {
     const desk = readDesk(dir, local);
@@ -248,6 +261,37 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope() } = {})
 /** The desks alone. */
 export function discoverDesks(roots, opts) {
   return discover(roots, opts).desks;
+}
+
+/**
+ * One folder and the folders inside it — the picker's view.
+ *
+ * A person taking a desk thinks "my agent lives in this directory": they open
+ * folders until they are standing in it. So this lists one level at a time,
+ * from a root down, the way a file picker does, and the walk above is not
+ * used for it: a flat list of every folder that might be a desk, shown by
+ * its last path segment, was 95 names from nowhere on the first machine it
+ * ran on (2026-09-10). Dotfolders and node_modules are not shown; everything
+ * else is, because a folder called `build` or `data` can be somebody's
+ * project. The roots are the fence, here as everywhere: a folder outside
+ * them is refused, not listed.
+ */
+export function listFolder(dir, roots, { local = readLocalScope() } = {}) {
+  const here = real(dir);
+  const under = roots.filter((r) => existsSync(r)).map(real);
+  const root = under.find((r) => isUnder(here, r));
+  if (!root) return { ok: false, error: `${dir} is not under this host's roots (${roots.join(', ')})` };
+  const depthOf = (p) => p.slice(root.length).split('/').filter(Boolean).length;
+  const record = (p) => folderRecord(p, depthOf(p), readDesk(p, local), local);
+  let entries;
+  try { entries = readdirSync(here, { withFileTypes: true }); } catch (err) { return { ok: false, error: `${dir} could not be read: ${err.message}` }; }
+  const children = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
+    children.push(record(join(here, e.name)));
+  }
+  children.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  return { ok: true, path: here, root, parent: here === root ? null : dirname(here), self: record(here), entries: children };
 }
 
 /** The origin a desk's board lives on, for matching desks to this host's server. */

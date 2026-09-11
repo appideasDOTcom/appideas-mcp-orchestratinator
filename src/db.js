@@ -1198,6 +1198,11 @@ export function makeStore(db) {
    * nothing on the board either: listAllChannels doesn't read this table, so the
    * channel still disappears — the log just goes on remembering you deleted it.
    */
+  const unseat = db.transaction((channel, agent) => {
+    db.prepare('DELETE FROM personas WHERE channel = ? AND agent = ?').run(channel, agent);
+    db.prepare('DELETE FROM hosted_desks WHERE channel = ? AND agent = ?').run(channel, agent);
+  });
+
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
@@ -1388,6 +1393,10 @@ export function makeStore(db) {
 
     // --- operator actions -----------------------------------------------------
     retireAgent: (channel, agent) => q.retireAgent.run({ channel, agent }).changes,
+    /** A desk moved to another floor leaves its old seat and its old hosted
+     *  row behind; both go, in one step, so the old floor does not keep an
+     *  empty desk for a folder that now sits somewhere else. */
+    unseat: (channel, agent) => unseat(channel, agent),
     unretireAgent: (channel, agent) => q.unretireAgent.run({ channel, agent }).changes,
     reassignTask: (channel, id, assignee) => q.reassignTask.run({ channel, id, assignee }).changes,
     setChannelArchived: (channel, archived, by) =>
