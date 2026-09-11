@@ -238,8 +238,11 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope() } = {})
   // inside a directory the walk skips — is still a desk Claude Code can see.
   // The walk is shallow so that a host does not crawl a home directory, but a
   // binding written by hand or from the floor is an explicit act, and it is
-  // taken up wherever it sits, as long as that is under a root: the roots are
-  // the fence on what this host will ever run.
+  // taken up wherever it sits, as long as that is under a root. The roots are
+  // where this host looks, and a folder taken from the picker outside them
+  // is added to them by the host (Host.addRoot) — so this stays the one rule,
+  // and a host with no board pinned still works its board out from the
+  // desks it was told to look at rather than from every binding on the disk.
   for (const [dir, desk] of local.desks) {
     const k = `${desk.channel}|${desk.agent}`;
     if (desks.has(k) || !existsSync(dir)) continue;
@@ -273,25 +276,28 @@ export function discoverDesks(roots, opts) {
  * its last path segment, was 95 names from nowhere on the first machine it
  * ran on (2026-09-10). Dotfolders and node_modules are not shown; everything
  * else is, because a folder called `build` or `data` can be somebody's
- * project. The roots are the fence, here as everywhere: a folder outside
- * them is refused, not listed.
+ * project. It starts at the home folder and goes anywhere the host's user
+ * can read — the roots are where the host looks for desks on its own, not a
+ * limit on what a person may pick.
  */
-export function listFolder(dir, roots, { local = readLocalScope() } = {}) {
+export function listFolder(dir, { local = readLocalScope() } = {}) {
   const here = real(dir);
-  const under = roots.filter((r) => existsSync(r)).map(real);
-  const root = under.find((r) => isUnder(here, r));
-  if (!root) return { ok: false, error: `${dir} is not under this host's roots (${roots.join(', ')})` };
-  const depthOf = (p) => p.slice(root.length).split('/').filter(Boolean).length;
+  let stat;
+  try { stat = statSync(here); } catch (err) { return { ok: false, error: `${dir} could not be opened: ${err.code === 'ENOENT' ? 'no such folder' : err.message}` }; }
+  if (!stat.isDirectory()) return { ok: false, error: `${dir} is a file, not a folder` };
+  const depthOf = (p) => p.split('/').filter(Boolean).length;
   const record = (p) => folderRecord(p, depthOf(p), readDesk(p, local), local);
   let entries;
-  try { entries = readdirSync(here, { withFileTypes: true }); } catch (err) { return { ok: false, error: `${dir} could not be read: ${err.message}` }; }
+  try { entries = readdirSync(here, { withFileTypes: true }); } catch (err) { return { ok: false, error: `${dir} could not be read: ${err.code === 'EACCES' ? 'your account cannot read it' : err.message}` }; }
   const children = [];
   for (const e of entries) {
     if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
     children.push(record(join(here, e.name)));
   }
   children.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  return { ok: true, path: here, root, parent: here === root ? null : dirname(here), self: record(here), entries: children };
+  // The picker's path runs from the top of the disk: anything the host's user
+  // can read is a place an agent may live.
+  return { ok: true, path: here, root: '/', parent: here === '/' ? null : dirname(here), self: record(here), entries: children };
 }
 
 /** The origin a desk's board lives on, for matching desks to this host's server. */

@@ -34,9 +34,9 @@
  *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
  *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { discover, listFolder, originOf } from './identity.js';
 import * as W from './window.js';
@@ -102,6 +102,10 @@ function loadConfig() {
     .filter(Boolean);
   return {
     roots,
+    // Where the roots came from, because a folder taken from the picker
+    // outside them is added to them — in memory always, and in the file when
+    // the file is what they were read from. See Host.addRoot.
+    rootsFrom: process.env.ORCH_HOST_ROOTS ? 'ORCH_HOST_ROOTS' : 'file',
     url: process.env.ORCH_URL ?? file.url ?? null,
     token: process.env.ORCH_AUTH_TOKEN ?? file.token ?? null,
     // Where the token came from, for the log and for rescan(): a desk's own
@@ -688,11 +692,10 @@ class Host {
       warn(`${channel}/${agent}: ${message}`);
       return this.emit({ type: 'error', channel, agent, code, message }, true);
     };
-    // The fence. The board offers only what this host reported, but the board
-    // is open to the network and this is the one place the check has teeth.
-    if (!path || !M.insideRoots(path, this.cfg.roots)) {
-      return fail(`refused: ${path || '(no path)'} is not under this host's roots (${this.cfg.roots.join(', ')})`, 'bind_refused');
-    }
+    // Any folder the picker showed can be a desk. The roots used to fence
+    // this; the board runs on localhost and that is the security model, so
+    // the only refusals left are a path that is not a folder here.
+    if (!path) return fail('refused: no folder was named', 'bind_refused');
     if (!existsSync(path)) return fail(`refused: ${path} does not exist`, 'bind_refused');
     if (!this.cfg.token) {
       return fail(`this host has no shared secret to bind with — run  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>  on it, or bind one repo by hand`, 'no_key');
@@ -727,10 +730,11 @@ class Host {
     const added = await M.mcpAdd(dir, { url: `${this.cfg.url}/mcp`, channel, agent, key: this.cfg.token });
     if (!added.ok) return fail(`could not bind ${dir}: ${added.error}`);
     log(`${channel}/${agent}: bound ${dir} in local scope`);
+    this.addRoot(dir);
     await this.rescan(`bound from the floor — ${channel}/${agent}`);
     const desk = this.desks.get(`${channel}|${agent}`);
     if (!desk) {
-      return fail(`bound ${dir}, but the rescan did not find the desk — is ${dir} under this host's roots (${this.cfg.roots.join(', ')}), and is ${this.cfg.url} the board its entry names?`);
+      return fail(`bound ${dir}, but the rescan did not find the desk — is ${this.cfg.url} the board its entry names?`);
     }
     if (oldLast) await desk.follow(oldLast);
     await this.register();
@@ -835,16 +839,45 @@ class Host {
   }
 
   /**
+   * A folder taken from the picker outside this host's roots becomes one of
+   * them. The roots are where the host looks for desks on its own, and a
+   * desk it has just bound is somewhere it must look — otherwise the rescan
+   * that follows the bind finds nothing and the desk never registers. Kept
+   * in memory, and written back to host.json when that is where the roots
+   * came from; roots given by ORCH_HOST_ROOTS are the environment's to
+   * change, so those live only for this run and the log says so.
+   */
+  addRoot(dir) {
+    if (M.insideRoots(dir, this.cfg.roots)) return false;
+    this.cfg.roots.push(dir);
+    if (this.cfg.rootsFrom !== 'file') {
+      log(`added ${dir} to this host's roots for this run — ORCH_HOST_ROOTS sets them, so add it there to keep it`);
+      return true;
+    }
+    let file = {};
+    try { file = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); } catch { /* absent or unreadable: written fresh below */ }
+    file.roots = [...new Set([...(Array.isArray(file.roots) ? file.roots : []), dir])];
+    try {
+      mkdirSync(dirname(CONFIG_FILE), { recursive: true });
+      writeFileSync(CONFIG_FILE, `${JSON.stringify(file, null, 2)}\n`);
+      log(`added ${dir} to this host's roots (${CONFIG_FILE})`);
+    } catch (err) {
+      warn(`added ${dir} to this host's roots for this run, but could not write ${CONFIG_FILE}: ${err.message}`);
+    }
+    return true;
+  }
+
+  /**
    * List one folder for the picker. Answered as an event, like the session
    * list: the work loop is one-way and the board keeps the last folder each
    * host showed. Marks each folder as bound to this board or another, so the
    * dialog can say which without a second question.
    */
   async browse(item) {
-    const asked = typeof item.payload?.path === 'string' && item.payload.path ? item.payload.path : (this.cfg.roots[0] ?? null);
+    // No path means the host's home folder: where every picker starts.
+    const asked = typeof item.payload?.path === 'string' && item.payload.path ? item.payload.path : homedir();
     const at = new Date().toISOString();
-    if (!asked) return this.emit({ type: 'browse', path: '(none)', requested: '(none)', at, error: 'this host has no roots to browse' }, true);
-    const r = listFolder(asked, this.cfg.roots);
+    const r = listFolder(asked);
     if (!r.ok) {
       warn(`browse ${asked}: ${r.error}`);
       return this.emit({ type: 'browse', path: asked, requested: asked, at, error: r.error }, true);

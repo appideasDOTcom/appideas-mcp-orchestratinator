@@ -729,10 +729,10 @@ try {
   console.log('\nthe folder picker and moving a desk');
   const CH2 = 'host-test-2';
   const browsed = (path) => json(`/api/floor/browse?host_id=host-test-1${path ? `&path=${encodeURIComponent(path)}` : ''}`).then((r) => r.json());
-  eq((await json('/api/floor/browse', { host_id: 'host-test-1' })).status, 200, 'the floor can ask the host to list its root');
-  const rootList = await until(async () => { const g = await browsed(); return g.at ? g : null; }, 15000);
+  eq((await json('/api/floor/browse', { host_id: 'host-test-1', path: FIX })).status, 200, 'the floor can ask the host to list a folder');
+  const rootList = await until(async () => { const g = await browsed(FIX); return g.at ? g : null; }, 15000);
   assert(!!rootList, 'and the host answers');
-  eq(rootList?.path, FIX, 'with the root it was given');
+  eq(rootList?.path, FIX, 'with the folder it was asked for');
   const inRoot = Object.fromEntries((rootList?.entries ?? []).map((f) => [f.name, f]));
   eq(inRoot['repo-a']?.bound?.agent, 'free', 'a folder that is a desk says which');
   eq(inRoot['repo-elsewhere']?.other_board, 'http://localhost:9', 'one bound to another board says so');
@@ -741,9 +741,29 @@ try {
   eq((await json('/api/floor/browse', { host_id: 'host-test-1', path: `${FIX}/repo-a` })).status, 200, 'and to open a folder inside it');
   const inner = await until(async () => { const g = await browsed(`${FIX}/repo-a`); return g.at ? g : null; }, 15000);
   eq([inner?.parent, inner?.self?.bound?.channel, (inner?.entries ?? []).map((f) => f.name)], [FIX, CH, ['src']], 'which says where it is, what it is bound as, and what is inside');
-  await json('/api/floor/browse', { host_id: 'host-test-1', path: '/etc' });
-  const outside = await until(async () => { const g = await browsed('/etc'); return g.at ? g : null; }, 15000);
-  assert(/not under this host's roots/.test(outside?.error ?? ''), `a folder outside the roots is refused, not listed — ${outside?.error}`);
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: HOME });
+  const outside = await until(async () => { const g = await browsed(HOME); return g.at ? g : null; }, 15000);
+  assert(!outside?.error && (outside?.entries ?? []).length >= 0 && outside?.parent === FIX, 'a folder outside the roots lists like any other — the roots are where the host looks on its own, not a fence');
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: `${FIX}/no-such-folder` });
+  const nowhere = await until(async () => { const g = await browsed(`${FIX}/no-such-folder`); return g.at ? g : null; }, 15000);
+  assert(/no such folder/.test(nowhere?.error ?? ''), `a folder that does not exist says so — ${nowhere?.error}`);
+  await json('/api/floor/browse', { host_id: 'host-test-1' });
+  const home = await until(async () => { const g = await browsed(); return g.at && g.path === HOME ? g : null; }, 15000);
+  eq(home?.path, HOME, 'and with no path named, the picker starts at the home folder');
+
+  // A folder outside the roots, taken from the picker: bound, and the folder
+  // becomes one of the host's roots so its rescan finds the desk.
+  const OUT = resolve(`./data/host-outside-${process.pid}`);
+  mkdirSync(OUT, { recursive: true });
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: resolve('./data') });
+  assert(await until(async () => { const g = await browsed(resolve('./data')); return g.at && (g.entries ?? []).some((f) => f.path === OUT) ? true : null; }, 15000), 'the picker shows a folder outside the roots');
+  const tookOut = await take({ host_id: 'host-test-1', path: OUT, channel: CH, agent: 'outsider', open: false });
+  eq([tookOut.status, (await tookOut.json()).mode], [200, 'take'], 'and it can be taken');
+  assert(await until(async () => (deskOf(await floor(), 'outsider')?.hosted?.live ? true : null), 20000), 'the host binds it and the desk registers — the roots were no fence');
+  assert(/added .*host-outside-.* to this host's roots for this run/.test(host.log), 'the host added the folder to its roots, and said that ORCH_HOST_ROOTS is where to keep it');
+  await json('/api/floor/desk/leave', { channel: CH, agent: 'outsider' });
+  await until(async () => (deskOf(await floor(), 'outsider')?.hosted?.state === 'offline' ? true : null), 20000);
+  rmSync(OUT, { recursive: true, force: true });
 
   // Move: free's folder onto another floor, under its own name. The window
   // is held by the floor and is on SESSION_ID (the fresh conversation from

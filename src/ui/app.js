@@ -1688,6 +1688,10 @@ tick();
  * by its last path segment — 95 names from nowhere, on the first machine it
  * ran on (2026-09-10) — and this replaced it.
  *
+ * It starts at the host's home folder and goes anywhere that account can
+ * read; the roots in host.json are where the host looks for desks on its
+ * own, not a limit on what you may pick.
+ *
  * The folder you stand in fills the form. A folder that already names its
  * agent (in its .mcp.json, or in Claude Code's local scope) fixes the agent:
  * the field is locked, because "my agent lives in this directory" is the
@@ -1729,7 +1733,8 @@ async function loadFolders() {
   if (!fm.hostId || !fm.hosts.some((h) => h.host_id === fm.hostId)) fm.hostId = live[0]?.host_id ?? fm.hosts[0]?.host_id ?? null;
   const host = fm.hosts.find((h) => h.host_id === fm.hostId) ?? null;
   renderDeskDialog();
-  if (host?.live) browseTo(fm.path ?? host.roots?.[0] ?? null);
+  // No path: the host starts its picker at its home folder.
+  if (host?.live) browseTo(fm.path ?? null);
 }
 
 /** Open one folder on the host: ask, then read until the host has answered. */
@@ -1962,8 +1967,7 @@ el.dlgBody.addEventListener('change', (e) => {
     const fm = ui.deskForm;
     fm.listing = null;
     fm.prefilled = null;
-    const host = (fm.hosts ?? []).find((h) => h.host_id === fm.hostId);
-    browseTo(host?.roots?.[0] ?? null);
+    browseTo(null);
     return;
   }
   renderDeskDialog();
