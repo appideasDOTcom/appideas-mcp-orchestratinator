@@ -1215,6 +1215,18 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    The caps are a text-transform so the DOM keeps sentence case: flash() swaps
    the label for an error and puts the original back, and the accessible name
    should not be shouted. */
+/* The panel's foot: the seat links down the left, the desk's two controls
+   down the right, top-aligned, with a little air above the whole of it. The
+   right column keeps to the right on its own margin rather than by
+   space-between, so it stays there when the links are hidden and it is the
+   only column left. */
+.p-foot { display: flex; align-items: flex-start; gap: 12px; padding-top: 6px; }
+.p-desk { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* The same control height as the Send row, said again because --p-ctl-h is
+   scoped to that row. A refusal borrows the button's label the way it borrows
+   a link's, so the flashed voice is declared here too. */
+.p-desk .btn { height: 28px; }
+.p-desk .btn.flashed { color: var(--block); border-color: var(--block); }
 .p-links { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
 .p-link {
   background: none; border: 0; padding: 0; margin: 0;
@@ -1552,3 +1564,16 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    line and let the row say what it is with the name first. */
 #desk-folder, #desk-channel { font-family: var(--mono); font-size: 12.5px; }
 .desk-folder-meta { margin-top: 6px; font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+
+/* The session picker: one button per conversation, title over its meta, the
+   current one outlined and inert. Scrolls inside the dialog past a screenful. */
+.dlg-sessions { margin-top: 10px; max-height: 42vh; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.sess-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left;
+  padding: 7px 9px; border: 1px solid var(--line, #d9dde3); border-radius: 6px; background: transparent; color: inherit;
+  font: inherit; cursor: pointer; }
+.sess-row:hover:not(:disabled) { border-color: var(--accent); }
+.sess-row:disabled { cursor: default; opacity: .55; }
+.sess-row.current { border-color: var(--accent); opacity: 1; }
+.sess-title { font-size: 13px; line-height: 1.3; }
+.sess-meta { font-size: 10.5px; color: var(--muted); }
+.sess-empty { padding: 8px 2px; font-size: 11.5px; }

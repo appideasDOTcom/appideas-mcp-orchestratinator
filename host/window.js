@@ -77,7 +77,7 @@ const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
 const STOP_TIMEOUT_MS = Number(process.env.ORCH_STOP_TIMEOUT_MS ?? 30_000);
 const RELEASE_TIMEOUT_MS = Number(process.env.ORCH_RELEASE_TIMEOUT_MS ?? 10_000);
 /** How long a freshly opened window gets to become a running session. */
-const READY_TIMEOUT_MS = Number(process.env.ORCH_READY_TIMEOUT_MS ?? 45_000);
+export const READY_TIMEOUT_MS = Number(process.env.ORCH_READY_TIMEOUT_MS ?? 45_000);
 /** Pause before each attempt to submit a pasted message — see send(). */
 const SUBMIT_SETTLE_MS = Number(process.env.ORCH_SUBMIT_SETTLE_MS ?? 400);
 /** How long a message waits for a running turn to end before it is typed in. */
@@ -227,6 +227,11 @@ async function rosterViaCli() {
     ok: true,
     sessions: rows
       .filter((r) => r && typeof r.cwd === 'string' && typeof r.sessionId === 'string')
+      // A process that is gone holds nothing, whatever the list says. The
+      // CLI should never print one, and the session-file reader above checks
+      // the same way; a stand-in that cannot unwrite its own entry can, and
+      // read as an editor it refused every reopen after the first.
+      .filter((r) => alive(Number(r.pid)))
       .map((r) => ({
         pid: Number(r.pid) || null,
         cwd: canonical(r.cwd),
@@ -2402,6 +2407,159 @@ async function lastTurnAt(path) {
     if ((t.role === 'user' || t.role === 'assistant') && Number.isFinite(Date.parse(t.at))) last = t.at;
   }
   return last;
+}
+
+/**
+ * The conversations in a folder, newest first — the floor's session picker.
+ *
+ * Thirty, by the file's mtime, and each read twice: the first 64 KB for the
+ * first thing a person said (its timestamp is when the conversation began)
+ * and the last 256 KB for the newest title record and the last spoken turn.
+ * A title is Claude Code's own: `custom-title` (the person named it, /rename)
+ * over `ai-title` (Claude Code named it) over the first prompt clipped — and
+ * `title_source` says which, so the page can mark a named one. The first
+ * prompt is read by readTranscript's block rule (contextTagOf), so a message
+ * that opens with an `<ide_opened_file>` block is titled by the words after
+ * it, not the tag.
+ *
+ * Deliberate omission, and the cost not paid: a `custom-title` written early
+ * in a long session and never repeated sits past the head and before the tail
+ * and is missed — the conversation shows its AI title or first prompt
+ * instead. Claude Code rewrites the title record often (781 copies of one in
+ * a real transcript, 2026-09-10), so the tail nearly always has it; a full
+ * scan of thirty multi-megabyte files on every open of the picker is what
+ * this buys. A file with no spoken turn in either read is listed with no
+ * title: a tab opened and closed, and the page says so rather than hiding it,
+ * because the current window's own conversation looks exactly like that for
+ * its first minute.
+ *
+ * `live`/`held` come from the roster and the panes, the same join holderOf
+ * makes: a row an editor holds cannot be reopened here, and the page needs
+ * to know which row that is.
+ */
+const SESSIONS_HEAD_BYTES = 64 * 1024;
+const SESSIONS_TAIL_BYTES = 256 * 1024;
+export async function sessionsIn(cwd, { limit = 30 } = {}) {
+  const here = canonical(cwd);
+  const dir = projectDir(here);
+  let names;
+  try { names = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
+  const { stat } = await import('node:fs/promises');
+  const files = [];
+  for (const name of names) {
+    try {
+      const st = await stat(join(dir, name));
+      if (st.isFile()) files.push({ name, size: st.size, mtime: st.mtime });
+    } catch { /* gone between readdir and stat */ }
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  const [r, all] = await Promise.all([roster(), panes()]);
+  const inPanes = new Set(all.map((p) => p.pid).filter(Boolean));
+  const rows = [];
+  for (const f of files.slice(0, Math.max(1, limit))) {
+    const id = f.name.slice(0, -'.jsonl'.length);
+    const meta = await transcriptMeta(join(dir, f.name), f.size);
+    const claiming = r.ok ? r.sessions.filter((x) => x.sessionId === id) : [];
+    const title = meta.custom ?? meta.ai ?? (meta.prompt ? clipTitle(meta.prompt) : null);
+    rows.push({
+      id,
+      title,
+      title_source: meta.custom ? 'custom' : meta.ai ? 'ai' : meta.prompt ? 'prompt' : null,
+      first_prompt: meta.prompt ? meta.prompt.slice(0, 200) : null,
+      started_at: meta.startedAt,
+      last_at: meta.lastAt ?? f.mtime.toISOString(),
+      modified_at: f.mtime.toISOString(),
+      size: f.size,
+      spoken: Boolean(meta.prompt || meta.lastAt),
+      live: claiming.length > 0,
+      held: claiming.length ? (claiming.some((x) => inPanes.has(x.pid)) ? 'floor' : 'editor') : null,
+      kind: claiming[0]?.kind ?? null,
+      pid: claiming[0]?.pid ?? null,
+    });
+  }
+  return rows;
+}
+
+/** A title from a first prompt: its first line, whitespace folded, 80 characters. */
+function clipTitle(s) {
+  const line = String(s).trim().split('\n')[0].replace(/\s+/g, ' ');
+  return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+}
+
+/**
+ * What the head and the tail of one transcript say about it. Both reads are
+ * bounded; on a small file they overlap and the whole file is read once.
+ */
+async function transcriptMeta(path, size) {
+  const out = { custom: null, ai: null, prompt: null, startedAt: null, lastAt: null };
+  const { open } = await import('node:fs/promises');
+  let fh;
+  try { fh = await open(path, 'r'); } catch { return out; }
+  try {
+    const headLen = Math.min(size, SESSIONS_HEAD_BYTES);
+    const head = Buffer.alloc(headLen);
+    await fh.read(head, 0, headLen, 0);
+    const whole = size <= SESSIONS_HEAD_BYTES;
+    const headLines = head.toString('utf8').split('\n');
+    if (!whole) headLines.pop();   // a line cut by the byte limit is not a record
+    let tailLines = [];
+    if (!whole) {
+      const tailLen = Math.min(size, SESSIONS_TAIL_BYTES);
+      const tail = Buffer.alloc(tailLen);
+      await fh.read(tail, 0, tailLen, size - tailLen);
+      tailLines = tail.toString('utf8').split('\n');
+      if (tailLen < size) tailLines.shift();   // the partial first line an arbitrary offset lands in
+    }
+    const parse = (line) => { try { return line.trim() ? JSON.parse(line) : null; } catch { return null; } };
+    const titleOf = (d) => {
+      if (d?.type === 'custom-title' && typeof d.customTitle === 'string' && d.customTitle.trim()) out.custom = d.customTitle.trim();
+      else if (d?.type === 'ai-title' && typeof d.aiTitle === 'string' && d.aiTitle.trim()) out.ai = d.aiTitle.trim();
+    };
+    for (const line of headLines) {
+      const d = parse(line);
+      if (!d) continue;
+      titleOf(d);
+      if (!out.prompt && d.type === 'user' && !d.isMeta && !d.isSidechain) {
+        const text = personText(d.message?.content);
+        if (text) {
+          out.prompt = text;
+          out.startedAt = Number.isFinite(Date.parse(d.timestamp)) ? d.timestamp : null;
+        }
+      }
+    }
+    // Titles: the newest record wins, and the tail is newer than the head.
+    // The last spoken turn: scanned from the end, like lastTurnAt.
+    const later = whole ? headLines : tailLines;
+    for (const line of later) titleOf(parse(line));
+    for (let i = later.length - 1; i >= 0 && !out.lastAt; i--) {
+      if (!later[i].includes('"timestamp"')) continue;
+      const d = parse(later[i]);
+      if (d && (d.type === 'user' || d.type === 'assistant') && !d.isSidechain && Number.isFinite(Date.parse(d.timestamp))) out.lastAt = d.timestamp;
+    }
+  } finally {
+    await fh.close();
+  }
+  return out;
+}
+
+/** The person's own words in a user record — every block that is not injected context. */
+function personText(content) {
+  const blocks = typeof content === 'string' ? [content]
+    : Array.isArray(content) ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  return blocks.filter((b) => !contextTagOf(b)).join('').trim() || null;
+}
+
+/**
+ * Whether this repo's window is mid-turn, with the line that says so — for a
+ * caller that must not close a working window and has to quote the pane
+ * rather than guess. No pane is not busy.
+ */
+export async function busyAt(cwd) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { pane: null, busy: false, foot: '' };
+  const r = await tmux(['capture-pane', '-p', '-t', pane.target]);
+  const text = r.ok ? r.out : '';
+  return { pane, busy: r.ok && isBusy(text), foot: footOf(text) };
 }
 
 /**

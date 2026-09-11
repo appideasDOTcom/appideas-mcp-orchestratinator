@@ -712,6 +712,65 @@ async function main() {
     assert(/ghost/.test(none.note ?? '') && /new conversation/.test(none.note ?? ''), `and the note says a new one starts — ${none.note}`);
     eq(await W.resumable(bare, null), { id: null, note: null }, 'no pin at all is no fallback: a fresh desk starts fresh, and silently');
 
+    // The session picker's list. Titles are Claude Code's own records —
+    // custom over AI over the first prompt — read from the head and the tail
+    // of each file, never the middle; the first prompt skips an injected
+    // context block; a file with no words is listed and says so; the roster
+    // marks a live one. Order is the file's mtime, newest first.
+    console.log('\n  the conversations in a folder, for the picker');
+    const picker = `${FIX}/picker`;
+    mkdirSync(picker, { recursive: true });
+    const pkdir = W.projectDir(W.canonical(picker));
+    mkdirSync(`${pkdir}/plain/subagents`, { recursive: true });
+    const line = (o) => JSON.stringify(o);
+    writeFileSync(`${pkdir}/named.jsonl`, [
+      line({ type: 'user', uuid: 'n1', timestamp: '2026-09-09T10:00:00Z', message: { content: [{ type: 'text', text: '<ide_opened_file>x.js</ide_opened_file>' }, { type: 'text', text: 'Rename the widget, please' }] } }),
+      line({ type: 'ai-title', aiTitle: 'Widget rename', sessionId: 'named' }),
+      line({ type: 'assistant', uuid: 'n2', timestamp: '2026-09-09T10:00:05Z', message: { content: [{ type: 'text', text: 'done' }] } }),
+      line({ type: 'custom-title', customTitle: 'Widgets', sessionId: 'named' }),
+      '',
+    ].join('\n'));
+    writeFileSync(`${pkdir}/ai.jsonl`, [
+      line({ type: 'user', uuid: 'a1', timestamp: '2026-09-08T10:00:00Z', message: { content: 'first words here' } }),
+      line({ type: 'ai-title', aiTitle: 'Machine-named', sessionId: 'ai' }),
+      line({ type: 'assistant', uuid: 'a2', timestamp: '2026-09-08T10:00:09Z', message: { content: [{ type: 'text', text: 'ok' }] } }),
+      '',
+    ].join('\n'));
+    writeFileSync(`${pkdir}/plain.jsonl`, [
+      line({ type: 'user', uuid: 'p0', isMeta: true, timestamp: '2026-09-07T09:59:00Z', message: { content: 'meta noise' } }),
+      line({ type: 'user', uuid: 'p1', timestamp: '2026-09-07T10:00:00Z', message: { content: [{ type: 'text', text: '<ide_opened_file>y.js</ide_opened_file>' }, { type: 'text', text: `A very long first prompt ${'x'.repeat(120)}` }] } }),
+      line({ type: 'assistant', uuid: 'p2', timestamp: '2026-09-07T10:00:07Z', message: { content: [{ type: 'text', text: 'ok' }] } }),
+      '',
+    ].join('\n'));
+    writeFileSync(`${pkdir}/plain/subagents/agent-z.jsonl`, `${line({ type: 'user', uuid: 'z', isSidechain: true, timestamp: '2026-09-09T12:00:00Z', message: { content: 'not top level' } })}\n`);
+    writeFileSync(`${pkdir}/empty.jsonl`, `${line({ type: 'bridge-session', sessionId: 'empty' })}\n`);
+    const t0 = Date.now() / 1000;
+    utimesSync(`${pkdir}/plain.jsonl`, t0 - 400, t0 - 400);
+    utimesSync(`${pkdir}/ai.jsonl`, t0 - 300, t0 - 300);
+    utimesSync(`${pkdir}/named.jsonl`, t0 - 200, t0 - 200);
+    utimesSync(`${pkdir}/empty.jsonl`, t0 - 100, t0 - 100);
+    mkdirSync(`${CLAUDE_HOME}/sessions`, { recursive: true });
+    const liveFile = `${CLAUDE_HOME}/sessions/${process.pid}.json`;
+    writeFileSync(liveFile, JSON.stringify({ pid: process.pid, sessionId: 'named', cwd: picker, kind: 'interactive', startedAt: Date.now() }));
+    const listed = await W.sessionsIn(picker);
+    eq(listed.map((r) => r.id), ['empty', 'named', 'ai', 'plain'], 'newest file first, and a subagent transcript is not a conversation');
+    const byId = Object.fromEntries(listed.map((r) => [r.id, r]));
+    eq([byId.named.title, byId.named.title_source], ['Widgets', 'custom'], 'a name the person gave wins, from the tail');
+    eq([byId.ai.title, byId.ai.title_source], ['Machine-named', 'ai'], 'else the name Claude Code gave');
+    eq(byId.plain.title_source, 'prompt', 'else the first prompt');
+    assert(byId.plain.title.startsWith('A very long first prompt') && byId.plain.title.length <= 80 && byId.plain.title.endsWith('…'), `clipped — ${byId.plain.title}`);
+    eq(byId.named.first_prompt, 'Rename the widget, please', 'and the first prompt is the person\'s words, not the IDE block glued in front of them');
+    eq(byId.plain.started_at, '2026-09-07T10:00:00Z', 'a conversation began when the person first spoke, meta records aside');
+    eq(byId.named.last_at, '2026-09-09T10:00:05Z', 'and was last spoken in at its last user or assistant turn');
+    eq([byId.empty.title, byId.empty.spoken], [null, false], 'a file with no words is listed with no title and says nothing was said');
+    eq([byId.named.live, byId.named.held, byId.ai.live], [true, 'editor', false], 'the roster marks the live one, and with no pane it is an editor\'s');
+    eq((await W.sessionsIn(picker, { limit: 2 })).map((r) => r.id), ['empty', 'named'], 'the limit takes the newest');
+    eq(await W.sessionsIn(`${FIX}/never-opened`), [], 'a folder Claude Code never opened has none');
+    rmSync(liveFile);
+    const idle = await W.busyAt(FIX);
+    eq([!!idle.pane, idle.busy], [true, false], 'busyAt: the open stand-in is not mid-turn');
+    eq((await W.busyAt(`${FIX}/never-opened`)).pane, null, 'and a folder with no window has no pane to be busy');
+
     // A conversation held by a background session. Claude Code's daemon keeps
     // one running after its tab closes; the roster lists it as kind `bg` with
     // a job id, and a `--resume` of it exits on its first line. Opening the

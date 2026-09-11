@@ -420,6 +420,29 @@ export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false }
    are not: "send a message instead" is no help at all to someone trying to
    stop one. Same verdict, re-worded by its code. `no_window` is stop's own: a
    nudge opens a window when there is none, a stop cannot. */
+/** One row of a host's session list, with only the fields the picker draws. */
+const SESSIONS_MAX = 60;
+function sessionRow(r) {
+  const id = str(r?.id);
+  if (!id) return null;
+  const s = (v) => (typeof v === 'string' && v ? v.slice(0, 300) : null);
+  return {
+    id,
+    title: s(r.title),
+    title_source: ['custom', 'ai', 'prompt'].includes(r.title_source) ? r.title_source : null,
+    first_prompt: s(r.first_prompt),
+    started_at: s(r.started_at),
+    last_at: s(r.last_at),
+    modified_at: s(r.modified_at),
+    size: Number.isFinite(Number(r.size)) ? Number(r.size) : null,
+    spoken: r.spoken === true,
+    live: r.live === true,
+    held: r.held === 'floor' || r.held === 'editor' ? r.held : null,
+    kind: s(r.kind),
+    pid: Number(r.pid) || null,
+  };
+}
+
 const STOP_WHY = {
   not_hosted: 'No host on this board is running that repo, so there is nothing here to stop.',
   held_by_editor: 'This conversation is open in your editor. Stop it there — one app holds a conversation at a time.',
@@ -941,9 +964,21 @@ export function createLive() {
    * which every open page polls every couple of seconds.
    */
   const folders = new Map(); // host_id -> { at, roots, folders }
+  /**
+   * Each desk's conversations as its host last listed them, for the session
+   * picker — in memory for the same reason the folder list is: the host
+   * answers the ask with a fresh list every time, and the picker reads it by
+   * its own GET rather than through the page's poll. `sessionsAsked` is the
+   * throttle: one walk of thirty transcripts per desk per few seconds, not
+   * one per click.
+   */
+  const sessions = new Map();      // deskKey -> { at, rows }
+  const sessionsAsked = new Map(); // deskKey -> ms when the host was last asked to list them
   return {
     partial,
     folders,
+    sessions,
+    sessionsAsked,
     pending,
     answered,
     delivery,
@@ -990,6 +1025,10 @@ export function createLive() {
  * one click, one look, no waiting to learn whether the throttle ate it.
  */
 const RESCAN_MIN_MS = 15_000;
+// One session listing per desk per this long — see /api/floor/sessions.
+const SESSIONS_MIN_MS = Number(process.env.ORCH_SESSIONS_MIN_MS ?? 5_000);
+// A session id is a file name under the project dir; what --resume is handed.
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export function askRescan(store, live, { channel, agent, why, force = false }) {
   const now = Date.now();
   const asked = [];
@@ -1081,6 +1120,18 @@ function applyHostEvent(store, live, hostId, ev) {
      * stays, offline, as the last thing known about the desk; the seat stays
      * too, because whether the agent is gone is the board's question.
      */
+    /**
+     * The folder's conversations, as the host read them off the disk — the
+     * answer to a `sessions` work item. Kept whole, with the host's own time
+     * on it, so the picker can tell a fresh list from the one it already had.
+     */
+    case 'sessions': {
+      const rows = Array.isArray(ev.rows) ? ev.rows.map(sessionRow).filter(Boolean).slice(0, SESSIONS_MAX) : [];
+      const at = str(ev.at) ?? now;
+      live.sessions.set(key, { at, rows });
+      live.publish(key, { type: 'sessions', at });
+      break;
+    }
     case 'unbound': {
       state('offline');
       live.pending.delete(key);
@@ -2290,6 +2341,86 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.enqueueHostWork(h.host_id, channel, agent, 'unbind', { queued_at: new Date().toISOString() });
     live.wake(h.host_id);
     res.json({ ok: true, host: h.host_name ?? h.host_id });
+  });
+
+  /**
+   * The session picker: ask the desk's host to list its folder's
+   * conversations, and read the list back.
+   *
+   * Two routes because the answer arrives on the host's own clock: the POST
+   * queues a `sessions` work item and returns at once; the host reads thirty
+   * transcripts and reports them as an event; the GET serves whatever list is
+   * held, with the host's time on it, so the page can poll until that time
+   * moves. Throttled per desk: a list is a walk of the folder's transcripts,
+   * and one per click would have a busy picker walking the disk on every
+   * redraw. Within the throttle the POST says `asked: false` and the held
+   * list is the answer.
+   *
+   * `known` on a row is the board's own knowledge, not the host's: whether
+   * turns of that conversation are stored here already. A reopen of a known
+   * one joins at its end; an unknown one is joined at its tail so the panel
+   * opens on something — see Desk.follow in host/index.js.
+   */
+  router.post('/api/floor/sessions', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const h = store.hostedDesk(channel, agent);
+    const nowMs = Date.now();
+    if (!h) return res.status(409).json({ error: 'No host on this board is running that repo, so there is no folder to list conversations from.', code: 'not_hosted' });
+    if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' });
+    }
+    const key = deskKey(channel, agent);
+    const held = live.sessions.get(key) ?? null;
+    if (nowMs - (live.sessionsAsked.get(key) ?? 0) < SESSIONS_MIN_MS) {
+      return res.json({ ok: true, asked: false, at: held?.at ?? null });
+    }
+    live.sessionsAsked.set(key, nowMs);
+    store.enqueueHostWork(h.host_id, channel, agent, 'sessions', { queued_at: new Date(nowMs).toISOString() });
+    live.wake(h.host_id);
+    res.json({ ok: true, asked: true, at: held?.at ?? null });
+  });
+
+  router.get('/api/floor/sessions', (req, res) => {
+    const channel = str(req.query.channel);
+    const agent = str(req.query.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const h = store.hostedDesk(channel, agent);
+    const held = live.sessions.get(deskKey(channel, agent)) ?? null;
+    const known = new Set(store.sessionsWithTurns(channel, agent));
+    res.json({
+      channel,
+      agent,
+      at: held?.at ?? null,
+      current: h?.sdk_session_id ?? null,
+      editor_pid: h?.outside_pid ?? null,
+      rows: (held?.rows ?? []).map((r) => ({ ...r, known: known.has(r.id) })),
+    });
+  });
+
+  /**
+   * Put the desk's window on another conversation, or on a new one
+   * (`session_id: null`). The reopen primitive — see Host.reopen in
+   * host/index.js. Refused by the same rule a leave is, with `editorOk`
+   * false: a resume closes a window the floor must hold, and an editor's
+   * chat is not the floor's to close.
+   */
+  router.post('/api/floor/reopen', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const sessionId = str(req.body?.session_id) ?? null;
+    if (sessionId && !SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'That is not a session id.', code: 'bad_session' });
+    const h = store.hostedDesk(channel, agent);
+    const last = store.lastTurns().find((t) => t.channel === channel && t.agent === agent) ?? null;
+    const check = switchable(h, last, Date.now(), { editorOk: false });
+    if (check.error) return res.status(409).json(check);
+    const known = sessionId ? (store.turnsInSessions(channel, agent, [sessionId])?.n ?? 0) > 0 : false;
+    store.logAdmin(channel, sessionId ? 'desk.reopen' : 'desk.new', { target: agent, detail: sessionId ?? 'a new conversation' });
+    store.enqueueHostWork(h.host_id, channel, agent, 'reopen', { session_id: sessionId, known, queued_at: new Date().toISOString() });
+    live.wake(h.host_id);
+    res.json({ ok: true, session_id: sessionId, known });
   });
 
   /**

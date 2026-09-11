@@ -971,6 +971,10 @@ export function makeStore(db) {
       `SELECT COUNT(*) AS n, MAX(created_at) AS last_at FROM turns
         WHERE channel = ? AND agent = ? AND session_id IN (SELECT value FROM json_each(?))`
     ),
+    // Which conversations the board has heard at all, for the session picker
+    // to say "known" — a reopen of one of these joins at the end rather than
+    // replaying a tail the panel already shows.
+    sessionsWithTurns: db.prepare(`SELECT DISTINCT session_id FROM turns WHERE channel = ? AND agent = ?`),
     // The newest turn carrying text, per desk — what the avatar's bubble says.
     lastTurns: db.prepare(
       `SELECT t.channel, t.agent, t.role, t.text, t.tool_name, t.via, t.created_at, t.id
@@ -1482,6 +1486,7 @@ export function makeStore(db) {
     },
     turnsInSessions: (channel, agent, sessions) =>
       q.turnsInSessions.get(channel, agent, JSON.stringify(sessions ?? [])),
+    sessionsWithTurns: (channel, agent) => q.sessionsWithTurns.all(channel, agent).map((r) => r.session_id),
     setAwaiting: (sessionId, kind, message = null) =>
       q.setAwaiting.run({ session_id: sessionId, kind, message }).changes,
     clearAwaiting: (sessionId) => q.clearAwaiting.run({ session_id: sessionId }).changes,

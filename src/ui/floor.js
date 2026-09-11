@@ -59,7 +59,7 @@
   const ATTACH_MS = 20_000;
   /* The links' labels, here as well as in the markup, because the spinner takes
      one over and something has to put it back. */
-  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code', attach: 'Open in tmux', claude: 'Open in Claude' };
+  const LINK_LABEL = { openhere: 'Open on the floor', handback: 'Open in VS Code', attach: 'Open in tmux', claude: 'Open in Claude', sessions: 'Sessions' };
   /* Which seat each link is asking for. That seat arriving is what "done" means
      — the POST returning only means the host has been told. Note this is not
      the same as the link going away: handback stays offered while the editor
@@ -2213,6 +2213,12 @@
           <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="${PROMPT_BOX}" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
+        <!-- The panel's foot, in two columns: the seat links down the left,
+             the desk's own controls down the right. One row for both, so
+             neither leaves a blank where the other's column starts — the
+             links used to sit under a right-aligned button row, with an
+             empty corner on each side of the fold. -->
+        <div class="p-foot">
         <div class="p-links">
           <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">${LINK_LABEL.openhere}</button>
           <button class="p-link" data-act="handback" title="Open this conversation in VS Code">${LINK_LABEL.handback}</button>
@@ -2225,14 +2231,23 @@
           <!-- Beneath the other two, not beside them: it is not a third place to
                put the conversation, it is the way out of this page. -->
           <button class="p-link" data-act="attach">${LINK_LABEL.attach}</button>
-          <!-- The reverse of taking a desk: the binding goes, the window
-               closes, the seat stays. Dims rather than vanishes, like the
-               rest of this row, with the server's reason as its title. -->
-          <button class="p-link" data-act="leave-desk" title="Remove this desk's binding and close its window">Leave desk</button>
           <!-- Shown only when the button cannot fire. Text, not a second
                mechanism — the one thing still useful when the host that would
                have opened the terminal is itself what is down. -->
           <div class="p-tmux mono hidden"></div>
+        </div>
+        <!-- Which of the folder's conversations the window is on, and whether
+             the folder stays a desk at all. Buttons, not links: they act on
+             the desk rather than move the seat, and six links in a column
+             read as a menu nobody asked for. -->
+        <div class="p-desk">
+          <button class="btn" data-act="sessions" title="Pick another of this folder's conversations for the desk, or start a new one">${LINK_LABEL.sessions}</button>
+          <!-- The reverse of taking a desk: the binding goes, the window
+               closes, the seat stays. Always confirmed in a dialog first.
+               Dims rather than vanishes, with the server's reason as its
+               title. -->
+          <button class="btn" data-act="leave-desk" title="Remove this desk's binding and close its window">Leave desk</button>
+        </div>
         </div>
       </div>`;
     ui.stick = true;
@@ -2476,6 +2491,26 @@
       toLeave.disabled = !!cannotLeave;
       toLeave.title = cannotLeave ?? 'Remove this desk\'s binding and close its window';
     }
+    const toSessions = wrap.querySelector('[data-act="sessions"]');
+    // A reopen in flight is settled like a move, against the payload: the POST
+    // is answered when the work is queued, and the conversation changes when
+    // the host has closed one window and the next has registered. The desk's
+    // `session_id` becoming the chosen id is that fact; for a new conversation
+    // it is any real id that is not the one it left. Failing that, the
+    // deadline — and what is said is what was seen, not why.
+    let reopenFailed = null;
+    const rp = ui.reopening && ui.reopening.channel === channel && ui.reopening.agent === agent ? ui.reopening : null;
+    if (rp) {
+      const sid = h?.session_id ?? null;
+      const real = !!sid && !String(sid).startsWith('host:');
+      const landed = rp.sessionId ? sid === rp.sessionId : (real && sid !== rp.from);
+      if (landed) ui.reopening = null;
+      else if (Date.now() - rp.since > MOVE_MS) {
+        reopenFailed = rp.sessionId ? `not on that conversation after ${MOVE_MS / 1000}s` : `no new conversation after ${MOVE_MS / 1000}s`;
+        ui.reopening = null;
+      }
+    }
+    const reopening = ui.reopening === rp ? rp : null;
     // A move in flight is settled here, against the payload, because the
     // payload is the only thing that knows. The POST is answered the moment the
     // work is queued; the seat changes when the host has actually done it, and
@@ -2593,10 +2628,17 @@
       toClaude.classList.add('hidden');
       tmuxCmd.classList.add('hidden');
     }
+    // The picker wants a live host — the list and the reopen are its work —
+    // and nothing else: an editor holding the conversation is a fact the
+    // dialog shows on the rows, not a reason to hide the door. Held flat
+    // while a move or another reopen is on its way.
+    toSessions.classList.toggle('hidden', !h?.live || !!move);
+    toSessions.disabled = !!reopening;
     setLinkBusy(toVsc, move?.act === 'handback');
     setLinkBusy(toFloor, move?.act === 'openhere');
     setLinkBusy(toTmux, !!attaching && attachAct === 'attach');
     setLinkBusy(toClaude, !!attaching && attachAct === 'claude');
+    setLinkBusy(toSessions, !!reopening);
     // Hiding both links is not the same as hiding the strip: an empty flex
     // column is zero-height but still counts as a row, so .p-compose's gap
     // leaves a blank line where the links were.
@@ -2607,6 +2649,7 @@
         && toClaude.classList.contains('hidden'));
     // After setLinkBusy, so the label is back before flash() borrows it.
     if (failed) flash(wrap.querySelector(`[data-act="${pending.act}"]`), failed);
+    if (reopenFailed) flash(toSessions, reopenFailed);
     // "attached", not "asked" — this one has been observed now.
     if (attachDone) flash(attachAct === 'claude' ? toClaude : toTmux, 'terminal attached');
     if (attachFailed) flash(attachAct === 'claude' ? toClaude : toTmux, attachFailed);
@@ -2836,6 +2879,10 @@
         // message already delivered is the whole complaint this answers.
         ui.delivery = ev.delivery ?? null;
         renderPanel();
+      } else if (ev.type === 'sessions') {
+        // A host listed this desk's conversations: the picker, if open, reads
+        // them now rather than at its next second.
+        window.sessionsArrived?.();
       } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session') {
         // Both change what the desk and the queue say; the cheapest correct
         // thing is to fetch the floor again rather than mirror the logic here.
@@ -3343,6 +3390,11 @@
       // button when a room's control opened it, else from the floor being
       // looked at, else the dialog asks.
       window.deskDialog?.({ channel: act.dataset.channel ?? (ui.floorFilter || null) });
+    } else if (act.dataset.act === 'sessions') {
+      if (!ui.open) return;
+      const open = floor.channels.find((c) => c.channel === ui.open.channel)
+        ?.desks.find((x) => x.agent === ui.open.agent);
+      window.sessionDialog?.(ui.open.channel, ui.open.agent, open?.persona ?? ui.open.agent);
     } else if (act.dataset.act === 'leave-desk') {
       if (!ui.open) return;
       const open = floor.channels.find((c) => c.channel === ui.open.channel)
@@ -3392,6 +3444,17 @@
    *  after "Take desk", so the operator watches the desk come up — not
    *  hosted, then hosted, then its window's first question — rather than
    *  hunting for it. */
+  /**
+   * The picker queued a reopen: spin the link until the desk's conversation
+   * is the chosen one. `from` is the id it is leaving, which is how a new
+   * conversation — no id until its window registers — is told from the old.
+   */
+  window.floorReopen = (channel, agent, sessionId, from) => {
+    ui.reopening = { channel, agent, sessionId: sessionId ?? null, from: from ?? null, since: Date.now() };
+    renderPanel();
+    tick();
+  };
+
   window.floorOpenDesk = (channel, agent) => {
     if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
     openDesk(channel, agent);

@@ -51,6 +51,11 @@ const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
 const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
+// How much of a conversation the board has never seen goes up when it is
+// reopened from the picker — see Desk.follow's 'tail'.
+const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
+// The picker's list: newest first, by file. See sessionsIn in window.js.
+const SESSIONS_LIMIT = Number(process.env.ORCH_SESSIONS_LIMIT ?? 30);
 const REQUEST_TIMEOUT_MS = 5_000;
 
 /**
@@ -151,6 +156,12 @@ class Desk {
     // from one that was already running, which is joined at its current end so
     // that hours of history are not replayed onto the floor.
     this.since = Date.now();
+    // A reopen in flight: the conversation the operator chose, and the pid of
+    // the window opened for it once known. While it stands, watch() adopts
+    // only that session — see the intent rule there — and it expires on the
+    // readiness budget so a window that never registers cannot freeze the
+    // desk on a conversation nothing is running.
+    this.intent = null;
   }
 
   get label() { return `${this.channel}/${this.agent}`; }
@@ -172,16 +183,27 @@ class Desk {
    * watch interval; the next tick then moves the offset past it and the floor
    * never sees the message it just sent.
    */
-  async follow(id, fromStart = false) {
+  async follow(id, mode = 'end') {
+    // Three places to join a conversation. 'start' is its first word, for one
+    // that began after this desk did. 'end' is where it stands now, for one
+    // already running or one whose turns the board holds — nothing dedups a
+    // replay. 'tail' is its recent past, for a conversation the operator
+    // picked that the board has never seen: the last 64 KB go up so the panel
+    // opens on a conversation rather than on nothing. A mid-line offset is
+    // safe — readTranscript drops the partial line it lands in. The booleans
+    // are the older callers' spelling of the first two.
+    if (mode === true) mode = 'start';
+    else if (mode === false) mode = 'end';
     this.lastSessionId = id;
     this.subOffsets = new Map();
     if (!id) { this.offset = 0; return; }
     const path = W.transcriptPath(this.cwd, id);
-    this.offset = fromStart ? 0 : await W.transcriptSize(path);
+    const size = await W.transcriptSize(path);
+    this.offset = mode === 'start' ? 0 : mode === 'tail' ? Math.max(0, size - TAIL_BYTES) : size;
     // Subagent files already on disk are joined at their end for the reason
     // the main transcript is; ones that appear later are new, and are read
     // from their first word.
-    if (!fromStart) {
+    if (mode !== 'start') {
       for (const sub of await W.subagentTranscripts(path)) this.subOffsets.set(sub.path, await W.transcriptSize(sub.path));
     }
   }
@@ -203,8 +225,39 @@ class Desk {
     // stopped running. Which is what the paragraph above follow() has always
     // claimed happens — "a conversation that changes underneath is not a
     // handoff to negotiate; it is simply the conversation now".
+    //
+    // Except while a reopen is in flight. Its window is closed and the next
+    // one is not registered yet, and in that gap the rule above would adopt
+    // whatever else is live in this folder — a stray editor session, say —
+    // and steal the pin from the conversation the operator just chose. So an
+    // unexpired intent adopts only the session that is its own: the pid the
+    // host opened, or the id it asked for. A fresh conversation has no id
+    // until it registers, which is what the pid is for. Expired, it is let
+    // go and said so, and newest-wins resumes.
+    if (this.intent) {
+      const it = this.intent;
+      if (Date.now() > it.until) {
+        warn(`${this.label}: the reopened window did not register within ${Math.round((it.until - it.since) / 1000)}s — following whatever is live here now`);
+        this.intent = null;
+      } else {
+        const mine = live.find((x) => (it.pid && x.pid === it.pid) || (it.sessionId && x.sessionId === it.sessionId)) ?? null;
+        if (mine) {
+          if (mine.sessionId !== this.lastSessionId) {
+            // A new conversation has no transcript when its window registers
+            // — Claude Code writes the file at the first prompt — so it is
+            // read from its first word. An id that already has words behind
+            // it is not new, whatever the window says (a stand-in reusing one
+            // id did exactly this), and reading it from the start replays
+            // what the board holds.
+            const fresh = (await W.transcriptSize(W.transcriptPath(this.cwd, mine.sessionId))) === 0;
+            await this.follow(mine.sessionId, fresh ? 'start' : 'end');
+          }
+          this.intent = null;
+        }
+      }
+    }
     const pinnedLive = this.lastSessionId && live.some((x) => x.sessionId === this.lastSessionId);
-    if (!pinnedLive && live.length) {
+    if (!this.intent && !pinnedLive && live.length) {
       const newest = live.reduce((a, b) => ((b.startedAt ?? 0) > (a.startedAt ?? 0) ? b : a));
       if (newest.sessionId !== this.lastSessionId) {
         // Read from the first word if it began after we got here, and from the
@@ -717,6 +770,54 @@ class Host {
     return this.emit({ type: 'unbound', channel, agent, cwd: desk.cwd }, true);
   }
 
+  /**
+   * Put this desk's window on another of its folder's conversations — or on
+   * a new one. The session picker's primitive, and what a move will be built
+   * on: close, then open with `--resume`.
+   *
+   * Close first, because open() returns early on an existing pane and
+   * ignores `resume`; a window that is mid-turn is not closed, and the refusal
+   * quotes the pane's bottom line rather than guessing why it is busy. Then
+   * the intent — see Desk.watch — and the offset: 'end' when the board holds
+   * this conversation's turns already, 'tail' when it has never seen them,
+   * so the panel opens on the conversation's recent past. `null` starts a
+   * fresh one, which has no id until its window registers; the intent's pid
+   * is how that one is recognised.
+   */
+  async reopen(desk, { sessionId = null, known = false } = {}) {
+    const { channel, agent } = desk;
+    const fail = (message, code = 'reopen_failed') => {
+      warn(`${desk.label}: ${message}`);
+      desk.intent = null;
+      return this.emit({ type: 'error', channel, agent, code, message }, true);
+    };
+    const at = await W.busyAt(desk.cwd);
+    if (at.pane && at.busy) return fail(`not reopened — the window is still working: ${at.foot}`);
+    if (at.pane) {
+      const shut = await W.closeWindow(desk.cwd);
+      if (!shut.ok) return fail(`could not close its window: ${shut.error}`);
+      log(`${desk.label}: closed its window to reopen on ${sessionId ?? 'a new conversation'}`);
+    }
+    const since = Date.now();
+    desk.intent = { sessionId, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
+    await desk.follow(sessionId, known ? 'end' : 'tail');
+    const r = await W.open(desk.cwd, { resume: sessionId });
+    if (!r.ok) return fail(r.error);
+    if (r.note) desk.told(r.note, r.resumed ?? sessionId);
+    if (r.resumed && r.resumed !== sessionId) {
+      // resumable() found the chosen id gone from disk and opened the
+      // folder's newest conversation instead; follow that one, from its tail.
+      desk.intent.sessionId = r.resumed;
+      await desk.follow(r.resumed, 'tail');
+    }
+    desk.intent.pid = r.pid;
+    log(`${desk.label}: reopened on ${r.resumed ?? 'a new conversation'} (${r.target})`);
+    const up = await W.waitReady(desk.cwd, { pid: r.pid, target: r.target });
+    for (const a of up.answered ?? []) log(`${desk.label}: answered the ${a.name} question with "${a.chose}"`);
+    if (!up.ok) this.emit({ type: 'error', channel, agent, message: up.error, code: up.code ?? null }, true);
+    return undefined;
+  }
+
   async handle(item) {
     if (item.kind === 'bind') {
       await this.bind(item);
@@ -917,6 +1018,19 @@ class Host {
       }
       case 'unbind':
         await this.unbind(desk);
+        break;
+      case 'sessions': {
+        // The picker's list, answered as an event rather than a reply: the
+        // work loop is one-way, and the board keeps the last list it heard.
+        const rows = await W.sessionsIn(desk.cwd, { limit: SESSIONS_LIMIT });
+        this.emit({ type: 'sessions', channel: desk.channel, agent: desk.agent, at: new Date().toISOString(), rows }, true);
+        break;
+      }
+      case 'reopen':
+        await this.reopen(desk, {
+          sessionId: typeof item.payload?.session_id === 'string' && item.payload.session_id ? item.payload.session_id : null,
+          known: item.payload?.known === true,
+        });
         break;
       case 'attach': {
         // The escape hatch, and the only work item that changes nothing. It

@@ -477,6 +477,58 @@ try {
   });
   eq(nowhere.status, 409, 'a desk no host runs cannot be opened');
 
+  console.log('\nthe session picker\'s routes');
+  const sessionsOf = () => fetch(`${HOST}/api/floor/sessions?channel=${CH}&agent=wanderer`).then((r) => r.json());
+  const askSessions = () => fetch(`${HOST}/api/floor/sessions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'wanderer' }),
+  });
+  const reopen = (body) => fetch(`${HOST}/api/floor/reopen`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'wanderer', ...body }),
+  });
+  eq((await sessionsOf()).at, null, 'before any host has listed them, a desk\'s sessions have no time — not an empty list that could mean anything');
+  let askedList = await askSessions();
+  eq([askedList.status, (await askedList.json()).asked], [200, true], 'the floor can ask the host to list a hosted desk\'s conversations');
+  eq(await takeWork(), ['sessions'], 'and the host is handed exactly that work');
+  askedList = await askSessions();
+  eq((await askedList.json()).asked, false, 'asked again inside the throttle, the board says so and queues nothing');
+  eq(await takeWork(), [], 'so a busy picker cannot have a host walking its folder on every redraw');
+  const LISTED_AT = '2026-09-10T01:02:03.000Z';
+  const listedRows = [
+    { id: 's-alpha', title: 'Alpha work', title_source: 'custom', first_prompt: 'do alpha', started_at: '2026-09-09T10:00:00Z', last_at: '2026-09-09T11:00:00Z', modified_at: '2026-09-09T11:00:00Z', size: 1234, spoken: true, live: true, held: 'editor', kind: 'interactive', pid: 4242 },
+    { id: 's-beta', title: null, title_source: null, spoken: false, live: false, held: null },
+    { title: 'no id at all' },
+  ];
+  eq((await hostEvents([{ type: 'sessions', channel: CH, agent: 'wanderer', at: LISTED_AT, rows: listedRows }])).applied, 1, 'the host answers with an event');
+  const gotList = await sessionsOf();
+  eq(gotList.at, LISTED_AT, 'served back with the host\'s own time on it');
+  eq(gotList.rows.map((r) => r.id), ['s-alpha', 's-beta'], 'every row with an id, none without');
+  eq([gotList.rows[0].title, gotList.rows[0].title_source, gotList.rows[0].held, gotList.rows[0].live, gotList.rows[0].size], ['Alpha work', 'custom', 'editor', true, 1234], 'with the fields the picker draws');
+  eq([gotList.rows[0].known, gotList.rows[1].known], [false, false], 'and none known to the board yet');
+  eq(gotList.current, null, 'the desk\'s current conversation is the board\'s to say — none registered here');
+  eq((await hostEvents([{ type: 'turn', channel: CH, agent: 'wanderer', session_id: 's-alpha', role: 'assistant', text: 'alpha spoke' }])).applied, 1, 'a turn of one of them reaches the board');
+  eq((await sessionsOf()).rows.map((r) => r.known), [true, false], 'and that one is known now');
+  const strangerList = await fetch(`${HOST}/api/host/events`, {
+    method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-stranger', events: [{ type: 'sessions', channel: CH, agent: 'wanderer', at: '2030-01-01T00:00:00.000Z', rows: [{ id: 's-fake' }] }] }),
+  }).then((r) => r.json());
+  eq(strangerList.applied, 0, 'a list from a host that does not run the desk is refused');
+  eq((await sessionsOf()).at, LISTED_AT, 'and changes nothing');
+
+  let pick = await reopen({ session_id: 's-alpha' });
+  eq([pick.status, (await pick.json()).known], [200, true], 'a pick of a known conversation is queued as known');
+  pick = await reopen({ session_id: 's-beta' });
+  eq((await pick.json()).known, false, 'and of an unknown one as unknown — the host joins those at the tail');
+  pick = await reopen({ session_id: null });
+  eq([pick.status, (await pick.json()).session_id], [200, null], 'start new is a reopen of nothing');
+  eq(await takeWork(), ['reopen', 'reopen', 'reopen'], 'each one work for the host');
+  eq((await reopen({ session_id: 'not a/session id' })).status, 400, 'a session id that could not be a file name is refused');
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', outside_pid: 4242 });
+  pick = await reopen({ session_id: 's-alpha' });
+  eq([pick.status, (await pick.json()).code], [409, 'held_by_editor'], 'refused while an editor holds the desk — a resume closes a window the floor must hold');
+  eq(await takeWork(), [], 'and queues nothing');
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', window: '@7', scope: 'project' });
+  eq((await fetch(`${HOST}/api/floor/sessions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }) })).status, 409,
+    'a desk no host runs has no folder to list');
+
   console.log('\nthe folders a host offers');
   // The list the "take a desk" dialog draws. Every value here is one that
   // cannot be a fallback — a name, a time, a count that nothing on the server

@@ -611,7 +611,7 @@ function refreshDialog() {
   // poll-driven redraw would throw away whatever is half-typed in it.
   // The take-a-desk and leave-desk dialogs hold typing and a choice; a poll
   // must not redraw either.
-  if (kind === 'rename' || kind === 'prompts' || kind === 'desk' || kind === 'leave') return;
+  if (kind === 'rename' || kind === 'prompts' || kind === 'desk' || kind === 'leave' || kind === 'sessions') return;
   if (agent) {
     const a = findAgent(channel, agent);
     const left = !a ? 0
@@ -1494,6 +1494,28 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'desk-leave':
       act(() => floorPost('desk/leave', { channel: d.channel, agent: d.agent }));
       break;
+    // --- the session picker. See sessionDialog below. The floor is told the
+    // moment the reopen is queued so its link can spin until the desk's
+    // conversation actually changes — the receipt for the click is there,
+    // not here.
+    case 'session-resume': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      const id = d.id;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: id })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, id, fm.current); }));
+      break;
+    }
+    case 'session-new': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: null })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, null, fm.current); }));
+      break;
+    }
+    case 'session-look':
+      askSessions();
+      break;
     case 'retire':
       act(() => admin('agent/retire', { channel: d.channel, agent: d.agent }));
       break;
@@ -1822,4 +1844,177 @@ el.dlgBody.addEventListener('input', (e) => {
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   const go = el.dlgBody.querySelector('[data-do="desk-take"]');
   if (go && !go.dataset.held) go.disabled = !(fm.path && channelNow && fm.agent.trim());
+});
+
+/**
+ * The session picker: a folder's recent conversations, for the desk's window
+ * to be reopened on — or a fresh one. The last of the three doors the floor
+ * opens without a terminal (start, resume, move), and the smallest surface
+ * that proves a reopen.
+ *
+ * The list is the host's. It is asked for when the dialog opens, and the
+ * dialog polls the GET each second until the host's time on the list moves —
+ * eight seconds, then it says the host did not answer — drawing whatever list
+ * it already has meanwhile, because a list a minute old beats a spinner. Rows
+ * the board cannot act on are drawn disabled with the reason as their title:
+ * the conversation the desk is on now, and one an editor holds, since a
+ * resume closes a window the floor must hold. The filter is by title only
+ * (decided 2026-09-08); there is no search of what was said.
+ *
+ * Kind 'sessions' is in refreshDialog's skip list, and typing redraws only
+ * the rows: the poll must never take the caret out of the filter box.
+ */
+function sessionDialog(channel, agent, persona) {
+  ui.dlgCtx = { kind: 'sessions', channel, agent };
+  ui.sessForm = {
+    channel, agent, persona: persona ?? agent,
+    rows: null, at: null, current: null, editorPid: null,
+    filter: '', waiting: true, error: null, note: null,
+  };
+  renderSessionDialog();
+  askSessions();
+}
+
+async function readSessions(fm) {
+  const res = await fetch(`./api/floor/sessions?channel=${encodeURIComponent(fm.channel)}&agent=${encodeURIComponent(fm.agent)}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json;
+}
+
+function takeSessions(fm, got) {
+  fm.rows = Array.isArray(got.rows) ? got.rows : [];
+  fm.at = got.at ?? null;
+  fm.current = got.current ?? null;
+  fm.editorPid = got.editor_pid ?? null;
+}
+
+async function askSessions() {
+  const fm = ui.sessForm;
+  if (!fm) return;
+  fm.waiting = true;
+  fm.error = null;
+  fm.note = null;
+  const mine = () => ui.dlgCtx?.kind === 'sessions' && ui.sessForm === fm;
+  let before = null;
+  try {
+    const held = await readSessions(fm);
+    before = held.at ?? null;
+    takeSessions(fm, held);
+    if (mine()) renderSessionDialog();
+    const asked = await floorPost('sessions', { channel: fm.channel, agent: fm.agent });
+    // Within the host's throttle the list in hand is the answer — seconds old.
+    if (asked.asked === false) { fm.waiting = false; if (mine()) renderSessionDialog(); return; }
+  } catch (e) {
+    fm.waiting = false;
+    fm.error = String(e.message ?? e);
+    if (mine()) renderSessionDialog();
+    return;
+  }
+  for (let i = 0; i < 8 && mine(); i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (!mine()) return;
+    const got = await readSessions(fm).catch(() => null);
+    if (got && got.at && got.at !== before) {
+      takeSessions(fm, got);
+      fm.waiting = false;
+      renderSessionDialog();
+      return;
+    }
+  }
+  if (!mine()) return;
+  fm.waiting = false;
+  fm.note = fm.rows?.length ? `The host did not answer in 8 s — this list is from ${agoText(fm.at)}.` : 'The host did not answer in 8 s.';
+  renderSessionDialog();
+}
+
+/** The floor's stream heard a host list sessions: read it now rather than at the next second. */
+function sessionsArrived() {
+  const fm = ui.sessForm;
+  if (!fm || ui.dlgCtx?.kind !== 'sessions') return;
+  readSessions(fm).then((got) => {
+    if (ui.sessForm !== fm) return;
+    takeSessions(fm, got);
+    fm.waiting = false;
+    fm.note = null;
+    renderSessionDialog();
+  }).catch(() => { /* the poll in askSessions will say so */ });
+}
+
+const EDITOR_HOLDS = 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.';
+
+function sessionRowsHtml(fm) {
+  const rows = fm.rows ?? [];
+  const q = fm.filter.trim().toLowerCase();
+  const shown = q ? rows.filter((r) => (r.title ?? '').toLowerCase().includes(q)) : rows;
+  if (!shown.length) {
+    const why = fm.rows === null ? 'Reading…'
+      : !rows.length ? (fm.waiting ? 'Asking the host…' : 'Claude Code has not opened this folder yet, so there is nothing to resume. Start new opens its first conversation.')
+      : 'No title matches.';
+    return `<p class="muted sess-empty">${esc(why)}</p>`;
+  }
+  return shown.map((r) => {
+    const current = r.id === fm.current;
+    const editor = r.held === 'editor';
+    const why = current ? 'This is the conversation on the desk now.' : editor ? EDITOR_HOLDS : 'Reopen the desk\'s window on this conversation';
+    const title = r.title ?? (r.spoken ? '(untitled)' : '(nothing said yet)');
+    const marks = [
+      current ? 'current' : null,
+      r.live && !current ? (editor ? 'in your editor' : 'open') : null,
+      r.title_source === 'custom' ? 'named' : null,
+    ].filter(Boolean);
+    return `<button type="button" class="sess-row${current ? ' current' : ''}" data-do="session-resume" data-id="${esc(r.id)}" title="${esc(why)}"${current || editor ? ' disabled' : ''}>
+      <span class="sess-title">${esc(title)}</span>
+      <span class="sess-meta">${esc(agoText(r.last_at ?? r.modified_at))}${marks.length ? ` · ${marks.map(esc).join(' · ')}` : ''}</span>
+    </button>`;
+  }).join('');
+}
+
+function sessionCountText(fm) {
+  const rows = fm.rows ?? [];
+  const q = fm.filter.trim().toLowerCase();
+  const shown = q ? rows.filter((r) => (r.title ?? '').toLowerCase().includes(q)) : rows;
+  const n = rows.length;
+  const base = n === 1 ? '1 conversation' : `${n} conversations`;
+  return `${q ? `${shown.length} of ${base}` : base} · newest first${fm.at ? ` · listed ${agoText(fm.at)}` : ''}`;
+}
+
+function renderSessionDialog() {
+  const fm = ui.sessForm;
+  if (!fm) return;
+  const notes = [];
+  if (fm.error) notes.push(`<b>${esc(fm.error)}</b>`);
+  else if (fm.waiting) notes.push('Asking the host for a fresh list…');
+  else if (fm.note) notes.push(esc(fm.note));
+  notes.push('Picking one closes the desk\'s window and reopens it with <span class="mono">--resume</span>; the conversation carries on where it left off. Refused while a turn is running.');
+  openDialog(`
+    <div class="dlg-head"><h3>Sessions — ${esc(fm.persona)}</h3></div>
+    <p class="dlg-sub">on <span class="mono">${esc(fm.channel)}</span> · <span class="mono">${esc(fm.agent)}</span> · this folder's conversations</p>
+    <label class="field">
+      <span>Filter by title</span>
+      <input id="sess-filter" class="input" type="text" value="${esc(fm.filter)}" placeholder="part of a title" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="dlg-sessions" role="list" aria-label="Conversations">${sessionRowsHtml(fm)}</div>
+    <div class="desk-folder-meta">
+      <span class="sess-count">${esc(sessionCountText(fm))}</span>
+      <button type="button" class="btn" data-do="session-look" title="Ask the host to list this folder's conversations again now">Look again</button>
+    </div>
+    <p class="dlg-note">${notes.join(' ')}</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Close</button>
+      <button type="button" class="btn primary" data-do="session-new" title="Close the desk's window and open a fresh conversation in this folder">Start new</button>
+    </div>
+  `);
+}
+
+// Typing in the filter redraws the rows and the count, never the box.
+el.dlgBody.addEventListener('input', (e) => {
+  if (ui.dlgCtx?.kind !== 'sessions' || !e.target.matches('#sess-filter')) return;
+  const fm = ui.sessForm;
+  if (!fm) return;
+  fm.filter = e.target.value;
+  const list = el.dlgBody.querySelector('.dlg-sessions');
+  if (list) list.innerHTML = sessionRowsHtml(fm);
+  const count = el.dlgBody.querySelector('.sess-count');
+  if (count) count.textContent = sessionCountText(fm);
 });

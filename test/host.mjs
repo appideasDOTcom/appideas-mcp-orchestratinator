@@ -228,7 +228,12 @@ function fixture() {
     // its assertions do not strictly require the delay to hold — which is
     // exactly how this went unnoticed until STARTUP_ASK_FLAG hit the same
     // wall and needed the delay to actually be there.
-    `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
+    // A window started with --resume registers under that id, as Claude Code
+    // does; without one it registers under the fixture's constant, which is
+    // the id a "fresh" conversation flips the desk to.
+    `const resumeAt = process.argv.indexOf('--resume');`,
+    `const MY_ID = resumeAt >= 0 && process.argv[resumeAt + 1] ? process.argv[resumeAt + 1] : SESSION_ID;`,
+    `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: MY_ID, name: 'stand-in' }]));`,
     `const READY_DELAY_FLAG = ${JSON.stringify(`${FIX}/ready-delay.flag`)};`,
     `let readyDelay = 0;`,
     `try { readyDelay = Number(fs.readFileSync(READY_DELAY_FLAG, 'utf8').trim()) || 0; } catch {}`,
@@ -259,6 +264,11 @@ function fixture() {
     `}`,
     `if (readyDelay > 0) setTimeout(announce, readyDelay); else announce();`,
     String.raw`process.stdout.write('\u001b[?2004h');`,
+    // A flag file makes the window look mid-turn: Claude Code's status line
+    // says "esc to interrupt" exactly while it works, and the host reads that
+    // off the pane's bottom line. A reopen must refuse such a window.
+    `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
+    String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
     `let acc = '', composer = '', n = 0;`,
     `process.stdin.on('data', (chunk) => {`,
@@ -584,6 +594,134 @@ try {
   assert(!execFileSync('tmux', ['list-windows', '-t', TMUX_SESSION, '-F', '#{window_name}'], { encoding: 'utf8' }).includes('plain-git'), 'and closed its window');
   assert(!!deskOf(await floor(), 'newbie'), 'the seat stays on the floor — whether the agent is gone is the board\'s question');
 
+  /* ── the session picker and the reopen primitive ────────────────────────────
+   * A desk's folder holds many conversations; the picker lists them and a
+   * pick closes the floor's window and reopens it with --resume. The host
+   * pins the chosen conversation before the new window registers, so a stray
+   * session in the same folder cannot steal the desk meanwhile; a picked
+   * conversation the board has never seen is joined at its tail, a known one
+   * at its end; a fresh one flips the desk to whatever id its window
+   * announces; and a window mid-turn is refused, quoting its status line. */
+  console.log('\nthe session picker and reopening');
+  const SESSION_B = 'bbbbbbbb-2222-3333-4444-555555555555';
+  const transcriptB = `${HOME}/.claude/projects/${slug()}/${SESSION_B}.jsonl`;
+  writeFileSync(transcriptB, [
+    JSON.stringify({ type: 'user', uuid: 'b-u1', timestamp: '2026-09-09T08:00:00Z', message: { content: 'the other conversation begins' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'b-a1', timestamp: '2026-09-09T08:00:05Z', message: { content: [{ type: 'text', text: 'B-TAIL-SEEN' }] } }),
+    '',
+  ].join('\n'));
+  const sessionsGet = () => json(`/api/floor/sessions?channel=${CH}&agent=free`).then((r) => r.json());
+  // The roster as it truly is. The stand-in overwrites roster.json whenever a
+  // window starts and cannot unwrite itself when one is killed, so after the
+  // desk taken and left above it names a dead pane under this same session id
+  // — which holderOf reads, correctly, as an editor holding it. Rebuild it
+  // from the one pane actually running in the repo.
+  const paneIn = (dir) => execFileSync('tmux', ['list-panes', '-s', '-t', TMUX_SESSION, '-F', '#{pane_pid} #{pane_current_path}'], { encoding: 'utf8' })
+    .trim().split('\n').map((l) => l.split(' ')).find(([, d]) => d === dir)?.[0] ?? null;
+  const freePid = Number(paneIn(REPO));
+  assert(freePid > 0, 'a window is open in the repo to begin with');
+  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: freePid, cwd: REPO, kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));
+  await sleep(WATCH_SETTLE_MS);
+  const askList = await json('/api/floor/sessions', { channel: CH, agent: 'free' });
+  eq(askList.status, 200, 'the floor can ask a desk\'s host to list its conversations');
+  eq((await askList.json()).asked, true, 'and the host is asked');
+  const listed = await until(async () => { const g = await sessionsGet(); return g.at ? g : null; }, 15000);
+  assert(!!listed, 'the host answers with a list, stamped with its time');
+  const rowsById = Object.fromEntries((listed?.rows ?? []).map((r) => [r.id, r]));
+  eq(rowsById[SESSION_ID]?.live, true, 'the conversation in the open window is marked live');
+  eq(rowsById[SESSION_ID]?.held, 'floor', 'and held by the floor');
+  eq(listed?.current, SESSION_ID, 'and the board says it is the desk\'s current one');
+  eq([rowsById[SESSION_B]?.title, rowsById[SESSION_B]?.known], ['the other conversation begins', false],
+    'the other conversation is titled by its first prompt and the board has never heard it');
+  eq((await (await json('/api/floor/sessions', { channel: CH, agent: 'free' })).json()).asked, false,
+    'asked again at once, the board serves the list it has rather than walking the folder again');
+
+  // Reopen on B, with the new window slow to register — and a stray session
+  // in the same folder during the gap, which newest-wins would have adopted.
+  // This session's panes only (-s, not -a: -a is every pane on the tmux
+  // server, the live board's included), and none at all in the instant a
+  // reopen has killed the session's last window — tmux drops the session
+  // with it, and the host makes a new one by the same name a moment later.
+  const paneOf = () => {
+    try {
+      return execFileSync('tmux', ['list-panes', '-s', '-t', TMUX_SESSION, '-F', '#{pane_pid}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n').filter(Boolean);
+    } catch { return []; }
+  };
+  const panesBefore = paneOf();
+  const argvAtReopen = argvLog().length;
+  const turnsBeforeB = ((await turns('free')).rows ?? []).length;
+  writeFileSync(`${FIX}/ready-delay.flag`, '3000');
+  const reopened = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
+  eq(reopened.status, 200, 'a pick is accepted');
+  eq((await reopened.json()).known, false, 'and the board says it has never seen that conversation');
+  await sleep(600);   // the old window is closed by now; the new one announces in 3 s
+  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: process.pid, cwd: REPO, kind: 'interactive', startedAt: Date.now() + 5000, sessionId: 'stray-session', name: 'stray' }]));
+  const seenIds = new Set();
+  for (let i = 0; i < 16; i++) { seenIds.add(deskOf(await floor(), 'free')?.hosted?.session_id ?? null); await sleep(150); }
+  assert(!seenIds.has('stray-session'), `a stray session in the folder is not adopted while the reopen is in flight — saw ${[...seenIds].join(', ')}`);
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_B ? true : null), 25000),
+    'and the desk lands on the conversation that was picked');
+  assert(argvLog().slice(argvAtReopen).includes(`--resume ${SESSION_B}`), 'opened with --resume of that id');
+  const panesAfter = paneOf();
+  assert(panesAfter.length === panesBefore.length && !panesAfter.some((p) => panesBefore.includes(p)), 'in a new pane, the old one gone');
+  assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('B-TAIL-SEEN')) ? true : null), 8000),
+    'a conversation the board had never seen is joined at its tail, so its recent past reaches the floor');
+  appendFileSync(transcriptB, `${JSON.stringify({ type: 'assistant', uuid: 'b-a2', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'B-LIVE-TURN' }] } })}\n`);
+  assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('B-LIVE-TURN')) ? true : null), 8000),
+    'and what it says next reaches the floor');
+  appendTurn({ type: 'assistant', uuid: 'a-old', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'A-AFTER-LEAVING' }] } });
+  await sleep(WATCH_SETTLE_MS);
+  assert(!((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('A-AFTER-LEAVING')), 'while the conversation it left is no longer followed');
+  eq((await until(async () => { const g = await sessionsGet(); return g.rows?.some((r) => r.id === SESSION_B && r.known) ? g : null; }, 4000)) !== null, true,
+    'the list now says the board knows that conversation');
+
+  // Known now: reopening it again joins at the end, replaying nothing.
+  rmSync(`${FIX}/ready-delay.flag`, { force: true });
+  const bTailCount = () => turns('free').then((t) => (t.rows ?? []).filter((r) => (r.text ?? '').includes('B-TAIL-SEEN')).length);
+  const tailBefore = await bTailCount();
+  await sleep(6000);   // past the listing throttle, so the reopen's own list is fresh — and past nothing else
+  const secondPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
+  eq((await secondPick.json()).known, true, 'a second pick of the same conversation is one the board knows');
+  assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.session_id === SESSION_B && d?.hosted?.held === 'floor' && !paneOf().some((p) => panesAfter.includes(p)) ? true : null; }, 25000),
+    'and the window is reopened on it');
+  await sleep(WATCH_SETTLE_MS);
+  eq(await bTailCount(), tailBefore, 'with nothing replayed');
+
+  // Mid-turn: a window whose status line says it is working is not closed.
+  // The flag is read when a window starts, so the pick that lands here opens
+  // the window that then refuses the next one.
+  writeFileSync(`${FIX}/busy.flag`, '1');
+  const busyOpen = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
+  eq(busyOpen.status, 200, 'a pick is queued while the window is idle');
+  const idBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
+  assert(await until(async () => { const p = paneOf(); return p.length === panesAfter.length && !p.some((x) => panesAfter.includes(x)) ? true : null; }, 25000),
+    'and lands in a new window — one that now says it is working');
+  await sleep(WATCH_SETTLE_MS);
+  const busyPanes = paneOf();
+  const busyPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID });
+  eq(busyPick.status, 200, 'the board queues the next pick — it cannot see the pane');
+  const errTurn = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /not reopened/.test(r.text ?? '')) ?? null, 15000);
+  assert(!!errTurn, 'the host refuses it as an error turn on the desk');
+  assert(/esc to interrupt/.test(errTurn?.text ?? ''), `quoting the pane's status line — ${errTurn?.text}`);
+  eq(paneOf(), busyPanes, 'and the working window is left exactly as it was');
+  eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_B, `still on its conversation (was ${idBefore})`);
+  rmSync(`${FIX}/busy.flag`, { force: true });
+
+  // A fresh conversation: no --resume, and the desk follows whatever id the
+  // new window announces. The working window is killed by hand first — the
+  // one thing the floor will not do — and the roster it cannot unwrite is
+  // cleared, as the section after this one does for the same reason.
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
+  const argvAtNew = argvLog().length;
+  const fresh = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null });
+  eq(fresh.status, 200, 'start new is accepted');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 25000),
+    'and the desk follows the conversation the new window announces');
+  const newLine = argvLog().slice(argvAtNew).trim().split('\n').pop() ?? '';
+  assert(!newLine.includes('--resume'), `opened with nothing to resume — ${JSON.stringify(newLine)}`);
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
@@ -605,9 +743,10 @@ try {
 
   killTmux();
   // The stand-in writes the roster and cannot unwrite it when the pane is
-  // killed under it. Left behind, its entry is a session with no pane, which
-  // holderOf reads — correctly — as an editor holding the conversation, and
-  // the send is refused before any of this is exercised.
+  // killed under it. The host drops a dead pid from the roster now (it read
+  // one as an editor holding the conversation once, and refused every reopen
+  // after the first), so this is belt and braces: the section starts from a
+  // roster that says what is true.
   writeFileSync(`${FIX}/roster.json`, '[]');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
   writeFileSync(`${FIX}/ready-delay.flag`, '6000');
