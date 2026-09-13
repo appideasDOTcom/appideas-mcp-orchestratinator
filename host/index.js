@@ -982,6 +982,8 @@ class Host {
           type: 'prompt', channel: desk.channel, agent: desk.agent,
           request_id: item.payload?.request_id ?? null,
           options: isForm ? [] : (r.ok ? r.options : []),
+          // The words above a plain menu, when the pane still shows them.
+          asked: isForm ? null : (r.ok ? r.asked ?? null : null),
           questions: isForm ? form.questions : null,
           tabs: isForm ? form.tabs : null,
           reason: r.ok ? null : r.error,

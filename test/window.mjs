@@ -137,6 +137,18 @@ async function main() {
        'nor the MCP approval');
     eq(W.composerOf('nothing on screen at all'), null, 'and a screen with no box at all is null, so the caller falls back to it');
 
+    // The words above the choices, from a single-select AskUserQuestion as
+    // 2.1.258 draws it (captured on a probe window, 2026-09-11). The floor
+    // drew such forms as choices under the tool's name for months.
+    const askForm = [RULE, ' \u2610 Scope', 'Which scope should step one audit?', '\u276f 1. Baseline only', '     Audit just the baseline.',
+      '  2. Everything in the tree', '     Audit everything in the tree.', '  3. Shelve new features', '     Shelve new features.', '  4. Type something.',
+      RULE, '  5. Chat about this', 'Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel'].join('\n');
+    eq(W.promptQuestion(askForm), { header: 'Scope', question: 'Which scope should step one audit?' }, 'the form\'s header and question are read from above its first choice');
+    eq(W.promptQuestion(askForm.split('\n').slice(2).join('\n')), { header: null, question: 'Which scope should step one audit?' }, 'the question alone when the header is off the top');
+    eq(W.promptQuestion(askForm.split('\n').slice(3).join('\n')), null, 'and nothing when the choices are all that is left — a short pane draws a tall form from the bottom up');
+    eq(W.promptQuestion(menu('Do you want to proceed?', '  \u276f 1. Yes', '    2. No')), { header: null, question: 'Do you want to proceed?' }, 'a permission prompt\'s own sentence reads the same way');
+    eq(W.promptOptions(askForm).map((o) => o.n), [1, 2, 3, 4, 5], 'and the choices are still the numbered rows, the extra two included');
+
     /* The composer once a message is queued behind a running turn.
      *
      * Claude Code puts its own prompt where the caret would be, and read as
@@ -711,6 +723,58 @@ async function main() {
     eq(none.id, null, 'with nothing on disk there is nothing to resume');
     assert(/ghost/.test(none.note ?? '') && /new conversation/.test(none.note ?? ''), `and the note says a new one starts — ${none.note}`);
     eq(await W.resumable(bare, null), { id: null, note: null }, 'no pin at all is no fallback: a fresh desk starts fresh, and silently');
+
+    // Which model the window comes up on. A plain `--resume` restores the
+    // conversation's last model over the operator's settings (2.1.258's
+    // restoreModelFromSession — measured 2026-09-14, see defaultModel()), so
+    // open() passes the default as `--model` when the operator has one, and
+    // nothing when they have not.
+    console.log('\n  the model a window is started on');
+    {
+      const fresh = (name) => { const d = `${FIX}/model-${name}`; mkdirSync(d, { recursive: true }); return d; };
+      const argv = (d) => (existsSync(`${d}/argv.txt`) ? readFileSync(`${d}/argv.txt`, 'utf8') : '');
+      const none = fresh('none');
+      eq(W.defaultModel(none), null, 'with no model in any settings file there is no default');
+      const opNone = await W.open(none);
+      assert(opNone.ok && await until(() => existsSync(`${none}/argv.txt`)), `the window opens${opNone.ok ? '' : ` — ${opNone.error}`}`);
+      assert(!/--model/.test(argv(none)), `and no --model is passed — history wins when nothing has said otherwise; argv: ${JSON.stringify(argv(none))}`);
+      eq(opNone.model, null, 'and open() says so');
+
+      mkdirSync(CLAUDE_HOME, { recursive: true });
+      writeFileSync(`${CLAUDE_HOME}/settings.json`, JSON.stringify({ model: 'fable' }));
+      const user = fresh('user');
+      eq(W.defaultModel(user), 'fable', 'the model in ~/.claude/settings.json is the default');
+      const opUser = await W.open(user);
+      assert(opUser.ok && await until(() => /^--model\nfable$/m.test(argv(user))), `and the window is started with --model fable — argv: ${JSON.stringify(argv(user))}`);
+      eq(opUser.model, 'fable', 'and open() reports it');
+
+      const repo = fresh('repo');
+      mkdirSync(`${repo}/.claude`, { recursive: true });
+      writeFileSync(`${repo}/.claude/settings.json`, JSON.stringify({ model: 'opus' }));
+      eq(W.defaultModel(repo), 'opus', "a desk's own .claude/settings.json outranks the user's");
+      writeFileSync(`${repo}/.claude/settings.local.json`, JSON.stringify({ model: 'sonnet' }));
+      eq(W.defaultModel(repo), 'sonnet', 'and its settings.local.json outranks both');
+      writeFileSync(`${repo}/.claude/settings.local.json`, '{not json');
+      eq(W.defaultModel(repo), 'opus', 'a file that will not parse is skipped, not fatal');
+      writeFileSync(`${repo}/.claude/settings.local.json`, JSON.stringify({ model: '  ' }));
+      eq(W.defaultModel(repo), 'opus', 'and so is a blank one');
+      process.env.ORCH_HOST_MODEL = 'haiku';
+      eq(W.defaultModel(repo), 'haiku', 'ORCH_HOST_MODEL pins floor windows over every file');
+      delete process.env.ORCH_HOST_MODEL;
+
+      // With a conversation to resume, the flag follows the id: the stand-in
+      // reads the resumed conversation as `$2`, and so would anything else
+      // that reads the pair off argv.
+      const pinned = fresh('pinned');
+      const pd = W.projectDir(W.canonical(pinned));
+      mkdirSync(pd, { recursive: true });
+      writeFileSync(`${pd}/conv.jsonl`, [rec('user', '2026-09-14T10:00:00Z'), rec('assistant', '2026-09-14T10:00:05Z'), ''].join('\n'));
+      const opPinned = await W.open(pinned, { resume: 'conv' });
+      assert(opPinned.ok && await until(() => /^--resume\nconv\n--model\nfable$/m.test(argv(pinned))), `--resume <id> and then --model — argv: ${JSON.stringify(argv(pinned))}`);
+      eq(opPinned.resumed, 'conv', 'on the pinned conversation');
+      rmSync(`${CLAUDE_HOME}/settings.json`);
+      eq(W.defaultModel(user), null, 'and with the settings file gone the default is gone with it');
+    }
 
     // The session picker's list. Titles are Claude Code's own records —
     // custom over AI over the first prompt — read from the head and the tail

@@ -97,6 +97,51 @@ const PASTE_TIMEOUT_MS = Number(process.env.ORCH_PASTE_TIMEOUT_MS ?? 60_000);
 const CLAUDE_HOME = process.env.ORCH_CLAUDE_HOME ?? join(homedir(), '.claude');
 
 /**
+ * The model a window is started on — the operator's default, when they have
+ * said what it is — and null when nothing has.
+ *
+ * A bare `claude --resume <id>` comes up on whatever model answered that
+ * conversation last, not on the default. On 2.1.258 that is
+ * restoreModelFromSession: it walks the transcript backwards to the last
+ * assistant record's `message.model` and installs it, and it stands aside
+ * (startupModelWinsOverSessionRestore) only for a model given at startup —
+ * the `--model` flag or an ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL
+ * variable. The `model` in settings.json is not on that list. So a desk
+ * created on Opus and moved to Fable with /model came back on Opus at every
+ * reopen from the floor, and the switch only ever lived in the process just
+ * detached from (reported 2026-09-14). Measured the same day on a throwaway
+ * window with settings saying fable: `--model opus` answered on Opus,
+ * `--resume <id>` answered on Opus, `--resume <id> --model fable` answered on
+ * Fable. open() passes what this returns as `--model`, which is the one form
+ * of "your default" that resume respects.
+ *
+ * The default is read from where Claude Code keeps it rather than pinned
+ * here, in Claude Code's own order — the desk's .claude/settings.local.json,
+ * its .claude/settings.json, then ~/.claude/settings.json — so changing it
+ * is one edit in one file, and a repo that names its own model keeps it.
+ * With no `model` anywhere there is no default to open on and no flag is
+ * passed: history wins, as before, which is the right answer when nothing
+ * has said otherwise. ORCH_HOST_MODEL pins floor windows over all of that,
+ * read per call so a test can flip it.
+ */
+export function defaultModel(cwd) {
+  const pinned = process.env.ORCH_HOST_MODEL?.trim();
+  if (pinned) return pinned;
+  const files = [
+    join(cwd, '.claude', 'settings.local.json'),
+    join(cwd, '.claude', 'settings.json'),
+    join(CLAUDE_HOME, 'settings.json'),
+  ];
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    let model;
+    try { model = JSON.parse(readFileSync(file, 'utf8'))?.model; } catch { continue; }
+    if (typeof model === 'string' && model.trim()) return model.trim();
+  }
+  return null;
+}
+
+/**
  * tmux exits non-zero for ordinary answers ("no such session"), so callers
  * that are asking a question rather than giving an order use `ok: false`
  * instead of catching. Only a missing tmux binary is worth reporting up.
@@ -1195,7 +1240,15 @@ export async function open(cwd, { resume = null } = {}) {
   // "No conversation found with session ID" and exit, and the window dies on
   // its first line with the desk's own conversation sitting one file over.
   const pick = await resumable(here, resume);
-  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE, ...(pick.id ? ['--resume', pick.id] : [])]
+  // And which model it comes up on: the operator's default, passed as
+  // `--model`, because a resume on its own restores the conversation's last
+  // model over the settings file — see defaultModel(). After `--resume <id>`
+  // rather than before: claude does not care where the flag sits, and the
+  // test stand-in reads the resumed id as `$2`.
+  const model = defaultModel(here);
+  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE,
+    ...(pick.id ? ['--resume', pick.id] : []),
+    ...(model ? ['--model', model] : [])]
     .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
     .join(' ');
 
@@ -1237,7 +1290,7 @@ export async function open(cwd, { resume = null } = {}) {
     pick.note,
     released ? `${pick.id ?? resume} was running in the background as ${released.job}, with no window the floor could type into; stopped that and opened it here.` : null,
   ].filter(Boolean).join(' ') || null;
-  return { ok: true, target: target.trim(), pid: Number(pid) || null, created: true, resumed: pick.id, note };
+  return { ok: true, target: target.trim(), pid: Number(pid) || null, created: true, resumed: pick.id, model, note };
 }
 
 /**
@@ -1472,6 +1525,37 @@ async function joinedScreenOf(target) {
   return r.ok ? r.out : '';
 }
 
+/**
+ * The words above the choices: a form's header (` ☐ Scope`) and the question
+ * under it, read from the lines between the last rule and the first numbered
+ * choice. Measured on 2.1.258 (2026-09-11): a single-select AskUserQuestion
+ * draws exactly that — rule, ` ☐ Scope`, `Which scope should step one
+ * audit?`, then `❯ 1. …`. Null when nothing readable stands there, which is
+ * what a short pane leaves: a form taller than the pane is drawn from the
+ * bottom up and its top is never written anywhere, so the hook's own copy of
+ * the words (tool_input.questions) is the one that survives that case.
+ */
+export function promptQuestion(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  const first = lines.findIndex((l) => /^\s*[\u276f>]?\s*1\.\s+\S/.test(l));
+  if (first < 0) return null;
+  let header = null;
+  const said = [];
+  for (let i = first - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (!l.trim()) continue;
+    if (/^[\s\u2500\u2501\u2504\u2508-]+$/.test(l)) break;   // the rule above the form
+    if (/^\s*\u2190/.test(l)) break;                            // a tab strip: a form the walk reads
+    const h = /^\s*[\u2610\u2612]\s+(.+)$/.exec(l);
+    if (h) { header = h[1].trim(); break; }
+    if (/esc to interrupt|enter to (select|confirm)/i.test(l)) break;
+    said.unshift(l.trim());
+  }
+  const question = said.join(' ').replace(/\s+/g, ' ').trim() || null;
+  if (!question && !header) return null;
+  return { header, question };
+}
+
 /** The numbered choices on a screen, in order, with their text. */
 export function promptOptions(screen) {
   const out = [];
@@ -1501,11 +1585,12 @@ export async function readPrompt(cwd) {
   if (!askingOf(await screenOf(pane.target))) {
     return { ok: false, code: 'no_prompt', error: 'the window is not holding a question — nothing is being asked' };
   }
-  const options = promptOptions(await joinedScreenOf(pane.target));
+  const joined = await joinedScreenOf(pane.target);
+  const options = promptOptions(joined);
   if (!options.length) {
     return { ok: false, code: 'no_prompt', error: 'the window is waiting on something, but it is not a list of choices' };
   }
-  return { ok: true, options };
+  return { ok: true, options, asked: promptQuestion(joined) };
 }
 
 /**

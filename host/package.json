@@ -1,6 +1,6 @@
 {
   "name": "orchestratinator-host",
-  "version": "0.10.3",
+  "version": "0.10.5",
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",

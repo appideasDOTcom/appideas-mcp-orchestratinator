@@ -253,6 +253,46 @@ async function main() {
     eq(received[0].body?.cwd, `${FIX}/repo`, 'filed under the repo, not under wherever it was standing');
     eq(received[0].body?.tool_name, 'Bash', 'with the event’s own fields intact');
 
+    // ---- a session standing in another desk's repo is still its own ----
+    // The QA agent works inside the repo it audits, so every hook it fires has
+    // that repo as cwd; the walk found that repo's binding and filed the QA
+    // session — its prompts included — under the other desk, while its own
+    // desk fell silent for four days (2026-09-11). The transcript path names
+    // the folder a session started in, and that is what a session is.
+    received.length = 0;
+    const transcriptFor = (dir, sid) => `${FIX}/.claude/projects/${realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-')}/${sid}.jsonl`;
+    await fire({ session_id: 'qa-session', hook_event_name: 'SessionStart', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/repo`, 'qa-session') });
+    await settle();
+    received.length = 0;
+    await fire({ session_id: 'qa-session', hook_event_name: 'Notification', notification_type: 'permission_prompt', cwd: `${FIX}/bothrepo`, transcript_path: transcriptFor(`${FIX}/repo`, 'qa-session') });
+    await settle();
+    eq(received.length, 1, 'a prompt raised while standing in another desk\'s repo is reported');
+    eq(received[0].body?.agent, AGENT, 'as the desk the session started in, not the one it is standing in');
+    eq(received[0].body?.cwd, `${FIX}/repo`, 'and filed under its own repo');
+    eq(readMemo()?.['qa-session']?.root, `${FIX}/repo`, 'and its memo still says its own repo — never overwritten by where it stood');
+    received.length = 0;
+    await fire({ session_id: 'local-qa', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/localrepo`, 'local-qa') });
+    await settle();
+    eq(received[0]?.body?.agent, 'local-agent', 'a local-scope desk\'s session is found by its transcript alone, with no memo and no walk');
+    received.length = 0;
+    mkdirSync(`${FIX}/repo/src`, { recursive: true });
+    await fire({ session_id: 'sub-session', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo/src`, transcript_path: transcriptFor(`${FIX}/repo/src`, 'sub-session') });
+    await settle();
+    eq(received[0]?.body?.agent, AGENT, 'a session started in a subfolder of its repo is that repo\'s');
+    received.length = 0;
+    await fire({ session_id: 'scratch-session', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/elsewhere`, 'scratch-session') });
+    await settle();
+    eq(received.length, 0, 'a session that started outside every desk reports nothing, however deep in a desk\'s repo it is standing');
+
+    // ---- a question's words travel with it ----
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'PermissionRequest', cwd: `${FIX}/repo`, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which scope should step one audit?', header: 'Scope', multiSelect: false, options: [{ label: 'Baseline only', description: 'Audit just the baseline.' }, { label: 'Everything' }] }, { not: 'a question' }] } });
+    await settle();
+    eq(received[0]?.body?.tool_input?.questions?.map((q) => `${q.header}|${q.question}|${q.options.length}`), ['Scope|Which scope should step one audit?|2'],
+      'an AskUserQuestion carries its questions, headers and options — the floor drew choices under the tool\'s name without them');
+    assert(!('not' in (received[0]?.body?.tool_input?.questions?.[1] ?? {})), 'and nothing that is not a question');
+
     // ---- what must never be reported ----
     received.length = 0;
     await fire({ session_id: 'a-session-never-seen-in-a-repo', hook_event_name: 'PermissionRequest', cwd: `${FIX}/elsewhere`, tool_name: 'Bash' });

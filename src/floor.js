@@ -682,6 +682,20 @@ export function promptChoices(options) {
 
 function toolSummary(toolName, toolInput) {
   const i = toolInput && typeof toolInput === 'object' ? toolInput : {};
+  // A question is summarised by its words, not by the tool's name: "Scope:
+  // which scope should step one audit?" is what the desk shows above the
+  // choices, and "AskUserQuestion" was what it showed for months.
+  if (toolName === 'AskUserQuestion' && Array.isArray(i.questions) && i.questions.length) {
+    const asked = i.questions.map((q) => {
+      const head = str(q?.header);
+      const text = str(q?.question);
+      return text ? (head ? `${head}: ${text}` : text) : null;
+    }).filter(Boolean);
+    if (asked.length) {
+      const line = asked.join(' · ').replace(/\s+/g, ' ').trim();
+      return line.length > 300 ? `${line.slice(0, 300)}…` : line;
+    }
+  }
   const first =
     str(i.command) ??
     str(i.file_path) ??
@@ -1319,6 +1333,18 @@ function applyHostEvent(store, live, hostId, ev) {
         console.log(`[orchestratinator] ${channel}/${agent}: a form of ${ev.questions.length} question(s) attached to the open prompt`);
       }
       req.options = Array.isArray(ev.options) ? ev.options.filter((o) => o && Number.isInteger(o.n)) : [];
+      // The question's own words, when the pane still showed them above the
+      // choices. They replace a summary that is only the tool's name — the
+      // hook's copy, when it carried one, already reads better than that and
+      // is kept. A desk that drew choices under "AskUserQuestion" for months
+      // was this line missing (2026-09-11).
+      const askedText = ev.asked && typeof ev.asked === 'object'
+        ? [str(ev.asked.header), str(ev.asked.question)].filter(Boolean).join(': ')
+        : null;
+      if (askedText && (!req.summary || req.summary === req.tool)) {
+        req.summary = clip(askedText, 500);
+        store.setDeskAwaiting(channel, agent, 'permission_request', clip(askedText, 500));
+      }
       // An AskUserQuestion is a form rather than one menu: a tab per question,
       // each with its own choices. Carried whole so the panel can draw all of it
       // and the operator answers once, instead of the floor driving a terminal

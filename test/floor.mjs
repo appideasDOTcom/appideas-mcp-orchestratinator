@@ -815,6 +815,12 @@ try {
   await register({ channel: CH, agent: 'ticker', cwd: '/repo/ticker', window: '@41' });
   await hostEvents([{ type: 'session', channel: CH, agent: 'ticker', session_id: 's-tick', cwd: '/repo/ticker' }]);
   await post(ev('ticker', 's-tick', 'SessionStart'));
+  // A question is summarised by its words. The hook carries them since
+  // 2026-09-11; before that the desk drew the choices under "AskUserQuestion".
+  await post(ev('asker', 's-ask', 'PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Which scope should step one audit?', header: 'Scope', options: [{ label: 'Baseline only' }] }] } }));
+  const askDesk = deskOf(await floor(), 'asker');
+  eq(askDesk?.permission?.summary, 'Scope: Which scope should step one audit?', 'a question\'s prompt is summarised by its header and words, not the tool\'s name');
+  eq(askDesk?.session?.awaiting_message, 'Scope: Which scope should step one audit?', 'and the desk\'s awaiting line says the same');
   await post(ev('ticker', 's-tick', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }));
   let ft = await floor();
   const startedAt = deskOf(ft, 'ticker').session.awaiting_since;
