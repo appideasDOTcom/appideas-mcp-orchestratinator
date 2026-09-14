@@ -28,9 +28,9 @@
  * to talk to its floor. A directory with no such file is not part of this system
  * and is skipped, which is what keeps unrelated projects off the board.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const TIMEOUT_MS = Number(process.env.ORCH_FLOOR_TIMEOUT_MS ?? 2000);
 /** How far up from cwd to look for `.mcp.json`, for sessions that have cd'd. */
@@ -64,26 +64,71 @@ function header(headers, name) {
   return null;
 }
 
+/** The orchestratinator entry in a set of MCP servers, or null. An entry
+ *  qualifies only if it carries both X-Channel and X-Agent — that pair is the
+ *  orchestratinator's signature, and matching on it rather than on a server
+ *  name means a repo can call the entry whatever it likes. */
+function identityIn(servers) {
+  for (const s of Object.values(servers && typeof servers === 'object' ? servers : {})) {
+    const channel = header(s?.headers, 'X-Channel');
+    const agent = header(s?.headers, 'X-Agent');
+    if (channel && agent && typeof s?.url === 'string') {
+      return { channel, agent, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key') };
+    }
+  }
+  return null;
+}
+
+/** The resolved spelling of a path, or the path itself when it has none.
+ *  Claude Code keys `projects` by the resolved path (a cwd of /tmp/x is filed
+ *  under /private/tmp/x), and the event's cwd may be spelled either way. */
+function real(dir) {
+  try { return realpathSync(dir); } catch { return dir; }
+}
+
 /**
- * Walk up from the session's directory for the `.mcp.json` that names this repo's
- * place on the board. An entry qualifies only if it carries both X-Channel and
- * X-Agent — that pair is the orchestratinator's signature, and matching on it
- * rather than on a server name means a repo can call the entry whatever it likes.
+ * Every directory bound in Claude Code's local scope — `~/.claude.json` →
+ * `projects[dir].mcpServers`, which is what `claude mcp add -s local` writes
+ * and what the floor binds a desk with (docs/desk-from-the-floor.md).
+ * `CLAUDE_CONFIG_DIR` moves the file, so it is honoured. Read once per event;
+ * a file that is absent, mid-rewrite, or broken yields an empty map and the
+ * walk below falls back to `.mcp.json` alone — never half of something.
  */
-function findIdentity(startDir) {
+function readLocalScope() {
+  const out = new Map();
+  let projects;
+  try {
+    projects = JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR ?? homedir(), '.claude.json'), 'utf8'))?.projects;
+  } catch {
+    return out;
+  }
+  if (!projects || typeof projects !== 'object') return out;
+  for (const [dir, p] of Object.entries(projects)) {
+    const id = identityIn(p?.mcpServers);
+    if (id) out.set(dir, id);
+  }
+  return out;
+}
+
+/**
+ * Walk up from the session's directory for the binding that names this repo's
+ * place on the board. At each level the local-scope entry is read before the
+ * directory's `.mcp.json`, because that is Claude Code's own precedence: when
+ * both exist, local is the one the window connects with (measured 2026-09-09
+ * — `whoami` answers the local identity whatever the file says). The host's
+ * `readDesk` in host/identity.js applies the same rule; they cannot share
+ * code, so a change here is a change there.
+ */
+function findIdentity(startDir, local = readLocalScope()) {
   let dir = resolve(startDir);
   for (let i = 0; i < MAX_LEVELS; i++) {
+    const mine = local.get(dir) ?? local.get(real(dir));
+    if (mine) return { ...mine, root: dir };
     const file = join(dir, '.mcp.json');
     if (existsSync(file)) {
       try {
-        const servers = JSON.parse(readFileSync(file, 'utf8'))?.mcpServers ?? {};
-        for (const s of Object.values(servers)) {
-          const channel = header(s?.headers, 'X-Channel');
-          const agent = header(s?.headers, 'X-Agent');
-          if (channel && agent && typeof s?.url === 'string') {
-            return { channel, agent, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key'), root: dir };
-          }
-        }
+        const id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers);
+        if (id) return { ...id, root: dir };
       } catch {
         // A malformed .mcp.json is already breaking this person's MCP connection
         // and they will hear about it from somewhere that can actually help.
@@ -92,6 +137,45 @@ function findIdentity(startDir) {
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
+  }
+  return null;
+}
+
+/** Claude Code's own directory name for a folder: every character that is not
+ *  a letter or digit becomes a dash. The host's projectSlug is the same rule. */
+const slugOf = (dir) => dir.replace(/[^A-Za-z0-9]/g, '-');
+
+/**
+ * The folder a session started in, read off its transcript path.
+ *
+ * Claude Code keeps every transcript under
+ * `~/.claude/projects/<slug of the folder the session started in>/`, so that
+ * directory name is the one fact about a session that does not move with it.
+ * The walk from `cwd` is not: an agent that works inside another desk's repo
+ * — a QA agent auditing the app it sits beside — fires every hook from that
+ * repo, the walk finds that repo's binding, and the session is filed under the
+ * other desk. Its prompts land on a desk whose window never asked them, and
+ * its own desk falls silent; measured 2026-09-11, four days of it.
+ *
+ * The slug is lossy, so it is matched rather than inverted: against the folder
+ * the event stands in and each folder above it (a session started in a
+ * subfolder of its repo), then against every local-scope desk. A slug that
+ * matches none of those is a session that started somewhere the walk cannot
+ * see from here — its memo says where, if it was ever seen there.
+ */
+function startDirOf(ev, cwd, local) {
+  const path = typeof ev.transcript_path === 'string' ? ev.transcript_path : '';
+  const slug = path ? basename(dirname(path)) : '';
+  if (!slug) return null;
+  let dir = resolve(cwd);
+  for (;;) {
+    if (slugOf(dir) === slug || slugOf(real(dir)) === slug) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  for (const known of local.keys()) {
+    if (slugOf(known) === slug || slugOf(real(known)) === slug) return known;
   }
   return null;
 }
@@ -186,6 +270,22 @@ function reduceToolInput(input) {
   for (const k of TOOL_INPUT_KEYS) {
     if (typeof input[k] === 'string' && input[k].trim()) out[k] = clip(input[k], 300);
   }
+  // An AskUserQuestion's words. The floor used to draw its choices with no
+  // question above them — the host reads the choices off the pane, and this
+  // was the only carrier of the question, dropped here (2026-09-11). Bounded
+  // the same way as everything else in this payload.
+  if (Array.isArray(input.questions)) {
+    const qs = input.questions.slice(0, 8).map((q) => (q && typeof q === 'object' ? {
+      question: clip(typeof q.question === 'string' ? q.question : '', 500),
+      header: clip(typeof q.header === 'string' ? q.header : '', 60),
+      multiSelect: q.multiSelect === true,
+      options: Array.isArray(q.options) ? q.options.slice(0, 12).map((o) => ({
+        label: clip(typeof o?.label === 'string' ? o.label : '', 120),
+        description: clip(typeof o?.description === 'string' ? o.description : '', 300),
+      })) : [],
+    } : null)).filter((q) => q && q.question);
+    if (qs.length) out.questions = qs;
+  }
   return Object.keys(out).length ? out : null;
 }
 
@@ -203,16 +303,34 @@ async function main() {
   const cwd = typeof ev.cwd === 'string' && ev.cwd ? ev.cwd : process.cwd();
   const sessionId = typeof ev.session_id === 'string' ? ev.session_id : null;
 
-  // Where the session is now, or failing that, where it was when it last stood
-  // somewhere that could answer the question. SessionStart fires in the repo, so
-  // by the time a session has wandered there is something to fall back on.
-  let id = findIdentity(cwd);
-  if (id && sessionId) remember(sessionId, id.root);
-  if (!id && sessionId) {
-    const root = readMemo()[sessionId]?.root;
-    // Re-resolved rather than replayed: a remembered repo whose .mcp.json has
+  // Which desk this session is. Its transcript path names the folder it
+  // started in (startDirOf), and that outranks wherever it is standing now:
+  // the walk from cwd files a session standing in another desk's repo under
+  // that desk. With the start folder known, the identity is the binding at or
+  // above it; a session whose start folder matches nothing visible from here
+  // has its memo — written only from a start folder, so it cannot be wrong
+  // about which desk — and a memo whose folder is not the one the transcript
+  // names is stale and ignored. Without a transcript path (an older payload),
+  // the walk from cwd stands, with the memo behind it.
+  const local = readLocalScope();
+  const transcriptSlug = typeof ev.transcript_path === 'string' && ev.transcript_path ? basename(dirname(ev.transcript_path)) : null;
+  let id = null;
+  const start = startDirOf(ev, cwd, local);
+  if (start) {
+    id = findIdentity(start, local);
+    if (id && sessionId) remember(sessionId, id.root);
+  } else if (transcriptSlug) {
+    const root = sessionId ? readMemo()[sessionId]?.root : null;
+    // Re-resolved rather than replayed: a remembered repo whose binding has
     // since gone is a repo that has left the board, and should report nothing.
-    if (root) id = findIdentity(root);
+    if (root && (slugOf(root) === transcriptSlug || slugOf(real(root)) === transcriptSlug)) id = findIdentity(root, local);
+  } else {
+    id = findIdentity(cwd, local);
+    if (id && sessionId) remember(sessionId, id.root);
+    if (!id && sessionId) {
+      const root = readMemo()[sessionId]?.root;
+      if (root) id = findIdentity(root, local);
+    }
   }
   // Not an orchestratinator repo, and never was one. This is the common case
   // across a machine and is exactly how a user-level install stays out of

@@ -330,6 +330,11 @@ export function openDb(path) {
   // rather than of this desk, carried per desk because that is the row the
   // floor already reads. It is the receipt an attach spins against.
   addColumn(db, 'hosted_desks', 'clients', 'INTEGER');
+  // Where the desk's binding was read from: 'local' (Claude Code's own
+  // ~/.claude.json, what the floor writes) or 'project' (the repo's
+  // .mcp.json). Says which file a person should look in, and which one a
+  // leave takes the entry out of.
+  addColumn(db, 'hosted_desks', 'scope', 'TEXT');
 
   migratePersonas(db);
   migrateAgentNames(db);
@@ -966,6 +971,10 @@ export function makeStore(db) {
       `SELECT COUNT(*) AS n, MAX(created_at) AS last_at FROM turns
         WHERE channel = ? AND agent = ? AND session_id IN (SELECT value FROM json_each(?))`
     ),
+    // Which conversations the board has heard at all, for the session picker
+    // to say "known" — a reopen of one of these joins at the end rather than
+    // replaying a tail the panel already shows.
+    sessionsWithTurns: db.prepare(`SELECT DISTINCT session_id FROM turns WHERE channel = ? AND agent = ?`),
     // The newest turn carrying text, per desk — what the avatar's bubble says.
     lastTurns: db.prepare(
       `SELECT t.channel, t.agent, t.role, t.text, t.tool_name, t.via, t.created_at, t.id
@@ -1109,12 +1118,15 @@ export function makeStore(db) {
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
-      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, window_open, holders, state, updated_at)
-       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, @window_open, @holders, 'idle', datetime('now'))
+      // scope is kept when a registration does not name one — an older host
+      // sends none — rather than blanked.
+      `INSERT INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, window_open, holders, scope, state, updated_at)
+       VALUES (@channel, @agent, @host_id, @cwd, @window_id, @outside_pid, @window_open, @holders, @scope, 'idle', datetime('now'))
        ON CONFLICT(channel, agent) DO UPDATE SET
          host_id = excluded.host_id, cwd = excluded.cwd,
          window_id = excluded.window_id, outside_pid = excluded.outside_pid,
          window_open = excluded.window_open, holders = excluded.holders,
+         scope = COALESCE(excluded.scope, hosted_desks.scope),
          state = 'idle', updated_at = datetime('now')`
     ),
     setHostedHolder: db.prepare(
@@ -1141,14 +1153,14 @@ export function makeStore(db) {
     ),
     listHostedDesks: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
-              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients,
+              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
     hostedDesk: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
-              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients,
+              d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id
@@ -1186,6 +1198,11 @@ export function makeStore(db) {
    * nothing on the board either: listAllChannels doesn't read this table, so the
    * channel still disappears — the log just goes on remembering you deleted it.
    */
+  const unseat = db.transaction((channel, agent) => {
+    db.prepare('DELETE FROM personas WHERE channel = ? AND agent = ?').run(channel, agent);
+    db.prepare('DELETE FROM hosted_desks WHERE channel = ? AND agent = ?').run(channel, agent);
+  });
+
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
@@ -1376,6 +1393,10 @@ export function makeStore(db) {
 
     // --- operator actions -----------------------------------------------------
     retireAgent: (channel, agent) => q.retireAgent.run({ channel, agent }).changes,
+    /** A desk moved to another floor leaves its old seat and its old hosted
+     *  row behind; both go, in one step, so the old floor does not keep an
+     *  empty desk for a folder that now sits somewhere else. */
+    unseat: (channel, agent) => unseat(channel, agent),
     unretireAgent: (channel, agent) => q.unretireAgent.run({ channel, agent }).changes,
     reassignTask: (channel, id, assignee) => q.reassignTask.run({ channel, id, assignee }).changes,
     setChannelArchived: (channel, archived, by) =>
@@ -1474,6 +1495,7 @@ export function makeStore(db) {
     },
     turnsInSessions: (channel, agent, sessions) =>
       q.turnsInSessions.get(channel, agent, JSON.stringify(sessions ?? [])),
+    sessionsWithTurns: (channel, agent) => q.sessionsWithTurns.all(channel, agent).map((r) => r.session_id),
     setAwaiting: (sessionId, kind, message = null) =>
       q.setAwaiting.run({ session_id: sessionId, kind, message }).changes,
     clearAwaiting: (sessionId) => q.clearAwaiting.run({ session_id: sessionId }).changes,
@@ -1544,10 +1566,10 @@ export function makeStore(db) {
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>
       q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid, window_open: windowOpen, holders, clients }).changes,
-    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null, windowOpen = null, holders = 0 } = {}) =>
+    hostDesk: (channel, agent, hostId, cwd, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, scope = null } = {}) =>
       q.upsertHostedDesk.run({
         channel, agent, host_id: hostId, cwd, window_id: windowId, outside_pid: outsidePid,
-        window_open: windowOpen, holders,
+        window_open: windowOpen, holders, scope,
       }).changes,
     setHostedSession: (channel, agent, sdkSessionId) =>
       q.setHostedSession.run({ channel, agent, sdk_session_id: sdkSessionId }).changes,

@@ -127,6 +127,14 @@ this file.
 
 ## Notes & limits
 
+**The floor can put a desk in any folder on a host.** "Take a desk" browses
+the host's disk from its home folder — anything the host's user can read —
+and binds the folder it is standing in. The `roots` in `host.json` are where
+the host looks for desks on its own, not a limit on what may be picked. They
+were a fence once (2026-09-10); it went, because the board runs on localhost
+and that is the security model this file describes.
+
+
 - **The network is the boundary. There is no second one for the dashboard.**
   The shared secret keeps a casual port-scan off `/mcp`, but it's one static
   key for every agent, and the board itself asks for nothing at all. Do not put

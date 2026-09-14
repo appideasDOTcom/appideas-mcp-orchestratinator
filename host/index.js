@@ -34,12 +34,13 @@
  *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
  *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { discoverDesks, originOf } from './identity.js';
+import { discover, listFolder, originOf } from './identity.js';
 import * as W from './window.js';
+import * as M from './mcp.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
 /** How long a queued permission answer stays worth delivering. */
@@ -50,6 +51,11 @@ const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
 const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
+// How much of a conversation the board has never seen goes up when it is
+// reopened from the picker — see Desk.follow's 'tail'.
+const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
+// The picker's list: newest first, by file. See sessionsIn in window.js.
+const SESSIONS_LIMIT = Number(process.env.ORCH_SESSIONS_LIMIT ?? 30);
 const REQUEST_TIMEOUT_MS = 5_000;
 
 /**
@@ -96,8 +102,15 @@ function loadConfig() {
     .filter(Boolean);
   return {
     roots,
+    // Where the roots came from, because a folder taken from the picker
+    // outside them is added to them — in memory always, and in the file when
+    // the file is what they were read from. See Host.addRoot.
+    rootsFrom: process.env.ORCH_HOST_ROOTS ? 'ORCH_HOST_ROOTS' : 'file',
     url: process.env.ORCH_URL ?? file.url ?? null,
     token: process.env.ORCH_AUTH_TOKEN ?? file.token ?? null,
+    // Where the token came from, for the log and for rescan(): a desk's own
+    // key outranks both of these, and only these — see main().
+    tokenSource: process.env.ORCH_AUTH_TOKEN ? 'ORCH_AUTH_TOKEN' : file.token ? `token in ${CONFIG_FILE}` : null,
     name: process.env.ORCH_HOST_NAME ?? file.name ?? hostname(),
     hostId: process.env.ORCH_HOST_ID ?? file.host_id ?? hostname(),
   };
@@ -112,10 +125,15 @@ function loadConfig() {
  * turn twice.
  */
 class Desk {
-  constructor(host, { channel, agent, cwd }) {
+  constructor(host, { channel, agent, cwd, scope = 'project' }) {
     this.host = host;
     this.channel = channel;
     this.agent = agent;
+    // Where the binding was read from: 'local' (Claude Code's own
+    // ~/.claude.json, what the floor writes) or 'project' (the repo's
+    // .mcp.json). Reported to the board so the floor can say which file to
+    // look in, and so an unbind knows which one to take the entry out of.
+    this.scope = scope;
     // Canonical, because everything downstream matches this against the cwd
     // Claude Code reports and against the transcript path derived from it, and
     // a repo reached through a symlink is spelled two ways. See canonical().
@@ -142,6 +160,12 @@ class Desk {
     // from one that was already running, which is joined at its current end so
     // that hours of history are not replayed onto the floor.
     this.since = Date.now();
+    // A reopen in flight: the conversation the operator chose, and the pid of
+    // the window opened for it once known. While it stands, watch() adopts
+    // only that session — see the intent rule there — and it expires on the
+    // readiness budget so a window that never registers cannot freeze the
+    // desk on a conversation nothing is running.
+    this.intent = null;
   }
 
   get label() { return `${this.channel}/${this.agent}`; }
@@ -163,16 +187,27 @@ class Desk {
    * watch interval; the next tick then moves the offset past it and the floor
    * never sees the message it just sent.
    */
-  async follow(id, fromStart = false) {
+  async follow(id, mode = 'end') {
+    // Three places to join a conversation. 'start' is its first word, for one
+    // that began after this desk did. 'end' is where it stands now, for one
+    // already running or one whose turns the board holds — nothing dedups a
+    // replay. 'tail' is its recent past, for a conversation the operator
+    // picked that the board has never seen: the last 64 KB go up so the panel
+    // opens on a conversation rather than on nothing. A mid-line offset is
+    // safe — readTranscript drops the partial line it lands in. The booleans
+    // are the older callers' spelling of the first two.
+    if (mode === true) mode = 'start';
+    else if (mode === false) mode = 'end';
     this.lastSessionId = id;
     this.subOffsets = new Map();
     if (!id) { this.offset = 0; return; }
     const path = W.transcriptPath(this.cwd, id);
-    this.offset = fromStart ? 0 : await W.transcriptSize(path);
+    const size = await W.transcriptSize(path);
+    this.offset = mode === 'start' ? 0 : mode === 'tail' ? Math.max(0, size - TAIL_BYTES) : size;
     // Subagent files already on disk are joined at their end for the reason
     // the main transcript is; ones that appear later are new, and are read
     // from their first word.
-    if (!fromStart) {
+    if (mode !== 'start') {
       for (const sub of await W.subagentTranscripts(path)) this.subOffsets.set(sub.path, await W.transcriptSize(sub.path));
     }
   }
@@ -194,8 +229,39 @@ class Desk {
     // stopped running. Which is what the paragraph above follow() has always
     // claimed happens — "a conversation that changes underneath is not a
     // handoff to negotiate; it is simply the conversation now".
+    //
+    // Except while a reopen is in flight. Its window is closed and the next
+    // one is not registered yet, and in that gap the rule above would adopt
+    // whatever else is live in this folder — a stray editor session, say —
+    // and steal the pin from the conversation the operator just chose. So an
+    // unexpired intent adopts only the session that is its own: the pid the
+    // host opened, or the id it asked for. A fresh conversation has no id
+    // until it registers, which is what the pid is for. Expired, it is let
+    // go and said so, and newest-wins resumes.
+    if (this.intent) {
+      const it = this.intent;
+      if (Date.now() > it.until) {
+        warn(`${this.label}: the reopened window did not register within ${Math.round((it.until - it.since) / 1000)}s — following whatever is live here now`);
+        this.intent = null;
+      } else {
+        const mine = live.find((x) => (it.pid && x.pid === it.pid) || (it.sessionId && x.sessionId === it.sessionId)) ?? null;
+        if (mine) {
+          if (mine.sessionId !== this.lastSessionId) {
+            // A new conversation has no transcript when its window registers
+            // — Claude Code writes the file at the first prompt — so it is
+            // read from its first word. An id that already has words behind
+            // it is not new, whatever the window says (a stand-in reusing one
+            // id did exactly this), and reading it from the start replays
+            // what the board holds.
+            const fresh = (await W.transcriptSize(W.transcriptPath(this.cwd, mine.sessionId))) === 0;
+            await this.follow(mine.sessionId, fresh ? 'start' : 'end');
+          }
+          this.intent = null;
+        }
+      }
+    }
     const pinnedLive = this.lastSessionId && live.some((x) => x.sessionId === this.lastSessionId);
-    if (!pinnedLive && live.length) {
+    if (!this.intent && !pinnedLive && live.length) {
       const newest = live.reduce((a, b) => ((b.startedAt ?? 0) > (a.startedAt ?? 0) ? b : a));
       if (newest.sessionId !== this.lastSessionId) {
         // Read from the first word if it began after we got here, and from the
@@ -307,12 +373,60 @@ class Desk {
     }
   }
 
+  /**
+   * The conversation to hand `--resume`, checked against the disk first.
+   *
+   * The pin is what the board holds for this desk, and it can name a session
+   * that never wrote a transcript — the reasoning is on resumable() in
+   * window.js. When the pin is not the conversation that opens, that is said
+   * here, twice: in this log, and on the floor as a line labeled `host`, so
+   * the desk does not simply appear to have changed its mind about which
+   * conversation it is. Filed under the conversation it leads into.
+   */
+  async resumeId() {
+    // A conversation that is running is the conversation, transcript or not:
+    // a window just opened from the floor has a session and no file yet, and
+    // checking the disk for it would announce a fallback about a desk whose
+    // window is right there. The check is for a pin nothing is running.
+    if (this.sessionId) return this.sessionId;
+    const pinned = this.lastSessionId;
+    const pick = await W.resumable(this.cwd, pinned);
+    if (pick.note) this.told(pick.note, pick.id ?? pinned);
+    // Follow the substitute from here, before its window comes up. Left
+    // pinned to the old id, watch() would adopt the new process as "newest
+    // live" and read its transcript from the first word — every turn of a
+    // conversation the floor relayed hours ago, drawn again with today's
+    // time on it (service-developer, 2026-09-09). Joining at the end here
+    // means the window's first new word is the first thing relayed.
+    if (pick.id && pick.id !== pinned) await this.follow(pick.id);
+    return pick.id;
+  }
+
+  /**
+   * Say on the floor what the host did on the person's behalf — a line
+   * labeled `host` in the desk's own chat, and the same line in this log.
+   * Every one of these is something a person would otherwise have to work
+   * out from a desk that changed under them: a conversation resumed other
+   * than the one the board named, a background session stopped to bring one
+   * here. Filed under the conversation it leads into.
+   */
+  told(text, sessionId) {
+    log(`${this.channel}/${this.agent}: ${text}`);
+    this.host.emit({
+      type: 'turn', channel: this.channel, agent: this.agent, session_id: sessionId ?? this.sessionId ?? this.lastSessionId,
+      role: 'context', text, at: new Date().toISOString(), uuid: null,
+      tool_name: 'host', tool_input: null, via: null,
+    }, true);
+  }
+
   /** Type into this repo's window, opening one if there isn't one. */
   async say(text) {
     // Resume the conversation this desk is, not merely the one that happens to
     // have a window open — those differ for exactly as long as it takes to
     // switch apps, which is when the floor is used.
-    const r = await W.send(this.cwd, text, { open: true, resume: this.sessionId ?? this.lastSessionId });
+    const id = await this.resumeId();
+    const r = await W.send(this.cwd, text, { open: true, resume: id });
+    if (r.note) this.told(r.note, id);
     if (!r.ok) {
       this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
     } else if (r.unverified) {
@@ -373,6 +487,9 @@ class Host {
   constructor(cfg) {
     this.cfg = cfg;
     this.desks = new Map();
+    // What discover() last found under the roots that could become a desk;
+    // posted with every registration. See rescan().
+    this.folders = [];
     this.outbox = [];
     this.flushTimer = null;
     this.stopping = false;
@@ -417,7 +534,7 @@ class Host {
     for (const d of this.desks.values()) {
       const held = await W.holderOf(d.cwd, d.lastSessionId).catch(() => null);
       desks.push({
-        channel: d.channel, agent: d.agent, cwd: d.cwd,
+        channel: d.channel, agent: d.agent, cwd: d.cwd, scope: d.scope,
         session_id: d.lastSessionId,
         window: held?.where === 'floor' ? held.window : null,
         outside_pid: held?.where === 'editor' ? held.pid : null,
@@ -425,8 +542,18 @@ class Host {
         holders: held?.holders ?? 0,
       });
     }
+    // The folders too, with paths and roots spelled the one way the board
+    // will compare them, and a mark on any bound to some other board — the
+    // origin is this host's to know, not the walk's.
+    const origin = originOf(this.cfg.url);
+    const roots = this.cfg.roots.map((r) => W.canonical(r));
+    const folders = (this.folders ?? []).map((f) => ({
+      ...f,
+      path: W.canonical(f.path),
+      other_board: f.bound && f.bound.board !== origin ? f.bound.board : null,
+    }));
     const reply = await this.request('/api/host/register', {
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession },
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders },
     });
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
@@ -464,20 +591,43 @@ class Host {
    */
   async rescan(reason = 'heartbeat') {
     const origin = originOf(this.cfg.url);
-    const found = discoverDesks(this.cfg.roots).filter((d) => originOf(d.url) === origin);
+    const seenNow = discover(this.cfg.roots);
+    // What is under the roots that could become a desk, for the floor's
+    // "take a desk" dialog. Carried on the next register(): a bind, a move
+    // and a leave each end in a rescan, so the list is fresh within a second
+    // of any change made from here, and the board's "look again" is a rescan.
+    this.folders = seenNow.folders;
+    const found = seenNow.desks.filter((d) => originOf(d.url) === origin);
     const seen = new Set();
     let changed = false;
     for (const d of found) {
       const k = `${d.channel}|${d.agent}`;
       seen.add(k);
-      // A host installed before any repo was bound to its board has no token
-      // to talk with. The first desk that appears is where one comes from —
-      // the same rule main() applies at boot.
-      if (!this.cfg.token && d.key) this.cfg.token = d.key;
+      // A desk's own key outranks the environment and host.json — the rule
+      // main() applies at boot, kept here for a desk bound after it. A host
+      // installed before any repo was bound has no key at all, and the first
+      // desk to appear is where one comes from. Never a second desk's over a
+      // first's: one board takes one key, and flipping between two would make
+      // every other request fail in turn.
+      if (d.key && d.key !== this.cfg.token && this.cfg.tokenSource !== 'a desk') {
+        log(`shared secret: now from ${d.channel}/${d.agent}'s ${d.scope === 'local' ? 'local-scope entry' : '.mcp.json'}${this.cfg.tokenSource ? `, which overrides ${this.cfg.tokenSource}` : ''}  (${reason})`);
+        this.cfg.token = d.key;
+        this.cfg.tokenSource = 'a desk';
+      }
       const have = this.desks.get(k);
-      if (have && have.cwd === W.canonical(d.cwd)) continue;
+      if (have && have.cwd === W.canonical(d.cwd)) {
+        // Same repo, same conversation — only where the binding is written
+        // may have changed, which a floor import does (.mcp.json → local
+        // scope). Not a new desk; say where it is bound now and carry on.
+        if (have.scope !== d.scope) {
+          have.scope = d.scope;
+          log(`desk ${d.channel}/${d.agent} is now bound in ${d.scope} scope  (${reason})`);
+          changed = true;
+        }
+        continue;
+      }
       this.desks.set(k, new Desk(this, d));
-      log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${reason})`);
+      log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope, ${reason})`);
       changed = true;
     }
     for (const [k, desk] of this.desks) {
@@ -520,7 +670,235 @@ class Host {
     }
   }
 
+  /**
+   * Take a desk from the floor: bind a folder under this host's roots to a
+   * (channel, agent) in Claude Code's local scope — importing, and removing,
+   * the folder's own .mcp.json entry for this board if it has one — and open
+   * a window there. See host/mcp.js for what "bind" means and why.
+   *
+   * Every step is a line in the log. A window opening in a folder the
+   * operator did not name in a terminal is exactly the kind of surprise this
+   * host is built not to spring, and the log is where they will read what
+   * happened. Refusals go to the desk as an error turn too, quoting the CLI's
+   * own last line rather than a guessed cause.
+   *
+   * Handled before the desk lookup, because until this runs there is no desk.
+   */
+  async bind(item) {
+    const { channel, agent } = item;
+    const p = item.payload ?? {};
+    const path = typeof p.path === 'string' ? p.path : '';
+    const fail = (message, code = 'bind_failed') => {
+      warn(`${channel}/${agent}: ${message}`);
+      return this.emit({ type: 'error', channel, agent, code, message }, true);
+    };
+    // Any folder the picker showed can be a desk. The roots used to fence
+    // this; the board runs on localhost and that is the security model, so
+    // the only refusals left are a path that is not a folder here.
+    if (!path) return fail('refused: no folder was named', 'bind_refused');
+    if (!existsSync(path)) return fail(`refused: ${path} does not exist`, 'bind_refused');
+    if (!this.cfg.token) {
+      return fail(`this host has no shared secret to bind with — run  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>  on it, or bind one repo by hand`, 'no_key');
+    }
+    const dir = W.canonical(path);
+    const origin = originOf(this.cfg.url);
+    // A move closes the folder's window and reopens it under the new names,
+    // because a running window keeps the headers it started with (measured
+    // 2026-09-09). Mid-turn it is refused before anything is touched, quoting
+    // the pane rather than guessing why it is busy.
+    if (p.from) {
+      const at = await W.busyAt(dir);
+      if (at.pane && at.busy) return fail(`not moved — the window is still working: ${at.foot}`, 'bind_refused');
+    }
+    log(`${channel}/${agent}: binding ${dir}${p.import ? ' — importing its .mcp.json entry' : ''}${p.from ? ` — moving it from ${p.from.channel}/${p.from.agent}` : ''}`);
+    // A desk already at this folder — the import case — keeps its conversation:
+    // the Desk object survives the rescan (same cwd), and its pinned id is
+    // handed to the new binding's registration below.
+    const before = [...this.desks.values()].find((d) => d.cwd === dir);
+    const oldLast = before?.lastSessionId ?? null;
+    if (p.import || before) {
+      const rm = await M.mcpRemove(dir);
+      if (!rm.ok) return fail(`could not clear the old local-scope entry in ${dir}: ${rm.error}`);
+      if (rm.removed) log(`${channel}/${agent}: removed the previous local-scope entry in ${dir}`);
+      const dropped = M.dropProjectEntry(dir, { origin });
+      if (!dropped.ok) return fail(`left ${dir}/.mcp.json alone: ${dropped.error}`);
+      if (dropped.removed.length) {
+        log(`${channel}/${agent}: removed ${dropped.removed.join(', ')} from ${dir}/.mcp.json${dropped.kept.length ? ` (kept ${dropped.kept.join(', ')})` : ''}`);
+      }
+      for (const x of dropped.foreign) log(`${channel}/${agent}: left ${x.name} in ${dir}/.mcp.json alone — it points at ${x.board}`);
+    }
+    const added = await M.mcpAdd(dir, { url: `${this.cfg.url}/mcp`, channel, agent, key: this.cfg.token });
+    if (!added.ok) return fail(`could not bind ${dir}: ${added.error}`);
+    log(`${channel}/${agent}: bound ${dir} in local scope`);
+    this.addRoot(dir);
+    await this.rescan(`bound from the floor — ${channel}/${agent}`);
+    const desk = this.desks.get(`${channel}|${agent}`);
+    if (!desk) {
+      return fail(`bound ${dir}, but the rescan did not find the desk — is ${this.cfg.url} the board its entry names?`);
+    }
+    if (oldLast) await desk.follow(oldLast);
+    await this.register();
+    await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: oldLast, from: p.from ?? null }, true);
+    if (p.open === false) return undefined;
+    // A moved desk whose window the floor holds: that window is still on the
+    // old channel, so it is closed and reopened on the same conversation —
+    // the reopen primitive, with nothing replayed. An editor's chat is left
+    // alone; it follows the new binding on its next tool call.
+    if (p.from && (await W.paneFor(desk.cwd))) {
+      await this.reopen(desk, { sessionId: oldLast, known: true });
+      return undefined;
+    }
+    // Same tail as `open`: a window, its startup questions surfaced on the
+    // floor rather than answered here, and any key pressed on the operator's
+    // behalf said out loud.
+    const r = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+    if (!r.ok) return this.emit({ type: 'error', channel, agent, message: r.error }, true);
+    if (r.created) {
+      const up = await W.waitReady(desk.cwd, { pid: r.pid, target: r.target });
+      for (const a of up.answered ?? []) log(`${channel}/${agent}: answered the ${a.name} question with "${a.chose}"`);
+      if (!up.ok) this.emit({ type: 'error', channel, agent, message: up.error, code: up.code ?? null }, true);
+    }
+    return undefined;
+  }
+
+  /**
+   * Leave a desk: close the floor's window there, take the binding out of
+   * wherever it was read from — the local-scope entry, and the .mcp.json entry
+   * for this board — and let the rescan drop the desk, which the next
+   * registration reports as offline. The seat stays on the floor; whether the
+   * agent is gone is the board's question, not this one's.
+   */
+  async unbind(desk) {
+    const { channel, agent } = desk;
+    const fail = (message) => {
+      warn(`${desk.label}: ${message}`);
+      return this.emit({ type: 'error', channel, agent, code: 'unbind_failed', message }, true);
+    };
+    if (await W.paneFor(desk.cwd)) {
+      const shut = await W.closeWindow(desk.cwd);
+      if (!shut.ok) return fail(`could not close its window: ${shut.error}`);
+      log(`${desk.label}: closed its window`);
+    }
+    const rm = await M.mcpRemove(desk.cwd);
+    if (!rm.ok) return fail(`could not remove the local-scope entry in ${desk.cwd}: ${rm.error}`);
+    if (rm.removed) log(`${desk.label}: removed the local-scope entry in ${desk.cwd}`);
+    const dropped = M.dropProjectEntry(desk.cwd, { origin: originOf(this.cfg.url), channel, agent });
+    if (!dropped.ok) return fail(`left ${desk.cwd}/.mcp.json alone: ${dropped.error}`);
+    if (dropped.removed.length) log(`${desk.label}: removed ${dropped.removed.join(', ')} from ${desk.cwd}/.mcp.json`);
+    await this.rescan(`left from the floor — ${desk.label}`);
+    await this.register();
+    return this.emit({ type: 'unbound', channel, agent, cwd: desk.cwd }, true);
+  }
+
+  /**
+   * Put this desk's window on another of its folder's conversations — or on
+   * a new one. The session picker's primitive, and what a move will be built
+   * on: close, then open with `--resume`.
+   *
+   * Close first, because open() returns early on an existing pane and
+   * ignores `resume`; a window that is mid-turn is not closed, and the refusal
+   * quotes the pane's bottom line rather than guessing why it is busy. Then
+   * the intent — see Desk.watch — and the offset: 'end' when the board holds
+   * this conversation's turns already, 'tail' when it has never seen them,
+   * so the panel opens on the conversation's recent past. `null` starts a
+   * fresh one, which has no id until its window registers; the intent's pid
+   * is how that one is recognised.
+   */
+  async reopen(desk, { sessionId = null, known = false } = {}) {
+    const { channel, agent } = desk;
+    const fail = (message, code = 'reopen_failed') => {
+      warn(`${desk.label}: ${message}`);
+      desk.intent = null;
+      return this.emit({ type: 'error', channel, agent, code, message }, true);
+    };
+    const at = await W.busyAt(desk.cwd);
+    if (at.pane && at.busy) return fail(`not reopened — the window is still working: ${at.foot}`);
+    if (at.pane) {
+      const shut = await W.closeWindow(desk.cwd);
+      if (!shut.ok) return fail(`could not close its window: ${shut.error}`);
+      log(`${desk.label}: closed its window to reopen on ${sessionId ?? 'a new conversation'}`);
+    }
+    const since = Date.now();
+    desk.intent = { sessionId, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
+    await desk.follow(sessionId, known ? 'end' : 'tail');
+    const r = await W.open(desk.cwd, { resume: sessionId });
+    if (!r.ok) return fail(r.error);
+    if (r.note) desk.told(r.note, r.resumed ?? sessionId);
+    if (r.resumed && r.resumed !== sessionId) {
+      // resumable() found the chosen id gone from disk and opened the
+      // folder's newest conversation instead; follow that one, from its tail.
+      desk.intent.sessionId = r.resumed;
+      await desk.follow(r.resumed, 'tail');
+    }
+    desk.intent.pid = r.pid;
+    log(`${desk.label}: reopened on ${r.resumed ?? 'a new conversation'} (${r.target})`);
+    const up = await W.waitReady(desk.cwd, { pid: r.pid, target: r.target });
+    for (const a of up.answered ?? []) log(`${desk.label}: answered the ${a.name} question with "${a.chose}"`);
+    if (!up.ok) this.emit({ type: 'error', channel, agent, message: up.error, code: up.code ?? null }, true);
+    return undefined;
+  }
+
+  /**
+   * A folder taken from the picker outside this host's roots becomes one of
+   * them. The roots are where the host looks for desks on its own, and a
+   * desk it has just bound is somewhere it must look — otherwise the rescan
+   * that follows the bind finds nothing and the desk never registers. Kept
+   * in memory, and written back to host.json when that is where the roots
+   * came from; roots given by ORCH_HOST_ROOTS are the environment's to
+   * change, so those live only for this run and the log says so.
+   */
+  addRoot(dir) {
+    if (M.insideRoots(dir, this.cfg.roots)) return false;
+    this.cfg.roots.push(dir);
+    if (this.cfg.rootsFrom !== 'file') {
+      log(`added ${dir} to this host's roots for this run — ORCH_HOST_ROOTS sets them, so add it there to keep it`);
+      return true;
+    }
+    let file = {};
+    try { file = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); } catch { /* absent or unreadable: written fresh below */ }
+    file.roots = [...new Set([...(Array.isArray(file.roots) ? file.roots : []), dir])];
+    try {
+      mkdirSync(dirname(CONFIG_FILE), { recursive: true });
+      writeFileSync(CONFIG_FILE, `${JSON.stringify(file, null, 2)}\n`);
+      log(`added ${dir} to this host's roots (${CONFIG_FILE})`);
+    } catch (err) {
+      warn(`added ${dir} to this host's roots for this run, but could not write ${CONFIG_FILE}: ${err.message}`);
+    }
+    return true;
+  }
+
+  /**
+   * List one folder for the picker. Answered as an event, like the session
+   * list: the work loop is one-way and the board keeps the last folder each
+   * host showed. Marks each folder as bound to this board or another, so the
+   * dialog can say which without a second question.
+   */
+  async browse(item) {
+    // No path means the host's home folder: where every picker starts.
+    const asked = typeof item.payload?.path === 'string' && item.payload.path ? item.payload.path : homedir();
+    const at = new Date().toISOString();
+    const r = listFolder(asked);
+    if (!r.ok) {
+      warn(`browse ${asked}: ${r.error}`);
+      return this.emit({ type: 'browse', path: asked, requested: asked, at, error: r.error }, true);
+    }
+    const origin = originOf(this.cfg.url);
+    const mark = (f) => ({ ...f, other_board: f.bound && f.bound.board !== origin ? f.bound.board : null });
+    return this.emit({
+      type: 'browse', requested: asked, path: r.path, root: r.root, parent: r.parent, at,
+      self: mark(r.self), entries: r.entries.map(mark),
+    }, true);
+  }
+
   async handle(item) {
+    if (item.kind === 'bind') {
+      await this.bind(item);
+      return;
+    }
+    if (item.kind === 'browse') {
+      await this.browse(item);
+      return;
+    }
     if (item.kind === 'rescan') {
       // Asked for rather than scheduled: the board saw a session start on a
       // desk no host runs, or somebody pressed the button, and this host may
@@ -604,6 +982,8 @@ class Host {
           type: 'prompt', channel: desk.channel, agent: desk.agent,
           request_id: item.payload?.request_id ?? null,
           options: isForm ? [] : (r.ok ? r.options : []),
+          // The words above a plain menu, when the pane still shows them.
+          asked: isForm ? null : (r.ok ? r.asked ?? null : null),
           questions: isForm ? form.questions : null,
           tabs: isForm ? form.tabs : null,
           reason: r.ok ? null : r.error,
@@ -695,8 +1075,10 @@ class Host {
         break;
       }
       case 'open': {
-        const r = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+        const id = await desk.resumeId();
+        const r = await W.open(desk.cwd, { resume: id });
         if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
+        if (r.note) desk.told(r.note, r.resumed ?? id);
         // Wait for it to actually be running, for two reasons: a window that
         // dies on its first line should say so here rather than look open, and
         // a freshly created window holds its pane after exit until something
@@ -712,6 +1094,22 @@ class Host {
         }
         break;
       }
+      case 'unbind':
+        await this.unbind(desk);
+        break;
+      case 'sessions': {
+        // The picker's list, answered as an event rather than a reply: the
+        // work loop is one-way, and the board keeps the last list it heard.
+        const rows = await W.sessionsIn(desk.cwd, { limit: SESSIONS_LIMIT });
+        this.emit({ type: 'sessions', channel: desk.channel, agent: desk.agent, at: new Date().toISOString(), rows }, true);
+        break;
+      }
+      case 'reopen':
+        await this.reopen(desk, {
+          sessionId: typeof item.payload?.session_id === 'string' && item.payload.session_id ? item.payload.session_id : null,
+          known: item.payload?.known === true,
+        });
+        break;
       case 'attach': {
         // The escape hatch, and the only work item that changes nothing. It
         // opens a terminal in front of the operator; the window keeps running
@@ -731,8 +1129,10 @@ class Host {
         // fingers. That is the whole feature: the handoff VS Code needs does
         // not exist in this direction, because the floor's window already is
         // the CLI.
-        const opened = await W.open(desk.cwd, { resume: desk.sessionId ?? desk.lastSessionId });
+        const id = await desk.resumeId();
+        const opened = await W.open(desk.cwd, { resume: id });
         if (!opened.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true); break; }
+        if (opened.note) desk.told(opened.note, opened.resumed ?? id);
         // Attach BEFORE waiting for readiness. Readiness gates automated
         // typing, not eyeballs: a window stuck on the trust question is
         // exactly what the operator should be looking at, and waitReady's own
@@ -843,7 +1243,7 @@ async function main() {
     process.exit(1);
   }
 
-  const found = discoverDesks(cfg.roots);
+  const { desks: found, folders } = discover(cfg.roots);
   if (!found.length) {
     warn(`no desks found under ${cfg.roots.join(', ')} — a desk is a directory whose .mcp.json carries X-Channel and X-Agent`);
   }
@@ -877,18 +1277,39 @@ async function main() {
   for (const d of found.filter((d) => originOf(d.url) !== origin)) {
     log(`skipping ${d.channel}/${d.agent} — its board is ${originOf(d.url)}, this host serves ${origin}`);
   }
-  // From a desk on the board we actually serve. found[0] was the same bug as
-  // the url: a key from another board authenticates against nothing here.
-  if (!cfg.token && mine.length) cfg.token = mine[0].key;
+  // The shared secret, and where it came from. A desk's own binding wins over
+  // ORCH_AUTH_TOKEN and over host.json (operator's rule, 2026-09-09): a repo
+  // bound by hand is the most direct statement of which key this board takes,
+  // and a machine whose environment carries a stale one should follow its
+  // desks rather than the other way round. The environment and the file exist
+  // for the machine with no hand-bound desk at all — every desk on it taken
+  // from the floor, which the host can only do with a key of its own. From a
+  // desk on the board we actually serve: a key from another board
+  // authenticates against nothing here. The value itself is never logged.
+  const keyed = mine.find((d) => d.key);
+  const bindingOf = (d) => `${d.channel}/${d.agent}'s ${d.scope === 'local' ? 'local-scope entry' : '.mcp.json'}`;
+  if (keyed) {
+    const overrides = cfg.token && cfg.token !== keyed.key ? `, which overrides ${cfg.tokenSource}` : '';
+    log(`shared secret: from ${bindingOf(keyed)}${overrides}`);
+    cfg.token = keyed.key;
+    cfg.tokenSource = 'a desk';
+    const others = mine.filter((d) => d.key && d.key !== keyed.key);
+    if (others.length) warn(`${others.length} desk${others.length === 1 ? '' : 's'} carr${others.length === 1 ? 'ies' : 'y'} a different key from ${keyed.channel}/${keyed.agent}'s — ${others.map((d) => `${d.channel}/${d.agent}`).join(', ')}. One board takes one key; using ${keyed.channel}/${keyed.agent}'s, and the others will be refused by the board.`);
+  } else if (cfg.token) {
+    log(`shared secret: from ${cfg.tokenSource} (no desk here carries one)`);
+  } else {
+    warn(`no shared secret: no desk here carries a key, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
+  }
   if (found.length && !mine.length) {
     warn(`every desk found points at another board — this host serves ${origin} and has nothing to do`);
   }
 
   const host = new Host(cfg);
+  host.folders = folders;
   for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
 
   log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · tmux ${W.tmuxSession} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
-  for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}`);
+  for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope)`);
   log(`attach to any of them with:  tmux attach -t ${W.tmuxSession}`);
 
   const stop = () => host.stop().finally(() => process.exit(0));

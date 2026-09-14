@@ -25,7 +25,7 @@ Never infer this from the conversation; ask the process.
 
 ```bash
 tmux ls; tmux list-panes -a -F '#{session_name}:#{window_id}.#{pane_id} dead=#{pane_dead} pid=#{pane_pid}'
-claude agents --json | python3 -c "import json,sys;[print(s['pid'], s['sessionId'], s['cwd']) for s in json.load(sys.stdin)]"
+claude agents --json | python3 -c "import json,sys;[print(s['pid'], s.get('kind'), s.get('id'), s['sessionId'], s['cwd']) for s in json.load(sys.stdin)]"
 curl -s localhost:8787/api/floor | python3 -c "
 import json,sys
 for c in json.load(sys.stdin).get('channels',[]):
@@ -38,12 +38,26 @@ A session in the roster with **no matching pane** is read as an editor holding
 it, and the floor will refuse to send. That is correct when an editor really has
 it — and a trap in tests, where a killed stand-in leaves its roster entry behind.
 
+**Read `kind` too.** `interactive` is a tab or a terminal with a person at it.
+`background` (the session file says `bg`, `ps` says `claude bg-spare`) is
+Claude Code's daemon keeping the conversation running after its tab closed —
+nobody is at it, and it is what `--resume` of that id means by "running as a
+background session (<id>)". The desk reads as *empty*, not held, because the
+watch follows interactive sessions only. Opening the desk from the floor does
+the move on its own since 2026-09-09: the host presses `claude stop <id>`,
+waits for the roster to drop it, and resumes the conversation in the window
+(`releaseBackground()` in [`host/window.js`](../../../host/window.js)). So a
+desk that *stays* empty after an open, with a `background` entry still in the
+roster, is that release failing — the desk's error quotes what `claude stop`
+said. Do not run `stop` by hand on a desk that is not yours; it is somebody's
+conversation, and the floor is the door onto it.
+
 Read `held` together with the three fields beside it, because `held` alone is
 ambiguous and each pairing means something different:
 
 | `held` | `window_open` | what it is |
 |---|---|---|
-| `null` | `false` | nothing running — the floor correctly offers to open one |
+| `null` | `false` | nothing running — the floor correctly offers to open one. **Or a background session**: check the roster's `kind` before believing "nothing" |
 | `null` | `true` | **a window that has not registered** — almost always stopped on a startup question. Go straight to step 4 |
 | `'floor'` / `'editor'` | — | a registered session; `holders` says how many processes claim it |
 
@@ -227,6 +241,50 @@ pruned old ones:
 ```bash
 docker compose exec -T orchestratinator node < fix.js   # better-sqlite3 at $DB_PATH
 ```
+
+**Every open on the board fails with `create window failed: index N in
+use`.** tmux, not the host: `new-window` takes a window *index*, and a bare
+`-t orch` is resolved against window names first, by prefix — so one window
+whose name starts with the session's name (a desk in a folder called
+`orch-slice1-demo`) makes `-t orch` mean that window's index, and every desk
+on the machine stops opening at once (3.7c, 2026-09-09). The target carries a
+trailing colon now (`orch:`); a return of this error means something else is
+passing the bare name. Reproduce it in a throwaway session before touching
+anything: `tmux new-session -d -s zz -n zz-demo sleep 60; tmux new-window -d
+-t zz -n x sleep 60` fails, `-t zz:` works.
+
+**The window opens and dies on its first line, and the desk's error quotes
+`No conversation found with session ID: <id>`.** The board's pin names a
+session that never became a transcript. The roster keeps a process's *first*
+id, so a VS Code tab that ran `/resume` inside registered as one session and
+wrote every word under another; when it closed, the desk was left pinned to
+the first. Since 2026-09-09 `resumable()` checks the disk and falls back to
+the folder's conversation with the latest spoken turn, saying so on the desk
+as a line labeled `host` — so seeing this error means that fallback found
+nothing to open, or the host predates it. What the board knows and what the
+disk has are two different lists; read both:
+
+```bash
+docker compose exec -T orchestratinator node <<'EOF'      # what the board has for the desk
+const db = new (require('better-sqlite3'))(process.env.DB_PATH, { readonly: true });
+for (const r of db.prepare(`SELECT session_id, started_at, ended_at, pid, awaiting_kind FROM agent_sessions
+  WHERE channel = ? AND agent = ? ORDER BY started_at DESC LIMIT 8`).all('<channel>', '<agent>')) console.log(JSON.stringify(r));
+EOF
+ls -lt ~/.claude/projects/$(python3 -c "import re;print(re.sub(r'[^A-Za-z0-9]','-','<desk cwd>'))")/*.jsonl | head   # what exists
+```
+
+A row with no file is a tab opened and closed without a word, or a process
+that resumed something else. A file whose mtime is today and whose last
+`"type":"user"` record is older was *reopened* without a turn — a
+`bridge-session` record moves the mtime — which is why the fallback goes by
+the last turn, not the file. The table is `agent_sessions`; there is no
+`sessions` table, and guessing that cost a round.
+
+**The window opens and dies on its first line, and the error says `running
+as a background session (<id>)`.** See `kind` in step 2: the daemon holds
+it, and the host now stops it before opening. Reaching this message means the
+release did not happen — a host older than `releaseBackground()`, or a
+`claude stop` that failed, which the desk's error will quote.
 
 ## What not to do
 

@@ -20,7 +20,7 @@
 //   npm run test:host
 import { spawn, execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
@@ -110,6 +110,44 @@ function fixture() {
     },
   }, null, 2));
 
+  // Local scope: desks bound with `claude mcp add -s local`, which lives in
+  // ~/.claude.json rather than in the repo — HOME is the fixture, so this is
+  // the file the host reads. Three cases: a desk bound only there; a directory
+  // bound both ways, where local must win because it is what Claude Code
+  // connects with (measured 2026-09-09); and a local binding to another board,
+  // skipped exactly as a .mcp.json one is.
+  const localScope = (agent, url = `${HOST}/mcp`) => ({
+    mcpServers: { orchestratinator: { type: 'http', url, headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': KEY } } },
+  });
+  for (const d of ['repo-local', 'repo-both', 'repo-localelse']) mkdirSync(`${FIX}/${d}`, { recursive: true });
+  writeFileSync(`${FIX}/repo-both/.mcp.json`, JSON.stringify({
+    mcpServers: {
+      orchestratinator: {
+        type: 'http', url: `${HOST}/mcp`,
+        headers: { 'X-Channel': CH, 'X-Agent': 'both-project', 'X-Orchestratinator-Key': KEY },
+      },
+    },
+  }, null, 2));
+  writeFileSync(`${HOME}/.claude.json`, JSON.stringify({
+    projects: {
+      [`${FIX}/repo-local`]: { ...localScope('local-a'), hasTrustDialogAccepted: true },
+      [`${FIX}/repo-both`]: localScope('both-local'),
+      [`${FIX}/repo-localelse`]: localScope('local-else', 'http://localhost:9/mcp'),
+    },
+  }, null, 2));
+
+  // Folders that are not desks, for the list the host offers: a git checkout
+  // nobody has bound, and a folder Claude Code has opened before — its project
+  // directory holds one transcript, dated to a moment that cannot be "now", so
+  // the time the board serves back is provably the one read off the file.
+  mkdirSync(`${FIX}/plain-git/.git`, { recursive: true });
+  writeFileSync(`${FIX}/plain-git/.git/HEAD`, 'ref: refs/heads/main\n');
+  mkdirSync(`${FIX}/opened`, { recursive: true });
+  const openedProject = `${HOME}/.claude/projects/${`${FIX}/opened`.replace(/[^A-Za-z0-9]/g, '-')}`;
+  mkdirSync(openedProject, { recursive: true });
+  writeFileSync(`${openedProject}/one.jsonl`, '');
+  utimesSync(`${openedProject}/one.jsonl`, new Date('2024-01-02T03:04:05Z'), new Date('2024-01-02T03:04:05Z'));
+
   // The stand-in: a roster on `agents --json`, a Claude Code otherwise.
   //
   // It asks for bracketed paste so a multi-line message is one turn, it
@@ -142,6 +180,36 @@ function fixture() {
     `const SESSION_ID = ${JSON.stringify(SESSION_ID)};`,
     `const ARGV = ${JSON.stringify(`${FIX}/argv.log`)};`,
     `if (process.argv[2] === 'agents') { process.stdout.write(fs.readFileSync(ROSTER, 'utf8')); process.exit(0); }`,
+    // `claude mcp add -s local …` and `claude mcp remove -s local …`, as the
+    // real CLI behaves (measured 2026-09-08/09): a read-modify-write of
+    // $HOME/.claude.json under projects[cwd].mcpServers, "already exists" on
+    // a duplicate add, "No MCP server named" on a missing remove, and the
+    // "File modified:" line on success. HOME is the fixture, so this is the
+    // file the host reads back. Handled before the argv log below: an mcp
+    // call is not a window, and the --resume assertion diffs that log.
+    `if (process.argv[2] === 'mcp') {`,
+    `  const CFG = require('path').join(process.env.HOME, '.claude.json');`,
+    `  let j = {}; try { j = JSON.parse(fs.readFileSync(CFG, 'utf8')); } catch {}`,
+    `  const a = process.argv.slice(3); const sub = a[0];`,
+    `  const scopeAt = a.indexOf('-s'); if (scopeAt >= 0 && a[scopeAt + 1] !== 'local') { process.stderr.write('stand-in: only local scope\\n'); process.exit(2); }`,
+    `  const rest = a.slice(1).filter((x, i, arr) => x !== '-s' && arr[i - 1] !== '-s');`,
+    `  j.projects = j.projects || {}; const dir = process.cwd(); j.projects[dir] = j.projects[dir] || {}; const p = j.projects[dir]; p.mcpServers = p.mcpServers || {};`,
+    `  const done = () => { fs.writeFileSync(CFG, JSON.stringify(j, null, 2)); process.stdout.write('File modified: ' + CFG + ' [project: ' + dir + ']\\n'); process.exit(0); };`,
+    `  if (sub === 'add') {`,
+    `    const t = rest.indexOf('--transport'); const transport = t >= 0 ? rest[t + 1] : 'stdio';`,
+    `    const positional = rest.filter((x, i, arr) => !x.startsWith('-') && arr[i - 1] !== '--transport' && arr[i - 1] !== '-H');`,
+    `    const [name, url] = positional; const headers = {};`,
+    `    rest.forEach((x, i) => { if (x === '-H') { const [k, ...v] = rest[i + 1].split(':'); headers[k.trim()] = v.join(':').trim(); } });`,
+    `    if (p.mcpServers[name]) { process.stderr.write('MCP server ' + name + ' already exists in local config\\n'); process.exit(1); }`,
+    `    p.mcpServers[name] = { type: transport, url, headers }; done();`,
+    `  }`,
+    `  if (sub === 'remove') {`,
+    `    const name = rest[0];`,
+    `    if (!p.mcpServers[name]) { process.stderr.write('No MCP server named "' + name + '" in local scope\\n'); process.exit(1); }`,
+    `    delete p.mcpServers[name]; done();`,
+    `  }`,
+    `  process.stderr.write('stand-in: unknown mcp subcommand\\n'); process.exit(2);`,
+    `}`,
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
@@ -160,7 +228,12 @@ function fixture() {
     // its assertions do not strictly require the delay to hold — which is
     // exactly how this went unnoticed until STARTUP_ASK_FLAG hit the same
     // wall and needed the delay to actually be there.
-    `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));`,
+    // A window started with --resume registers under that id, as Claude Code
+    // does; without one it registers under the fixture's constant, which is
+    // the id a "fresh" conversation flips the desk to.
+    `const resumeAt = process.argv.indexOf('--resume');`,
+    `const MY_ID = resumeAt >= 0 && process.argv[resumeAt + 1] ? process.argv[resumeAt + 1] : SESSION_ID;`,
+    `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: MY_ID, name: 'stand-in' }]));`,
     `const READY_DELAY_FLAG = ${JSON.stringify(`${FIX}/ready-delay.flag`)};`,
     `let readyDelay = 0;`,
     `try { readyDelay = Number(fs.readFileSync(READY_DELAY_FLAG, 'utf8').trim()) || 0; } catch {}`,
@@ -191,6 +264,11 @@ function fixture() {
     `}`,
     `if (readyDelay > 0) setTimeout(announce, readyDelay); else announce();`,
     String.raw`process.stdout.write('\u001b[?2004h');`,
+    // A flag file makes the window look mid-turn: Claude Code's status line
+    // says "esc to interrupt" exactly while it works, and the host reads that
+    // off the pane's bottom line. A reopen must refuse such a window.
+    `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
+    String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
     `let acc = '', composer = '', n = 0;`,
     `process.stdin.on('data', (chunk) => {`,
@@ -276,6 +354,35 @@ try {
   const d0 = deskOf(seen ?? (await floor()), 'free');
   eq(d0?.hosted?.host, 'Test Mac', 'and the floor names the machine it is on');
   assert(!deskOf(await floor(), 'pro'), 'a repo whose .mcp.json names another board is left alone');
+
+  console.log('\n  local scope');
+  assert(!!(await until(async () => (deskOf(await floor(), 'local-a')?.hosted ? true : null))),
+    'a desk bound in Claude Code\'s local scope (~/.claude.json, no .mcp.json in the repo) is found and hosted');
+  assert(/host-test\/local-a .*repo-local .*\(local scope\)/.test(host.log), 'and the host says which scope it read it from');
+  assert(!!deskOf(await floor(), 'both-local')?.hosted, 'a directory bound both ways is hosted as its local-scope desk — the one Claude Code connects with');
+  assert(!deskOf(await floor(), 'both-project'), 'and not as the .mcp.json one');
+  assert(!deskOf(await floor(), 'local-else'), 'a local-scope binding to another board is left alone');
+  assert(/skipping host-test\/local-else/.test(host.log), 'and named as skipped, like a .mcp.json one');
+
+  console.log('\n  the folders the host offers');
+  const offered = await (await json('/api/floor/folders')).json();
+  const mineF = offered.hosts.find((h) => h.host_id === 'host-test-1');
+  assert(!!mineF?.live && (mineF?.folders?.length ?? 0) > 0, 'the host reports what sits under its roots, and the board serves it back');
+  eq(mineF?.roots, [FIX], 'under the roots it was given');
+  const byName = Object.fromEntries((mineF?.folders ?? []).map((f) => [f.name, f]));
+  eq(byName['repo-a']?.bound, { channel: CH, agent: 'free', scope: 'project', board: HOST }, 'a desk shows its binding, its scope and its board');
+  eq(byName['repo-local']?.bound?.scope, 'local', 'a local-scope desk says so');
+  eq(byName['repo-both']?.has_mcp_json, true, 'and a directory that also has a .mcp.json entry says that too — the import case');
+  eq(byName['repo-elsewhere']?.other_board, 'http://localhost:9', 'a folder bound to another board says which');
+  eq(byName['repo-a']?.other_board ?? null, null, 'and one bound here does not');
+  eq(byName['plain-git']?.bound ?? null, null, 'a git checkout that is not a desk is offered, unbound');
+  eq(byName['opened']?.last_active, '2024-01-02T03:04:05.000Z', 'a folder Claude Code has opened carries the time of its newest transcript');
+  eq(byName['opened']?.sessions, 1, 'and how many sessions it has had');
+  eq(byName['repo-local']?.trusted, true, 'whether Claude Code trusts the folder yet comes from the same file');
+  assert(!byName['src'], 'a plain subdirectory that is none of these is not offered');
+  const order = (mineF?.folders ?? []).map((f) => f.name);
+  assert(order.indexOf('repo-a') < order.indexOf('opened') && order.indexOf('opened') < order.indexOf('plain-git'),
+    `newest activity first, never-opened last — ${order.join(', ')}`);
 
   eq(deskOf(await floor(), 'free')?.hosted?.session_id?.startsWith('host:'), true,
     'with no window open yet, the desk has no conversation — it does not invent one');
@@ -428,6 +535,260 @@ try {
     'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
   assert(/dropped desk .*late/.test(host.log), 'which the host also says');
 
+  /* ── taking a desk from the floor ──────────────────────────────────────────
+   * The first door that needs no terminal. The route refuses what the board
+   * can see is wrong; the host binds with `claude mcp add -s local` (the
+   * stand-in above), with its own key, and opens a window. Import takes a
+   * .mcp.json desk into local scope and removes the file's entry, keeping
+   * other servers. Leave is the reverse. */
+  console.log('\ntaking a desk from the floor');
+  const take = (body) => json('/api/floor/desk', body);
+  const localCfg = () => JSON.parse(readFileSync(`${HOME}/.claude.json`, 'utf8'));
+  const argvLog = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'bad name!' })).status, 400, 'an agent name with a space in it is refused');
+  eq((await take({ host_id: 'host-test-1', path: '/nope', channel: CH, agent: 'newbie' })).status, 409, 'a folder the host did not offer is refused');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-elsewhere`, channel: CH, agent: 'newbie' })).status, 409, 'a folder bound to another board is refused');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-a`, channel: CH, agent: 'somebody-else' })).status, 400, 'a folder that names its agent cannot be taken under another name');
+  const argvBefore = argvLog().length;
+  const took = await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'newbie', persona: 'Newbie Nine' });
+  eq(took.status, 200, 'an unbound git checkout can be taken as a desk');
+  eq((await took.json()).mode, 'take', 'as a fresh binding');
+  eq(deskOf(await floor(), 'newbie')?.persona, 'Newbie Nine', 'the seat is drawn at once, wearing the name it was given');
+  assert(await until(async () => (deskOf(await floor(), 'newbie')?.hosted?.live === true ? true : null), 20000),
+    'and within seconds the host has bound it and registered the desk');
+  eq(deskOf(await floor(), 'newbie')?.hosted?.scope, 'local', 'in local scope');
+  const entry = localCfg().projects?.[`${FIX}/plain-git`]?.mcpServers?.orchestratinator;
+  eq(entry?.headers, { 'X-Channel': CH, 'X-Agent': 'newbie', 'X-Orchestratinator-Key': KEY },
+    'written by `claude mcp add -s local`, with the key the host holds — the board never sent one');
+  eq(entry?.url, `${HOST}/mcp`, 'pointing at this board');
+  assert(/newbie: bound .*plain-git in local scope/.test(host.log), 'and the host log says so');
+  assert(await until(() => (argvLog().length > argvBefore ? true : null), 15000), 'and a window opened there');
+  assert(!argvLog().slice(argvBefore).includes('--resume'), 'a fresh conversation, with nothing to resume');
+  const offeredNow = await (await json('/api/floor/folders')).json();
+  eq(offeredNow.hosts.find((h) => h.host_id === 'host-test-1')?.folders.find((f) => f.name === 'plain-git')?.bound?.agent, 'newbie',
+    'and the folder list now shows it bound');
+
+  // Import: a .mcp.json desk, with another server beside ours, into local scope.
+  writeFileSync(`${REPO}/.mcp.json`, JSON.stringify({
+    mcpServers: {
+      orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'free', 'X-Orchestratinator-Key': KEY } },
+      github: { type: 'http', url: 'http://127.0.0.1:9/mcp' },
+    },
+  }, null, 2));
+  const sidBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
+  const imported = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free', open: false });
+  eq(imported.status, 200, 'a desk bound in its .mcp.json can be brought onto the floor');
+  eq((await imported.json()).mode, 'import', 'as an import');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.scope === 'local' ? true : null), 20000), 'after which it is a local-scope desk');
+  eq(Object.keys(JSON.parse(readFileSync(`${REPO}/.mcp.json`, 'utf8')).mcpServers), ['github'], 'its .mcp.json lost the orchestratinator entry and kept the other server');
+  eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Agent'], 'free', 'and ~/.claude.json gained it');
+  eq(deskOf(await floor(), 'free')?.hosted?.session_id, sidBefore, 'the conversation it was following is the one it still follows');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/opened`, channel: CH, agent: 'newbie' })).status, 409, 'a name already seated at another folder is refused');
+
+  // Leave: the reverse, all the way back to an unbound folder.
+  const left = await json('/api/floor/desk/leave', { channel: CH, agent: 'newbie' });
+  eq(left.status, 200, 'a desk can be left from the floor');
+  assert(await until(async () => (deskOf(await floor(), 'newbie')?.hosted?.state === 'offline' ? true : null), 20000), 'and the desk goes offline once the host has unbound it');
+  eq(localCfg().projects?.[`${FIX}/plain-git`]?.mcpServers?.orchestratinator ?? null, null, 'its local-scope entry is gone');
+  assert(/dropped desk host-test\/newbie/.test(host.log), 'the host dropped the desk');
+  assert(!execFileSync('tmux', ['list-windows', '-t', TMUX_SESSION, '-F', '#{window_name}'], { encoding: 'utf8' }).includes('plain-git'), 'and closed its window');
+  assert(!!deskOf(await floor(), 'newbie'), 'the seat stays on the floor — whether the agent is gone is the board\'s question');
+
+  /* ── the session picker and the reopen primitive ────────────────────────────
+   * A desk's folder holds many conversations; the picker lists them and a
+   * pick closes the floor's window and reopens it with --resume. The host
+   * pins the chosen conversation before the new window registers, so a stray
+   * session in the same folder cannot steal the desk meanwhile; a picked
+   * conversation the board has never seen is joined at its tail, a known one
+   * at its end; a fresh one flips the desk to whatever id its window
+   * announces; and a window mid-turn is refused, quoting its status line. */
+  console.log('\nthe session picker and reopening');
+  const SESSION_B = 'bbbbbbbb-2222-3333-4444-555555555555';
+  const transcriptB = `${HOME}/.claude/projects/${slug()}/${SESSION_B}.jsonl`;
+  writeFileSync(transcriptB, [
+    JSON.stringify({ type: 'user', uuid: 'b-u1', timestamp: '2026-09-09T08:00:00Z', message: { content: 'the other conversation begins' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'b-a1', timestamp: '2026-09-09T08:00:05Z', message: { content: [{ type: 'text', text: 'B-TAIL-SEEN' }] } }),
+    '',
+  ].join('\n'));
+  const sessionsGet = () => json(`/api/floor/sessions?channel=${CH}&agent=free`).then((r) => r.json());
+  // The roster as it truly is. The stand-in overwrites roster.json whenever a
+  // window starts and cannot unwrite itself when one is killed, so after the
+  // desk taken and left above it names a dead pane under this same session id
+  // — which holderOf reads, correctly, as an editor holding it. Rebuild it
+  // from the one pane actually running in the repo.
+  const paneIn = (dir) => execFileSync('tmux', ['list-panes', '-s', '-t', TMUX_SESSION, '-F', '#{pane_pid} #{pane_current_path}'], { encoding: 'utf8' })
+    .trim().split('\n').map((l) => l.split(' ')).find(([, d]) => d === dir)?.[0] ?? null;
+  const freePid = Number(paneIn(REPO));
+  assert(freePid > 0, 'a window is open in the repo to begin with');
+  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: freePid, cwd: REPO, kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));
+  await sleep(WATCH_SETTLE_MS);
+  const askList = await json('/api/floor/sessions', { channel: CH, agent: 'free' });
+  eq(askList.status, 200, 'the floor can ask a desk\'s host to list its conversations');
+  eq((await askList.json()).asked, true, 'and the host is asked');
+  const listed = await until(async () => { const g = await sessionsGet(); return g.at ? g : null; }, 15000);
+  assert(!!listed, 'the host answers with a list, stamped with its time');
+  const rowsById = Object.fromEntries((listed?.rows ?? []).map((r) => [r.id, r]));
+  eq(rowsById[SESSION_ID]?.live, true, 'the conversation in the open window is marked live');
+  eq(rowsById[SESSION_ID]?.held, 'floor', 'and held by the floor');
+  eq(listed?.current, SESSION_ID, 'and the board says it is the desk\'s current one');
+  eq([rowsById[SESSION_B]?.title, rowsById[SESSION_B]?.known], ['the other conversation begins', false],
+    'the other conversation is titled by its first prompt and the board has never heard it');
+  eq((await (await json('/api/floor/sessions', { channel: CH, agent: 'free' })).json()).asked, false,
+    'asked again at once, the board serves the list it has rather than walking the folder again');
+
+  // Reopen on B, with the new window slow to register — and a stray session
+  // in the same folder during the gap, which newest-wins would have adopted.
+  // This session's panes only (-s, not -a: -a is every pane on the tmux
+  // server, the live board's included), and none at all in the instant a
+  // reopen has killed the session's last window — tmux drops the session
+  // with it, and the host makes a new one by the same name a moment later.
+  const paneOf = () => {
+    try {
+      return execFileSync('tmux', ['list-panes', '-s', '-t', TMUX_SESSION, '-F', '#{pane_pid}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n').filter(Boolean);
+    } catch { return []; }
+  };
+  const panesBefore = paneOf();
+  const argvAtReopen = argvLog().length;
+  const turnsBeforeB = ((await turns('free')).rows ?? []).length;
+  writeFileSync(`${FIX}/ready-delay.flag`, '3000');
+  const reopened = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
+  eq(reopened.status, 200, 'a pick is accepted');
+  eq((await reopened.json()).known, false, 'and the board says it has never seen that conversation');
+  await sleep(600);   // the old window is closed by now; the new one announces in 3 s
+  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: process.pid, cwd: REPO, kind: 'interactive', startedAt: Date.now() + 5000, sessionId: 'stray-session', name: 'stray' }]));
+  const seenIds = new Set();
+  for (let i = 0; i < 16; i++) { seenIds.add(deskOf(await floor(), 'free')?.hosted?.session_id ?? null); await sleep(150); }
+  assert(!seenIds.has('stray-session'), `a stray session in the folder is not adopted while the reopen is in flight — saw ${[...seenIds].join(', ')}`);
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_B ? true : null), 25000),
+    'and the desk lands on the conversation that was picked');
+  assert(argvLog().slice(argvAtReopen).includes(`--resume ${SESSION_B}`), 'opened with --resume of that id');
+  const panesAfter = paneOf();
+  assert(panesAfter.length === panesBefore.length && !panesAfter.some((p) => panesBefore.includes(p)), 'in a new pane, the old one gone');
+  assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('B-TAIL-SEEN')) ? true : null), 8000),
+    'a conversation the board had never seen is joined at its tail, so its recent past reaches the floor');
+  appendFileSync(transcriptB, `${JSON.stringify({ type: 'assistant', uuid: 'b-a2', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'B-LIVE-TURN' }] } })}\n`);
+  assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('B-LIVE-TURN')) ? true : null), 8000),
+    'and what it says next reaches the floor');
+  appendTurn({ type: 'assistant', uuid: 'a-old', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'A-AFTER-LEAVING' }] } });
+  await sleep(WATCH_SETTLE_MS);
+  assert(!((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('A-AFTER-LEAVING')), 'while the conversation it left is no longer followed');
+  eq((await until(async () => { const g = await sessionsGet(); return g.rows?.some((r) => r.id === SESSION_B && r.known) ? g : null; }, 4000)) !== null, true,
+    'the list now says the board knows that conversation');
+
+  // Known now: reopening it again joins at the end, replaying nothing.
+  rmSync(`${FIX}/ready-delay.flag`, { force: true });
+  const bTailCount = () => turns('free').then((t) => (t.rows ?? []).filter((r) => (r.text ?? '').includes('B-TAIL-SEEN')).length);
+  const tailBefore = await bTailCount();
+  await sleep(6000);   // past the listing throttle, so the reopen's own list is fresh — and past nothing else
+  const secondPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
+  eq((await secondPick.json()).known, true, 'a second pick of the same conversation is one the board knows');
+  assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.session_id === SESSION_B && d?.hosted?.held === 'floor' && !paneOf().some((p) => panesAfter.includes(p)) ? true : null; }, 25000),
+    'and the window is reopened on it');
+  await sleep(WATCH_SETTLE_MS);
+  eq(await bTailCount(), tailBefore, 'with nothing replayed');
+
+  // Mid-turn: a window whose status line says it is working is not closed.
+  // The flag is read when a window starts, so the pick that lands here opens
+  // the window that then refuses the next one.
+  writeFileSync(`${FIX}/busy.flag`, '1');
+  const busyOpen = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
+  eq(busyOpen.status, 200, 'a pick is queued while the window is idle');
+  const idBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
+  assert(await until(async () => { const p = paneOf(); return p.length === panesAfter.length && !p.some((x) => panesAfter.includes(x)) ? true : null; }, 25000),
+    'and lands in a new window — one that now says it is working');
+  await sleep(WATCH_SETTLE_MS);
+  const busyPanes = paneOf();
+  const busyPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID });
+  eq(busyPick.status, 200, 'the board queues the next pick — it cannot see the pane');
+  const errTurn = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /not reopened/.test(r.text ?? '')) ?? null, 15000);
+  assert(!!errTurn, 'the host refuses it as an error turn on the desk');
+  assert(/esc to interrupt/.test(errTurn?.text ?? ''), `quoting the pane's status line — ${errTurn?.text}`);
+  eq(paneOf(), busyPanes, 'and the working window is left exactly as it was');
+  eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_B, `still on its conversation (was ${idBefore})`);
+  rmSync(`${FIX}/busy.flag`, { force: true });
+
+  // A fresh conversation: no --resume, and the desk follows whatever id the
+  // new window announces. The working window is killed by hand first — the
+  // one thing the floor will not do — and the roster it cannot unwrite is
+  // cleared, as the section after this one does for the same reason.
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
+  const argvAtNew = argvLog().length;
+  const fresh = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null });
+  eq(fresh.status, 200, 'start new is accepted');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 25000),
+    'and the desk follows the conversation the new window announces');
+  const newLine = argvLog().slice(argvAtNew).trim().split('\n').pop() ?? '';
+  assert(!newLine.includes('--resume'), `opened with nothing to resume — ${JSON.stringify(newLine)}`);
+
+  /* ── the folder picker, and moving a desk to another floor ────────────────
+   * The host lists one folder at a time, the way a file picker shows it, and
+   * a bound folder taken onto another floor under its own name is moved:
+   * rebound, and its window closed and reopened on the same conversation. */
+  console.log('\nthe folder picker and moving a desk');
+  const CH2 = 'host-test-2';
+  const browsed = (path) => json(`/api/floor/browse?host_id=host-test-1${path ? `&path=${encodeURIComponent(path)}` : ''}`).then((r) => r.json());
+  eq((await json('/api/floor/browse', { host_id: 'host-test-1', path: FIX })).status, 200, 'the floor can ask the host to list a folder');
+  const rootList = await until(async () => { const g = await browsed(FIX); return g.at ? g : null; }, 15000);
+  assert(!!rootList, 'and the host answers');
+  eq(rootList?.path, FIX, 'with the folder it was asked for');
+  const inRoot = Object.fromEntries((rootList?.entries ?? []).map((f) => [f.name, f]));
+  eq(inRoot['repo-a']?.bound?.agent, 'free', 'a folder that is a desk says which');
+  eq(inRoot['repo-elsewhere']?.other_board, 'http://localhost:9', 'one bound to another board says so');
+  eq([inRoot['plain-git']?.bound ?? null, inRoot['plain-git']?.git], [null, true], 'an unbound checkout is plain, and known to be a checkout');
+  assert(!inRoot['.claude'] && !inRoot['home'] === false, 'dotfolders are not listed');
+  eq((await json('/api/floor/browse', { host_id: 'host-test-1', path: `${FIX}/repo-a` })).status, 200, 'and to open a folder inside it');
+  const inner = await until(async () => { const g = await browsed(`${FIX}/repo-a`); return g.at ? g : null; }, 15000);
+  eq([inner?.parent, inner?.self?.bound?.channel, (inner?.entries ?? []).map((f) => f.name)], [FIX, CH, ['src']], 'which says where it is, what it is bound as, and what is inside');
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: HOME });
+  const outside = await until(async () => { const g = await browsed(HOME); return g.at ? g : null; }, 15000);
+  assert(!outside?.error && (outside?.entries ?? []).length >= 0 && outside?.parent === FIX, 'a folder outside the roots lists like any other — the roots are where the host looks on its own, not a fence');
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: `${FIX}/no-such-folder` });
+  const nowhere = await until(async () => { const g = await browsed(`${FIX}/no-such-folder`); return g.at ? g : null; }, 15000);
+  assert(/no such folder/.test(nowhere?.error ?? ''), `a folder that does not exist says so — ${nowhere?.error}`);
+  await json('/api/floor/browse', { host_id: 'host-test-1' });
+  const home = await until(async () => { const g = await browsed(); return g.at && g.path === HOME ? g : null; }, 15000);
+  eq(home?.path, HOME, 'and with no path named, the picker starts at the home folder');
+
+  // A folder outside the roots, taken from the picker: bound, and the folder
+  // becomes one of the host's roots so its rescan finds the desk.
+  const OUT = resolve(`./data/host-outside-${process.pid}`);
+  mkdirSync(OUT, { recursive: true });
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: resolve('./data') });
+  assert(await until(async () => { const g = await browsed(resolve('./data')); return g.at && (g.entries ?? []).some((f) => f.path === OUT) ? true : null; }, 15000), 'the picker shows a folder outside the roots');
+  const tookOut = await take({ host_id: 'host-test-1', path: OUT, channel: CH, agent: 'outsider', open: false });
+  eq([tookOut.status, (await tookOut.json()).mode], [200, 'take'], 'and it can be taken');
+  assert(await until(async () => (deskOf(await floor(), 'outsider')?.hosted?.live ? true : null), 20000), 'the host binds it and the desk registers — the roots were no fence');
+  assert(/added .*host-outside-.* to this host's roots for this run/.test(host.log), 'the host added the folder to its roots, and said that ORCH_HOST_ROOTS is where to keep it');
+  await json('/api/floor/desk/leave', { channel: CH, agent: 'outsider' });
+  await until(async () => (deskOf(await floor(), 'outsider')?.hosted?.state === 'offline' ? true : null), 20000);
+  rmSync(OUT, { recursive: true, force: true });
+
+  // Move: free's folder onto another floor, under its own name. The window
+  // is held by the floor and is on SESSION_ID (the fresh conversation from
+  // above), so the move closes it and reopens it there.
+  const sidBeforeMove = deskOf(await floor(), 'free')?.hosted?.session_id;
+  eq(sidBeforeMove, SESSION_ID, 'the desk to move is on a known conversation, in a floor-held window');
+  const argvAtMove = argvLog().length;
+  const movedOut = await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' });
+  eq([movedOut.status, (await movedOut.json()).mode], [200, 'move'], 'taking it onto another floor under its own name is a move');
+  eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'renamed' })).status, 400, 'and under another name is refused — the folder names its agent');
+  const onNewFloor = (f) => f.channels.find((c) => c.channel === CH2)?.desks.find((d) => d.agent === 'free');
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.live ? true : null), 30000), 'the desk appears on the new floor, hosted');
+  assert(/free: bound .*repo-a in local scope/.test(host.log) && /moving it from host-test\/free/.test(host.log), 'the host rebound the folder and said where from');
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'on the same conversation');
+  assert(await until(() => (argvLog().slice(argvAtMove).includes(`--resume ${SESSION_ID}`) ? true : null), 25000),
+    'its window reopened with --resume, because a running window keeps the headers it started with');
+  eq(deskOf(await floor(), 'free') ?? null, null, 'and its seat has left the old floor');
+  eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH2, 'the binding on disk names the new floor');
+
+  // And back, so the sections below find it where they expect it.
+  const back = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free' });
+  eq((await back.json()).mode, 'move', 'moving it back is a move too');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'and it is home, on its conversation');
+  await sleep(WATCH_SETTLE_MS);
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
@@ -449,9 +810,10 @@ try {
 
   killTmux();
   // The stand-in writes the roster and cannot unwrite it when the pane is
-  // killed under it. Left behind, its entry is a session with no pane, which
-  // holderOf reads — correctly — as an editor holding the conversation, and
-  // the send is refused before any of this is exercised.
+  // killed under it. The host drops a dead pid from the roster now (it read
+  // one as an editor holding the conversation once, and refused every reopen
+  // after the first), so this is belt and braces: the section starts from a
+  // roster that says what is true.
   writeFileSync(`${FIX}/roster.json`, '[]');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
   writeFileSync(`${FIX}/ready-delay.flag`, '6000');
@@ -598,6 +960,43 @@ try {
   rmSync(`${boards}/two`, { recursive: true, force: true });
   const agreed = await runHost(boards, { until: /tmux/ });
   assert(/→ http:\/\/127\.0\.0\.1:9911/.test(agreed.out), 'desks that agree on one board need no url at all');
+
+  // Local scope can live elsewhere: CLAUDE_CONFIG_DIR moves ~/.claude.json
+  // (measured 2026-09-09), and a host that read only the home file would miss
+  // every desk bound on such a machine.
+  const cfgDir = `${FIX}/cfg`;
+  mkdirSync(cfgDir, { recursive: true });
+  mkdirSync(`${boards}/three`, { recursive: true });
+  writeFileSync(`${cfgDir}/.claude.json`, JSON.stringify({
+    projects: {
+      [`${boards}/three`]: {
+        mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9911/mcp', headers: { 'X-Channel': CH, 'X-Agent': 'cfg-agent', 'X-Orchestratinator-Key': 'key-cfg' } } },
+      },
+    },
+  }));
+  // Resolved on the line printed after the desk list — the startup line itself
+  // says "tmux", so that marker would cut the output before any desk is named.
+  const moved = await runHost(boards, { CLAUDE_CONFIG_DIR: cfgDir, until: /attach to any of them/ });
+  assert(/host-test\/cfg-agent .*\(local scope\)/.test(moved.out), 'a desk bound in local scope under CLAUDE_CONFIG_DIR is found there');
+
+  /* ── where the shared secret comes from ─────────────────────────────────────
+   * A desk's own binding outranks ORCH_AUTH_TOKEN and host.json (the operator's
+   * rule, 2026-09-09): a repo bound by hand says which key this board takes.
+   * The environment and the file are for the machine with no hand-bound repo,
+   * whose every desk will be taken from the floor — which the host can only do
+   * with a key of its own. And the value is never printed. */
+  console.log('\n  where the shared secret comes from');
+  const keyed = await runHost(boards, { ORCH_AUTH_TOKEN: 'env-key-value', until: /shared secret/ });
+  assert(/shared secret: from host-test\/board-a's \.mcp\.json, which overrides ORCH_AUTH_TOKEN/.test(keyed.out),
+    "a desk's own .mcp.json wins over ORCH_AUTH_TOKEN, and the host says so");
+  assert(!/env-key-value|key-board-a/.test(keyed.out), 'without printing either value');
+  const emptyRoot = `${FIX}/empty-root`;
+  mkdirSync(emptyRoot, { recursive: true });
+  const envOnly = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', ORCH_AUTH_TOKEN: 'env-key-value', until: /shared secret/ });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(no desk here carries one\)/.test(envOnly.out), 'with no desk to read one from, the environment supplies it');
+  const none = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', until: /shared secret/ });
+  assert(/no shared secret/.test(none.out) && /install\.sh --token/.test(none.out),
+    'and with nothing at all the host says so, and how to give it one');
 } catch (err) {
   console.error(err);
   failures++;

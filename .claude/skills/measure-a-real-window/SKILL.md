@@ -67,6 +67,11 @@ measured, which read as a phantom keystroke source and cost a round to chase
 down. He is not doing anything wrong; he cannot see a window he was not told
 about. Name it, and give him one you are not using if he wants to play.
 
+**The same goes for background sessions.** `claude agents --json` lists every
+one on the machine, and `claude stop <id>` on one that is not yours ends
+somebody's conversation holder with nobody watching. Make your own to
+measure against — see "A background session" below — and stop only that.
+
 ## The probe inherits your environment
 
 A fresh `tmux -L probe` server takes its environment from whoever starts it,
@@ -205,6 +210,41 @@ For anything about *timing* on screen, a single capture is not enough — see
 skill: it records panes and the board's awaiting state for a window that already
 exists. Use that one for a desk that is misbehaving, this one for a question
 about Claude Code itself.
+
+## A background session
+
+Claude Code's daemon can hold a conversation with no terminal at all, and
+on 2.1.258 that is what a VS Code tab can leave behind when it closes. The
+host releases one on a floor open (`releaseBackground()` in
+[`host/window.js`](../../../host/window.js)); this is how that was measured,
+and how to measure it again when a release changes it. It costs one short
+prompt of tokens.
+
+```bash
+cd "$SP/bg" && mkdir -p . && claude --bg "This is a measurement fixture for the orchestratinator host. Reply with the single word pong and nothing else."
+# prints:  backgrounded · <job>   — the job id is what attach/logs/stop take
+sleep 8; ls -t ~/.claude/sessions/*.json | head -1 | xargs cat      # kind "bg", jobId, sessionId, cwd
+claude agents --json | python3 -c "import json,sys;[print(s['pid'], s['kind'], s['id'], s['sessionId']) for s in json.load(sys.stdin) if s.get('id')=='<job>']"
+claude logs <job> | tail -3                                           # the raw pane, ANSI and all
+claude stop <job>                                                     # "stopped <job>", at once
+claude agents --json | grep -c '<job>'                                # 0 — the roster entry and the pid are gone
+tmux -L probe new-session -d -s p -n bg -c "$SP/bg" -x 200 -y 50 "exec claude --resume <sessionId>"
+```
+
+What it showed, 2026-09-09: the session file says `kind: "bg"` and carries
+`jobId`; `claude agents --json` says `kind: "background"` and puts the job in
+`id`; `name` is a label made from the prompt and may be several words, so
+never hand `name` to `stop`. `stop` returned in under a second, the roster
+file and the process were gone at once, and `--resume <sessionId>` in the
+probe pane came up on the conversation — the trust question first, the
+folder being new — with the pane's own roster entry `interactive` under the
+same session id, which is what lets `holderOf` join it to the pane. A
+`--resume` *before* the stop is refused on the first line with "running as a
+background session (<job>). Run claude attach <job> to open it, or claude
+stop <job> first to resume it here", and `remain-on-exit` is what keeps that
+line readable. `claude attach` was not measured: a pane running the attach
+client would not carry the session's pid, so it is not a window the host can
+join, and there was no reason to find out more.
 
 ## Teardown
 

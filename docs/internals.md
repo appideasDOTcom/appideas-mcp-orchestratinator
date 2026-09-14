@@ -130,6 +130,18 @@ just means a client opens a session per turn, which is normal and handled.
   claimed a task, then its turn died) can't sit invisibly in `claimed`.
   `status=claimed` inspections never trigger this — only actionable open-task
   listings do.
+- **The folder list:** each host reports, on every registration, the folders
+  under its roots that could become a desk — bound or not, and from which
+  file, with the time of the newest transcript Claude Code wrote there. It is
+  in memory only (`live.folders`) and served by `GET /api/floor/folders` on
+  demand, never in `/api/floor`. A field on a folder crosses six places, all
+  hand-picked, and a drop in any one arrives on the page as `undefined`:
+  `discover()` in `host/identity.js` builds it → `register()` in
+  `host/index.js` posts it (paths canonical, `other_board` set against this
+  host's origin) → `/api/host/register` validates it (`cleanFolders`: absolute,
+  under a posted root, capped at 300) → `live.folders` → the GET's projection →
+  the dialog. The floor suite reads each field back through the GET with a
+  fixture value that cannot equal a fallback.
 
 ```
 src/

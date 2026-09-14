@@ -184,6 +184,31 @@ function writeFixture() {
   writeFileSync(`${FIX}/downboard/.mcp.json`, JSON.stringify({
     mcpServers: { o: { url: `http://127.0.0.1:${DEAD_PORT}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'patient' } } },
   }));
+
+  // Local scope. `claude mcp add -s local` writes a repo's binding into
+  // ~/.claude.json (HOME is the fixture here) rather than into the repo, and
+  // the floor binds desks that way. Keyed by the resolved path, as Claude Code
+  // writes it — tmpdir() is a symlink on macOS, so this is the lookup that has
+  // to work. One repo bound only there; one bound both ways, where the local
+  // entry must win because it is the one Claude Code connects with.
+  mkdirSync(`${FIX}/localrepo/sub`, { recursive: true });
+  mkdirSync(`${FIX}/bothrepo`, { recursive: true });
+  writeFileSync(`${FIX}/bothrepo/.mcp.json`, JSON.stringify({
+    mcpServers: { orchestratinator: { type: 'http', url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'both-project', 'X-Orchestratinator-Key': KEY } } },
+  }));
+  writeFileSync(`${FIX}/.claude.json`, JSON.stringify(localScopeFile({
+    [realpathSync(`${FIX}/localrepo`)]: 'local-agent',
+    [realpathSync(`${FIX}/bothrepo`)]: 'both-local',
+  })));
+}
+
+/** A ~/.claude.json with one local-scope orchestratinator entry per directory. */
+function localScopeFile(agents) {
+  const projects = {};
+  for (const [dir, agent] of Object.entries(agents)) {
+    projects[dir] = { mcpServers: { orchestratinator: { type: 'http', url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': KEY } } } };
+  }
+  return { projects };
 }
 
 async function main() {
@@ -228,6 +253,46 @@ async function main() {
     eq(received[0].body?.cwd, `${FIX}/repo`, 'filed under the repo, not under wherever it was standing');
     eq(received[0].body?.tool_name, 'Bash', 'with the event’s own fields intact');
 
+    // ---- a session standing in another desk's repo is still its own ----
+    // The QA agent works inside the repo it audits, so every hook it fires has
+    // that repo as cwd; the walk found that repo's binding and filed the QA
+    // session — its prompts included — under the other desk, while its own
+    // desk fell silent for four days (2026-09-11). The transcript path names
+    // the folder a session started in, and that is what a session is.
+    received.length = 0;
+    const transcriptFor = (dir, sid) => `${FIX}/.claude/projects/${realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-')}/${sid}.jsonl`;
+    await fire({ session_id: 'qa-session', hook_event_name: 'SessionStart', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/repo`, 'qa-session') });
+    await settle();
+    received.length = 0;
+    await fire({ session_id: 'qa-session', hook_event_name: 'Notification', notification_type: 'permission_prompt', cwd: `${FIX}/bothrepo`, transcript_path: transcriptFor(`${FIX}/repo`, 'qa-session') });
+    await settle();
+    eq(received.length, 1, 'a prompt raised while standing in another desk\'s repo is reported');
+    eq(received[0].body?.agent, AGENT, 'as the desk the session started in, not the one it is standing in');
+    eq(received[0].body?.cwd, `${FIX}/repo`, 'and filed under its own repo');
+    eq(readMemo()?.['qa-session']?.root, `${FIX}/repo`, 'and its memo still says its own repo — never overwritten by where it stood');
+    received.length = 0;
+    await fire({ session_id: 'local-qa', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/localrepo`, 'local-qa') });
+    await settle();
+    eq(received[0]?.body?.agent, 'local-agent', 'a local-scope desk\'s session is found by its transcript alone, with no memo and no walk');
+    received.length = 0;
+    mkdirSync(`${FIX}/repo/src`, { recursive: true });
+    await fire({ session_id: 'sub-session', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo/src`, transcript_path: transcriptFor(`${FIX}/repo/src`, 'sub-session') });
+    await settle();
+    eq(received[0]?.body?.agent, AGENT, 'a session started in a subfolder of its repo is that repo\'s');
+    received.length = 0;
+    await fire({ session_id: 'scratch-session', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/elsewhere`, 'scratch-session') });
+    await settle();
+    eq(received.length, 0, 'a session that started outside every desk reports nothing, however deep in a desk\'s repo it is standing');
+
+    // ---- a question's words travel with it ----
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'PermissionRequest', cwd: `${FIX}/repo`, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which scope should step one audit?', header: 'Scope', multiSelect: false, options: [{ label: 'Baseline only', description: 'Audit just the baseline.' }, { label: 'Everything' }] }, { not: 'a question' }] } });
+    await settle();
+    eq(received[0]?.body?.tool_input?.questions?.map((q) => `${q.header}|${q.question}|${q.options.length}`), ['Scope|Which scope should step one audit?|2'],
+      'an AskUserQuestion carries its questions, headers and options — the floor drew choices under the tool\'s name without them');
+    assert(!('not' in (received[0]?.body?.tool_input?.questions?.[1] ?? {})), 'and nothing that is not a question');
+
     // ---- what must never be reported ----
     received.length = 0;
     await fire({ session_id: 'a-session-never-seen-in-a-repo', hook_event_name: 'PermissionRequest', cwd: `${FIX}/elsewhere`, tool_name: 'Bash' });
@@ -241,6 +306,47 @@ async function main() {
     await fire({ session_id: SID, hook_event_name: 'Stop', cwd: `${FIX}/repo` }, { home: FIX });
     await settle();
     eq(received.length, 1, 'and an ordinary event still goes through afterwards');
+
+    // ---- local scope: bound with `claude mcp add -s local`, nothing in the repo ----
+    received.length = 0;
+    await fire({ session_id: 'local-session', hook_event_name: 'SessionStart', cwd: `${FIX}/localrepo/sub` });
+    await settle();
+    eq(received.length, 1, 'a session in a repo bound only in ~/.claude.json is reported');
+    eq(received[0]?.body?.agent, 'local-agent', 'as the local-scope identity');
+    eq(received[0]?.body?.cwd, `${FIX}/localrepo`, 'filed under the bound directory, found by walking up');
+    eq(received[0]?.headers['x-orchestratinator-key'], KEY, 'with the key from that entry');
+
+    received.length = 0;
+    await fire({ session_id: 'both-session', hook_event_name: 'SessionStart', cwd: `${FIX}/bothrepo` });
+    await settle();
+    eq(received[0]?.body?.agent, 'both-local', 'a repo bound both ways reports the local identity — the one Claude Code connects with');
+
+    // CLAUDE_CONFIG_DIR moves the file; the hook follows it.
+    received.length = 0;
+    mkdirSync(`${FIX}/cfg`, { recursive: true });
+    mkdirSync(`${FIX}/cfgrepo`, { recursive: true });
+    writeFileSync(`${FIX}/cfg/.claude.json`, JSON.stringify(localScopeFile({ [realpathSync(`${FIX}/cfgrepo`)]: 'cfg-agent' })));
+    await fire({ session_id: 'cfg-session', hook_event_name: 'SessionStart', cwd: `${FIX}/cfgrepo` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/cfg` } });
+    await settle();
+    eq(received[0]?.body?.agent, 'cfg-agent', 'a binding under CLAUDE_CONFIG_DIR is found there');
+
+    // A torn or broken ~/.claude.json must not take the .mcp.json desks with it:
+    // Claude Code rewrites the file constantly, and a read that lands mid-write
+    // is an ordinary event, not a reason to go silent.
+    received.length = 0;
+    const goodLocal = readFileSync(`${FIX}/.claude.json`, 'utf8');
+    writeFileSync(`${FIX}/.claude.json`, '{ "projects": { half-written');
+    await fire({ session_id: SID, hook_event_name: 'Stop', cwd: `${FIX}/repo` });
+    await settle();
+    eq(received[0]?.body?.agent, AGENT, 'an unreadable ~/.claude.json falls back to .mcp.json rather than reporting nothing');
+
+    // Removed from local scope → no longer a desk, memo or not.
+    received.length = 0;
+    writeFileSync(`${FIX}/.claude.json`, JSON.stringify({ projects: {} }));
+    await fire({ session_id: 'local-session', hook_event_name: 'PermissionRequest', cwd: `${FIX}/elsewhere`, tool_name: 'Bash' });
+    await settle();
+    eq(received.length, 0, 'a local-scope binding that has been removed reports nothing — the memo is re-resolved, not replayed');
+    writeFileSync(`${FIX}/.claude.json`, goodLocal);
 
     // ---- never fail loudly: this runs on the critical path of somebody's work ----
     received.length = 0;

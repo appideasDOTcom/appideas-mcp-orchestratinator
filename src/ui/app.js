@@ -609,7 +609,9 @@ function refreshDialog() {
   // redraw, so leave it exactly as the operator is using it. The prompt manager
   // is the same: it reads its own endpoint and redraws after each change, and a
   // poll-driven redraw would throw away whatever is half-typed in it.
-  if (kind === 'rename' || kind === 'prompts') return;
+  // The take-a-desk and leave-desk dialogs hold typing and a choice; a poll
+  // must not redraw either.
+  if (kind === 'rename' || kind === 'prompts' || kind === 'desk' || kind === 'leave' || kind === 'sessions') return;
   if (agent) {
     const a = findAgent(channel, agent);
     const left = !a ? 0
@@ -1473,6 +1475,68 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'advance':
       act(() => admin('agent/advance', { channel: d.channel, agent: d.agent, up_to_id: Number(d.upTo) }));
       break;
+    // --- take a desk / leave a desk. See deskDialog below.
+    case 'desk-look':
+      // The folder the picker stands in, listed again by the host.
+      readDeskForm();
+      browseTo(ui.deskForm?.path ?? null);
+      break;
+    case 'desk-take': {
+      readDeskForm();
+      const fm = ui.deskForm;
+      const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
+      const body = { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true };
+      if (fm.persona.trim()) body.persona = fm.persona.trim();
+      act(() => floorPost('desk', body).then(() => { window.floorOpenDesk?.(channel, body.agent); }));
+      break;
+    }
+    case 'desk-leave':
+      act(() => floorPost('desk/leave', { channel: d.channel, agent: d.agent }));
+      break;
+    // --- the session picker. See sessionDialog below. The floor is told the
+    // moment the reopen is queued so its link can spin until the desk's
+    // conversation actually changes — the receipt for the click is there,
+    // not here.
+    case 'session-resume': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      const id = d.id;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: id })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, id, fm.current); }));
+      break;
+    }
+    case 'session-new': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: null })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, null, fm.current); }));
+      break;
+    }
+    case 'session-look':
+      askSessions();
+      break;
+    // --- the session picker. See sessionDialog below. The floor is told the
+    // moment the reopen is queued so its link can spin until the desk's
+    // conversation actually changes — the receipt for the click is there,
+    // not here.
+    case 'session-resume': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      const id = d.id;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: id })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, id, fm.current); }));
+      break;
+    }
+    case 'session-new': {
+      const fm = ui.sessForm;
+      if (!fm) break;
+      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: null })
+        .then(() => { window.floorReopen?.(fm.channel, fm.agent, null, fm.current); }));
+      break;
+    }
+    case 'session-look':
+      askSessions();
+      break;
     case 'retire':
       act(() => admin('agent/retire', { channel: d.channel, agent: d.agent }));
       break;
@@ -1610,3 +1674,483 @@ document.addEventListener('visibilitychange', () => {
 });
 
 tick();
+
+/**
+ * Take a desk: pick the folder the agent lives in, and it becomes a desk on a
+ * floor — no file to edit, no terminal.
+ *
+ * A folder picker, not a list. It opens on the host's projects folder and
+ * shows the folders inside it; you open folders until you are standing in
+ * the agent's, the way a file dialog works. Each level is one round trip to
+ * the host (`POST /api/floor/browse`, then the GET until the host's time on
+ * it moves), because the folders are on the host's disk, not this machine's.
+ * The first version was a flat list of every folder that might be a desk,
+ * by its last path segment — 95 names from nowhere, on the first machine it
+ * ran on (2026-09-10) — and this replaced it.
+ *
+ * It starts at the host's home folder and goes anywhere that account can
+ * read; the roots in host.json are where the host looks for desks on its
+ * own, not a limit on what you may pick.
+ *
+ * The folder you stand in fills the form. A folder that already names its
+ * agent (in its .mcp.json, or in Claude Code's local scope) fixes the agent:
+ * the field is locked, because "my agent lives in this directory" is the
+ * whole idea, and only the floor is yours to choose. Change the floor and
+ * the take becomes a move; keep it and it is an import into local scope; an
+ * unbound folder asks for a name. One dialog, three modes, decided by what
+ * the folder says and what you pick.
+ *
+ * Drawn by renderDeskDialog and redrawn on every choice, so the operator's
+ * picks live in ui.deskForm rather than in the DOM. The poll never redraws
+ * it: 'desk' is in refreshDialog's skip list.
+ */
+function deskDialog({ channel = null, hostId = null, path = null } = {}) {
+  ui.dlgCtx = { kind: 'desk' };
+  ui.deskForm = {
+    hosts: null, hostId, path, listing: null, waiting: false, seq: 0,
+    wantChannel: channel, channel, newChannel: '', agent: '', persona: '', prefilled: null, error: null,
+  };
+  renderDeskDialog();
+  loadFolders();
+}
+
+/** The hosts and their roots, read when the dialog opens: where a picker can start. */
+async function loadFolders() {
+  const fm = ui.deskForm;
+  if (!fm) return;
+  try {
+    const res = await fetch('./api/floor/folders');
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    fm.hosts = json.hosts ?? [];
+    fm.error = null;
+  } catch (e) {
+    fm.hosts = [];
+    fm.error = `Could not read the host list — ${e.message}`;
+  }
+  if (ui.dlgCtx?.kind !== 'desk' || ui.deskForm !== fm) return;
+  const live = fm.hosts.filter((h) => h.live);
+  if (!fm.hostId || !fm.hosts.some((h) => h.host_id === fm.hostId)) fm.hostId = live[0]?.host_id ?? fm.hosts[0]?.host_id ?? null;
+  const host = fm.hosts.find((h) => h.host_id === fm.hostId) ?? null;
+  renderDeskDialog();
+  // No path: the host starts its picker at its home folder.
+  if (host?.live) browseTo(fm.path ?? null);
+}
+
+/** Open one folder on the host: ask, then read until the host has answered. */
+async function browseTo(path) {
+  const fm = ui.deskForm;
+  if (!fm || !fm.hostId) return;
+  const seq = ++fm.seq;
+  fm.waiting = true;
+  fm.error = null;
+  fm.path = path;
+  renderDeskDialog();
+  const mine = () => ui.dlgCtx?.kind === 'desk' && ui.deskForm === fm && fm.seq === seq;
+  const read = async () => {
+    const res = await fetch(`./api/floor/browse?host_id=${encodeURIComponent(fm.hostId)}${path ? `&path=${encodeURIComponent(path)}` : ''}`);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    return json;
+  };
+  try {
+    const before = (await read()).at ?? null;
+    await floorPost('browse', { host_id: fm.hostId, ...(path ? { path } : {}) });
+    for (let i = 0; i < 16 && mine(); i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!mine()) return;
+      const got = await read().catch(() => null);
+      if (got && got.at && got.at !== before) {
+        takeListing(fm, got);
+        fm.waiting = false;
+        renderDeskDialog();
+        return;
+      }
+    }
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.error = 'The host did not answer in 8 s.';
+  } catch (e) {
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.error = String(e.message ?? e);
+  }
+  renderDeskDialog();
+}
+
+/** What the host listed, and the form filled from the folder it stands in. */
+function takeListing(fm, got) {
+  fm.listing = got;
+  if (got.path) fm.path = got.path;
+  // Filled once per folder: the folder's own binding fixes the agent and
+  // proposes the floor; an unbound folder asks for a name, on the floor the
+  // dialog was opened from. Typed values survive a redraw, not a new folder.
+  if (fm.prefilled !== fm.path) {
+    const b = got.self?.bound ?? null;
+    fm.agent = b ? b.agent : '';
+    if (b) fm.channel = b.channel;
+    else if (fm.wantChannel) fm.channel = fm.wantChannel;
+    fm.prefilled = fm.path;
+  }
+}
+
+/** Copy what is in the boxes into ui.deskForm, so a redraw keeps it. */
+function readDeskForm() {
+  const fm = ui.deskForm;
+  if (!fm) return;
+  const v = (id) => el.dlgBody.querySelector(`#${id}`)?.value;
+  if (v('desk-host') !== undefined) fm.hostId = v('desk-host') || null;
+  if (v('desk-channel') !== undefined) fm.channel = v('desk-channel') || null;
+  if (v('desk-new-channel') !== undefined) fm.newChannel = v('desk-new-channel') ?? '';
+  if (v('desk-agent') !== undefined) fm.agent = v('desk-agent') ?? '';
+  if (v('desk-persona') !== undefined) fm.persona = v('desk-persona') ?? '';
+}
+
+const agoText = (isoStr) => {
+  if (!isoStr) return 'never opened';
+  const s = Math.max(0, (Date.now() - Date.parse(isoStr)) / 1000);
+  if (s < 90) return 'just now';
+  if (s < 5400) return `${Math.round(s / 60)}m ago`;
+  if (s < 172800) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+};
+
+/** The path from the root to here, one crumb per folder. */
+function crumbsOf(root, path) {
+  const base = root && path.startsWith(root) ? root : path;
+  const rest = path.slice(base.length).split('/').filter(Boolean);
+  const out = [{ name: base.split('/').filter(Boolean).pop() ?? base, path: base }];
+  let p = base;
+  for (const part of rest) {
+    p = `${p}/${part}`;
+    out.push({ name: part, path: p });
+  }
+  return out;
+}
+
+function renderDeskDialog() {
+  const fm = ui.deskForm;
+  if (!fm) return;
+  const hosts = fm.hosts ?? [];
+  const liveHosts = hosts.filter((h) => h.live);
+  const host = hosts.find((h) => h.host_id === fm.hostId) ?? null;
+  const L = fm.listing && !fm.listing.error ? fm.listing : null;
+  const self = L?.self ?? null;
+  const bound = self?.bound ?? null;
+  const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
+  const mode = !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
+  const channels = [...new Set([...(ui.state?.channels ?? []).map((c) => c.channel), ...(fm.channel && fm.channel !== '__new__' ? [fm.channel] : [])])].sort();
+  if (!fm.channel && channels.length) fm.channel = channels[0];
+  const crumbs = L ? crumbsOf(L.root, L.path) : [];
+  const dirs = L?.entries ?? [];
+
+  const title = mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
+  const primary = mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
+  const dirRow = (f) => {
+    const marks = [
+      f.bound && !f.other_board ? `${f.bound.channel} / ${f.bound.agent}` : null,
+      f.other_board ? 'another board' : null,
+      f.sessions > 0 ? 'opened by Claude' : null,
+    ].filter(Boolean);
+    return `<button type="button" class="dir-row" data-go="${esc(f.path)}" title="Open ${esc(f.name)}"><span class="dir-name">${esc(f.name)}</span><span class="dir-marks">${marks.map(esc).join(' · ')}</span></button>`;
+  };
+  // What the folder you are standing in says about itself: the sentence the
+  // form is filled from, so the two can never disagree.
+  let here = '';
+  if (self) {
+    const where = bound?.scope === 'project' ? 'its .mcp.json' : "Claude Code's local scope";
+    if (self.other_board) here = `<b>${esc(self.name)}</b> is bound to <span class="mono">${esc(self.other_board)}</span>, not this board. Change it there.`;
+    else if (bound) here = `<b>${esc(self.name)}</b> is <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(bound.channel)}</span>, according to ${where}.`;
+    else here = `<b>${esc(self.name)}</b> is not a desk yet.${self.sessions > 0 ? ` Claude Code has opened it before (${self.sessions} conversation${self.sessions === 1 ? '' : 's'}).` : ''}`;
+  }
+  const notes = [];
+  if (fm.error) notes.push(`<b>${esc(fm.error)}</b>`);
+  else if (fm.hosts === null) notes.push('Reading the host list…');
+  else if (!hosts.length) notes.push('No host is registered on this board, so there is nobody to bind a folder. Install the host on a machine that has the repos.');
+  else if (!liveHosts.length) notes.push('Every host on this board is offline right now.');
+  else if (fm.listing?.error) notes.push(`<b>${esc(fm.listing.error)}</b>`);
+  if (self && !self.other_board) {
+    if (mode === 'take') {
+      notes.push(`Binds this folder as the agent you name, on the floor you pick, and opens a window there. Nothing in the folder is edited.${self.trusted ? '' : ' Claude Code has not opened it before, so its window will ask the folder-trust question — on the desk, for you to answer.'}`);
+    } else if (mode === 'import') {
+      notes.push(`Brings it onto the floor as it is. The binding moves into Claude Code's local scope${bound.scope === 'project' ? ' and the orchestratinator entry comes out of its .mcp.json (other servers stay)' : ''}. A window already open there is not touched.`);
+    } else {
+      notes.push(`Moves it: rebinds the folder as <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(channelNow)}</span>, and if the floor holds its window, closes it and reopens it on the same conversation. Its seat leaves <span class="mono">${esc(bound.channel)}</span>. Refused while a turn is running.`);
+    }
+  }
+  const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting);
+  openDialog(`
+    <div class="dlg-head"><h3>${title}</h3></div>
+    <p class="dlg-sub">open the folder your agent lives in, then pick its floor</p>
+    ${hosts.length > 1 ? `
+    <label class="field">
+      <span>Host</span>
+      <select id="desk-host" class="input">
+        ${hosts.map((h) => `<option value="${esc(h.host_id)}"${h.host_id === fm.hostId ? ' selected' : ''}${h.live ? '' : ' disabled'}>${esc(h.name)}${h.live ? '' : ' — offline'}</option>`).join('')}
+      </select>
+    </label>` : ''}
+    <div class="dlg-crumbs" aria-label="Where you are">
+      ${crumbs.map((c, i) => `${i ? '<span class="sep">/</span>' : ''}<button type="button" class="crumb${i === crumbs.length - 1 ? ' here' : ''}"${i === crumbs.length - 1 ? ' disabled' : ` data-go="${esc(c.path)}"`}>${esc(c.name)}</button>`).join('')}
+      ${fm.waiting ? '<span class="muted">· looking…</span>' : ''}
+    </div>
+    <div class="dlg-dirs" role="list">
+      ${dirs.length ? dirs.map(dirRow).join('') : `<div class="dir-empty">${fm.listing === null ? (fm.waiting ? 'Asking the host…' : '') : 'No folders inside this one.'}</div>`}
+    </div>
+    <div class="desk-folder-meta">
+      <span>${L ? `${dirs.length} folder${dirs.length === 1 ? '' : 's'} in ${esc(crumbs[crumbs.length - 1]?.name ?? '')}` : ''}</span>
+      <button type="button" class="btn" data-do="desk-look" title="Ask the host to look at this folder again now"${fm.waiting || !host?.live ? ' disabled' : ''}>Look again</button>
+    </div>
+    <p class="dlg-self">${here || '&nbsp;'}</p>
+    <label class="field">
+      <span>Agent${bound ? ' — set by the folder' : ''}</span>
+      <input id="desk-agent" class="input" type="text" maxlength="64" value="${esc(fm.agent)}" placeholder="developer" autocomplete="off" spellcheck="false"${bound ? ' readonly' : ''}>
+    </label>
+    <label class="field">
+      <span>Floor</span>
+      <select id="desk-channel" class="input">
+        ${channels.map((c) => `<option value="${esc(c)}"${c === fm.channel ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        <option value="__new__"${fm.channel === '__new__' ? ' selected' : ''}>new floor…</option>
+      </select>
+    </label>
+    ${fm.channel === '__new__' ? `
+    <label class="field">
+      <span>New floor's name</span>
+      <input id="desk-new-channel" class="input" type="text" maxlength="64" value="${esc(fm.newChannel)}" placeholder="my-project" autocomplete="off" spellcheck="false">
+    </label>` : ''}
+    <label class="field">
+      <span>Display name (optional)</span>
+      <input id="desk-persona" class="input" type="text" maxlength="40" value="${esc(fm.persona)}" placeholder="what the nameplate says" autocomplete="off">
+    </label>
+    <p class="dlg-note">${notes.join(' ') || '&nbsp;'}</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="desk-take"${canGo ? '' : ' disabled'}>${primary}</button>
+    </div>
+  `);
+}
+
+/** Leave a desk: a confirmation that says exactly what goes and what stays. */
+function leaveDeskDialog(channel, agent, persona, scope) {
+  ui.dlgCtx = { kind: 'leave', channel, agent };
+  const where = scope === 'local' ? "Claude Code's local scope" : scope === 'project' ? 'its .mcp.json' : 'wherever it is bound';
+  openDialog(`
+    <div class="dlg-head"><h3>Leave desk — ${esc(persona ?? agent)}</h3></div>
+    <p class="dlg-sub">on <span class="mono">${esc(channel)}</span> · <span class="mono">${esc(agent)}</span></p>
+    <p class="dlg-note">
+      Removes this desk's binding (${esc(where)}) and closes the floor's window there. The folder and its
+      conversations stay where they are. The seat stays on the floor as not hosted — remove the agent from the
+      board if it is gone for good. A chat open in your editor keeps running, without the board.
+    </p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn danger" data-do="desk-leave" data-channel="${esc(channel)}" data-agent="${esc(agent)}">Leave desk</button>
+    </div>
+  `);
+}
+
+// Opening a folder — a row, or a crumb back up the path.
+el.dlgBody.addEventListener('click', (e) => {
+  if (ui.dlgCtx?.kind !== 'desk') return;
+  const go = e.target.closest('[data-go]');
+  if (!go || go.disabled) return;
+  readDeskForm();
+  browseTo(go.dataset.go);
+});
+// A choice redraws the take-a-desk dialog (the title, the note and the button
+// depend on it); typing only records itself, so the caret is never taken away
+// mid-word. Changing host starts the picker again at that host's root.
+el.dlgBody.addEventListener('change', (e) => {
+  if (ui.dlgCtx?.kind !== 'desk') return;
+  if (!e.target.matches('#desk-host, #desk-channel')) return;
+  readDeskForm();
+  if (e.target.matches('#desk-host')) {
+    const fm = ui.deskForm;
+    fm.listing = null;
+    fm.prefilled = null;
+    browseTo(null);
+    return;
+  }
+  renderDeskDialog();
+});
+el.dlgBody.addEventListener('input', (e) => {
+  if (ui.dlgCtx?.kind !== 'desk') return;
+  if (!e.target.matches('#desk-agent, #desk-persona, #desk-new-channel')) return;
+  readDeskForm();
+  const fm = ui.deskForm;
+  const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
+  const go = el.dlgBody.querySelector('[data-do="desk-take"]');
+  if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting);
+});
+
+/**
+ * The session picker: a folder's recent conversations, for the desk's window
+ * to be reopened on — or a fresh one. The last of the three doors the floor
+ * opens without a terminal (start, resume, move), and the smallest surface
+ * that proves a reopen.
+ *
+ * The list is the host's. It is asked for when the dialog opens, and the
+ * dialog polls the GET each second until the host's time on the list moves —
+ * eight seconds, then it says the host did not answer — drawing whatever list
+ * it already has meanwhile, because a list a minute old beats a spinner. Rows
+ * the board cannot act on are drawn disabled with the reason as their title:
+ * the conversation the desk is on now, and one an editor holds, since a
+ * resume closes a window the floor must hold. The filter is by title only
+ * (decided 2026-09-08); there is no search of what was said.
+ *
+ * Kind 'sessions' is in refreshDialog's skip list, and typing redraws only
+ * the rows: the poll must never take the caret out of the filter box.
+ */
+function sessionDialog(channel, agent, persona) {
+  ui.dlgCtx = { kind: 'sessions', channel, agent };
+  ui.sessForm = {
+    channel, agent, persona: persona ?? agent,
+    rows: null, at: null, current: null, editorPid: null,
+    filter: '', waiting: true, error: null, note: null,
+  };
+  renderSessionDialog();
+  askSessions();
+}
+
+async function readSessions(fm) {
+  const res = await fetch(`./api/floor/sessions?channel=${encodeURIComponent(fm.channel)}&agent=${encodeURIComponent(fm.agent)}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json;
+}
+
+function takeSessions(fm, got) {
+  fm.rows = Array.isArray(got.rows) ? got.rows : [];
+  fm.at = got.at ?? null;
+  fm.current = got.current ?? null;
+  fm.editorPid = got.editor_pid ?? null;
+}
+
+async function askSessions() {
+  const fm = ui.sessForm;
+  if (!fm) return;
+  fm.waiting = true;
+  fm.error = null;
+  fm.note = null;
+  const mine = () => ui.dlgCtx?.kind === 'sessions' && ui.sessForm === fm;
+  let before = null;
+  try {
+    const held = await readSessions(fm);
+    before = held.at ?? null;
+    takeSessions(fm, held);
+    if (mine()) renderSessionDialog();
+    const asked = await floorPost('sessions', { channel: fm.channel, agent: fm.agent });
+    // Within the host's throttle the list in hand is the answer — seconds old.
+    if (asked.asked === false) { fm.waiting = false; if (mine()) renderSessionDialog(); return; }
+  } catch (e) {
+    fm.waiting = false;
+    fm.error = String(e.message ?? e);
+    if (mine()) renderSessionDialog();
+    return;
+  }
+  for (let i = 0; i < 8 && mine(); i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (!mine()) return;
+    const got = await readSessions(fm).catch(() => null);
+    if (got && got.at && got.at !== before) {
+      takeSessions(fm, got);
+      fm.waiting = false;
+      renderSessionDialog();
+      return;
+    }
+  }
+  if (!mine()) return;
+  fm.waiting = false;
+  fm.note = fm.rows?.length ? `The host did not answer in 8 s — this list is from ${agoText(fm.at)}.` : 'The host did not answer in 8 s.';
+  renderSessionDialog();
+}
+
+/** The floor's stream heard a host list sessions: read it now rather than at the next second. */
+function sessionsArrived() {
+  const fm = ui.sessForm;
+  if (!fm || ui.dlgCtx?.kind !== 'sessions') return;
+  readSessions(fm).then((got) => {
+    if (ui.sessForm !== fm) return;
+    takeSessions(fm, got);
+    fm.waiting = false;
+    fm.note = null;
+    renderSessionDialog();
+  }).catch(() => { /* the poll in askSessions will say so */ });
+}
+
+const EDITOR_HOLDS = 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.';
+
+function sessionRowsHtml(fm) {
+  const rows = fm.rows ?? [];
+  const q = fm.filter.trim().toLowerCase();
+  const shown = q ? rows.filter((r) => (r.title ?? '').toLowerCase().includes(q)) : rows;
+  if (!shown.length) {
+    const why = fm.rows === null ? 'Reading…'
+      : !rows.length ? (fm.waiting ? 'Asking the host…' : 'Claude Code has not opened this folder yet, so there is nothing to resume. Start new opens its first conversation.')
+      : 'No title matches.';
+    return `<p class="muted sess-empty">${esc(why)}</p>`;
+  }
+  return shown.map((r) => {
+    const current = r.id === fm.current;
+    const editor = r.held === 'editor';
+    const why = current ? 'This is the conversation on the desk now.' : editor ? EDITOR_HOLDS : 'Reopen the desk\'s window on this conversation';
+    const title = r.title ?? (r.spoken ? '(untitled)' : '(nothing said yet)');
+    const marks = [
+      current ? 'current' : null,
+      r.live && !current ? (editor ? 'in your editor' : 'open') : null,
+      r.title_source === 'custom' ? 'named' : null,
+    ].filter(Boolean);
+    return `<button type="button" class="sess-row${current ? ' current' : ''}" data-do="session-resume" data-id="${esc(r.id)}" title="${esc(why)}"${current || editor ? ' disabled' : ''}>
+      <span class="sess-title">${esc(title)}</span>
+      <span class="sess-meta">${esc(agoText(r.last_at ?? r.modified_at))}${marks.length ? ` · ${marks.map(esc).join(' · ')}` : ''}</span>
+    </button>`;
+  }).join('');
+}
+
+function sessionCountText(fm) {
+  const rows = fm.rows ?? [];
+  const q = fm.filter.trim().toLowerCase();
+  const shown = q ? rows.filter((r) => (r.title ?? '').toLowerCase().includes(q)) : rows;
+  const n = rows.length;
+  const base = n === 1 ? '1 conversation' : `${n} conversations`;
+  return `${q ? `${shown.length} of ${base}` : base} · newest first${fm.at ? ` · listed ${agoText(fm.at)}` : ''}`;
+}
+
+function renderSessionDialog() {
+  const fm = ui.sessForm;
+  if (!fm) return;
+  const notes = [];
+  if (fm.error) notes.push(`<b>${esc(fm.error)}</b>`);
+  else if (fm.waiting) notes.push('Asking the host for a fresh list…');
+  else if (fm.note) notes.push(esc(fm.note));
+  notes.push('Picking one closes the desk\'s window and reopens it with <span class="mono">--resume</span>; the conversation carries on where it left off. Refused while a turn is running.');
+  openDialog(`
+    <div class="dlg-head"><h3>Sessions — ${esc(fm.persona)}</h3></div>
+    <p class="dlg-sub">on <span class="mono">${esc(fm.channel)}</span> · <span class="mono">${esc(fm.agent)}</span> · this folder's conversations</p>
+    <label class="field">
+      <span>Filter by title</span>
+      <input id="sess-filter" class="input" type="text" value="${esc(fm.filter)}" placeholder="part of a title" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="dlg-sessions" role="list" aria-label="Conversations">${sessionRowsHtml(fm)}</div>
+    <div class="desk-folder-meta">
+      <span class="sess-count">${esc(sessionCountText(fm))}</span>
+      <button type="button" class="btn" data-do="session-look" title="Ask the host to list this folder's conversations again now">Look again</button>
+    </div>
+    <p class="dlg-note">${notes.join(' ')}</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Close</button>
+      <button type="button" class="btn primary" data-do="session-new" title="Close the desk's window and open a fresh conversation in this folder">Start new</button>
+    </div>
+  `);
+}
+
+// Typing in the filter redraws the rows and the count, never the box.
+el.dlgBody.addEventListener('input', (e) => {
+  if (ui.dlgCtx?.kind !== 'sessions' || !e.target.matches('#sess-filter')) return;
+  const fm = ui.sessForm;
+  if (!fm) return;
+  fm.filter = e.target.value;
+  const list = el.dlgBody.querySelector('.dlg-sessions');
+  if (list) list.innerHTML = sessionRowsHtml(fm);
+  const count = el.dlgBody.querySelector('.sess-count');
+  if (count) count.textContent = sessionCountText(fm);
+});

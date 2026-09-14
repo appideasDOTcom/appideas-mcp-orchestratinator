@@ -32,6 +32,29 @@ The board now reports `holders` and says so on the desk rather than picking one
 quietly. So: not "impossible", but "diverges without telling you", which is
 worse. Do not design against it as a guarantee.
 
+**The board's pin can name a conversation that does not exist, and a process
+you cannot see can hold one that does.** Both measured 2026-09-09 on 2.1.258,
+on one desk. The roster keeps a process's *first* session id, so a VS Code tab
+that runs `/resume` inside writes every word into another file and leaves the
+desk pinned to an id with no transcript — and `claude --resume` of that exits
+on its first line. `resumable()` in [`host/window.js`](host/window.js) checks
+the disk before handing an id over, falls back to the conversation with the
+latest spoken turn (as `readTranscript` files it — a tab holding only
+`/resume` and its output is not one), and says so on the floor as a line
+labeled `host`. And Claude Code's daemon keeps a conversation running after
+its tab has closed: `kind: bg` in the session file, `claude bg-spare` in `ps`,
+"running as a background session (<job>)" when resumed. The watch follows
+interactive sessions only, so such a desk reads as empty — and opening it
+from the floor does the move: the host presses `claude stop <job>` itself,
+waits for the roster to drop it, resumes the conversation in the window and
+says so on the desk (`releaseBackground()`). That is the one thing the host
+does on the person's behalf, and the reasoning is beside it: the click is the
+handoff and there is no tab of theirs to close, `stop` keeps the conversation
+in Claude Code's own words, and the version that told a partner to run
+`claude stop` themselves stranded a working channel for an afternoon. **A
+remedy is never handed to the operator as a command.** If the floor can name
+it, the floor runs it on the click.
+
 State lives in three places, and they must agree:
 
 | What | Where | Read it with |
@@ -118,6 +141,12 @@ day was spent proving each of those; do not adjust `answerSteps()` in
 
 Three consequences worth knowing before touching `host/window.js`:
 
+- **`-t orch` is not the session.** `new-window` takes a window index, and
+  tmux resolves a bare name against window *names* first, by prefix — so the
+  day a desk called `orch-slice1-demo` had a window, `-t orch` meant that
+  window's index and every open on the board failed with `create window
+  failed: index 1 in use` (3.7c, 2026-09-09). A session target carries the
+  trailing colon: `orch:`.
 - **Pane width is set by whoever is attached.** A footer that fits on one line at
   160 columns wraps at 80, which broke `askingOf` and made a real fault look
   intermittent. Read footers as the last few lines rejoined.
@@ -286,6 +315,21 @@ own tmux session names and ports, so they are safe to run beside a live host —
 but a suite killed halfway leaves a server on port 8896 and fixtures in `data/`,
 which will poison the next run. Check for both before concluding a failure is
 real.
+
+Two more things about `test:window`, both from 2026-09-09. Its stand-in
+fakes exactly what the host reads and no more: it answers `agents`, it
+answers `stop <job>` by dropping the roster entry the test wrote for itself
+(and refuses job `stuck-1`, for the failure path), and on `--resume` it
+registers its own pid under that id, because readiness and delivery read the
+roster — a case that opens a window from a message needs that, or it waits
+out the 45s readiness timeout on "the roster had nothing at all". It writes
+no transcript, so a send that opens a window can only end `not_delivered`
+there; the case asserts the release, the window and the text arriving, and
+delivery is proved by the section that writes its own transcript. And the
+answer-a-prompt cases read a fixture pane 500ms after creating it: under
+editor load they went red twice with `its last line reads ""` and were green
+on the rerun. That red is a pane not yet drawn, not the code — rerun before
+reading anything into it.
 
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so

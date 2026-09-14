@@ -71,8 +71,13 @@ const SESSION = (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._
 const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
 /** Long enough for a cold `claude agents --json`, short enough not to stall a poll. */
 const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
+// `claude stop` answers from the daemon at once — 0s measured on 2.1.258 — so
+// the budget is for a CLI that has to boot first. The release wait is for the
+// roster entry to go, which happened within the same second.
+const STOP_TIMEOUT_MS = Number(process.env.ORCH_STOP_TIMEOUT_MS ?? 30_000);
+const RELEASE_TIMEOUT_MS = Number(process.env.ORCH_RELEASE_TIMEOUT_MS ?? 10_000);
 /** How long a freshly opened window gets to become a running session. */
-const READY_TIMEOUT_MS = Number(process.env.ORCH_READY_TIMEOUT_MS ?? 45_000);
+export const READY_TIMEOUT_MS = Number(process.env.ORCH_READY_TIMEOUT_MS ?? 45_000);
 /** Pause before each attempt to submit a pasted message — see send(). */
 const SUBMIT_SETTLE_MS = Number(process.env.ORCH_SUBMIT_SETTLE_MS ?? 400);
 /** How long a message waits for a running turn to end before it is typed in. */
@@ -90,6 +95,51 @@ const PASTE_TIMEOUT_MS = Number(process.env.ORCH_PASTE_TIMEOUT_MS ?? 60_000);
  * what happens to a message that never lands without writing into the real one.
  */
 const CLAUDE_HOME = process.env.ORCH_CLAUDE_HOME ?? join(homedir(), '.claude');
+
+/**
+ * The model a window is started on — the operator's default, when they have
+ * said what it is — and null when nothing has.
+ *
+ * A bare `claude --resume <id>` comes up on whatever model answered that
+ * conversation last, not on the default. On 2.1.258 that is
+ * restoreModelFromSession: it walks the transcript backwards to the last
+ * assistant record's `message.model` and installs it, and it stands aside
+ * (startupModelWinsOverSessionRestore) only for a model given at startup —
+ * the `--model` flag or an ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL
+ * variable. The `model` in settings.json is not on that list. So a desk
+ * created on Opus and moved to Fable with /model came back on Opus at every
+ * reopen from the floor, and the switch only ever lived in the process just
+ * detached from (reported 2026-09-14). Measured the same day on a throwaway
+ * window with settings saying fable: `--model opus` answered on Opus,
+ * `--resume <id>` answered on Opus, `--resume <id> --model fable` answered on
+ * Fable. open() passes what this returns as `--model`, which is the one form
+ * of "your default" that resume respects.
+ *
+ * The default is read from where Claude Code keeps it rather than pinned
+ * here, in Claude Code's own order — the desk's .claude/settings.local.json,
+ * its .claude/settings.json, then ~/.claude/settings.json — so changing it
+ * is one edit in one file, and a repo that names its own model keeps it.
+ * With no `model` anywhere there is no default to open on and no flag is
+ * passed: history wins, as before, which is the right answer when nothing
+ * has said otherwise. ORCH_HOST_MODEL pins floor windows over all of that,
+ * read per call so a test can flip it.
+ */
+export function defaultModel(cwd) {
+  const pinned = process.env.ORCH_HOST_MODEL?.trim();
+  if (pinned) return pinned;
+  const files = [
+    join(cwd, '.claude', 'settings.local.json'),
+    join(cwd, '.claude', 'settings.json'),
+    join(CLAUDE_HOME, 'settings.json'),
+  ];
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    let model;
+    try { model = JSON.parse(readFileSync(file, 'utf8'))?.model; } catch { continue; }
+    if (typeof model === 'string' && model.trim()) return model.trim();
+  }
+  return null;
+}
 
 /**
  * tmux exits non-zero for ordinary answers ("no such session"), so callers
@@ -182,13 +232,20 @@ function readSessionFiles() {
       pid,
       cwd: canonical(d.cwd),
       sessionId: d.sessionId,
-      kind: typeof d.kind === 'string' ? d.kind : 'interactive',
+      // The file says `bg` where `claude agents --json` says `background` for
+      // the same process (2.1.258) — one word here, the CLI's, so a reader of
+      // either sees the same roster. The first cut compared against the CLI's
+      // word and let the daemon's session through as an editor tab.
+      kind: d.kind === 'bg' ? 'background' : typeof d.kind === 'string' ? d.kind : 'interactive',
       // How this session was started — 'claude-vscode' for the VS Code
       // extension, and so on. It is the difference between a window that can be
       // typed into and one that has to be reached another way, which is not a
       // detail: it decides whether a message can be delivered at all.
       entrypoint: typeof d.entrypoint === 'string' ? d.entrypoint : null,
       name: typeof d.name === 'string' ? d.name : null,
+      // Claude Code's handle for a background session — what `claude stop`
+      // and `claude attach` take. `name` is a label and may be words.
+      job: typeof d.jobId === 'string' ? d.jobId : null,
       startedAt: Number(d.startedAt) || null,
     });
   }
@@ -215,6 +272,11 @@ async function rosterViaCli() {
     ok: true,
     sessions: rows
       .filter((r) => r && typeof r.cwd === 'string' && typeof r.sessionId === 'string')
+      // A process that is gone holds nothing, whatever the list says. The
+      // CLI should never print one, and the session-file reader above checks
+      // the same way; a stand-in that cannot unwrite its own entry can, and
+      // read as an editor it refused every reopen after the first.
+      .filter((r) => alive(Number(r.pid)))
       .map((r) => ({
         pid: Number(r.pid) || null,
         cwd: canonical(r.cwd),
@@ -692,25 +754,6 @@ export async function paneFor(cwd) {
 }
 
 /**
- * A live Claude Code for this repo that is not in any tmux pane.
- *
- * The floor types by pasting into a pane, so a session running anywhere else —
- * an editor's built-in terminal, a plain shell — cannot be typed into at all.
- * Opening a second one "for the floor" is far worse than refusing: both resume
- * the same conversation and append to the same transcript, so every message the
- * floor sends is read and answered by the copy, in a window nobody is watching,
- * while the person waits in the one they are actually sitting at. That is not a
- * hypothetical — it is what this did.
- */
-export async function outsideTmux(cwd) {
-  const here = canonical(cwd);
-  const [r, all] = await Promise.all([roster(), panes()]);
-  if (!r.ok) return null;
-  const inPanes = new Set(all.map((p) => p.pid).filter(Boolean));
-  return r.sessions.find((s) => s.cwd === here && s.kind === 'interactive' && !inPanes.has(s.pid)) ?? null;
-}
-
-/**
  * Who is holding a particular conversation right now.
  *
  * The question is about the conversation, not the directory. A repo can have
@@ -735,7 +778,7 @@ export async function holderOf(cwd, sessionId) {
   // window that was already on screen waiting for a keypress. Measured on the
   // qa desk: pane alive, `held` null for 60s, the pane showing the MCP prompt.
   const paneHere = paneIn(all, cwd);
-  const nothing = { where: null, pid: null, window: null, paneWindow: paneHere?.window ?? null, holders: 0 };
+  const nothing = { where: null, pid: null, window: null, paneWindow: paneHere?.window ?? null, holders: 0, kind: null, name: null, job: null };
   if (!sessionId || !r.ok) return nothing;
   // Every live process claiming this conversation, not the first one found.
   // `find()` picked one silently, so two copies — an editor and a tmux window,
@@ -752,7 +795,69 @@ export async function holderOf(cwd, sessionId) {
     window: pane ? pane.window : null,
     paneWindow: paneHere?.window ?? null,
     holders: mine.length,
+    // What kind of process, and what Claude Code calls it. An `editor` here is
+    // "not in a pane we own", and since 2.1.258 that includes Claude Code's
+    // own daemon keeping a conversation alive after its tab has closed — see
+    // releaseBackground().
+    kind: live.kind ?? 'interactive',
+    name: live.name ?? null,
+    job: live.job ?? null,
   };
+}
+
+/** The refusal for a conversation a background session holds, with what was observed. */
+function heldInBackground(held, why) {
+  const job = held.job ?? held.name ?? String(held.pid);
+  return {
+    ok: false,
+    code: 'held_by_background',
+    error: `That conversation is running as a background Claude Code session (${job}, pid ${held.pid}), which is not a window the floor can type into${why ? `, and ${why}` : ''}.`,
+  };
+}
+
+/**
+ * Move a conversation out of a background session so a window can take it.
+ *
+ * Claude Code's daemon keeps a conversation running after its tab has gone —
+ * the roster lists it as kind `background` with a job id — and answers a
+ * `--resume` of it with "running as a background session (<id>). Run claude
+ * attach <id> to open it, or claude stop <id> first to resume it here". So
+ * this presses `claude stop`, and it is the one thing the host does on the
+ * person's behalf. The case for it is three facts together. The click on the
+ * floor *is* the handoff — "your editor's tab closes, the host opens a
+ * window" — and here the tab is already closed: there is nothing of the
+ * person's to close, only a process with no screen. `claude stop` keeps the
+ * conversation, in Claude Code's own words, and the window resumes it from
+ * its last turn — measured 2026-09-09 on 2.1.258: stop returns at once, the
+ * roster entry and the pid go with it, `--resume` of the same id comes up on
+ * the conversation, and the pane's roster entry is interactive under that
+ * id, so holderOf's join holds. And the alternative was a desk that said
+ * "run `claude stop 323362b2`" to the people this floor exists to keep out of
+ * a terminal, which stranded a working channel for an afternoon.
+ *
+ * Not a trust or MCP answer: those choose what Claude Code may do in a
+ * folder and stay the person's. This chooses only where the conversation
+ * they asked for runs. Gone means gone from the roster, not "the command
+ * returned" — the window is not opened on a promise.
+ */
+async function releaseBackground(held) {
+  const job = held.job ?? held.name ?? String(held.pid);
+  let stopped;
+  try {
+    stopped = await run(CLAUDE, ['stop', job], { timeout: STOP_TIMEOUT_MS });
+  } catch (err) {
+    const why = (err?.stderr || err?.stdout || err?.message || String(err)).trim();
+    return heldInBackground(held, `\`claude stop ${job}\` did not stop it: ${why}`);
+  }
+  const until = Date.now() + RELEASE_TIMEOUT_MS;
+  for (;;) {
+    const r = await roster();
+    if (r.ok && !r.sessions.some((x) => x.pid === held.pid)) return { ok: true, job };
+    if (Date.now() >= until) {
+      return heldInBackground(held, `\`claude stop ${job}\` said "${(stopped?.stdout ?? '').trim()}" but the session was still in the roster ${RELEASE_TIMEOUT_MS / 1000}s later`);
+    }
+    await sleep(250);
+  }
 }
 
 /**
@@ -1072,13 +1177,31 @@ export async function open(cwd, { resume = null } = {}) {
   const already = await paneFor(here);
   if (already) return { ok: true, target: already.target, created: false };
 
-  const stray = (await holderOf(here, resume)).where === 'editor' ? await outsideTmux(here) : null;
-  if (stray) {
-    return {
-      ok: false,
-      code: 'outside_tmux',
-      error: `Claude Code is already running for this repo outside tmux (pid ${stray.pid}), and the floor can only type into a tmux window. Opening a second one would answer you in a copy you are not looking at. Quit that one, or sit in it here: tmux attach -t ${SESSION}`,
-    };
+  // A live process claiming this conversation and not in a pane of ours
+  // blocks a second copy, whatever kind it is. Opening one "for the floor" is
+  // far worse than refusing: both resume the same conversation and append to
+  // the same transcript, so every message the floor sends is read and
+  // answered by the copy, in a window nobody is watching, while the person
+  // waits in the one they are sitting at. Not a hypothetical — it is what
+  // this did. It then went back through a directory search for the pid that
+  // counted interactive sessions only, so a background session holding the
+  // conversation was found by holderOf and lost again, and the window opened
+  // a second copy for Claude Code to refuse on its first line (2026-09-09).
+  // holderOf already has the pid; use it.
+  const held = await holderOf(here, resume);
+  let released = null;
+  if (held.where === 'editor') {
+    if (held.kind !== 'background') {
+      return {
+        ok: false,
+        code: 'outside_tmux',
+        error: `Claude Code is already running for this repo outside tmux (pid ${held.pid}), and the floor can only type into a tmux window. Opening a second one would answer you in a copy you are not looking at. Quit that one, or sit in it here: tmux attach -t ${SESSION}`,
+      };
+    }
+    // A background session has no screen and no person at it: this open is
+    // the handoff, so it is moved here — see releaseBackground().
+    released = await releaseBackground(held);
+    if (!released.ok) return released;
   }
 
   // Keep the plain repo name when it is free, so `tmux attach` reads as a list
@@ -1111,7 +1234,21 @@ export async function open(cwd, { resume = null } = {}) {
   // see measure-a-real-window), so this rests on the docs and the binary's
   // check order rather than on seeing it go away. A survey on a floor window
   // after this is the thing to re-measure.
-  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE, ...(resume ? ['--resume', resume] : [])]
+  //
+  // The id is checked against the disk before it is handed over — see
+  // resumable(). A pin that never became a transcript makes `claude` print
+  // "No conversation found with session ID" and exit, and the window dies on
+  // its first line with the desk's own conversation sitting one file over.
+  const pick = await resumable(here, resume);
+  // And which model it comes up on: the operator's default, passed as
+  // `--model`, because a resume on its own restores the conversation's last
+  // model over the settings file — see defaultModel(). After `--resume <id>`
+  // rather than before: claude does not care where the flag sits, and the
+  // test stand-in reads the resumed id as `$2`.
+  const model = defaultModel(here);
+  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE,
+    ...(pick.id ? ['--resume', pick.id] : []),
+    ...(model ? ['--model', model] : [])]
     .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
     .join(' ');
 
@@ -1124,8 +1261,18 @@ export async function open(cwd, { resume = null } = {}) {
   // as part of creating it, which is exact and cannot race.
   const FORMAT = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_pid}'].join(SEP);
   const has = await tmux(['has-session', '-t', SESSION]);
+  // `-t 'orch:'`, with the colon, and not `-t orch`. new-window's target is a
+  // *window index*, and tmux resolves a bare name against window names before
+  // session names — by prefix. The day a desk whose folder was called
+  // `orch-slice1-demo` opened a window (2026-09-09), `-t orch` stopped meaning
+  // "the session" and started meaning "that window's index", and every open
+  // on the board failed with `create window failed: index 1 in use` until it
+  // was closed. Measured on tmux 3.7c: a session `zz` holding a window
+  // `zz-demo` refuses `new-window -t zz` and accepts `new-window -t zz:`.
+  // The trailing colon is the session with no window part, which is the next
+  // free index — what the bare name only appeared to mean.
   const made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', SESSION, '-n', name, '-c', here, `exec ${cmd}`])
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, `exec ${cmd}`])
     : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, `exec ${cmd}`]);
   if (!made.ok) return { ok: false, error: made.error, missing: made.missing };
   const [target, pid] = made.out.split('\n')[0].split(SEP);
@@ -1138,7 +1285,12 @@ export async function open(cwd, { resume = null } = {}) {
   // finished starting", for the full timeout. waitReady turns this off once
   // the session is really up, so a window that closes normally still closes.
   await tmux(['set-option', '-w', '-t', target.trim(), 'remain-on-exit', 'on']);
-  return { ok: true, target: target.trim(), pid: Number(pid) || null, created: true };
+  // What was done that the person did not do: one line, for the desk.
+  const note = [
+    pick.note,
+    released ? `${pick.id ?? resume} was running in the background as ${released.job}, with no window the floor could type into; stopped that and opened it here.` : null,
+  ].filter(Boolean).join(' ') || null;
+  return { ok: true, target: target.trim(), pid: Number(pid) || null, created: true, resumed: pick.id, model, note };
 }
 
 /**
@@ -1159,7 +1311,11 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // "some pane exists here" is not the same question and answering it that way
   // typed into whichever window happened to be open.
   const held = await holderOf(here, resume);
-  if (held.where === 'editor') {
+  // A background session holding it is released by open() below, when this
+  // message may open a window — the same move as a click on the floor.
+  // Without that leave it is a refusal, with the reason.
+  if (held.where === 'editor' && !(held.kind === 'background' && autoOpen)) {
+    if (held.kind === 'background') return heldInBackground(held, 'this message was not allowed to open one; opening the desk from the floor moves it here first');
     return {
       ok: false,
       code: 'held_by_editor',
@@ -1170,8 +1326,9 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // With no conversation named, the folder is all there is to go on — which
   // is right for a caller that just wants "this repo's window".
   if (!pane && !resume) pane = await paneFor(here);
+  let opened = null;
   if (!pane && autoOpen) {
-    const opened = await open(here, { resume });
+    opened = await open(here, { resume });
     if (!opened.ok) return opened;
     // A pane is not a session. Claude Code takes a moment to start, and on a
     // repo it has not seen before it stops to ask whether the folder is
@@ -1264,7 +1421,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     // Nothing to check against: the pane is running something with no Claude
     // Code session to find. A real desk always has one, because waitReady does
     // not return without it, so this is the stand-in the tests drive.
-    if (!path) return { ok: true, target: pane.target, confirmed: false, unverified: true };
+    if (!path) return { ok: true, target: pane.target, confirmed: false, unverified: true, note: opened?.note ?? null };
 
     // Press Enter again only if the window has gone completely still without
     // the message appearing. Retrying blind is worse than not retrying: an
@@ -1322,7 +1479,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       // Said as held, not merely as sent. A message that arrived a minute late
       // is not the same event as one that went straight through, and the
       // operator watching the desk is entitled to know which they got.
-      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued', held: true };
+      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued', held: true, note: opened?.note ?? null };
     }
     // Say which of the two this is instead of asserting the one that reads
     // worse. The text still being in the composer is checkable, and when it is
@@ -1332,6 +1489,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       ok: false,
       code: 'not_delivered',
       target: pane.target,
+      note: opened?.note ?? null,
       error: stuck
         ? `the window took the message but never submitted it — it is still in the composer, not in the conversation. Attach with \`tmux attach -t ${SESSION}\` and press Enter to send it.`
         : `the message went in but the conversation did not confirm it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer, so it may well have been sent. Check the window before retyping it.`,
@@ -1340,7 +1498,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // `queued` is the honest word for what happened, and the floor says it: the
   // window has the message and will read it at its next step, which is not the
   // same as it already being a turn in the conversation.
-  return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued' };
+  return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued', note: opened?.note ?? null };
 }
 
 /**
@@ -1365,6 +1523,37 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
 async function joinedScreenOf(target) {
   const r = await tmux(['capture-pane', '-p', '-J', '-t', target, '-S', '-12']);
   return r.ok ? r.out : '';
+}
+
+/**
+ * The words above the choices: a form's header (` ☐ Scope`) and the question
+ * under it, read from the lines between the last rule and the first numbered
+ * choice. Measured on 2.1.258 (2026-09-11): a single-select AskUserQuestion
+ * draws exactly that — rule, ` ☐ Scope`, `Which scope should step one
+ * audit?`, then `❯ 1. …`. Null when nothing readable stands there, which is
+ * what a short pane leaves: a form taller than the pane is drawn from the
+ * bottom up and its top is never written anywhere, so the hook's own copy of
+ * the words (tool_input.questions) is the one that survives that case.
+ */
+export function promptQuestion(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  const first = lines.findIndex((l) => /^\s*[\u276f>]?\s*1\.\s+\S/.test(l));
+  if (first < 0) return null;
+  let header = null;
+  const said = [];
+  for (let i = first - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (!l.trim()) continue;
+    if (/^[\s\u2500\u2501\u2504\u2508-]+$/.test(l)) break;   // the rule above the form
+    if (/^\s*\u2190/.test(l)) break;                            // a tab strip: a form the walk reads
+    const h = /^\s*[\u2610\u2612]\s+(.+)$/.exec(l);
+    if (h) { header = h[1].trim(); break; }
+    if (/esc to interrupt|enter to (select|confirm)/i.test(l)) break;
+    said.unshift(l.trim());
+  }
+  const question = said.join(' ').replace(/\s+/g, ' ').trim() || null;
+  if (!question && !header) return null;
+  return { header, question };
 }
 
 /** The numbered choices on a screen, in order, with their text. */
@@ -1396,11 +1585,12 @@ export async function readPrompt(cwd) {
   if (!askingOf(await screenOf(pane.target))) {
     return { ok: false, code: 'no_prompt', error: 'the window is not holding a question — nothing is being asked' };
   }
-  const options = promptOptions(await joinedScreenOf(pane.target));
+  const joined = await joinedScreenOf(pane.target);
+  const options = promptOptions(joined);
   if (!options.length) {
     return { ok: false, code: 'no_prompt', error: 'the window is waiting on something, but it is not a list of choices' };
   }
-  return { ok: true, options };
+  return { ok: true, options, asked: promptQuestion(joined) };
 }
 
 /**
@@ -2205,8 +2395,256 @@ export async function screen(cwd, { lines = 60 } = {}) {
  * anything reporting it.
  */
 export function transcriptPath(cwd, sessionId) {
-  const slug = cwd.replace(/[^A-Za-z0-9]/g, '-');
-  return join(CLAUDE_HOME, 'projects', slug, `${sessionId}.jsonl`);
+  return join(projectDir(cwd), `${sessionId}.jsonl`);
+}
+
+/** Claude Code's own directory for a working directory: one transcript per
+ *  session, plus a subdirectory per session for its subagents. Exists only
+ *  once Claude Code has opened the folder, which is what the folder list
+ *  reads it for. */
+export function projectDir(cwd) {
+  return join(CLAUDE_HOME, 'projects', projectSlug(cwd));
+}
+
+/**
+ * Claude Code's own directory name for a working directory: every character
+ * that is not a letter or digit becomes a dash. Exported because it is the one
+ * place the rule lives — the folder list and the session picker find a
+ * directory's transcripts by it, and two spellings of one rule is how a desk
+ * ends up reading a file that does not exist.
+ */
+export function projectSlug(cwd) {
+  return cwd.replace(/[^A-Za-z0-9]/g, '-');
+}
+
+/**
+ * Which conversation `--resume` can actually open here.
+ *
+ * The board pins a desk to the session id the roster last showed for it, and
+ * the roster is written when a process starts. A process that starts as one
+ * session and picks another up from inside — /resume in a VS Code tab — keeps
+ * its first id in the roster and writes every word into the other file. Close
+ * it, and the desk is pinned to an id that never became a transcript, and
+ * `claude --resume <that>` can only say "No conversation found with session
+ * ID" and exit. Seen on 2.1.258 (2026-09-09): service-developer pinned to
+ * 47717b6c…, eight session rows from one afternoon of opening and closing
+ * tabs, three with a file on disk, one with any turns in it.
+ *
+ * So the pin is checked against the disk, and when nobody has spoken in it
+ * the desk's conversation is the one in this folder with the latest turn.
+ * "Spoken" is as readTranscript files it — a `user` or `assistant` turn — and
+ * not a record type: a tab in which somebody typed /resume and nothing else
+ * holds three user records, all of them the command and its output, which the
+ * reader files as context. The first cut counted those and opened that tab
+ * (62c585ba) instead of the conversation. By the time of the last turn, not
+ * the file's mtime, because reopening a conversation appends metadata without
+ * saying anything (a `bridge-session` record moved 8cac3404's mtime to today
+ * while its last word was yesterday's). With nothing spoken anywhere the
+ * window starts fresh, as it does for a desk with no pin at all — and a desk
+ * with no pin is left alone: a folder just taken from the floor starts a new
+ * conversation, not whichever old one happens to be in it.
+ *
+ * Nothing here decides silently. The note says what was asked for and what
+ * was opened, and the caller puts it where the operator will read it.
+ */
+export async function resumable(cwd, sessionId) {
+  if (!sessionId) return { id: null, note: null };
+  const here = canonical(cwd);
+  const own = transcriptPath(here, sessionId);
+  const exists = existsSync(own);
+  if (exists && await lastTurnAt(own)) return { id: sessionId, note: null };
+  const asked = `${sessionId} ${exists ? 'has no turns in it' : 'never wrote a transcript'}, so there is nothing to resume there`;
+  const newest = await newestConversation(here);
+  // Said as a fact about the folder, not as something done: the caller may
+  // still be refused — by a background session holding the conversation, for
+  // one — and "opened X instead" above a refusal to open X is a false record.
+  if (!newest) return { id: null, note: `${asked}; nothing else in this folder has any either, so a new conversation starts.` };
+  return {
+    id: newest.id,
+    note: `${asked}; the conversation here is ${newest.id} — the newest in this folder, last turn ${newest.at}.`,
+  };
+}
+
+/** The transcript in this folder whose last turn is latest, or null. */
+async function newestConversation(cwd) {
+  let names;
+  try { names = readdirSync(projectDir(cwd)).filter((f) => f.endsWith('.jsonl')); } catch { return null; }
+  let best = null;
+  for (const name of names) {
+    const at = await lastTurnAt(join(projectDir(cwd), name));
+    if (at && (!best || at > best.at)) best = { id: name.slice(0, -'.jsonl'.length), at };
+  }
+  return best;
+}
+
+/**
+ * When somebody last said something in a transcript, or null if nobody has.
+ * Through readTranscript, so "said" means exactly what the floor draws as a
+ * person or the agent speaking — the one reader, not a second opinion on
+ * record types. Read whole rather than tailed: it runs once per open, on a
+ * folder's few files, and the whole point is not to miss the last word.
+ */
+async function lastTurnAt(path) {
+  const r = await readTranscript(path);
+  if (!r.ok) return null;
+  let last = null;
+  for (const t of r.turns) {
+    if ((t.role === 'user' || t.role === 'assistant') && Number.isFinite(Date.parse(t.at))) last = t.at;
+  }
+  return last;
+}
+
+/**
+ * The conversations in a folder, newest first — the floor's session picker.
+ *
+ * Thirty, by the file's mtime, and each read twice: the first 64 KB for the
+ * first thing a person said (its timestamp is when the conversation began)
+ * and the last 256 KB for the newest title record and the last spoken turn.
+ * A title is Claude Code's own: `custom-title` (the person named it, /rename)
+ * over `ai-title` (Claude Code named it) over the first prompt clipped — and
+ * `title_source` says which, so the page can mark a named one. The first
+ * prompt is read by readTranscript's block rule (contextTagOf), so a message
+ * that opens with an `<ide_opened_file>` block is titled by the words after
+ * it, not the tag.
+ *
+ * Deliberate omission, and the cost not paid: a `custom-title` written early
+ * in a long session and never repeated sits past the head and before the tail
+ * and is missed — the conversation shows its AI title or first prompt
+ * instead. Claude Code rewrites the title record often (781 copies of one in
+ * a real transcript, 2026-09-10), so the tail nearly always has it; a full
+ * scan of thirty multi-megabyte files on every open of the picker is what
+ * this buys. A file with no spoken turn in either read is listed with no
+ * title: a tab opened and closed, and the page says so rather than hiding it,
+ * because the current window's own conversation looks exactly like that for
+ * its first minute.
+ *
+ * `live`/`held` come from the roster and the panes, the same join holderOf
+ * makes: a row an editor holds cannot be reopened here, and the page needs
+ * to know which row that is.
+ */
+const SESSIONS_HEAD_BYTES = 64 * 1024;
+const SESSIONS_TAIL_BYTES = 256 * 1024;
+export async function sessionsIn(cwd, { limit = 30 } = {}) {
+  const here = canonical(cwd);
+  const dir = projectDir(here);
+  let names;
+  try { names = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
+  const { stat } = await import('node:fs/promises');
+  const files = [];
+  for (const name of names) {
+    try {
+      const st = await stat(join(dir, name));
+      if (st.isFile()) files.push({ name, size: st.size, mtime: st.mtime });
+    } catch { /* gone between readdir and stat */ }
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  const [r, all] = await Promise.all([roster(), panes()]);
+  const inPanes = new Set(all.map((p) => p.pid).filter(Boolean));
+  const rows = [];
+  for (const f of files.slice(0, Math.max(1, limit))) {
+    const id = f.name.slice(0, -'.jsonl'.length);
+    const meta = await transcriptMeta(join(dir, f.name), f.size);
+    const claiming = r.ok ? r.sessions.filter((x) => x.sessionId === id) : [];
+    const title = meta.custom ?? meta.ai ?? (meta.prompt ? clipTitle(meta.prompt) : null);
+    rows.push({
+      id,
+      title,
+      title_source: meta.custom ? 'custom' : meta.ai ? 'ai' : meta.prompt ? 'prompt' : null,
+      first_prompt: meta.prompt ? meta.prompt.slice(0, 200) : null,
+      started_at: meta.startedAt,
+      last_at: meta.lastAt ?? f.mtime.toISOString(),
+      modified_at: f.mtime.toISOString(),
+      size: f.size,
+      spoken: Boolean(meta.prompt || meta.lastAt),
+      live: claiming.length > 0,
+      held: claiming.length ? (claiming.some((x) => inPanes.has(x.pid)) ? 'floor' : 'editor') : null,
+      kind: claiming[0]?.kind ?? null,
+      pid: claiming[0]?.pid ?? null,
+    });
+  }
+  return rows;
+}
+
+/** A title from a first prompt: its first line, whitespace folded, 80 characters. */
+function clipTitle(s) {
+  const line = String(s).trim().split('\n')[0].replace(/\s+/g, ' ');
+  return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+}
+
+/**
+ * What the head and the tail of one transcript say about it. Both reads are
+ * bounded; on a small file they overlap and the whole file is read once.
+ */
+async function transcriptMeta(path, size) {
+  const out = { custom: null, ai: null, prompt: null, startedAt: null, lastAt: null };
+  const { open } = await import('node:fs/promises');
+  let fh;
+  try { fh = await open(path, 'r'); } catch { return out; }
+  try {
+    const headLen = Math.min(size, SESSIONS_HEAD_BYTES);
+    const head = Buffer.alloc(headLen);
+    await fh.read(head, 0, headLen, 0);
+    const whole = size <= SESSIONS_HEAD_BYTES;
+    const headLines = head.toString('utf8').split('\n');
+    if (!whole) headLines.pop();   // a line cut by the byte limit is not a record
+    let tailLines = [];
+    if (!whole) {
+      const tailLen = Math.min(size, SESSIONS_TAIL_BYTES);
+      const tail = Buffer.alloc(tailLen);
+      await fh.read(tail, 0, tailLen, size - tailLen);
+      tailLines = tail.toString('utf8').split('\n');
+      if (tailLen < size) tailLines.shift();   // the partial first line an arbitrary offset lands in
+    }
+    const parse = (line) => { try { return line.trim() ? JSON.parse(line) : null; } catch { return null; } };
+    const titleOf = (d) => {
+      if (d?.type === 'custom-title' && typeof d.customTitle === 'string' && d.customTitle.trim()) out.custom = d.customTitle.trim();
+      else if (d?.type === 'ai-title' && typeof d.aiTitle === 'string' && d.aiTitle.trim()) out.ai = d.aiTitle.trim();
+    };
+    for (const line of headLines) {
+      const d = parse(line);
+      if (!d) continue;
+      titleOf(d);
+      if (!out.prompt && d.type === 'user' && !d.isMeta && !d.isSidechain) {
+        const text = personText(d.message?.content);
+        if (text) {
+          out.prompt = text;
+          out.startedAt = Number.isFinite(Date.parse(d.timestamp)) ? d.timestamp : null;
+        }
+      }
+    }
+    // Titles: the newest record wins, and the tail is newer than the head.
+    // The last spoken turn: scanned from the end, like lastTurnAt.
+    const later = whole ? headLines : tailLines;
+    for (const line of later) titleOf(parse(line));
+    for (let i = later.length - 1; i >= 0 && !out.lastAt; i--) {
+      if (!later[i].includes('"timestamp"')) continue;
+      const d = parse(later[i]);
+      if (d && (d.type === 'user' || d.type === 'assistant') && !d.isSidechain && Number.isFinite(Date.parse(d.timestamp))) out.lastAt = d.timestamp;
+    }
+  } finally {
+    await fh.close();
+  }
+  return out;
+}
+
+/** The person's own words in a user record — every block that is not injected context. */
+function personText(content) {
+  const blocks = typeof content === 'string' ? [content]
+    : Array.isArray(content) ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  return blocks.filter((b) => !contextTagOf(b)).join('').trim() || null;
+}
+
+/**
+ * Whether this repo's window is mid-turn, with the line that says so — for a
+ * caller that must not close a working window and has to quote the pane
+ * rather than guess. No pane is not busy.
+ */
+export async function busyAt(cwd) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { pane: null, busy: false, foot: '' };
+  const r = await tmux(['capture-pane', '-p', '-t', pane.target]);
+  const text = r.ok ? r.out : '';
+  return { pane, busy: r.ok && isBusy(text), foot: footOf(text) };
 }
 
 /**
