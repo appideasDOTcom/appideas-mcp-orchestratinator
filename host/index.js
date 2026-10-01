@@ -41,6 +41,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { discover, listFolder, originOf } from './identity.js';
 import * as W from './window.js';
 import * as M from './mcp.js';
+import * as D from './dialog.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
 /** How long a queued permission answer stays worth delivering. */
@@ -57,6 +58,10 @@ const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
 // The picker's list: newest first, by file. See sessionsIn in window.js.
 const SESSIONS_LIMIT = Number(process.env.ORCH_SESSIONS_LIMIT ?? 30);
 const REQUEST_TIMEOUT_MS = 5_000;
+/** How long a request for the folder dialog stays worth acting on — shorter
+ *  than the 8 s the page waits, on purpose, so a dialog that does open is one
+ *  the page is still there to hear about. See D.pickIsStale. */
+const PICK_TTL_MS = Number(process.env.ORCH_PICK_TTL_MS ?? 6_000);
 
 /**
  * Which key answers a permission prompt in Claude Code's own dialog. The floor
@@ -493,6 +498,8 @@ class Host {
     this.outbox = [];
     this.flushTimer = null;
     this.stopping = false;
+    // The folder dialog on this machine's screen, while one is open. See pick().
+    this.picking = null;
   }
 
   async request(path, { method = 'GET', body, timeout = REQUEST_TIMEOUT_MS } = {}) {
@@ -552,8 +559,11 @@ class Host {
       path: W.canonical(f.path),
       other_board: f.bound && f.bound.board !== origin ? f.bound.board : null,
     }));
+    // And whether this machine can show its own folder dialog, so the page
+    // knows which picker to draw before anybody clicks: the native one, or its
+    // own list for a host with no backend. See host/dialog.js.
     const reply = await this.request('/api/host/register', {
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders },
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog() },
     });
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
@@ -868,26 +878,94 @@ class Host {
   }
 
   /**
-   * List one folder for the picker. Answered as an event, like the session
-   * list: the work loop is one-way and the board keeps the last folder each
-   * host showed. Marks each folder as bound to this board or another, so the
-   * dialog can say which without a second question.
+   * One folder as the board keeps it for the form: the listing, with each
+   * folder marked as bound to this board or another so the dialog can say
+   * which without a second question. The one shape for a folder opened in
+   * the page's list and one chosen in the native dialog, so the form cannot
+   * be filled two ways.
    */
-  async browse(item) {
-    // No path means the host's home folder: where every picker starts.
-    const asked = typeof item.payload?.path === 'string' && item.payload.path ? item.payload.path : homedir();
+  listingEvent(asked) {
     const at = new Date().toISOString();
     const r = listFolder(asked);
-    if (!r.ok) {
-      warn(`browse ${asked}: ${r.error}`);
-      return this.emit({ type: 'browse', path: asked, requested: asked, at, error: r.error }, true);
-    }
+    if (!r.ok) return { type: 'browse', path: asked, requested: asked, at, error: r.error };
     const origin = originOf(this.cfg.url);
     const mark = (f) => ({ ...f, other_board: f.bound && f.bound.board !== origin ? f.bound.board : null });
-    return this.emit({
+    return {
       type: 'browse', requested: asked, path: r.path, root: r.root, parent: r.parent, at,
       self: mark(r.self), entries: r.entries.map(mark),
-    }, true);
+    };
+  }
+
+  /**
+   * List one folder for the picker. Answered as an event, like the session
+   * list: the work loop is one-way and the board keeps the last folder each
+   * host showed.
+   */
+  async browse(item) {
+    // No path means the host's home folder: where the page's own list starts.
+    const asked = typeof item.payload?.path === 'string' && item.payload.path ? item.payload.path : homedir();
+    const ev = this.listingEvent(asked);
+    if (ev.error) warn(`browse ${asked}: ${ev.error}`);
+    return this.emit(ev, true);
+  }
+
+  /**
+   * Open the operating system's folder dialog on this machine, and say what
+   * the person chose in it. See host/dialog.js for what was measured.
+   *
+   * Three things are said, each as a `pick` event, because the page has
+   * nothing else to settle on: `open` the moment the dialog is up (from then
+   * on the page waits for the person, not for a clock), then `chosen`,
+   * `cancelled` or `failed`. A chosen folder is listed first, as the same
+   * `browse` event the page's own list produces — that record is what says a
+   * folder is already a desk, on which floor and under which agent, and it
+   * is what the board checks a take against: the board never sends a path
+   * this host has not named, and naming it is this.
+   *
+   * It opens where the page asks — the folder the last choice was made in —
+   * or at the nearest folder above that which still exists (D.startFor).
+   *
+   * Not awaited. The work loop that calls this also delivers messages to
+   * desks, and a person in a folder dialog takes as long as they take.
+   *
+   * One dialog at a time: a second request while one is open says `open`
+   * again rather than stacking another on the screen.
+   */
+  pick(item) {
+    const say = (state, more = {}) => this.emit({ type: 'pick', state, at: new Date().toISOString(), ...more }, true);
+    if (D.pickIsStale(item, PICK_TTL_MS)) {
+      warn(`not opening the folder dialog — it was asked for ${Math.round(Number(item.waited_ms) / 1000)}s ago and nobody is waiting for it now`);
+      return undefined;
+    }
+    if (this.picking) return say('open', { start: this.picking.start });
+    const start = D.startFor(item.payload?.start);
+    const opened = D.openFolderDialog(start);
+    if (!opened.ok) {
+      warn(`folder dialog: ${opened.error}`);
+      return say('failed', { start, error: opened.error });
+    }
+    this.picking = { start, close: opened.close };
+    log(`opened the folder dialog at ${start}`);
+    opened.done.then((r) => {
+      this.picking = null;
+      if (!r.ok) {
+        warn(`folder dialog: ${r.error}`);
+        return say('failed', { start, error: r.error });
+      }
+      if (r.cancelled) {
+        log(`the folder dialog was closed without a choice${r.why ? ` — ${r.why}` : ''}`);
+        return say('cancelled', { start, why: r.why ?? null });
+      }
+      const listing = this.listingEvent(r.path);
+      if (listing.error) {
+        warn(`folder dialog: chose ${r.path}, which could not be listed: ${listing.error}`);
+        return say('failed', { start, error: listing.error });
+      }
+      log(`the folder dialog chose ${listing.path}`);
+      this.emit(listing);
+      return say('chosen', { start, path: listing.path, parent: listing.parent });
+    }).catch((err) => warn(`folder dialog: ${err.message}`));
+    return say('open', { start });
   }
 
   async handle(item) {
@@ -897,6 +975,10 @@ class Host {
     }
     if (item.kind === 'browse') {
       await this.browse(item);
+      return;
+    }
+    if (item.kind === 'pick') {
+      await this.pick(item);
       return;
     }
     if (item.kind === 'rescan') {
@@ -1228,6 +1310,9 @@ class Host {
     log('shutting down');
     // The windows are left running. They are Claude Code sessions in tmux, and
     // they belong to the person at this machine, not to this process.
+    // A folder dialog is the opposite: it is this process's question, and
+    // with nobody left to hear the answer it comes off the screen.
+    this.picking?.close();
     await this.flush();
     try { await this.request('/api/host/unregister', { method: 'POST', body: { host_id: this.cfg.hostId }, timeout: 2000 }); } catch { /* best effort */ }
   }

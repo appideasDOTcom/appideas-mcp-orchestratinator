@@ -185,6 +185,8 @@ const iso = (s) => (s ? `${String(s).replace(' ', 'T').replace(/Z*$/, '')}Z` : n
    ago". */
 /** The most folders kept per host; the same cap the host applies. */
 const FOLDER_CAP = 300;
+/** What a host can say about its folder dialog. See Host.pick in host/index.js. */
+const PICK_STATES = new Set(['open', 'chosen', 'cancelled', 'failed']);
 const underRoots = (p, roots) => roots.some((r) => p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`));
 /**
  * A host's folder list, field by field, in the shape the page reads. Anything
@@ -985,7 +987,7 @@ export function createLive() {
    * things about to be wrong. Served by its own GET, never in /api/floor,
    * which every open page polls every couple of seconds.
    */
-  const folders = new Map(); // host_id -> { at, roots, folders }
+  const folders = new Map(); // host_id -> { at, roots, folders, dialog }
   /**
    * Each desk's conversations as its host last listed them, for the session
    * picker — in memory for the same reason the folder list is: the host
@@ -999,12 +1001,17 @@ export function createLive() {
   /** The folder each host last listed for the picker — one level, with the
    *  folder itself. In memory like the rest; the picker asks again on open. */
   const browse = new Map();        // host_id -> { at, requested, path, root, parent, self, entries, error }
+  /** Where each host's own folder dialog has got to — open on its screen,
+   *  chosen, closed without a choice, or failed. In memory like the rest: it
+   *  is the answer to a click made seconds ago, and worth nothing after. */
+  const pick = new Map();          // host_id -> { at, state, start, path, parent, error, why }
   return {
     partial,
     folders,
     sessions,
     sessionsAsked,
     browse,
+    pick,
     pending,
     answered,
     delivery,
@@ -1094,6 +1101,26 @@ function applyHostEvent(store, live, hostId, ev) {
       error,
       self: error ? null : folderRecordOf(ev.self),
       entries: error || !Array.isArray(ev.entries) ? [] : ev.entries.map(folderRecordOf).filter(Boolean).slice(0, FOLDER_CAP),
+    });
+    return true;
+  }
+  // The host's own folder dialog, like the listing above: about the host, not
+  // a desk. A chosen folder arrives as a `browse` first — that is the record
+  // the form is filled from and a take is checked against — so this keeps
+  // only where the dialog has got to, for the page that is waiting on it.
+  if (str(ev.type) === 'pick') {
+    const state = str(ev.state);
+    if (!PICK_STATES.has(state)) return false;
+    const path = state === 'chosen' ? str(ev.path) : null;
+    if (state === 'chosen' && !path) return false;
+    live.pick.set(hostId, {
+      at: str(ev.at) ?? new Date().toISOString(),
+      state,
+      start: str(ev.start),
+      path,
+      parent: state === 'chosen' ? str(ev.parent) : null,
+      error: state === 'failed' ? str(ev.error) ?? 'the folder dialog failed and the host did not say how' : null,
+      why: str(ev.why),
     });
     return true;
   }
@@ -1940,7 +1967,9 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // sends no list (an older one) simply has none to serve.
     if (Array.isArray(req.body?.folders)) {
       const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && r.startsWith('/'));
-      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots) });
+      // And whether it can show its own folder dialog. Only `true` counts: a
+      // host that predates the dialog says nothing, and gets the page's list.
+      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots), dialog: req.body.dialog === true });
     }
 
     const desks = Array.isArray(req.body?.desks) ? req.body.desks : [];
@@ -2057,7 +2086,13 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       items = store.takeHostWork(hostId);
       store.touchHost(hostId);
     }
-    res.json({ work: items });
+    // How long each item sat here, by this server's clock alone. A host that
+    // must not act on old work (a folder dialog nobody is waiting for) reads
+    // this rather than comparing a timestamp from this machine with its own
+    // clock — the two are different computers, and a container's clock drifts
+    // while its laptop sleeps.
+    const handedAt = Date.now();
+    res.json({ work: items.map((w) => ({ ...w, waited_ms: Math.max(0, handedAt - Date.parse(iso(w.created_at))) })) });
   });
 
   /** What a host's desks are doing. A batch, because a streaming reply would
@@ -2083,10 +2118,11 @@ export function createFloorRouter({ store, auth, sessions = null }) {
   /**
    * What each host offers as a place a desk could be taken: the folders under
    * its roots, newest activity first, each saying whether it is bound already
-   * and from which file. Read by the "take a desk" dialog when it opens, not
-   * by the page's poll — see `folders` in createLive. A host that has not
-   * reported a list has `at: null`, which is not the same thing as an empty
-   * list and is drawn differently.
+   * and from which file — the top of which the dialog draws as "Recently
+   * opened". Read by the "take a desk" dialog when it opens, not by the
+   * page's poll — see `folders` in createLive. A host that has not reported a
+   * list has `at: null`, which is not the same thing as an empty list and is
+   * drawn differently. `names` rides along for the same dialog.
    */
   router.get('/api/floor/folders', (_req, res) => {
     const nowMs = Date.now();
@@ -2100,9 +2136,16 @@ export function createFloorRouter({ store, auth, sessions = null }) {
         at: f?.at ?? null,
         roots: f?.roots ?? [],
         folders: f?.folders ?? [],
+        dialog: f?.dialog === true,
       };
     });
-    res.json({ now: new Date(nowMs).toISOString(), hosts });
+    // The names somebody has saved, by agent id — for the dialog to show the
+    // name a desk will carry rather than ask for one. Only saved ones: an
+    // agent nobody has named is absent, which the dialog draws as "none"
+    // rather than as the name the board would derive from its id.
+    const names = {};
+    for (const [agent, p] of Object.entries(store.listProfiles())) if (p.persona) names[agent] = p.persona;
+    res.json({ now: new Date(nowMs).toISOString(), hosts, names });
   });
 
   router.get('/api/floor', (_req, res) => {
@@ -2461,6 +2504,51 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const match = held && (!want || held.path === want || held.requested === want);
     if (!match) return res.json({ host_id: hostId, roots, at: null });
     res.json({ host_id: hostId, roots, at: held.at, path: held.path, root: held.root, parent: held.parent, self: held.self, entries: held.entries, error: held.error });
+  });
+
+  /**
+   * The folder dialog: ask a host to open its operating system's own folder
+   * dialog on its own screen, and read back where that has got to. Two routes
+   * for the reason browse has two — the host answers on its own clock, as
+   * events — and a third reason of its own: the answer waits on a person.
+   * The host says `open` as soon as the dialog is up, so the page can stop
+   * counting seconds and wait for the choice instead.
+   *
+   * `start` is where the dialog opens: the folder the last choice was made
+   * in, remembered by the browser that made it. It is a hint and is treated
+   * as one — the host opens the nearest folder that still exists — and it is
+   * never a folder to bind: a take is still checked against what the host
+   * has named (`unknown_folder` above), and what the dialog returns is named
+   * by the host as a listing before the page is told it was chosen.
+   *
+   * A host that has not said it can show a dialog is not asked: the page
+   * draws its own list for one, and a request it cannot act on would only be
+   * eight seconds of nothing.
+   */
+  router.post('/api/floor/pick', auth.adminGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    const start = str(req.body?.start);
+    if (start && !start.startsWith('/')) return res.status(400).json({ error: 'start must be absolute', code: 'bad_path' });
+    const nowMs = Date.now();
+    const hostRow = store.listHosts().find((h) => h.host_id === hostId);
+    if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: `The host ${hostRow?.name ?? hostId} is not on this board right now, so there is nobody to open a dialog.`, code: 'no_host' });
+    }
+    if (live.folders.get(hostId)?.dialog !== true) {
+      return res.status(409).json({ error: `The host ${hostRow.name} has no folder dialog of its own. Its folders are listed in the page instead.`, code: 'no_dialog' });
+    }
+    store.enqueueHostWork(hostId, '*', '*', 'pick', { start: start ?? null });
+    live.wake(hostId);
+    res.json({ ok: true, host: hostRow.name });
+  });
+
+  router.get('/api/floor/pick', (req, res) => {
+    const hostId = str(req.query.host_id);
+    if (!hostId) return res.status(400).json({ error: 'host_id is required' });
+    const held = live.pick.get(hostId) ?? null;
+    if (!held) return res.json({ host_id: hostId, at: null });
+    res.json({ host_id: hostId, ...held });
   });
 
   /**

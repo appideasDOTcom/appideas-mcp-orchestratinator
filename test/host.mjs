@@ -22,6 +22,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale } from '../host/dialog.js';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -299,6 +300,27 @@ function fixture() {
     `process.stdin.resume();`,
   ].join('\n'));
   chmodSync(`${FIX}/claude`, 0o755);
+
+  // The stand-in for a person at the operating system's folder dialog — a
+  // dialog cannot be clicked from a test. The host runs it in place of the
+  // real one (ORCH_FOLDER_DIALOG), with the start folder as its argument, and
+  // reads the same JSON off its stdout. What it answers is a file, so each
+  // case says what "the person" does next: choose a folder, close the dialog,
+  // take their time, or have the dialog die. It logs where it was opened, and
+  // its pid, so a test can see that a dialog left open really was ended.
+  writeFileSync(`${FIX}/dialog`,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(`${FIX}/dialog.cjs`)} "$@"\n`);
+  chmodSync(`${FIX}/dialog`, 0o755);
+  writeFileSync(`${FIX}/dialog-answer.json`, '{"cancel":true}');
+  writeFileSync(`${FIX}/dialog.cjs`, [
+    `const fs = require('fs');`,
+    `fs.appendFileSync(${JSON.stringify(`${FIX}/dialog.log`)}, JSON.stringify({ start: process.argv[2], pid: process.pid }) + '\\n');`,
+    `let a = {}; try { a = JSON.parse(fs.readFileSync(${JSON.stringify(`${FIX}/dialog-answer.json`)}, 'utf8')); } catch {}`,
+    `setTimeout(() => {`,
+    `  if (a.fail) { process.stderr.write(a.fail + '\\n'); process.exit(a.code || 1); }`,
+    `  process.stdout.write(JSON.stringify(a.cancel ? { cancelled: true } : { path: a.path }) + '\\n');`,
+    `}, a.delay || 0);`,
+  ].join('\n'));
 }
 
 function startHost(id = 'host-test-1', extraEnv = {}) {
@@ -314,6 +336,10 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
       // calls it delivered. The stand-in writes one, so this is the real path;
       // the timeout is only shortened so a genuine failure fails fast.
       ORCH_SUBMIT_SETTLE_MS: '150', ORCH_LAND_TIMEOUT_MS: '8000',
+      // The folder dialog is the stand-in above, and one left open is closed
+      // after four seconds rather than ten minutes — longer than the three
+      // the slowest "person" below takes to choose.
+      ORCH_FOLDER_DIALOG: `${FIX}/dialog`, ORCH_PICK_TIMEOUT_MS: '4000',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -747,6 +773,10 @@ try {
   await json('/api/floor/browse', { host_id: 'host-test-1', path: `${FIX}/no-such-folder` });
   const nowhere = await until(async () => { const g = await browsed(`${FIX}/no-such-folder`); return g.at ? g : null; }, 15000);
   assert(/no such folder/.test(nowhere?.error ?? ''), `a folder that does not exist says so — ${nowhere?.error}`);
+  // The recent list is the host's last report, and a folder on it can be gone
+  // by the time it is clicked. The open is let fail, and this is the sentence
+  // the dialog then shows — so it has to say which path, not only that one failed.
+  assert((nowhere?.error ?? '').includes(`${FIX}/no-such-folder`), 'and says which path, in the host\'s own words — what a stale recent folder shows');
   await json('/api/floor/browse', { host_id: 'host-test-1' });
   const home = await until(async () => { const g = await browsed(); return g.at && g.path === HOME ? g : null; }, 15000);
   eq(home?.path, HOME, 'and with no path named, the picker starts at the home folder');
@@ -788,6 +818,117 @@ try {
   eq((await back.json()).mode, 'move', 'moving it back is a move too');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'and it is home, on its conversation');
   await sleep(WATCH_SETTLE_MS);
+
+  /* ── the host's own folder dialog (issue #4, items 1 and 2) ────────────────
+   * The picker is one function in the host with each operating system's own
+   * dialog behind it (host/dialog.js). What is real here: the work item, the
+   * child process, the three things the host says while a person chooses, the
+   * listing a chosen folder arrives as, and the take that follows. What is
+   * stood in for is the person — see the fixture's dialog. That the real
+   * macOS dialog takes the front from this host's LaunchAgent is not
+   * something a suite can see: it was measured on a real desktop, and the
+   * measurement is in host/dialog.js. */
+  console.log('\nthe host\'s own folder dialog');
+  const dialogLog = () => (existsSync(`${FIX}/dialog.log`) ? readFileSync(`${FIX}/dialog.log`, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  const person = (a) => writeFileSync(`${FIX}/dialog-answer.json`, JSON.stringify(a));
+  const pickGet = () => json('/api/floor/pick?host_id=host-test-1').then((r) => r.json());
+  const pickAsk = (start) => json('/api/floor/pick', { host_id: 'host-test-1', ...(start ? { start } : {}) });
+  const pickAt = async () => (await pickGet()).at ?? null;
+  const settled = (after) => until(async () => { const g = await pickGet(); return g.at && g.at !== after && g.state !== 'open' ? g : null; }, 15000);
+  eq((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-1')?.dialog, true,
+    'the host says it can show a folder dialog, so the page offers the button rather than its own list');
+
+  // Chosen: a folder two levels down that nothing has listed — not a
+  // checkout, never opened, so absent from the flat list, and never browsed.
+  const PICKED = `${FIX}/picked-deep/inner`;
+  mkdirSync(PICKED, { recursive: true });
+  person({ path: PICKED });
+  let pickBefore = await pickAt();
+  eq((await pickAsk(`${FIX}/repo-a`)).status, 200, 'the floor can ask the host to open its folder dialog');
+  let pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.path, pickGot?.parent], ['chosen', PICKED, `${FIX}/picked-deep`], 'and the host answers with the folder chosen in it, and the folder that one sits in');
+  eq(dialogLog().at(-1)?.start, `${FIX}/repo-a`, 'the dialog opened where it was asked to: the folder the last choice was made in');
+  const pickedListing = await browsed(PICKED);
+  eq([pickedListing.path, pickedListing.self?.name, pickedListing.self?.bound ?? null, pickedListing.self?.git], [PICKED, 'inner', null, false],
+    'the chosen folder arrives with the host\'s own record of it — the same listing the page\'s list produces, which is what says whether it is already a desk');
+  assert(/opened the folder dialog at .*repo-a/.test(host.log) && /the folder dialog chose .*picked-deep\/inner/.test(host.log), 'and the host log says what it opened and what was chosen');
+  const tookPicked = await take({ host_id: 'host-test-1', path: PICKED, channel: CH, agent: 'picked', open: false });
+  eq([tookPicked.status, (await tookPicked.json()).mode], [200, 'take'], 'so it can be taken, though no list ever showed it — the host named it, by listing it');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/picked-deep/never-named`, channel: CH, agent: 'ghost' })).status, 409, 'while a path the host has not named is still refused, dialog or no dialog');
+  assert(await until(async () => (deskOf(await floor(), 'picked')?.hosted?.live ? true : null), 20000), 'the host binds it and the desk registers');
+  await json('/api/floor/desk/leave', { channel: CH, agent: 'picked' });
+  await until(async () => (deskOf(await floor(), 'picked')?.hosted?.state === 'offline' ? true : null), 20000);
+
+  // While a person is choosing: the host says the dialog is open, a second
+  // ask does not stack a second dialog, and the work loop is not held.
+  person({ path: PICKED, delay: 3000 });
+  pickBefore = await pickAt();
+  const callsBefore = dialogLog().length;
+  await pickAsk(`${FIX}/repo-a`);
+  const opened = await until(async () => { const g = await pickGet(); return g.at && g.at !== pickBefore && g.state === 'open' ? g : null; }, 8000);
+  eq([opened?.state, opened?.start], ['open', `${FIX}/repo-a`], 'while the dialog is up the host says so, and where — from here the page waits for the person, not for a clock');
+  await pickAsk(`${FIX}/repo-a`);
+  await json('/api/floor/browse', { host_id: 'host-test-1', path: FIX });
+  const whileOpen = await until(async () => { const g = await browsed(FIX); return g.at && g.at > opened.at ? g : null; }, 2000);
+  eq([!!whileOpen, (await pickGet()).state], [true, 'open'],
+    'the host goes on doing other work while the dialog is still open — a person choosing does not hold up the loop that delivers messages');
+  pickGot = await settled(pickBefore);
+  eq(pickGot?.state, 'chosen', 'and the choice arrives when it is made');
+  eq(dialogLog().length, callsBefore + 1, 'a second ask while a dialog is open did not put a second one on the screen');
+
+  // Item 2: where it opens. A remembered folder that is gone lands on the
+  // nearest folder above it that still exists; with nothing remembered, home.
+  person({ cancel: true });
+  pickBefore = await pickAt();
+  await pickAsk(`${FIX}/repo-a/gone-since/and-deeper`);
+  pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.path ?? null], ['cancelled', null], 'a dialog closed without a choice is said as that, with no folder');
+  eq(dialogLog().at(-1)?.start, `${FIX}/repo-a`, 'a remembered folder that no longer exists opens the nearest one above it that does');
+  pickBefore = await pickAt();
+  await pickAsk();
+  await settled(pickBefore);
+  eq(dialogLog().at(-1)?.start, HOME, 'and with nothing remembered the dialog opens at home');
+
+  // The dialog failing, and the dialog left open.
+  person({ fail: 'stand-in: the display is asleep', code: 3 });
+  pickBefore = await pickAt();
+  await pickAsk();
+  pickGot = await settled(pickBefore);
+  eq(pickGot?.state, 'failed', 'a dialog that dies is said as failed');
+  assert(/exit code 3/.test(pickGot?.error ?? '') && /the display is asleep/.test(pickGot?.error ?? ''), `quoting how it ended and what it said, not a guess at why — ${pickGot?.error}`);
+  person({ path: PICKED, delay: 60000 });
+  pickBefore = await pickAt();
+  await pickAsk();
+  pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.why], ['cancelled', 'left open for 4s'], 'a dialog nobody touches is closed by the host, and it says that is what happened');
+  const leftPid = dialogLog().at(-1)?.pid;
+  let leftAlive = true;
+  try { process.kill(leftPid, 0); } catch { leftAlive = false; }
+  assert(leftPid > 0 && !leftAlive, 'by ending its process — which is how a dialog is closed, since the window goes with it');
+  person({ cancel: true });
+
+  // The function itself, away from a host: which command, where it starts,
+  // and what its answer means.
+  const mac = dialogCommand(`/tmp/it's "here"`, { platform: 'darwin', env: {} });
+  eq([mac?.cmd, mac?.args.slice(0, 3)], ['osascript', ['-l', 'JavaScript', '-e']], 'on macOS the dialog is osascript running an open panel itself');
+  assert(/NSOpenPanel/.test(mac.args[3]) && /NSApplicationActivationPolicyAccessory/.test(mac.args[3]) && /activateIgnoringOtherApps\(true\)/.test(mac.args[3]),
+    'with the two lines measured to bring it to the front: the activation policy, and the activate call');
+  eq(mac.args[4], `/tmp/it's "here"`, 'the start folder is handed over as an argument');
+  assert(!mac.args[3].includes('here'), 'never written into the script — a path with a quote in it is a path, not source');
+  eq([dialogCommand('/x', { platform: 'linux', env: {} }), dialogCommand('/x', { platform: 'win32', env: {} })], [null, null],
+    'Linux and Windows have no backend until one has been watched taking focus');
+  eq([hasDialog({ platform: 'darwin', env: {} }), hasDialog({ platform: 'linux', env: {} })], [true, false], 'which is what the host tells the board, so such a host gets the page\'s list');
+  eq(dialogCommand('/x', { platform: 'linux', env: { ORCH_FOLDER_DIALOG: '/bin/stand-in' } }), { cmd: '/bin/stand-in', args: ['/x'] }, 'the suite\'s stand-in takes the place of any of them');
+  eq([startFor(REPO, '/home'), startFor(`${REPO}/gone/deeper`, '/home'), startFor(`${REPO}/.mcp.json`, '/home'), startFor('relative/path', '/home'), startFor(undefined, '/home'), startFor('/no-such-top-level-folder-here', '/home')],
+    [REPO, REPO, REPO, '/home', '/home', '/'],
+    'a start that exists is used; one that is gone, or is a file, is the nearest folder above it; no start at all is home');
+  eq(readAnswer({ code: 0, signal: null, stdout: '{"path":"/a/b"}\n', stderr: '' }), { ok: true, path: '/a/b' }, 'the dialog\'s answer is a path');
+  eq(readAnswer({ code: 0, signal: null, stdout: '{"cancelled":true}\n', stderr: '' }), { ok: true, cancelled: true }, 'or that it was closed');
+  eq([readAnswer({ code: 0, signal: null, stdout: '{"path":"not/absolute"}', stderr: '' }).ok, readAnswer({ code: 0, signal: null, stdout: 'hello', stderr: '' }).ok, readAnswer({ code: 1, signal: null, stdout: '{"path":"/a/b"}', stderr: '' }).ok], [false, false, false],
+    'and anything else — a path that is not one, words that are not an answer, an answer from a process that failed — is a failure');
+  eq(readAnswer({ code: null, signal: 'SIGKILL', stdout: '', stderr: 'line one\nexecution error: no screen\n' }).error, 'the folder dialog ended on SIGKILL: execution error: no screen', 'said with how it ended and its last line');
+  eq([pickIsStale({ waited_ms: 7000 }, 6000), pickIsStale({ waited_ms: 1000 }, 6000), pickIsStale({}, 6000), pickIsStale({ waited_ms: null }, 6000)], [true, false, false, false],
+    'a request the board held for longer than the page waits is stale; a fresh one, and one from a board that does not say, are not');
 
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
@@ -874,7 +1015,9 @@ try {
   killTmux();
   writeFileSync(`${FIX}/roster.json`, '[]');
   writeFileSync(`${FIX}/startup-ask.flag`, 'mcp');
-  host = startHost('host-test-1');
+  // Started with a folder-dialog TTL nothing can meet, for the last case in
+  // this section: every request for the dialog reaches this host "too late".
+  host = startHost('host-test-1', { ORCH_PICK_TTL_MS: '-1' });
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
 
@@ -895,6 +1038,15 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'free')?.permission == null ? true : null), 8000),
     'and once the window finishes starting — the forced delay elapsing, same as a real one registering — the prompt comes down on its own');
   rmSync(`${FIX}/startup-ask.flag`, { force: true });
+
+  // A request for the folder dialog that reaches the host after the page has
+  // given up must not open one: a dialog appearing in front of somebody who
+  // stopped waiting is a surprise, and nothing would read its answer.
+  const staleCalls = dialogLog().length;
+  const staleAt = await pickAt();
+  eq((await pickAsk()).status, 200, 'a request for the folder dialog is queued for a host that will get it too late');
+  assert(await until(() => (/not opening the folder dialog — it was asked for/.test(host.log) ? true : null), 8000), 'the host says it is not opening one, and why');
+  eq([dialogLog().length, await pickAt()], [staleCalls, staleAt], 'and no dialog opened, and nothing was said to the board as if one had');
 
   /* ── which board this host serves ───────────────────────────────────────────
    * This used to be `originOf(found[0].url)` — the first desk the filesystem

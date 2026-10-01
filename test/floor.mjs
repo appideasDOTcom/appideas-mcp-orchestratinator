@@ -11,7 +11,7 @@
 //   npm run test:floor
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, claudeable, switchable } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
@@ -675,6 +675,152 @@ try {
   eq(gone?.persona, 'Fresh Face', 'and the seat stays');
   known.delete('fresh');
   await registerWith({ roots: ['/repo'], folders: offered });
+
+  /* ── the host's own folder dialog (issue #4, items 1 and 2) ─────────────────
+   * The board's half: whether a host has a dialog at all, the ask, where the
+   * dialog has got to, and the rule that survives all of it — a take is only
+   * ever for a folder the host has named. What the host does with the ask is
+   * the host suite's. */
+  console.log('\nthe host\'s own folder dialog');
+  const dialogAsk = (body) => fetch(`${HOST}/api/floor/pick`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const dialogAt = () => fetch(`${HOST}/api/floor/pick?host_id=h-open`).then((r) => r.json());
+  const hostOpen = async () => (await folders()).hosts.find((h) => h.host_id === 'h-open');
+  eq((await hostOpen())?.dialog, false, 'a host that has not said it can show a folder dialog is taken not to have one — the page lists its folders itself');
+  rr = await dialogAsk({ host_id: 'h-open' });
+  eq([rr.status, (await rr.json()).code], [409, 'no_dialog'], 'and it is not asked for one');
+  eq(await takeWork(), [], 'nothing is queued for it');
+  await registerWith({ roots: ['/repo'], folders: offered, dialog: 'yes' });
+  eq((await hostOpen())?.dialog, false, 'only a plain true counts as saying so');
+  await registerWith({ roots: ['/repo'], folders: offered, dialog: true });
+  eq((await hostOpen())?.dialog, true, 'a host that says it can is served as one that can — the flag crosses registration to the dialog');
+  eq((await dialogAt()).at, null, 'before a dialog has been asked for there is nothing to read — not a stale answer');
+  rr = await dialogAsk({ host_id: 'nobody' });
+  eq((await rr.json()).code, 'no_host', 'a host the board does not have cannot be asked');
+  rr = await dialogAsk({ host_id: 'h-open', start: 'relative/nonsense' });
+  eq([rr.status, (await rr.json()).code], [400, 'bad_path'], 'nor can a dialog be started somewhere that is not an absolute path');
+  eq(await takeWork(), [], 'and neither refusal queued anything');
+  rr = await dialogAsk({ host_id: 'h-open', start: '/repo/last-place' });
+  eq(rr.status, 200, 'the floor can ask a host to open its folder dialog');
+  let pickWork = await takeWorkFull();
+  eq(pickWork.map((w) => `${w.kind}:${w.payload.start}`), ['pick:/repo/last-place'], 'the host is handed the ask, with where to open: the folder the last choice was made in');
+  assert(Number.isInteger(pickWork[0]?.waited_ms) && pickWork[0].waited_ms >= 0 && pickWork[0].waited_ms < 5000,
+    `stamped with how long it waited on the board, by the board's own clock — ${pickWork[0]?.waited_ms}ms — which is how a host knows a request nobody is waiting for any more`);
+  await dialogAsk({ host_id: 'h-open' });
+  pickWork = await takeWorkFull();
+  eq(pickWork.map((w) => `${w.kind}:${w.payload.start}`), ['pick:null'], 'with nothing remembered there is no start, and the host opens at home');
+
+  const OPENED = '2026-10-01T02:03:04.000Z';
+  eq((await hostEvents([{ type: 'pick', state: 'open', at: OPENED, start: '/repo' }])).applied, 1, 'the host says the dialog is open');
+  let pk = await dialogAt();
+  eq([pk.at, pk.state, pk.start, pk.path], [OPENED, 'open', '/repo', null], 'which the page reads, with the host\'s time on it — from here it waits for the person, not a clock');
+  eq((await hostEvents([{ type: 'pick', state: 'thinking', at: '2026-10-01T02:03:05.000Z' }, { type: 'pick', state: 'chosen', at: '2026-10-01T02:03:06.000Z' }])).applied, 0,
+    'a state the board does not know, and a choice with no folder, are not taken');
+  eq((await dialogAt()).at, OPENED, 'and leave what the page reads as it was');
+  const CHOSEN = '2026-10-01T02:03:09.000Z';
+  eq((await hostEvents([
+    { type: 'browse', requested: '/elsewhere/picked', path: '/elsewhere/picked', root: '/', parent: '/elsewhere', at: CHOSEN,
+      self: { path: '/elsewhere/picked', name: 'picked', depth: 2, bound: null, has_mcp_json: false, other_board: null, trusted: false, git: true, last_active: null, sessions: 0 }, entries: [] },
+    { type: 'pick', state: 'chosen', at: CHOSEN, start: '/repo', path: '/elsewhere/picked', parent: '/elsewhere' },
+  ])).applied, 2, 'a choice arrives as the host\'s listing of the folder, then the word that it was chosen');
+  pk = await dialogAt();
+  eq([pk.state, pk.path, pk.parent], ['chosen', '/elsewhere/picked', '/elsewhere'], 'the page reads the folder chosen, and the folder it sits in — where the next dialog will open');
+  eq((await browsed('/elsewhere/picked')).self?.name, 'picked', 'and reads the host\'s record of that folder from the same place a listed one comes from');
+  rr = await take({ host_id: 'h-open', path: '/elsewhere/picked', channel: CH, agent: 'picked-one' });
+  eq([rr.status, (await rr.json()).mode], [200, 'take'], 'so a folder the dialog returned can be taken — outside the roots, never in the flat list, but named by the host');
+  eq((await takeWorkFull()).map((w) => `${w.kind}:${w.payload.path}`), ['bind:/elsewhere/picked'], 'and the host is handed the bind');
+  rr = await take({ host_id: 'h-open', path: '/elsewhere/remembered-only', channel: CH, agent: 'ghost' });
+  eq((await rr.json()).code, 'unknown_folder', 'while a path the host has not named is refused as before, whatever a dialog or a memory says');
+  eq((await hostEvents([{ type: 'pick', state: 'cancelled', at: '2026-10-01T02:04:00.000Z', start: '/repo', why: 'left open for 600s' }])).applied, 1, 'a dialog closed without a choice is said as that');
+  pk = await dialogAt();
+  eq([pk.state, pk.why, pk.path], ['cancelled', 'left open for 600s', null], 'with why, when the host closed it itself, and no folder');
+  eq((await hostEvents([{ type: 'pick', state: 'failed', at: '2026-10-01T02:05:00.000Z', start: '/repo', error: 'the folder dialog ended with exit code 1: no screen' }])).applied, 1, 'and one that failed says so');
+  pk = await dialogAt();
+  eq([pk.state, pk.error], ['failed', 'the folder dialog ended with exit code 1: no screen'], 'in the host\'s own words, for the page to show');
+  await registerWith({ roots: ['/repo'], folders: offered });
+
+  /* ── what the take-a-desk dialog reads rather than asks for (issue #4) ──────
+   * Two things: the agent's saved name, and the folders opened most recently.
+   * The server's half is `names` on the folders response; the page's half is
+   * three small functions in src/ui/app.js, lifted out by their section
+   * comments the way test/markdown.mjs lifts the renderer — app.js is a
+   * browser script with no exports. If the slice fails, the section moved:
+   * update the markers, do not route around the test. What the dialog then
+   * draws with them is measured on the real page (verify-ui-change). */
+  console.log('\nthe name a desk already carries, read rather than typed');
+  const persona = (body) => fetch(`${HOST}/api/floor/persona`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  eq((await persona({ channel: CH, agent: 'alpha', persona: 'Alpha Prime' })).status, 200, 'an operator saves a name for an agent');
+  const named = (await folders()).names;
+  eq(named?.alpha, 'Alpha Prime', 'the folders response carries the saved name, by agent id — the dialog shows it instead of asking');
+  eq(named?.fresh, 'Fresh Face', 'whichever way it was saved');
+  const gammaDesk = deskOf(await floor(), 'gamma');
+  assert(typeof gammaDesk?.persona === 'string' && gammaDesk.persona.length > 0, `an agent nobody has named still has a name on its desk, derived from its id — ${gammaDesk?.persona}`);
+  eq(Object.hasOwn(named ?? {}, 'gamma'), false, 'but it is not served as a saved name: nothing is saved, and the dialog says "none"');
+  rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh' });
+  eq(rr.status, 200, 'a take that sends no name is accepted');
+  await takeWork();
+  eq((await folders()).names?.fresh, 'Fresh Face', 'and leaves the saved name exactly as it was');
+
+  const lifted = await (async () => {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- take a desk: what the dialog reads ---------- */');
+    const b = src.indexOf('/* ---------- take a desk: the dialog ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the take-a-desk section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/desk-dialog-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir };\n`);
+    try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+  })();
+  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir } = lifted;
+  eq(savedName(named, 'alpha'), 'Alpha Prime', 'the dialog reads an agent\'s saved name from that map');
+  eq(savedName(named, '  alpha '), 'Alpha Prime', 'whatever space was typed around the id');
+  eq(savedName(named, 'gamma'), null, 'and reads none for an agent with nothing saved — drawn as "none"');
+  eq([savedName(named, ''), savedName(null, 'alpha'), savedName({ alpha: '   ' }, 'alpha'), savedName(named, 'constructor')], [null, null, null, null],
+    'no id, no map, a blank name and a name that is only an object\'s own plumbing are all none');
+  eq(takeBody({ hostId: 'h-open', path: '/repo/zeta-newest', channel: CH, newChannel: '', agent: ' fresh ', persona: 'Typed Name' }),
+    { host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', open: true },
+    'what the dialog sends on a take names the host, the folder, the floor and the agent — and no name, even if a form somehow held one');
+  eq(takeBody({ hostId: 'h-open', path: '/repo/x', channel: '__new__', newChannel: ' brand-new ', agent: 'x' }).channel, 'brand-new', 'a new floor is sent by the name typed for it');
+
+  console.log('\nrecently opened');
+  const hostList = (await folders()).hosts.find((h) => h.host_id === 'h-open')?.folders ?? [];
+  eq(recentFolders(hostList).map((f) => f.name), ['zeta-newest', 'alpha-older'],
+    'the dialog offers the folders Claude Code has been run in, newest first — not one never opened, and not one bound to another board');
+  eq(recentFolders(hostList)[1].bound?.agent, 'alpha', 'each still carrying the host\'s record of it, which is what says it is already a desk');
+  const many = Array.from({ length: 40 }, (_, i) => ({ path: `/repo/r${i}`, name: `r${i}`, last_active: new Date(Date.UTC(2026, 0, 1 + i)).toISOString(), other_board: null }));
+  eq(RECENT_MAX, 5, 'a recent list is short');
+  eq(recentFolders(many).map((f) => f.name), ['r39', 'r38', 'r37', 'r36', 'r35'], 'five of forty, the newest five, whatever order they arrived in');
+  eq(recentFolders([...many].reverse()).map((f) => f.name), ['r39', 'r38', 'r37', 'r36', 'r35'], 'the same five from the same list reversed');
+  eq(recentFolders([
+    { path: '/repo/never', name: 'never', last_active: null, other_board: null },
+    { path: '/repo/once', name: 'once', last_active: '2026-09-30T00:00:00.000Z', other_board: null },
+  ]).map((f) => f.name), ['once'], 'a folder Claude Code has never been run in is not recent, wherever it sits in the host\'s list');
+  eq(recentFolders([{ path: '/repo/elsewhere', name: 'elsewhere', last_active: '2026-09-30T00:00:00.000Z', other_board: 'http://10.0.0.9:8787' }]), [],
+    'a folder bound to another board is not offered, however recent — it could only be refused');
+  eq([recentFolders(undefined), recentFolders([]), recentFolders([{ name: 'no-path', last_active: '2026-09-30T00:00:00.000Z' }])], [[], [], []],
+    'no list, an empty list and a folder with no path are all nothing to offer');
+
+  console.log('\nwhere the folder dialog opens: the last place a choice was made');
+  const browserStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, m }; };
+  const st = browserStore();
+  eq(rememberedDir(st, 'h1'), null, 'a browser that has chosen nothing remembers nothing, and the dialog opens at home');
+  rememberDir(st, 'h1', '/Users/me/dev/plugins');
+  eq(rememberedDir(st, 'h1'), '/Users/me/dev/plugins', 'after a choice it remembers the folder the choice was made in');
+  eq(rememberedDir(st, 'h2'), null, 'per host — a path on one machine means nothing on another');
+  rememberDir(st, 'h2', '/home/other/src');
+  eq([rememberedDir(st, 'h1'), rememberedDir(st, 'h2')], ['/Users/me/dev/plugins', '/home/other/src'], 'and remembering one host\'s leaves the other\'s alone');
+  rememberDir(st, 'h1', '/Users/me/dev/sites');
+  eq(rememberedDir(st, 'h1'), '/Users/me/dev/sites', 'the last choice replaces the one before');
+  rememberDir(st, 'h1', null); rememberDir(st, 'h1', 'relative/path'); rememberDir(st, '', '/x');
+  eq([rememberedDir(st, 'h1'), [...st.m.keys()]], ['/Users/me/dev/sites', ['orch.desk.dir']], 'no folder, a path that is not absolute and no host are not choices — nothing is overwritten, nothing else is written');
+  st.m.set('orch.desk.dir', 'not json at all');
+  eq(rememberedDir(st, 'h1'), null, 'a store holding something else is no memory at all');
+  rememberDir(st, 'h1', '/Users/me/dev/again');
+  eq(rememberedDir(st, 'h1'), '/Users/me/dev/again', 'and is written over by the next choice');
+  st.m.set('orch.desk.dir', JSON.stringify({ h1: 'not/absolute', h2: 42 }));
+  eq([rememberedDir(st, 'h1'), rememberedDir(st, 'h2')], [null, null], 'nor is a remembered value that is not an absolute path ever sent as a start');
+  const deadStore = { getItem: () => { throw new Error('storage is off'); }, setItem: () => { throw new Error('storage is off'); } };
+  let threw = false;
+  try { rememberDir(deadStore, 'h1', '/x'); } catch { threw = true; }
+  eq([rememberedDir(deadStore, 'h1'), threw], [null, false], 'and a browser with storage turned off simply starts at home each time');
 
   console.log('\na host that names the conversation it is following');
   // The host's one-time `session` event can be lost to its own startup: the

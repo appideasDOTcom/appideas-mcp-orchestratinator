@@ -1481,13 +1481,18 @@ el.dlgBody.addEventListener('click', (e) => {
       readDeskForm();
       browseTo(ui.deskForm?.path ?? null);
       break;
+    case 'desk-pick':
+      // The host's own folder dialog, on its own screen.
+      readDeskForm();
+      pickFolder();
+      break;
     case 'desk-take': {
       readDeskForm();
-      const fm = ui.deskForm;
-      const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
-      const body = { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true };
-      if (fm.persona.trim()) body.persona = fm.persona.trim();
-      act(() => floorPost('desk', body).then(() => { window.floorOpenDesk?.(channel, body.agent); }));
+      const body = takeBody(ui.deskForm);
+      // Where this folder sits is where the next dialog opens — however it
+      // was chosen, the dialog, a recent row or the page's own list.
+      rememberDir(localStorage, body.host_id, ui.deskForm.listing?.parent ?? null);
+      act(() => floorPost('desk', body).then(() => { window.floorOpenDesk?.(body.channel, body.agent); }));
       break;
     }
     case 'desk-leave':
@@ -1675,22 +1680,120 @@ document.addEventListener('visibilitychange', () => {
 
 tick();
 
+/* ---------- take a desk: what the dialog reads ---------- */
+
+/** How many recent folders the dialog offers. Short on purpose: the flat list
+ *  of every candidate was taken out of this dialog for being 95 names from
+ *  nowhere, and a recent list that grows is that list again. */
+const RECENT_MAX = 5;
+
+/**
+ * The folders to offer as "Recently opened": the ones Claude Code has
+ * actually been run in, newest first, a handful of them.
+ *
+ * A folder nobody has opened is not recent, whatever its place in the host's
+ * list, and one bound to another board cannot be taken from here — a row
+ * whose only answer is a refusal is not worth one of five places. Sorted
+ * here as well as by the host, so the order does not depend on every hop
+ * between the two keeping it.
+ */
+function recentFolders(folders, max = RECENT_MAX) {
+  return (Array.isArray(folders) ? folders : [])
+    .filter((f) => f && f.path && f.last_active && !f.other_board)
+    .sort((a, b) => String(b.last_active).localeCompare(String(a.last_active)))
+    .slice(0, max);
+}
+
+/**
+ * The name somebody has saved for an agent, or null when nobody has.
+ *
+ * Names are kept by agent id for the whole board, so this is the name the
+ * desk will carry the moment it is seated. Null is drawn as "none" rather
+ * than as the name the board would derive from the id: the dialog says what
+ * is saved, and nothing is saved.
+ */
+function savedName(names, agent) {
+  const id = String(agent ?? '').trim();
+  const name = id && names && Object.hasOwn(names, id) ? names[id] : null;
+  return typeof name === 'string' && name.trim() ? name.trim() : null;
+}
+
+/** Where this browser keeps the folder the last choice was made in, per host. */
+const DESK_DIR_KEY = 'orch.desk.dir';
+
+/**
+ * The folder the last choice on this host was made in, or null.
+ *
+ * Per host, because a path is a path on one machine; per browser, like the
+ * floor filter and the view, because it is this person's habit and nobody
+ * else's. Anything in the store that is not an absolute path is no memory at
+ * all — the store is the browser's and can hold whatever was once put there.
+ */
+function rememberedDir(storage, hostId) {
+  try {
+    const dir = JSON.parse(storage.getItem(DESK_DIR_KEY) ?? '{}')?.[hostId];
+    return typeof dir === 'string' && dir.startsWith('/') ? dir : null;
+  } catch { return null; }
+}
+
+/**
+ * Remember where a choice was made: the chosen folder's parent, which is
+ * where its siblings are — seating several agents in a row is choosing
+ * neighbours, and the dialog should open among them, not back at home.
+ *
+ * Only ever a hint. The host opens the nearest folder that still exists, so
+ * a remembered folder that has since gone costs nothing but being wrong.
+ */
+function rememberDir(storage, hostId, dir) {
+  if (!hostId || typeof dir !== 'string' || !dir.startsWith('/')) return;
+  try {
+    let all = {};
+    try { all = JSON.parse(storage.getItem(DESK_DIR_KEY) ?? '{}') ?? {}; } catch { /* unreadable: start again */ }
+    if (typeof all !== 'object' || Array.isArray(all)) all = {};
+    all[hostId] = dir;
+    storage.setItem(DESK_DIR_KEY, JSON.stringify(all));
+  } catch { /* not worth failing over */ }
+}
+
+/**
+ * What a take sends: the host, the folder, the floor and the agent.
+ *
+ * No name. The dialog reads the one the agent already carries, and a take
+ * that sends none makes no change to it — so seating an agent can never
+ * rename it on every floor it sits on, which a typed field here could.
+ */
+function takeBody(fm) {
+  const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
+  return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true };
+}
+
+/* ---------- take a desk: the dialog ---------- */
+
 /**
  * Take a desk: pick the folder the agent lives in, and it becomes a desk on a
  * floor — no file to edit, no terminal.
  *
- * A folder picker, not a list. It opens on the host's projects folder and
- * shows the folders inside it; you open folders until you are standing in
- * the agent's, the way a file dialog works. Each level is one round trip to
- * the host (`POST /api/floor/browse`, then the GET until the host's time on
- * it moves), because the folders are on the host's disk, not this machine's.
- * The first version was a flat list of every folder that might be a desk,
- * by its last path segment — 95 names from nowhere, on the first machine it
- * ran on (2026-09-10) — and this replaced it.
+ * The folder is chosen in the operating system's own folder dialog, opened
+ * by the host on the machine it runs on — the operator's — because that is
+ * the dialog a person already knows, and the folders are that machine's.
+ * "Choose folder…" asks for it (`POST /api/floor/pick`) and the page reads
+ * where it has got to: the host says the dialog is open, and from then on
+ * the wait is for the person rather than for a clock. It opens in the folder
+ * the last choice was made in, which this browser remembers per host.
  *
- * It starts at the host's home folder and goes anywhere that account can
- * read; the roots in host.json are where the host looks for desks on its
- * own, not a limit on what you may pick.
+ * A host with no dialog of its own (see host/dialog.js: only macOS has one
+ * so far) gets the picker this dialog had before, drawn here: it opens on
+ * the host's home folder and shows the folders inside it, and you open
+ * folders until you are standing in the agent's. Each level is one round
+ * trip (`POST /api/floor/browse`, then the GET until the host's time on it
+ * moves). So does a host whose dialog failed, with what it said. The first
+ * version of all was a flat list of every folder that might be a desk, by
+ * its last path segment — 95 names from nowhere, on the first machine it ran
+ * on (2026-09-10).
+ *
+ * Either way it goes anywhere that account can read; the roots in host.json
+ * are where the host looks for desks on its own, not a limit on what you may
+ * pick.
  *
  * The folder you stand in fills the form. A folder that already names its
  * agent (in its .mcp.json, or in Claude Code's local scope) fixes the agent:
@@ -1700,6 +1803,13 @@ tick();
  * unbound folder asks for a name. One dialog, three modes, decided by what
  * the folder says and what you pick.
  *
+ * Two things beside the picker are read rather than asked for. The agent's
+ * name is the one it already carries on the board — shown, not typed, and
+ * "none" when nobody has saved one — and above the picker sits a short
+ * "Recently opened" list: the top of the host's own folder list, which it
+ * already sorts newest activity first, so the folder somebody was just in is
+ * one click instead of a walk down from home.
+ *
  * Drawn by renderDeskDialog and redrawn on every choice, so the operator's
  * picks live in ui.deskForm rather than in the DOM. The poll never redraws
  * it: 'desk' is in refreshDialog's skip list.
@@ -1707,14 +1817,20 @@ tick();
 function deskDialog({ channel = null, hostId = null, path = null } = {}) {
   ui.dlgCtx = { kind: 'desk' };
   ui.deskForm = {
-    hosts: null, hostId, path, listing: null, waiting: false, seq: 0,
-    wantChannel: channel, channel, newChannel: '', agent: '', persona: '', prefilled: null, error: null,
+    hosts: null, names: {}, hostId, path, listing: null, waiting: false, seq: 0,
+    // picking: null | 'asking' | 'open' — where the host's own dialog has got
+    // to. listMode: the page's list is drawn although the host has a dialog,
+    // because that dialog failed, and pickError is what it said.
+    picking: null, listMode: false, pickError: null, pickNote: null,
+    wantChannel: channel, channel, newChannel: '', agent: '', prefilled: null, error: null,
   };
   renderDeskDialog();
   loadFolders();
 }
 
-/** The hosts and their roots, read when the dialog opens: where a picker can start. */
+/** The hosts with their roots and folder lists, and the names saved on this
+ *  board, read when the dialog opens: where a picker can start, what was
+ *  opened recently, and what each agent is called. */
 async function loadFolders() {
   const fm = ui.deskForm;
   if (!fm) return;
@@ -1723,9 +1839,11 @@ async function loadFolders() {
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
     fm.hosts = json.hosts ?? [];
+    fm.names = json.names ?? {};
     fm.error = null;
   } catch (e) {
     fm.hosts = [];
+    fm.names = {};
     fm.error = `Could not read the host list — ${e.message}`;
   }
   if (ui.dlgCtx?.kind !== 'desk' || ui.deskForm !== fm) return;
@@ -1733,15 +1851,114 @@ async function loadFolders() {
   if (!fm.hostId || !fm.hosts.some((h) => h.host_id === fm.hostId)) fm.hostId = live[0]?.host_id ?? fm.hosts[0]?.host_id ?? null;
   const host = fm.hosts.find((h) => h.host_id === fm.hostId) ?? null;
   renderDeskDialog();
-  // No path: the host starts its picker at its home folder.
-  if (host?.live) browseTo(fm.path ?? null);
+  // A host with a dialog of its own is asked for nothing until somebody
+  // presses the button — unless the caller named a folder, which is looked at
+  // to fill the form. One without lists its home folder here, as before.
+  if (host?.live && (fm.path || !host.dialog)) browseTo(fm.path ?? null);
 }
 
-/** Open one folder on the host: ask, then read until the host has answered. */
-async function browseTo(path) {
+/**
+ * Ask the host to open its own folder dialog, and wait for the choice.
+ *
+ * Two waits, and only the first is on a clock. The host has 8 s to say the
+ * dialog is open — a host that cannot be reached must not leave a button
+ * spinning — and once it has, the wait is for a person, who takes as long as
+ * they take: it ends when the host says chosen, cancelled or failed, or when
+ * this dialog is closed. (The host closes a dialog nobody touches, after ten
+ * minutes, and says cancelled.)
+ *
+ * A dialog that fails, or a host that never opens one, falls back to the
+ * page's own list with what was said — a way forward rather than a dead
+ * button. A chosen folder arrives as the host's own listing of it, the same
+ * record the list would have produced, so the form below is filled one way.
+ */
+async function pickFolder() {
+  const fm = ui.deskForm;
+  if (!fm || !fm.hostId || fm.picking) return;
+  const seq = ++fm.seq;
+  const hostName = (fm.hosts ?? []).find((h) => h.host_id === fm.hostId)?.name ?? fm.hostId;
+  const mine = () => ui.dlgCtx?.kind === 'desk' && ui.deskForm === fm && fm.seq === seq;
+  const get = async (what, extra = '') => {
+    const res = await fetch(`./api/floor/${what}?host_id=${encodeURIComponent(fm.hostId)}${extra}`);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    return json;
+  };
+  const toList = (why) => {
+    fm.picking = null;
+    fm.pickError = why;
+    fm.listMode = true;
+    browseTo(fm.path ?? null);
+  };
+  fm.picking = 'asking';
+  fm.listMode = false;
+  fm.waiting = false;
+  fm.error = null;
+  fm.pickError = null;
+  fm.pickNote = null;
+  renderDeskDialog();
+  try {
+    let last = (await get('pick')).at ?? null;
+    const start = rememberedDir(localStorage, fm.hostId);
+    await floorPost('pick', { host_id: fm.hostId, ...(start ? { start } : {}) });
+    const asked = Date.now();
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!mine()) return;
+      const got = await get('pick').catch(() => null);
+      if (!mine()) return;
+      if (got && got.at && got.at !== last) {
+        last = got.at;
+        if (got.state === 'open') {
+          fm.picking = 'open';
+          renderDeskDialog();
+        } else if (got.state === 'chosen') {
+          const listing = await get('browse', `&path=${encodeURIComponent(got.path)}`);
+          if (!mine()) return;
+          if (!listing.at) throw new Error(`${hostName} chose ${got.path} and did not say what is in it`);
+          rememberDir(localStorage, fm.hostId, got.parent ?? listing.parent ?? null);
+          fm.picking = null;
+          takeListing(fm, listing);
+          renderDeskDialog();
+          return;
+        } else if (got.state === 'cancelled') {
+          fm.picking = null;
+          fm.pickNote = got.why ? `The folder dialog was closed — ${got.why}.` : null;
+          renderDeskDialog();
+          return;
+        } else if (got.state === 'failed') {
+          toList(got.error ?? 'The folder dialog failed.');
+          return;
+        }
+      }
+      if (fm.picking === 'asking' && Date.now() - asked > 8000) {
+        toList(`${hostName} did not open its folder dialog in 8 s.`);
+        return;
+      }
+    }
+  } catch (e) {
+    if (!mine()) return;
+    toList(String(e.message ?? e));
+  }
+}
+
+/**
+ * Open one folder on the host: ask, then read until the host has answered.
+ *
+ * `keep` is for a folder taken from the recent list. That list is the host's
+ * last report and a folder on it can have gone since — so the open is tried,
+ * and when the host says it cannot, the picker stays standing where it was
+ * and says which path failed, in the host's own words. Without it a failed
+ * open is where the picker now stands: no crumbs, no rows, and no way back.
+ */
+async function browseTo(path, { keep = false } = {}) {
   const fm = ui.deskForm;
   if (!fm || !fm.hostId) return;
   const seq = ++fm.seq;
+  const stood = { path: fm.path, listing: fm.listing };
+  // Opening a folder here is the choice now: a host dialog still on screen
+  // has nobody waiting on it (its seq is stale), so the form stops saying one is.
+  fm.picking = null;
   fm.waiting = true;
   fm.error = null;
   fm.path = path;
@@ -1761,7 +1978,13 @@ async function browseTo(path) {
       if (!mine()) return;
       const got = await read().catch(() => null);
       if (got && got.at && got.at !== before) {
-        takeListing(fm, got);
+        if (keep && got.error) {
+          fm.path = stood.path;
+          fm.listing = stood.listing;
+          fm.error = got.error;
+        } else {
+          takeListing(fm, got);
+        }
         fm.waiting = false;
         renderDeskDialog();
         return;
@@ -1775,6 +1998,9 @@ async function browseTo(path) {
     fm.waiting = false;
     fm.error = String(e.message ?? e);
   }
+  // Unanswered, a recent folder is not where the picker stands either: the
+  // form is still the old folder's, and a take must not carry the new path.
+  if (keep) { fm.path = stood.path; fm.listing = stood.listing; }
   renderDeskDialog();
 }
 
@@ -1803,7 +2029,6 @@ function readDeskForm() {
   if (v('desk-channel') !== undefined) fm.channel = v('desk-channel') || null;
   if (v('desk-new-channel') !== undefined) fm.newChannel = v('desk-new-channel') ?? '';
   if (v('desk-agent') !== undefined) fm.agent = v('desk-agent') ?? '';
-  if (v('desk-persona') !== undefined) fm.persona = v('desk-persona') ?? '';
 }
 
 const agoText = (isoStr) => {
@@ -1843,6 +2068,17 @@ function renderDeskDialog() {
   if (!fm.channel && channels.length) fm.channel = channels[0];
   const crumbs = L ? crumbsOf(L.root, L.path) : [];
   const dirs = L?.entries ?? [];
+  const recent = recentFolders(host?.folders);
+  const name = savedName(fm.names, fm.agent);
+  // Which picker is drawn: the host's own dialog behind a button, or the
+  // page's list — for a host with no dialog, and for one whose dialog failed.
+  const native = host?.dialog === true && !fm.listMode;
+  const onHost = hosts.length > 1 ? ` on ${esc(host?.name ?? '')}` : '';
+  const pickState = fm.picking === 'asking' ? `Asking ${esc(host?.name ?? 'the host')} to open its folder dialog…`
+    : fm.picking === 'open' ? `The folder dialog is open on ${esc(host?.name ?? 'the host')} — choose there.`
+    : fm.waiting ? 'looking…'
+    : fm.pickNote ? esc(fm.pickNote)
+    : '';
 
   const title = mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
   const primary = mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
@@ -1853,6 +2089,16 @@ function renderDeskDialog() {
       f.sessions > 0 ? 'opened by Claude' : null,
     ].filter(Boolean);
     return `<button type="button" class="dir-row" data-go="${esc(f.path)}" title="Open ${esc(f.name)}"><span class="dir-name">${esc(f.name)}</span><span class="dir-marks">${marks.map(esc).join(' · ')}</span></button>`;
+  };
+  // A recent folder carries its path as well as its name — a name alone is
+  // what made the old flat list unreadable — and opens like any other row,
+  // except that a path which has gone leaves the picker where it stands.
+  const recentRow = (f) => {
+    const marks = [
+      f.bound ? `${f.bound.channel} / ${f.bound.agent}` : null,
+      agoText(f.last_active),
+    ].filter(Boolean);
+    return `<button type="button" class="dir-row recent-row" data-go="${esc(f.path)}" data-recent="1" title="Open ${esc(f.path)}"><span class="recent-what"><span class="dir-name">${esc(f.name)}</span><span class="recent-path mono"><bdi>${esc(f.path)}</bdi></span></span><span class="dir-marks">${marks.map(esc).join(' · ')}</span></button>`;
   };
   // What the folder you are standing in says about itself: the sentence the
   // form is filled from, so the two can never disagree.
@@ -1878,10 +2124,10 @@ function renderDeskDialog() {
       notes.push(`Moves it: rebinds the folder as <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(channelNow)}</span>, and if the floor holds its window, closes it and reopens it on the same conversation. Its seat leaves <span class="mono">${esc(bound.channel)}</span>. Refused while a turn is running.`);
     }
   }
-  const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting);
+  const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
   openDialog(`
     <div class="dlg-head"><h3>${title}</h3></div>
-    <p class="dlg-sub">open the folder your agent lives in, then pick its floor</p>
+    <p class="dlg-sub">${native ? 'choose' : 'open'} the folder your agent lives in, then pick its floor</p>
     ${hosts.length > 1 ? `
     <label class="field">
       <span>Host</span>
@@ -1889,6 +2135,18 @@ function renderDeskDialog() {
         ${hosts.map((h) => `<option value="${esc(h.host_id)}"${h.host_id === fm.hostId ? ' selected' : ''}${h.live ? '' : ' disabled'}>${esc(h.name)}${h.live ? '' : ' — offline'}</option>`).join('')}
       </select>
     </label>` : ''}
+    ${recent.length ? `
+    <div class="dlg-recent-head">Recently opened</div>
+    <div class="dlg-dirs dlg-recent" role="list" aria-label="Recently opened">
+      ${recent.map(recentRow).join('')}
+    </div>` : ''}
+    ${native ? `
+    <div class="desk-pick">
+      <button type="button" class="btn" data-do="desk-pick"${host?.live && !fm.picking && !fm.waiting ? '' : ' disabled'}>${L ? 'Choose another folder' : 'Choose folder'}${onHost}…</button>
+      <span class="muted desk-pick-state">${pickState}</span>
+    </div>
+    ${L ? `<p class="desk-chosen mono" title="${esc(L.path)}"><bdi>${esc(L.path)}</bdi></p>` : ''}` : `
+    ${fm.pickError ? `<p class="dlg-note desk-pick-failed"><b>${esc(fm.pickError)}</b> Its folders are listed here instead.</p>` : ''}
     <div class="dlg-crumbs" aria-label="Where you are">
       ${crumbs.map((c, i) => `${i ? '<span class="sep">/</span>' : ''}<button type="button" class="crumb${i === crumbs.length - 1 ? ' here' : ''}"${i === crumbs.length - 1 ? ' disabled' : ` data-go="${esc(c.path)}"`}>${esc(c.name)}</button>`).join('')}
       ${fm.waiting ? '<span class="muted">· looking…</span>' : ''}
@@ -1899,7 +2157,8 @@ function renderDeskDialog() {
     <div class="desk-folder-meta">
       <span>${L ? `${dirs.length} folder${dirs.length === 1 ? '' : 's'} in ${esc(crumbs[crumbs.length - 1]?.name ?? '')}` : ''}</span>
       <button type="button" class="btn" data-do="desk-look" title="Ask the host to look at this folder again now"${fm.waiting || !host?.live ? ' disabled' : ''}>Look again</button>
-    </div>
+      ${host?.dialog ? `<button type="button" class="btn" data-do="desk-pick" title="Ask the host to open its own folder dialog again"${fm.waiting || !host?.live ? ' disabled' : ''}>Folder dialog…</button>` : ''}
+    </div>`}
     <p class="dlg-self">${here || '&nbsp;'}</p>
     <label class="field">
       <span>Agent${bound ? ' — set by the folder' : ''}</span>
@@ -1917,10 +2176,10 @@ function renderDeskDialog() {
       <span>New floor's name</span>
       <input id="desk-new-channel" class="input" type="text" maxlength="64" value="${esc(fm.newChannel)}" placeholder="my-project" autocomplete="off" spellcheck="false">
     </label>` : ''}
-    <label class="field">
-      <span>Display name (optional)</span>
-      <input id="desk-persona" class="input" type="text" maxlength="40" value="${esc(fm.persona)}" placeholder="what the nameplate says" autocomplete="off">
-    </label>
+    <div class="field desk-name">
+      <span>Name</span>
+      <output id="desk-name" class="desk-name-read${name ? '' : ' none'}" title="The name saved for this agent on the board">${name ? esc(name) : 'none'}</output>
+    </div>
     <p class="dlg-note">${notes.join(' ') || '&nbsp;'}</p>
     <div class="dlg-foot">
       <button type="button" class="btn" data-do="cancel">Cancel</button>
@@ -1954,7 +2213,7 @@ el.dlgBody.addEventListener('click', (e) => {
   const go = e.target.closest('[data-go]');
   if (!go || go.disabled) return;
   readDeskForm();
-  browseTo(go.dataset.go);
+  browseTo(go.dataset.go, { keep: go.dataset.recent === '1' });
 });
 // A choice redraws the take-a-desk dialog (the title, the note and the button
 // depend on it); typing only records itself, so the caret is never taken away
@@ -1967,19 +2226,39 @@ el.dlgBody.addEventListener('change', (e) => {
     const fm = ui.deskForm;
     fm.listing = null;
     fm.prefilled = null;
-    browseTo(null);
+    fm.path = null;
+    fm.picking = null;
+    fm.listMode = false;
+    fm.pickError = null;
+    fm.pickNote = null;
+    // Whatever was being waited for was the other host's: its loop sees the
+    // seq move and stops, and nothing else would ever clear the flag — which
+    // left the new host's button disabled and saying "looking…" for good.
+    fm.waiting = false;
+    fm.seq++;
+    // Another machine: its own dialog waits to be asked for, its list does not.
+    if ((fm.hosts ?? []).find((h) => h.host_id === fm.hostId)?.dialog) renderDeskDialog();
+    else browseTo(null);
     return;
   }
   renderDeskDialog();
 });
 el.dlgBody.addEventListener('input', (e) => {
   if (ui.dlgCtx?.kind !== 'desk') return;
-  if (!e.target.matches('#desk-agent, #desk-persona, #desk-new-channel')) return;
+  if (!e.target.matches('#desk-agent, #desk-new-channel')) return;
   readDeskForm();
   const fm = ui.deskForm;
+  // The name follows the id as it is typed, without a redraw: an unbound
+  // folder's agent is whatever is in the box, and so is whose name this is.
+  const shown = el.dlgBody.querySelector('#desk-name');
+  if (shown) {
+    const name = savedName(fm.names, fm.agent);
+    shown.textContent = name ?? 'none';
+    shown.classList.toggle('none', !name);
+  }
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   const go = el.dlgBody.querySelector('[data-do="desk-take"]');
-  if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting);
+  if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
 });
 
 /**
