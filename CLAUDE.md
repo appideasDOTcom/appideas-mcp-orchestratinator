@@ -127,6 +127,27 @@ relays the conversation, `run()` handles work. Keep them apart. When they shared
 one loop, delivering a message blocked the relay for up to a minute — the floor
 went silent mid-conversation and then dumped the backlog in one batch.
 
+**Work that waits on a person, or walks the disk, is started and not
+awaited.** The same reasoning one level down: `run()` handles work items in
+order, so anything slow inside one holds every message behind it. The folder
+dialog (`pick`), a conversation read whole (`read`), the recent list and a
+search all return at once and answer later as events; the search goes further
+and runs as a process of its own, because one 70 MB transcript is a third of a
+second of `JSON.parse` on the event loop the relay shares.
+
+**The host puts one thing on the operator's screen itself, and how was
+measured, not chosen.** The folder dialog is one function,
+[`host/dialog.js`](host/dialog.js), with a backend per platform and only
+macOS filled in. Its header is the record: four ways of opening a dialog
+from a LaunchAgent were watched, three are *drawn and never focused* (or
+outlive their process), and a cross-platform npm library was tried and is
+one of the three. So: do not swap it for a library, and do not write a Linux
+or Windows backend from first principles — a backend goes in after it has
+been watched taking focus from the host's own service, which is what the
+**measure-the-desktop** skill is for. A host with no backend says so on
+registration (`dialog`) and the page draws its own list for it; that list is
+the fallback, not leftover code.
+
 ## Driving a window
 
 Everything the host knows about a window is a text capture of its pane, and
@@ -203,6 +224,37 @@ Two things follow, and both were bugs before they were rules:
   The note is retired by the message *becoming a turn* — and by that in either
   order, because the host's two loops do not wait for each other and the relay
   genuinely does publish the turn first sometimes. It did, on the real board.
+
+## History is read off the hosts, not the board
+
+**`turns` is a live tail, not an archive**: the newest 400 rows a desk
+(`TURN_RETENTION`), and a conversation picked from the list is joined
+mid-stream. Measured on this board when it first had a real history
+(2026-10-01): any row at all for 41% of the conversations on disk, about a
+quarter of the turns, no titles in `agent_sessions`, and 180 session rows
+for transcripts on no disk here. Anything that claims to cover *the
+history* built on those tables covers part of it without saying which part.
+
+So three things read the transcripts on the host instead, each answered as
+events and held only in the server's memory — the recent list across desks,
+the search, and a conversation opened to read whole
+([`host/history.js`](host/history.js), `Host.readWhole`; the routes and the
+reasoning are in [`docs/internals.md`](docs/internals.md)). Two rules come
+with that, and both were rulings rather than accidents:
+
+- **An answer names the hosts it is from.** A host that is offline is in the
+  answer as offline and the page says its conversations are not covered. Do
+  not "fix" an empty result by falling back to `turns`.
+- **Reading is not resuming.** Opening a conversation to read closes, opens
+  and moves nothing, so none of a reopen's refusals apply to it — an
+  editor-held, current or mid-turn conversation can be read. It is drawn in
+  its desk's panel as a *different shell*: a banner, a way back, and no
+  message box or actions at all. Absent, not disabled.
+
+Before measuring anything against these stores again, read the
+**measure-live-data** skill: the first three numbers it produced were wrong
+(a folder counted three times; a figure measured on one store and quoted
+for the other; a byte scan mistaken for a search).
 
 ## The two surfaces
 
@@ -331,6 +383,42 @@ editor load they went red twice with `its last line reads ""` and were green
 on the rerun. That red is a pane not yet drawn, not the code — rerun before
 reading anything into it.
 
+Three more reds were seen in `test:window` on 2026-10-01, in one full run
+under load (load average 7–14): "the presser succeeds once the cursor is
+confirmed on the right row", "and reports which row it took", "with Enter
+actually reaching the window this time" — all in *answering a startup
+question, against a real pane*. The suite alone straight after was green,
+and so were the next two full runs and QA's. Nothing in that section had
+been touched. The cause was not found; it is recorded here so the next one
+is recognised, not so it is waved through — rerun, and if it repeats, read
+the pane.
+
+**The suites have a stand-in for the person, too.** `ORCH_FOLDER_DIALOG`
+names a program the host runs in place of the operating system's folder
+dialog — the host suite points it at a script whose answer is a file, so a
+case says what "the person" does next (choose, cancel, take three seconds,
+have the dialog die). It is to the dialog what `ORCH_HOST_CLAUDE` is to
+Claude Code. That the *real* dialog takes the front cannot be seen by any
+suite; it is measured on a desktop.
+
+**Page logic is tested by lifting it out of the page.** `src/ui/app.js` is a
+classic browser script with no exports, so `test/floor.mjs` slices a section
+out between two section comments (`/* ---------- take a desk: what the
+dialog reads ---------- */` and its closing twin) and imports it, the way
+`test/markdown.mjs` lifts the renderer from `floor.js`. To make a page
+decision testable, write it as a small pure function inside such a section
+and leave the DOM code as its caller. If a slice fails, the section moved:
+fix the markers, do not route around the test. What only a real page shows
+— what is drawn, focused, in view — is `verify-ui-change`'s, and is reported
+as measured there. There is still no browser tier in `npm test`.
+
+**Never break the working tree to watch a test fail.** Mutation checks run
+in a copy outside the repo — the **mutate-in-a-copy** skill, whose tool
+refuses to edit a git checkout. The working tree is the commit surface at
+every moment: on 2026-10-01 a mutation run edited `host/index.js` in place
+with a restore step, the commit landed mid-run, and `8788a6d` reached
+`origin/develop` with a line deliberately removed.
+
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the
@@ -363,6 +451,25 @@ operator's live floor.
   the operator can see something waiting on your channel, so poll before
   replying. Answering "nudge" with acknowledgement instead of a channel check is
   the most likely way to look broken while working perfectly.
+- **A poll that comes back empty is not the end of a nudge. List the tasks.**
+  Work is assigned as a task, and a task is not a message: `poll_messages`
+  returned nothing on the nudge that carried issue #4, and the assignment
+  was sitting in `list_tasks`. Do both, every time.
+- **Post, poll, then build.** When a task says to post a result before
+  building on it, the post is where the operator rules — so poll after
+  posting and before the first line of the build, and again at each phase
+  boundary of a long task. A ruling on the folder picker sat unread for
+  twenty minutes behind a build that had to be taken back out. A claim
+  lapses fifteen minutes after it is made (`CLAIM_TTL_MINUTES`), working or
+  not, and reopens; re-claim when a listing shows it open.
+- **What needs the operator's call goes to the QA desk, not to him.** His
+  standing rule since 2026-10-01: decisions, go-aheads and "which do you
+  want" are sent to `appideas-qa` on the board with the options and the
+  measurement, and come back as a task. He answers permission prompts in
+  your window and can type to you whenever he likes; he is not to be left a
+  question at the end of a turn in each of several windows. A ruling or a
+  deploy go-ahead that arrives as a task "from costmo, through appideas-qa"
+  is his.
 - **That playbook is written for the agents who *use* this tool, and you are the
   one who builds it — so the last fifth of it is not about you, and where the
   two disagree this file wins.** It sits in `docs/` as the public worked

@@ -10,7 +10,7 @@ can still be wrong on the page. The only honest test is the real page against a
 real server. This is how to get one in about a minute, and — more importantly —
 the specific ways this has produced a **false pass**.
 
-## Eight ways a green result has lied here
+## Ten ways a green result has lied here
 
 **Probing the panel before it has caught up.** Clicking a desk renders its
 panel *asynchronously* — `openDesk()` fetches turns first, then renders — and
@@ -83,6 +83,24 @@ edge is another half a stroke beyond that. To check what a mark looks aligned
 overflows its button when it sits exactly on the line. Related: `color-mix()` computes to
 `color(srgb 0..1)` floats while a hex literal computes to `rgb(0..255)` — compare
 those directly and a darker colour reports as lighter. Convert before comparing.
+
+**Reading the text when the fault is in the drawing.** A probe returned
+`/repo/deep/nest/zeta-newest` for a row's path and the row was wrong: on
+screen it read `repo/deep/nest/zeta-newest/`, the leading slash drawn at the
+far end, because `direction: rtl` (used to cut a long path at the left)
+reorders a neutral character. `textContent` is the logical string and will
+never show that. **Anything about how text is laid out — truncation, bidi,
+wrapping, which end is cut — is only in a screenshot.** Take one with
+`page.shot()` and look at it; the fix there was a `<bdi>` around the path.
+
+**Clicking a button a person could not.** `page.click()` dispatches a
+`MouseEvent`, and a delegated `[data-do]` handler runs for it whether or not
+the button is `disabled`. A check clicked "Choose folder…" while it was
+disabled and saying "looking…" — left that way by a flag nothing cleared
+after a change of host — and the flow carried on, green, through a control no
+person could have pressed. **Read `disabled` off the button before clicking
+it**, as part of the probe, and treat a disabled button you expected to
+press as the finding.
 
 ## A throwaway server
 
@@ -182,6 +200,55 @@ host uses and rows no host could have produced cannot be seeded by accident.
 event refused, usually a `hosted_desks` row that did not land or names another
 host. It is not an error in any log.
 
+### answering-host.mjs — a host that answers the page's questions
+
+`seed-desk.mjs` and `seed-folders.mjs` put state on the board; neither takes
+work. Anything on the page that *asks a host and waits* — the folder dialog
+and the in-page list in Take a desk, the History dialog's recent list and
+search, a conversation opened to read — sits for eight seconds against them
+and says the host did not answer. [`answering-host.mjs`](answering-host.mjs)
+long-polls the work queue for its host and answers each item the way
+`host/index.js` does, as events:
+
+```bash
+node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8905 &
+node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 --answers /tmp/answers.json > /tmp/work.jsonl &
+# a second host with no folder dialog, to see the page's own list:
+node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 --host h2 --no-dialog &
+```
+
+- **Its stdout is what the page sent**: one JSON line per work item, payload
+  included. That is how to check the remembered start directory reached the
+  host (`"kind":"pick","payload":{"start":"/repo/deep/nest"}`) or that the
+  switch did (`"deep":true`) — the effect, not the appearance.
+- **`--answers` is re-read on every item**, so a check changes what "the
+  person" does between steps by rewriting one file: `{"pick":{"mode":"chosen",
+  "path":"…","delay":1500}}`, then `cancelled` (with `why`), `failed` (with
+  `error`), `silent` (says nothing — the page's 8-second path).
+- A conversation whose id ends `-old` reads as thirty turns in two pages,
+  with a tool call, a thought, a subagent label, and one turn containing
+  `<b>all</b>` — which must arrive on the page as those characters.
+- An offline host for the "not covered" line is a row, not a process:
+  `INSERT OR REPLACE INTO hosts (host_id, name, last_seen) VALUES ('h2',
+  'oldbox', datetime('now', '-2 days'))`.
+
+Three things about waiting on a page that waits on a host, each a red that
+was the check and not the page:
+
+- **Do not wait on a state shorter than the page's poll.** The page reads the
+  host's answer every 500 ms; with a 300 ms delay between `open` and
+  `cancelled` it never draws "the dialog is open" at all, and a `waitFor` on
+  that text times out against a page that is right. Wait on the outcome, or
+  make the delay longer than the poll.
+- **`waitFor` gives up at 8 s by default, and so does the page.** Checking
+  the page's own "did not answer in 8 s" path needs `waitFor(expr, { timeout:
+  14000 })` — an options object; a bare number is ignored.
+- **A redraw must not take what was typed.** Answers arrive on the host's
+  clock, and a dialog that rebuilds itself on each one empties the box under
+  the person's fingers. After the answer lands, read the field's value and
+  `document.activeElement` — the History dialog redraws only its list for
+  this reason, and the check for it is one line.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
@@ -241,6 +308,10 @@ whole question.
 | in-dialog actions | `#dlg [data-do="…"]`, Nudge is `#dlg .nudge` |
 | dialog error | `#dlg .dlg-err:not([hidden])` |
 | a message on its way | `#p-turns .t-pending` (`.t-body`, `.t-when`) |
+| Take a desk | `#take-desk`; then `#dlg .desk-pick [data-do="desk-pick"]` (host has a dialog) or `#dlg .dir-row[data-go]` / `.crumb[data-go]` (the page's list); recent rows `#dlg .dlg-recent .recent-row[data-go="…"]`; the name `#dlg #desk-name`; `#dlg [data-do="desk-take"]` |
+| History | `#history`; `#dlg #hist-query` (type, then dispatch a `keydown` with `key: 'Enter'`), `#dlg #hist-deep`, rows `#dlg .hist-row`, the coverage line `#dlg .hist-cover` |
+| a conversation open to read | `#floor-panel` `dataset.reading` (the session id — wait on this), `.p-reading-state`, `[data-act="read-back"]`; `#p-text` must be absent |
+| a desk's Sessions rows | `#floor-panel [data-act="sessions"]`, then `#dlg .sess-row` (`.sess-title`, `.sess-meta`, `.sess-detail`) |
 
 Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true}))` — the
 handler is delegated and reads the event target.
