@@ -442,6 +442,8 @@ function sessionRow(r) {
     title_source: ['custom', 'ai', 'prompt'].includes(r.title_source) ? r.title_source : null,
     first_prompt: s(r.first_prompt),
     started_at: s(r.started_at),
+    branch: s(r.branch),
+    model: s(r.model),
     last_at: s(r.last_at),
     modified_at: s(r.modified_at),
     size: Number.isFinite(Number(r.size)) ? Number(r.size) : null,
@@ -1005,13 +1007,24 @@ export function createLive() {
    *  chosen, closed without a choice, or failed. In memory like the rest: it
    *  is the answer to a click made seconds ago, and worth nothing after. */
   const pick = new Map();          // host_id -> { at, state, start, path, parent, error, why }
+  /** Conversations read whole off a host's disk, for reading — see READS_MAX.
+   *  Keyed by desk and session; the newest few, the oldest dropped. */
+  const reads = new Map();         // readKey -> { request_id, session_id, asked_at, at, rows, done, error }
+  /** The recent list each host last answered with, and the last few searches
+   *  — see HISTORY_MIN_MS. A search is its own record, by id, because two
+   *  people can be searching for different things at once. */
+  const recent = new Map();        // host_id -> { request_id, asked_ms, at, rows, error }
+  const searches = new Map();      // search id -> { id, query, deep, asked_ms, hosts: Map(host_id -> { name, at, rows, files, ms, error }) }
   return {
+    recent,
+    searches,
     partial,
     folders,
     sessions,
     sessionsAsked,
     browse,
     pick,
+    reads,
     pending,
     answered,
     delivery,
@@ -1062,6 +1075,38 @@ const RESCAN_MIN_MS = 15_000;
 const SESSIONS_MIN_MS = Number(process.env.ORCH_SESSIONS_MIN_MS ?? 5_000);
 // A session id is a file name under the project dir; what --resume is handed.
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/**
+ * A conversation read whole, for reading. How many the board keeps in memory
+ * at once, how many rows of one it will take, and how many it serves per GET.
+ *
+ * In memory and few on purpose. `turns` is a live tail — the newest 400 rows
+ * a desk, by design (TURN_RETENTION) — and the archive is the transcript on
+ * the workstation that wrote it. Reading one "as it was" therefore means the
+ * host reading that file, and the board holding the result only for as long
+ * as somebody is looking at it: a copy in the database would be the complete
+ * duplicate this server has always declined to keep.
+ */
+const READS_MAX = 4;
+const READ_ROWS_MAX = 50_000;
+const READ_PAGE_MAX = 1000;
+const readKey = (channel, agent, sessionId) => `${deskKey(channel, agent)}|${sessionId}`;
+/**
+ * History across every desk: the recent list and the search. Both are read
+ * off the hosts' transcripts and held here in memory, per host, with the
+ * host's own time on each answer — see host/history.js for why it is the
+ * transcripts and not this server's tables.
+ *
+ * A recent list is asked of a host at most this often, for the reason the
+ * per-desk list is: it is a walk of every folder's transcripts, and one per
+ * click would have a dialog walking the disk on every open. A search is not
+ * one per keystroke for the same reason, and the same words asked again
+ * inside this long are answered with the search already running.
+ */
+const HISTORY_MIN_MS = Number(process.env.ORCH_HISTORY_MIN_MS ?? 5_000);
+const HISTORY_ROWS_MAX = 100;
+const SEARCHES_MAX = 4;
+const QUERY_MIN = 2;
+const QUERY_MAX = 200;
 export function askRescan(store, live, { channel, agent, why, force = false }) {
   const now = Date.now();
   const asked = [];
@@ -1103,6 +1148,48 @@ function applyHostEvent(store, live, hostId, ev) {
       entries: error || !Array.isArray(ev.entries) ? [] : ev.entries.map(folderRecordOf).filter(Boolean).slice(0, FOLDER_CAP),
     });
     return true;
+  }
+  // History is about the host too: every desk's conversations on that
+  // machine, or what a search of them found. A row has to name a desk this
+  // host runs — it is opened to read in that desk's panel, by that host — so
+  // a row for anybody else's desk is dropped rather than served.
+  if (str(ev.type) === 'history') {
+    const requestId = str(ev.request_id);
+    const mine = (r) => {
+      const row = sessionRow(r);
+      const channel = str(r?.channel);
+      const agent = str(r?.agent);
+      if (!row || !channel || !agent || store.hostedDesk(channel, agent)?.host_id !== hostId) return null;
+      return { ...row, channel, agent };
+    };
+    const rows = (Array.isArray(ev.rows) ? ev.rows : []).slice(0, HISTORY_ROWS_MAX);
+    const at = str(ev.at) ?? new Date().toISOString();
+    if (str(ev.kind) === 'recent') {
+      const held = live.recent.get(hostId);
+      if (!held || held.request_id !== requestId) return false;
+      held.at = at;
+      held.error = str(ev.error);
+      held.rows = rows.map(mine).filter(Boolean);
+      return true;
+    }
+    if (str(ev.kind) === 'search') {
+      const host = live.searches.get(requestId)?.hosts.get(hostId);
+      if (!host) return false;
+      host.at = at;
+      host.error = str(ev.error);
+      host.files = Number.isFinite(Number(ev.files)) ? Number(ev.files) : null;
+      host.ms = Number.isFinite(Number(ev.ms)) ? Number(ev.ms) : null;
+      host.rows = rows.map((r) => {
+        const row = mine(r);
+        if (!row) return null;
+        const snippets = (Array.isArray(r.snippets) ? r.snippets : []).slice(0, 5).map((sn) => ({
+          role: str(sn?.role), at: str(sn?.at), via: str(sn?.via), text: clip(str(sn?.text) ?? '', 400),
+        })).filter((sn) => sn.role && sn.text);
+        return { ...row, hits: Math.max(0, Number(r.hits) || 0), snippets };
+      }).filter(Boolean);
+      return true;
+    }
+    return false;
   }
   // The host's own folder dialog, like the listing above: about the host, not
   // a desk. A chosen folder arrives as a `browse` first — that is the record
@@ -1213,6 +1300,36 @@ function applyHostEvent(store, live, hostId, ev) {
       const at = str(ev.at) ?? now;
       live.sessions.set(key, { at, rows });
       live.publish(key, { type: 'sessions', at });
+      break;
+    }
+    /**
+     * A page of a conversation the host is reading whole, for reading — the
+     * answer to a `read` work item. The same rules a relayed turn goes by
+     * (a tool is its one-line summary, context keeps its tag, a subagent's
+     * turn keeps its label), so what is read looks like what was watched —
+     * but none of it touches `turns`, the desk's session or its state:
+     * reading a conversation is not having it. Pages for a request nobody is
+     * waiting on any more are dropped.
+     */
+    case 'transcript': {
+      const sid = str(ev.session_id);
+      const held = sid ? live.reads.get(readKey(channel, agent, sid)) : null;
+      if (!held || held.request_id !== str(ev.request_id)) return false;
+      held.at = str(ev.at) ?? now;
+      const error = str(ev.error);
+      if (error) { held.error = error; held.done = true; break; }
+      for (const t of Array.isArray(ev.turns) ? ev.turns : []) {
+        if (held.rows.length >= READ_ROWS_MAX) break;
+        const role = str(t?.role);
+        const via = str(t?.via) ?? null;
+        const row = role === 'tool' ? { text: toolSummary(str(t.tool_name) ?? 'tool', t.tool_input), tool_name: str(t.tool_name), via }
+          : role === 'context' ? { text: clip(t.text), tool_name: str(t.tool_name), via: null }
+          : role === 'user' || role === 'assistant' || role === 'thinking' ? { text: clip(t.text), tool_name: null, via }
+          : null;
+        if (!row || (!row.text && !row.tool_name)) continue;
+        held.rows.push({ id: held.rows.length + 1, session_id: sid, role, ...row, created_at: str(t.at) });
+      }
+      if (ev.done === true) held.done = true;
       break;
     }
     case 'unbound': {
@@ -2604,6 +2721,159 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       current: h?.sdk_session_id ?? null,
       editor_pid: h?.outside_pid ?? null,
       rows: (held?.rows ?? []).map((r) => ({ ...r, known: known.has(r.id) })),
+    });
+  });
+
+  /**
+   * History across every desk: the conversations most recently spoken in,
+   * and a search of what was said in them — the History button's dialog.
+   *
+   * Both are asked of every host that is on the board, answered by each on
+   * its own clock as a `history` event, and served merged, newest first.
+   * And both say what they cover: every answer names the hosts that
+   * answered, the ones asked that have not, and the ones that are offline —
+   * whose conversations are on a disk nobody can read right now, and are
+   * therefore not in the list. A history that covered half the machines and
+   * did not say so is the thing this was built not to be.
+   */
+  const hostsNow = (nowMs) => store.listHosts().map((h) => ({
+    host_id: h.host_id, name: h.name ?? h.host_id,
+    live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+  }));
+  const withDesk = (rows, host, personas) => rows.map((r) => ({
+    ...r, host_id: host.host_id, host: host.name, persona: personas.get(deskKey(r.channel, r.agent)) ?? r.agent,
+  }));
+  const newestFirst = (a, b) => (Date.parse(b.last_at ?? b.modified_at ?? '') || 0) - (Date.parse(a.last_at ?? a.modified_at ?? '') || 0);
+  const personasNow = () => new Map(store.listPersonas().map((p) => [deskKey(p.channel, p.agent), p.persona]));
+
+  router.post('/api/floor/history/recent', auth.adminGuard, (_req, res) => {
+    const nowMs = Date.now();
+    const hosts = hostsNow(nowMs);
+    const asked = [];
+    for (const h of hosts.filter((x) => x.live)) {
+      const held = live.recent.get(h.host_id);
+      if (held && nowMs - held.asked_ms < HISTORY_MIN_MS) continue;
+      const requestId = `${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      // The rows in hand stay until the new answer lands: a list a minute old
+      // beats an empty one, and its time says how old it is.
+      live.recent.set(h.host_id, { request_id: requestId, asked_ms: nowMs, at: held?.at ?? null, rows: held?.rows ?? [], error: null });
+      store.enqueueHostWork(h.host_id, '*', '*', 'recent', { request_id: requestId });
+      live.wake(h.host_id);
+      asked.push(h.name);
+    }
+    res.json({ ok: true, asked, hosts });
+  });
+
+  router.get('/api/floor/history/recent', (_req, res) => {
+    const nowMs = Date.now();
+    const personas = personasNow();
+    const hosts = hostsNow(nowMs).map((h) => {
+      const held = live.recent.get(h.host_id);
+      return { ...h, at: held?.at ?? null, asked: !!held, error: held?.error ?? null, rows: held?.rows?.length ?? 0 };
+    });
+    const rows = hosts.flatMap((h) => withDesk(live.recent.get(h.host_id)?.rows ?? [], h, personas)).sort(newestFirst).slice(0, HISTORY_ROWS_MAX);
+    res.json({ now: new Date(nowMs).toISOString(), hosts, rows });
+  });
+
+  router.post('/api/floor/history/search', auth.adminGuard, (req, res) => {
+    const query = str(req.body?.query) ?? '';
+    const deep = req.body?.deep === true;
+    if (query.length < QUERY_MIN) return res.status(400).json({ error: `Search for at least ${QUERY_MIN} characters.`, code: 'short_query' });
+    if (query.length > QUERY_MAX) return res.status(400).json({ error: `A search is ${QUERY_MAX} characters at most.`, code: 'long_query' });
+    const nowMs = Date.now();
+    const hosts = hostsNow(nowMs);
+    const liveHosts = hosts.filter((h) => h.live);
+    if (!liveHosts.length) {
+      return res.status(409).json({ error: 'No host is on this board right now, and the conversations are on the hosts\' disks — there is nothing to search.', code: 'no_host' });
+    }
+    // The same words, asked again inside the throttle: the search already
+    // running is the answer, not a second walk of every disk.
+    const same = [...live.searches.values()].find((x) => x.query === query && x.deep === deep && nowMs - x.asked_ms < HISTORY_MIN_MS);
+    if (same) return res.json({ ok: true, asked: false, id: same.id, query, deep });
+    const id = `${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    live.searches.set(id, { id, query, deep, asked_ms: nowMs, hosts: new Map(liveHosts.map((h) => [h.host_id, { name: h.name, at: null, rows: [], files: null, ms: null, error: null }])) });
+    while (live.searches.size > SEARCHES_MAX) live.searches.delete(live.searches.keys().next().value);
+    for (const h of liveHosts) {
+      store.enqueueHostWork(h.host_id, '*', '*', 'search', { request_id: id, query, deep });
+      live.wake(h.host_id);
+    }
+    res.json({ ok: true, asked: true, id, query, deep });
+  });
+
+  router.get('/api/floor/history/search', (req, res) => {
+    const id = str(req.query.id);
+    const held = id ? live.searches.get(id) : null;
+    if (!held) return res.status(404).json({ error: 'That search is not held any more. Search again.', code: 'no_search' });
+    const nowMs = Date.now();
+    const personas = personasNow();
+    const hosts = hostsNow(nowMs).map((h) => {
+      const mine = held.hosts.get(h.host_id);
+      return {
+        ...h, asked: !!mine, at: mine?.at ?? null, error: mine?.error ?? null,
+        files: mine?.files ?? null, ms: mine?.ms ?? null, rows: mine?.rows.length ?? 0,
+      };
+    });
+    const rows = hosts.flatMap((h) => withDesk(held.hosts.get(h.host_id)?.rows ?? [], h, personas)).sort(newestFirst).slice(0, HISTORY_ROWS_MAX);
+    res.json({
+      id, query: held.query, deep: held.deep, asked_at: new Date(held.asked_ms).toISOString(),
+      done: [...held.hosts.values()].every((h) => h.at), hosts, rows,
+    });
+  });
+
+  /**
+   * Open one of a desk's conversations to read, as it was: ask the desk's
+   * host to read the whole transcript, and serve it back page by page.
+   *
+   * Reading is not resuming. Nothing here closes, moves or opens a window,
+   * so none of the reopen route's refusals apply: the conversation an editor
+   * holds, the one the desk is on, and one in the middle of a turn can all
+   * be read. The only requirement is a host that is there to read the file.
+   *
+   * It is the whole conversation and not the board's copy because the
+   * board's copy is a tail — the newest 400 rows a desk, joined mid-stream
+   * for a conversation picked from the list — and a reading view built on it
+   * opens conversations that begin mid-sentence.
+   *
+   * Two routes for the reason the session list has two: the host answers on
+   * its own clock, in pages, and the GET serves what has arrived so far with
+   * `done` to say when that is all of it.
+   */
+  router.post('/api/floor/read', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    const sessionId = str(req.body?.session_id);
+    if (!channel || !agent || !sessionId) return res.status(400).json({ error: 'channel, agent and session_id are required' });
+    if (!SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'That is not a session id.', code: 'bad_session' });
+    const h = store.hostedDesk(channel, agent);
+    const nowMs = Date.now();
+    if (!h) return res.status(409).json({ error: 'No host on this board is running that repo, so there is nobody to read its conversations.', code: 'not_hosted' });
+    if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: `The host for this desk (${h.host_name ?? h.host_id}) is offline, and the conversation is on its disk.`, code: 'host_offline' });
+    }
+    const key = readKey(channel, agent, sessionId);
+    const requestId = `${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    live.reads.delete(key);
+    live.reads.set(key, { request_id: requestId, session_id: sessionId, asked_at: new Date(nowMs).toISOString(), at: null, rows: [], done: false, error: null });
+    // The newest few only: a Map keeps insertion order, so the first key is the oldest.
+    while (live.reads.size > READS_MAX) live.reads.delete(live.reads.keys().next().value);
+    store.enqueueHostWork(h.host_id, channel, agent, 'read', { session_id: sessionId, request_id: requestId });
+    live.wake(h.host_id);
+    res.json({ ok: true, session_id: sessionId, request_id: requestId });
+  });
+
+  router.get('/api/floor/read', (req, res) => {
+    const channel = str(req.query.channel);
+    const agent = str(req.query.agent);
+    const sessionId = str(req.query.session);
+    if (!channel || !agent || !sessionId) return res.status(400).json({ error: 'channel, agent and session are required' });
+    const held = live.reads.get(readKey(channel, agent, sessionId)) ?? null;
+    if (!held) return res.json({ channel, agent, session_id: sessionId, request_id: null, at: null, done: false, error: null, total: 0, from: 0, rows: [] });
+    const from = Math.max(0, Number(req.query.from) || 0);
+    const limit = Math.min(READ_PAGE_MAX, Math.max(1, Number(req.query.limit) || READ_PAGE_MAX));
+    res.json({
+      channel, agent, session_id: sessionId, request_id: held.request_id, at: held.at,
+      done: held.done, error: held.error, total: held.rows.length, from,
+      rows: held.rows.slice(from, from + limit),
     });
   });
 

@@ -788,9 +788,12 @@ async function main() {
     mkdirSync(`${pkdir}/plain/subagents`, { recursive: true });
     const line = (o) => JSON.stringify(o);
     writeFileSync(`${pkdir}/named.jsonl`, [
-      line({ type: 'user', uuid: 'n1', timestamp: '2026-09-09T10:00:00Z', message: { content: [{ type: 'text', text: '<ide_opened_file>x.js</ide_opened_file>' }, { type: 'text', text: 'Rename the widget, please' }] } }),
+      line({ type: 'user', uuid: 'n1', timestamp: '2026-09-09T10:00:00Z', gitBranch: 'main', message: { content: [{ type: 'text', text: '<ide_opened_file>x.js</ide_opened_file>' }, { type: 'text', text: 'Rename the widget, please' }] } }),
       line({ type: 'ai-title', aiTitle: 'Widget rename', sessionId: 'named' }),
-      line({ type: 'assistant', uuid: 'n2', timestamp: '2026-09-09T10:00:05Z', message: { content: [{ type: 'text', text: 'done' }] } }),
+      line({ type: 'assistant', uuid: 'n1b', timestamp: '2026-09-09T10:00:03Z', gitBranch: 'main', message: { model: 'claude-early-1', content: [{ type: 'text', text: 'looking' }] } }),
+      line({ type: 'assistant', uuid: 'n2', timestamp: '2026-09-09T10:00:05Z', gitBranch: 'feature/widgets', message: { model: 'claude-later-2', content: [{ type: 'text', text: 'done' }] } }),
+      line({ type: 'assistant', uuid: 'n3', timestamp: '2026-09-09T10:00:06Z', isSidechain: true, gitBranch: 'sidechain-branch', message: { model: 'claude-sidechain-9', content: [{ type: 'text', text: 'a subagent, not this conversation' }] } }),
+      line({ type: 'assistant', uuid: 'n4', gitBranch: 'feature/widgets', message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error' }] } }),
       line({ type: 'custom-title', customTitle: 'Widgets', sessionId: 'named' }),
       '',
     ].join('\n'));
@@ -827,6 +830,12 @@ async function main() {
     eq(byId.plain.started_at, '2026-09-07T10:00:00Z', 'a conversation began when the person first spoke, meta records aside');
     eq(byId.named.last_at, '2026-09-09T10:00:05Z', 'and was last spoken in at its last user or assistant turn');
     eq([byId.empty.title, byId.empty.spoken], [null, false], 'a file with no words is listed with no title and says nothing was said');
+    // Row detail (issue #8): the branch and the model are the transcript's
+    // own, the newest record that says — not the board's agent_sessions,
+    // which has no model for three sessions in four.
+    eq([byId.named.branch, byId.named.model], ['feature/widgets', 'claude-later-2'],
+      'a row carries the branch and the model the conversation last had — the newest record wins, a subagent\'s record and Claude Code\'s own "<synthetic>" message aside');
+    eq([byId.ai.branch, byId.ai.model, byId.empty.branch, byId.empty.model], [null, null, null, null], 'and neither, rather than a guess, for a transcript that never says');
     eq([byId.named.live, byId.named.held, byId.ai.live], [true, 'editor', false], 'the roster marks the live one, and with no pane it is an editor\'s');
     eq((await W.sessionsIn(picker, { limit: 2 })).map((r) => r.id), ['empty', 'named'], 'the limit takes the newest');
     eq(await W.sessionsIn(`${FIX}/never-opened`), [], 'a folder Claude Code never opened has none');

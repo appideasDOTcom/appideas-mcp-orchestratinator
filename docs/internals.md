@@ -173,6 +173,38 @@ just means a client opens a session per turn, which is normal and handled.
   (`localStorage['orch.desk.dir']`) and sent as a hint; the host opens the
   nearest folder above it that still exists.
 
+- **History, and reading a conversation whole:** three things on the floor
+  read the transcripts on the hosts rather than this server's tables, and
+  the reason is in `host/history.js`'s header with the numbers it was
+  decided on — `turns` is a live tail (the newest 400 rows a desk), and a
+  list or a search built on it covers part of the history without saying
+  which part.
+  - *Recent across desks* (`POST`/`GET /api/floor/history/recent`): a
+    `recent` work item to every live host; each answers with its desks'
+    conversations, the picker's own bounded read of each file, as a
+    `history` event. Throttled per host (`ORCH_HISTORY_MIN_MS`, 5 s).
+  - *Search* (`POST`/`GET /api/floor/history/search`): a `search` work item;
+    the host runs `host/history.js` as a process of its own (a 70 MB
+    transcript is a third of a second of `JSON.parse`, and the relay shares
+    the host's event loop), ends it if a newer search arrives, and answers
+    with the conversations that matched, how many turns in each, and the
+    first few. Said text only unless `deep`, which adds tool calls, thoughts,
+    injected context and the subagents' transcripts. Each search is its own
+    record by id, so two people can search at once.
+  - *Reading one* (`POST`/`GET /api/floor/read`): a `read` work item to the
+    desk's host, which pages the whole transcript — subagents merged in by
+    time — up as `transcript` events. Rows are built by the rules a relayed
+    turn is (`toolSummary`, the context tag, `via`) and held in memory, the
+    newest four reads, never written to `turns`. Nothing a reopen refuses is
+    refused: reading closes and moves nothing.
+  Every answer names the hosts it is from; a host that is offline is in the
+  answer as offline, and the page says its conversations are not covered. A
+  row a host sends for a desk it does not run is dropped. The page draws the
+  first two in the History dialog (`historyDialog` in `src/ui/app.js`) and
+  the third in the desk's own chat panel (`readingShell` in
+  `src/ui/floor.js`): a different shell with a banner and a way back, the
+  same `turnNode`, and no composer or actions at all.
+
 ```
 src/
   server.js   Express + Streamable HTTP wiring, per-session header binding

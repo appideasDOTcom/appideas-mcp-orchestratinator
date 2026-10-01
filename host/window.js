@@ -2521,6 +2521,12 @@ async function lastTurnAt(path) {
  * `live`/`held` come from the roster and the panes, the same join holderOf
  * makes: a row an editor holds cannot be reopened here, and the page needs
  * to know which row that is.
+ *
+ * `branch` and `model` are read from the same two bounded reads, off the
+ * transcript's own records rather than from the board's `agent_sessions` —
+ * which has a model for one session in four (66 of 274 on the first board
+ * measured, 2026-10-01) and nothing at all for a conversation the hook never
+ * reported.
  */
 const SESSIONS_HEAD_BYTES = 64 * 1024;
 const SESSIONS_TAIL_BYTES = 256 * 1024;
@@ -2552,6 +2558,8 @@ export async function sessionsIn(cwd, { limit = 30 } = {}) {
       title_source: meta.custom ? 'custom' : meta.ai ? 'ai' : meta.prompt ? 'prompt' : null,
       first_prompt: meta.prompt ? meta.prompt.slice(0, 200) : null,
       started_at: meta.startedAt,
+      branch: meta.branch,
+      model: meta.model,
       last_at: meta.lastAt ?? f.mtime.toISOString(),
       modified_at: f.mtime.toISOString(),
       size: f.size,
@@ -2576,7 +2584,7 @@ function clipTitle(s) {
  * bounded; on a small file they overlap and the whole file is read once.
  */
 async function transcriptMeta(path, size) {
-  const out = { custom: null, ai: null, prompt: null, startedAt: null, lastAt: null };
+  const out = { custom: null, ai: null, prompt: null, startedAt: null, lastAt: null, branch: null, model: null };
   const { open } = await import('node:fs/promises');
   let fh;
   try { fh = await open(path, 'r'); } catch { return out; }
@@ -2621,6 +2629,26 @@ async function transcriptMeta(path, size) {
       const d = parse(later[i]);
       if (d && (d.type === 'user' || d.type === 'assistant') && !d.isSidechain && Number.isFinite(Date.parse(d.timestamp))) out.lastAt = d.timestamp;
     }
+    // The branch and the model, as the conversation last had them: Claude
+    // Code writes `gitBranch` on its records and `message.model` on every
+    // assistant turn, and both can change mid-conversation (a checkout, a
+    // /model), so the newest record that says is the one to believe — the
+    // tail first, then the head for a file whose tail is all tool output.
+    // `<synthetic>` is the model Claude Code names on a message it wrote
+    // itself (an API error, an interrupt), which is nobody's model.
+    const said = (d) => {
+      if (!d || d.isSidechain) return;
+      if (!out.branch && typeof d.gitBranch === 'string' && d.gitBranch.trim()) out.branch = d.gitBranch.trim();
+      const m = d.type === 'assistant' ? d.message?.model : null;
+      if (!out.model && typeof m === 'string' && m.trim() && m !== '<synthetic>') out.model = m.trim();
+    };
+    const scan = (lines) => {
+      for (let i = lines.length - 1; i >= 0 && !(out.branch && out.model); i--) {
+        if (lines[i].includes('"gitBranch"') || lines[i].includes('"model"')) said(parse(lines[i]));
+      }
+    };
+    scan(later);
+    if (!whole) scan(headLines);
   } finally {
     await fh.close();
   }

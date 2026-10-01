@@ -494,7 +494,7 @@ try {
   eq(await takeWork(), [], 'so a busy picker cannot have a host walking its folder on every redraw');
   const LISTED_AT = '2026-09-10T01:02:03.000Z';
   const listedRows = [
-    { id: 's-alpha', title: 'Alpha work', title_source: 'custom', first_prompt: 'do alpha', started_at: '2026-09-09T10:00:00Z', last_at: '2026-09-09T11:00:00Z', modified_at: '2026-09-09T11:00:00Z', size: 1234, spoken: true, live: true, held: 'editor', kind: 'interactive', pid: 4242 },
+    { id: 's-alpha', title: 'Alpha work', title_source: 'custom', first_prompt: 'do alpha', started_at: '2026-09-09T10:00:00Z', last_at: '2026-09-09T11:00:00Z', modified_at: '2026-09-09T11:00:00Z', size: 1234, spoken: true, live: true, held: 'editor', kind: 'interactive', pid: 4242, branch: 'feature/alpha', model: 'claude-test-7' },
     { id: 's-beta', title: null, title_source: null, spoken: false, live: false, held: null },
     { title: 'no id at all' },
   ];
@@ -503,6 +503,9 @@ try {
   eq(gotList.at, LISTED_AT, 'served back with the host\'s own time on it');
   eq(gotList.rows.map((r) => r.id), ['s-alpha', 's-beta'], 'every row with an id, none without');
   eq([gotList.rows[0].title, gotList.rows[0].title_source, gotList.rows[0].held, gotList.rows[0].live, gotList.rows[0].size], ['Alpha work', 'custom', 'editor', true, 1234], 'with the fields the picker draws');
+  eq([gotList.rows[0].branch, gotList.rows[0].model, gotList.rows[0].started_at, gotList.rows[0].last_at], ['feature/alpha', 'claude-test-7', '2026-09-09T10:00:00Z', '2026-09-09T11:00:00Z'],
+    'and the row\'s detail — its branch, its model, and the two times its length is drawn from — crosses whole');
+  eq([gotList.rows[1].branch, gotList.rows[1].model], [null, null], 'a row the host gave neither for has neither, not a default');
   eq([gotList.rows[0].known, gotList.rows[1].known], [false, false], 'and none known to the board yet');
   eq(gotList.current, null, 'the desk\'s current conversation is the board\'s to say — none registered here');
   eq((await hostEvents([{ type: 'turn', channel: CH, agent: 'wanderer', session_id: 's-alpha', role: 'assistant', text: 'alpha spoke' }])).applied, 1, 'a turn of one of them reaches the board');
@@ -528,6 +531,152 @@ try {
   await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', window: '@7', scope: 'project' });
   eq((await fetch(`${HOST}/api/floor/sessions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me' }) })).status, 409,
     'a desk no host runs has no folder to list');
+
+  /* ── opening a conversation to read, as it was (issue #8, Remaining 4) ──────
+   * The board's own copy of a conversation is a tail, so reading one means
+   * the host reading the whole transcript and the board holding it — in
+   * memory, briefly, never in `turns`. And reading is not resuming: every
+   * refusal a reopen makes is absent here, on purpose. */
+  console.log('\nopening a conversation to read, as it was');
+  let rd;
+  const readWorkFull = () => fetch(`${HOST}/api/host/work?host_id=h-open&wait=0`, { headers: HK }).then((r) => r.json()).then((w) => w.work ?? []);
+  const readAsk = (body) => fetch(`${HOST}/api/floor/read`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'wanderer', ...body }) });
+  const readGet = (session, extra = '') => fetch(`${HOST}/api/floor/read?channel=${CH}&agent=wanderer&session=${session}${extra}`).then((r) => r.json());
+  const page = (session, requestId, more) => hostEvents([{ type: 'transcript', channel: CH, agent: 'wanderer', session_id: session, request_id: requestId, at: '2026-09-11T01:02:03.000Z', ...more }]);
+  eq((await readAsk({})).status, 400, 'a conversation has to be named to be read');
+  rd = await readAsk({ session_id: '../../etc/passwd' });
+  eq([rd.status, (await rd.json()).code], [400, 'bad_session'], 'by an id that could be a file name and nothing else');
+  rd = await fetch(`${HOST}/api/floor/read`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'nobody-hosts-me', session_id: 's-alpha' }) });
+  eq([rd.status, (await rd.json()).code], [409, 'not_hosted'], 'and on a desk some host runs — the conversation is on that host\'s disk');
+  let got = await readGet('s-alpha');
+  eq([got.request_id, got.at, got.done, got.rows], [null, null, false, []], 'before anybody has asked, there is nothing to read — not an empty conversation');
+  eq(await takeWork(), [], 'and none of those refusals queued anything');
+  const turnsBeforeRead = ((await turns('wanderer')).rows ?? []).length;
+  const sessionBeforeRead = deskOf(await floor(), 'wanderer')?.hosted?.session_id ?? null;
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', outside_pid: 4242 });
+  rd = await readAsk({ session_id: 's-alpha' });
+  const asked1 = await rd.json();
+  eq([rd.status, asked1.session_id, typeof asked1.request_id], [200, 's-alpha', 'string'], 'a conversation an editor holds can be read — reading closes nothing, so the reopen\'s refusal does not apply');
+  const readWork = await readWorkFull();
+  eq(readWork.map((w) => `${w.kind}:${w.agent}:${w.payload.session_id}:${w.payload.request_id === asked1.request_id}`), ['read:wanderer:s-alpha:true'], 'the desk\'s host is handed the read, naming the request it answers');
+  eq((await page('s-alpha', asked1.request_id, { turns: [
+    { role: 'user', text: 'first words', at: '2026-09-09T10:00:00Z' },
+    { role: 'context', text: '<ide_opened_file>x.js</ide_opened_file>', tool_name: 'ide_opened_file', at: '2026-09-09T10:00:00Z' },
+    { role: 'thinking', text: 'a thought before speaking', at: '2026-09-09T10:00:02Z' },
+    { role: 'assistant', text: 'the reply', at: '2026-09-09T10:00:03Z' },
+    { role: 'tool', text: '', tool_name: 'Bash', tool_input: { command: 'ls -la' }, at: '2026-09-09T10:00:04Z' },
+    { role: 'assistant', text: 'a subagent searching', via: 'Find the widget', at: '2026-09-09T10:00:05Z' },
+    { role: 'banana', text: 'not a role', at: '2026-09-09T10:00:06Z' },
+    { role: 'assistant', text: '', at: '2026-09-09T10:00:07Z' },
+  ] })).applied, 1, 'the host answers with a page of the transcript');
+  got = await readGet('s-alpha');
+  eq([got.done, got.total, got.request_id === asked1.request_id], [false, 6, true], 'which the board holds and serves while more is on its way — six turns, the two that are not turns dropped');
+  eq(got.rows.map((r) => `${r.id}|${r.role}|${r.text}|${r.tool_name ?? ''}|${r.via ?? ''}`), [
+    '1|user|first words||', '2|context|<ide_opened_file>x.js</ide_opened_file>|ide_opened_file|', '3|thinking|a thought before speaking||',
+    '4|assistant|the reply||', '5|tool|Bash: ls -la|Bash|', '6|assistant|a subagent searching||Find the widget',
+  ], 'each row as a relayed turn would be: a tool is its one-line summary, context keeps its tag, a subagent\'s turn its label');
+  eq(got.rows[0].created_at, '2026-09-09T10:00:00Z', 'dated when it was said, not when it was read');
+  eq((await page('s-alpha', 'some-other-request', { turns: [{ role: 'user', text: 'from a stale read' }], done: true })).applied, 0, 'a page answering a request nobody is waiting on is not taken');
+  eq((await fetch(`${HOST}/api/host/events`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-stranger', events: [{ type: 'transcript', channel: CH, agent: 'wanderer', session_id: 's-alpha', request_id: asked1.request_id, turns: [{ role: 'user', text: 'forged' }], done: true }] }) }).then((r) => r.json())).applied, 0,
+    'nor is one from a host that does not run the desk');
+  eq((await page('s-alpha', asked1.request_id, { turns: [{ role: 'assistant', text: 'the last word', at: '2026-09-09T11:00:00Z' }], done: true })).applied, 1, 'the last page says it is the last');
+  got = await readGet('s-alpha');
+  eq([got.done, got.total, got.rows.at(-1).id, got.rows.at(-1).text], [true, 7, 7, 'the last word'], 'and the board says the conversation is whole');
+  got = await readGet('s-alpha', '&from=2&limit=3');
+  eq([got.from, got.rows.map((r) => r.id), got.total], [2, [3, 4, 5], 7], 'it is served in pages, so a long one is not one enormous answer');
+  eq(((await turns('wanderer')).rows ?? []).length, turnsBeforeRead, 'none of it was written into the desk\'s turns — reading a conversation is not having it');
+  eq(deskOf(await floor(), 'wanderer')?.hosted?.session_id ?? null, sessionBeforeRead, 'and the desk is on the conversation it was on');
+  rd = await readAsk({ session_id: 's-alpha' });
+  const asked2 = await rd.json();
+  got = await readGet('s-alpha');
+  eq([asked2.request_id !== asked1.request_id, got.total, got.done], [true, 0, false], 'asking again starts again — the transcript may have grown since');
+  eq((await page('s-alpha', asked2.request_id, { error: 'no conversation s-alpha in /repo/wanderer: no transcript yet', done: true })).applied, 1, 'a conversation the host cannot find is answered as that');
+  got = await readGet('s-alpha');
+  eq([got.done, got.error], [true, 'no conversation s-alpha in /repo/wanderer: no transcript yet'], 'in the host\'s words, naming the folder');
+  for (const id of ['s-1', 's-2', 's-3', 's-4']) await readAsk({ session_id: id });
+  eq([(await readGet('s-alpha')).request_id, typeof (await readGet('s-4')).request_id, typeof (await readGet('s-1')).request_id], [null, 'string', 'string'],
+    'the board holds the newest four reads and lets the oldest go — it is a reading desk, not a second archive');
+  await takeWork();
+  await register({ channel: CH, agent: 'wanderer', cwd: '/repo/wanderer', window: '@7', scope: 'project' });
+
+  /* ── history across every desk: recent, and search (issue #8, Remaining 2, 3) ─
+   * Both are asked of every host on the board and answered from the
+   * transcripts on its disk; the board merges, and says which hosts
+   * answered. What a host does with the ask is the host suite's. */
+  {
+  console.log('\nrecent conversations across every desk');
+  const hPost = (path, body = {}) => fetch(`${HOST}/api/floor/history/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const hGet = (path) => fetch(`${HOST}/api/floor/history/${path}`).then((r) => r.json());
+  const hWork = () => fetch(`${HOST}/api/host/work?host_id=h-open&wait=0`, { headers: HK }).then((r) => r.json()).then((w) => w.work ?? []);
+  const hEvent = (ev, host = 'h-open') => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: host, events: [{ type: 'history', ...ev }] }) }).then((r) => r.json());
+  let hist = await hGet('recent');
+  eq([hist.rows, hist.hosts.find((h) => h.host_id === 'h-open')?.at ?? null, hist.hosts.find((h) => h.host_id === 'h-open')?.asked], [[], null, false],
+    'before any host has been asked there is no recent list — and the answer says the host has not been asked, not that it has nothing');
+  let hr = await hPost('recent');
+  eq([hr.status, (await hr.json()).asked], [200, ['openbox']], 'the floor asks every host on the board for its recent conversations');
+  const recentWork = await hWork();
+  eq(recentWork.map((w) => `${w.kind}:${w.channel}:${typeof w.payload.request_id}`), ['recent:*:string'], 'each is handed that work, about the machine rather than a desk');
+  hr = await hPost('recent');
+  eq([(await hr.json()).asked, await hWork()], [[], []], 'asked again inside the throttle, nobody is asked — a list is a walk of every folder\'s transcripts');
+  const recentRows = [
+    { id: 'r-old', channel: CH, agent: 'wanderer', title: 'Older work', title_source: 'ai', started_at: '2026-09-01T10:00:00Z', last_at: '2026-09-01T11:00:00Z', modified_at: '2026-09-01T11:00:00Z', size: 10, spoken: true, live: false, held: null, branch: 'main', model: 'claude-old-1' },
+    { id: 'r-new', channel: CH, agent: 'wanderer', title: 'Newer work', title_source: 'custom', started_at: '2026-09-20T10:00:00Z', last_at: '2026-09-20T12:30:00Z', modified_at: '2026-09-20T12:30:00Z', size: 20, spoken: true, live: true, held: 'floor', branch: 'feature/new', model: 'claude-new-2' },
+    { id: 'r-stray', channel: CH, agent: 'nobody-hosts-me', title: 'A desk this host does not run', last_at: '2026-09-25T10:00:00Z' },
+    { id: 'r-nodesk', title: 'No desk named at all', last_at: '2026-09-26T10:00:00Z' },
+  ];
+  eq((await hEvent({ kind: 'recent', request_id: 'not-the-request', at: '2026-09-27T00:00:00.000Z', rows: recentRows })).applied, 0, 'an answer to a request the board did not make is not taken');
+  eq((await hEvent({ kind: 'recent', request_id: recentWork[0].payload.request_id, at: '2026-09-27T01:02:03.000Z', rows: recentRows })).applied, 1, 'the host answers with its desks\' conversations');
+  hist = await hGet('recent');
+  eq(hist.rows.map((r) => r.id), ['r-new', 'r-old'], 'served most recently spoken in first — and a row for a desk the host does not run, or for no desk, is dropped: it could not be opened');
+  eq([hist.rows[0].channel, hist.rows[0].agent, hist.rows[0].host, hist.rows[0].title, hist.rows[0].branch, hist.rows[0].model, hist.rows[0].started_at, hist.rows[0].live],
+    [CH, 'wanderer', 'openbox', 'Newer work', 'feature/new', 'claude-new-2', '2026-09-20T10:00:00Z', true],
+    'each row says which desk and host it is on, and carries the same detail a desk\'s own list does');
+  assert(typeof hist.rows[0].persona === 'string' && hist.rows[0].persona.length > 0, `with the desk\'s name as the floor shows it — ${hist.rows[0].persona}`);
+  const openHost = hist.hosts.find((h) => h.host_id === 'h-open');
+  eq([openHost.live, openHost.asked, openHost.at, openHost.rows], [true, true, '2026-09-27T01:02:03.000Z', 2], 'and the answer says which host answered, and when');
+  eq((await hEvent({ kind: 'recent', request_id: recentWork[0].payload.request_id, at: '2030-01-01T00:00:00.000Z', rows: [{ id: 'forged', channel: CH, agent: 'wanderer' }] }, 'h-stranger')).applied, 0,
+    'a list from a host that was not asked changes nothing');
+  const hostsSeen = (await hGet('recent')).hosts.map((h) => `${h.host_id}:${h.live}:${h.asked}`);
+  assert(hostsSeen.includes('h-open:true:true') && hostsSeen.length >= 1, `and every host the board knows is in the answer with whether it is there and whether it was asked — ${hostsSeen.join(', ')}`);
+
+  console.log('\nsearching what was said, across every desk');
+  hr = await hPost('search', { query: 'x' });
+  eq([hr.status, (await hr.json()).code], [400, 'short_query'], 'a search of one character is refused — it would match every turn there is');
+  hr = await hPost('search', { query: 'y'.repeat(201) });
+  eq((await hr.json()).code, 'long_query', 'and so is one longer than a sentence');
+  eq(await hWork(), [], 'neither queued anything');
+  hr = await hPost('search', { query: '  widget rename  ' });
+  const s1 = await hr.json();
+  eq([hr.status, s1.asked, s1.query, s1.deep], [200, true, 'widget rename', false], 'a search is accepted, for what was said — tool calls and thinking are not searched unless asked for');
+  let searchWork = await hWork();
+  eq(searchWork.map((w) => `${w.kind}:${w.payload.query}:${w.payload.deep}:${w.payload.request_id === s1.id}`), ['search:widget rename:false:true'], 'and every host is handed it, with whether to look deeper');
+  hr = await hPost('search', { query: 'widget rename' });
+  const s1again = await hr.json();
+  eq([s1again.asked, s1again.id, await hWork()], [false, s1.id, []], 'the same words again, at once, are answered by the search already running — not a second walk of every disk');
+  hr = await hPost('search', { query: 'widget rename', deep: true });
+  const s2 = await hr.json();
+  searchWork = await hWork();
+  eq([s2.asked, s2.id !== s1.id, searchWork.map((w) => w.payload.deep)], [true, true, [true]], 'the same words with tool calls and thinking included is a different search');
+  let found = await hGet(`search?id=${s1.id}`);
+  eq([found.done, found.rows, found.hosts.find((h) => h.host_id === 'h-open')?.asked, found.hosts.find((h) => h.host_id === 'h-open')?.at], [false, [], true, null],
+    'until the host answers, the search is not done and says who it is waiting for');
+  eq((await hEvent({ kind: 'search', request_id: s1.id, query: 'widget rename', deep: false, at: '2026-09-27T02:00:00.000Z', files: 104, ms: 2700, rows: [
+    { id: 'r-old', channel: CH, agent: 'wanderer', title: 'Older work', last_at: '2026-09-01T11:00:00Z', hits: 2, snippets: [{ role: 'user', at: '2026-09-01T10:00:00Z', text: '…please do the widget rename today…' }, { role: 'assistant', at: '2026-09-01T10:01:00Z', via: 'Find the widget', text: 'the widget rename is done' }, { role: null, text: 'no role' }] },
+    { id: 'r-new', channel: CH, agent: 'wanderer', title: 'Newer work', last_at: '2026-09-20T12:30:00Z', hits: 1, snippets: [{ role: 'assistant', text: 'after the widget rename…' }] },
+    { id: 'r-stray', channel: CH, agent: 'nobody-hosts-me', title: 'not this host\'s desk', hits: 9, snippets: [] },
+  ] })).applied, 1, 'the host answers with the conversations it found, how many files it read and how long it took');
+  found = await hGet(`search?id=${s1.id}`);
+  eq([found.done, found.query, found.deep, found.rows.map((r) => `${r.id}:${r.hits}`)], [true, 'widget rename', false, ['r-new:1', 'r-old:2']], 'served most recently spoken in first, each with how many turns matched');
+  eq(found.rows[1].snippets.map((sn) => `${sn.role}|${sn.via ?? ''}|${sn.text}`), ['user||…please do the widget rename today…', 'assistant|Find the widget|the widget rename is done'], 'and the first of them, as said — who, and under which subagent');
+  const answered = found.hosts.find((h) => h.host_id === 'h-open');
+  eq([answered.at, answered.files, answered.ms, answered.rows, answered.error], ['2026-09-27T02:00:00.000Z', 104, 2700, 2, null], 'the answer says which host answered, over how many files, in how long');
+  eq((await hGet(`search?id=${s2.id}`)).done, false, 'and the other search is still its own, unanswered');
+  eq((await hEvent({ kind: 'search', request_id: s2.id, query: 'widget rename', deep: true, at: '2026-09-27T02:00:05.000Z', rows: [], error: 'the search ended with exit code 1: out of memory' })).applied, 1, 'a search that failed on a host says so');
+  found = await hGet(`search?id=${s2.id}`);
+  eq([found.done, found.hosts.find((h) => h.host_id === 'h-open')?.error], [true, 'the search ended with exit code 1: out of memory'], 'in the host\'s words, on that host\'s line');
+  eq((await fetch(`${HOST}/api/floor/history/search?id=nonsense`)).status, 404, 'a search the board is not holding says so');
+  await hWork();
+  }
 
   console.log('\nthe folders a host offers');
   // The list the "take a desk" dialog draws. Every value here is one that
@@ -797,6 +946,66 @@ try {
     'a folder bound to another board is not offered, however recent — it could only be refused');
   eq([recentFolders(undefined), recentFolders([]), recentFolders([{ name: 'no-path', last_active: '2026-09-30T00:00:00.000Z' }])], [[], [], []],
     'no list, an empty list and a folder with no path are all nothing to offer');
+
+  console.log('\nwhat a session row says under its title');
+  const sessLift = await (async () => {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- sessions: what a row says ---------- */');
+    const b = src.indexOf('/* ---------- sessions: the dialog ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the session-row section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/session-row-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { spanText, sessionDetail };\n`);
+    try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+  })();
+  const { spanText, sessionDetail } = sessLift;
+  {
+    // JavaScript accepts a `case` label written twice and runs only the first,
+    // so a second copy of a handler is dead code nothing reports: the three
+    // session cases were in the click handler twice (issue #8, "Also").
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const count = (label) => src.split(`case '${label}':`).length - 1;
+    eq([count('session-resume'), count('session-new'), count('session-look')], [1, 1, 1], 'each of the picker\'s three actions is handled in one place — a duplicated case is unreachable, and silently so');
+  }
+  eq(sessionDetail(gotList.rows[0]), ['1h long', 'feature/alpha', 'claude-test-7'], 'how long it ran, its branch, its model — in that order, from the row the board served');
+  eq(sessionDetail(gotList.rows[1]), [], 'and nothing at all for a row with none of the three — no line of dashes');
+  eq(sessionDetail({ started_at: '2026-09-09T10:00:00Z', last_at: '2026-09-09T10:00:00Z', branch: ' ', model: 'claude-x' }), ['under a minute long', 'claude-x'], 'each part only when there is one');
+  eq([spanText('2026-09-09T10:00:00Z', '2026-09-09T10:00:59Z'), spanText('2026-09-09T10:00:00Z', '2026-09-09T10:14:30Z'), spanText('2026-09-09T10:00:00Z', '2026-09-09T12:14:00Z'), spanText('2026-09-09T10:00:00Z', '2026-09-09T12:00:00Z')],
+    ['under a minute', '14m', '2h 14m', '2h'], 'a length reads as minutes, then hours and minutes');
+  eq([spanText('2026-09-09T10:00:00Z', '2026-09-11T09:59:00Z'), spanText('2026-09-09T10:00:00Z', '2026-09-12T14:00:00Z'), spanText('2026-09-09T10:00:00Z', '2026-09-12T10:30:00Z')],
+    ['47h 59m', '3d 4h', '3d'], 'and past two days as days and hours — wall-clock, because a conversation picked up the next morning is a day long');
+  eq([spanText(null, '2026-09-09T10:00:00Z'), spanText('2026-09-09T10:00:00Z', null), spanText('nonsense', 'more'), spanText('2026-09-09T11:00:00Z', '2026-09-09T10:00:00Z')],
+    [null, null, null, null], 'no start, no end, times that are not times, and an end before its start are no length at all');
+
+  console.log('\nwhat the History dialog says about its answer');
+  const histLift = await (async () => {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- history: what the dialog says about its answer ---------- */');
+    const b = src.indexOf('/* ---------- history: the dialog ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the history section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/history-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { coverageText, hitsText, markHits };\n`);
+    try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+  })();
+  const { coverageText, hitsText, markHits } = histLift;
+  const H1 = { name: 'alpha', live: true, asked: true, at: '2026-10-01T00:00:00Z', error: null, files: 104, ms: 2700 };
+  eq(coverageText([H1]), ['from alpha'], 'a recent list says which host it is from');
+  eq(coverageText([H1], 'search'), ['alpha read 104 conversations in 2.7 s'], 'a search says how much that host read, and how long it took');
+  eq(coverageText([{ ...H1, files: 1, ms: 40 }], 'search'), ['alpha read 1 conversation in 0.0 s'], 'one conversation is one conversation');
+  eq(coverageText([H1, { name: 'beta', live: false, asked: false, at: null }]), ['from alpha', 'beta is offline — its conversations are not covered'],
+    'a host that is offline is named as not covered — the half of the history this answer does not have');
+  eq(coverageText([H1, { name: 'beta', live: false }, { name: 'gamma', live: false }]).at(-1), 'beta, gamma are offline — their conversations are not covered', 'however many of them there are');
+  eq(coverageText([{ name: 'alpha', live: true, asked: true, at: null }]), ['waiting for alpha'], 'a host that was asked and has not answered is being waited for');
+  eq(coverageText([{ name: 'alpha', live: true, asked: false, at: null }]), ['alpha has not been asked'], 'one that came onto the board after the question has not been asked');
+  eq(coverageText([{ name: 'alpha', live: true, asked: true, at: '2026-10-01T00:00:00Z', error: 'the search ended with exit code 1: boom' }], 'search'), ['alpha: the search ended with exit code 1: boom'],
+    'and one whose search failed says what it said, instead of counting as an answer');
+  eq([coverageText([]), coverageText(null), coverageText(undefined)], [['no host is on this board, and the conversations are on the hosts\' disks'], [], []],
+    'a board with no host says so; an answer not read yet says nothing rather than that');
+  eq([hitsText(1), hitsText(3), hitsText(0), hitsText('x')], ['1 turn matched', '3 turns matched', '0 turns matched', '0 turns matched'], 'how many turns matched, in words');
+  const safe = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  eq(markHits('the Widget Rename and the widget rename', 'widget rename', safe), 'the <mark>Widget Rename</mark> and the <mark>widget rename</mark>', 'every occurrence in a snippet is marked, whatever its case, as it was written');
+  eq(markHits('<b>bold</b> widget & <script>', 'widget', safe), '&lt;b&gt;bold&lt;/b&gt; <mark>widget</mark> &amp; &lt;script&gt;', 'and what is around it is drawn as the characters it is — a snippet is somebody\'s pasted text');
+  eq(markHits('a <mark> in the text', '<mark>', safe), 'a <mark>&lt;mark&gt;</mark> in the text', 'even when the thing searched for is markup');
+  eq([markHits('nothing to mark', '', safe), markHits('nothing to mark', 'zzz', safe), markHits(null, 'x', safe)], ['nothing to mark', 'nothing to mark', ''], 'no search, no match and no text are left as they are');
 
   console.log('\nwhere the folder dialog opens: the last place a choice was made');
   const browserStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, m }; };
