@@ -141,7 +141,37 @@ just means a client opens a session per turn, which is normal and handled.
   host's origin) → `/api/host/register` validates it (`cleanFolders`: absolute,
   under a posted root, capped at 300) → `live.folders` → the GET's projection →
   the dialog. The floor suite reads each field back through the GET with a
-  fixture value that cannot equal a fallback.
+  fixture value that cannot equal a fallback. The dialog draws the top of that
+  list as **Recently opened** — the folders Claude Code has been run in,
+  newest first, five of them (`recentFolders` in `src/ui/app.js`); the list as
+  a whole was taken out of the dialog for being every candidate by its last
+  path segment, and five with their paths is as long as it gets. The same GET
+  carries `names`: the names somebody has saved, by agent id, which the dialog
+  shows for the agent being seated instead of asking for one — an agent with
+  nothing saved is absent from the map and reads "none", not the name the
+  board would derive from its id.
+- **The folder dialog:** "Take a desk" chooses its folder in the operating
+  system's own dialog, opened by the host on the machine it runs on. One
+  function, `host/dialog.js`, with a backend per platform — macOS only so
+  far, and that file's header is the record of why it is the backend it is
+  (four ways were watched from a LaunchAgent; three are drawn and never take
+  focus, or outlive their process) and why it is not a library (the one on
+  npm that runs on a Mac is one of the three). A host says whether it has a
+  dialog on every registration (`dialog` beside its folder list), and the
+  page draws its own one-level list for a host that has none, or whose dialog
+  failed. The ask is `POST /api/floor/pick` → a `pick` work item → the dialog
+  in a child process, not awaited, because the same loop delivers messages →
+  `pick` events (`open`, then `chosen` / `cancelled` / `failed`) → `GET
+  /api/floor/pick`, which the page polls: 8 s for `open`, then for as long as
+  the person takes. A chosen folder is sent as an ordinary `browse` listing
+  first, so the form is filled and a take is checked exactly as for a folder
+  opened in the list — the board still never sends a path the host has not
+  named. Work items carry `waited_ms`, stamped by the board as it hands them
+  over, so the host can drop a request the page has given up on without
+  comparing two machines' clocks. Where the dialog opens is the folder the
+  last choice was made in, remembered per host in the browser
+  (`localStorage['orch.desk.dir']`) and sent as a hint; the host opens the
+  nearest folder above it that still exists.
 
 ```
 src/

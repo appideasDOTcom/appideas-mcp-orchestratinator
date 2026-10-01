@@ -127,9 +127,10 @@ this file.
 
 ## Notes & limits
 
-**The floor can put a desk in any folder on a host.** "Take a desk" browses
-the host's disk from its home folder — anything the host's user can read —
-and binds the folder it is standing in. The `roots` in `host.json` are where
+**The floor can put a desk in any folder on a host.** "Take a desk" picks
+from the host's disk — in the host's own folder dialog, opened on that
+machine's screen, or in a list of it drawn in the page for a host that has no
+dialog — anything the host's user can read, and binds the folder chosen. The `roots` in `host.json` are where
 the host looks for desks on its own, not a limit on what may be picked. They
 were a fence once (2026-09-10); it went, because the board runs on localhost
 and that is the security model this file describes.

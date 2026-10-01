@@ -1594,3 +1594,22 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .dir-marks { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
 .dir-empty { padding: 8px 9px; font-size: 11.5px; color: var(--muted); }
 .dlg-self { margin-top: 10px; font-size: 12px; }
+/* Recently opened: the same rows as the picker, each with its path under its
+   name — a name alone says nothing about where it is. The path is cut at the
+   left, because the end of a path is the part that tells two repos apart:
+   that is what `direction: rtl` is for, and why the path itself sits in a
+   <bdi> — without the isolate the leading slash is drawn at the far end
+   (`repo/deep/nest/` it read, on the first screenshot). */
+.dlg-recent-head { margin-top: 12px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.dlg-recent { max-height: none; }
+.recent-row { align-items: center; }
+.recent-what { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.recent-path { font-size: 10.5px; color: var(--muted); direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The host's own folder dialog: the button that asks for it, what it is
+   doing beside it, and the folder it came back with underneath. */
+.desk-pick { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.desk-pick-state { font-size: 11.5px; }
+.desk-chosen { margin-top: 8px; font-size: 12px; direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The agent's name, read off the board rather than typed. */
+.desk-name-read { display: block; font-size: 14px; padding: 7px 0; }
+.desk-name-read.none { color: var(--muted); }
