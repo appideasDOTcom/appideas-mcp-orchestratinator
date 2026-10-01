@@ -1560,6 +1560,7 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 
 /* The take-a-desk button sits at the head's right edge, beside the totals. */
 #take-desk { margin-left: 10px; flex: 0 0 auto; }
+#history { margin-left: 6px; flex: 0 0 auto; }
 /* The dialog's folder select carries a long path per row; keep it on one
    line and let the row say what it is with the name first. */
 #desk-folder, #desk-channel { font-family: var(--mono); font-size: 12.5px; }
@@ -1576,6 +1577,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .sess-row.current { border-color: var(--accent); opacity: 1; }
 .sess-title { font-size: 13px; line-height: 1.3; }
 .sess-meta { font-size: 10.5px; color: var(--muted); }
+/* How long it ran, its branch, its model — the transcript's own facts, in mono because two of the three are identifiers. */
+.sess-detail { font-size: 10.5px; color: var(--muted); font-family: var(--mono); }
 .sess-empty { padding: 8px 2px; font-size: 11.5px; }
 
 /* The folder picker in Take a desk: the path as crumbs, the folders inside
@@ -1613,3 +1616,30 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 /* The agent's name, read off the board rather than typed. */
 .desk-name-read { display: block; font-size: 14px; padding: 7px 0; }
 .desk-name-read.none { color: var(--muted); }
+
+/* History: a search box over every desk's conversations. The rows are the
+   session picker's rows with the desk named on them; a search result adds
+   how many turns matched and the first few, the match marked. */
+.hist-search { display: flex; gap: 8px; margin-top: 12px; }
+.hist-search .input { flex: 1 1 auto; font-size: 14px; padding: 7px 9px; }
+.hist-deep { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.hist-hits { font-size: 10.5px; color: var(--accent); margin-top: 2px; }
+.hist-snip { display: block; font-size: 11.5px; line-height: 1.35; color: var(--muted); }
+.hist-snip b { font-weight: 600; margin-right: 4px; }
+.hist-snip mark, .t-found mark { background: color-mix(in srgb, var(--wait) 30%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+.hist-cover { margin-top: 6px; font-size: 11px; }
+
+/* A past conversation open to read in a desk's panel. A different ground and
+   a banner across the top, because nothing else about a column of turns says
+   it is not the live one — and there is deliberately nothing to type into. */
+.deskpanel.reading { background: color-mix(in srgb, var(--wait) 7%, var(--surface)); border-color: color-mix(in srgb, var(--wait) 45%, var(--border)); }
+.p-reading { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; padding: 8px 10px;
+  background: color-mix(in srgb, var(--wait) 16%, var(--surface)); border-bottom: 1px solid color-mix(in srgb, var(--wait) 45%, var(--border)); font-size: 12px; }
+.p-reading-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-reading-tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--wait); font-weight: 600; margin-right: 4px; }
+.p-reading-state { grid-column: 1; font-size: 11px; }
+.p-reading .btn { grid-column: 2; grid-row: 1 / span 2; }
+.p-reading.failed .p-reading-state { color: var(--block, #c0392b); }
+.p-persona-read { font: 600 13.5px var(--sans); }
+/* The turn a search was for, in the conversation it was found in. */
+.t.t-found { outline: 2px solid color-mix(in srgb, var(--wait) 55%, transparent); outline-offset: 2px; border-radius: 6px; }

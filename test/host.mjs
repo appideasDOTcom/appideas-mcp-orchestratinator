@@ -340,6 +340,9 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
       // after four seconds rather than ten minutes — longer than the three
       // the slowest "person" below takes to choose.
       ORCH_FOLDER_DIALOG: `${FIX}/dialog`, ORCH_PICK_TIMEOUT_MS: '4000',
+      // A conversation read whole goes up three turns to a page, so a short
+      // fixture still crosses a page boundary.
+      ORCH_READ_PAGE_TURNS: '3',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -818,6 +821,122 @@ try {
   eq((await back.json()).mode, 'move', 'moving it back is a move too');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'and it is home, on its conversation');
   await sleep(WATCH_SETTLE_MS);
+
+  /* ── reading a conversation whole (issue #8, Remaining 4) ──────────────────
+   * A conversation opened to read is the host reading the transcript from
+   * its first record — its subagents' files with it — and nothing else: no
+   * window closes, opens or moves, and the desk stays on its own
+   * conversation. The fixture has one of every kind of turn, a subagent,
+   * and more turns than a page holds. */
+  console.log('\nreading a conversation whole');
+  const SESSION_C = 'cccccccc-2222-3333-4444-555555555555';
+  const cPath = `${HOME}/.claude/projects/${slug()}/${SESSION_C}.jsonl`;
+  const rec = (o) => JSON.stringify(o);
+  writeFileSync(cPath, [
+    rec({ type: 'user', uuid: 'c1', timestamp: '2026-09-08T09:00:00Z', message: { content: [{ type: 'text', text: '<ide_opened_file>z.js</ide_opened_file>' }, { type: 'text', text: 'C-FIRST-WORDS' }] } }),
+    rec({ type: 'assistant', uuid: 'c2', timestamp: '2026-09-08T09:00:02Z', message: { content: [{ type: 'thinking', thinking: 'C-A-THOUGHT' }, { type: 'text', text: 'C-REPLY-ONE' }, { type: 'tool_use', name: 'Bash', input: { command: 'ls C-DIR' } }] } }),
+    rec({ type: 'user', uuid: 'c3', timestamp: '2026-09-08T09:00:10Z', message: { content: 'C-SECOND-WORDS' } }),
+    rec({ type: 'assistant', uuid: 'c4', timestamp: '2026-09-08T09:00:20Z', message: { content: [{ type: 'text', text: 'C-LAST-WORD' }] } }),
+    '',
+  ].join('\n'));
+  mkdirSync(`${cPath.slice(0, -'.jsonl'.length)}/subagents`, { recursive: true });
+  writeFileSync(`${cPath.slice(0, -'.jsonl'.length)}/subagents/agent-s1.jsonl`,
+    `${rec({ type: 'assistant', uuid: 'cs1', isSidechain: true, timestamp: '2026-09-08T09:00:05Z', message: { content: [{ type: 'text', text: 'C-SUBAGENT-SEARCHING' }] } })}\n`);
+  writeFileSync(`${cPath.slice(0, -'.jsonl'.length)}/subagents/agent-s1.meta.json`, JSON.stringify({ description: 'Find the C thing', agentType: 'Explore' }));
+  const readGetC = (id = SESSION_C, extra = '') => json(`/api/floor/read?channel=${CH}&agent=free&session=${id}${extra}`).then((r) => r.json());
+  const deskBeforeRead = deskOf(await floor(), 'free')?.hosted;
+  const panesBeforeRead = paneOf();
+  const argvBeforeRead = argvLog().length;
+  const turnsBeforeRead = ((await turns('free')).rows ?? []).length;
+  const askedRead = await json('/api/floor/read', { channel: CH, agent: 'free', session_id: SESSION_C });
+  eq(askedRead.status, 200, 'the floor can ask a desk\'s host to read one of its conversations whole');
+  const whole = await until(async () => { const g = await readGetC(); return g.done ? g : null; }, 15000);
+  assert(!!whole && !whole.error, `and the host answers with all of it — ${whole?.error ?? `${whole?.total} turns`}`);
+  eq((whole?.rows ?? []).map((r) => `${r.role}|${r.text}|${r.via ?? ''}`), [
+    'context|<ide_opened_file>z.js</ide_opened_file>|', 'user|C-FIRST-WORDS|', 'thinking|C-A-THOUGHT|', 'assistant|C-REPLY-ONE|', 'tool|Bash: ls C-DIR|',
+    'assistant|C-SUBAGENT-SEARCHING|Find the C thing', 'user|C-SECOND-WORDS|', 'assistant|C-LAST-WORD|',
+  ], 'from its first word to its last, in the order things were said: the injected context, a thought, a tool call, and the subagent\'s words under its description, between the turns either side of it');
+  eq([whole?.rows?.[1]?.created_at, whole?.rows?.at(-1)?.created_at], ['2026-09-08T09:00:00Z', '2026-09-08T09:00:20Z'], 'each dated when it was said');
+  assert(new RegExp(`free: read ${SESSION_C} whole for the floor — 8 turns`).test(host.log), 'the host log says what it read');
+  eq((await readGetC(SESSION_C, '&from=3&limit=2')).rows.map((r) => r.text), ['C-REPLY-ONE', 'Bash: ls C-DIR'], 'eight turns at three to a page arrived as one conversation, and can be read back in pages');
+  const deskAfterRead = deskOf(await floor(), 'free')?.hosted;
+  eq([deskAfterRead?.session_id, deskAfterRead?.held, paneOf(), argvLog().length], [deskBeforeRead?.session_id, deskBeforeRead?.held, panesBeforeRead, argvBeforeRead],
+    'and nothing moved: the desk is on the conversation it was on, in the window it was in, and no window was opened or closed — reading is not resuming');
+  await sleep(WATCH_SETTLE_MS);
+  const afterRead = (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
+  eq([afterRead.length, afterRead.some((r) => (r.text ?? '').includes('C-FIRST-WORDS'))], [turnsBeforeRead, false], 'nor did any of it become the desk\'s own turns');
+  await json('/api/floor/read', { channel: CH, agent: 'free', session_id: 'no-such-conversation' });
+  const missing = await until(async () => { const g = await readGetC('no-such-conversation'); return g.done ? g : null; }, 15000);
+  assert(/no conversation no-such-conversation in .*repo-a/.test(missing?.error ?? ''), `a conversation that is not in the desk's folder is said as that, naming the folder — ${missing?.error}`);
+
+  /* ── history across every desk (issue #8, Remaining 2 and 3) ───────────────
+   * The recent list and the search are both read off the transcripts in the
+   * desks' folders by the real host — the search in a process of its own —
+   * and come back as events. The fixture conversation above has a word only
+   * the person said, one only the agent said, one only in a tool call, one
+   * only in a thought and one only in a subagent's transcript, so each
+   * choice of what a search covers has a hit that proves it. */
+  {
+    console.log('\nhistory across every desk');
+    const hGet = (path) => json(`/api/floor/history/${path}`).then((r) => r.json());
+    const search = async (query, deep = false) => {
+      const asked = await (await json('/api/floor/history/search', { query, deep })).json();
+      return until(async () => { const g = await hGet(`search?id=${asked.id}`); return g.done ? g : null; }, 20000);
+    };
+    const askedRecent = await (await json('/api/floor/history/recent', {})).json();
+    eq(askedRecent.asked, ['Test Mac'], 'the floor asks the host for its recent conversations');
+    const rec = await until(async () => { const g = await hGet('recent'); return g.hosts.find((h) => h.host_id === 'host-test-1')?.at ? g : null; }, 15000);
+    const recC = rec?.rows.find((r) => r.id === SESSION_C);
+    eq([recC?.channel, recC?.agent, recC?.title, recC?.started_at, recC?.last_at, recC?.host], [CH, 'free', 'C-FIRST-WORDS', '2026-09-08T09:00:00Z', '2026-09-08T09:00:20Z', 'Test Mac'],
+      'and the host answers with every desk\'s conversations, each naming its desk, with the title and times its own transcript gives');
+    const order = (rec?.rows ?? []).map((r) => Date.parse(r.last_at ?? r.modified_at));
+    assert(order.length >= 3 && order.every((t, i) => i === 0 || order[i - 1] >= t), `most recently spoken in first — ${rec?.rows.map((r) => r.id.slice(0, 8)).join(', ')}`);
+    eq(new Set((rec?.rows ?? []).map((r) => `${r.channel}/${r.agent}/${r.id}`)).size, rec?.rows.length, 'each conversation once, under the one desk its folder is');
+
+    let got = await search('c-last-word');
+    eq([got?.rows.map((r) => `${r.id}:${r.channel}/${r.agent}:${r.hits}`), got?.rows[0]?.snippets.map((sn) => `${sn.role}|${sn.text}`)], [[`${SESSION_C}:${CH}/free:1`], ['assistant|C-LAST-WORD']],
+      'a search finds what the agent said, whatever the case it is typed in, and quotes it');
+    const hostLine = got?.hosts.find((h) => h.host_id === 'host-test-1');
+    assert(hostLine?.at && hostLine.files >= 3 && Number.isInteger(hostLine.ms) && !hostLine.error, `saying which host answered, over how many transcripts, in how long — ${hostLine?.files} files, ${hostLine?.ms} ms`);
+    assert(/search: "c-last-word" — 1 conversation in \d+ files/.test(host.log), 'the host log says what was searched for and what it found');
+    got = await search('C-SECOND-WORDS');
+    eq(got?.rows.map((r) => `${r.id}:${r.snippets[0]?.role}`), [`${SESSION_C}:user`], 'and what the person said');
+    eq([(await search('ls C-DIR'))?.rows.length, (await search('C-A-THOUGHT'))?.rows.length, (await search('C-SUBAGENT-SEARCHING'))?.rows.length], [0, 0, 0],
+      'a word that is only in a tool call, only in a thought, or only in a subagent\'s transcript is not found by a plain search — that is the stated half');
+    got = await search('ls C-DIR', true);
+    eq(got?.rows.map((r) => `${r.id}:${r.snippets[0]?.role}:${r.snippets[0]?.text}`), [`${SESSION_C}:tool:Bash ls C-DIR`], 'with tool calls and thinking included it is: the tool call, by its name and what it was given');
+    eq((await search('C-A-THOUGHT', true))?.rows.map((r) => r.snippets[0]?.role), ['thinking'], 'the thought');
+    got = await search('c-subagent-searching', true);
+    eq(got?.rows.map((r) => `${r.snippets[0]?.role}|${r.snippets[0]?.via}`), ['assistant|Find the C thing'], 'and the subagent\'s words, under its description');
+    eq((await search('zz-no-such-words-anywhere'))?.rows, [], 'a search that finds nothing answers with nothing, and is still an answer');
+    // The module itself, run the way the host runs it — its own process, asked
+    // on stdin — with one folder named twice, as a board's table of every desk
+    // a folder has ever been would name it.
+    const twice = JSON.parse(execFileSync(process.execPath, ['host/history.js'], {
+      input: JSON.stringify({ query: 'c-last-word', deep: false, desks: [{ channel: CH, agent: 'free', cwd: REPO }, { channel: 'another-floor', agent: 'same-folder', cwd: REPO }] }),
+      env: { ...process.env, HOME, ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION },
+      encoding: 'utf8',
+    }));
+    eq([twice.rows.map((r) => `${r.channel}/${r.agent}`), twice.files], [[`${CH}/free`], rec?.rows.filter((r) => r.agent === 'free').length],
+      'a folder named twice is read once and its conversations listed once, under the first desk to name it — not every file twice and every result twice over');
+    // Past its limit a list is cut, and it is cut after it is put in order:
+    // the fixture's conversation C is the newest *file* and the one spoken in
+    // longest ago, so a list cut in file order would keep exactly the wrong one.
+    const ask = (body) => JSON.parse(execFileSync(process.execPath, ['host/history.js'], {
+      input: JSON.stringify({ desks: [{ channel: CH, agent: 'free', cwd: REPO }], ...body }),
+      env: { ...process.env, HOME, ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION }, encoding: 'utf8',
+    }));
+    const newestSpoken = rec?.rows.filter((r) => r.agent === 'free')[0]?.id;
+    assert(newestSpoken && newestSpoken !== SESSION_C, `the conversation spoken in most recently is not the newest file — ${newestSpoken?.slice(0, 8)}`);
+    eq(ask({ op: 'recent', max: 1 }).rows.map((r) => r.id), [newestSpoken], 'a recent list cut to its limit keeps the conversations spoken in most recently, not the files written most recently');
+    // "on" is in what the person said in C ("C-SECOND-WORDS") and in a
+    // conversation spoken in since ("the other conversation begins").
+    const both = ask({ query: 'on' }).rows.map((r) => r.id);
+    assert(both.includes(SESSION_C) && both.length >= 2 && both[0] !== SESSION_C, `a search that finds C and a conversation spoken in since lists the later one first — ${both.map((id) => id.slice(0, 8)).join(', ')}`);
+    eq(ask({ query: 'on', max: 1 }).rows.map((r) => r.id), [both[0]], 'and cut to its limit it keeps that one, not the newest file');
+    const deskAfterSearch = deskOf(await floor(), 'free')?.hosted;
+    eq([deskAfterSearch?.session_id, paneOf()], [deskBeforeRead?.session_id, panesBeforeRead], 'none of which moved the desk or its window');
+  }
 
   /* ── the host's own folder dialog (issue #4, items 1 and 2) ────────────────
    * The picker is one function in the host with each operating system's own

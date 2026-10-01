@@ -611,7 +611,7 @@ function refreshDialog() {
   // poll-driven redraw would throw away whatever is half-typed in it.
   // The take-a-desk and leave-desk dialogs hold typing and a choice; a poll
   // must not redraw either.
-  if (kind === 'rename' || kind === 'prompts' || kind === 'desk' || kind === 'leave' || kind === 'sessions') return;
+  if (kind === 'rename' || kind === 'prompts' || kind === 'desk' || kind === 'leave' || kind === 'sessions' || kind === 'history') return;
   if (agent) {
     const a = findAgent(channel, agent);
     const left = !a ? 0
@@ -1520,28 +1520,24 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'session-look':
       askSessions();
       break;
-    // --- the session picker. See sessionDialog below. The floor is told the
-    // moment the reopen is queued so its link can spin until the desk's
-    // conversation actually changes — the receipt for the click is there,
-    // not here.
-    case 'session-resume': {
-      const fm = ui.sessForm;
-      if (!fm) break;
-      const id = d.id;
-      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: id })
-        .then(() => { window.floorReopen?.(fm.channel, fm.agent, id, fm.current); }));
+    // --- history across every desk. See historyDialog below.
+    case 'history-search':
+      runHistorySearch();
+      break;
+    case 'history-clear':
+      if (ui.histForm) { ui.histForm.search = null; ui.histForm.query = ''; ui.histForm.seq++; renderHistoryDialog(); }
+      break;
+    case 'history-look':
+      askRecent();
+      break;
+    case 'history-read': {
+      // Opened to read in its own desk's panel — the floor script's, which
+      // owns the panel. The dialog closes: the conversation is the answer.
+      const find = ui.histForm?.search ? ui.histForm.search.query : null;
+      closeDialog();
+      window.floorRead?.(d.channel, d.agent, d.id, d.title || null, { find });
       break;
     }
-    case 'session-new': {
-      const fm = ui.sessForm;
-      if (!fm) break;
-      act(() => floorPost('reopen', { channel: fm.channel, agent: fm.agent, session_id: null })
-        .then(() => { window.floorReopen?.(fm.channel, fm.agent, null, fm.current); }));
-      break;
-    }
-    case 'session-look':
-      askSessions();
-      break;
     case 'retire':
       act(() => admin('agent/retire', { channel: d.channel, agent: d.agent }));
       break;
@@ -2261,6 +2257,44 @@ el.dlgBody.addEventListener('input', (e) => {
   if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
 });
 
+/* ---------- sessions: what a row says ---------- */
+
+/**
+ * How long a conversation ran, from the first thing the person said to the
+ * last thing anybody said — or null when either end is missing or the two
+ * are the wrong way round, which is no length at all rather than a guess.
+ *
+ * Wall-clock, not working time: a conversation picked up again the next
+ * morning is a day long, and that is the true answer to "how long has this
+ * one been going".
+ */
+function spanText(startIso, endIso) {
+  const a = Date.parse(startIso ?? '');
+  const b = Date.parse(endIso ?? '');
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return null;
+  const mins = Math.floor((b - a) / 60000);
+  if (mins < 1) return 'under a minute';
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return mins % 60 ? `${hours}h ${mins % 60}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days}d ${hours % 24}h` : `${days}d`;
+}
+
+/**
+ * The detail under a row's title: how long it ran, its branch, its model —
+ * each only when the transcript said, in that order. A row with none of the
+ * three (a tab opened and closed, nothing said) has no detail line at all,
+ * not three dashes.
+ */
+function sessionDetail(r) {
+  const span = spanText(r?.started_at, r?.last_at);
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return [span ? `${span} long` : null, text(r?.branch), text(r?.model)].filter(Boolean);
+}
+
+/* ---------- sessions: the dialog ---------- */
+
 /**
  * The session picker: a folder's recent conversations, for the desk's window
  * to be reopened on — or a fresh one. The last of the three doors the floor
@@ -2275,6 +2309,10 @@ el.dlgBody.addEventListener('input', (e) => {
  * the conversation the desk is on now, and one an editor holds, since a
  * resume closes a window the floor must hold. The filter is by title only
  * (decided 2026-09-08); there is no search of what was said.
+ *
+ * Each row says, under its title, how long the conversation ran, the branch
+ * it was last on and the model it last spoke with — read by the host off the
+ * transcript itself, so a conversation the hook never reported has them too.
  *
  * Kind 'sessions' is in refreshDialog's skip list, and typing redraws only
  * the rows: the poll must never take the caret out of the filter box.
@@ -2378,9 +2416,11 @@ function sessionRowsHtml(fm) {
       r.live && !current ? (editor ? 'in your editor' : 'open') : null,
       r.title_source === 'custom' ? 'named' : null,
     ].filter(Boolean);
+    const detail = sessionDetail(r);
     return `<button type="button" class="sess-row${current ? ' current' : ''}" data-do="session-resume" data-id="${esc(r.id)}" title="${esc(why)}"${current || editor ? ' disabled' : ''}>
       <span class="sess-title">${esc(title)}</span>
       <span class="sess-meta">${esc(agoText(r.last_at ?? r.modified_at))}${marks.length ? ` · ${marks.map(esc).join(' · ')}` : ''}</span>
+      ${detail.length ? `<span class="sess-detail">${detail.map(esc).join(' · ')}</span>` : ''}
     </button>`;
   }).join('');
 }
@@ -2432,4 +2472,280 @@ el.dlgBody.addEventListener('input', (e) => {
   if (list) list.innerHTML = sessionRowsHtml(fm);
   const count = el.dlgBody.querySelector('.sess-count');
   if (count) count.textContent = sessionCountText(fm);
+});
+
+/* ---------- history: what the dialog says about its answer ---------- */
+
+/**
+ * Which hosts an answer covers, in words — the line under the list.
+ *
+ * History is read off each host's own disk, so an answer is only ever about
+ * the hosts that gave one, and the ones that did not are the part somebody
+ * would otherwise assume was searched. Each is named: answered (with how
+ * much it read, for a search), failed and what it said, asked and not yet
+ * back, on the board but not asked, and offline — whose conversations are
+ * simply not in this list.
+ */
+function coverageText(hosts, kind = 'recent') {
+  // No answer read yet is not "no hosts": it says nothing until it knows.
+  if (!Array.isArray(hosts)) return [];
+  const list = hosts;
+  const names = (xs) => xs.map((h) => h.name).join(', ');
+  const out = [];
+  const answered = list.filter((h) => h.at && !h.error);
+  const failed = list.filter((h) => h.error);
+  const waiting = list.filter((h) => h.live && h.asked && !h.at && !h.error);
+  const unasked = list.filter((h) => h.live && !h.asked);
+  const offline = list.filter((h) => !h.live);
+  if (answered.length) {
+    out.push(kind === 'search'
+      ? answered.map((h) => `${h.name} read ${h.files ?? '?'} conversation${h.files === 1 ? '' : 's'}${Number.isFinite(h.ms) ? ` in ${(h.ms / 1000).toFixed(1)} s` : ''}`).join(', ')
+      : `from ${names(answered)}`);
+  }
+  for (const h of failed) out.push(`${h.name}: ${h.error}`);
+  if (waiting.length) out.push(`waiting for ${names(waiting)}`);
+  if (unasked.length) out.push(`${names(unasked)} ${unasked.length === 1 ? 'has' : 'have'} not been asked`);
+  if (offline.length) out.push(`${names(offline)} ${offline.length === 1 ? 'is' : 'are'} offline — ${offline.length === 1 ? 'its' : 'their'} conversations are not covered`);
+  if (!list.length) out.push('no host is on this board, and the conversations are on the hosts\' disks');
+  return out;
+}
+
+/** "3 turns matched", and "100 or more" is not claimed: the count is the host's. */
+function hitsText(n) {
+  const k = Math.max(0, Number(n) || 0);
+  return `${k} turn${k === 1 ? '' : 's'} matched`;
+}
+
+/**
+ * A snippet with every occurrence of the search marked. `safe` is the
+ * escaper: the text is escaped piece by piece around the matches, so a
+ * snippet that contains markup is drawn as the characters it is.
+ */
+function markHits(text, query, safe) {
+  const t = String(text ?? '');
+  const q = String(query ?? '').trim().toLowerCase();
+  if (!q) return safe(t);
+  const low = t.toLowerCase();
+  let out = '';
+  let from = 0;
+  for (;;) {
+    const at = low.indexOf(q, from);
+    if (at < 0) break;
+    out += `${safe(t.slice(from, at))}<mark>${safe(t.slice(at, at + q.length))}</mark>`;
+    from = at + q.length;
+  }
+  return out + safe(t.slice(from));
+}
+
+/* ---------- history: the dialog ---------- */
+
+/**
+ * History: every desk's conversations in one list, the most recently spoken
+ * in first, with a search of what was said in them over the top.
+ *
+ * Both are the hosts' — read off the transcripts on each machine, because
+ * the board's own copy is a tail and its session table has no titles (the
+ * numbers are in host/history.js). So this dialog asks, and waits: the list
+ * it already holds is drawn at once, and the line under it says which hosts
+ * the answer is from and which it is not. A search is asked for with Enter
+ * or the button, never per keystroke — it is a walk of every transcript on
+ * every host — and by default it looks at what the person and the agent
+ * said; the switch adds tool calls, thoughts and subagents.
+ *
+ * A row opens that conversation to read, in its own desk's panel on the
+ * floor (window.floorRead). It does not resume it: nothing here moves a desk
+ * onto a conversation — that stays the Sessions dialog's, on the desk.
+ */
+function historyDialog() {
+  ui.dlgCtx = { kind: 'history' };
+  ui.histForm = { hosts: null, rows: null, query: '', deep: false, search: null, waiting: true, error: null, note: null, seq: 0 };
+  renderHistoryDialog();
+  askRecent();
+}
+
+async function getHistory(path) {
+  const res = await fetch(`./api/floor/history/${path}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json;
+}
+
+/** Ask every host for its recent conversations, and read until each has answered. */
+async function askRecent() {
+  const fm = ui.histForm;
+  if (!fm) return;
+  const seq = ++fm.seq;
+  const mine = () => ui.dlgCtx?.kind === 'history' && ui.histForm === fm && fm.seq === seq;
+  fm.waiting = true;
+  fm.error = null;
+  fm.note = null;
+  fm.search = null;
+  try {
+    const held = await getHistory('recent');
+    if (!mine()) return;
+    fm.hosts = held.hosts;
+    fm.rows = held.rows;
+    renderHistoryDialog();
+    const before = new Map(held.hosts.map((h) => [h.host_id, h.at]));
+    const asked = await floorPost('history/recent', {});
+    // Inside the throttle nobody is asked, and the list in hand is seconds old.
+    if (!asked.asked?.length) { fm.waiting = false; if (mine()) renderHistoryDialog(); return; }
+    for (let i = 0; i < 12 && mine(); i++) {
+      await new Promise((r) => setTimeout(r, 700));
+      if (!mine()) return;
+      const got = await getHistory('recent').catch(() => null);
+      if (!got) continue;
+      fm.hosts = got.hosts;
+      fm.rows = got.rows;
+      const pending = got.hosts.filter((h) => h.live && h.asked && h.at === before.get(h.host_id));
+      if (!pending.length) { fm.waiting = false; renderHistoryDialog(); return; }
+      renderHistoryDialog();
+    }
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.note = 'Not every host answered in 8 s — the list is what the others gave.';
+  } catch (e) {
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.error = String(e.message ?? e);
+  }
+  renderHistoryDialog();
+}
+
+/** Search what was said: asked once, on Enter or the button, and read until every host has answered. */
+async function runHistorySearch() {
+  const fm = ui.histForm;
+  if (!fm) return;
+  const query = fm.query.trim();
+  // An empty box is the way back to the recent list.
+  if (!query) { fm.search = null; fm.seq++; renderHistoryDialog(); return; }
+  const seq = ++fm.seq;
+  const mine = () => ui.dlgCtx?.kind === 'history' && ui.histForm === fm && fm.seq === seq;
+  fm.search = { query, deep: fm.deep, hosts: null, rows: [], done: false };
+  fm.waiting = true;
+  fm.error = null;
+  fm.note = null;
+  renderHistoryDialog();
+  try {
+    const asked = await floorPost('history/search', { query, deep: fm.deep });
+    for (let i = 0; i < 60 && mine(); i++) {
+      const got = await getHistory(`search?id=${encodeURIComponent(asked.id)}`);
+      if (!mine()) return;
+      fm.search = { query: got.query, deep: got.deep, hosts: got.hosts, rows: got.rows, done: got.done };
+      if (got.done) { fm.waiting = false; renderHistoryDialog(); return; }
+      renderHistoryDialog();
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.note = 'Not every host answered in 30 s — these are the results from the ones that did.';
+  } catch (e) {
+    if (!mine()) return;
+    fm.waiting = false;
+    fm.error = String(e.message ?? e);
+  }
+  renderHistoryDialog();
+}
+
+function historyRowsHtml(fm) {
+  const searching = !!fm.search;
+  const rows = (searching ? fm.search.rows : fm.rows) ?? [];
+  const manyHosts = new Set(rows.map((r) => r.host_id)).size > 1;
+  if (!rows.length) {
+    const why = searching
+      ? (fm.waiting ? 'Searching…' : `Nothing ${fm.search.deep ? 'in any conversation' : 'anybody said'} matches “${fm.search.query}”.${fm.search.deep ? '' : ' Tool calls and thinking were not searched.'}`)
+      : (fm.rows === null || fm.waiting ? 'Asking the hosts…' : 'No conversations yet.');
+    return `<p class="muted sess-empty">${esc(why)}</p>`;
+  }
+  return rows.map((r) => {
+    const title = r.title ?? (r.spoken ? '(untitled)' : '(nothing said yet)');
+    const marks = [
+      `${r.persona ?? r.agent} · ${r.channel}/${r.agent}`,
+      manyHosts ? r.host : null,
+      agoText(r.last_at ?? r.modified_at),
+      r.live ? (r.held === 'editor' ? 'in your editor' : 'open') : null,
+    ].filter(Boolean);
+    const detail = sessionDetail(r);
+    const snips = searching ? (r.snippets ?? []).map((sn) => {
+      const who = sn.role === 'user' ? 'you' : sn.role === 'assistant' ? (sn.via ? `agent · ${sn.via}` : 'agent') : sn.role;
+      return `<span class="hist-snip"><b>${esc(who)}</b> ${markHits(sn.text, fm.search.query, esc)}</span>`;
+    }).join('') : '';
+    return `<button type="button" class="sess-row hist-row" data-do="history-read" data-channel="${esc(r.channel)}" data-agent="${esc(r.agent)}" data-id="${esc(r.id)}" data-title="${esc(r.title ?? '')}" title="Open this conversation to read, in ${esc(r.persona ?? r.agent)}'s panel — it is not resumed">
+      <span class="sess-title">${esc(title)}</span>
+      <span class="sess-meta">${marks.map(esc).join(' · ')}</span>
+      ${detail.length ? `<span class="sess-detail">${detail.map(esc).join(' · ')}</span>` : ''}
+      ${searching ? `<span class="hist-hits">${esc(hitsText(r.hits))}</span>${snips}` : ''}
+    </button>`;
+  }).join('');
+}
+
+function renderHistoryDialog() {
+  const fm = ui.histForm;
+  if (!fm) return;
+  const searching = !!fm.search;
+  const rows = (searching ? fm.search.rows : fm.rows) ?? [];
+  const hosts = searching ? fm.search.hosts : fm.hosts;
+  const count = searching
+    ? `${rows.length} conversation${rows.length === 1 ? '' : 's'} ${fm.search.deep ? 'with a match, tool calls and thinking included' : 'where somebody said it'}`
+    : `${rows.length} conversation${rows.length === 1 ? '' : 's'} · most recently spoken in first`;
+  const notes = [];
+  if (fm.error) notes.push(`<b>${esc(fm.error)}</b>`);
+  else if (fm.waiting) notes.push(searching ? 'Searching every host\'s transcripts…' : 'Asking every host for a fresh list…');
+  else if (fm.note) notes.push(esc(fm.note));
+  notes.push('A row opens that conversation to read, in its desk\'s panel on the floor. It is not resumed — to put a desk on one, use that desk\'s Sessions.');
+  const cover = coverageText(hosts, searching ? 'search' : 'recent').join(' · ');
+  // An answer arriving redraws the list and the lines under it, never the
+  // box: the hosts answer on their own clocks, and a redraw of the whole
+  // dialog every poll would take the caret out of a search being typed.
+  const mode = searching ? 'search' : 'recent';
+  const list = ui.dlgCtx?.kind === 'history' ? el.dlgBody.querySelector('.hist-rows') : null;
+  if (list && fm.drawn === mode) {
+    list.innerHTML = historyRowsHtml(fm);
+    el.dlgBody.querySelector('.hist-count').textContent = count;
+    el.dlgBody.querySelector('.hist-cover').textContent = cover;
+    el.dlgBody.querySelector('.dlg-note').innerHTML = notes.join(' ');
+    return;
+  }
+  fm.drawn = mode;
+  const hadFocus = document.activeElement?.id === 'hist-query';
+  openDialog(`
+    <div class="dlg-head"><h3>History</h3></div>
+    <p class="dlg-sub">every desk's conversations, read off the hosts' own transcripts</p>
+    <div class="hist-search">
+      <input id="hist-query" class="input" type="search" value="${esc(fm.query)}" placeholder="search what was said" autocomplete="off" spellcheck="false" maxlength="200">
+      <button type="button" class="btn" data-do="history-search">Search</button>
+    </div>
+    <label class="hist-deep"><input type="checkbox" id="hist-deep"${fm.deep ? ' checked' : ''}> include tool calls and thinking</label>
+    <div class="dlg-sessions hist-rows" role="list" aria-label="${searching ? 'Search results' : 'Recent conversations'}">${historyRowsHtml(fm)}</div>
+    <div class="desk-folder-meta">
+      <span class="hist-count">${esc(count)}</span>
+      ${searching
+        ? '<button type="button" class="btn" data-do="history-clear" title="Leave the search and show the recent list">Back to recent</button>'
+        : '<button type="button" class="btn" data-do="history-look" title="Ask every host for its recent conversations again now">Look again</button>'}
+    </div>
+    <p class="hist-cover muted">${esc(cover)}</p>
+    <p class="dlg-note">${notes.join(' ')}</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Close</button>
+    </div>
+  `);
+  if (hadFocus) {
+    const box = el.dlgBody.querySelector('#hist-query');
+    box?.focus();
+    box?.setSelectionRange(box.value.length, box.value.length);
+  }
+}
+
+// What is typed, and the switch, live in ui.histForm so a redraw keeps them.
+el.dlgBody.addEventListener('input', (e) => {
+  if (ui.dlgCtx?.kind !== 'history' || !ui.histForm) return;
+  if (e.target.matches('#hist-query')) ui.histForm.query = e.target.value;
+  if (e.target.matches('#hist-deep')) ui.histForm.deep = e.target.checked;
+});
+// Enter in the box searches. Typing alone does not: a search is a walk of
+// every transcript on every host, and one per keystroke would be a dozen.
+el.dlgBody.addEventListener('keydown', (e) => {
+  if (ui.dlgCtx?.kind !== 'history' || e.key !== 'Enter' || !e.target.matches('#hist-query')) return;
+  e.preventDefault();
+  runHistorySearch();
 });

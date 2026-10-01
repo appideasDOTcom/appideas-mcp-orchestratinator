@@ -34,14 +34,17 @@
  *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
  *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
  */
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { discover, listFolder, originOf } from './identity.js';
 import * as W from './window.js';
 import * as M from './mcp.js';
 import * as D from './dialog.js';
+import * as H from './history.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
 /** How long a queued permission answer stays worth delivering. */
@@ -58,6 +61,15 @@ const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
 // The picker's list: newest first, by file. See sessionsIn in window.js.
 const SESSIONS_LIMIT = Number(process.env.ORCH_SESSIONS_LIMIT ?? 30);
 const REQUEST_TIMEOUT_MS = 5_000;
+// A conversation read whole goes up in pages: so many turns, or so many
+// characters, whichever comes first — one long reply must not make a page
+// the board's body limit refuses.
+const READ_PAGE_TURNS = Number(process.env.ORCH_READ_PAGE_TURNS ?? 200);
+const READ_PAGE_CHARS = Number(process.env.ORCH_READ_PAGE_CHARS ?? 256 * 1024);
+// A search of every transcript runs as host/history.js in a process of its
+// own, and is ended if it has not answered in this long.
+const HISTORY_SCRIPT = fileURLToPath(new URL('./history.js', import.meta.url));
+const SEARCH_TIMEOUT_MS = Number(process.env.ORCH_SEARCH_TIMEOUT_MS ?? 60_000);
 /** How long a request for the folder dialog stays worth acting on — shorter
  *  than the 8 s the page waits, on purpose, so a dialog that does open is one
  *  the page is still there to hear about. See D.pickIsStale. */
@@ -500,6 +512,8 @@ class Host {
     this.stopping = false;
     // The folder dialog on this machine's screen, while one is open. See pick().
     this.picking = null;
+    // The search of this machine's transcripts that is running, if one is. See search().
+    this.searching = null;
   }
 
   async request(path, { method = 'GET', body, timeout = REQUEST_TIMEOUT_MS } = {}) {
@@ -848,6 +862,135 @@ class Host {
     return undefined;
   }
 
+  /** The desks this host runs, as the history module wants them. */
+  deskFolders() {
+    return [...this.desks.values()].map((d) => ({ channel: d.channel, agent: d.agent, cwd: d.cwd }));
+  }
+
+  /**
+   * The conversations most recently spoken in, across every desk here — the
+   * History dialog's list. The picker's own bounded read of each folder,
+   * merged; answered as a `history` event naming the request it answers.
+   * Not awaited by the work loop, like everything else here that reads disk
+   * on somebody's click.
+   */
+  async recent(item) {
+    const requestId = item.payload?.request_id ?? null;
+    const at = () => new Date().toISOString();
+    try {
+      const rows = await H.recentAcross(this.deskFolders());
+      return this.emit({ type: 'history', kind: 'recent', request_id: requestId, at: at(), rows }, true);
+    } catch (err) {
+      warn(`recent conversations: ${err.message}`);
+      return this.emit({ type: 'history', kind: 'recent', request_id: requestId, at: at(), rows: [], error: err.message }, true);
+    }
+  }
+
+  /**
+   * Search what was said in every conversation on this machine. See
+   * host/history.js for why it is the transcripts and why it is a process of
+   * its own.
+   *
+   * One search at a time: a new one ends the one before it, because the
+   * person who asked has asked for something else, and two walks of the same
+   * disk answer nobody sooner. The answer is a `history` event — the rows,
+   * how many files were read and how long it took — or what the process said
+   * when it failed, quoted.
+   */
+  search(item) {
+    const requestId = item.payload?.request_id ?? null;
+    const query = typeof item.payload?.query === 'string' ? item.payload.query : '';
+    const deep = item.payload?.deep === true;
+    const say = (more) => this.emit({ type: 'history', kind: 'search', request_id: requestId, query, deep, at: new Date().toISOString(), ...more }, true);
+    if (this.searching) {
+      log(`search: a newer search replaces "${this.searching.query}"`);
+      this.searching.superseded = true;
+      try { this.searching.child.kill('SIGTERM'); } catch { /* already gone */ }
+    }
+    let child;
+    try {
+      child = spawn(process.execPath, [HISTORY_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err) {
+      warn(`search: could not start — ${err.message}`);
+      return say({ rows: [], error: `could not start the search: ${err.message}` });
+    }
+    const mine = { child, query, superseded: false };
+    this.searching = mine;
+    let out = '';
+    let errOut = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { errOut += d; });
+    const timer = setTimeout(() => { mine.timedOut = true; child.kill('SIGTERM'); }, SEARCH_TIMEOUT_MS);
+    child.on('error', (err) => { errOut += err.message; });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (this.searching === mine) this.searching = null;
+      // Replaced by a newer search: nobody is waiting for this one.
+      if (mine.superseded) return;
+      let got = null;
+      try { got = JSON.parse(out); } catch { /* reported below as it came */ }
+      if (code === 0 && got && Array.isArray(got.rows)) {
+        log(`search: "${query}"${deep ? ' (with tool calls and thinking)' : ''} — ${got.rows.length} conversation${got.rows.length === 1 ? '' : 's'} in ${got.files} files, ${got.ms} ms`);
+        say({ rows: got.rows, files: got.files, ms: got.ms });
+        return;
+      }
+      const tail = errOut.trim().split('\n').pop() || out.trim().split('\n').pop() || '';
+      const how = mine.timedOut ? `was ended after ${Math.round(SEARCH_TIMEOUT_MS / 1000)}s` : signal ? `ended on ${signal}` : `ended with exit code ${code}`;
+      warn(`search: "${query}" ${how}${tail ? `: ${tail}` : ''}`);
+      say({ rows: [], error: `the search ${how}${tail ? `: ${tail}` : ''}` });
+    });
+    child.stdin.end(JSON.stringify({ desks: this.deskFolders(), query, deep }));
+    return undefined;
+  }
+
+  /**
+   * Read one of a desk's conversations whole, for somebody to read — the
+   * transcript from its first record, its subagents' transcripts with it,
+   * in the order things were said.
+   *
+   * Nothing is opened, closed or moved, and the desk's own place in its
+   * conversation is not touched: this is a file read, and the offsets the
+   * relay keeps are the relay's. It goes up as `transcript` events in pages,
+   * each naming the request it answers, the last one saying `done` — the
+   * board keeps it in memory only for whoever asked.
+   *
+   * The id is checked again here, though the board checked it: it becomes a
+   * file name on this machine. A conversation that is not in this desk's
+   * folder is said as that, with the folder named.
+   */
+  async readWhole(desk, payload) {
+    const { channel, agent } = desk;
+    const sessionId = typeof payload?.session_id === 'string' ? payload.session_id : '';
+    const requestId = payload?.request_id ?? null;
+    const say = (more) => this.emit({ type: 'transcript', channel, agent, session_id: sessionId, request_id: requestId, at: new Date().toISOString(), ...more }, true);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId)) return say({ error: 'that is not a session id', done: true });
+    const path = W.transcriptPath(desk.cwd, sessionId);
+    const main = await W.readTranscript(path);
+    if (!main.ok) return say({ error: `no conversation ${sessionId} in ${desk.cwd}: ${main.error}`, done: true });
+    const turns = [...main.turns];
+    // A subagent with no meta file yet is read under its id here rather than
+    // waited for (metaGraceMs: 0): the relay waits because a stored turn is
+    // never relabeled, and nothing read this way is stored.
+    for (const sub of await W.subagentTranscripts(path, { metaGraceMs: 0 })) {
+      const r = await W.readTranscript(sub.path, { via: sub.label });
+      if (r.ok) turns.push(...r.turns);
+    }
+    if (turns.every((t) => Number.isFinite(Date.parse(t.at)))) turns.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    log(`${desk.label}: read ${sessionId} whole for the floor — ${turns.length} turn${turns.length === 1 ? '' : 's'}`);
+    let page = [];
+    let chars = 0;
+    for (const t of turns) {
+      page.push({ role: t.role, text: t.text, at: t.at, tool_name: t.tool_name ?? null, tool_input: t.tool_input ?? null, via: t.via ?? null });
+      chars += String(t.text ?? '').length;
+      if (page.length >= READ_PAGE_TURNS || chars >= READ_PAGE_CHARS) {
+        await say({ turns: page });
+        page = [];
+        chars = 0;
+      }
+    }
+    return say({ turns: page, done: true });
+  }
+
   /**
    * A folder taken from the picker outside this host's roots becomes one of
    * them. The roots are where the host looks for desks on its own, and a
@@ -979,6 +1122,16 @@ class Host {
     }
     if (item.kind === 'pick') {
       await this.pick(item);
+      return;
+    }
+    // History is about this machine, not one desk, and reads disk: neither
+    // is awaited, so a message to a desk is never behind somebody's search.
+    if (item.kind === 'recent') {
+      this.recent(item).catch((err) => warn(`recent conversations: ${err.message}`));
+      return;
+    }
+    if (item.kind === 'search') {
+      this.search(item);
       return;
     }
     if (item.kind === 'rescan') {
@@ -1186,6 +1339,11 @@ class Host {
         this.emit({ type: 'sessions', channel: desk.channel, agent: desk.agent, at: new Date().toISOString(), rows }, true);
         break;
       }
+      case 'read':
+        // Not awaited: a long conversation is seconds of reading and posting,
+        // and this loop is the one that delivers messages.
+        this.readWhole(desk, item.payload).catch((err) => warn(`${desk.label}: could not read ${item.payload?.session_id} — ${err.message}`));
+        break;
       case 'reopen':
         await this.reopen(desk, {
           sessionId: typeof item.payload?.session_id === 'string' && item.payload.session_id ? item.payload.session_id : null,
@@ -1313,6 +1471,7 @@ class Host {
     // A folder dialog is the opposite: it is this process's question, and
     // with nobody left to hear the answer it comes off the screen.
     this.picking?.close();
+    try { this.searching?.child.kill('SIGTERM'); } catch { /* already gone */ }
     await this.flush();
     try { await this.request('/api/host/unregister', { method: 'POST', body: { host_id: this.cfg.hostId }, timeout: 2000 }); } catch { /* best effort */ }
   }

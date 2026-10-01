@@ -130,3 +130,7 @@ hook on a moved desk) and a deploy that needs plugin, host and server new
 together. The security boundary is unchanged — the board can already drive
 every desk — but its reach widens to every directory under the host's roots,
 which must be the fence.
+
+## Linux and Windows backends for the folder picker
+
+`host/dialog.js` has a native folder dialog for macOS only, so a Linux or Windows host gets the page's in-page list — issue #4 is held open as partially implemented until each backend is built and watched taking focus from the host's own service, or ruled out.

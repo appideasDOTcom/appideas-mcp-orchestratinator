@@ -348,6 +348,7 @@
     stream: null,        // EventSource for the open desk, if the browser has one
     partial: '',         // the reply being streamed to the open desk right now
     filterWas: null,     // the session the panel was last scoped to
+    reading: null,       // a past conversation open to read in the panel — see readingShell
     timer: null,
     // What each desk's sign last said, kept outside the DOM because the DOM is
     // rebuilt wholesale and would otherwise forget the previous message — and
@@ -2262,6 +2263,130 @@
     });
   }
 
+  /* ---------- a conversation opened to read ---------- */
+
+  /**
+   * A past conversation, opened to read, in its own desk's panel.
+   *
+   * Reading is not resuming, and the panel has to say so before anybody
+   * types: this is not the conversation the desk is on, nothing here is live,
+   * and a message written under it would go to a different conversation. So
+   * the shell is a different shell — a banner naming what is being read with
+   * the way back to live in it, a different ground, and no message box, no
+   * send, no stop, no seat links, no Sessions, no Leave: nothing that acts.
+   * Not disabled controls, which invite the question of why; absent ones.
+   *
+   * The turns are the whole transcript, read by the host (`/api/floor/read`)
+   * rather than the board's copy, which is a tail. They are drawn by the
+   * same turnNode the live panel uses, so a tool call, a thought and a
+   * subagent's words look here exactly as they did when they happened. The
+   * live conversation keeps arriving underneath, into ui.turns, and is drawn
+   * again the moment the person goes back — nothing is lost by reading.
+   */
+  function readingShell(wrap, channel, agent, r) {
+    stashDraft();          // the live shell's box is about to go; what was typed in it is kept
+    wrap.dataset.channel = channel;
+    wrap.dataset.agent = agent;
+    wrap.dataset.reading = r.sessionId;
+    wrap.classList.add('reading');
+    wrap.innerHTML = `
+      <div class="p-head">
+        <div class="p-id">
+          <span class="p-persona-read"></span>
+          <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
+        </div>
+        <button class="btn" data-act="close-panel" title="Close">✕</button>
+      </div>
+      <div class="p-reading" role="status">
+        <div class="p-reading-what"><span class="p-reading-tag">Reading</span> <b class="p-reading-title"></b></div>
+        <div class="p-reading-state muted"></div>
+        <button class="btn" data-act="read-back" title="Leave this conversation and show the one the desk is on now">Back to live</button>
+      </div>
+      <div class="p-turns" id="p-turns"></div>`;
+    wrap.querySelector('.p-reading-title').textContent = r.title || '(untitled)';
+  }
+
+  function renderReading(wrap, d) {
+    const r = ui.reading;
+    const forKey = `${r.channel}|${r.agent}|read|${r.sessionId}`;
+    if (ui.panelFor !== forKey) {
+      readingShell(wrap, r.channel, r.agent, r);
+      ui.panelFor = forKey;
+      r.drawn = 0;
+      closePromptMenu();
+    }
+    wrap.classList.remove('hidden');
+    wrap.querySelector('.p-persona-read').textContent = d.persona;
+    const n = r.rows.length;
+    const turnsText = `${n} turn${n === 1 ? '' : 's'}`;
+    wrap.querySelector('.p-reading-state').textContent = r.error ? r.error
+      : r.done ? `A past conversation, as it was — the whole of it, ${turnsText}. Nothing here is live.`
+        : n ? `Reading it off ${d.hosted?.host ?? 'the host'}… ${turnsText} so far.`
+          : `Asking ${d.hosted?.host ?? 'the host'} to read it…`;
+    wrap.querySelector('.p-reading').classList.toggle('failed', !!r.error);
+    const box = $('p-turns');
+    for (const t of r.rows.slice(r.drawn)) {
+      const node = turnNode(t);
+      // What a search found, marked — so a conversation of two thousand turns
+      // opens on the turn that was looked for rather than at its first word.
+      if (r.find && String(t.text ?? '').toLowerCase().includes(r.find)) node.classList.add('t-found');
+      box.appendChild(node);
+    }
+    r.drawn = n;
+    if (r.done && !r.settled) {
+      r.settled = true;
+      const hit = box.querySelector('.t-found');
+      if (hit) hit.scrollIntoView({ block: 'center' });
+      else box.scrollTop = 0;
+    }
+    for (const w of wrap.querySelectorAll('.t-when[data-at]')) w.textContent = ago(w.dataset.at);
+  }
+
+  /** Fetch one conversation whole: ask, then read pages until the host says that is all. */
+  async function readWhole(r) {
+    const mine = () => ui.reading === r;
+    const q = `channel=${encodeURIComponent(r.channel)}&agent=${encodeURIComponent(r.agent)}&session=${encodeURIComponent(r.sessionId)}`;
+    try {
+      const asked = await fetch('./api/floor/read', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ channel: r.channel, agent: r.agent, session_id: r.sessionId }),
+      });
+      const said = await asked.json().catch(() => ({}));
+      if (!asked.ok) throw new Error(said.error ?? `HTTP ${asked.status}`);
+      const started = Date.now();
+      while (mine()) {
+        const res = await fetch(`./api/floor/read?${q}&from=${r.rows.length}`);
+        const got = await res.json().catch(() => ({}));
+        if (!mine()) return;
+        if (got.request_id === said.request_id) {
+          if (got.error) throw new Error(got.error);
+          if (got.rows?.length) r.rows = r.rows.concat(got.rows);
+          // Done only once every row the board holds has been fetched.
+          if (got.done && r.rows.length >= got.total) { r.done = true; renderPanel(); return; }
+          if (got.at) r.heard = true;
+          renderPanel();
+        }
+        if (!r.heard && Date.now() - started > 8000) throw new Error('The host did not answer in 8 s.');
+        await new Promise((ok) => setTimeout(ok, got.rows?.length ? 0 : 400));
+      }
+    } catch (e) {
+      if (!mine()) return;
+      r.error = String(e.message ?? e);
+      renderPanel();
+    }
+  }
+
+  /** Leave the reading view: the live shell is rebuilt and every live turn drawn again. */
+  function stopReading() {
+    if (!ui.reading) return;
+    ui.reading = null;
+    ui.panelFor = null;
+    ui.renderedTurn = 0;
+    const wrap = $('floor-panel');
+    wrap.classList.remove('reading');
+    delete wrap.dataset.reading;
+  }
+
   function renderPanel() {
     const wrap = $('floor-panel');
     if (!ui.open) {
@@ -2273,6 +2398,9 @@
       // desk let a probe read "alpha's panel is up" off an empty box.
       delete wrap.dataset.channel;
       delete wrap.dataset.agent;
+      delete wrap.dataset.reading;
+      wrap.classList.remove('reading');
+      ui.reading = null;
       ui.panelFor = null;
       // The menu lives on the body, not in the panel, so emptying the panel does
       // not take it with it — it would be left floating over the floor, pointing
@@ -2286,6 +2414,13 @@
     const d = c?.desks.find((x) => x.agent === agent);
     if (!d) {
       wrap.classList.add('hidden');
+      return;
+    }
+    // A past conversation is open to read on this desk: its own shell, and
+    // none of what follows — no composer to gate, no alert, no live turns.
+    if (ui.reading && ui.reading.channel === channel && ui.reading.agent === agent) {
+      if (!ui.stream) ui.delivery = d.delivery ?? null;
+      renderReading(wrap, d);
       return;
     }
     // A message the window is holding, from the poll rather than the stream.
@@ -3022,7 +3157,10 @@
         ui.delivery = null;
         ui.sinceTurn = 0;
         ui.renderedTurn = 0;
-        $('p-turns')?.replaceChildren();
+        // Not while a past conversation is being read: the box on screen is
+        // the reading view's then, and the live turns are redrawn from zero
+        // when the person goes back to them.
+        if (!ui.reading) $('p-turns')?.replaceChildren();
         await loadTurns(true);
       } else {
         await loadTurns(false);
@@ -3053,6 +3191,9 @@
   /* ---------- events ---------- */
 
   function openDesk(channel, agent) {
+    // Opening a desk is opening its live conversation: a past one being read
+    // here, or on the desk before, is put away.
+    stopReading();
     ui.open = { channel, agent };
     ui.turns = [];
     ui.sending = [];
@@ -3227,6 +3368,14 @@
     } else if (act.dataset.act === 'close-panel') {
       ui.open = null;
       render();
+    } else if (act.dataset.act === 'read-back') {
+      stopReading();
+      ui.stick = true;
+      renderPanel();
+    } else if (act.dataset.act === 'history') {
+      // app.js owns the dialogs on this page; a row in it comes back here
+      // through window.floorRead.
+      window.historyDialog?.();
     } else if (act.dataset.act === 'send') {
       await sendChat();
     } else if (act.dataset.act === 'ask-tab') {
@@ -3458,6 +3607,25 @@
   window.floorOpenDesk = (channel, agent) => {
     if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
     openDesk(channel, agent);
+  };
+  /**
+   * Open one of a desk's conversations to read, in that desk's panel — from
+   * the History dialog. The desk's panel is opened if it is not already (its
+   * live conversation loads underneath, as it would), and the reading view
+   * goes over it. `find` is what a search was for: the turns that contain it
+   * are marked, and the view opens on the first of them.
+   */
+  window.floorRead = (channel, agent, sessionId, title, { find = null } = {}) => {
+    if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
+    if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) openDesk(channel, agent);
+    else stopReading();
+    ui.reading = {
+      channel, agent, sessionId, title: title ?? null,
+      find: typeof find === 'string' && find.trim() ? find.trim().toLowerCase() : null,
+      rows: [], done: false, error: null, heard: false, drawn: 0, settled: false,
+    };
+    renderPanel();
+    readWhole(ui.reading);
   };
   window.floorNudged = (channel, agent, text) => {
     // Whichever surface sent it, the desk rings. The board's dialog has already
