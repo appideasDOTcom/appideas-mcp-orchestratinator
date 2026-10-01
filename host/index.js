@@ -962,6 +962,7 @@ class Host {
         return say('failed', { start, error: listing.error });
       }
       log(`the folder dialog chose ${listing.path}`);
+      this.emit(listing);
       return say('chosen', { start, path: listing.path, parent: listing.parent });
     }).catch((err) => warn(`folder dialog: ${err.message}`));
     return say('open', { start });
