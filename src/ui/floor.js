@@ -583,6 +583,83 @@
     pop.style.top = `${Math.round(top)}px`;
   }
 
+  /* ---------- a question form: what the page decides ---------- */
+
+  /**
+   * Which questions of a form have no answer yet, by index.
+   *
+   * The page's copy of `unansweredOf` in src/floor.js, which is where the
+   * ruling and the measurements behind it are written down. The server decides
+   * — it refuses the POST — and this exists so Submit can show the question
+   * without a round trip, and so the count under the form is the same count.
+   * No DOM in it: test/floor.mjs lifts this section out by its two comments and
+   * runs it against the server's over the same cases. If the slice fails, the
+   * section moved — fix the markers there.
+   *
+   * `questions` is `[{ options: [{ n, other }] }]`, `answers` is what
+   * `askAnswers` reads off the form.
+   */
+  function askUnanswered(questions, answers) {
+    const qs = Array.isArray(questions) ? questions : [];
+    const open = [];
+    for (let i = 0; i < qs.length; i++) {
+      const a = answers?.[i] ?? {};
+      const opts = Array.isArray(qs[i]?.options) ? qs[i].options : [];
+      const chosen = (Array.isArray(a.choose) ? a.choose : []).map((n) => opts.find((o) => o.n === n)).filter(Boolean);
+      const typed = typeof a.text === 'string' && a.text.trim() !== '';
+      // A free-text choice with nothing typed is not an answer, whatever else
+      // is ticked beside it.
+      if (!chosen.length || (!typed && chosen.some((o) => o.other))) open.push(i);
+    }
+    return open;
+  }
+
+  /** What the line under the form says, or null when every question has an answer. */
+  function askWarnText(open, total) {
+    if (!open.length) return null;
+    return `\u26a0 ${total - open.length} of ${total} answered \u2014 Submit sends nothing until every question has an answer`;
+  }
+
+  /**
+   * What the alert box offers for an open prompt, as one word.
+   *
+   * Pulled out of the template because the rule that matters is a negative
+   * one, and a negative spread over four conditions is how it was broken: a
+   * question is never offered as a menu (issue #7, item 3). The board knows a
+   * prompt is a question before anyone reads the pane — the hook names the
+   * tool — so whenever it has no form to draw for one, this says
+   * `question-unread`, and the box says so and offers the window. Three ways
+   * used to end at Approve / Deny / Cancel instead:
+   *
+   *   - the host found no form on the pane and read it as a flat menu
+   *     (measured: a form taller than an 80x24 pane loses its header row);
+   *   - the host never answered, and the reading spinner gave up to "the
+   *     ordinary buttons";
+   *   - and with nothing pressable at all, the guess buttons — where Yes
+   *     presses `1`, which on a question is its first choice.
+   *
+   * `reading` is the caller's, because it has a deadline and this has no clock.
+   */
+  function promptOffer(req, reading) {
+    if (!req) return 'none';
+    if (req.questions?.length) return 'form';
+    if (reading) return 'reading';
+    if (req.startup) return 'startup';
+    if (req.tool === 'AskUserQuestion') return 'question-unread';
+    // An alert nobody could read. Not "no request object" — a permission_prompt
+    // notification makes one of those with every choice null, which is exactly
+    // the case in question. What decides it is whether anything came back that
+    // can be pressed: no approve, no deny, no numbered choices.
+    //
+    // `req.read` is the difference between "the host looked and found nothing"
+    // and "nobody has looked yet". Without it this fired for the second or two
+    // every ordinary prompt spends being read, replacing Approve and Deny with
+    // guess buttons — and a Yes pressed in that window is a blind keystroke at a
+    // prompt the board never saw. Measured live: four of them in a row.
+    const pressable = !!req.choices?.approve || !!req.choices?.deny || (req.choices?.extras ?? []).length > 0;
+    return req.read && !pressable ? 'unreadable' : 'menu';
+  }
+
   /* ---------- a question the window is asking ---------- */
 
   /**
@@ -634,24 +711,49 @@
   }
 
   /**
-   * The same warning the window gives, in the same words.
+   * How many questions have an answer, said under the form.
    *
+   * This used to be the window's own warning with the window's own leniency:
    * Claude Code's review screen says "You have not answered all questions" and
-   * still lets you submit. Measured, not assumed — a partly-filled form went
-   * through and came back with one answer missing. So the floor warns and does
-   * not block either: matching what an operator is already used to beats being
-   * stricter than the thing we are a second door onto.
+   * still lets you submit, and the floor matched it — "you can still submit" —
+   * on the argument that a second door should not be stricter than the first.
+   * Ruled out on issue #7 (2026-10-01): a part-filled form sent from here
+   * half-sends, the agent carries on one answer short, and the host says
+   * "answered". Now Submit goes to the first question without an answer and
+   * sends nothing; the person at the window can still do what the window lets
+   * them.
+   *
+   * Counted, because a warning under a form showing one question of three does
+   * not say which. Submit is what says which, by showing it.
    */
   function askWarn(form) {
-    const qs = [...form.querySelectorAll('.p-q')];
-    const done = qs.filter((q) => q.querySelector('input:checked')).length;
     const warn = form.querySelector('.p-ask-warn');
     if (!warn) return;
-    warn.classList.toggle('hidden', done === qs.length);
-    // Counted, because "you have not answered all questions" under a form
-    // showing one of them does not say which. The button above says it submits
-    // all of them; this says how many of them have anything in them.
-    warn.textContent = `\u26a0 ${done} of ${qs.length} answered \u2014 you can still submit`;
+    const shape = askShape(form);
+    const text = askWarnText(askUnanswered(shape, askAnswers(form)), shape.length);
+    warn.classList.toggle('hidden', !text);
+    if (text) warn.textContent = text;
+  }
+
+  /** The form as `askUnanswered` wants it: each question's rows, and which one
+   *  is the free-text row. Read off the DOM for the same reason the answers
+   *  are — it is what the operator is looking at. */
+  function askShape(form) {
+    return [...form.querySelectorAll('.p-q')].map((q) => ({
+      options: [...q.querySelectorAll('input[type="radio"],input[type="checkbox"]')]
+        .map((i) => ({ n: Number(i.value), other: i.dataset.other === '1' })),
+    }));
+  }
+
+  /** Bring one question to the front, the way its tab does. */
+  function askShow(form, index) {
+    const want = String(index);
+    for (const t of form.querySelectorAll('.p-tab')) t.classList.toggle('on', t.dataset.q === want);
+    for (const q of form.querySelectorAll('.p-q')) q.classList.toggle('hidden', q.dataset.q !== want);
+    // A free-text choice ticked with nothing in it is the one gap that has
+    // somewhere to put the cursor.
+    const field = form.querySelector(`.p-q[data-q="${want}"] .p-other`);
+    if (field && !field.disabled && !field.value.trim()) field.focus();
   }
 
   /** Read the form back. Only the free text of a choice that was actually ticked. */
@@ -2482,8 +2584,10 @@
     // nothing else.
     // Reading is a state with a deadline. A host that never comes back would
     // otherwise leave a spinner where the answer should be, and no way to say
-    // no — so past this it falls through to the ordinary buttons, which is what
-    // was there before any of this and is at least something to press.
+    // no. Past it the box used to fall through to Approve / Deny / Cancel —
+    // "at least something to press" — and only a question is ever `reading`,
+    // so that was a question drawn as a menu. Now it says the question could
+    // not be read and offers the window and Cancel: see promptOffer.
     const reading = !!req?.reading && Date.now() - Date.parse(req.at ?? 0) < READ_GIVE_UP_MS;
     // What this waits on is not the prompt closing. /api/floor/answer clears the
     // desk's awaiting state as soon as it queues the work, so by the time the
@@ -2500,21 +2604,12 @@
       ui.answering = null;
     }
     const sendingAnswers = !!answering && ui.answering === answering;
-    // An alert nobody could read. Not "no request object" — a permission_prompt
-    // notification makes one of those with every choice null, which is exactly
-    // the case in question. What decides it is whether anything came back that
-    // can be pressed: no approve, no deny, no numbered choices, no form.
-    //
-    // Before this, that state rendered buttons saying Approve and Deny, which
-    // claim an understanding nobody has. The window might be asking something
-    // else entirely.
-    // `req.read` is the difference between "the host looked and found nothing"
-    // and "nobody has looked yet". Without it this fired for the second or two
-    // every ordinary prompt spends being read, replacing Approve and Deny with
-    // guess buttons — and a Yes pressed in that window is a blind keystroke at a
-    // prompt the board never saw. Measured live: four of them in a row.
-    const unreadable = !!req && !!req.read && !req.questions?.length
-      && !req.choices?.approve && !req.choices?.deny && !(req.choices?.extras ?? []).length;
+    // Which of the box's bodies is drawn — a form, the reading spinner, a
+    // startup question's rows, the menu, or one of the two ways of saying the
+    // board could not read what the window is asking. Decided in one place:
+    // see promptOffer, and why a question is never the menu.
+    const offer = promptOffer(req, reading);
+    const unreadable = offer === 'unreadable';
     const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
     const alertSig = sendingAnswers
       ? `sending|${answering.request_id}`
@@ -2523,7 +2618,7 @@
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${unreadable ? 'unreadable' : ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
@@ -2562,12 +2657,21 @@
                  <button class="btn" data-act="press" data-choice="interrupt" title="Stop the turn instead of answering it">Interrupt</button>
                </div>
              </div>` : ''}
+             ${offer === 'question-unread' ? `<div class="p-unknown p-question-unread">
+               <div class="p-unknown-why">This is a question, and the board could not read its choices
+                 \u2014 ${esc(req.form_unread ?? 'the host has not sent back what the window is showing')}.
+                 Nothing here would be an answer to it: open the window to answer it there, or cancel the question.</div>
+               <div class="p-decide">
+                 <button class="btn primary" data-act="ask-open" title="A terminal on this desk\u2019s own window, where the question is">Open the window</button>
+                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel the question</button>
+               </div>
+             </div>` : ''}
              ${req?.startup ? `<div class="p-startup">
                <div class="p-unknown-why">Nothing here is answered for you. Pick a row and that row is chosen in the window, the same as pressing it there.</div>
                <div class="p-more">${req.options.map((o) =>
                  `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(o.text)}</span></button>`).join('')}</div>
              </div>` : ''}
-             ${req && !req.questions?.length && !reading && !unreadable && !req.startup ? `<div class="p-decide">
+             ${offer === 'menu' ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="${req.choices?.denyAsks ? 'deny-open' : 'decide'}" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
                <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
@@ -3379,15 +3483,18 @@
     } else if (act.dataset.act === 'send') {
       await sendChat();
     } else if (act.dataset.act === 'ask-tab') {
-      const form = act.closest('.p-ask');
-      const want = act.dataset.q;
-      for (const t of form.querySelectorAll('.p-tab')) t.classList.toggle('on', t.dataset.q === want);
-      for (const q of form.querySelectorAll('.p-q')) q.classList.toggle('hidden', q.dataset.q !== want);
+      askShow(act.closest('.p-ask'), act.dataset.q);
     } else if (act.dataset.act === 'ask-submit') {
       const form = act.closest('.p-ask');
       const answers = askAnswers(form);
-      if (!answers.some((a) => a.choose.length)) {
-        flash(act, 'nothing chosen yet');
+      // A form with a question unanswered is never sent: Submit shows the
+      // first one instead. The server refuses the same form by the same rule
+      // (`unansweredOf`), so this is the short way round, not the gate.
+      const open = askUnanswered(askShape(form), answers);
+      if (open.length) {
+        askShow(form, open[0]);
+        askWarn(form);
+        flash(act, 'this one has no answer yet');
         return;
       }
       // The spinner goes up on the POST succeeding, not on the click. Not for
@@ -3419,6 +3526,9 @@
           const body = await r.json().catch(() => ({}));
           flash(act, String(body.error ?? `that didn't send (${r.status})`).slice(0, 60));
           for (const b of form.querySelectorAll('button')) b.disabled = false;
+          // The board found a question unanswered that this page did not —
+          // a page older than the server, say. It names which; show it.
+          if (body.code === 'unanswered' && Number.isInteger(body.question)) askShow(form, body.question);
         }
       } catch (err) {
         flash(act, String(err.message).slice(0, 60));
@@ -3534,6 +3644,11 @@
       await moveSeat(act.dataset.act);
     } else if (act.dataset.act === 'attach' || act.dataset.act === 'claude') {
       await attachTmux(act.dataset.act);
+    } else if (act.dataset.act === 'ask-open') {
+      // The same door as "Open in Claude" below the box, offered where the
+      // unread question is. One implementation: its spinner and its refusals
+      // are the link's.
+      await attachTmux('claude');
     } else if (act.dataset.act === 'take-desk') {
       // app.js owns the dialogs on this page. The channel comes from the
       // button when a room's control opened it, else from the floor being
@@ -3831,13 +3946,16 @@
     const box = e.target.closest?.('.p-q input[type="radio"],.p-q input[type="checkbox"]');
     if (!box) return;
     const q = box.closest('.p-q');
-    askWarn(box.closest('.p-ask'));
     const other = q.querySelector('input[data-other="1"]');
     const field = q.querySelector('.p-other');
-    if (!field) return;
-    field.disabled = !other?.checked;
-    if (!field.disabled) field.focus();
-    else field.value = '';
+    if (field) {
+      field.disabled = !other?.checked;
+      if (!field.disabled) field.focus();
+      else field.value = '';
+    }
+    // After the field, not before: whether a free-text choice counts as an
+    // answer depends on what is typed in it.
+    askWarn(box.closest('.p-ask'));
   });
 
   // Every keystroke into the box is filed under its desk as it happens, so no
@@ -3845,6 +3963,10 @@
   // that loses it. See the drafts note above stashDraft.
   document.addEventListener('input', (e) => {
     if (e.target?.id === 'p-text') stashDraft();
+    // Typing into a free-text choice is what turns it into an answer, so the
+    // count under the form follows the words.
+    const form = e.target?.classList?.contains('p-other') ? e.target.closest('.p-ask') : null;
+    if (form) askWarn(form);
   });
 
   document.addEventListener('keydown', (e) => {

@@ -532,6 +532,156 @@ function askForOptions(store, live, channel, agent, requestId) {
 }
 
 /**
+ * A question form, built from the tool call's own input rather than read off
+ * the pane — in the shape `questionOf` in host/window.js returns, so the panel
+ * and `answerSteps` cannot tell the difference.
+ *
+ * For the form the host cannot read. A window draws on the alternate screen
+ * and cuts the top off anything taller than its pane, and a window the host
+ * opened is 80x24 until somebody attaches: measured on 2.1.284 (issue #7), a
+ * one-question form needing 26 rows lost its header row, `questionOf` finds a
+ * form by that row, and the floor drew Approve / Deny / Cancel over a
+ * question. The words were never missing, though — the floor hook has sent
+ * `tool_input.questions` with every PermissionRequest since 2026-09-11, and
+ * until now it was used for the summary line and nothing else.
+ *
+ * What this has to get right is the row numbers, because they are the keys
+ * that get pressed. Measured on real windows, the builder set against the pane
+ * reader on the same forms (see `form-from-input` in test/floor.mjs for the
+ * captured cases): the choices are numbered from 1 in the order given, and the
+ * window adds its own free-text row straight after them — "Type something."
+ * on a single-select, "Type something" on a multi. Its last row, "Chat about
+ * this", is not an answer and is left out here as it is there. A lone
+ * single-select draws no tab strip; anything else does.
+ *
+ * Null when the numbering cannot be trusted: no questions, a choice with no
+ * label, or a list long enough that the hook may have cut it
+ * (plugin/hooks/report.mjs keeps 8 questions of 12 choices; the tool allows 4
+ * of 4). A form that cannot be built is said to be unreadable; it is never
+ * guessed at.
+ */
+export function formFromInput(input) {
+  const asked = Array.isArray(input) ? input : [];
+  if (!asked.length || asked.length >= 8) return null;
+  const strip = asked.length > 1 || asked.some((q) => q?.multiSelect === true);
+  const questions = [];
+  for (let i = 0; i < asked.length; i++) {
+    const q = asked[i];
+    const given = Array.isArray(q?.options) ? q.options : [];
+    if (!str(q?.question) || !given.length || given.length >= 12 || given.some((o) => !str(o?.label))) return null;
+    const multi = q.multiSelect === true;
+    const options = given.map((o, k) => ({
+      n: k + 1,
+      text: str(o.label),
+      ...(str(o.description) ? { detail: str(o.description) } : {}),
+      checked: multi ? false : null,
+      other: false,
+    }));
+    options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
+    questions.push({
+      tab: i, tab_title: str(q.header), strip, question: str(q.question),
+      kind: multi ? 'multi' : 'single', options, cursor: 0, submit: multi,
+    });
+  }
+  const tabs = questions.map((q) => ({ title: q.tab_title ?? q.question, answered: false, submit: false }));
+  if (strip) tabs.push({ title: 'Submit', answered: false, submit: true });
+  return { questions, tabs };
+}
+
+/**
+ * Which form is drawn for a question: the host's reading of the pane, or the
+ * call's own input.
+ *
+ * The pane's, when it is whole — as many questions as the call asked. Its row
+ * numbers are the ones observed on the window, which is the reason to prefer
+ * it; its words are not, so the question and each choice's description are
+ * taken from the call where the row matches. The pane gives one screen line of
+ * a question that wraps, with the window's own left bar on it: measured, "│
+ * The error you see … and a refusal by the board" for a question of 242
+ * characters.
+ *
+ * The call's, when the pane's is missing or short. Both were measured on
+ * 2.1.284 at 80x24: no form at all for a one-question form taller than the
+ * pane, and one question of two where only the second tab was too tall. A cut
+ * form still takes its keys — `2` answered the first, `Left Left Left 2 1 3
+ * Tab` and a confirm answered the second, each as chosen — so the form built
+ * from the call is answered the same way as one that was read.
+ *
+ * Neither: null, and the panel says the question could not be read. It is
+ * never drawn as a menu.
+ */
+export function settleForm(asked, read, readTabs = null) {
+  const pane = Array.isArray(read) && read.length ? read : null;
+  const call = asked?.questions?.length ? asked : null;
+  if (pane && (!call || pane.length === call.questions.length)) {
+    return {
+      from: 'pane',
+      tabs: Array.isArray(readTabs) ? readTabs : null,
+      questions: call ? pane.map((q, i) => withWords(q, call.questions[i])) : pane,
+      said: `a form of ${pane.length} question(s) read off the pane`,
+    };
+  }
+  if (call) {
+    return {
+      from: 'call',
+      tabs: call.tabs,
+      questions: call.questions,
+      said: `${pane ? `the host read ${pane.length} of ${call.questions.length} questions` : 'the host read no form'}` +
+        ' off the pane — drawing the form from the input of the call itself',
+    };
+  }
+  return { from: null, tabs: null, questions: null, said: 'a question with no form from the host and none from the hook' };
+}
+
+/** A question as the pane has it, with the call's words where the rows agree. */
+function withWords(q, c) {
+  if (!c || (q.tab_title && c.tab_title && q.tab_title !== c.tab_title)) return q;
+  return {
+    ...q,
+    question: c.question ?? q.question,
+    options: (q.options ?? []).map((o) => {
+      const same = c.options.find((x) => x.n === o.n && x.text === o.text);
+      return same?.detail ? { ...o, detail: same.detail } : o;
+    }),
+  };
+}
+
+/**
+ * Which questions of a form have no answer yet, by index.
+ *
+ * A form with a question unanswered is never sent to the window — costmo's
+ * ruling on issue #7 (2026-10-01), replacing warn-and-allow. The window's own
+ * review screen warns "You have not answered all questions" and then takes
+ * Enter anyway, and the floor used to match that: a blank became a bare Tab.
+ * Measured on 2.1.284, that half-sends the form — it submits with what there
+ * is and the agent carries on one answer short, while the host logs it as
+ * answered.
+ *
+ * A free-text choice with nothing typed is not an answer either. Its digit
+ * opens a field, and the next key of the script is typed into it: measured as
+ * `4` then `1` leaving the form standing with "1" in the field and nothing
+ * answered. So a ticked free-text row with no words makes the question
+ * unanswered whatever else is ticked beside it, rather than being dropped
+ * quietly from a multi-select the operator can see it ticked on.
+ *
+ * The page asks itself the same thing before it posts (`askUnanswered` in
+ * src/ui/floor.js) so that Submit can show the question. This is the one that
+ * decides; test/floor.mjs runs both over the same cases so they cannot drift.
+ */
+export function unansweredOf(questions, answers) {
+  const qs = Array.isArray(questions) ? questions : [];
+  const open = [];
+  for (let i = 0; i < qs.length; i++) {
+    const a = answers?.[i] ?? {};
+    const opts = Array.isArray(qs[i]?.options) ? qs[i].options : [];
+    const chosen = (Array.isArray(a.choose) ? a.choose : []).map((n) => opts.find((o) => o.n === n)).filter(Boolean);
+    const typed = typeof a.text === 'string' && a.text.trim() !== '';
+    if (!chosen.length || (!typed && chosen.some((o) => o.other))) open.push(i);
+  }
+  return open;
+}
+
+/**
  * The keys that turn a filled-in form into an answered one.
  *
  * Every mechanic here was measured on a real prompt, and two of them are not
@@ -549,10 +699,16 @@ function askForOptions(store, live, channel, agent, requestId) {
  *
  * `answers` is one entry per question: { choose: [n, …], text } — the numbers
  * are the window's own, and `text` is what to type into its free-text choice.
+ *
+ * A form with a question unanswered has no keys at all: see `unansweredOf`.
+ * The route refuses it before this is reached; returning nothing here is what
+ * keeps every other caller — a driver, a test, the next route — from pressing
+ * half of a form into a window.
  */
 export function answerSteps(questions, answers) {
   const qs = Array.isArray(questions) ? questions : [];
   const steps = [];
+  if (unansweredOf(qs, answers).length) return steps;
   // To a known end. One press per tab is always enough, and pressing left at the
   // left end does nothing. Only when there is a strip to walk: a one-question
   // form draws none (`strip: false`, read off the pane), and its digit both
@@ -625,24 +781,22 @@ export function answerSteps(questions, answers) {
       steps.push({ key: 'Enter', final: true, clarify: true });
       return steps;
     } else {
-      const n = chosen[0];
-      if (n) {
-        // One key. The digit *selects* on a single-select — it does not merely
-        // move the cursor — and selecting advances to the next tab by itself.
-        //
-        // There used to be an Enter after it, on the measured-once belief that
-        // the digit only moved. Recorded frame by frame, that Enter lands on the
-        // tab the digit already advanced to and answers *that* question with
-        // whatever sits highlighted there, which is always its first option. So
-        // the sequence answered question 2 for the operator before reaching it,
-        // and the only rounds that ever looked correct were the ones where the
-        // operator had chosen option 1 anyway. The visible half was the last key
-        // having nothing to press: "the window stopped asking after 6 of 7
-        // steps", reported while the form had in fact submitted.
-        steps.push({ key: String(n) });
-      } else {
-        steps.push({ key: 'Tab' });
-      }
+      // One key. The digit *selects* on a single-select — it does not merely
+      // move the cursor — and selecting advances to the next tab by itself.
+      //
+      // There used to be an Enter after it, on the measured-once belief that
+      // the digit only moved. Recorded frame by frame, that Enter lands on the
+      // tab the digit already advanced to and answers *that* question with
+      // whatever sits highlighted there, which is always its first option. So
+      // the sequence answered question 2 for the operator before reaching it,
+      // and the only rounds that ever looked correct were the ones where the
+      // operator had chosen option 1 anyway. The visible half was the last key
+      // having nothing to press: "the window stopped asking after 6 of 7
+      // steps", reported while the form had in fact submitted.
+      //
+      // Always a choice by here. A blank used to be stepped past with a bare
+      // Tab, and that Tab is what half-sent a form — see `unansweredOf`.
+      steps.push({ key: String(chosen[0]) });
     }
   }
 
@@ -851,12 +1005,18 @@ export function ingestHookEvent(store, body, live = null) {
       live?.pending.set(key, {
         request_id: `${sessionId}:${body.tool_name ?? 'tool'}:${Date.parse(new Date().toISOString())}`,
         tool: str(body.tool_name) ?? 'tool',
-        // A question is a form, and the form is on the pane rather than in this
-        // event — the host has to go and read it, which takes a walk of the tabs
-        // and a second or two. Until it comes back there is nothing to show, and
-        // showing Approve/Deny/Cancel in the meantime offered an answer to a
-        // question that was not the one being asked.
+        // A question is a form, and the host goes and reads it off the pane —
+        // a walk of the tabs, a second or two. Until it comes back the panel
+        // shows a spinner, because showing Approve/Deny/Cancel in the meantime
+        // offered an answer to a question that was not the one being asked.
+        // (This used to say the form is on the pane "rather than in this
+        // event". It is in this event too, since 2026-09-11 — see `asked`.)
         reading: str(body.tool_name) === 'AskUserQuestion',
+        // The form as the call asked it, kept for the pane that cannot show
+        // it: see `formFromInput`, and the 'prompt' case below for which of
+        // the two is drawn. Null for anything that is not a question, and for
+        // a hook too old to carry the questions.
+        asked: str(body.tool_name) === 'AskUserQuestion' ? formFromInput(body.tool_input?.questions) : null,
         summary: clip(summary, 500),
         message: clip(body.notification_message ?? body.message, 500),
         at: new Date().toISOString(),
@@ -1501,6 +1661,38 @@ function applyHostEvent(store, live, hostId, ev) {
       // Why there are none, kept so the panel can say something better than
       // offering nothing without explanation.
       req.options_error = req.options.length ? null : (str(ev.reason) ?? null);
+      // A question is never a menu (issue #7, item 3). When the host finds no
+      // form on the pane it reads the pane as a flat menu instead, which is
+      // right for a permission prompt and was drawn for a question too:
+      // Approve on its first choice, Deny on the first one starting "No".
+      // The board knows which it is before the pane is read — the hook names
+      // the tool — so for a question the menu is dropped here, whatever came
+      // back, and one of three things is drawn instead.
+      //
+      // And when the hook did not say — a prompt announced only by its
+      // Notification has no tool name — the menu itself can: "Chat about
+      // this" is the last row of every question form and of nothing else
+      // (the measured misreading was rows 1–3, "Type something.", "Chat about
+      // this"). A menu ending on it is a question the host could not read.
+      if (req.tool !== 'AskUserQuestion' && req.options.some((o) => /^chat about this$/i.test(String(o.text ?? '').trim()))) {
+        req.tool = 'AskUserQuestion';
+      }
+      if (req.tool === 'AskUserQuestion') {
+        const settled = settleForm(req.asked, req.questions, req.tabs);
+        req.options = [];
+        req.options_error = null;
+        req.questions = settled.questions;
+        req.tabs = settled.tabs;
+        // Which reading the form is, and why there is none when there is none.
+        // The panel says the second out loud; the first is for whoever reads
+        // the payload wondering where a form came from.
+        req.form_from = settled.from;
+        req.form_unread = settled.questions
+          ? null
+          : clip(str(ev.form_error) ?? str(ev.reason) ?? 'the host sent back no form for it', 300);
+        console.log(`[orchestratinator] ${channel}/${agent}: ${settled.said}` +
+          `${settled.questions ? '' : ` — ${req.form_unread}`}`);
+      }
       // The host has now looked. Until this arrives, "no choices" means nobody
       // has read the window yet — not that the window offered nothing. Without
       // the distinction the panel showed its could-not-read buttons for the
@@ -1912,8 +2104,11 @@ export function buildFloor(store, live = null, sessions = null) {
           // The prompt, plus which of its choices are the three that always
           // show and which get a row of their own. Sorted here so the panel and
           // the endpoint cannot disagree about what "deny" presses.
+          // `asked` is the board's own copy of a question's input, kept to
+          // draw from if the pane cannot be read; what is drawn is already in
+          // `questions`, so it is not sent a second time.
           permission: pendingReq
-            ? { ...pendingReq, choices: promptChoices(pendingReq.options) }
+            ? { ...pendingReq, asked: undefined, choices: promptChoices(pendingReq.options) }
             : null,
           // A message the window has taken but not yet read. Carried on the
           // desk so a page that arrives mid-queue is in the same state as one
@@ -3108,6 +3303,19 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     }
     if (!pendingReq.questions?.length) {
       return res.status(409).json({ error: 'That prompt is not a question form.', code: 'not_a_form' });
+    }
+    // Refused whole, and before anything below clears the desk: the prompt
+    // stays open exactly as it was, and `question` is what lets the page show
+    // the one that needs answering. See `unansweredOf` for the ruling.
+    const blank = unansweredOf(pendingReq.questions, answers);
+    if (blank.length) {
+      const n = pendingReq.questions.length;
+      return res.status(400).json({
+        error: n > 1 ? `Question ${blank[0] + 1} of ${n} has no answer yet.` : 'That question has no answer yet.',
+        code: 'unanswered',
+        question: blank[0],
+        unanswered: blank,
+      });
     }
 
     const steps = answerSteps(pendingReq.questions, answers);

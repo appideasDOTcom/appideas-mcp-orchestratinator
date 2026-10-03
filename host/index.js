@@ -1210,9 +1210,13 @@ class Host {
         // indistinguishable from one that was never read — and the panel falls
         // back to Approve/Deny, which looks like a working answer to the wrong
         // question.
+        // A form that was there and could not be read whole is said here too:
+        // "read 5 option(s)" was the only trace of a question the floor then
+        // drew as Approve / Deny (issue #7). Not for `not_a_form`, which is
+        // every ordinary permission prompt.
         log(`${desk.channel}/${desk.agent}: read ${isForm
           ? `a form of ${form.questions.length} question(s): ${form.questions.map((q) => `${q.tab_title ?? '?'}[${q.kind},${(q.options ?? []).length}]`).join(' ')}`
-          : `${(r.options ?? []).length} option(s)${r.ok ? '' : ` — ${r.error}`}`}`);
+          : `${(r.options ?? []).length} option(s)${r.ok ? '' : ` — ${r.error}`}${form.code === 'form_cut' ? ` — ${form.error}` : ''}`}`);
         this.emit({
           type: 'prompt', channel: desk.channel, agent: desk.agent,
           request_id: item.payload?.request_id ?? null,
@@ -1221,6 +1225,12 @@ class Host {
           asked: isForm ? null : (r.ok ? r.asked ?? null : null),
           questions: isForm ? form.questions : null,
           tabs: isForm ? form.tabs : null,
+          // Why there is no form, in the reader's own words. The board knows
+          // which tool is asking and this host does not: for a permission
+          // prompt "no form header on the pane" is the ordinary case and goes
+          // unused, for an AskUserQuestion it is what the floor says when it
+          // has to say it could not read the question.
+          form_error: isForm ? null : (form.error ?? null),
           reason: r.ok ? null : r.error,
           // The prose above is for the operator; this is for the board. "There
           // is no question on this pane" and "there is a question I could not
@@ -1243,9 +1253,20 @@ class Host {
         const r = await W.answerQuestion(desk.cwd, steps);
         if (!r.ok) {
           warn(`${desk.label}: could not answer the question — ${r.error}`);
+          // Anything short of the form being gone from the pane arrives here
+          // (issue #7): answerQuestion no longer returns ok for a form left on
+          // its review screen or standing anywhere else, so this is the only
+          // thing said about one, and `answer_failed` is what raises the desk
+          // again with the form.
+          //
+          // Two wordings, because they are different facts. A form still on
+          // the pane has, or may have, the operator's choices in it — "did not
+          // land" was said about exactly that once, about answers that had
+          // landed. What is known is that it was not submitted.
+          const standing = r.code === 'still_asking' || r.code === 'not_confirmed';
           this.emit({
             type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed',
-            message: `your answers did not land — ${r.error}`,
+            message: `${standing ? 'the form was not submitted' : 'your answers did not land'} — ${r.error}`,
           }, true);
           break;
         }

@@ -211,6 +211,56 @@ skill: it records panes and the board's awaiting state for a window that already
 exists. Use that one for a desk that is misbehaving, this one for a question
 about Claude Code itself.
 
+## A question form
+
+[`form.mjs`](form.mjs) raises a real AskUserQuestion on the probe, reads it
+every way the floor does, and — given answers — plays them through the host's
+own `answerSteps` and `answerQuestion` and reads the tool result back out of
+the transcript.
+
+```bash
+PROBE_SOCKET=probe node .claude/skills/measure-a-real-window/form.mjs "$SP/probe" \
+  'two single-select questions: header "One", question "Which one?", options Alpha, Bravo; header "Two", question "And which?", options Red, Green' \
+  '[{"choose":[1]},{"choose":[2]}]'
+# pane 200x50 alternate_on=1; top line …
+# readQuestions  → One[single,3] Two[single,3]
+# formFromInput  → One[single,3] Two[single,3]
+#   rows, numbers, free-text rows, kinds and strip: IDENTICAL
+# settleForm     → from=pane: a form of 2 question(s) read off the pane
+# answerSteps    → Left Left Left 1 2
+# answerQuestion → ok=true code=- done=[Left Left Left 1 2 Enter(confirm)] in 4612 ms
+# tool result    → "Your questions have been answered: …"
+```
+
+Leave the answers off and it cancels with Escape. What it was built to
+measure, and what it found on 2.1.284 (2026-10-01, issue #7):
+
+- **`#{alternate_on}` is 1.** The window draws on the alternate screen, so
+  `capture-pane -S -N` above the visible pane is *startup output*, not the
+  conversation, and nothing a redraw removes is anywhere.
+- **A form taller than the pane loses its top rows.** Resize before raising
+  (`tmux -L probe resize-window -t p:probe -x 80 -y 24` — what a window is
+  until somebody attaches) and a 26-row form has no header row: `readQuestions`
+  says `not_a_form`. Make only the second tab tall and it says `form_cut`.
+  The form built from the call's input is unaffected, and the cut form still
+  takes its keys.
+- **A bare paste is declined.** Given only a pasted block, the window answers
+  "Your message contained only pasted text, with nothing from you saying what
+  to do with it" and waits. Type the instruction (`send-keys -l`), which is
+  what `form.mjs` does; `probe.mjs say` pastes, and is right for everything
+  that is not an instruction to follow.
+- **The open call is the last one without a result.** Two questions with the
+  same text fail validation at once, the model retries, and the form on
+  screen belongs to the retry.
+- **A late key.** Point `ORCH_TMUX` at a wrapper that holds one `send-keys`
+  back a few seconds and the host sees what a stalled window looks like;
+  `form.mjs` reads the pane on the socket directly, so only the host's keys
+  are delayed.
+
+Timing on a probe is the floor of it, not the case: last digit to "Ready to
+submit your answers?" was 28–57 ms on a window with a short conversation. A
+desk with a long one was not measured — forms are not raised on his desks.
+
 ## A background session
 
 Claude Code's daemon can hold a conversation with no terminal at all, and

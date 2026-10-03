@@ -184,6 +184,58 @@ Three consequences worth knowing before touching `host/window.js`:
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
 
+## A question on the floor
+
+Three rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
+2.1.284). Each is the opposite of what the code did the day before, and each
+had a reasonable argument behind the old way — which is why they are here.
+
+- **A form with a question unanswered is never sent.** costmo's ruling. The
+  window's own review screen warns "You have not answered all questions" and
+  takes Enter anyway, and the floor used to match it on the argument that a
+  second door should not be stricter than the first: a blank became a bare
+  `Tab`. Measured, that half-sends — the form submits one answer short and the
+  host logged it answered. Now Submit shows the first unanswered question and
+  sends nothing, the route refuses the same form (`unansweredOf` in
+  [`src/floor.js`](src/floor.js)), and `answerSteps` has no keys for one. A
+  free-text choice with nothing typed is not an answer: its digit opens a
+  field and the script's next key is typed into it. The page has its own copy
+  of the rule (`askUnanswered`) so Submit can show the tab without a round
+  trip; `test/floor.mjs` runs both over the same cases. Do not re-propose
+  matching the window's leniency.
+- **Nothing is answered until the form is gone from the pane.**
+  `answerQuestion` used to look for the review screen once, straight after the
+  last key, and call anything else an answer. Two real things were "anything
+  else": a review screen drawn 2.5 s late, and a form standing on a free-text
+  field. It now watches for up to `ORCH_ANSWER_GONE_MS` (8 s), confirms the
+  review screen whenever it appears, and says `still_asking` with the pane's
+  last two lines if the form is still there. The review screen is read from the
+  bottom of the pane (`reviewingOf`), not found anywhere in the capture — a
+  conversation that quotes "Ready to submit your answers?" above a composer
+  would otherwise get three Enters in its message box.
+- **A question is never a menu, and its form does not depend on the pane.**
+  Claude Code draws on the alternate screen and **cuts the top off a form
+  taller than its pane**; a window the host opened is 80x24 until somebody
+  attaches. The header row `questionOf` finds a form by is the first thing
+  cut, so the host read a 26-row form as a flat menu of five and the floor
+  drew Approve / Deny / Cancel over a question. A tall *second* tab did worse:
+  the walk returned one question of two as if it were the form. The words were
+  never missing — the hook has carried `tool_input.questions` since
+  2026-09-11 — so the board builds the form from the call (`formFromInput`),
+  uses the pane's reading only when it has every question (`settleForm`), and
+  the reader says `form_cut` instead of returning a part. A cut form still
+  takes its keys; that was measured, not assumed, and the built form was set
+  against the pane's reading on four real forms before anything was pressed
+  with it. With no form from either, the panel says it could not read the
+  question and offers the window and Cancel (`promptOffer`) — not Approve /
+  Deny, and not the blind Yes / No, where Yes presses `1`. Two fixes that look
+  available and are not: there is no scrollback to read more of (alternate
+  screen), and resizing the operator's window to read it is moving his
+  furniture.
+
+`form.mjs` in **measure-a-real-window** raises a real form on a probe window,
+reads it both ways, and answers it through the host's own code.
+
 ## A message to a desk that is working
 
 **Type into it. Do not wait for the turn to end.** This is the one place the
@@ -392,6 +444,15 @@ and so were the next two full runs and QA's. Nothing in that section had
 been touched. The cause was not found; it is recorded here so the next one
 is recognised, not so it is waved through — rerun, and if it repeats, read
 the pane.
+
+**A fixture pane lives as long as its `sleep`, and the section around it
+grows.** The answer-a-prompt panes end in `sleep 30`. On 2026-10-01 new cases
+that each wait several seconds on a window were added above a later use of
+the `talking` pane, it had exited by the time it was reached, and the refusal
+under test read `no_window` instead of `no_prompt` — red for the fixture's
+age, not the code. That pane now sleeps 180; give a pane used late the same.
+A form that has to answer its keys (the tab walk) is a small node stand-in on
+the alternate screen, `formPane` in `test/window.mjs` — a shell cannot redraw.
 
 **The suites have a stand-in for the person, too.** `ORCH_FOLDER_DIALOG`
 names a program the host runs in place of the operating system's folder

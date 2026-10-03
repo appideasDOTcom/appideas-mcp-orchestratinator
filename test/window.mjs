@@ -1278,7 +1278,10 @@ async function main() {
       `printf '%s\\n' ${JSON.stringify(RULE60)}`,
       `printf '%s\\n' '\u276f '`,
       `printf '%s\\n' ${JSON.stringify(RULE60)}`,
-      'sleep 30');
+      // Long-lived: this pane is used again well below, after cases that each
+      // wait several seconds on a window. At 30 it had exited by then, and the
+      // refusal read `no_window` instead of the `no_prompt` under test.
+      'sleep 180');
     const quoting = await W.answerPrompt(talking, '1');
     eq(quoting.ok, false, 'a window talking about a prompt is not answered');
     eq(quoting.code, 'no_prompt', 'it is back at its composer, so there is no question to answer');
@@ -1310,8 +1313,16 @@ async function main() {
     // is a script, and a script aimed at the wrong moment types its digits into
     // whatever is there.
     const seq = await W.answerQuestion(offering, [{ key: '2' }, { key: '3' }]);
-    assert(seq.ok, `a live question takes a sequence — ${seq.error ?? ''}`);
-    eq(seq.done, ['2', '3'], 'and reports what it pressed, in order');
+    eq(seq.done, ['2', '3'], 'a live question takes a sequence, and reports what it pressed, in order');
+    // Pressing every key is not the answer having gone in — issue #7, item 2.
+    // This pane takes the keys and goes on holding its question, and that used
+    // to be asserted here as `ok`: the form standing anywhere but its review
+    // screen was reported as answered. Nothing is, now, until the form is gone.
+    eq(seq.ok, false, 'but a form still standing after every key is not reported as answered');
+    eq(seq.code, 'still_asking', 'it is reported as still asking');
+    assert(/Esc to cancel · Tab to amend/.test(seq.error ?? ''),
+      `quoting the line the pane ends on rather than guessing why — ${seq.error ?? ''}`);
+    eq(seq.quiet, ['2', '3'], 'and naming the keys the pane showed no reaction to');
 
     const intoNothing = await W.answerQuestion(talking, [{ key: '1' }, { key: 'Enter' }]);
     eq(intoNothing.ok, false, 'a window that is not asking takes nothing');
@@ -1346,6 +1357,180 @@ async function main() {
     eq(stuck.done.filter((d) => d === 'Enter(confirm)').length, 3,
       'having pressed it more than once, in case the first arrived mid-redraw');
 
+    // A review screen that is drawn late is still confirmed — issue #7, item 2.
+    //
+    // Measured on 2.1.284 with the last key reaching the window 2.5 s late:
+    // the host looked for the review screen once, straight after the key, did
+    // not find it yet, pressed nothing and returned ok — and the window sat on
+    // "Ready to submit your answers?" with both answers in it. This pane does
+    // the same: it takes the digit, waits 2.5 s, and only then draws the
+    // review screen; the Enter that confirms it leaves a mark.
+    const lateMark = `${PROMPT_DIR}/late-review.mark`;
+    const lateReview = await pane('late-review',
+      `printf '%s\\n' '  ←  ☒ One  ☐ Two  ✔ Submit  →'`,
+      `printf '%s\\n' '  And which?'`,
+      `printf '%s\\n' '  ❯ 1. Red'`,
+      `printf '%s\\n' '    2. Green'`,
+      `printf '%s\\n' '  Enter to select · Tab/Arrow keys to navigate · Esc to cancel'`,
+      'stty raw -echo', 'dd bs=1 count=1 >/dev/null 2>&1',
+      'sleep 2.5',
+      `printf '%s\\r\\n' '  Review your answers'`,
+      `printf '%s\\r\\n' '  Ready to submit your answers?'`,
+      `printf '%s\\r\\n' '  ❯ 1. Submit answers'`,
+      `printf '%s\\r\\n' '    2. Cancel'`,
+      'dd bs=1 count=1 >/dev/null 2>&1', `touch ${JSON.stringify(lateMark)}`, 'stty sane',
+      `i=0; while [ $i -lt 60 ]; do printf '%s\\n' '  carrying on'; i=$((i+1)); done`,
+      'sleep 30');
+    const late = await W.answerQuestion(lateReview, [{ key: '2' }]);
+    assert(late.ok, `a form whose review screen turns up late is still submitted — ${late.error ?? ''}`);
+    eq(late.done, ['2', 'Enter(confirm)'], 'by waiting for the review screen and confirming it when it comes');
+    assert(existsSync(lateMark), 'with that Enter actually reaching the window');
+
+    // The review screen is read from the bottom of the pane, not found anywhere
+    // in it. A window back at its composer under a conversation that quotes
+    // "Ready to submit your answers?" is not on that screen, and pressing
+    // Enter there is pressing it into the operator's message box. The whole
+    // capture was what used to be searched: three Enters, then "not confirmed"
+    // about a form that had gone through.
+    const quoteMark = `${PROMPT_DIR}/quoting-review.mark`;
+    const quotingReview = await pane('quoting-review',
+      `printf '%s\\n' '  The window sat on this until somebody pressed it:'`,
+      `printf '%s\\n' '  Ready to submit your answers?'`,
+      `printf '%s\\n' '  ❯ 1. Submit answers'`,
+      `printf '%s\\n' '    2. Cancel'`,
+      `printf '%s\\n' ${JSON.stringify(RULE60)}`,
+      `printf '%s\\n' '❯ '`,
+      `printf '%s\\n' ${JSON.stringify(RULE60)}`,
+      'stty raw -echo', 'dd bs=1 count=1 >/dev/null 2>&1', `touch ${JSON.stringify(quoteMark)}`, 'sleep 30');
+    const quoted = await W.answerQuestion(quotingReview, [{ key: '1', final: true }]);
+    assert(quoted.ok, `a form that is gone is an answer, whatever the conversation above the composer quotes — ${quoted.error ?? ''}`);
+    eq(quoted.done, [], 'and nothing is pressed: no confirming Enter into a composer');
+    assert(!existsSync(quoteMark), 'not one byte reached the window');
+    eq([
+      W.reviewingOf('  ←  ☒ ProbeOne  ☐ ProbeTwo  ✔ Submit  →\n  Review your answers\n  ⚠ You have not answered all questions\n   ● Which one for probe one?\n     → Alpha\n  Ready to submit your answers?\n  ❯ 1. Submit answers\n    2. Cancel\n'),
+      W.reviewingOf('  Ready to submit your answers?\n  ❯ 1. Submit answers\n    2. Cancel\n' + `${RULE60}\n❯ \n${RULE60}\n  ⏵⏵ auto mode on (shift+tab to cycle)\n`),
+      W.reviewingOf('  ←  ☒ One  ☐ Two  ✔ Submit  →\n  And which?\n  ❯ 1. Red\n    2. Green\n  Enter to select · Tab/Arrow keys to navigate · Esc to cancel\n'),
+    ], [true, false, false],
+      'reviewingOf: the review screen as 2.1.284 draws it is one; the same words above a composer are not; a question tab is not');
+
+    // A form too tall for its pane — issue #7, item 3.
+    //
+    // Claude Code draws on the alternate screen and cuts the top off what does
+    // not fit, and a window the host opened is 80x24 until somebody attaches.
+    // CUT is the visible pane of a real 2.1.284 window at 80x24, holding a
+    // one-question form that needs 26 rows (captured 2026-10-01): the header
+    // row, ` ☐ Error seen`, is not on it and not in scrollback either. That is
+    // the row `questionOf` finds a form by, so the host read this as a flat
+    // menu of five and the floor drew Approve / Deny / Cancel over a question.
+    console.log('\n  a question form taller than its pane');
+    const CUT = [
+      '│ The error you see after every tab is answered — which of these is it? Nothing',
+      '│ on this machine recorded one: the host log has no failed form answer since',
+      '│ early September, and a refusal by the board is flashed on the button and',
+      '│ written nowhere.',
+      '',
+      '❯ 1. Flash on the Submit button',
+      '     A short red line on the button itself for about three seconds — "That',
+      '     prompt is no longer open." or similar — and the form stays or vanishes. The',
+      '     board refused the answer before the host ever got it. This is my best',
+      '     guess: 37 of the 137 forms the host read never produced an answer attempt,',
+      '     including all 11 on this desk today.',
+      '  2. Error on the next message',
+      '     The answer looks accepted, then the next thing sent to that desk fails with',
+      '     "the window would not take the message — it was pasted in N times…". The',
+      '     form was left standing in the window. I reproduced this state today on a',
+      '     real window with a slow redraw.',
+      '  3. No words at all',
+      '     "sending your answers to the window…" spins, stops, and nothing happens;',
+      '     the question is still up when you open tmux.',
+      '  4. Type something.',
+      '─'.repeat(80),
+      '  5. Chat about this',
+      '',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ];
+    assert(W.askingOf(CUT.join('\n')), 'the cut form is a live question by its footer');
+    eq(W.questionOf(CUT.join('\n')), null, 'and questionOf finds no form in it: the header row it looks for was cut');
+    eq(W.promptOptions(CUT.join('\n')).map((o) => o.n), [1, 2, 3, 4, 5],
+      'while the menu reader finds five rows — the "read 5 option(s)" the host logged for it');
+
+    // A pane that draws like the real thing: on the alternate screen, so a
+    // redraw leaves nothing in scrollback, and one screen per tab — Tab goes
+    // on, Left goes back. A shell cannot do this; the walk needs a window that
+    // answers its keys.
+    const formPane = async (name, screens) => {
+      const dir = `${PROMPT_DIR}/${name}`;
+      mkdirSync(dir, { recursive: true });
+      const script = `${dir}/run.cjs`;
+      writeFileSync(script, [
+        '#!/usr/bin/env node',
+        `const screens = ${JSON.stringify(screens)};`,
+        `let at = 0;`,
+        `const draw = () => process.stdout.write('\\x1b[H\\x1b[2J' + screens[at].join('\\r\\n'));`,
+        `process.stdout.write('\\x1b[?1049h');`,
+        `draw();`,
+        `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+        `process.stdin.resume();`,
+        `process.stdin.on('data', (buf) => {`,
+        `  const s = buf.toString('latin1');`,
+        `  if (s.includes('\\t')) at = Math.min(screens.length - 1, at + 1);`,
+        `  else if (/\\x1b[\\[O]D/.test(s)) at = Math.max(0, at - 1);`,
+        `  else return;`,
+        `  draw();`,
+        `});`,
+        `setTimeout(() => process.exit(0), 60000);`,
+      ].join('\n'));
+      chmodSync(script, 0o755);
+      await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, script]).catch(() => {});
+      await sleep(700);
+      return dir;
+    };
+
+    const cutOne = await formPane('cut-one', [CUT]);
+    const cutRead = await W.readQuestions(cutOne);
+    eq([cutRead.ok, cutRead.code], [false, 'not_a_form'], 'read off a real pane, the cut form is not readable as a form');
+    assert(/no question form.s header is on its \d+x\d+ pane/.test(cutRead.error ?? ''),
+      `and the reader says what it saw, with the size of the pane it saw it on — ${cutRead.error ?? ''}`);
+
+    // Half a form is not a form. The first tab fits; the second is taller than
+    // the pane and loses its strip. The walk used to stop there and return
+    // what it had — measured, `ok` with one question of two — and the floor
+    // would have drawn a one-question form over a two-question one.
+    const TAB_ONE = [
+      '←  ☐ Colour  ☐ Toppings  ✔ Submit  →',
+      '',
+      'Which colour should the probe use?',
+      '',
+      '❯ 1. Red',
+      '  2. Green',
+      '  3. Type something.',
+      '─'.repeat(60),
+      '  4. Chat about this',
+      '',
+      'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+    ];
+    const TAB_TWO_CUT = [
+      '     descriptions, and this is the tail of the first one.',
+      '  2. [ ] Peppers',
+      '     Add peppers to the probe.',
+      '  3. [ ] Type something',
+      '     Submit',
+      '─'.repeat(60),
+      '  4. Chat about this',
+      '',
+      'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+    ];
+    const halfForm = await formPane('half-form', [TAB_ONE, TAB_TWO_CUT, TAB_TWO_CUT]);
+    const halfRead = await W.readQuestions(halfForm);
+    eq([halfRead.ok, halfRead.code], [false, 'form_cut'], 'a form whose second tab cannot be read is not returned as a form of one');
+    assert(/has 2 questions and only 1 could be read off its \d+x\d+ pane/.test(halfRead.error ?? ''),
+      `it says how many it has and how many it read — ${halfRead.error ?? ''}`);
+    eq(halfRead.questions, undefined, 'and hands back no part of it to draw');
+    const REVIEW = [TAB_ONE[0], '', 'Review your answers', '', 'Ready to submit your answers?', '', '❯ 1. Submit answers', '  2. Cancel'];
+    const wholeForm = await formPane('whole-form', [TAB_ONE, TAB_ONE.map((l, i) => (i === 2 ? 'Which toppings should the probe add?' : l)), REVIEW]);
+    const wholeRead = await W.readQuestions(wholeForm);
+    eq([wholeRead.ok, wholeRead.questions?.length], [true, 2], `the same walk over a form that fits reads both questions — ${wholeRead.error ?? ''}`);
+
     // Busy is not stopped, and the difference cost a whole form.
     //
     // A sequence is a dozen keystrokes and the window works between them. When
@@ -1360,9 +1545,14 @@ async function main() {
       // Busy first, and only then the line that says it will take an answer.
       `printf '%s\\n' '  esc to interrupt'`,
       'stty raw -echo', 'sleep 1',
-      `printf '%s\\n' '  Esc to cancel \u00b7 Tab to amend'`,
+      `printf '%s\\r\\n' '  Esc to cancel \u00b7 Tab to amend'`,
+      // And then it takes the key and moves on, the way `hears` does. It used
+      // to sit on the question for ever, which was reported as an answer until
+      // issue #7 — a form still standing no longer is.
+      'dd bs=1 count=1 >/dev/null 2>&1', 'stty sane',
+      `i=0; while [ $i -lt 60 ]; do printf '%s\\n' '  running your command'; i=$((i+1)); done`,
       'sleep 30');
-    const waited = await W.answerQuestion(busyThenAsking, [{ key: '1' }]);
+    const waited =await W.answerQuestion(busyThenAsking, [{ key: '1' }]);
     assert(waited.ok, `a window that is merely busy is waited for, not abandoned — ${waited.error ?? ''}`);
     eq(waited.done, ['1'], 'and the step is played once it is asking again');
 

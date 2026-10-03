@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, claudeable, switchable } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, formFromInput, settleForm, claudeable, switchable } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -1332,14 +1332,29 @@ try {
     assert(!keys(endSingles).slice(3).includes('Tab'),
       'with no blind tab walk behind it — that walk is what pressed Cancel');
 
-    // A question left unanswered is stepped past rather than guessed at.
-    const skipped = keys(answerSteps([single, multi], [{}, { choose: [1] }]));
-    assert(!skipped.includes('Enter') || skipped.indexOf('Tab') < skipped.indexOf('1'),
-      'an unanswered question is passed over, not answered on the operator\u2019s behalf');
+    // A form with a question unanswered has no keys at all — issue #7, item 1.
+    //
+    // This used to assert the opposite: a blank was "stepped past" with a bare
+    // Tab. Measured on 2.1.284, that Tab half-sends the form — `Left Left Left
+    // Tab 2` submitted with one answer and the host logged it as answered.
+    // costmo's ruling (2026-10-01): never submitted, Submit moves to the first
+    // unanswered question instead.
+    eq(keys(answerSteps([single, multi], [{}, { choose: [1] }])), [],
+      'a form whose first question is unanswered produces no keys \u2014 not a Tab past it');
+    eq(keys(answerSteps([single, single], [{ choose: [1] }, {}])), [],
+      'nor one whose last question is \u2014 the Tab that used to stand in for it is what half-sent the form');
+    eq(keys(answerSteps([single, single], [{ choose: [1] }])), [],
+      'nor one with fewer answers than questions');
+    eq(unansweredOf([single, multi, single], [{}, { choose: [1] }, { choose: [] }]), [0, 2],
+      'unansweredOf names every question without an answer, by index');
+    eq(unansweredOf([single, multi], [{ choose: [2] }, { choose: [1, 2] }]), [],
+      'and none when each has one');
 
-    // A number the window never offered is dropped rather than pressed.
+    // A number the window never offered is dropped rather than pressed — and a
+    // question answered only by such a number has no answer.
     const bogus = keys(answerSteps([single], [{ choose: [9] }]));
     assert(!bogus.includes('9'), 'a choice the window does not have is never pressed');
+    eq(unansweredOf([single], [{ choose: [9] }]), [0], 'and choosing only that leaves the question unanswered');
 
     // The free-text row on a single-select is not a fourth answer. Taking it
     // withdraws the whole form and sends the words back as a clarification,
@@ -1372,11 +1387,61 @@ try {
       'no later tab is walked to, because the form is gone');
     eq(clar.length, keys(clar).lastIndexOf('Enter') + 1, 'the sequence stops at the Enter that withdraws the form');
 
-    // Only when the words are actually going somewhere. A single-select choice
-    // with no text is an ordinary answer and must keep the ordinary ending.
-    const stillNormal = answerSteps([singleFree], [{ choose: [3] }]);
-    assert(!stillNormal.some((st) => st.clarify), 'choosing that row without typing is not a clarification');
-    eq(keys(stillNormal).slice(-1), ['3'], 'and it still ends on its own answer, with nothing walked to Submit');
+    // A free-text choice with nothing typed is not an answer — issue #7, item 1.
+    //
+    // This used to assert that the row's digit was pressed as an ordinary
+    // answer. Measured on 2.1.284: the digit opens a field, and the next key
+    // of the script is typed into it — `4` then `1` left the form standing
+    // with "1" in the field, nothing answered, and the host said answered.
+    eq(unansweredOf([singleFree], [{ choose: [3] }]), [0],
+      'the free-text row ticked with nothing typed leaves a single-select unanswered');
+    eq(unansweredOf([singleFree], [{ choose: [3], text: '   ' }]), [0], 'and so do spaces');
+    eq(keys(answerSteps([singleFree, multi], [{ choose: [3] }, { choose: [1] }])), [],
+      'so its digit is never pressed: the form has no keys');
+    eq(unansweredOf([multi], [{ choose: [1, 3] }]), [0],
+      'on a multi-select too, whatever else is ticked beside it — the ticked row is not quietly dropped');
+    eq(unansweredOf([multi], [{ choose: [1, 3], text: 'and this' }]), [],
+      'with words in it, it is an answer');
+    eq(unansweredOf([multi], [{ choose: [1], text: 'stray' }]), [],
+      'and words without the row ticked do not make an answered question unanswered');
+
+    // The page asks itself the same question before it posts, so Submit can
+    // show the tab. Its copy is lifted out of the browser script by its section
+    // comments, the way test/markdown.mjs lifts the renderer, and run over the
+    // same cases as the server's: the two must not drift. If the slice fails,
+    // the section moved — fix the markers, do not route around the test.
+    const page = await (async () => {
+      const src = readFileSync('src/ui/floor.js', 'utf8');
+      const a = src.indexOf('  /* ---------- a question form: what the page decides ---------- */');
+      const b = src.indexOf('  /* ---------- a question the window is asking ---------- */');
+      if (a < 0 || b < 0 || b < a) throw new Error('the question-form section was not found in src/ui/floor.js between its two section comments');
+      const tmp = `./data/ask-form-${process.pid}.mjs`;
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { askUnanswered, askWarnText };\n`);
+      try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    })();
+    const cases = [
+      [[single, multi], [{ choose: [1] }, { choose: [2] }]],
+      [[single, multi], [{}, { choose: [1] }]],
+      [[single, single], [{ choose: [1] }, {}]],
+      [[single, single], [{ choose: [1] }]],
+      [[single], [{ choose: [9] }]],
+      [[singleFree], [{ choose: [3] }]],
+      [[singleFree], [{ choose: [3], text: 'none of these' }]],
+      [[multi], [{ choose: [1, 3] }]],
+      [[multi], [{ choose: [1, 3], text: 'and this' }]],
+      [[multi], [{ choose: [1], text: 'stray' }]],
+      [[single, multi, singleFree], []],
+      [[], []],
+    ];
+    eq(cases.map(([q, a]) => page.askUnanswered(q, a)), cases.map(([q, a]) => unansweredOf(q, a)),
+      `the page’s askUnanswered and the server’s unansweredOf agree on all ${cases.length} cases`);
+    eq(page.askUnanswered([single, multi, singleFree], [{ choose: [1] }, {}, { choose: [3] }]), [1, 2],
+      'and the page names the first unanswered question, which is the tab Submit shows');
+    eq(page.askWarnText([], 3), null, 'with every question answered there is nothing to say under the form');
+    const warned = page.askWarnText([1, 2], 3);
+    assert(warned.includes('1 of 3 answered'), `otherwise the line counts them — "${warned}"`);
+    assert(!/you can still submit/i.test(warned) && /sends nothing/i.test(warned),
+      'and no longer says "you can still submit": it says Submit sends nothing until they are all answered');
   }
 
   console.log('\nthe window\u2019s own choices');
@@ -1549,6 +1614,20 @@ try {
   fa = await floor();
   eq(askerDesk().permission?.questions?.length, 2, 'the form reaches the panel');
 
+  // Nothing accepts a form with a question unanswered — issue #7, item 1. The
+  // page refuses first; this is the board refusing whatever posts to it.
+  const partForm = await fetch(`${HOST}/api/floor/answer`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'asker', request_id: formId, answers: [{ choose: [1] }, {}] }),
+  });
+  eq(partForm.status, 400, 'a form with a question unanswered is refused by the board');
+  const partBody = await partForm.json();
+  eq([partBody.code, partBody.question], ['unanswered', 1], 'saying which question — the second — so the page can show it');
+  eq(await takeWork(), [], 'and nothing is queued for the host: not one key goes to the window');
+  fa = await floor();
+  eq([askerDesk().permission?.request_id, askerDesk().permission?.questions?.length, askerDesk().session.awaiting_kind],
+    [formId, 2, 'permission_request'], 'the form is still open on the desk exactly as it was, and the desk still asking');
+
   const sentForm = await fetch(`${HOST}/api/floor/answer`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ channel: CH, agent: 'asker', request_id: formId, answers: [{ choose: [1] }, { choose: [2] }] }),
@@ -1581,6 +1660,158 @@ try {
   eq(askerDesk().permission, null, 'the second failure does not offer it a third time');
   assert(String(askerDesk().session.awaiting_message).includes('not being offered again'),
     'and says so, rather than leaving the operator wondering where the form went');
+
+  console.log('\na question is never drawn as Approve / Deny');
+  {
+    // Issue #7, item 3. Measured on 2.1.284: a window the host opened is 80x24
+    // until somebody attaches, Claude Code cuts the top off a form taller than
+    // its pane, and the host — finding no form header — read the pane as a
+    // flat menu. The floor drew Approve on the question's first choice and
+    // Deny on the first one starting "No".
+    //
+    // The two forms below are real: the call's input and the pane's reading of
+    // it, captured off the same window at 200x50 (2026-10-01). They are what
+    // "the form built from the call equals the form the host reads" was
+    // measured on, and the keys at the end are the ones that answered the same
+    // form at 80x24, where the host could read none of it.
+    const INPUT = [
+      { question: 'Which colour should the probe use?', header: 'Colour', multiSelect: false, options: [
+        { label: 'Red', description: 'Use red for the probe.' }, { label: 'Green', description: 'Use green for the probe.' }, { label: 'Blue', description: 'Use blue for the probe.' }] },
+      { question: 'Which toppings should the probe add?', header: 'Toppings', multiSelect: true, options: [
+        { label: 'Olives', description: 'Add olives to the probe.' }, { label: 'Peppers', description: 'Add peppers to the probe.' },
+        { label: 'Onions', description: 'Add onions to the probe.' }, { label: 'Capers', description: 'Add capers to the probe.' }] },
+    ];
+    const PANE = [
+      { tab: 0, tab_title: 'Colour', strip: true, kind: 'single', question: 'Which colour should the probe use?', options: [
+        { n: 1, text: 'Red', checked: null, other: false }, { n: 2, text: 'Green', checked: null, other: false },
+        { n: 3, text: 'Blue', checked: null, other: false }, { n: 4, text: 'Type something.', checked: null, other: true }] },
+      { tab: 1, tab_title: 'Toppings', strip: true, kind: 'multi', question: 'Which toppings should the probe add?', options: [
+        { n: 1, text: 'Olives', checked: false, other: false }, { n: 2, text: 'Peppers', checked: false, other: false },
+        { n: 3, text: 'Onions', checked: false, other: false }, { n: 4, text: 'Capers', checked: false, other: false },
+        { n: 5, text: 'Type something', checked: false, other: true }] },
+    ];
+    const rows = (qs) => qs.map((q) => ({
+      tab: q.tab, tab_title: q.tab_title, strip: q.strip, kind: q.kind, question: q.question,
+      options: q.options.map((o) => ({ n: o.n, text: o.text, checked: o.checked, other: o.other })),
+    }));
+    const built = formFromInput(INPUT);
+    eq(rows(built.questions), PANE,
+      'form-from-input: built from the call, a single then a multi has the rows, numbers, free-text rows, kinds and strip the host read off the real pane');
+    eq(rows(formFromInput(INPUT.slice(0, 1)).questions)[0].strip, false, 'a lone single-select has no strip, as on the pane');
+    eq(rows(formFromInput(INPUT.slice(1)).questions).map((q) => [q.strip, q.options.at(-1).n, q.options.at(-1).text]), [[true, 5, 'Type something']],
+      'a lone multi-select has one, and its free-text row is the next number, spelled as a multi spells it');
+    eq(built.questions[0].options[0].detail, 'Use red for the probe.', 'each choice keeps its description');
+    eq(built.tabs.map((t) => t.title), ['Colour', 'Toppings', 'Submit'], 'and the tabs are the headers, then Submit');
+    eq([formFromInput(null), formFromInput([]), formFromInput([{ question: 'Q?', options: [{ label: 'A' }, { description: 'no label' }] }]),
+      formFromInput([{ question: 'Q?', options: Array.from({ length: 12 }, (_, i) => ({ label: `c${i}` })) }])],
+    [null, null, null, null],
+    'no form is built when the numbering cannot be trusted: no questions, a choice with no label, a list the hook may have cut');
+
+    // Which reading is drawn.
+    eq(settleForm(built, PANE, ['x']).from, 'pane', 'settleForm: the host’s reading is used when it has every question the call asked');
+    const barred = [{ ...PANE[0], question: '│ Which colour should the probe' }, PANE[1]];
+    eq(settleForm(built, barred).questions[0].question, 'Which colour should the probe use?',
+      'with the question’s own words from the call — the pane gives one screen line, with the window’s bar on it');
+    eq(settleForm(built, PANE).questions[1].options[0].detail, 'Add olives to the probe.', 'and each choice’s description, where the row is the same row');
+    eq([settleForm(built, [PANE[0]]).from, settleForm(built, [PANE[0]]).questions.length], ['call', 2],
+      'a reading with fewer questions than were asked is not drawn: the form comes from the call');
+    eq([settleForm(built, null).from, settleForm(built, null).questions.length], ['call', 2], 'nor is no reading at all');
+    eq(settleForm(null, PANE).questions, PANE, 'with nothing from the hook, the host’s reading stands as it is');
+    eq([settleForm(null, null).from, settleForm(null, null).questions], [null, null], 'and with neither there is no form');
+
+    // The board, end to end. The host's event is the measured misreading: no
+    // form, and the pane's five rows as a flat menu.
+    const MENU = [{ n: 1, text: 'Red' }, { n: 2, text: 'Green' }, { n: 3, text: 'No colour' }, { n: 4, text: 'Type something.' }, { n: 5, text: 'Chat about this' }];
+    const NOFORM = 'the window is asking, and no question form’s header is on its 80x24 pane';
+    const tall = () => deskOf(fa, 'tall');
+    await register({ channel: CH, agent: 'tall', cwd: '/repo/tall', window: '@77' });
+    await hostEvents([{ type: 'session', channel: CH, agent: 'tall', session_id: 's-tall', cwd: '/repo/tall' }]);
+    await post(ev('tall', 's-tall', 'SessionStart'));
+    await takeWork();
+    await post(ev('tall', 's-tall', 'PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: { questions: INPUT } }));
+    await takeWork();
+    fa = await floor();
+    const tallId = tall().permission.request_id;
+    eq(Object.hasOwn(tall().permission, 'asked') && tall().permission.asked !== undefined, false, 'the board’s own copy of the call is not sent to the page a second time');
+    await hostEvents([{ type: 'prompt', channel: CH, agent: 'tall', request_id: tallId, options: MENU, questions: null, tabs: null, form_error: NOFORM }]);
+    fa = await floor();
+    eq(tall().permission.questions?.map((q) => `${q.tab_title}:${q.kind}:${q.options.length}`), ['Colour:single:4', 'Toppings:multi:5'],
+      'a question the host read as a menu is drawn as its form, every choice under its own words');
+    eq([tall().permission.options, tall().permission.choices.approve, tall().permission.choices.deny], [[], null, null],
+      'and the menu is gone: nothing for Approve or Deny to press');
+    eq(tall().permission.form_from, 'call', 'the payload says the form is the call’s, not the pane’s');
+    const tallSent = await fetch(`${HOST}/api/floor/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: CH, agent: 'tall', request_id: tallId, answers: [{ choose: [2] }, { choose: [1, 3] }] }),
+    });
+    eq(tallSent.status, 200, 'that form can be answered');
+    const tallWork = (await takeWorkFull()).find((w) => w.kind === 'answer');
+    eq((tallWork?.payload?.steps ?? []).map((st) => st.key), ['Left', 'Left', 'Left', '2', '1', '3', 'Tab'],
+      'with the keys that answered the same form on a real 80x24 window: Left Left Left 2 1 3 Tab');
+
+    // No form from the host and none from the hook: said, not guessed at.
+    await post(ev('tall', 's-tall', 'PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: {} }));
+    await takeWork();
+    fa = await floor();
+    const blindId = tall().permission.request_id;
+    await hostEvents([{ type: 'prompt', channel: CH, agent: 'tall', request_id: blindId, options: MENU, questions: null, tabs: null, form_error: NOFORM }]);
+    fa = await floor();
+    eq([tall().permission.questions, tall().permission.options, tall().permission.choices.approve, tall().permission.choices.deny], [null, [], null, null],
+      'a question nobody could read has no form and no menu either');
+    eq(tall().permission.form_unread, NOFORM, 'and carries what the host saw, for the panel to say');
+    const unreadReq = tall().permission;
+
+    // A prompt announced only by its Notification has no tool name. The menu
+    // says what it is: "Chat about this" is the last row of every question
+    // form and of nothing else.
+    await register({ channel: CH, agent: 'tallquiet', cwd: '/repo/tallquiet', window: '@78' });
+    await hostEvents([{ type: 'session', channel: CH, agent: 'tallquiet', session_id: 's-tq', cwd: '/repo/tallquiet' }]);
+    await post(ev('tallquiet', 's-tq', 'SessionStart'));
+    await post(ev('tallquiet', 's-tq', 'Notification', { notification_type: 'permission_prompt', notification_message: 'Claude needs your attention' }));
+    await takeWork();
+    fa = await floor();
+    await hostEvents([{ type: 'prompt', channel: CH, agent: 'tallquiet', request_id: deskOf(fa, 'tallquiet').permission.request_id, options: MENU, questions: null, tabs: null, form_error: NOFORM }]);
+    fa = await floor();
+    eq([deskOf(fa, 'tallquiet').permission.tool, deskOf(fa, 'tallquiet').permission.choices.approve], ['AskUserQuestion', null],
+      'a menu ending in "Chat about this" is known for a question even when the hook never named the tool');
+    // And an ordinary permission prompt is still a menu.
+    await register({ channel: CH, agent: 'tallbash', cwd: '/repo/tallbash', window: '@79' });
+    await hostEvents([{ type: 'session', channel: CH, agent: 'tallbash', session_id: 's-tb', cwd: '/repo/tallbash' }]);
+    await post(ev('tallbash', 's-tb', 'SessionStart'));
+    await post(ev('tallbash', 's-tb', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }));
+    await takeWork();
+    fa = await floor();
+    await hostEvents([{ type: 'prompt', channel: CH, agent: 'tallbash', request_id: deskOf(fa, 'tallbash').permission.request_id,
+      options: [{ n: 1, text: 'Yes' }, { n: 2, text: 'No' }], questions: null, tabs: null, form_error: NOFORM }]);
+    fa = await floor();
+    const bashReq = deskOf(fa, 'tallbash').permission;
+    eq([bashReq.choices.approve, bashReq.choices.deny], [1, 2], 'a permission prompt keeps its Approve and Deny');
+
+    // What the panel offers for each — the page's own decision, lifted out of
+    // the browser script by its section comments.
+    const { promptOffer } = await (async () => {
+      const src = readFileSync('src/ui/floor.js', 'utf8');
+      const a = src.indexOf('  /* ---------- a question form: what the page decides ---------- */');
+      const b = src.indexOf('  /* ---------- a question the window is asking ---------- */');
+      if (a < 0 || b < 0 || b < a) throw new Error('the question-form section was not found in src/ui/floor.js between its two section comments');
+      const tmp = `./data/prompt-offer-${process.pid}.mjs`;
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { promptOffer };\n`);
+      try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    })();
+    eq(promptOffer(unreadReq, false), 'question-unread', 'promptOffer: a question with no form is said to be unread — the window and Cancel, not Approve / Deny');
+    eq(promptOffer({ ...unreadReq, read: false, reading: true }, false), 'question-unread',
+      'and so is one the host never came back about, once the reading spinner gives up');
+    eq(promptOffer({ ...unreadReq, read: true, options: [], choices: { approve: null, deny: null, extras: [] } }, false), 'question-unread',
+      'never the guess buttons either: Yes there presses 1, which on a question is its first choice');
+    eq(promptOffer({ ...unreadReq, reading: true }, true), 'reading', 'while it is still being read it is the spinner');
+    eq(promptOffer(deskOf(fa, 'tallquiet').permission, false), 'question-unread', 'the question known by its menu is unread too');
+    eq(promptOffer(bashReq, false), 'menu', 'a permission prompt is the menu');
+    eq(promptOffer({ tool: 'Bash', read: true, choices: { approve: null, deny: null, extras: [] } }, false), 'unreadable',
+      'a prompt that is not a question, with nothing to press, keeps the guess buttons');
+    eq(promptOffer({ tool: 'startup', startup: true, read: true, options: [{ n: 1, text: 'Yes' }], choices: { approve: 1 } }, false), 'startup', 'a startup question its rows');
+    eq(promptOffer({ ...unreadReq, questions: PANE }, false), 'form', 'and a question with a form is the form');
+    eq(promptOffer(null, false), 'none', 'no prompt, nothing offered');
+  }
 
   console.log('\nan interrupt marker is not the operator talking');
   // Claude Code writes `[Request interrupted by user]` into the transcript as a
