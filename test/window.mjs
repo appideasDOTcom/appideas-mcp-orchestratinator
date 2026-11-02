@@ -101,7 +101,18 @@ async function until(fn, ms = 5000) {
  * the host is settled on an observable rather than a clock.
  */
 async function drawn(dir) {
-  const shown = await until(async () => ((await W.screen(dir)).text ?? '').trim() !== '', 8000);
+  // The pane is found by its directory, as the host finds one; tmux is asked
+  // directly because the host's own module is imported inside the cases.
+  const paneOf = async () => {
+    const r = await run('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_current_path}\t#{pane_id}']).catch(() => ({ stdout: '' }));
+    return r.stdout.split('\n').map((l) => l.split('\t')).find(([path]) => path === dir)?.[1] ?? null;
+  };
+  const shown = await until(async () => {
+    const id = await paneOf();
+    if (!id) return false;
+    const r = await run('tmux', ['capture-pane', '-p', '-t', id]).catch(() => ({ stdout: '' }));
+    return r.stdout.trim() !== '';
+  }, 8000);
   if (!shown) throw new Error(`fixture pane in ${dir} drew nothing in 8 s`);
   return dir;
 }
