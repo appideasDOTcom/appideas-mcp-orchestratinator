@@ -1959,6 +1959,156 @@ try {
     await post({ ...ev('free', 's9', 'UserPromptSubmit', { message: 'yes' }), channel: 'other-floor' });
   }
 
+  // Archive is the one way to put a floor away (issue #21), and the board and
+  // the floor agree on which floors exist (issue #6): one channel list on the
+  // server, one flag, and one pill list drawn by one function on both views.
+  // The page half is lifted out of app.js and run over both payloads, because
+  // the failure worth catching is the two views disagreeing — a floor put away
+  // on one and offered on the other, or a pill on one page and not the other.
+  console.log('\narchive is the one way to put a floor away, on both views');
+  {
+    const state = () => fetch(`${HOST}/api/state`).then((r) => r.json());
+    const admin = (path, body) =>
+      fetch(`${HOST}/api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        .then((r) => r.status);
+    const lifted = await (async () => {
+      const src = readFileSync('src/ui/app.js', 'utf8');
+      const a = src.indexOf('/* ---------- put away: what the pills read ---------- */');
+      const b = src.indexOf('/* ---------- put away: the pills ---------- */');
+      if (a < 0 || b < 0 || b < a) throw new Error('the put-away section was not found in src/ui/app.js between its two section comments');
+      const tmp = `./data/put-away-${process.pid}.mjs`;
+      // The section calls the page's own escaper, which is defined later in the file.
+      const escFn = `const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));\n`;
+      writeFileSync(tmp, `${escFn}${src.slice(a, b)}\nexport { onBoard, putAway, pickable, pillFacts, pillBar };\n`);
+      try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    })();
+    const { onBoard, putAway, pickable, pillFacts, pillBar } = lifted;
+    const names = (payload) => payload.channels.map((c) => c.channel);
+    const has = (payload, name) => payload.channels.some((c) => c.channel === name);
+
+    {
+      // What "one mechanism" removed. Each of these was the browser-local fold
+      // or the second place archived floors were drawn, and each coming back
+      // is the two-mechanism confusion coming back with it.
+      const app = readFileSync('src/ui/app.js', 'utf8');
+      const page = readFileSync('src/ui/floor.js', 'utf8');
+      eq([app.includes("'orch.minimized'"), app.includes('data-act="minimize"'), app.includes('toggle-archived'), page.includes('minimizedChannels'), page.includes('pick-sep')],
+        [false, false, false, false, false],
+        'the browser-local fold is gone from both pages: no localStorage key, no – button, no "N archived channels" toggle, no picker tail');
+      assert(page.includes('window.onBoard?.(') && page.includes('window.putAway?.(') && page.includes('window.pillBar?.('),
+        'and the floor draws its lists with the board\'s functions rather than a copy of them');
+    }
+
+    // #6: a channel whose only trace is a desk a hook event made.
+    const CH6 = 'persona-only';
+    eq([has(await state(), CH6), has(await floor(), CH6)], [false, false], 'a channel nothing has written to is on neither view');
+    await post({ ...ev('solo', 's-solo', 'SessionStart'), channel: CH6 });
+    let s = await state();
+    let f = await floor();
+    eq(has(s, CH6), true, 'a desk made by a hook event alone puts its channel on the board — no agents row, and the board lists it anyway (#6)');
+    eq(has(f, CH6), true, 'and on the floor');
+    eq(names(s), names(f), 'the two views list the same floors, in the same order');
+    eq(s.totals.channels, f.totals.channels, 'and their totals count the same set');
+    eq(s.channels.find((c) => c.channel === CH6).agents.length, 0, 'with no agent row under it on the board — the desk is the floor\'s; the row is the list\'s');
+
+    // The round trip, read on both views after each half.
+    eq(await admin('channel/archive', { channel: CH6 }), 200, 'archived by the board\'s route — the one the floor\'s "put away" reaches through the same dialog');
+    s = await state();
+    f = await floor();
+    eq([s.channels.find((c) => c.channel === CH6)?.archived, f.channels.find((c) => c.channel === CH6)?.archived], [true, true], 'flagged on both payloads');
+    eq(pickable(s.channels).includes(CH6), false, 'not offered by the board\'s channel filter or the desk dialog\'s Floor dropdown');
+    eq(onBoard(f.channels).some((c) => c.channel === CH6), false, 'nor by the floor picker, nor as a storey');
+    eq([putAway(s.channels).map((c) => c.channel), putAway(f.channels).map((c) => c.channel)], [[CH6], [CH6]], 'and a pill on both views — the same list, from the same function');
+    assert(pillBar(s.channels).includes(`data-act="unarchive" data-channel="${CH6}"`) && pillBar(f.channels).includes(`data-act="unarchive" data-channel="${CH6}"`),
+      'each pill is the restore control, drawn by one function over either payload');
+    eq([s.totals.channels, f.totals.channels], [onBoard(s.channels).length, onBoard(f.channels).length], 'the totals are the server\'s and count the floors on the board');
+    eq([s.totals.archived_channels, f.totals.archived], [1, 1], 'and say how many are put away');
+
+    eq(await admin('channel/unarchive', { channel: CH6 }), 200, 'the pill restores, by the same route on either view');
+    s = await state();
+    f = await floor();
+    eq([s.channels.find((c) => c.channel === CH6).archived, f.channels.find((c) => c.channel === CH6).archived], [false, false], 'back on both');
+    eq([pickable(s.channels).includes(CH6), onBoard(f.channels).some((c) => c.channel === CH6)], [true, true], 'back in the filter, the dropdown, the picker and the building');
+    eq([putAway(s.channels).length, putAway(f.channels).length], [0, 0], 'and out of both pill lists');
+
+    // What a pill says, read off either payload's shape.
+    eq(pillFacts({ channel: 'x', agents: [{ unread: 2 }, { unread: 1 }], tasks: { open: 1, claimed: 1, done: 4 }, messages: 7 }),
+      { unread: 3, unfinished: 2, messages: 7 }, 'a pill reads the board\'s channel: unread off its agent rows, the counts off its header');
+    eq(pillFacts({ channel: 'x', desks: [{ board: { unread: 2 } }, { board: null }], stats: { open: 1, claimed: 1, done: 4, contracts: 0, messages: 7 } }),
+      { unread: 2, unfinished: 2, messages: 7 }, 'and the floor\'s: unread off the sign on each desk, the counts off the storey\'s line — the same numbers');
+    assert(pillBar([{ channel: 'x', archived: true, agents: [{ unread: 3 }], tasks: { open: 0, claimed: 0 }, messages: 0 }]).includes('<span class="min-count">3</span>'),
+      'and the unread count is on the pill, so putting a floor away never hides news');
+    eq(pillBar([{ channel: 'x', archived: false }]), '', 'nothing put away, no bar at all');
+
+    // The board row the one list gives a persona-only channel is a real row:
+    // its control can delete it, and the delete sticks because purgeChannel
+    // sweeps personas — while anything that writes to the channel again still
+    // brings it back (#6, Don't break).
+    const del = await fetch(`${HOST}/api/admin/channel/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH6, confirm: CH6 }) });
+    eq(del.status, 200, 'the row control can delete a channel that has no agents row');
+    s = await state();
+    f = await floor();
+    eq([has(s, CH6), has(f, CH6)], [false, false], 'and it is gone from both views, not just the board');
+    await post({ ...ev('solo', 's-solo-2', 'SessionStart'), channel: CH6 });
+    s = await state();
+    f = await floor();
+    eq([has(s, CH6), has(f, CH6)], [true, true], 'until something writes to it again — then it is back on both');
+    await fetch(`${HOST}/api/admin/channel/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH6, confirm: CH6 }) });
+  }
+
+  // Decided 6 (issue #21): an archived floor unarchives itself when something
+  // STARTS on it, and only then. Three doors in — a hook session starting, a
+  // host binding a desk or opening a window's session, the operator naming
+  // the floor in Take a desk — and the boundary: an agent already on the
+  // floor working does not bring it back. The fourth door, an MCP session
+  // connecting, is in test/admin.mjs, where there is an MCP client.
+  console.log('\nan archived floor comes back when something starts on it');
+  {
+    const CHW = 'wakes';
+    const state = () => fetch(`${HOST}/api/state`).then((r) => r.json());
+    const archivedNow = async () => (await state()).channels.find((c) => c.channel === CHW)?.archived ?? null;
+    const admin = (path, body) =>
+      fetch(`${HOST}/api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.status);
+    const restoredRows = async () =>
+      (await fetch(`${HOST}/api/activity?limit=500&channel=${CHW}`).then((r) => r.json())).rows.filter((r) => r.kind === 'admin.channel.unarchive');
+
+    await post({ ...ev('riser', 's-rise-1', 'SessionStart'), channel: CHW });
+    eq(await admin('channel/archive', { channel: CHW }), 200, 'a floor with a desk on it is archived');
+    eq(await archivedNow(), true, 'and reads as put away');
+
+    // The boundary first, so the doors below mean something.
+    await post({ ...ev('riser', 's-rise-1', 'UserPromptSubmit', { message: 'still here' }), channel: CHW });
+    await post({ ...ev('riser', 's-rise-1', 'Stop'), channel: CHW });
+    eq(await archivedNow(), true, 'an agent already on it working — a prompt, a turn ending — does not bring it back: archive is not a session kill, and the work it does not kill does not undo it');
+    eq((await restoredRows()).length, 0, 'and nothing is written to the log for that');
+
+    // Door 1: a session starting under its name, by hook.
+    await post({ ...ev('riser', 's-rise-2', 'SessionStart'), channel: CHW });
+    eq(await archivedNow(), false, 'a session starting on it (the hook\'s SessionStart) brings it back');
+    let rows = await restoredRows();
+    eq([rows.length, rows[0]?.actor], [1, 'riser'], 'with an audit row naming who started');
+    assert(JSON.stringify(rows[0]).includes('a session started on it'), 'and saying which door it came through');
+
+    // Door 2: a host binding a desk on it, and a host\'s window opening a session on it.
+    eq(await admin('channel/archive', { channel: CHW }), 200, 'archived again');
+    eq((await hostEvents([{ type: 'bound', channel: CHW, agent: 'riser', cwd: '/repo/riser', scope: 'local' }])).applied, 1, 'a host binds a desk on it');
+    eq(await archivedNow(), false, 'a host binding a desk on it brings it back');
+    eq(await admin('channel/archive', { channel: CHW }), 200, 'archived once more');
+    eq((await hostEvents([{ type: 'session', channel: CHW, agent: 'riser', session_id: 's-rise-3', cwd: '/repo/riser' }])).applied, 1, 'its window opens a session');
+    eq(await archivedNow(), false, 'a window opening a session on it brings it back');
+
+    // Door 3: the operator naming it in Take a desk.
+    eq(await admin('channel/archive', { channel: CHW }), 200, 'archived a third time');
+    await registerWith({ roots: ['/repo'], folders: offered });
+    rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CHW, agent: 'taker' });
+    eq(rr.status, 200, 'the operator takes a desk on it, by typing its name');
+    await takeWorkFull();
+    eq(await archivedNow(), false, 'and that brings it back — the plainest "I want this floor" there is');
+    rows = await restoredRows();
+    eq(rows.map((r) => r.actor).sort(), ['operator', 'riser', 'riser', 'riser'], 'each return is on the log with who started it: the agent for a session or a desk, the operator for a take');
+    eq((await floor()).channels.find((c) => c.channel === CHW)?.archived, false, 'and the floor payload agrees, so the pill leaves both lists on the next poll');
+  }
+
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();
   const tables = Object.keys(backup.tables ?? {});

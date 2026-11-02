@@ -397,8 +397,10 @@ pre.raw {
 .chip.tiny { font-size: 10px; padding: 1px 6px; }
 .reveal-bar { grid-column: 1 / -1; display: flex; gap: 6px; }
 
-/* Minimized channels: a pill row under the cards. Dashed, so a pill reads as a
-   card that's been folded away rather than as one more filter chip. */
+/* Put-away (archived) channels: a pill row under the cards on the board, and
+   under the building on the floor — the one place a put-away floor is drawn,
+   and the pill is the way back. Dashed, so a pill reads as a card that has
+   been put away rather than as one more filter chip. */
 .min-bar {
   grid-column: 1 / -1;
   display: flex;
@@ -420,11 +422,8 @@ pre.raw {
   transition: border-color .12s ease, color .12s ease;
 }
 .min-pill:hover, .min-pill:focus-visible { border-style: solid; border-color: var(--accent); color: var(--text); }
-/* Widening your focus again shouldn't be N clicks. Not a channel, so no mono. */
-.min-all { border-style: none; text-decoration: underline dotted; }
 .min-name { font-family: var(--mono); }
-.min-flag { font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; opacity: .8; }
-/* Whatever the folded channel is carrying stays legible from out here. */
+/* Whatever the put-away channel is carrying stays legible from out here. */
 .min-count {
   min-width: 17px;
   padding: 0 5px;
@@ -709,8 +708,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:hover:not(:has(.deskArrow:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:hover:not(:has(.deskArrow:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -1439,24 +1438,19 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .dp-open:hover { background: color-mix(in srgb, var(--accent) 34%, var(--surface)); }
 
 
-/* Floor picker — one pill per channel, above the rooms. Empty with one floor. */
+/* Floor picker — one pill per channel, above the rooms. Empty with one floor,
+   and a put-away floor is not in it: that one is a pill in #floor-away. */
 #floor-pick { margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
 #floor-pick:empty { display: none; }
-/* The mark between the floors in the building and the ones put away. A dot and
-   nothing else: a word ("archived") would be read as a chip and clicked, and a
-   rule would divide a row that wraps into two rows divided in the wrong place. */
-.pick-sep { color: var(--muted); opacity: .6; padding: 0 2px; user-select: none; }
-/* A floor that has been put away. Dimmed to the same degree as its card on the
-   board, because it is the same fact — and still a full chip rather than a
-   ghost: it is the only way into that room from here, so it has to look
-   pressable. The dashes are archiving's alone: past the dot both are put away,
-   and the difference between "I folded this" and "we archived this" is the one
-   the border carries.
-   Selected, either goes back to being an ordinary chip — you are standing in
-   that room, and a dashed outline around where you are reads as a fault. */
-#floor-pick .chip.folded, #floor-pick .chip.archived { opacity: .72; }
-#floor-pick .chip.archived { border-style: dashed; }
-#floor-pick .chip.folded.on, #floor-pick .chip.archived.on { opacity: 1; border-style: solid; }
+/* The put-away floors, under the building. The same pills as the board's,
+   inset to the panel's own margin like the picker above and the rooms. */
+#floor-away { padding: 0 14px 14px; }
+#floor-away:empty { display: none; }
+/* The control on a storey that puts it away. Drawn like the meta line it sits
+   under — a word in the margin, not a button in a box — and lit on hover so it
+   reads as pressable; it is the one thing on a storey that is not "ride here". */
+.roomPut { fill: var(--muted); font: 11px var(--mono); cursor: pointer; text-decoration: underline dotted; }
+.roomPut:hover, .roomPut:focus-visible { fill: var(--accent); outline: none; }
 
 /* A desk the board knows but no window has reported from. Dimmed like "away"
    (it inherits that) but the nameplate carries the reason, in the warning tone

@@ -28,40 +28,80 @@ const el = {
   setBody: $('set-body'),
 };
 
+/* ---------- put away: what the pills read ---------- */
+
 /*
- * Minimizing a channel is a view preference, not a claim about the work, so it
- * lives in this browser and nowhere else — that is the whole difference from
- * archiving, which is a shared, audited statement everyone sees. Kept across
- * reloads, because a board you have to re-tidy on every refresh isn't tidy.
+ * Archive is the one way to put a floor away, and a put-away floor is drawn in
+ * exactly one place on each view: a pill at the bottom. It is the server's
+ * flag — shared, audited, undone by the pill — and nothing on either page is a
+ * view preference about which floors exist.
+ *
+ * There used to be a second way. "Minimize" folded a card into the same pill
+ * row, kept the fold in this browser's localStorage, and was undone from the
+ * board only; archiving had its own toggle that revealed the cards in place.
+ * The two looked alike in the floor picker's tail and in the pill row, and on
+ * the live board — with nothing archived at all — every "still archived" floor
+ * an operator reported was a minimized one (issue #21, measured 2026-11-02).
+ * costmo's ruling was to simplify rather than label: one mechanism, one place
+ * it shows. Do not bring a browser-local fold back.
+ *
+ * These are plain functions over a payload's channel list, on `window` because
+ * this is a classic script, so the floor draws its pills with the same code —
+ * two pill lists built by different code would be the two-mechanism drift in
+ * a new coat — and so `test/floor.mjs` can lift the section and run both
+ * views' lists over one payload.
  */
-const MIN_KEY = 'orch.minimized';
-function loadMinimized() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(MIN_KEY) ?? '[]');
-    return new Set(Array.isArray(raw) ? raw.filter((s) => typeof s === 'string') : []);
-  } catch {
-    return new Set();   // private mode, or someone put junk in there
-  }
-}
-function saveMinimized() {
-  try { localStorage.setItem(MIN_KEY, JSON.stringify([...ui.minimized])); } catch { /* not worth failing over */ }
+
+/** The channels drawn as cards, rows and choices: everything not put away. */
+function onBoard(channels) { return (channels ?? []).filter((c) => !c.archived); }
+
+/** The channels drawn only as pills — same members, same order, on both views. */
+function putAway(channels) {
+  return (channels ?? []).filter((c) => c.archived).sort((a, b) => a.channel.localeCompare(b.channel));
 }
 
+/** What a picker, a filter or a dropdown may offer: never a put-away floor. */
+function pickable(channels) { return onBoard(channels).map((c) => c.channel); }
+
 /**
- * Which channels this browser has folded away — the floor's copy of the same
- * fact, so a channel minimized here is not a storey there either.
- *
- * A function, because `ui` is a top-level `const` and so is not on `window` at
- * all; a top-level `function` in a classic script is. A copy of the names
- * rather than the Set itself, because handing the other surface the live one
- * makes it possible to minimize a channel from the floor by accident — and
- * minimizing stays a board control. floor.js only ever asks.
+ * What a pill carries. Read off either payload: the board's channel has agent
+ * rows and task counts, the floor's has desks with the board's sign on each
+ * and the same counts under `stats`. A pill that hid an unread count would make
+ * the page lie by omission, which is the one thing it must not do.
  */
-function minimizedChannels() { return [...ui.minimized]; }
+function pillFacts(c) {
+  const seats = c.agents ?? (c.desks ?? []).map((d) => d.board ?? {});
+  const unread = seats.reduce((n, a) => n + (a.unread ?? 0), 0);
+  const tasks = c.tasks ?? c.stats ?? {};
+  const unfinished = (tasks.open ?? 0) + (tasks.claimed ?? 0);
+  return { unread, unfinished, messages: c.messages ?? c.stats?.messages ?? 0 };
+}
+
+function pillTitle(c) {
+  const f = pillFacts(c);
+  return `${c.channel} — archived; click to restore · ${f.unread} unread · ` +
+    `${f.unfinished} unfinished task${f.unfinished === 1 ? '' : 's'} · ${f.messages} message${f.messages === 1 ? '' : 's'}`;
+}
+
+/** One pill: the channel's name, its unread count, and the way back. */
+function pillHtml(c) {
+  const f = pillFacts(c);
+  return `<button type="button" class="min-pill" data-act="unarchive" data-channel="${esc(c.channel)}" title="${esc(pillTitle(c))}">
+            <span class="min-name">${esc(c.channel)}</span>
+            ${f.unread ? `<span class="min-count">${f.unread}</span>` : ''}
+          </button>`;
+}
+
+/** The pill list, or nothing at all when nothing is put away. */
+function pillBar(channels) {
+  const away = putAway(channels);
+  return away.length ? `<div class="min-bar">${away.map(pillHtml).join('')}</div>` : '';
+}
+
+/* ---------- put away: the pills ---------- */
 
 const ui = {
   limit: PAGE,
-  minimized: loadMinimized(),
   kinds: new Set(['message', 'task', 'contract', 'admin']),
   text: '',
   channel: '',
@@ -70,7 +110,6 @@ const ui = {
   lastChannelSig: null,
   hasMore: false,
   showRetired: false,
-  showArchived: false,
   state: null,   // the most recent /api/state, so a dialog can read live counts
   // The saved-prompt library while its manager is open, and which row is being
   // edited — an id, 'new', or null for the plain list. Outside the dialog's DOM
@@ -287,9 +326,6 @@ function channelCard(c) {
             <b>${c.contracts}</b> contracts · <b>${c.messages}</b> msgs
           </span>
           <div class="row-acts">
-            <!-- Minimize is view state, and private to this browser — unlike archive,
-                 which is a shared statement everyone on the board sees. -->
-            <button type="button" class="row-act" data-act="minimize" data-channel="${esc(c.channel)}" title="Minimize ${esc(c.channel)} — folds it into a pill below so you can focus. This browser only; nobody else sees it, and nothing is archived.">–</button>
             <button type="button" class="row-act" data-act="channel" data-channel="${esc(c.channel)}" title="Archive or delete this channel">🗑</button>
           </div>
         </div>
@@ -298,8 +334,7 @@ function channelCard(c) {
 }
 
 function renderChannels(state) {
-  const sig = JSON.stringify(state.channels) + JSON.stringify(state.totals) +
-    `|${ui.showRetired}|${ui.showArchived}|${[...ui.minimized].sort().join('\n')}`;
+  const sig = JSON.stringify(state.channels) + JSON.stringify(state.totals) + `|${ui.showRetired}`;
   if (sig === ui.lastChannelSig) {
     // Same data — but the ages still have to keep counting up.
     refreshAges(el.channels);
@@ -317,44 +352,14 @@ function renderChannels(state) {
     return;
   }
 
-  const onBoard = state.channels.filter((c) => ui.showArchived || !c.archived);
-  const shown = onBoard.filter((c) => !ui.minimized.has(c.channel));
-  const minimized = onBoard.filter((c) => ui.minimized.has(c.channel));
-  // Archived channels and retired agents are never dropped silently — the count
-  // is always on screen, even when the rows aren't.
-  const bar = t.archived_channels
-    ? `<div class="reveal-bar">
-         <button type="button" class="chip${ui.showArchived ? ' on' : ''}" data-act="toggle-archived">
-           ${t.archived_channels} archived channel${t.archived_channels === 1 ? '' : 's'}
-         </button>
-       </div>`
-    : '';
-
-  // A minimized channel keeps whatever it is carrying on screen. A pill that hid
-  // an unread count would make the board lie by omission, which is the one thing
-  // it must not do — same reason archived channels keep a count.
-  const pills = minimized.length
-    ? `<div class="min-bar">${minimized.map((c) => {
-        const unread = (c.agents ?? []).reduce((sum, a) => sum + a.unread, 0);
-        const unfinished = c.tasks.open + c.tasks.claimed;
-        const title = `${c.channel} — click to restore · ${unread} unread · ` +
-          `${unfinished} unfinished task${unfinished === 1 ? '' : 's'} · ${c.messages} message${c.messages === 1 ? '' : 's'}`;
-        return `<button type="button" class="min-pill" data-act="restore" data-channel="${esc(c.channel)}" title="${esc(title)}">
-            <span class="min-name">${esc(c.channel)}</span>
-            ${c.archived ? '<span class="min-flag">archived</span>' : ''}
-            ${unread ? `<span class="min-count">${unread}</span>` : ''}
-          </button>`;
-      }).join('')}${minimized.length > 1
-        ? `<button type="button" class="min-pill min-all" data-act="restore-all" title="Bring all ${minimized.length} minimized channels back">show all</button>`
-        : ''}</div>`
-    : '';
-
-  const cards = !shown.length && minimized.length
-    ? '<div class="empty">every channel is minimized — click a pill to bring one back</div>'
+  // A put-away channel is never dropped silently: it is a pill under the cards,
+  // carrying its unread count, and the pill is the way back.
+  const shown = onBoard(state.channels);
+  const cards = !shown.length
+    ? '<div class="empty">every channel is archived — click a pill to restore one</div>'
     : shown.map(channelCard).join('');
-
   // Pills last, so they land on their own row beneath the cards.
-  el.channels.innerHTML = bar + cards + pills;
+  el.channels.innerHTML = cards + pillBar(state.channels);
 }
 
 function renderServer(state) {
@@ -370,7 +375,9 @@ function renderServer(state) {
 }
 
 function syncChannelFilter(state) {
-  const names = state.channels.map((c) => c.channel);
+  // Not a put-away channel: its log rows are still in the feed under "all
+  // channels", but the filter offers only the floors on the board.
+  const names = pickable(state.channels);
   const current = [...el.filterChannel.options].slice(1).map((o) => o.value);
   if (JSON.stringify(names) === JSON.stringify(current)) return;
   const selected = el.filterChannel.value;
@@ -520,6 +527,27 @@ async function admin(path, body) {
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
   return json;
+}
+
+/**
+ * What a pill does when clicked, on either view: restore the channel. On
+ * `window` because the floor's pills are drawn by the same code (pillHtml) and
+ * have to do the same thing — a pill that restored on one page and not the
+ * other would be the old two-mechanism confusion back again. The board is
+ * re-polled at once so the card returns without waiting out the interval;
+ * the floor's own poll picks it up on its next tick.
+ */
+async function restoreChannel(channel) {
+  try {
+    await admin('channel/unarchive', { channel });
+  } catch (err) {
+    // No dialog is open to carry the error, so the status dot does: the same
+    // place a failed poll reports, which is what a failed write amounts to.
+    el.dot.className = 'dot down';
+    el.dot.title = `could not restore ${channel}: ${err.message ?? err}`;
+  }
+  ui.lastChannelSig = null;
+  tick();
 }
 
 /**
@@ -1074,8 +1102,8 @@ function channelDialog(channel) {
     <div class="dlg-choice">
       <button type="button" class="btn primary" data-do="${c.archived ? 'unarchive' : 'archive'}" data-channel="${esc(channel)}">${c.archived ? 'Restore' : 'Archive'}</button>
       <p>${c.archived
-        ? 'Puts the channel back on the board. Nothing was lost while it was hidden — agents could keep working on it the whole time.'
-        : 'Hides it from the board. Nothing is deleted and agents on it keep working; restore it any time from the “archived” chip.'}</p>
+        ? 'Puts the channel back on the board and the floor. Nothing was lost while it was put away — agents could keep working on it the whole time.'
+        : 'Puts the channel away, for everyone: off the board and the floor, out of the picker, the filter and the Floor dropdown. Nothing is deleted and agents on it keep working; it stays as a pill at the bottom of both views, and clicking the pill restores it — as does anything new starting on it, such as a desk taken there or a session connecting under its name.'}</p>
     </div>
     <div class="dlg-danger">
       <h4>Delete permanently</h4>
@@ -1390,26 +1418,23 @@ el.channels.addEventListener('click', (e) => {
   const { channel, agent } = btn.dataset;
   const action = btn.dataset.act;
 
-  // The reveal toggles are view state, not operator actions — they work whether
+  // The reveal toggle is view state, not an operator action — it works whether
   // or not this browser can write.
-  if (action === 'toggle-archived' || action === 'toggle-retired') {
-    if (action === 'toggle-archived') ui.showArchived = !ui.showArchived;
-    else ui.showRetired = !ui.showRetired;
+  if (action === 'toggle-retired') {
+    ui.showRetired = !ui.showRetired;
     ui.lastChannelSig = null;
     tick();
     return;
   }
 
-  // So is minimizing, and it never leaves the browser — so it re-renders from the
-  // state already in hand rather than waiting on a fetch that would return the
-  // same thing. Changing what you're looking at should feel instant.
-  if (action === 'minimize' || action === 'restore' || action === 'restore-all') {
-    if (action === 'minimize') ui.minimized.add(channel);
-    else if (action === 'restore') ui.minimized.delete(channel);
-    else ui.minimized.clear();
-    saveMinimized();
-    ui.lastChannelSig = null;
-    if (ui.state) renderChannels(ui.state); else tick();
+  // A pill restores. That is an operator action on the server — the same route
+  // the channel dialog's Restore takes, with the same audit row — and the card
+  // comes back on the next poll, which the tick asks for at once. There is no
+  // local redraw to make it feel instant: the fact lives on the server, and a
+  // page that drew the card before the server agreed would be showing a
+  // restore that could still fail.
+  if (action === 'unarchive') {
+    restoreChannel(channel);
     return;
   }
 
@@ -2060,7 +2085,10 @@ function renderDeskDialog() {
   const bound = self?.bound ?? null;
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   const mode = !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
-  const channels = [...new Set([...(ui.state?.channels ?? []).map((c) => c.channel), ...(fm.channel && fm.channel !== '__new__' ? [fm.channel] : [])])].sort();
+  // The floors on the board, never a put-away one — plus whatever the form
+  // already holds, so a floor archived while the dialog is open keeps its place
+  // in the dropdown rather than silently becoming another floor.
+  const channels = [...new Set([...pickable(ui.state?.channels), ...(fm.channel && fm.channel !== '__new__' ? [fm.channel] : [])])].sort();
   if (!fm.channel && channels.length) fm.channel = channels[0];
   const crumbs = L ? crumbsOf(L.root, L.path) : [];
   const dirs = L?.entries ?? [];

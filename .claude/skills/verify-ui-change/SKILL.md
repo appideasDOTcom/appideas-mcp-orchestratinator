@@ -283,10 +283,10 @@ check is about ten lines:
 // check.mjs — run with: node --experimental-websocket check.mjs
 import { open } from '<repo>/.claude/skills/verify-ui-change/drive.mjs';
 
-const page = await open({ base: 'http://localhost:8905', view: 'floor', floor: '', minimized: ['beta'] });
+const page = await open({ base: 'http://localhost:8905', view: 'floor', floor: '' });
 console.log(await page.probe('probe.js'));            // a file of browser code
-await page.click('#floor-pick .chip.folded');
-await page.waitFor(`document.querySelectorAll('#floor-rooms .room').length === 1`);
+await page.click('#floor-away .min-pill[data-channel="beta"]');   // a put-away floor's pill restores it
+await page.waitFor(`document.querySelectorAll('#floor-rooms .room').length === 2`);
 console.log(await page.probe('probe.js'));
 await page.shot('out.png', '#floor-pick');            // a PNG of one element
 await page.close();

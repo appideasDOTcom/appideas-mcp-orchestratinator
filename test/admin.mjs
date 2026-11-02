@@ -297,6 +297,21 @@ try {
     const stillWorks = await call(alpha.client, 'whoami');
     eq(stillWorks.channel, CHANNEL, 'an agent on an archived channel keeps working');
 
+    // Decided 6 (issue #21): something STARTING on an archived channel brings
+    // it back; an agent already on it writing does not. The MCP door is here
+    // because this suite has an MCP client; the hook, host and take doors are
+    // in test/floor.mjs.
+    await call(alpha.client, 'send_message', { body: 'still working while put away' });
+    eq((await chan()).archived, true, 'and its writes landing do not bring the channel back — writing is not starting');
+    const newbie = await makeClient('newbie');
+    await call(newbie.client, 'whoami');
+    eq((await chan()).archived, false, 'a new MCP session connecting under the channel\'s name brings it back');
+    const why = (await activity()).rows.find((r) => r.kind === 'admin.channel.unarchive' && r.actor === 'newbie');
+    assert(!!why && JSON.stringify(why).includes('connected'), 'with an audit row naming the agent that connected, so the return is explained on the log');
+    await close(newbie.transport);
+    await postJson('channel/archive', { channel: CHANNEL });
+    eq((await chan()).archived, true, 'put away again, for the restore below');
+
     await postJson('channel/unarchive', { channel: CHANNEL });
     const back = await chan();
     assert(back.archived === false, 'unarchive puts it back');
@@ -392,7 +407,12 @@ try {
     for (const k of ['admin.advance', 'admin.retire', 'admin.unretire', 'admin.task.close', 'admin.task.reassign', 'admin.channel.archive', 'admin.channel.unarchive', 'admin.channel.delete']) {
       assert(kinds.has(k), `${k} is in the feed`);
     }
-    assert(rows.every((r) => r.actor === 'operator'), 'every operator row is attributed to "operator"');
+    // One kind of row is not the operator's: a channel brought back by
+    // something starting on it (Decided 6) is attributed to what started, so
+    // the log does not credit the operator with a restore they did not make.
+    const woke = rows.filter((r) => r.kind === 'admin.channel.unarchive' && r.actor !== 'operator');
+    eq(woke.map((r) => r.actor), ['newbie'], 'a channel restored by a session connecting is attributed to that session\'s agent');
+    assert(rows.filter((r) => !woke.includes(r)).every((r) => r.actor === 'operator'), 'every other row is attributed to "operator"');
     assert(rows.every((r) => !!r.detail), 'and says what actually happened');
   }
 } catch (err) {

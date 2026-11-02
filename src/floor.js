@@ -940,6 +940,10 @@ export function ingestHookEvent(store, body, live = null) {
     pid,
   });
   const persona = store.ensurePersona(channel, agent);
+  // A session starting under an archived floor's name brings the floor back
+  // (Decided 6). Only the start: every other hook event is an agent already on
+  // the floor working, and archive is not a session kill — those stay put away.
+  if (event === 'SessionStart') store.wakeChannel(channel, `a session started on it: ${agent}`, agent);
 
   /**
    * Whether a host is tailing this repo's transcript right now.
@@ -1437,6 +1441,8 @@ function applyHostEvent(store, live, hostId, ev) {
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
     store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: cwd });
+    // Something starting on an archived floor brings it back (Decided 6).
+    store.wakeChannel(channel, `${ev.from ? 'a desk moved onto it' : 'a host bound a desk on it'}: ${agent}`, agent);
     const sid = str(ev.session_id);
     // The conversation it keeps, when it had one (an import). Through the
     // session case, which is what rekeys the placeholder and publishes.
@@ -1560,6 +1566,9 @@ function applyHostEvent(store, live, hostId, ev) {
         live.publish(key, { type: 'session', session_id: live_id });
       }
       store.ensurePersona(channel, agent);
+      // A window's session opening on an archived floor brings it back
+      // (Decided 6) — this is a session starting, not an agent writing.
+      store.wakeChannel(channel, `a window opened a session on it: ${agent}`, agent);
       break;
     }
 
@@ -1939,8 +1948,8 @@ export function buildFloor(store, live = null, sessions = null) {
   // against the same column the board reads. It used to be applied only to the
   // sign, which hid the trash can's effect from the floor entirely: an agent
   // removed on the board kept its desk, its bubble and its place in the queue.
-  // Archived channels do
-  // not — they are carried with a flag and left out of the building by the page.
+  // Archived channels are
+  // carried with a flag and left out of the building by the page.
   // Dropping them here is what this used to do, and it took the way back in with
   // them: a channel absent from the payload has no chip in the floor picker
   // either, so an archived room could be hidden and then never visited again.
@@ -1976,10 +1985,16 @@ export function buildFloor(store, live = null, sessions = null) {
   }
 
   const queue = [];
-  const channels = [...byChannel.keys()].sort().map((channel) => {
+  // The floors are the board's channels — the same list, from the same query
+  // (listAllChannels, which counts a persona as a channel for exactly this
+  // reason). The keys of `personas` were the list here, and the two views
+  // disagreed by two floors on the live board: a channel whose only trace was
+  // a hook-made desk was a storey with no board row to archive it from
+  // (issue #6). A channel the board knows with no desk on it is a storey with
+  // no desks, which is the truth about it.
+  const channels = store.listAllChannels().map((channel) => {
     const shelved = archived.has(channel);
-    const desks = byChannel
-      .get(channel)
+    const desks = (byChannel.get(channel) ?? [])
       .filter((p) => !retired.has(key(channel, p.agent)))
       .sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0) || a.agent.localeCompare(b.agent))
       .map((p) => {
@@ -2802,6 +2817,9 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     store.ensurePersona(channel, agent);
     if (persona) store.setProfile(channel, agent, { persona });
     store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}` });
+    // Naming an archived floor in Take a desk brings it back (Decided 6): the
+    // operator typed its name, which is the plainest "I want this floor" there is.
+    store.wakeChannel(channel, `a desk was taken on it: ${agent}`, 'operator');
     store.enqueueHostWork(hostId, channel, agent, 'bind', {
       path, channel, agent, import: mode !== 'take', from, resume: mode === 'move',
       open: req.body?.open !== false, queued_at: new Date(nowMs).toISOString(),

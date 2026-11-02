@@ -283,7 +283,13 @@ app.post('/mcp', async (req, res) => {
         // Record presence immediately so a freshly connected window appears on
         // the dashboard before it calls its first tool.
         if (context.channel && context.agent) {
-          try { store.touchAgent(context.channel, context.agent, 'connect'); } catch { /* best-effort */ }
+          try {
+            store.touchAgent(context.channel, context.agent, 'connect');
+            // A session connecting under an archived floor's name brings the
+            // floor back (issue #21, Decided 6) — "for any reason", in costmo's
+            // words, so a reconnect counts too. The audit row names the agent.
+            store.wakeChannel(context.channel, `${context.agent} connected`, context.agent);
+          } catch { /* best-effort */ }
         }
       },
     });
