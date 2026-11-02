@@ -105,7 +105,10 @@ and a running process older than the file is the most common reason a fix
 "didn't work". Compare `ps -o lstart=` against the file's mtime rather than
 assuming.
 
-**The server is the other half, and it goes stale independently.** `src/` is
+**The server is the other half, and it goes stale independently.** The
+**deploy-both-halves** skill is the procedure — its `status.sh` reads both
+halves against the tree, with symbol counts in what is served — and a deploy
+task is closed with those readings, not with "rebuilt". `src/` is
 baked into the image (`build: .`; only `/data` is a volume), so a change there
 needs `docker compose up -d --build` — and that printing `Container … Running`
 instead of `Recreated` means it did *not* take your change. Restart each in its
@@ -533,6 +536,13 @@ operator's live floor.
 
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
+- **The tree is committed whenever costmo chooses, so an edit is not
+  announced until its suite has run.** On 2026-11-02 "taking the Low" was
+  posted with the fix in the tree and the window suite still running; he
+  committed and pushed on that, the fix had a `ReferenceError` in it, and QA
+  spent a run measuring a commit that could not pass. Say "in the tree,
+  unverified" if you must say anything before the suite is green — and
+  prefer saying nothing until it is.
 - **The version lives in three files, so bump it with one command.**
   `npm run set-version <x.y.z>` writes `package.json`, `host/package.json` and
   `plugin/.claude-plugin/plugin.json`. They must agree — `npm run smoke` asserts

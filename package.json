@@ -12,6 +12,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "smoke": "node test/smoke.mjs",
+    "reanchor-facts": "node scripts/reanchor-facts.mjs",
     "set-version": "node scripts/set-version.mjs",
     "test:admin": "node test/admin.mjs",
     "test:auth": "node test/auth.mjs",

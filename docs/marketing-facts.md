@@ -9,7 +9,8 @@ claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
 Line numbers are for `c6f9474`. A later commit may move them; the file names
-will not.
+will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
+reference whose line is found once at the new commit and lists the rest.
 
 ## 1. The three parts, and where each runs
 
