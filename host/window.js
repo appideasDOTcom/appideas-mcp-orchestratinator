@@ -1782,7 +1782,22 @@ export async function readQuestions(cwd) {
   const first = questionOf(await screenOf(pane.target, 34));
   // No tab strip: this is a plain menu — a permission prompt — and walking it
   // with Tab would be pressing keys into somebody else's widget.
-  if (!first) return { ok: false, code: 'not_a_form', error: 'the window is asking, but not with a question form' };
+  //
+  // Or it is a question form too tall for its pane. Claude Code draws on the
+  // alternate screen and cuts the top off what does not fit, so the header row
+  // `questionOf` finds a form by is not on the pane and not in scrollback
+  // either — measured on 2.1.284 (issue #7): a one-question form needing 26
+  // rows, in the 80x24 a window has until somebody attaches, read as this. The
+  // two cannot be told apart from here, so the pane's size goes in the words:
+  // the board knows which tool is asking, and what it says about a question it
+  // could not read should be what was seen.
+  if (!first) {
+    return {
+      ok: false,
+      code: 'not_a_form',
+      error: `the window is asking, and no question form's header is on its ${await sizeOf(pane.target)} pane`,
+    };
+  }
   // One question, no strip: the whole form is on screen already, and there is
   // nothing to walk — Tab was measured to do nothing on it. Pressing keys into
   // a widget that does not need them is the one way a read can change a form.
@@ -1812,7 +1827,28 @@ export async function readQuestions(cwd) {
     await tmux(['send-keys', '-t', pane.target, 'Left']);
     await sleep(STEP_MS);
   }
+  // Part of a form is not a form. The walk stops at a tab it cannot read — one
+  // taller than the pane loses its strip, the same cut as above — and it used
+  // to return what it had: measured (issue #7), a two-question form at 80x24
+  // came back `ok` with one question. The floor would draw that one, the
+  // operator would answer everything shown, and the window would be left
+  // standing on the tab nobody was offered.
+  const asked = first.tabs.filter((t) => !t.submit).length;
+  if (questions.length < asked) {
+    return {
+      ok: false,
+      code: 'form_cut',
+      error: `the form has ${asked} questions and only ${questions.length} could be read off its ${await sizeOf(pane.target)} pane`,
+    };
+  }
   return { ok: true, tabs: first.tabs, questions };
+}
+
+/** The pane's size as tmux reports it, for saying what a reading was taken from.
+ *  Width is set by whoever is attached and height decides what a form loses. */
+async function sizeOf(target) {
+  const r = await tmux(['display-message', '-p', '-t', target, '#{pane_width}x#{pane_height}']);
+  return r.ok && /^\d+x\d+$/.test(r.out) ? r.out : 'unmeasured';
 }
 
 /** How long each step of a scripted answer is given to land before the next. */
@@ -1866,6 +1902,7 @@ export async function answerQuestion(cwd, steps = []) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo', done: [] };
   const done = [];
+  const quiet = [];
   let closed = false;
   for (const step of steps) {
     const { asking, screen: seen } = await askingSoon(pane.target);
@@ -1895,9 +1932,15 @@ export async function answerQuestion(cwd, steps = []) {
     if (typeof step.text !== 'string' && !step.key) continue;
     const r = await tmux(['send-keys', '-t', pane.target, ...arg]);
     if (!r.ok) return { ok: false, error: r.error, done };
+    const name = typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key);
     if (typeof step.settle === 'number') await sleep(step.settle);
-    else await reacted(pane.target, seen);
-    done.push(typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key));
+    // Kept for the report, not acted on: a key the pane did not visibly react
+    // to is not a failure by itself — the walk to the left end is meant to be
+    // a no-op once it is there, which is why Left is not counted — but when
+    // the form is still standing at the end it is the one observation that
+    // tells a swallowed key from a slow window.
+    else if (!(await reacted(pane.target, seen)) && step.key !== 'Left') quiet.push(name);
+    done.push(name);
   }
 
   // Playing the last step is not the same as the answer having gone in. The
@@ -1911,31 +1954,113 @@ export async function answerQuestion(cwd, steps = []) {
   // The operator asked not to be the one to confirm. So the end of the script is
   // not the end of the job: look at the pane, and keep pressing while it is
   // still asking. This is why the count is a loop and not one more step.
-  for (let i = 0; i < CONFIRM_TRIES; i++) {
-    if (!CONFIRMING.test(await screenOf(pane.target))) break;
-    const r = await tmux(['send-keys', '-t', pane.target, 'Enter']);
-    if (!r.ok) return { ok: false, error: r.error, done };
-    done.push('Enter(confirm)');
-    await sleep(ANSWER_CONFIRM_MS);
+  //
+  // And the job has one end: the form gone from the pane. This used to look
+  // for the review screen once, straight after the last key, and call anything
+  // else an answer — and "anything else" was two real things (issue #7,
+  // measured on 2.1.284, both logged "answered"):
+  //
+  //   - a review screen that had not been drawn yet. With the last key reaching
+  //     the window 2.5 s late, the one look found the last question still up,
+  //     pressed nothing, and the window was left on "Ready to submit your
+  //     answers?" with both answers in it;
+  //   - a form standing somewhere that is not the review screen at all — a
+  //     free-text field with the script's next digit typed into it.
+  //
+  // So it watches instead, for as long as the window keeps holding a question:
+  // the review screen is confirmed whenever it turns up, the form leaving is
+  // the only success, and a form still there when the time runs out is said as
+  // that, with the line the pane ends on.
+  const stop = Date.now() + ANSWER_GONE_MS;
+  let confirms = 0;
+  let gone = 0;
+  let screen = '';
+  for (;;) {
+    screen = await screenOf(pane.target);
+    if (reviewingOf(screen)) {
+      gone = 0;
+      if (confirms >= CONFIRM_TRIES) {
+        return {
+          ok: false,
+          code: 'not_confirmed',
+          done,
+          screen,
+          error: `the window is still showing "Ready to submit your answers?" after ${CONFIRM_TRIES}` +
+            ` attempt${CONFIRM_TRIES === 1 ? '' : 's'} to confirm it`,
+        };
+      }
+      const r = await tmux(['send-keys', '-t', pane.target, 'Enter']);
+      if (!r.ok) return { ok: false, error: r.error, done };
+      done.push('Enter(confirm)');
+      confirms++;
+      await sleep(ANSWER_CONFIRM_MS);
+      continue;
+    }
+    if (!askingOf(screen)) {
+      // Twice running, not once. The bottom line is a rule for a frame while
+      // the form redraws between tabs — recorded as `foot[────]` 48 ms before
+      // the review screen appeared — and one look landing on that frame would
+      // call a form that is still arriving gone.
+      if (++gone >= 2) return { ok: true, done, screen, closed };
+    } else {
+      gone = 0;
+    }
+    if (Date.now() >= stop) break;
+    await sleep(ANSWER_GONE_POLL_MS);
   }
-
-  const screen = await screenOf(pane.target);
-  if (CONFIRMING.test(screen)) {
-    return {
-      ok: false,
-      code: 'not_confirmed',
-      done,
-      screen,
-      error: `the window is still showing "Ready to submit your answers?" after ${CONFIRM_TRIES}` +
-        ` attempt${CONFIRM_TRIES === 1 ? '' : 's'} to confirm it`,
-    };
-  }
-  return { ok: true, done, screen, closed };
+  return {
+    ok: false,
+    code: 'still_asking',
+    done,
+    quiet,
+    screen,
+    // What is on the pane, not why. A key that was swallowed, a window that is
+    // slow and a form that wanted something else all look like this from here.
+    // Two lines, because the footer wraps: at 80 columns the last line of a
+    // form with a free-text field open is the single word "cancel", which is
+    // what this quoted the first time it was run against a real window.
+    error: `the window is still holding the form ${Math.round(ANSWER_GONE_MS / 1000)}s after the last key was sent` +
+      ` — its last two lines read "${String(screen).split('\n').map((l) => l.trim()).filter(Boolean).slice(-2).join(' / ').slice(0, 180)}"` +
+      `${quiet.length ? `; the pane did not change after ${quiet.join(', ')}` : ''}`,
+  };
 }
 
 /** The review screen's own words. Matching the question rather than the footer
  *  keeps this independent of how many choices the confirmation offers. */
 const CONFIRMING = /ready to submit your answers/i;
+
+/**
+ * Whether the pane is on the form's review screen, read from its bottom.
+ *
+ * Positional, like every other status here: the screen ends on its own little
+ * menu — "Ready to submit your answers?", "1. Submit answers", "2. Cancel" —
+ * and that is what is matched, in the last few lines and nowhere else. The
+ * words anywhere in the capture is what this used to test, and the capture
+ * includes the conversation: a pane back at its composer under a transcript
+ * that quotes the review screen read as standing on it, so Enter was pressed
+ * three times into the composer and a form that had gone through came back
+ * "not confirmed". Found reading the code while the form was being discussed
+ * on this repo's own desks, and pinned by a fixture pane in test/window.mjs;
+ * not seen on a live desk.
+ */
+export function reviewingOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  return CONFIRMING.test(lines.slice(-6).join('\n')) && /^\s*\d+\.\s*Cancel\s*$/i.test(lines[lines.length - 1] ?? '');
+}
+
+/**
+ * How long a form is watched after its last key before it is called standing,
+ * and how often it is looked at.
+ *
+ * The form normally leaves well inside a second: last digit to review screen
+ * was 28–57 ms on a probe window (four runs, 2026-10-01), and the confirm
+ * press is another ANSWER_CONFIRM_MS. Eight seconds is for the window that is
+ * not normal — the late key that left a form on its review screen was 2.5 s
+ * late — and it is the whole cost of a failure, paid on the work loop, so it
+ * is not longer than that needs.
+ */
+const ANSWER_GONE_MS = Number(process.env.ORCH_ANSWER_GONE_MS ?? 8000);
+const ANSWER_GONE_POLL_MS = Number(process.env.ORCH_ANSWER_GONE_POLL_MS ?? 150);
 
 /** Enough to cover a press landing mid-redraw, few enough that a window which is
  *  genuinely stuck says so instead of being hammered. */

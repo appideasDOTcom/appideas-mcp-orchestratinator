@@ -1351,6 +1351,7 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    sits in — it is a note, not a refusal; submitting anyway is allowed there and
    allowed here. */
 .p-ask-warn { font-size: 11.5px; color: var(--busy); }
+.p-ask-note { font-size: 11.5px; color: var(--muted, #888); }
 /* While the host walks the window's tabs to find out what is being asked. The
    alternative was Approve/Deny/Cancel over a question — buttons that answer
    something else, offered for the two seconds before the real ones arrive. */
