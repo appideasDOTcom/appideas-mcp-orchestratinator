@@ -464,10 +464,13 @@ out the 45s readiness timeout on "the roster had nothing at all". It writes
 no transcript, so a send that opens a window can only end `not_delivered`
 there; the case asserts the release, the window and the text arriving, and
 delivery is proved by the section that writes its own transcript. And the
-answer-a-prompt cases read a fixture pane 500ms after creating it: under
-editor load they went red twice with `its last line reads ""` and were green
-on the rerun. That red is a pane not yet drawn, not the code — rerun before
-reading anything into it.
+fixture panes used to be read a fixed 500 ms (700 ms for the alternate-screen
+form) after creation: under editor load that went red with `its last line
+reads ""` or `no_prompt` — twice on 2026-10-01, once on 2026-10-03, once in
+QA's review of PR #25 — and green on every rerun. Since 2026-11-02 `drawn()`
+in `test/window.mjs` waits up to 8 s for the pane to show anything instead,
+the same settle-on-an-observable rule the host lives by. A red of that shape
+now means the pane really drew nothing; read it rather than rerunning.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is

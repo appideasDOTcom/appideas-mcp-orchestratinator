@@ -1,13 +1,14 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `0ce4f1e`
-(branch `develop`, 2026-10-17). Cite this file; do not restate a fact from
-memory or from the README. Where a claim did not hold, it is narrowed here or
-marked **not claimed**. Where the answer is not this repo's to give, it says
-whose it is.
+code. Every fact names the file and line that holds it, at commit `c6f9474`
+(branch `develop`, 2026-11-02; first written at `0ce4f1e`, 2026-10-17, and
+re-anchored line by line — ten references had moved, none had changed). Cite
+this file; do not restate a fact from memory or from the README. Where a
+claim did not hold, it is narrowed here or marked **not claimed**. Where the
+answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `0ce4f1e`. A later commit may move them; the file names
+Line numbers are for `c6f9474`. A later commit may move them; the file names
 will not.
 
 ## 1. The three parts, and where each runs
@@ -76,18 +77,18 @@ conversation open in an editor means nothing can be typed in.
 | --- | --- | --- |
 | Status word, detail line, age, TTL expiry | nothing beyond the MCP tools | `src/tools.js:54-75`, `src/agent-state.js:56-139` |
 | Tray: unread, assigned, claimed counts; derived state when no status is set | nothing beyond the MCP tools | `src/agent-state.js:102-139, 221` |
-| Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:998-1045`, `src/floor.js:1985-2010`, `src/db.js:119-124` |
-| Permission prompt text, the tool asking | plugin | `src/floor.js:998-1010` |
-| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2003-2008`, `src/ui/floor.js:2675-2676`, `host/index.js:1154-1298` |
+| Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:1039-1086`, `src/floor.js:2026-2051`, `src/db.js:119-124` |
+| Permission prompt text, the tool asking | plugin | `src/floor.js:1039-1051` |
+| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2044-2049`, `src/ui/floor.js:2714-2715`, `host/index.js:1154-1298` |
 | Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:903-915, 967-996` |
 | Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:2906, 2964-3026` |
 | Thinking, drawn as a thought bubble | host | `host/window.js:2993-2994` |
-| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:295`, `src/ui/floor.js:1129-1142` |
+| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:295`, `src/ui/floor.js:1168-1181` |
 | Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:254`, `host/index.js:1151, 1316` |
-| Open in VS Code | host (macOS) | `host/index.js:1319`, `host/window.js:2354-2370` |
-| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1374-1385`, `host/window.js:2450` |
-| Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:2681`, `host/dialog.js` |
-| Recent conversations, search, read a conversation whole | host | `host/history.js:1-37`, `host/index.js:1356-1368` |
+| Open in VS Code | host (macOS) | `host/index.js:1320`, `host/window.js:2354-2370` |
+| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1375-1386`, `host/window.js:2450` |
+| Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:2722`, `host/dialog.js` |
+| Recent conversations, search, read a conversation whole | host | `host/history.js:1-37`, `host/index.js:1357-1369` |
 | Tool calls on the plugin path carry only one descriptive field (command, path, pattern, description, prompt, url), clipped to 300 characters | plugin | `plugin/hooks/report.mjs:42, 267-290` |
 
 Two honest limits worth not contradicting on the page:
@@ -207,7 +208,7 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.10.5** at `0ce4f1e`, in all three places that carry it:
+- **Version: 0.10.6** at `c6f9474`, in all three places that carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
   They are kept equal by `npm run set-version` (`scripts/set-version.mjs`)
   and `npm run smoke` asserts it. The dashboard header reports the server's.
@@ -223,7 +224,8 @@ VS Code."
 
 ## 7. README claims to source from here, not from the README
 
-Checked line by line against `0ce4f1e`. Nothing in the README is false at
+Checked line by line against `c6f9474` (the README is byte-identical to its
+`0ce4f1e` text, where it was first checked). Nothing in the README is false at
 HEAD. Four things need care:
 
 - **"A plugin for Claude Code or Visual Studio Code — either one, or both."**

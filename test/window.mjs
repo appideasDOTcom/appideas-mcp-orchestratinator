@@ -91,6 +91,21 @@ async function until(fn, ms = 5000) {
   return false;
 }
 
+/**
+ * A fixture pane, once it has drawn something. A fixed sleep after
+ * `new-window` was the wait here (500 ms, then 700 ms for the alternate-screen
+ * form), and under load it was the one source of red in this suite: a pane
+ * read before its script had printed answers `no_prompt` or `its last line
+ * reads ""` — 2026-10-01 twice, 2026-10-03, 2026-11-02 (QA's review of PR
+ * #25). Bounded on the pane's content instead, the way everything else in
+ * the host is settled on an observable rather than a clock.
+ */
+async function drawn(dir) {
+  const shown = await until(async () => ((await W.screen(dir)).text ?? '').trim() !== '', 8000);
+  if (!shown) throw new Error(`fixture pane in ${dir} drew nothing in 8 s`);
+  return dir;
+}
+
 const received = () => (existsSync(SINK) ? readFileSync(SINK, 'utf8') : '');
 /** Strip the bracketed-paste markers a real TUI would consume itself. */
 const clean = (s) => s.replace(/\x1b\[20[01]~/g, '');
@@ -1226,8 +1241,7 @@ async function main() {
       const dir = `${PROMPT_DIR}/${name}`;
       mkdirSync(dir, { recursive: true });
       await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, sh]).catch(() => {});
-      await sleep(500);
-      return dir;
+      return drawn(dir);
     };
 
     // Ignores the key entirely: the question is still there afterwards.
@@ -1482,8 +1496,7 @@ async function main() {
       ].join('\n'));
       chmodSync(script, 0o755);
       await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, script]).catch(() => {});
-      await sleep(700);
-      return dir;
+      return drawn(dir);
     };
 
     const cutOne = await formPane('cut-one', [CUT]);
@@ -1632,8 +1645,7 @@ async function main() {
       ].join('\n'));
       chmodSync(script, 0o755);
       await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, script]).catch(() => {});
-      await sleep(500);
-      return dir;
+      return drawn(dir);
     };
 
     // Cursor stuck on "Continue without…" (index 2) — the dialog's real
