@@ -3,7 +3,7 @@
 What the landing page may say about the orchestratinator, checked against the
 code. Every fact names the file and line that holds it, at commit `c6f9474`
 (branch `develop`, 2026-11-02; first written at `0ce4f1e`, 2026-10-17, and
-re-anchored line by line — ten references had moved, none had changed). Cite
+re-anchored line by line — sixteen references had moved, none had changed). Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
@@ -54,7 +54,7 @@ the workstation listens.
 
 - Purpose and the reach-out rule: `host/index.js:1-36`.
 - Zero dependencies: `host/package.json` (`"dependencies": {}`),
-  `host/install.sh:90-92`.
+  `host/install.sh:91-93`.
 - Requirements enforced by the installer: `tmux` (`host/install.sh:26-35`),
   `node` and a `claude` on PATH (`host/install.sh:63-65`).
 - **OS: macOS.** The installer writes a LaunchAgent (`host/install.sh:6,19`).
@@ -80,11 +80,11 @@ conversation open in an editor means nothing can be typed in.
 | Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:1039-1086`, `src/floor.js:2026-2051`, `src/db.js:119-124` |
 | Permission prompt text, the tool asking | plugin | `src/floor.js:1039-1051` |
 | Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2044-2049`, `src/ui/floor.js:2714-2715`, `host/index.js:1154-1298` |
-| Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:903-915, 967-996` |
+| Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:944-956, 1008-1037` |
 | Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:2906, 2964-3026` |
 | Thinking, drawn as a thought bubble | host | `host/window.js:2993-2994` |
 | Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:295`, `src/ui/floor.js:1168-1181` |
-| Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:254`, `host/index.js:1151, 1316` |
+| Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:254`, `host/index.js:1151, 1317` |
 | Open in VS Code | host (macOS) | `host/index.js:1320`, `host/window.js:2354-2370` |
 | Open in Claude, Open in tmux | host (macOS) | `host/index.js:1375-1386`, `host/window.js:2450` |
 | Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:2722`, `host/dialog.js` |
@@ -161,7 +161,7 @@ desk (`src/db.js:509`). **Backups exclude `turns` and `agent_sessions`**
 
 **The network boundary.** The shared secret guards `/mcp`, `/api/ingest` and
 the host routes, and nothing else (`src/auth.js:29-30, 156`;
-`src/floor.js:2244, 2269, 2386, 2412`). The dashboard has no sign-in at all;
+`src/floor.js:2285, 2310, 2427, 2453`). The dashboard has no sign-in at all;
 anything that can reach the port can read every message on every channel
 and take operator actions. Compose publishes port 8787 on every interface by
 default, so by default that is the LAN; one edit makes it loopback only
