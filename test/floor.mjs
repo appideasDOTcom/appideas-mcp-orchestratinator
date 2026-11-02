@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, formFromInput, settleForm, claudeable, switchable } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -1387,6 +1387,31 @@ try {
       'no later tab is walked to, because the form is gone');
     eq(clar.length, keys(clar).lastIndexOf('Enter') + 1, 'the sequence stops at the Enter that withdraws the form');
 
+    // What follows the withdrawal is one message carrying every answer, not
+    // only the typed one — costmo's ruling on issue #7 (2026-11-02), on a
+    // measured run where the agent received "I like Dragon Fruit" and the
+    // colour and weekday chosen beside it were gone with the form.
+    const colour = { kind: 'single', tab_title: 'Colour', question: 'Which colour?',
+      options: [{ n: 1, text: 'Blue' }, { n: 2, text: 'Green' }, { n: 3, text: 'Orange' }, { n: 4, text: 'Type something.', other: true }] };
+    const fruit = { kind: 'single', tab_title: 'Fruit', question: 'Which fruit?',
+      options: [{ n: 1, text: 'Apple' }, { n: 2, text: 'Banana' }, { n: 3, text: 'Mango' }, { n: 4, text: 'Type something.', other: true }] };
+    const weekday = { kind: 'single', tab_title: 'Weekday', question: 'Which weekday?',
+      options: [{ n: 1, text: 'Monday' }, { n: 2, text: 'Wednesday' }, { n: 3, text: 'Friday' }, { n: 4, text: 'Type something.', other: true }] };
+    const every = clarifyMessage([colour, fruit, weekday], [{ choose: [3] }, { choose: [4], text: 'I like Dragon Fruit' }, { choose: [3] }]);
+    eq(every, 'Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday.',
+      'the message after a withdrawn form carries every answer as words, the picks beside the typed one');
+    assert(every.includes('Orange') && every.includes('Friday'),
+      'nothing the operator chose on the other tabs is dropped');
+    const typedLast = clarifyMessage([colour, fruit], [{ choose: [1] }, { choose: [4], text: 'Dragon fruit, please.' }]);
+    eq(typedLast, 'Colour: Blue. Fruit: Dragon fruit, please.', 'a typed answer that ends in its own full stop is not given a second');
+    const noTitles = clarifyMessage([{ ...colour, tab_title: null }], [{ choose: [2] }]);
+    eq(noTitles, 'Which colour?: Green.', 'a form with no tab titles is labelled by its questions');
+    const multiWords = clarifyMessage([colour, multi], [{ choose: [4], text: 'teal' }, { choose: [1, 2] }]);
+    assert(/^Colour: teal\. /.test(multiWords) && /: [^.]+, [^.]+\.$/.test(multiWords),
+      `a multi-select's picks are listed with commas — "${multiWords}"`);
+    eq(clarifyMessage([colour], [{ choose: [9] }]), '', 'a choice the window never offered says nothing');
+    eq(clarifyMessage([], []), '', 'and an empty form is an empty message');
+
     // A free-text choice with nothing typed is not an answer — issue #7, item 1.
     //
     // This used to assert that the row's digit was pressed as an ordinary
@@ -1416,7 +1441,7 @@ try {
       const b = src.indexOf('  /* ---------- a question the window is asking ---------- */');
       if (a < 0 || b < 0 || b < a) throw new Error('the question-form section was not found in src/ui/floor.js between its two section comments');
       const tmp = `./data/ask-form-${process.pid}.mjs`;
-      writeFileSync(tmp, `${src.slice(a, b)}\nexport { askUnanswered, askWarnText };\n`);
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { askUnanswered, askWarnText, askWithdrawText };\n`);
       try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     })();
     const cases = [
@@ -1442,6 +1467,22 @@ try {
     assert(warned.includes('1 of 3 answered'), `otherwise the line counts them — "${warned}"`);
     assert(!/you can still submit/i.test(warned) && /sends nothing/i.test(warned),
       'and no longer says "you can still submit": it says Submit sends nothing until they are all answered');
+
+    // The page says, the moment "Type something." is ticked on a single-choice
+    // question, that the form will be withdrawn and every answer sent as words
+    // — so "Submit all answers" does not promise a form that is not submitted.
+    const shape = [{ kind: 'single', options: colour.options }, { kind: 'single', options: fruit.options }, { kind: 'multi', options: multi.options }];
+    eq(page.askWithdrawText(shape, [{ choose: [3] }, { choose: [3] }, { choose: [1] }]), null,
+      'with every answer a pick the form says nothing about withdrawing');
+    const told = page.askWithdrawText(shape, [{ choose: [3] }, { choose: [4], text: '' }, { choose: [1] }]);
+    assert(told && /withdraw/i.test(told) && /every answer/i.test(told) && /words/i.test(told),
+      `ticking the free-text row on a single-choice question says the form will be withdrawn and every answer sent as words — "${told}"`);
+    eq(page.askWithdrawText(shape, [{ choose: [3] }, { choose: [4] }, { choose: [1] }]), told,
+      'said the moment the row is ticked, before anything is typed');
+    eq(page.askWithdrawText(shape, [{ choose: [1] }, { choose: [1] }, { choose: [3], text: 'typed into a multi' }]), null,
+      "but not for a multi-select's free text, which is a real field and withdraws nothing");
+    const lone = page.askWithdrawText([{ kind: 'single', options: colour.options }], [{ choose: [4] }]);
+    assert(lone && /withdraw/i.test(lone) && !/every answer/i.test(lone), `a one-question form says so without "every answer" — "${lone}"`);
   }
 
   console.log('\nthe window\u2019s own choices');
@@ -1660,6 +1701,33 @@ try {
   eq(askerDesk().permission, null, 'the second failure does not offer it a third time');
   assert(String(askerDesk().session.awaiting_message).includes('not being offered again'),
     'and says so, rather than leaving the operator wondering where the form went');
+
+  // A typed answer on a single-choice question withdraws the form, and what
+  // follows it is one message carrying every answer — costmo's ruling on issue
+  // #7 (2026-11-02). The board queues the answer keys and then the chat, in
+  // that order, so the words arrive at the composer the decline has just put
+  // there; the chat's text is the whole form in words, not the typed part.
+  await post(ev('asker', 's-ask', 'PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: {} }));
+  await takeWork();
+  fa = await floor();
+  const typedId = askerDesk().permission.request_id;
+  const QT = [
+    { kind: 'single', tab_title: 'Colour', question: 'Which colour?', options: [{ n: 1, text: 'Blue' }, { n: 2, text: 'Orange' }, { n: 3, text: 'Type something.', other: true }] },
+    { kind: 'single', tab_title: 'Fruit', question: 'Which fruit?', options: [{ n: 1, text: 'Apple' }, { n: 2, text: 'Mango' }, { n: 3, text: 'Type something.', other: true }] },
+    { kind: 'single', tab_title: 'Weekday', question: 'Which weekday?', options: [{ n: 1, text: 'Monday' }, { n: 2, text: 'Friday' }, { n: 3, text: 'Type something.', other: true }] },
+  ];
+  await hostEvents([{ type: 'prompt', channel: CH, agent: 'asker', request_id: typedId, options: [], questions: QT, tabs: ['Colour', 'Fruit', 'Weekday'] }]);
+  const typedForm = await fetch(`${HOST}/api/floor/answer`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: CH, agent: 'asker', request_id: typedId,
+      answers: [{ choose: [2] }, { choose: [3], text: 'I like Dragon Fruit' }, { choose: [2] }] }),
+  });
+  eq(typedForm.status, 200, 'a form with a typed answer on a single-choice question is accepted');
+  eq((await typedForm.json()).clarify, true, 'and said to be a withdrawal, not an answer');
+  const typedWork = await takeWorkFull();
+  eq(typedWork.map((w) => w.kind), ['answer', 'chat'], 'the host is handed the keys that withdraw the form, then one chat');
+  eq(typedWork[1]?.payload?.text, 'Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday.',
+    'whose text is every answer in words, the picks beside the typed one — nothing chosen is dropped');
 
   console.log('\na question is never drawn as Approve / Deny');
   {

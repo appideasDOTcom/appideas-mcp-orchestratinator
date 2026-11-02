@@ -203,6 +203,30 @@ for (const l of fs.readFileSync(process.argv[1],"utf8").split("\n")) { if(!l.tri
   console.log(String(j.type).padEnd(16), String(j.operation||j.attachment?.type||"").padEnd(15), j.timestamp); }' <transcript>
 ```
 
+## A line in the composer that nobody typed
+
+Since 2.1.300 Claude Code draws a **prompt suggestion** a few seconds after
+a turn ends: a plausible next message, as ghost text after the cursor. On a
+plain capture it is indistinguishable from a typed draft, and on
+2026-11-02 three such lines on probe desks were reported as "typed into the
+composer and never sent", with no record of what typed them — because
+nothing had. Two reads tell them apart, and neither presses anything:
+
+```bash
+tmux -L probe capture-pane -p -e -t p:probe | grep '❯'      # SGR 2m (dim) = a suggestion
+tmux -L probe display -p -t p:probe '#{cursor_x},#{cursor_y}' # column 2 = nothing typed
+```
+
+A suggestion is dim (`\x1b[2m`) and the cursor stays at column 2, behind
+the `❯`; typed text is in the default colour with the cursor at its end.
+The transcript has no record of a suggestion. `composerOf` reads it as the
+composer's contents, which matters to nothing the host does with that
+reading, and a paste through `send()` replaces it — measured: one user
+record with the host's own words and none of the suggestion. Tab or Enter
+would accept it, so never press either "to see what happens" on a window
+that is not yours. Not every turn gets one: a one-word reply drew none in
+60 s, a turn with three Bash calls drew `cat notes.txt` after 2 s.
+
 ## Recording the pane over time
 
 For anything about *timing* on screen, a single capture is not enough — see

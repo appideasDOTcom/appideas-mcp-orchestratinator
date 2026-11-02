@@ -621,6 +621,34 @@
   }
 
   /**
+   * What the form says the moment "Type something." is ticked on a
+   * single-choice question, or null.
+   *
+   * On a single-select that row is not a fourth answer: it is the window's
+   * clarify hatch, and taking it withdraws the whole form. So the host
+   * withdraws it and sends one message with every answer as words instead
+   * (`clarifyMessage` in src/floor.js; costmo's ruling on issue #7,
+   * 2026-11-02). The person filling the form in is told so before they
+   * press Submit, because "Submit all answers" otherwise promises a form
+   * that will not be submitted. A multi-select's field is a real field and
+   * says nothing. `questions` is `[{ kind, options: [{ n, other }] }]`.
+   */
+  function askWithdrawText(questions, answers) {
+    const qs = Array.isArray(questions) ? questions : [];
+    for (let i = 0; i < qs.length; i++) {
+      if (qs[i]?.kind === 'multi') continue;
+      const opts = Array.isArray(qs[i]?.options) ? qs[i].options : [];
+      const a = answers?.[i] ?? {};
+      const other = (Array.isArray(a.choose) ? a.choose : []).map((n) => opts.find((o) => o.n === n)).find((o) => o?.other);
+      if (!other) continue;
+      return qs.length > 1
+        ? '\u270e A typed answer withdraws the form in the window \u2014 every answer will be sent as one message in words instead'
+        : '\u270e A typed answer withdraws the form in the window \u2014 it will be sent as a message in words instead';
+    }
+    return null;
+  }
+
+  /**
    * What the alert box offers for an open prompt, as one word.
    *
    * Pulled out of the template because the rule that matters is a negative
@@ -702,6 +730,7 @@
       <div class="p-tabs">${tabs}</div>
       ${body}
       <div class="p-ask-warn hidden">\u26a0 You have not answered all questions</div>
+      <div class="p-ask-note hidden"></div>
       <div class="p-ask-foot">
         <button type="button" class="btn primary" data-act="ask-submit">${qs.length > 1 ? 'Submit all answers' : 'Submit answers'}</button>
         <button type="button" class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}"
@@ -730,9 +759,18 @@
     const warn = form.querySelector('.p-ask-warn');
     if (!warn) return;
     const shape = askShape(form);
-    const text = askWarnText(askUnanswered(shape, askAnswers(form)), shape.length);
+    const answers = askAnswers(form);
+    const text = askWarnText(askUnanswered(shape, answers), shape.length);
     warn.classList.toggle('hidden', !text);
     if (text) warn.textContent = text;
+    // Said the moment the row is ticked, not when Submit is pressed: the
+    // choice to type is made with the form still in front of the person.
+    const note = form.querySelector('.p-ask-note');
+    const withdraw = askWithdrawText(shape, answers);
+    if (note) {
+      note.classList.toggle('hidden', !withdraw);
+      if (withdraw) note.textContent = withdraw;
+    }
   }
 
   /** The form as `askUnanswered` wants it: each question's rows, and which one
@@ -740,6 +778,7 @@
    *  are — it is what the operator is looking at. */
   function askShape(form) {
     return [...form.querySelectorAll('.p-q')].map((q) => ({
+      kind: q.querySelector('input[type="checkbox"]') ? 'multi' : 'single',
       options: [...q.querySelectorAll('input[type="radio"],input[type="checkbox"]')]
         .map((i) => ({ n: Number(i.value), other: i.dataset.other === '1' })),
     }));

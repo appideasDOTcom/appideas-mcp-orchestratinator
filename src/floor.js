@@ -647,6 +647,47 @@ function withWords(q, c) {
 }
 
 /**
+ * The one message that stands in for a withdrawn form.
+ *
+ * A typed answer on a single-choice question takes the window's clarify row,
+ * and that row withdraws the whole form: the agent gets the tool declined and
+ * then whatever is typed next, and nothing chosen on the other tabs reaches
+ * it. Measured on the live board (qa-probe/issue7-probe-c, 2026-11-02): the
+ * host logged "withdrew the form and sent the words back as a clarification",
+ * the agent received "I like Dragon Fruit", and the colour and weekday it had
+ * been given were gone with the form. costmo's ruling on issue #7 that day:
+ * nothing the operator chose is dropped — the host sends one message with
+ * every answer as words, the picks beside the typed one:
+ *
+ *   Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday.
+ *
+ * Labelled by the tab's title, which is the call's own `header`, and by the
+ * question itself when a form has no titles. A multi-select's picks are listed
+ * with commas. Empty when nothing was answered, which the route never passes —
+ * `unansweredOf` refuses such a form before this is reached.
+ */
+export function clarifyMessage(questions, answers) {
+  const qs = Array.isArray(questions) ? questions : [];
+  const parts = [];
+  for (let i = 0; i < qs.length; i++) {
+    const q = qs[i] ?? {};
+    const a = answers?.[i] ?? {};
+    const opts = Array.isArray(q.options) ? q.options : [];
+    const typed = typeof a.text === 'string' ? a.text.trim() : '';
+    const said = (Array.isArray(a.choose) ? a.choose : [])
+      .map((n) => opts.find((o) => o.n === n))
+      .filter(Boolean)
+      .map((o) => (o.other ? typed : str(o.text)))
+      .filter(Boolean);
+    if (!said.length) continue;
+    const label = str(q.tab_title) || str(q.question) || `Question ${i + 1}`;
+    const line = `${label}: ${said.join(', ')}`;
+    parts.push(/[.!?]$/.test(line) ? line : `${line}.`);
+  }
+  return parts.join(' ');
+}
+
+/**
  * Which questions of a form have no answer yet, by index.
  *
  * A form with a question unanswered is never sent to the window — costmo's
@@ -3335,12 +3376,14 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     }).join(' · ');
     // Taking a single-select's free-text row withdraws the form rather than
     // answering it, so this is a different event from an answer and is recorded
-    // as one — the choices on the other tabs were never delivered.
+    // as one. The choices on the other tabs go with the form — the window
+    // delivers none of them — so the message that follows carries every
+    // answer, not only the typed one. See `clarifyMessage`.
     const clarify = steps.some((st) => st.clarify);
     // Queued after the answer, and read in order by the host, so the words
     // arrive at a composer that the decline has just put there.
     if (clarify) {
-      const words = answers.map((a) => (typeof a?.text === 'string' ? a.text.trim() : '')).find(Boolean);
+      const words = clarifyMessage(pendingReq.questions, answers);
       if (words) store.enqueueHostWork(check.hosted.host_id, channel, agent, 'chat', { text: clip(words, 4000) });
     }
     store.logAdmin(channel, clarify ? 'permission.clarified' : 'permission.answered',

@@ -181,12 +181,27 @@ Three consequences worth knowing before touching `host/window.js`:
   "esc to interrupt" read as busy for ever. Status is positional: `footOf` reads
   the bottom line, and nothing quoted above it can fake one.
 
+- **A line in the composer that nobody typed is a prompt suggestion.**
+  Claude Code 2.1.300 draws a suggested next prompt as ghost text after a
+  turn ends — dim (SGR `2m`), after the cursor, which stays at column 2
+  right behind the `❯`; typed text is in the default colour with the cursor
+  at its end. Ten of twenty-one idle windows on this machine held one on
+  2026-11-02, and three of them were reported as "typed into the composer
+  and never sent" with no record anywhere, because nothing had entered
+  them. `composerOf` reads a suggestion as the composer's contents, and that
+  is harmless where the host uses it — the paste check wants the composer to
+  *change*, the stuck check looks for the *sent* text — and measured on a
+  probe, a paste through `send()` replaces the suggestion: one user record,
+  the host's own words, nothing of the suggestion in it. Tab or Enter in
+  such a window would accept it. Before chasing a phantom keystroke source,
+  read the row with `capture-pane -e` and the cursor with `#{cursor_x}`.
+
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
 
 ## A question on the floor
 
-Three rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
+Four rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
 2.1.284). Each is the opposite of what the code did the day before, and each
 had a reasonable argument behind the old way — which is why they are here.
 
@@ -232,6 +247,25 @@ had a reasonable argument behind the old way — which is why they are here.
   available and are not: there is no scrollback to read more of (alternate
   screen), and resizing the operator's window to read it is moving his
   furniture.
+
+- **A typed answer on a single-choice question withdraws the form, and
+  every answer follows as one message.** The free-text row on a
+  single-select is Claude Code's clarify hatch, not a fourth choice: taking
+  it declines the whole tool call, and nothing picked on the other tabs
+  reaches the agent. Measured on the live board (2026-11-02, 2.1.300,
+  `qa-probe/issue7-probe-c`): the host logged a withdrawal, the agent got
+  the tool declined and then "I like Dragon Fruit", and the colour and
+  weekday chosen beside it were gone. costmo's ruling: nothing the operator
+  chose is dropped — the board queues the withdrawing keys and then one chat
+  carrying every answer in words, labelled by tab (`clarifyMessage` in
+  [`src/floor.js`](src/floor.js), used by `/api/floor/answer`):
+  `Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday.` The page
+  says so the moment "Type something." is ticked on a single-choice question
+  (`askWithdrawText`), because "Submit all answers" otherwise promises a
+  form that is not submitted. A multi-select's field is a real field and
+  withdraws nothing. The alternatives — saying so on the page and dropping
+  the picks, or re-measuring the row on the current window — were
+  considered and not chosen; do not re-propose them.
 
 `form.mjs` in **measure-a-real-window** raises a real form on a probe window,
 reads it both ways, and answers it through the host's own code.

@@ -1279,11 +1279,12 @@ class Host {
         // the window to take them. "22 of 21" was the first version of this line.
         const confirms = r.done.filter((d) => d === 'Enter(confirm)').length;
         // A form taken by its free-text row was not answered — it was withdrawn,
-        // and the words went back as a clarification. Same success, different
-        // event, and saying "answered" for it is how the operator comes to
-        // expect a reply to choices that were never delivered.
+        // and every answer goes back as one message in words, queued behind
+        // this by the board (`clarifyMessage` in src/floor.js). Same success,
+        // different event, and saying "answered" for it is how the operator
+        // comes to expect a reply to choices the form never delivered.
         if (steps.some((st) => st.clarify)) {
-          log(`${desk.label}: withdrew the form and sent the words back as a clarification` +
+          log(`${desk.label}: withdrew the form; every answer follows as one message in words` +
             ` — ${r.done.slice(-3).join(' ')}`);
           break;
         }
