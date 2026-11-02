@@ -396,6 +396,34 @@ reports.
 of this pipeline lived in a session scratchpad, was lost, and had to be rebuilt
 from nothing when the image next needed regenerating.
 
+## Shooting the landing-page captures
+
+The five captures the appideas.com page uses (`docs/review/landing/`) come
+from two files here, the same shape as the nomenclature shot:
+
+```bash
+PORT=8906 DB_PATH=./data/landing.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/landing-seed.mjs &      # the README fixture; keeps a heartbeat
+node --experimental-websocket .claude/skills/verify-ui-change/landing-shot.mjs
+```
+
+`landing-seed.mjs` is the README's fictional company rebuilt through the
+real doors — the original seed lived in a scratchpad and was lost, which is
+why this one is here. Three things in `landing-shot.mjs` are worth keeping:
+
+- **The moment is frozen by replaying polls, not by stubbing them dead.**
+  `fetch` is wrapped so the first answer to `/api/state`, `/api/floor` and
+  `/api/activity` is cached and every later poll gets the cache. Auto-refresh
+  stays on and the clock stops, and — unlike `fetch = () => new Promise(...)`
+  — clicking another desk, switching to the building and striking a bell all
+  still work, because POSTs and `/api/floor/turns` pass through.
+- **`resize(w, h, { dpr })` and `shot(path, null, { full: true })`** exist for
+  this: a capture asked for at device pixel ratio 2, and a view taller than
+  the window (the building, the board) captured whole rather than cut.
+- **An open task backdated by `created_at` alone reads as "task reopened"**
+  in the activity log — the query treats `updated_at > created_at` on an
+  open task as a stale claim reopening. Move both.
+
 ## Teardown, because leftovers poison the next run
 
 `lsof` is not installed on this machine, and env vars do not appear in `ps`, so a

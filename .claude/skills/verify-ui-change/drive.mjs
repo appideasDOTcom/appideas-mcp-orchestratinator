@@ -178,9 +178,13 @@ export async function open({
      * else's. Overriding here rather than at launch is what makes that work on
      * a reused browser.
      */
-    resize: async (width, height) => {
-      await cmd('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
-      return { width, height };
+    resize: async (width, height, { dpr = 1 } = {}) => {
+      // `dpr` is the device pixel ratio the page is told it has. A landing-page
+      // capture is asked for at DPR 2 (3200x2000 from a 1600x1000 viewport);
+      // the clip `scale` on shot() is a different thing — it scales the
+      // capture, not what the page believes about itself.
+      await cmd('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: dpr, mobile: false });
+      return { width, height, dpr };
     },
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
@@ -195,7 +199,18 @@ export async function open({
       return true;
     })()`),
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
-    shot: async (path, selector = null, { pad = 8, scale = 3 } = {}) => {
+    shot: async (path, selector = null, { pad = 8, scale = 3, full = false } = {}) => {
+      // `full` captures the whole document rather than the viewport, at the
+      // page's own DPR: for a view taller than the window (the building). The
+      // clip is the document's size; `captureBeyondViewport` is what lets the
+      // clip reach past the bottom of the window.
+      if (full && !selector) {
+        const size = JSON.parse(await evalJs(`JSON.stringify({ w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight })`));
+        const png = await cmd('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true,
+          clip: { x: 0, y: 0, width: size.w, height: size.h, scale: 1 } });
+        writeFileSync(path, Buffer.from(png.result.data, 'base64'));
+        return path;
+      }
       const clip = selector
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(selector)});
