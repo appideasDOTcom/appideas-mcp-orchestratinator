@@ -475,7 +475,9 @@ class Desk {
       this.told(`${text.trim()} — ${r.said}`, r.session_id ?? id);
       this.host.emit({
         type: 'receipt', channel: this.channel, agent: this.agent, command: r.command, said: r.said, text,
-        session_id: r.session_id ?? null, model: r.model ?? null, effort: r.effort ?? null, compacting: !!r.compacting,
+        // The window's session, always: the board writes the picker's words
+        // and a compaction's state to it, not to "the desk's newest".
+        session_id: r.session_id ?? id ?? null, model: r.model ?? null, effort: r.effort ?? null, compacting: !!r.compacting,
       }, true);
       // A compaction's end, watched and said separately — started and not
       // awaited, so the work loop is not held for the minutes it can take.
@@ -487,7 +489,7 @@ class Desk {
         W.awaitCompaction(this.cwd, { path, before }).then((end) => {
           if (!end.ok) return;
           this.told(end.said, id);
-          this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: end.said, text, compacting: false, compacted: !!end.compacted }, true);
+          this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: end.said, text, session_id: id ?? null, compacting: false, compacted: !!end.compacted }, true);
           log(`${this.label}: /compact — ${end.said}`);
         }).catch((err) => warn(`${this.label}: watching the compaction: ${err.message}`));
       }

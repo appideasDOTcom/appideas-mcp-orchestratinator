@@ -2783,14 +2783,13 @@
       // While a change is asked for, the select shows it rather than snapping
       // back to the old value until the window confirms; the asked-for note
       // beside it says which it is.
-      const askedFam = s.model_requested ? modelFamily(s.model_requested) : null;
-      modelSel.value = askedFam && MODEL_CHOICES.some((m) => m.value === askedFam) ? askedFam : s.model ? fam : '';
+      modelSel.value = modelSelectValue(s);
       modelSel.disabled = !canChat;
       effortSel.innerHTML = [
         ...(!s.effort ? ['<option value="">effort…</option>'] : []),
         ...EFFORT_LEVELS.map((l) => `<option value="${l}">${l}</option>`),
       ].join('');
-      effortSel.value = s.effort_requested ?? s.effort ?? '';
+      effortSel.value = effortSelectValue(s);
       effortSel.disabled = !canChat;
       const asked = wrap.querySelector('.p-asked');
       const askedText = [
@@ -3310,6 +3309,22 @@
     let line = parts.join(' · ');
     if (asked.length) line += `${line ? ' ' : ''}→ ${asked.join(', ')} asked`;
     return line;
+  }
+
+  /**
+   * What the model select shows: the asked-for family while a change is
+   * pending and the control has a row for it, else the confirmed model's
+   * family, else nothing. Pure, so the rule is tested (QA, PR #32 info 4).
+   */
+  function modelSelectValue(s, choices = MODEL_CHOICES) {
+    const fam = modelFamily(s?.model);
+    const askedFam = s?.model_requested ? modelFamily(s.model_requested) : null;
+    if (askedFam && choices.some((m) => m.value === askedFam)) return askedFam;
+    return s?.model ? fam : '';
+  }
+  /** The effort select: the asked-for level while pending, else the confirmed one. */
+  function effortSelectValue(s) {
+    return s?.effort_requested ?? s?.effort ?? '';
   }
 
   /** The compacting line: which kind, and for how long. */

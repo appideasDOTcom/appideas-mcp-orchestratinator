@@ -10,7 +10,11 @@ The orchestratinator runs as two processes that go stale independently
 under launchd from the working tree. A deploy is therefore two restarts and
 two sets of readings, and the completion note is the readings — "I rebuilt
 it" is not one. Done three times on 2026-11-02 (tasks 237, 239, and the
-version bump); this is the procedure that was run each time.
+version bump); this is the procedure that was run each time. **There is a
+third half when `plugin/` changed** — the hooks every window runs come from
+Claude Code's plugin cache, not from the tree — and it has its own step
+below; a deploy that skipped it (QA, PR #32) leaves every window on the
+old hooks.
 
 ## Before touching anything
 
@@ -65,6 +69,33 @@ MCP session in the server's memory and one tool call per desk restores it.
 Do not raise a form, send a chat or open a window on anyone's desk to "test"
 the deploy. The hand check is costmo's and reaches him through appideas-qa;
 the symbol counts are yours.
+
+## The third half: the plugin
+
+Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).
+The marketplace is a directory source pointing at this tree, so the update
+installs from the working tree — it must be clean at the commit being
+deployed. Measured 2026-11-03 (task 251):
+
+```bash
+grep -E '"version"|installPath' ~/.claude/plugins/installed_plugins.json   # before: the cache path and version
+P=$(grep -o '"installPath": "[^"]*"' ~/.claude/plugins/installed_plugins.json | cut -d'"' -f4)
+grep -c PreCompact "$P/hooks/hooks.json"                                    # a symbol the change adds
+claude plugin update orchestratinator-floor@appideas-orchestratinator       # "updated from X to Y … Restart to apply changes."
+# then the same three readings after, plus:
+claude plugin details orchestratinator-floor@appideas-orchestratinator | grep Hooks
+ls ~/.claude/plugins/cache/appideas-orchestratinator/orchestratinator-floor/   # the old version dir stays
+```
+
+What the readings say and do not say: `installed_plugins.json` moves to a
+new per-version cache directory; the old one is left in place, so windows
+already running — which loaded their hooks at start from the old path —
+keep firing the old events; they take the new hooks at their next start.
+That is the CLI's own "Restart to apply changes" plus the retained
+directory, not a measurement on a live window: do not drive anyone's desk
+to prove it. Say in the note which event hooks the running windows still
+have, and that until they restart the board gets those events only from
+the host's transcript side (compaction state, model switches on 0.10.9).
 
 ## The server half alone
 

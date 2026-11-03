@@ -1225,6 +1225,28 @@ try {
   eq(commandOf('/btw is it late?'), { name: 'btw', args: 'is it late?' }, 'the route and the host parse a command the same way');
   eq(FLOOR_COMMANDS.map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'the floor\'s own list');
 
+  // Two live sessions on one desk — the floor's window and an editor tab —
+  // and the window is the one the host drives. The picker's words and the
+  // asked-for value go to the window's session, and the panel shows that
+  // session, not the desk's newest live row (QA, PR #32 finding 1: measured
+  // at 0ad3a17, both landed on the other session).
+  await register({ channel: CH, agent: 'twofold', cwd: '/repo/twofold', window: '@15' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: 's-two-window', cwd: '/repo/twofold' }]);
+  await post(ev('twofold', 's-two-window', 'SessionStart', { source: 'startup', model: 'claude-haiku-5-5' }));
+  await post(ev('twofold', 's-two-editor', 'SessionStart', { source: 'startup', model: 'claude-fable-5-1' }));
+  let two = deskOf(await floor(), 'twofold');
+  eq(two?.session?.session_id, 's-two-window', "a hosted desk's session is the window's, the roster's id, not the newest live row");
+  const askTwo = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'twofold', text: '/model opus' }) });
+  eq(askTwo.status, 200, '/model opus is accepted for it');
+  await takeWork();
+  eq((await sessOf('twofold'))?.model_requested, 'opus', "and the asked-for value lands on the window's session");
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 for this session only', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
+  two = await sessOf('twofold');
+  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the picker's words land on the window's session the host named");
+  await post(ev('twofold', 's-two-window', 'SessionEnd', { reason: 'prompt_input_exit' }));
+  await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: null }]);
+  eq((await sessOf('twofold'))?.model, 'claude-fable-5-1', 'and the other live session was never touched');
+
   // The host's receipts, in the command's own terms (issue #9).
   const noteOf = async (agent) => deskOf(await floor(), agent)?.delivery ?? null;
   eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 for this session only with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
@@ -1270,7 +1292,7 @@ try {
     const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/chat-controls-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
@@ -1292,6 +1314,13 @@ try {
     eq(page.deliveryNote({ state: 'queued', held: true }), 'queued — the window took it once it was free', 'held: taken after a wait');
     eq(page.deliveryNote({ state: 'queued', held: 'compacting' }), 'held — the desk is compacting; it reads this when that ends', 'held by a compaction: said as that');
     eq(page.deliveryNote({ state: 'done', said: 'a new conversation started' }), 'a new conversation started', 'a command\'s receipt is its own sentence');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5' }), 'haiku', 'the model select shows the confirmed model\'s family');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'opus' }), 'opus', 'and the asked-for one while a change is pending, so one selection sticks (costmo, 2026-11-03)');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'claude-sonnet-5-5' }), 'sonnet', 'an id asked for reads as its family');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'gpt-9' }), 'haiku', 'but an ask the control has no row for leaves the confirmed one showing');
+    eq(page.modelSelectValue({ model: null }), '', 'and nothing known is nothing selected');
+    eq(page.effortSelectValue({ effort: 'low', effort_requested: 'high' }), 'high', 'the effort select shows the asked-for level while pending');
+    eq(page.effortSelectValue({ effort: 'low' }), 'low', 'else the confirmed one');
   }
 
   console.log('\nstopping a turn');

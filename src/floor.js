@@ -1844,12 +1844,17 @@ function applyHostEvent(store, live, hostId, ev) {
         // id; the id wins when the hook arrives, and clears the asked-for
         // either way. Effort has no hook of its own: the picker's word, and
         // the next Stop's effort.level, are its only confirmations.
-        if (str(ev.effort)) store.setDeskEffort(channel, agent, str(ev.effort));
+        // On the window's session when the host names it — the one it drove
+        // — and only on "the desk's newest live" for a host that does not.
+        // With two live sessions on one desk the picker's words landed on
+        // the other, newer one (QA, PR #32 finding 1).
+        const named = !!str(ev.session_id);
+        if (str(ev.effort)) { if (named) store.setEffort(sid, str(ev.effort)); else store.setDeskEffort(channel, agent, str(ev.effort)); }
         // The picker's own words ("Opus 5.5") stand as the model until a hook
         // or the next reply names the id — a window on the older plugin
         // sends no PostModelSwitch, and the select snapped back to the
         // previous model until the reply came (costmo, 2026-11-03).
-        if (str(ev.model)) store.setDeskModel(channel, agent, str(ev.model));
+        if (str(ev.model)) { if (named) store.setModel(sid, str(ev.model)); else store.setDeskModel(channel, agent, str(ev.model)); }
         live.publish(key, { type: 'session', session_id: sid });
       }
       if (ev.compacting) {
@@ -2120,6 +2125,7 @@ export function buildFloor(store, live = null, sessions = null) {
   const key = deskKey;
 
   const current = new Map();     // channel+agent -> newest session row
+  const byId = new Map();        // session_id -> row, for a hosted desk's window
 
   const sessionCount = new Map();
   for (const s of store.floorSessions()) {
@@ -2127,6 +2133,7 @@ export function buildFloor(store, live = null, sessions = null) {
 
     sessionCount.set(k, (sessionCount.get(k) ?? 0) + 1);
     if (!current.has(k)) current.set(k, s);
+    byId.set(s.session_id, s);
   }
 
   const lastTurn = new Map(store.lastTurns().map((t) => [key(t.channel, t.agent), t]));
@@ -2237,7 +2244,16 @@ export function buildFloor(store, live = null, sessions = null) {
       .map((p) => {
         const k = key(channel, p.agent);
         const h = hosted.get(k) ?? null;
-        const s = current.get(k) ?? null;
+        // A hosted desk's session is the window's — the roster's id the host
+        // reports — when the board has that row; the desk's newest live row
+        // only otherwise. Two live sessions on one desk (an editor tab beside
+        // the floor's window) made "newest" the one the floor was not
+        // driving (QA, PR #32 finding 1).
+        // Only while that session is live: a window that closed leaves the
+        // desk pinned to its id for the reopen, and the row to show meanwhile
+        // is the desk's newest live one, as before.
+        const pinned = h?.sdk_session_id ? byId.get(h.sdk_session_id) ?? null : null;
+        const s = (pinned && !pinned.ended_at ? pinned : null) ?? current.get(k) ?? null;
         const t = lastTurn.get(k) ?? null;
         // Said and did, kept apart, and looked up per desk — see the note on
         // deskLastMessage in db.js for why these are not one query each.
@@ -2929,8 +2945,14 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const h = check.hosted;
     // What the floor asked for, shown apart from what the window confirms —
     // the picker's receipt or the hook clears it.
-    if (cmd?.name === 'model' && cmd.args) store.setRequested(channel, agent, { model: cmd.args });
-    if (cmd?.name === 'effort' && cmd.args) store.setRequested(channel, agent, { effort: cmd.args.toLowerCase() });
+    // On the window's session — the roster's, which the host reports on the
+    // hosted desk — not the desk's newest live row, which with two live
+    // sessions is the other one (QA, PR #32 finding 1). A desk whose window
+    // has not registered yet has only a placeholder, and then the desk.
+    const windowSid = h.sdk_session_id && !String(h.sdk_session_id).startsWith('host:') ? h.sdk_session_id : null;
+    const ask = (what) => (windowSid ? store.setRequestedFor(windowSid, what) : store.setRequested(channel, agent, what));
+    if (cmd?.name === 'model' && cmd.args) ask({ model: cmd.args });
+    if (cmd?.name === 'effort' && cmd.args) ask({ effort: cmd.args.toLowerCase() });
     // The message is not written down here.
     //
     // It used to be, the moment it was accepted, and it was then written a

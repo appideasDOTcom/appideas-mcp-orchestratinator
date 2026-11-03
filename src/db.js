@@ -947,6 +947,16 @@ export function makeStore(db) {
                              WHERE channel = @channel AND agent = @agent
                              ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
+    // By session, for the route: the window's session is the one the host
+    // drives (the roster's, on the hosted desk), and with two live sessions on
+    // one desk "the newest live" was the other one (QA, PR #32 finding 1).
+    setRequestedFor: db.prepare(
+      `UPDATE agent_sessions
+          SET model_requested  = CASE WHEN @model IS NULL THEN model_requested ELSE @model END,
+              effort_requested = CASE WHEN @effort IS NULL THEN effort_requested ELSE @effort END,
+              updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
     setModel: db.prepare(
       `UPDATE agent_sessions
           SET model = @model, model_requested = NULL, updated_at = datetime('now')
@@ -1642,6 +1652,8 @@ export function makeStore(db) {
     // confirmed by session or by desk — see the statements.
     setRequested: (channel, agent, { model = null, effort = null } = {}) =>
       q.setRequested.run({ channel, agent, model, effort }).changes,
+    setRequestedFor: (sessionId, { model = null, effort = null } = {}) =>
+      q.setRequestedFor.run({ session_id: sessionId, model, effort }).changes,
     setModel: (sessionId, model) => q.setModel.run({ session_id: sessionId, model }).changes,
     setEffort: (sessionId, effort) => q.setEffort.run({ session_id: sessionId, effort }).changes,
     setDeskEffort: (channel, agent, effort) => q.setDeskEffort.run({ channel, agent, effort }).changes,
