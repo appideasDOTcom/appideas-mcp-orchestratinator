@@ -227,6 +227,11 @@ would accept it, so never press either "to see what happens" on a window
 that is not yours. Not every turn gets one: a one-word reply drew none in
 60 s, a turn with three Bash calls drew `cat notes.txt` after 2 s.
 
+[`suggestion.mjs`](suggestion.mjs) does the whole measurement on the probe —
+a work-shaped turn, the wait for the dim row, `composerOf` and the cursor,
+then `send()` over it and the user records that followed. Run it on a new
+Claude Code before trusting the paragraph above.
+
 ## Recording the pane over time
 
 For anything about *timing* on screen, a single capture is not enough — see
@@ -256,8 +261,29 @@ PROBE_SOCKET=probe node .claude/skills/measure-a-real-window/form.mjs "$SP/probe
 # tool result    → "Your questions have been answered: …"
 ```
 
-Leave the answers off and it cancels with Escape. What it was built to
-measure, and what it found on 2.1.284 (2026-10-01, issue #7):
+Leave the answers off and it cancels with Escape.
+
+A typed answer on a single-choice question is a different path: the keys end
+at `N Enter`, the tool result is the decline, and the floor then sends one
+message carrying every answer. `form.mjs` plays the first half;
+[`clarify.mjs`](clarify.mjs) plays the second from the same answers and
+reads the receipt — the user record and the agent's reply — which is the
+only proof the ruling on issue #7 (2026-11-02) is what runs:
+
+```bash
+PROBE_SOCKET=probe node .claude/skills/measure-a-real-window/form.mjs "$SP/probe" \
+  'three single-select questions: header "Colour" …; header "Fruit" …; header "Weekday" …' \
+  '[{"choose":[3]},{"choose":[4],"text":"I like Dragon Fruit"},{"choose":[3]}]'
+# answerSteps    → Left Left Left Left 3 4 Enter
+# tool result    → "The user doesn't want to proceed with this tool use…"
+PROBE_SOCKET=probe node .claude/skills/measure-a-real-window/clarify.mjs "$SP/probe" \
+  '[{"choose":[3]},{"choose":[4],"text":"I like Dragon Fruit"},{"choose":[3]}]'
+# clarifyMessage → "Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday."
+# user record    → 2026-11-02T20:24:29.867Z "Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday."
+```
+
+What `form.mjs` was built to measure, and what it found on 2.1.284
+(2026-10-01, issue #7):
 
 - **`#{alternate_on}` is 1.** The window draws on the alternate screen, so
   `capture-pane -S -N` above the visible pane is *startup output*, not the

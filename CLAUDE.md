@@ -105,7 +105,10 @@ and a running process older than the file is the most common reason a fix
 "didn't work". Compare `ps -o lstart=` against the file's mtime rather than
 assuming.
 
-**The server is the other half, and it goes stale independently.** `src/` is
+**The server is the other half, and it goes stale independently.** The
+**deploy-both-halves** skill is the procedure — its `status.sh` reads both
+halves against the tree, with symbol counts in what is served — and a deploy
+task is closed with those readings, not with "rebuilt". `src/` is
 baked into the image (`build: .`; only `/data` is a volume), so a change there
 needs `docker compose up -d --build` — and that printing `Container … Running`
 instead of `Recreated` means it did *not* take your change. Restart each in its
@@ -360,6 +363,33 @@ not disagree. The same rule put `deliverable()` in `src/floor.js`: one answer to
 "can this desk be typed into", used by the compose box and the Nudge button
 alike.
 
+**Archive is the one way to put a floor away, and both views read one
+channel list.** Two rulings from issue #21 and #6 (costmo, 2026-11-02), and
+each replaced something that had a reasonable argument behind it. There used
+to be a browser-local "minimize" beside archive — a fold kept in
+`localStorage`, undone from the board only, drawn in the floor picker's tail
+next to archived floors. The argument for it was real (tidying your own
+screen should not be an audited statement about the team's work), and the
+failure was measured: with `channel_flags` at 0 rows, every floor an operator
+reported as "still archived" was a minimized one. So: one mechanism, the
+server's flag; a put-away floor is drawn in exactly one place on each view,
+the pill list at the bottom (`pillBar` in `src/ui/app.js`, which the floor
+calls through `window`), and the pill restores. Do not re-propose a quick
+fold. And the floor's storeys were the keys of `personas` while the board's
+rows were `agents ∪ messages ∪ tasks ∪ contracts`, so a channel whose only
+trace was a hook-made desk was a floor with no board row to archive it from
+— two of them on the live board. `listAllChannels` now includes `personas`
+and `buildFloor` iterates that one list; a floor with no desks and a board
+row with no agents are both the truth about such a channel, and the row's
+delete sticks because `purgeChannel` sweeps `personas`. One more ruling
+rides on the flag (Decided 6): **an archived floor comes back when
+something starts on it**, and only then — `wakeChannel` in `src/db.js`,
+called at four doors (a hook `SessionStart`, a host's `bound` and `session`
+events, the Take a desk route, an MCP connect) and nowhere else, with an
+audit row naming the door. The boundary is deliberate and tested: an agent
+already on the floor writing does not restore it, because archive is not a
+session kill and must not be undone by the work it does not kill.
+
 **A user record is not all the operator, and the split is the relay's job.**
 Claude Code glues machine-injected context — IDE state, slash-command records —
 onto the person's message, and joining the blocks once put
@@ -533,6 +563,13 @@ operator's live floor.
 
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
+- **The tree is committed whenever costmo chooses, so an edit is not
+  announced until its suite has run.** On 2026-11-02 "taking the Low" was
+  posted with the fix in the tree and the window suite still running; he
+  committed and pushed on that, the fix had a `ReferenceError` in it, and QA
+  spent a run measuring a commit that could not pass. Say "in the tree,
+  unverified" if you must say anything before the suite is green — and
+  prefer saying nothing until it is.
 - **The version lives in three files, so bump it with one command.**
   `npm run set-version <x.y.z>` writes `package.json`, `host/package.json` and
   `plugin/.claude-plugin/plugin.json`. They must agree — `npm run smoke` asserts

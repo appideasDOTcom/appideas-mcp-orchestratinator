@@ -694,6 +694,7 @@ export function makeStore(db) {
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
     listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
+    channelFlag: db.prepare(`SELECT archived_at FROM channel_flags WHERE channel = ?`),
 
     // Saved prompts. Ordered here rather than in the picker: two surfaces list
     // them (the compose menu and the manager) and an order decided twice is an
@@ -726,10 +727,21 @@ export function makeStore(db) {
       `SELECT id, channel, title, status, assignee, claimed_by, created_by, updated_at
        FROM tasks WHERE status != 'done' ORDER BY channel, id DESC LIMIT 2000`
     ),
+    // Every channel the board and the floor exist on, from one query — the two
+    // views draw from this one list so they cannot disagree about which floors
+    // there are. `personas` is in the union because a desk can exist with no
+    // agents row behind it (a window posts hook events before its agent ever
+    // calls an MCP tool, and that is deliberate), and a channel holding only
+    // such desks was a storey on the floor with no row on the board — no trash
+    // can, no archive, nothing to put it away with (issue #6: two of them on
+    // the live board, measured 2026-11-02). purgeChannel sweeps personas, so a
+    // delete still removes the channel; a new agents row still brings a deleted
+    // one back.
     listAllChannels: db.prepare(
       `SELECT channel FROM (
          SELECT channel FROM agents    UNION SELECT channel FROM messages
          UNION SELECT channel FROM tasks UNION SELECT channel FROM contracts
+         UNION SELECT channel FROM personas
        ) WHERE channel IS NOT NULL ORDER BY channel`
     ),
     countTasksByStatus: db.prepare(
@@ -1401,6 +1413,28 @@ export function makeStore(db) {
     reassignTask: (channel, id, assignee) => q.reassignTask.run({ channel, id, assignee }).changes,
     setChannelArchived: (channel, archived, by) =>
       q.setChannelArchived.run({ channel, at: archived ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null, by }).changes,
+    /**
+     * An archived floor unarchives itself when something STARTS on it (issue
+     * #21, Decided 6 — costmo, 2026-11-02): a desk taken there from the Take a
+     * desk dialog, an MCP session connecting under its name, a window's session
+     * opening on it. Not when an agent already on it writes — archive is still
+     * not a session kill, and a floor with a working agent stays put away
+     * until something new arrives. The three callers are the three doors;
+     * nothing else restores a channel but the operator's own Restore.
+     *
+     * The audit row says why it came back. A floor reappearing with no record
+     * of what brought it back reads as the archive having failed, and the
+     * operator's first question is "who did that" — so the actor is whatever
+     * started, and the detail names the door. Returns whether it restored
+     * anything, so a caller can say so; a channel that was not archived is
+     * left exactly as it is, with no row.
+     */
+    wakeChannel: (channel, why, by = 'system') => {
+      if (!q.channelFlag.get(channel)?.archived_at) return false;
+      q.setChannelArchived.run({ channel, at: null, by });
+      q.insertAdminEvent.run({ channel, action: 'channel.unarchive', actor: by, target: channel, detail: `restored to the board — ${why}` });
+      return true;
+    },
     purgeChannel,
     logAdmin: (channel, action, { actor = 'operator', target = null, detail = null } = {}) =>
       n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid),

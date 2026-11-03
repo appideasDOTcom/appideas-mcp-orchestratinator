@@ -200,6 +200,30 @@ host uses and rows no host could have produced cannot be seeded by accident.
 event refused, usually a `hosted_desks` row that did not land or names another
 host. It is not an error in any log.
 
+### seed-form.mjs — a desk holding a question form
+
+A check of the question panel needs a desk with an AskUserQuestion on it,
+and a `PermissionRequest` through `/api/ingest` is not enough on its own:
+the panel draws `permission.questions`, which the board fills only when a
+host's `prompt` event settles the form. [`seed-form.mjs`](seed-form.mjs)
+posts the call with three questions (two single-choice, one multi), takes
+the host's work and answers it as a host that read no form off the pane, so
+the form is drawn from the call — and keeps the host fresh while it runs.
+
+```bash
+node .claude/skills/verify-ui-change/seed-form.mjs http://localhost:8905 &
+# form     Colour[single,3] Fruit[single,3] Days[multi,3] | hosted true | from call
+```
+
+Then in the page: click `.desk[data-agent="typist"] .deskHit`, wait on
+`#floor-panel .p-ask`, tick inputs with a bubbling `change` event (the page
+redraws the lines under the form on `change` and `input`), and read
+`.p-ask-warn` and `.p-ask-note`. The free-text radio is
+`.p-q[data-q="1"] input[data-other="1"]`; its field `.p-other` is enabled
+once it is ticked. Measured 2026-11-02 for the withdraw note (issue #7,
+round 2): hidden at start, shown with `display: block` the instant the row
+is ticked, hidden again when a pick replaces it, never shown for the multi.
+
 ### answering-host.mjs — a host that answers the page's questions
 
 `seed-desk.mjs` and `seed-folders.mjs` put state on the board; neither takes
@@ -259,10 +283,10 @@ check is about ten lines:
 // check.mjs — run with: node --experimental-websocket check.mjs
 import { open } from '<repo>/.claude/skills/verify-ui-change/drive.mjs';
 
-const page = await open({ base: 'http://localhost:8905', view: 'floor', floor: '', minimized: ['beta'] });
+const page = await open({ base: 'http://localhost:8905', view: 'floor', floor: '' });
 console.log(await page.probe('probe.js'));            // a file of browser code
-await page.click('#floor-pick .chip.folded');
-await page.waitFor(`document.querySelectorAll('#floor-rooms .room').length === 1`);
+await page.click('#floor-away .min-pill[data-channel="beta"]');   // a put-away floor's pill restores it
+await page.waitFor(`document.querySelectorAll('#floor-rooms .room').length === 2`);
 console.log(await page.probe('probe.js'));
 await page.shot('out.png', '#floor-pick');            // a PNG of one element
 await page.close();

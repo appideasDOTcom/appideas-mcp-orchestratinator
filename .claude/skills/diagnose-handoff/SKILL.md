@@ -286,6 +286,27 @@ it, and the host now stops it before opening. Reaching this message means the
 release did not happen — a host older than `releaseBackground()`, or a
 `claude stop` that failed, which the desk's error will quote.
 
+## A form the floor says it answered, still standing in the window
+
+The report arrives as "it appeared to submit, and when I opened the window
+later the form was still waiting". Before any theory, match the answer to
+its receipt with [`match-answer.mjs`](match-answer.mjs):
+
+```bash
+node .claude/skills/diagnose-handoff/match-answer.mjs qa-probe issue7-probe-c --since '2026-11-02 18:00'
+# admin_events #1662 2026-11-02 20:06:22Z permission.clarified: │ Of the three colours…
+#   ee8f0ab2 asked 2026-11-02T20:05:47.759Z → tool_result 2026-11-02T20:06:22.866Z — SUBMITTED
+```
+
+The server's `admin_events` row is the desk, the second and what was pressed;
+the desk's transcript is the proof — a `tool_result` for the call means it
+submitted, none means it is standing. The host log line ("answered with N of
+N step(s)") carries no timestamp, and the board's `turns` never holds the
+result, so neither settles it alone. On the deployed code since 2026-11-02 a
+form still there after 8 s is logged "the form was not submitted"
+(`still_asking`) rather than "answered"; a report against an older host is
+read against that host's own log.
+
 ## What not to do
 
 - Do not theorise about environment drift, versions, or infrastructure until

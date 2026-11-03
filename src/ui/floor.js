@@ -1832,42 +1832,29 @@
 
   /* The channels the building is made of, and the ones put away.
 
-     Two ways to put one away, and they are not the same kind of statement.
-     **Archived** is shared, audited and on the server; **minimized** is this
-     browser tidying up and never leaves it. Both are the board's controls —
-     there is nothing on the floor that sets either, deliberately, because a
-     room you have to walk into to put away is a worse place to put it away
-     from than the list of rooms.
+     One way to put a floor away: archive, the server's flag, shared and
+     audited. A put-away floor is not a storey, is not in the picker, and is
+     drawn in one place on this view — the pill list under "all floors",
+     where clicking it restores. The floor can put one away too (the control
+     on each storey opens the board's own channel dialog), so the list of
+     rooms is a place you can put a room away from without walking into it.
 
-     What the floor does with both is the same: refuse to build with them. A
-     channel that is put away is not a storey — and it keeps its chip, at the
-     end of the picker, so the room is still somewhere you can go and look.
+     There used to be a second way, a browser-local "minimize" that this view
+     read off the board and kept out of the building alongside archived
+     rooms, with both kinds behind a separator at the end of the picker. The
+     two were undone in different places and looked alike; see the section
+     comment above `onBoard` in app.js for why it went and must not return.
 
-     Where they differ is the totals, and that difference is on purpose:
+     The totals stay the server's: archived is out of them there, because the
+     count of floors in this building is the same number for everyone looking
+     at it, and nothing here re-derives them from the same rows.
 
-     - Archived is out of them, decided on the server, because the count of
-       floors in this building is the same number for everyone looking at it.
-     - Minimized is NOT. It is one person's fold, and it would make "4 floors"
-       mean something different in two browsers looking at one board. The board
-       does not move its own totals for a minimized card either; this is that
-       rule, not a second one. The chips at the tail are where the rest went.
-
-     So the totals stay the server's, in one place, rather than being
-     re-derived here from the same rows by different code. */
-  const foldedNow = () => new Set(window.minimizedChannels?.() ?? []);
-  const onFloor = () => {
-    const m = foldedNow();
-    return (floor.channels ?? []).filter((c) => !c.archived && !m.has(c.channel));
-  };
-  /* The tail, in the order they were put away in: minimized first, archived
-     after it. Both are behind the same separator — one mark saying "past here
-     is put away" reads faster than two saying which kind. */
-  const shelved = () => {
-    const m = foldedNow();
-    return (floor.channels ?? [])
-      .filter((c) => c.archived || m.has(c.channel))
-      .sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0) || a.channel.localeCompare(b.channel));
-  };
+     Both lists come from app.js — `onBoard`, `putAway`, `pillBar` — so the two
+     views cannot disagree about which floors are on them. The `?.` and the
+     fallback are the cross-script contract: loading this file alone must not
+     crash, but it is not a second definition of "put away". */
+  const onFloor = () => window.onBoard?.(floor.channels) ?? (floor.channels ?? []).filter((c) => !c.archived);
+  const shelved = () => window.putAway?.(floor.channels) ?? [];
 
   function room(c) {
     const collapsed = inBuilding();
@@ -1900,6 +1887,19 @@
     const meta = el('text', { x: geo.w - PAD + 6, y: 23, class: 'roomMeta', 'text-anchor': 'end' });
     meta.textContent = `${c.live}/${c.desks.length} here${c.awaiting ? ` · ${c.awaiting} need you` : ''}`;
     svg.appendChild(meta);
+
+    // The way to put this floor away, from the list of floors: it opens the
+    // board's channel dialog — the same Archive, with the same audit row —
+    // so there is one archive, reached from two views. Only under "all
+    // floors", which is the list; a floor you are standing on is reached by
+    // its chip, and the list is where you put rooms away from. Under the
+    // stats line rather than the name so it reads as a control, not a title.
+    if (!ui.floorFilter) {
+      const put = el('text', { x: geo.w - PAD + 6, y: 41, class: 'roomPut', 'text-anchor': 'end', 'data-act': 'archive-floor', 'data-channel': c.channel, role: 'button', tabindex: '0' });
+      put.textContent = 'put away';
+      put.appendChild(el('title')).textContent = `Archive ${c.channel} — off the board and the floor, kept as a pill below; agents on it keep working`;
+      svg.appendChild(put);
+    }
 
     // Envelopes are appended to this layer so they sit above the furniture and
     // can be removed without touching anything that was drawn from data.
@@ -3190,36 +3190,23 @@
     // are two, because a picker with one choice is furniture.
     const here = onFloor();
     const away = shelved();
-    const names = floor.channels.map((c) => c.channel);
+    // A floor this browser remembers standing on that has since been put away
+    // lands the page on all floors — a put-away floor is not somewhere to stand.
+    const names = here.map((c) => c.channel);
     if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
-    const pickSig = JSON.stringify([here.map((c) => c.channel), away.map((c) => c.channel), ui.floorFilter]);
+    const pickSig = JSON.stringify([names, ui.floorFilter]);
     if (pickSig !== ui.pickSig) {
       ui.pickSig = pickSig;
-      const chip = (n, cls = '', title = '') =>
-        `<button class="chip${cls}${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}"${title ? ` title="${esc(title)}"` : ''}>${esc(n)}</button>`;
-      // Why this chip is in the tail, on the chip. Archived wins when a channel
-      // is both: it is the one of the two that other people can see.
-      const put = (c) => c.archived
-        ? [' archived', 'Archived on the board — kept out of "all floors". Restore it from the board view.']
-        : [' folded', 'Minimized on the board, in this browser only — kept out of "all floors". Restore it from the board view.'];
-      // A picker with one choice is furniture — but an archived channel makes a
-      // second choice out of a single floor, because "all floors" no longer
-      // contains it and there would otherwise be nothing offering the way in.
-      const worth = names.length > 1 || away.length > 0;
-      $('floor-pick').innerHTML = !worth ? '' : [
+      const chip = (n) => `<button class="chip${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}">${esc(n)}</button>`;
+      // A picker with one choice is furniture. A put-away floor is not a choice
+      // here at all: it is a pill under the building, and only there.
+      $('floor-pick').innerHTML = names.length < 2 ? '' : [
         `<button class="chip${ui.floorFilter ? '' : ' on'}" data-floor="">all floors</button>`,
         ...here.map((c) => chip(c.channel)),
-        // The tail, and why it is a tail. Archived rooms sort after everything
-        // else behind a mark rather than being dropped or greyed in place: a
-        // list that reorders itself around a flag reads as a list in an order,
-        // which is the one thing it must not be mistaken for.
-        ...(away.length ? ['<span class="pick-sep" aria-hidden="true">·</span>'] : []),
-        ...away.map((c) => chip(c.channel, ...put(c))),
       ].join('');
     }
-    // "all floors" means the floors in the building. Named, it is whichever one
-    // you named, archived or not — the chip is an offer to go and look.
-    const shown = ui.floorFilter ? floor.channels.filter((c) => c.channel === ui.floorFilter) : here;
+    // "all floors" means the floors in the building. Named, it is that one.
+    const shown = ui.floorFilter ? here.filter((c) => c.channel === ui.floorFilter) : here;
 
     // Stacked floors are drawn inside a building; one floor on its own is just
     // that floor. The class carries the whole difference in the stylesheet.
@@ -3232,17 +3219,21 @@
         // Two different empties. "Nothing here yet" is wrong when there are
         // rooms and every one of them has been put away — that sends someone
         // looking for a bug in the hook plugin over a decision they made
-        // themselves on the board. It names which decision, because minimized
-        // and archived are undone in different places.
-        const arc = away.filter((c) => c.archived).length;
-        const how = [(away.length - arc) && `${away.length - arc} minimized`, arc && `${arc} archived`]
-          .filter(Boolean).join(' and ');
+        // themselves. It says where the rooms went and how they come back.
         rooms.innerHTML = away.length
-          ? `<div class="q-empty">Every floor is put away — ${how}, on the chips above. Nothing is deleted: pick a chip to look at one, or bring it back from the board view.</div>`
+          ? `<div class="q-empty">Every floor is put away — ${away.length} archived, in the pills below. Nothing is deleted: click a pill to bring one back.</div>`
           : '<div class="q-empty">No desks yet. An agent gets a seat the moment it appears on the board or its window posts a hook event.</div>';
       } else {
         rooms.replaceChildren(...shown.map(room));
       }
+    }
+    // The floors put away, under "all floors" and only there: a pill each, the
+    // same pill the board draws, and clicking it restores. Redrawn only when
+    // the list changes, for the same reason the rooms are.
+    const awaySig = ui.floorFilter ? '' : JSON.stringify(away.map((c) => [c.channel, window.pillFacts?.(c) ?? null]));
+    if (awaySig !== ui.awaySig) {
+      ui.awaySig = awaySig;
+      $('floor-away').innerHTML = ui.floorFilter ? '' : (window.pillBar?.(floor.channels) ?? '');
     }
     // Ages and counts in the open card tick with everything else.
     renderDetails();
@@ -3428,6 +3419,14 @@
       return;
     }
 
+    // So does the put-away control, for the same reason: it sits inside the
+    // storey, and riding to a floor is not what pressing "put away" asked for.
+    const put = e.target.closest?.('svg.room .roomPut');
+    if (put && ui.on) {
+      window.channelDialog?.(put.dataset.channel);
+      return;
+    }
+
     const storey = e.target.closest?.('svg.room.collapsed');
     if (storey && ui.on) {
       setFloor(storey.dataset.channel);
@@ -3506,7 +3505,11 @@
     const act = e.target.closest?.('[data-act]');
     if (!act || !ui.on) return;
 
-    if (act.dataset.act === 'open') {
+    if (act.dataset.act === 'unarchive') {
+      // A pill restores — the board's own restore, then this view's next poll
+      // at once, so the room is back before the interval would have asked.
+      Promise.resolve(window.restoreChannel?.(act.dataset.channel)).then(() => tick());
+    } else if (act.dataset.act === 'open') {
       openDesk(act.dataset.channel, act.dataset.agent);
     } else if (act.dataset.act === 'close-panel') {
       ui.open = null;

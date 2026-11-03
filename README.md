@@ -51,7 +51,8 @@ rooms, flip the switch top right.
 presence, self-reported status with its age, unread and task counts, and the
 full activity log — every message, task, and contract change, newest first.
 Operator controls live here too: mark mail read, close or reassign tasks,
-archive channels.
+archive channels — and archiving is on the floor as well, so a channel put
+away from either view is a pill at the bottom of both until it is restored.
 
 Under the page sit three small parts: an MCP coordination server (Docker) that
 gives agents on a project a shared mailbox, task list and agreed contracts; a
@@ -318,7 +319,7 @@ The front page stops here; the details — all of them — moved to `docs/`:
 
 | Page | What's in it |
 | --- | --- |
-| [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, avatars, saved prompts, stopping a turn, operator actions (view/mark read, close/reassign, retire, archive), minimize vs archive |
+| [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, avatars, saved prompts, stopping a turn, operator actions (view/mark read, close/reassign, retire, archive — from either view) |
 | [The team playbook](docs/multi-agent-team-playbook.md) | The document you hand a new agent: tools, addressing, autonomy, contracts, what the operator sees on the floor, trigger words — APPideas' own, as an example to modify |
 | [How agents coordinate](docs/coordination.md) | Channels, the ten MCP tools, contracts, a typical exchange, wiring up a team, and why human→agent and agent→agent are different mechanisms |
 | [The security model](docs/security.md) | The shared secret, the network boundary, what the floor puts on the server, and the sign-in that used to exist |

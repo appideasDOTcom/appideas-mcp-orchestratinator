@@ -73,7 +73,7 @@ const READY = {
 /**
  * Open the board or the floor and hand back something to drive it with.
  *
- * `view`, `floor` and `minimized` are written to localStorage — which cannot be
+ * `view` and `floor` are written to localStorage — which cannot be
  * done from about:blank (no origin: "SecurityError: Access is denied for this
  * document"), so this navigates to get an origin, writes, and navigates again.
  * That dance is the single most-repeated mistake in driving this page.
@@ -82,7 +82,6 @@ export async function open({
   base = 'http://localhost:8787',
   view = null,          // 'floor' | 'board' | null to leave whatever is stored
   floor = undefined,    // channel name, or '' for all floors
-  minimized = undefined,// array of channel names, or [] to clear
   ready = undefined,    // a JS expression to wait for; defaults per view
   port = DEBUG_PORT,
 } = {}) {
@@ -160,7 +159,8 @@ export async function open({
   const sets = [];
   if (view) sets.push(`localStorage.setItem('orch.view', ${JSON.stringify(view)})`);
   if (floor !== undefined) sets.push(`localStorage.setItem('orch.floor', ${JSON.stringify(floor)})`);
-  if (minimized !== undefined) sets.push(`localStorage.setItem('orch.minimized', ${JSON.stringify(JSON.stringify(minimized))})`);
+  // There is no `minimized` any more: putting a floor away is the server's
+  // archive flag (issue #21), so a check seeds it with POST /api/admin/channel/archive.
   if (sets.length) { await evalJs(`${sets.join(';')};'ok'`); await goto(base); }
   await waitFor(ready ?? READY[view] ?? `document.readyState === 'complete'`, { timeout: 15000 });
 

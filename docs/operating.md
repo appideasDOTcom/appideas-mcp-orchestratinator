@@ -69,14 +69,17 @@ tool call is never read as "waiting". That gap looks identical whether the
 agent is blocked, crashed, or simply finished and quiet, so only the agent can
 say — which is what `set_status` is for.
 
-**Minimize a channel to change your focus.** The `–` on any channel header
-folds that card into a pill beneath the board; clicking the pill unfolds it,
-and `show all` brings everything back at once. This is *focus*, not a decision:
-it lives in `localStorage` in one browser, so nobody else's board changes,
-nothing is audited, and there's no server round-trip — which is the whole
-difference from archiving a channel, which is a shared and semi-permanent
-statement (see *Operator actions* below). A pill keeps the channel's unread
-count on it, so narrowing your focus never hides news.
+**Archive a channel to put it away.** The 🗑 on a channel header opens the
+channel dialog, and **Archive** there puts the channel away for everyone: off
+the board's cards, the activity filter and the desk dialog's Floor dropdown,
+and off the floor and its picker. It stays as a pill beneath the cards — and
+beneath the building on the floor — carrying its unread count, and clicking
+the pill restores it. It is a shared, audited statement (see *Operator
+actions* below), not a view preference. There is deliberately no
+browser-local way to fold a channel out of sight: there used to be one, it
+looked exactly like archiving in every list, and the two were undone in
+different places — so a floor "still archived" after a restore was usually a
+floor folded in that one browser. One mechanism, one place it shows.
 
 **Activity log.** Every interesting write — messages, task
 opened/claimed/done, contract versions, and operator actions — merged into one
@@ -231,7 +234,7 @@ the log can show it.
 | **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
 | **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
 | **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
-| **Archive a channel** | Hides it from the board for everyone, and says so in the log. Nothing is deleted and agents on it keep working. Semi-permanent by intent — if you only want it out of your way for the next hour, minimize it instead. |
+| **Archive a channel** | Puts it away for everyone — off the board, the floor, the picker, the filter and the Floor dropdown — and says so in the log. Nothing is deleted and agents on it keep working. It stays as a pill at the bottom of both views, and the pill restores it. Reachable from the floor too: **put away** on a storey, under "all floors", opens this same dialog. |
 | **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
 
 Two behaviours worth knowing before you use them:
@@ -244,28 +247,34 @@ that is working while invisible on the board is a worse failure than a
 cluttered board. The flip side is that "remove" is not how you stop an agent;
 close its window.
 
-**Retired agents and archived channels are hidden, never dropped.** Both keep a
-count on screen (`1 retired`, `2 archived channels`) that reveals them again.
+**Retired agents and archived channels are hidden, never dropped.** A retired
+agent keeps a count on screen (`1 retired`) that reveals it again; an archived
+channel is a pill at the bottom of the board, with its unread count on it.
 Silently omitting a row would make the board lie, which is the one thing it
 must not do.
 
-The floor says the same thing in its own vocabulary. A channel put away — by
-archiving it, or by minimizing it — is not a storey in the building, but it
-keeps its chip in the floor picker, moved to the end behind a `·`, so the room
-is still somewhere you can walk into. Both stay board controls; there is
-nothing on the floor that sets either.
+The floor says the same thing in its own vocabulary. A channel put away is not
+a storey in the building and is not in the floor picker; it is a pill under
+"all floors", the same pill the board draws, and clicking it there restores it
+too. The floor can put one away as well — **put away** on a storey, under "all
+floors", opens the board's channel dialog — so there is one archive, reached
+from either view. The two views agree on which floors exist: the board's
+channel list and the floor's are one list (a desk made by a hook event alone
+counts as a channel on both), so a floor archived from the floor is a pill on
+the board, and the two totals count the same set.
 
-Where the two differ is the numbers, and the difference is the one between
-them:
+Archived is a shared statement, so it is out of the floor's totals and out of
+the operator queue: the count of floors in this building is the same number
+for everyone looking at it, and a prompt in a room the team has put away
+should not read as "1 need you". A floor you were standing on that gets
+archived — by you or by anyone — lands you on all floors at the next poll.
 
-- **Archived** is a shared statement, so it is out of the floor's totals and
-  out of the operator queue. The count of floors in this building is the same
-  number for everyone looking at it, and a prompt in a room the team has put
-  away should not read as "1 need you".
-- **Minimized** is one browser tidying up, so it changes nothing but what is
-  drawn. The totals stay put — as they do on the board, where minimizing a card
-  does not move them either — because a fold in one browser must not make
-  "4 floors" mean something different in another.
+**An archived floor comes back by itself when something starts on it.** A
+desk taken there from Take a desk, a session connecting under its name, a
+window opening on it — any of these restores the floor, and the log says
+what brought it back and who. Only a start counts: an agent already on the
+floor keeps working without bringing it back, because archive is not a
+session kill and the work it does not kill does not undo it.
 
 Deleting a channel removes it from the board but **not** from the activity
 log: `admin_events` is deliberately not swept, because an audit trail you can
