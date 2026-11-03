@@ -2533,7 +2533,9 @@
         <!-- Which of the folder's conversations the window is on, and whether
              the folder stays a desk at all. Buttons, not links: they act on
              the desk rather than move the seat, and six links in a column
-             read as a menu nobody asked for. -->
+             read as a menu nobody asked for. Two rows of two (#10 Decided 5):
+             model and effort above, Sessions and Leave desk below; the grid
+             is in styles.css and the order here is the reading order. -->
         <div class="p-desk">
           <!-- The model and the effort level, for this session only: the host
                drives the window's own picker and presses s. What the window

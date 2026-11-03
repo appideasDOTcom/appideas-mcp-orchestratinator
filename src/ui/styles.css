@@ -1233,7 +1233,13 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    space-between, so it stays there when the links are hidden and it is the
    only column left. */
 .p-foot { display: flex; align-items: flex-start; gap: 12px; padding-top: 6px; }
-.p-desk { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Two rows of two (costmo, #10 Decided 5, 2026-11-03): the model and effort
+   controls on the first, Sessions and Leave desk on the second, each column
+   as wide as its widest control so the four line up. The asked-for note,
+   when there is one, is a line of its own above the first row, spanning both
+   columns. One run of four on a row wrapped "Leave desk" onto two lines. */
+.p-desk { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; align-items: center; margin-left: auto; }
+.p-desk .p-asked { grid-column: 1 / -1; text-align: right; }
 /* The same control height as the Send row, said again because --p-ctl-h is
    scoped to that row. A refusal borrows the button's label the way it borrows
    a link's, so the flashed voice is declared here too. */
@@ -1513,7 +1519,7 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .p-slash-row:hover, .p-slash-row.is-first { background: color-mix(in srgb, var(--busy) 12%, transparent); }
 .p-slash-row i { font-style: normal; color: var(--muted); }
 /* The model and effort controls on the panel's foot. */
-.p-sel { height: 28px; font-size: 11px; padding: 0 4px; max-width: 110px; }
+.p-sel { height: 28px; font-size: 11px; padding: 0 4px; width: 100%; min-width: 0; }
 .p-asked { font-size: 10.5px; }
 .t-partial .t-body { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
 .t-partial .t-body::after { content: '▍'; color: var(--accent); animation: caret 1s steps(2) infinite; }
