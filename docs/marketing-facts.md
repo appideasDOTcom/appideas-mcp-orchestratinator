@@ -1,7 +1,7 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `e2df53f`
+code. Every fact names the file and line that holds it, at commit `cc52a23`
 (branch `develop`, 2026-11-03; first written at `0ce4f1e`, 2026-10-17;
 re-anchored at `c6f9474` on 2026-11-02 — sixteen references had moved, none
 had changed — at `8f4a703` on 2026-11-03 — six moved and one was placed by
@@ -10,12 +10,16 @@ none changed — and again here for issue #20: nine moved and two were placed
 by hand, the schema and the backup list, which both grew by `desk_flags`;
 the version and the stored-tables facts changed, nothing else — and once
 more at `e2df53f`, the PR #30 fix: four moved, none placed by hand, none
-changed). Cite
+changed — and at `cc52a23` for issues #9/#10/#15: twenty-seven moved and
+five placed by hand (the hooks list, the hook's payload block and the
+hook-content block, which grew; the transcript reader, whose context line
+was rewritten); the version, the events, what the plugin sends and the
+floor's per-desk table changed in substance). Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `e2df53f`. A later commit may move them; the file names
+Line numbers are for `cc52a23`. A later commit may move them; the file names
 will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
 reference whose line is found once at the new commit and lists the rest.
 
@@ -43,9 +47,10 @@ shares plugin installs with the terminal `claude`. One install covers both.
 
 - Manifest: `plugin/.claude-plugin/plugin.json`; marketplace
   `.claude-plugin/marketplace.json:9-16` (`source: ./plugin`).
-- The eight events: `plugin/hooks/hooks.json:4-91` — SessionStart,
+- The twelve events: `plugin/hooks/hooks.json:4-135` — SessionStart,
   SessionEnd, UserPromptSubmit, PreToolUse, PermissionRequest, Notification,
-  Stop, StopFailure. All eight run the identical command line.
+  Stop, StopFailure, PreCompact, PostCompact, PreModelSwitch,
+  PostModelSwitch. All twelve run the identical command line.
 - The reporter: `plugin/hooks/report.mjs`. Identity is read from the repo's
   own `.mcp.json` or Claude Code's local-scope entry, never configured
   (`report.mjs:25-29`, `report.mjs:97-142`).
@@ -66,9 +71,9 @@ the workstation listens.
 - Requirements enforced by the installer: `tmux` (`host/install.sh:26-35`),
   `node` and a `claude` on PATH (`host/install.sh:63-65`).
 - **OS: macOS.** The installer writes a LaunchAgent (`host/install.sh:6,19`).
-  "Open in VS Code" uses macOS `open -a` (`host/window.js:2366`); "Open in
+  "Open in VS Code" uses macOS `open -a` (`host/window.js:2979`); "Open in
   Claude" and "Open in tmux" drive Terminal.app or iTerm through `osascript`
-  (`host/window.js:2387-2411, 2478`); the folder dialog has a macOS backend
+  (`host/window.js:3000-3024, 3091`); the folder dialog has a macOS backend
   and no other, by ruling (`host/dialog.js:1-50, 99-101`). The host's core
   loop is portable Node, but no other platform is installed, measured or
   claimed. Say "macOS" for the host.
@@ -78,25 +83,28 @@ the workstation listens.
 The server's own state (MCP tables) needs neither plugin nor host. The plugin
 adds *state* from inside the session. The host adds the full conversation and
 every action that types into a window. The decider on the server is one
-function, `deliverable()` (`src/floor.js:254-269`): no host, host offline, or
+function, `deliverable()` (`src/floor.js:295-310`): no host, host offline, or
 conversation open in an editor means nothing can be typed in.
 
 | Shown on the desk | Needs | Where |
 | --- | --- | --- |
 | Status word, detail line, age, TTL expiry | nothing beyond the MCP tools | `src/tools.js:54-75`, `src/agent-state.js:56-139` |
 | Tray: unread, assigned, claimed counts; derived state when no status is set | nothing beyond the MCP tools | `src/agent-state.js:102-139, 221` |
-| Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:1043-1090`, `src/floor.js:2060-2085`, `src/db.js:134-139` |
-| Permission prompt text, the tool asking | plugin | `src/floor.js:1043-1055` |
-| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2078-2083`, `src/ui/floor.js:2850-2851`, `host/index.js:1154-1298` |
-| Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:948-960, 1012-1041` |
-| Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:2906, 2964-3026` |
-| Thinking, drawn as a thought bubble | host | `host/window.js:2993-2994` |
-| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:295`, `src/ui/floor.js:1186-1199` |
-| Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:254`, `host/index.js:1151, 1317` |
-| Open in VS Code | host (macOS) | `host/index.js:1320`, `host/window.js:2354-2370` |
-| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1375-1386`, `host/window.js:2450` |
-| Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:2759`, `host/dialog.js` |
-| Recent conversations, search, read a conversation whole | host | `host/history.js:1-37`, `host/index.js:1357-1369` |
+| Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:1144-1191`, `src/floor.js:2251-2276`, `src/db.js:134-139` |
+| Permission prompt text, the tool asking | plugin | `src/floor.js:1144-1156` |
+| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2269-2274`, `src/ui/floor.js:2906-2907`, `host/index.js:1211-1355` |
+| Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:997-1008, 1113-1134` |
+| Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:3540, 3492-3678` |
+| The window compacting, from its start to its end, and a message sent meanwhile held rather than timed out | plugin (`PreCompact` / `PostCompact`) for the state; host for the held message and the summary, drawn as a system record | `src/floor.js:1080-1089`, `host/window.js:1259` |
+| The model and effort level, what was asked for beside what the window confirmed; a change from the floor is this session only, through the window's own picker | plugin (`PreModelSwitch` / `PostModelSwitch`, `effort_level`); host (the picker, the transcript's next reply) | `src/floor.js:1099-1111, 1851`, `host/window.js:2026` |
+| A slash command from the composer, confirmed on the command's own receipt and said in its terms (a new conversation, compacting, answered in the window); a long message typed in so the window never wraps it | host | `src/floor.js:189, 1819`, `host/window.js:1405, 1216, 1490, 3462` |
+| Thinking, drawn as a thought bubble | host | `host/window.js:3662-3663` |
+| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:336`, `src/ui/floor.js:1186-1199` |
+| Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:295`, `host/index.js:1208, 1374` |
+| Open in VS Code | host (macOS) | `host/index.js:1377`, `host/window.js:2967-2983` |
+| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1432-1443`, `host/window.js:3063` |
+| Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:2981`, `host/dialog.js` |
+| Recent conversations, search, read a conversation whole | host | `host/history.js:1-37`, `host/index.js:1414-1426` |
 | Tool calls on the plugin path carry only one descriptive field (command, path, pattern, description, prompt, url), clipped to 300 characters | plugin | `plugin/hooks/report.mjs:42, 267-290` |
 
 Two honest limits worth not contradicting on the page:
@@ -107,11 +115,11 @@ Two honest limits worth not contradicting on the page:
   `src/agent-state.js:102-139`). Since 0.10.8 a desk with nothing live
   behind it — no session reporting, no host, or the host offline — is not
   drawn at all, and comes back on its own when something is; the storey
-  still counts it in `N/M here` (`src/ui/floor.js:1898, 1910-1917`, issue #20).
+  still counts it in `N/M here` (`src/ui/floor.js:1900, 1912-1919`, issue #20).
   Do not say "a desk for every agent": say every agent with something
   running has one.
 - The floor is a live tail, not an archive: the newest 400 turns per desk
-  (`TURN_RETENTION`, `src/db.js:524`). History is read off the hosts'
+  (`TURN_RETENTION`, `src/db.js:537`). History is read off the hosts'
   transcripts, not the server (`host/history.js`).
 
 ## 3. The ten MCP tools
@@ -141,40 +149,43 @@ Claim TTL defaults to 15 minutes (`docker-compose.yml:29`); status TTL to
 repo's own binding (`url` in `.mcp.json`), on the same origin as `/mcp`.
 The plugin posts to `<that origin>/api/ingest`
 (`plugin/hooks/report.mjs:242-253, 340`); the host talks to
-`<that origin>/api/host/*` (`host/index.js:520`). There is no other network
+`<that origin>/api/host/*` (`host/index.js:577`). There is no other network
 destination in the server, the plugin or the host: the only `fetch` calls
 are those two, and no third-party URL appears in `src/`, `host/` or
 `plugin/`. **Nothing goes to any third party.** The server itself makes no
 outbound connections.
 
-**What the plugin sends**, per hook event (`plugin/hooks/report.mjs:343-369`):
+**What the plugin sends**, per hook event (`plugin/hooks/report.mjs:343-391`):
 channel, agent, session id, event name, the transcript's *path* on the
 workstation, the repo's path on the workstation, permission mode, model
 name, git branch, and the event's own fields: the prompt you typed
 (`UserPromptSubmit`), the final reply of a turn (`Stop`), the tool name and
 one descriptive field (`PreToolUse`, `PermissionRequest`), a notification's
-type and message, an error's type and message. Text is clipped to 20,000
+type and message, an error's code, details, type and message
+(`StopFailure`), the session's effort level, a compaction's trigger (never
+its summary), and a model switch's from, to and requested model. Text is
+clipped to 20,000
 characters (`report.mjs:39`), tool input to the listed keys at 300
 characters each (`report.mjs:42, 271`). A `Write` of a file never puts the
 file on the wire (`report.mjs:15-17`).
 
 **What the host sends.** The conversation itself, read from Claude Code's
 transcript: user, assistant, tool, thinking, context and subagent turns
-(`host/window.js:2906-3026`), plus who holds each desk and what its pane
+(`host/window.js:3492-3678`), plus who holds each desk and what its pane
 shows when a prompt is open. The server clips each turn to 20,000 characters
-(`src/floor.js:50, 170`).
+(`src/floor.js:50, 211`).
 
 **What the server stores** (`src/db.js:20-260`): messages, contracts and
 their history, tasks, agent presence and status, channel flags, desk flags
 (a desk hidden by hand, issue #20), an operator audit log, floor sessions (`agent_sessions`, including the workstation paths
 above), turns, agent names and avatars, seats, hosts, hosted desks, the
 host work queue, and saved prompts. Turns are pruned to the newest 400 per
-desk (`src/db.js:524`). **Backups exclude `turns` and `agent_sessions`**
-(`src/db.js:580-592` lists the eleven tables a backup carries).
+desk (`src/db.js:537`). **Backups exclude `turns` and `agent_sessions`**
+(`src/db.js:593-605` lists the eleven tables a backup carries).
 
 **The network boundary.** The shared secret guards `/mcp`, `/api/ingest` and
 the host routes, and nothing else (`src/auth.js:29-30, 156`;
-`src/floor.js:2322, 2347, 2464, 2490`). The dashboard has no sign-in at all;
+`src/floor.js:2528, 2553, 2670, 2696`). The dashboard has no sign-in at all;
 anything that can reach the port can read every message on every channel
 and take operator actions. Compose publishes port 8787 on every interface by
 default, so by default that is the LAN; one edit makes it loopback only
@@ -221,7 +232,7 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.10.8** at `730c24e`, in all three places that carry it:
+- **Version: 0.10.9** at `cc52a23`, in all three places that carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
   They are kept equal by `npm run set-version` (`scripts/set-version.mjs`)
   and `npm run smoke` asserts it. The dashboard header reports the server's.
@@ -262,7 +273,7 @@ table no longer lists "minimize vs archive" — there is no minimize. Both hold
 
 Two README phrasings that hold and are worth keeping verbatim: *"A
 conversation is one `claude` process, so one app holds it at a time"*
-(`CLAUDE.md`, first rule; enforced by `src/floor.js:254-269`), and *"Nothing
+(`CLAUDE.md`, first rule; enforced by `src/floor.js:295-310`), and *"Nothing
 merges, nothing is shared but the board"* (agents never touch each other's
 repos; the server holds messages, tasks and contracts and nothing else).
 
