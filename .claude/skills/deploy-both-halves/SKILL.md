@@ -65,3 +65,35 @@ MCP session in the server's memory and one tool call per desk restores it.
 Do not raise a form, send a chat or open a window on anyone's desk to "test"
 the deploy. The hand check is costmo's and reaches him through appideas-qa;
 the symbol counts are yours.
+
+## The server half alone
+
+When nothing under `host/` changed since the last deploy, the task says
+"server half only" (tasks 243 and 248, 2026-11-03): rebuild the container,
+leave the host up, and say in the note that the host was not restarted and
+why (`git log -1 -- host/` against the host pid's start time). The host
+rides out the swap on its own — its log shows one `[host] fetch failed;
+retrying in 1s` and then carries on; `/api/floor` reads the host live again
+within seconds. Restarting it anyway blanks nothing extra, but it is a
+restart of something that did not change, and the note has to explain it.
+
+Three things about the readings, all measured this way:
+
+- **"Which archived floors came back" is always "none" right after the
+  restart.** A reconnect is what restores a floor (#21 Decided 6), and
+  `sessions: 0` says nobody has reconnected yet. Say that, and that each
+  put-away floor with a working agent restores on that agent's next call
+  with an audit row naming the MCP door. To see which did, read
+  `admin_events` for `channel.unarchive` rows after the container's created
+  time, minutes later — not the floor payload at the moment of the restart.
+- **Desk flags and channel flags ride through** — they are rows in the
+  `/data` volume. Read the hidden count and the archived list before and
+  after and expect them equal; a difference is the finding, not the deploy.
+- **`grep -c` prints `0` and exits 1**, so a symbol you expect to be absent
+  before the rebuild ends an `&&` chain at that grep. `status.sh` tolerates
+  it; a hand-rolled chain should use `;` between readings.
+
+A row repair or a read inside the container goes through
+`docker compose exec -T orchestratinator node` with a heredoc, not `node -e`
+with quoted SQL — the shell turns `\"2026-11-03\"` into a column name and
+SQLite says `no such column`.
