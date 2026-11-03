@@ -2228,21 +2228,24 @@ try {
     // #30): the flag is on the seat the desk leaves, and the seat ends. The
     // desk the operator took onto the other floor arrives drawn, with a row
     // on the floor it left — and a move back does not find the flag again.
-    const deskRowsOn = async (ch) => (await fetch(`${HOST}/api/activity?limit=500&channel=${ch}`).then((r) => r.json())).rows.filter((r) => r.kind.startsWith('admin.desk.'));
-    const rowsBeforeMove = (await deskRowsOn(CHW)).length;
+    // The move itself writes desk.moved on the floor the desk lands on; what
+    // this reads is the hide/restore record, on the floor it leaves.
+    const hideShowOn = async (ch) => (await fetch(`${HOST}/api/activity?limit=500&channel=${ch}`).then((r) => r.json())).rows
+      .filter((r) => r.kind === 'admin.desk.hide' || r.kind === 'admin.desk.show').map((r) => JSON.stringify(r));
+    const rowsBeforeMove = new Set(await hideShowOn(CHW));
     eq((await hostEvents([{ type: 'bound', channel: 'moved-onto', agent: 'taker', cwd: '/repo/zeta-newest', scope: 'local', from: { channel: CHW, agent: 'taker' } }])).applied, 1,
       'the hidden desk is moved onto another floor');
     fl = await floor();
     eq(deskOf(fl, 'taker', 'moved-onto')?.hidden, false, 'a hidden desk moved to another floor arrives there as a desk, not a pill');
     assert(deskRows(channelOf(fl, 'moved-onto')).drawn.some((x) => x.agent === 'taker'), 'and is drawn — the operator just asked for it');
     eq(deskOf(fl, 'taker', CHW) ?? null, null, 'its old seat is gone');
-    let moveRows = (await deskRowsOn(CHW)).slice(rowsBeforeMove);
-    eq(moveRows.map((r) => r.kind), ['admin.desk.show'], 'with a restore row on the floor it left, because the drawing changed');
-    assert(/taker/.test(JSON.stringify(moveRows[0])) && /moved-onto/.test(JSON.stringify(moveRows[0])), 'naming the desk and where it went');
+    let moveRows = (await hideShowOn(CHW)).filter((r) => !rowsBeforeMove.has(r));
+    eq(moveRows.map((r) => JSON.parse(r).kind), ['admin.desk.show'], 'with a restore row on the floor it left, because the drawing changed');
+    assert(/taker/.test(moveRows[0] ?? '') && /moved-onto/.test(moveRows[0] ?? ''), 'naming the desk and where it went');
     eq((await hostEvents([{ type: 'bound', channel: CHW, agent: 'taker', cwd: '/repo/zeta-newest', scope: 'local', from: { channel: 'moved-onto', agent: 'taker' } }])).applied, 1,
       'and moved back');
     eq(deskOf(await floor(), 'taker', CHW)?.hidden, false, 'the desk does not find its old flag on the way back — a move clears it, it does not leave it behind');
-    eq((await deskRowsOn(CHW)).length, rowsBeforeMove + 1, 'and nothing was hidden or restored on the way back, so there is no second row');
+    eq((await hideShowOn(CHW)).filter((r) => !rowsBeforeMove.has(r)).length, 1, 'and nothing was hidden or restored on the way back, so there is no second row');
     eq(await admin('desk/hide', { channel: CHW, agent: 'taker' }), 200, 'hidden again by hand, for the floor to be put away with two pills on it');
 
     // Archive still wins: a hidden desk on a put-away floor is neither a
