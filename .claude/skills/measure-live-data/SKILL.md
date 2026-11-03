@@ -25,6 +25,14 @@ grep '^@@JSON@@' /tmp/board.out | sed 's/^@@JSON@@//' > /tmp/board.json
 node $D/disk-join.mjs /tmp/board.json
 ```
 
+`channel-sets.js` answers one specific question that has come up twice: which
+channels each source yields — `listAllChannels`, `agents`, `messages`,
+`tasks`, `contracts`, `personas`, `channel_flags`, `hosted_desks` — with the
+names in every difference and the row counts behind the channels that are
+only in one. It is the measurement issues #21 and #6 were decided on, and
+the first thing to run when the board and the floor disagree about how many
+floors there are.
+
 `board-snapshot.js` and `disk-join.mjs` answer the general questions — how
 many rows, sessions and desks; how many conversations are on disk; how many
 of those the board has any row for; what it costs to read them all. For the

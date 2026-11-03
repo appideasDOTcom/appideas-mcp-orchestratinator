@@ -38,6 +38,21 @@ silently does not apply is a mutant that "survives" against unchanged code.
 Refresh the copy (`copy-repo.sh` again) whenever the tree has changed; a
 stale copy tests yesterday's code and tests.
 
+For more than two or three mutants, or for any whose old or new text holds
+backticks, `${}` or both kinds of quote, write them as a JSON list and hand
+it to `run-mutants.mjs`, which makes the copy once and runs each through
+`run-mutant.sh` with no shell in between:
+
+```bash
+node .claude/skills/mutate-in-a-copy/run-mutants.mjs /tmp/mutants.json > /tmp/mutants.log
+# [["a pill is not the restore control", "floor", "src/ui/app.js", "data-act=\"unarchive\" data-channel", "data-act=\"restore\" data-channel"], …]
+```
+
+Keep the JSON file outside the repo. A mutant whose new text is the old
+text plus a dead branch is a no-op and proves nothing — one was written
+that way on 2026-11-02 and had to be discounted in the report; say so if
+it happens rather than counting it as a survivor.
+
 The suites take their own ports (8896–8898) and tmux session names by pid,
 so the copy runs exactly like the repo — and collides with a run in the
 repo or in QA's clone for the same reason. One at a time, and say so on the

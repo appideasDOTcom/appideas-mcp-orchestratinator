@@ -708,8 +708,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -996,6 +996,19 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    "working" — so the tray reads in the same language as the label above it. */
 .pill.claimed .pillBox { fill: color-mix(in srgb, var(--busy) 18%, var(--surface)); stroke: var(--busy); }
 .pill.claimed:hover .pillBox { fill: color-mix(in srgb, var(--busy) 34%, var(--surface)); }
+
+/* A desk put away by hand (#20): a pill under the storey's last desk, and the
+   way back. Dashed and muted like the put-away floors' pills below the
+   building, so it reads as something put away rather than as one more count;
+   solid and lit on hover, the same as those. */
+.deskPill { cursor: pointer; }
+.deskPill:focus { outline: none; }
+.deskPillBox { fill: var(--surface-2); stroke: var(--border); stroke-dasharray: 3 2; }
+.deskPillText { fill: var(--muted); font: 10px var(--mono); }
+.deskPill:hover .deskPillBox, .deskPill:focus-visible .deskPillBox { stroke: var(--accent); stroke-dasharray: none; }
+.deskPill:hover .deskPillText, .deskPill:focus-visible .deskPillText { fill: var(--text); }
+.deskPillCount { fill: var(--wait-bg); }
+.deskPillCountText { fill: var(--wait); font: 600 9px var(--mono); }
 
 @media (prefers-reduced-motion: reduce) { .blind { transition: none; } }
 
@@ -1436,6 +1449,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
            border: 1px solid var(--accent); color: var(--text);
            font: 600 11px var(--sans); }
 .dp-open:hover { background: color-mix(in srgb, var(--accent) 34%, var(--surface)); }
+/* Under "Open conversation", and quieter: putting a desk away is the second
+   thing this card offers, not the first. */
+.dp-hide { margin-top: 6px; background: var(--surface-2); border-color: var(--border); color: var(--muted); font-weight: 500; }
+.dp-hide:hover { background: var(--surface-2); border-color: var(--accent); color: var(--text); }
 
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor,

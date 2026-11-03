@@ -158,6 +158,9 @@
   const PLATE_Y = FACE_Y + FACE_H + 14;     // nameplate, below the counter
   const PILL_H = 17;
   const PILL_Y = PLATE_Y + 23;
+  // The hidden desks' pills under a storey (#20): air above the row, and
+  // between rows when the names wrap.
+  const PILL_ROW_GAP = 10;
   // How long a just-changed sign keeps the old card on the strip. Covers the
   // CSS transition with margin, so a room rebuilt mid-turn still shows the
   // roll rather than snapping to the new card.
@@ -549,7 +552,13 @@
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Edit avatar</button>` +
       `</div>${bits.join('')}` +
       `<div class="dp-foot"><button type="button" class="dp-open" data-act="open"` +
-      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button></div>`;
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button>` +
+      // Put this desk away (#20, Decided 2): under "Open conversation", for
+      // any desk this card is open on. It becomes a pill under the storey,
+      // and stays one until that pill is clicked, whatever the agent does.
+      `<button type="button" class="dp-open dp-hide" data-act="hide-desk"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
+      ` title="Put this desk away: a pill under the storey, shared with everyone looking at this board; the agent keeps working and still counts. Click the pill to bring it back.">Hide desk</button></div>`;
   }
 
   /** Draw, move or remove the popover to match `ui.details`. */
@@ -558,10 +567,12 @@
     if (!ui.details) { pop?.remove(); return; }
     const c = floor.channels.find((x) => x.channel === ui.details.channel);
     const d = c?.desks.find((x) => x.agent === ui.details.agent);
-    // A desk can vanish under an open popover — retired, or its channel
-    // archived. Close rather than leave a card describing something that is no
-    // longer on the floor.
-    if (!d) { ui.details = null; pop?.remove(); return; }
+    // A desk can vanish under an open popover — retired, its channel archived,
+    // put away from this very card, or gone empty under it (#20: a hidden or
+    // empty desk is still in the payload, so "still in the payload" is not
+    // "still drawn"). Close rather than leave a card describing something that
+    // is no longer on the floor.
+    if (!d || !c || !deskRows(c).drawn.includes(d)) { ui.details = null; pop?.remove(); return; }
 
     if (!pop) {
       pop = document.createElement('div');
@@ -992,18 +1003,25 @@
    * `collapsed` is the building view: one row, and the rest of the floor scrolls
    * past it.
    */
-  function roomGeometry(n, collapsed) {
+  function roomGeometry(n, collapsed, pillLines = 0) {
     const cols = COLS;
     const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / cols));
+    // The last row contributes only what it draws below the desk origin (the
+    // nameplate), not a whole cell — a full DESK_H there leaves every room
+    // ending in a band of empty carpet that reads as "somebody is missing".
+    // A storey with nothing drawn on it (every desk empty or put away, #20)
+    // ends at its header band for the same reason: the row's height is
+    // mostly the bubble above it, and there is nobody to speak.
+    const bottom = n ? PAD + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW : HEAD_BAND;
+    // The hidden desks' pills, as a tray under the last desk; absent, no height.
+    const pillY = bottom + PILL_ROW_GAP;
     return {
       cols,
       rows,
       collapsed: !!collapsed,
       w: ROOM_W,
-      // The last row contributes only what it draws below the desk origin (the
-      // nameplate), not a whole cell — a full DESK_H there leaves every room
-      // ending in a band of empty carpet that reads as "somebody is missing".
-      h: PAD * 2 + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW,
+      pillY,
+      h: (pillLines ? pillY + pillLines * (PILL_H + PILL_ROW_GAP) - PILL_ROW_GAP : bottom) + PAD,
     };
   }
 
@@ -1856,9 +1874,115 @@
   const onFloor = () => window.onBoard?.(floor.channels) ?? (floor.channels ?? []).filter((c) => !c.archived);
   const shelved = () => window.putAway?.(floor.channels) ?? [];
 
+  /* ---------- a desk's place on the floor: what the page decides ---------- */
+
+  /**
+   * Empty: nothing live behind the desk (issue #20). Exactly the three
+   * nameplate readings — `host offline`, `not reporting`, and the name alone,
+   * which the card calls `away` — and nothing else: a hosted desk is live
+   * while its host says so, an unhosted one while its hooks are heard or it
+   * is waiting on a person, and both of those are the server's `live` and
+   * `hosted.live`. Nothing here re-derives them.
+   *
+   * An empty desk is not drawn, and is back by itself the moment either turns
+   * true; nothing is clicked and nothing is recorded (Decided 1). It is not a
+   * pill either — a pill is the way back from a decision, and nobody made one.
+   * The payload keeps the desk, so every count the storey prints still counts
+   * it; `2/5 here` over two desks is the truth about that floor.
+   *
+   * This reverses, for the drawing only, the server's rule that every agent
+   * the board knows gets a desk (buildFloor's comment on it still holds for
+   * the payload): the reminder of who still needs the plugin was fifteen
+   * nameplates on the live board that nobody could type into.
+   */
+  const deskEmpty = (d) => !d.live && !d.hosted?.live;
+
+  /**
+   * How a storey draws its desks: the ones on it, and the ones the operator
+   * put away by hand as a row of pills beneath them (Decided 3). A hidden
+   * desk is a pill whatever its agent does meanwhile — live or empty — until
+   * the pill is clicked (Decided 5); an empty desk that nobody hid is neither
+   * drawn nor a pill. Archive wins: a put-away floor is not a storey, so it
+   * has no desk pills either. The page never asks for one (`onFloor` keeps
+   * archived channels out of `room`), and this says so too rather than
+   * leaving the rule to the caller.
+   */
+  function deskRows(c) {
+    if (c.archived) return { drawn: [], pills: [] };
+    const desks = c.desks ?? [];
+    return {
+      drawn: desks.filter((d) => !d.hidden && !deskEmpty(d)),
+      pills: desks.filter((d) => d.hidden),
+    };
+  }
+
+  /* ---------- a desk's place on the floor: the drawing ---------- */
+
+  /** A desk pill's width, by the same estimate the sign's pills use. */
+  const deskPillWidth = (d) => d.agent.length * 6 + 16 + (d.board?.unread ? String(d.board.unread).length * 6 + 14 : 0);
+
+  /**
+   * Lay the hidden desks out as a row of pills under the storey's last desk,
+   * wrapping when the row is wider than the room — a floor can hide more
+   * names than one line holds. Positions are room-local; the row's own top is
+   * added by the caller, since it depends on how many desk rows sit above.
+   */
+  function deskPillTray(pills) {
+    const items = [];
+    let x = PAD, line = 0;
+    for (const d of pills) {
+      const w = deskPillWidth(d);
+      if (x > PAD && x + w > ROOM_W - PAD) { x = PAD; line++; }
+      items.push({ d, x, y: line * (PILL_H + PILL_ROW_GAP), w });
+      x += w + 6;
+    }
+    return { items, lines: pills.length ? line + 1 : 0 };
+  }
+
+  /**
+   * One pill: the agent's name, its unread count if it has one, and the way
+   * back. The name is the id rather than the persona, the way the board's
+   * pills name a channel by its id: it is what the .mcp.json says, and the
+   * persona is one hover away. The unread count rides on it for the reason
+   * the floor's pills carry one — a pill that hid news would make the page
+   * lie by omission. Dashed, like those, so it reads as something put away
+   * and not as one more control.
+   */
+  function deskPill(it, channel) {
+    const { d, x, y, w } = it;
+    const unread = d.board?.unread ?? 0;
+    const g = el('g', {
+      class: 'deskPill',
+      transform: `translate(${x} ${y})`,
+      'data-act': 'show-desk',
+      'data-channel': channel,
+      'data-agent': d.agent,
+      role: 'button',
+      tabindex: '0',
+    });
+    g.appendChild(el('rect', { x: 0, y: 0, width: w, height: PILL_H, rx: PILL_H / 2, class: 'deskPillBox' }));
+    const name = el('text', { x: 8, y: PILL_H / 2 + 3.5, class: 'deskPillText' });
+    name.textContent = d.agent;
+    g.appendChild(name);
+    if (unread) {
+      const cw = String(unread).length * 6 + 8;
+      g.appendChild(el('rect', { x: w - cw - 4, y: 2, width: cw, height: PILL_H - 4, rx: (PILL_H - 4) / 2, class: 'deskPillCount' }));
+      const n = el('text', { x: w - 4 - cw / 2, y: PILL_H / 2 + 3, 'text-anchor': 'middle', class: 'deskPillCountText' });
+      n.textContent = String(unread);
+      g.appendChild(n);
+    }
+    const tip = el('title');
+    tip.textContent = `${d.persona} (${d.agent}) — hidden; click to restore the desk` +
+      `${unread ? ` · ${unread} unread` : ''}${deskEmpty(d) ? '' : ' · live'}`;
+    g.appendChild(tip);
+    return g;
+  }
+
   function room(c) {
     const collapsed = inBuilding();
-    const geo = roomGeometry(c.desks.length, collapsed);
+    const { drawn, pills } = deskRows(c);
+    const tray = deskPillTray(pills);
+    const geo = roomGeometry(drawn.length, collapsed, tray.lines);
     const svg = el('svg', {
       class: `room${collapsed ? ' collapsed' : ''}`,
       viewBox: `0 0 ${geo.w} ${geo.h}`,
@@ -1909,11 +2033,18 @@
     // envelopes with it. deskXY() coordinates are track-local either way; in the
     // full-floor view the track simply never moves.
     const track = el('g', { class: 'deskTrack' });
-    c.desks.forEach((d, i) => track.appendChild(desk(d, i, geo, c.channel)));
+    drawn.forEach((d, i) => track.appendChild(desk(d, i, geo, c.channel)));
     track.appendChild(mail);
+
+    // The desks put away by hand, as pills under the last desk. On the room
+    // and not on the track: a collapsed storey scrolls its desks, and the
+    // pills are the way back, which must not scroll out of reach.
+    const trayG = el('g', { class: 'deskPills', transform: `translate(0 ${geo.pillY})` });
+    for (const it of tray.items) trayG.appendChild(deskPill(it, c.channel));
 
     if (!collapsed) {
       svg.appendChild(track);
+      if (tray.items.length) svg.appendChild(trayG);
       return svg;
     }
 
@@ -1938,7 +2069,8 @@
     // does not move when the other goes.
     svg.appendChild(scrollArrow('left', geo));
     svg.appendChild(scrollArrow('right', geo));
-    applyScroll(svg, c.desks.length);
+    if (tray.items.length) svg.appendChild(trayG);
+    applyScroll(svg, drawn.length);
     return svg;
   }
 
@@ -1959,15 +2091,19 @@
     if (!c) return;
     // Ask the room how it is drawn rather than assuming — a collapsed storey is
     // one row, and laying an envelope out on a three-row grid it is not using
-    // sends it to a desk that is not there.
-    const geo = roomGeometry(c.desks.length, svg.classList.contains('collapsed'));
-    const idx = (a) => c.desks.findIndex((d) => d.agent === a);
+    // sends it to a desk that is not there. The same goes for which desks are
+    // drawn: positions are among the desks on the storey, not the payload's
+    // list, and a desk that is empty or put away is nowhere an envelope can
+    // land, so it is skipped.
+    const { drawn } = deskRows(c);
+    const geo = roomGeometry(drawn.length, svg.classList.contains('collapsed'));
+    const idx = (a) => drawn.findIndex((d) => d.agent === a);
     const from = idx(fromAgent);
     if (from < 0) return;
 
     const targets = toAgent
       ? [idx(toAgent)].filter((i) => i >= 0)
-      : c.desks.map((_, i) => i).filter((i) => i !== from);
+      : drawn.map((_, i) => i).filter((i) => i !== from);
     if (!targets.length) return;
 
     const layer = svg.querySelector('.mailLayer');
@@ -3389,6 +3525,16 @@
         openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
         return;
       }
+      // "Hide desk" (#20). The card closes now rather than on the next poll:
+      // it is about to describe a desk that is not drawn, and the click
+      // should read as having worked.
+      const hideBtn = e.target.closest?.('[data-act="hide-desk"]');
+      if (hideBtn && ui.on) {
+        ui.details = null;
+        renderDetails();
+        setDeskHidden(hideBtn.dataset.channel, hideBtn.dataset.agent, true);
+        return;
+      }
       // "Edit avatar", from the card that already names this desk. The card
       // closes first: it is positioned against the desk it came from and would
       // otherwise sit under the modal.
@@ -3415,7 +3561,7 @@
       const c = floor.channels.find((x) => x.channel === svg.dataset.channel);
       const ch = svg.dataset.channel;
       ui.scroll[ch] = (ui.scroll[ch] ?? 0) + (scroller.classList.contains('left') ? -1 : 1);
-      applyScroll(svg, c?.desks.length ?? 0);
+      applyScroll(svg, c ? deskRows(c).drawn.length : 0);
       return;
     }
 
@@ -3424,6 +3570,14 @@
     const put = e.target.closest?.('svg.room .roomPut');
     if (put && ui.on) {
       window.channelDialog?.(put.dataset.channel);
+      return;
+    }
+
+    // And a hidden desk's pill, which restores it (#20): inside the storey
+    // too, and the one way back for a desk put away by hand.
+    const deskPillEl = e.target.closest?.('svg.room .deskPill');
+    if (deskPillEl && ui.on) {
+      setDeskHidden(deskPillEl.dataset.channel, deskPillEl.dataset.agent, false, deskPillEl);
       return;
     }
 
@@ -3722,6 +3876,34 @@
 
 
   /** A short note on the send button, then back to normal. */
+  /**
+   * Put a desk away by hand, or bring it back (#20): the server's flag, by
+   * the board's admin route, then this view's next poll at once so the storey
+   * redraws before the interval would have asked. Two callers — the card's
+   * "Hide desk" and the pill — and no third: the auto-hide of an empty desk
+   * is a drawing decision (deskRows) and writes nothing anywhere.
+   *
+   * A refusal is said on the pill, where the click was; the card has already
+   * closed by the time a hide could fail, and the next poll draws the desk
+   * back, which is the truth of what happened.
+   */
+  async function setDeskHidden(channel, agent, hidden, at = null) {
+    try {
+      const r = await fetch(`./api/admin/desk/${hidden ? 'hide' : 'show'}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ channel, agent }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${r.status}`);
+      }
+    } catch (err) {
+      const t = at?.querySelector?.('title');
+      if (t) t.textContent = `could not ${hidden ? 'hide' : 'restore'} ${agent}: ${err.message ?? err}`;
+    }
+    tick();
+  }
+
   function flash(btn, text, ms = 2600) {
     if (!btn) return;
     const was = btn.dataset.label ?? btn.textContent;
@@ -4044,6 +4226,12 @@
     if (bellEl) {
       e.preventDefault();
       bellEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return;
+    }
+    const deskPillEl = document.activeElement?.closest?.('svg.room .deskPill');
+    if (deskPillEl) {
+      e.preventDefault();
+      deskPillEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       return;
     }
     const deskEl = document.activeElement?.closest?.('svg.room .desk');

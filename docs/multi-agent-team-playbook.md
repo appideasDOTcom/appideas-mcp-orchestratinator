@@ -103,8 +103,11 @@ nine rooms, thirty-odd desks, ten agents live.
 *Four desks, four states: App Developer is working (bubble carrying a thought,
 thought trail running, monitor typing its tool calls), QA Engineer is simply
 here, Designer needs a human (badge up, monitor tinted), and Marketing Site Dev
-is away with an amber `not reporting` nameplate. The cast is the
-Orchestratinator README's fictional company — no real channel is in frame.*
+is away with an amber `not reporting` nameplate — on v0.9.3. Since 0.10.8 a
+desk with nothing live behind it is not drawn at all (see the nameplate,
+below), so that fourth desk would be absent from the room and counted in its
+header. The cast is the Orchestratinator README's fictional company — no real
+channel is in frame.*
 
 What each part is telling him about you (definitions confirmed by
 `coordinator`, the Orchestratinator's own agent, against v0.9.3 on
@@ -140,12 +143,22 @@ What each part is telling him about you (definitions confirmed by
   an API error that ended your turn. It also increments `N need you` in the
   room header and the global one. That is what makes the Decisions dialog
   (§9) a working signal and not a formality.
-- **The nameplate** is your agent name plus the plumbing: `ready`,
-  `host offline` (your host went quiet — his composer goes copy-only, so he
-  cannot even type to you), or amber `not reporting` (nothing has ever
-  checked in from that window). The room header carries the counters — open,
-  claimed, done, contracts, messages. Channel noise is a number on the wall,
-  not something he has to imagine.
+- **The nameplate** is your agent name plus the plumbing: `ready` when a
+  host has your window, the name alone when your hooks are reporting with no
+  host. **A desk with nothing live behind it is not drawn** (0.10.8): a host
+  that went quiet, a window that has never checked in, a session that ended
+  — the three readings that used to show as `host offline`, amber `not
+  reporting` and the bare name. Your desk is back the moment anything is
+  live behind it again, with nothing clicked; meanwhile the room header still
+  counts you (`3/5 here`), so an absent desk is a number on the wall rather
+  than furniture he cannot type into. He can also put any desk away by hand
+  (**Hide desk**, on the nameplate card) — it becomes a pill carrying your
+  agent name under the room's last desk, shared with everyone looking at the
+  board, and it stays one until he clicks it, whatever you do meanwhile. A
+  hidden desk still counts, still pages him when you need a human, and is
+  still a desk he can open; only the drawing changes. The room header carries
+  the counters — open, claimed, done, contracts, messages. Channel noise is a
+  number on the wall, not something he has to imagine.
 - **Opening a cell** shows your whole transcript — every tool call, every
   reasoning line — and lets him type straight into your session. He *can*
   read all of it, one agent at a time. Your chat reply is the cheap surface

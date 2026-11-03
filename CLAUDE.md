@@ -388,7 +388,53 @@ called at four doors (a hook `SessionStart`, a host's `bound` and `session`
 events, the Take a desk route, an MCP connect) and nowhere else, with an
 audit row naming the door. The boundary is deliberate and tested: an agent
 already on the floor writing does not restore it, because archive is not a
-session kill and must not be undone by the work it does not kill.
+session kill and must not be undone by the work it does not kill. One
+consequence looks like a bug and is not: a server rebuild drops every MCP
+session, every live agent reconnects, and each reconnect is a start — so a
+deploy restores every archived floor that has a working agent on it. QA
+measured it on PR #29 and put it to costmo; ruled keep as built
+(2026-11-03): a reconnect is a session opening, and archive is a statement
+about floors nobody is working on. Do not special-case the reconnect.
+
+**An empty desk is not drawn, and a desk put away by hand is the same flag
+one level down.** Issue #20 (costmo, 2026-11-03, 0.10.8). The floor used
+to draw a desk for every agent the board knows, and the comment in
+`buildFloor` defending that — a room that lies about who works there, the
+reminder of who still needs the plugin — is still true of the *payload*
+and false of the *drawing*: measured on the live board, 15 of 35 drawn
+desks had nothing live behind them (9 `host offline`, 5 `not reporting`,
+1 the name alone). So the page leaves out any desk with `!live &&
+!hosted?.live` — exactly those three nameplate readings, and nothing else
+(`deskEmpty` in `src/ui/floor.js`, lifted into `test/floor.mjs`) — and it
+is back the moment either turns true, with nothing clicked and nothing
+written; an empty desk is not a pill. The deliberate hide is **Hide desk**
+under Open conversation on the nameplate card: `desk_flags` in `src/db.js`,
+the `desk/hide` and `desk/show` routes beside `channel/archive` in
+`src/web.js`, an audit row each, `hidden` on the desk in `/api/floor`, and
+a pill carrying the agent id (and its unread count) in a row under the
+storey's last desk, inside the storey's SVG, which restores. Four rulings
+ride on it, each tested: the payload keeps every desk and every count — a
+hidden desk still counts in `N/M here`, the totals and the operator queue,
+because hiding is not muting; nothing the agent does clears the flag —
+not coming back, not any of `wakeChannel`'s doors, which touch
+`channel_flags` only — so the pill restores it, and one other thing does,
+found by QA on PR #30: a move. The flag is on the seat, `unseat` takes
+the flag with the seat, and the handler logs a `desk.show` row on the
+floor the desk left. Cleared rather than carried because the only way to
+move a hidden desk is to take it from another floor's dialog, so the desk
+on the new floor is one the operator just asked to see; left behind, the
+row was found again by a move back, which arrived hidden with no row
+saying why; archive wins, so a hidden desk on a put-away floor
+is neither a desk nor a pill until the floor is back; and hide is not
+retire. Two things that look like gaps and are not: a browser-local hide
+was the minimize removed in #21 and is not to return under this name, and
+the board view is untouched because the issue is the floor's drawing — the
+board's row for a hidden agent is still the truth about the agent. The
+card's own clicks are handled in a branch of their own that swallows
+anything it does not name (`#desk-pop` in the click handler), so a new
+button on the card goes there and not in the generic `[data-act]` chain —
+the first cut put it in the chain and the button did nothing, which the
+page check caught and the suite could not.
 
 **A user record is not all the operator, and the split is the relay's job.**
 Claude Code glues machine-injected context — IDE state, slash-command records —
@@ -501,6 +547,19 @@ QA's review of PR #25 — and green on every rerun. Since 2026-11-02 `drawn()`
 in `test/window.mjs` waits up to 8 s for the pane to show anything instead,
 the same settle-on-an-observable rule the host lives by. A red of that shape
 now means the pane really drew nothing; read it rather than rerunning.
+
+**Stopping a full run halfway takes more than killing `npm test`.** The
+chain is `npm run smoke && npm run test:admin && …`, and on 2026-11-02
+killing `npm test` and the `node test/host.mjs` under it left the chain's
+next link, `node test/window.mjs`, starting on its own with a tmux session
+and a fixture of its own. What a half-run leaves, all named by the suite's
+pid: `node test/<suite>.mjs`, its `node src/server.js`, a tmux session
+`orch-host-test-<pid>` or `orch-test-<pid>`, and `data/host-<pid>*`,
+`data/window-fixture-<pid>` or `data/floor-<pid>*`. Kill the `node test/`
+processes and their servers, `tmux kill-session` each test session, remove
+the fixtures, then check `tmux ls` and `data/` again before the next run.
+`lsof` and `netstat` are not on this machine; match on the command line
+with `ps -Ao pid,command`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is

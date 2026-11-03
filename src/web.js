@@ -382,6 +382,24 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     });
   }
 
+  // The same pair one level down (issue #20): a desk put away by hand, and
+  // brought back. Like archive it is a statement about the operator's
+  // attention and not about the agent's work — the desk stays in the payload,
+  // the counts and the operator queue, and nothing is closed. Unlike archive
+  // nothing but the operator's own Restore clears it (Decided 5): the agent
+  // coming back to life does not, and neither does anything starting on the
+  // floor — see wakeChannel, which touches channel_flags only.
+  for (const [path, hidden, action] of [['hide', true, 'desk.hide'], ['show', false, 'desk.show']]) {
+    router.post(`/desk/${path}`, (req, res) => {
+      const channel = str(req.body?.channel);
+      const agent = str(req.body?.agent);
+      if (!channel || !agent) return bad(res, 'channel and agent are required');
+      store.setDeskHidden(channel, agent, hidden, 'operator');
+      store.logAdmin(channel, action, { target: agent, detail: hidden ? 'hidden from the floor' : 'restored to the floor' });
+      res.json({ ok: true, channel, agent, hidden });
+    });
+  }
+
   /**
    * Permanent, unrecoverable deletion of everything on a channel. Guarded by
    * having to name the channel exactly: this is the one action on the board with

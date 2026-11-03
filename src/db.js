@@ -77,6 +77,21 @@ export function openDb(path) {
       archived_by TEXT
     );
 
+    -- The same flag one level down (issue #20): a desk the operator has put
+    -- away by hand. Shared and audited like archive, and for the same reason
+    -- — a browser-local hide was the "minimize" removed in #21, and every
+    -- floor reported as "still archived" turned out to be one of those. A
+    -- hidden desk stays in every payload and every count; only the drawing
+    -- changes. Cleared by the operator's own Restore and nothing else: not by
+    -- the agent coming back, and not by wakeChannel's doors (Decided 5).
+    CREATE TABLE IF NOT EXISTS desk_flags (
+      channel     TEXT NOT NULL,
+      agent       TEXT NOT NULL,
+      hidden_at   TEXT,
+      hidden_by   TEXT,
+      PRIMARY KEY (channel, agent)
+    );
+
     -- Operator actions taken from the dashboard. These exist so the board can
     -- explain itself: an unread count dropping from 139 to 0 with nothing in the
     -- log is indistinguishable from a bug. Unioned into the activity feed.
@@ -569,6 +584,7 @@ export const BACKUP_TABLES = [
   'tasks',
   'agents',
   'channel_flags',
+  'desk_flags',
   'admin_events',
   'personas',
   'agent_profile',
@@ -695,6 +711,13 @@ export function makeStore(db) {
     ),
     listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
     channelFlag: db.prepare(`SELECT archived_at FROM channel_flags WHERE channel = ?`),
+    setDeskHidden: db.prepare(
+      `INSERT INTO desk_flags (channel, agent, hidden_at, hidden_by)
+       VALUES (@channel, @agent, @at, @by)
+       ON CONFLICT(channel, agent) DO UPDATE SET hidden_at = @at, hidden_by = @by`
+    ),
+    listDeskFlags: db.prepare(`SELECT channel, agent, hidden_at, hidden_by FROM desk_flags WHERE hidden_at IS NOT NULL`),
+    deskHidden: db.prepare(`SELECT 1 FROM desk_flags WHERE channel = ? AND agent = ? AND hidden_at IS NOT NULL`),
 
     // Saved prompts. Ordered here rather than in the picker: two surfaces list
     // them (the compose menu and the manager) and an order decided twice is an
@@ -1213,12 +1236,18 @@ export function makeStore(db) {
   const unseat = db.transaction((channel, agent) => {
     db.prepare('DELETE FROM personas WHERE channel = ? AND agent = ?').run(channel, agent);
     db.prepare('DELETE FROM hosted_desks WHERE channel = ? AND agent = ?').run(channel, agent);
+    // A desk put away by hand (issue #20) is a flag on this seat, and the
+    // seat ends here — so does the flag. Left behind, it was found again by
+    // the next desk of the same name on this floor (a move back), which
+    // arrived hidden with no row saying why (QA, PR #30). The caller logs
+    // the restore; this keeps the row from outliving the seat.
+    db.prepare('DELETE FROM desk_flags WHERE channel = ? AND agent = ?').run(channel, agent);
   });
 
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1413,6 +1442,9 @@ export function makeStore(db) {
     reassignTask: (channel, id, assignee) => q.reassignTask.run({ channel, id, assignee }).changes,
     setChannelArchived: (channel, archived, by) =>
       q.setChannelArchived.run({ channel, at: archived ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null, by }).changes,
+    /** A desk put away by hand, or brought back — see desk_flags for the rules. */
+    setDeskHidden: (channel, agent, hidden, by) =>
+      q.setDeskHidden.run({ channel, agent, at: hidden ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null, by }).changes,
     /**
      * An archived floor unarchives itself when something STARTS on it (issue
      * #21, Decided 6 — costmo, 2026-11-02): a desk taken there from the Take a
@@ -1468,6 +1500,9 @@ export function makeStore(db) {
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),
     listChannelFlags: () => q.listChannelFlags.all(),
+    /** Only the desks currently hidden — a cleared flag is a row with nothing to say. */
+    listDeskFlags: () => q.listDeskFlags.all(),
+    isDeskHidden: (channel, agent) => !!q.deskHidden.get(channel, agent),
 
     // --- saved prompts --------------------------------------------------------
     // The duplicate-title check is a read the caller makes before writing, and

@@ -94,7 +94,8 @@ just means a client opens a session per turn, which is normal and handled.
   serialize naturally — no cross-process locking. Data lives in a Docker
   volume.
 - **Schema:** `messages`, `contracts` (+ `contract_history`), `tasks`, `agents`
-  (presence), `channel_flags` (archive), `admin_events` (operator audit) — all
+  (presence), `channel_flags` (archive), `desk_flags` (a desk hidden by
+  hand), `admin_events` (operator audit) — all
   keyed by `channel` — plus the floor's tables: `agent_sessions` and `turns`
   (what each window reported), `agent_profile` and `personas` (who each agent
   is and where it sits), `hosts`, `hosted_desks`, `host_outbox` and
