@@ -717,6 +717,7 @@ export function makeStore(db) {
        ON CONFLICT(channel, agent) DO UPDATE SET hidden_at = @at, hidden_by = @by`
     ),
     listDeskFlags: db.prepare(`SELECT channel, agent, hidden_at, hidden_by FROM desk_flags WHERE hidden_at IS NOT NULL`),
+    deskHidden: db.prepare(`SELECT 1 FROM desk_flags WHERE channel = ? AND agent = ? AND hidden_at IS NOT NULL`),
 
     // Saved prompts. Ordered here rather than in the picker: two surfaces list
     // them (the compose menu and the manager) and an order decided twice is an
@@ -1235,6 +1236,12 @@ export function makeStore(db) {
   const unseat = db.transaction((channel, agent) => {
     db.prepare('DELETE FROM personas WHERE channel = ? AND agent = ?').run(channel, agent);
     db.prepare('DELETE FROM hosted_desks WHERE channel = ? AND agent = ?').run(channel, agent);
+    // A desk put away by hand (issue #20) is a flag on this seat, and the
+    // seat ends here — so does the flag. Left behind, it was found again by
+    // the next desk of the same name on this floor (a move back), which
+    // arrived hidden with no row saying why (QA, PR #30). The caller logs
+    // the restore; this keeps the row from outliving the seat.
+    db.prepare('DELETE FROM desk_flags WHERE channel = ? AND agent = ?').run(channel, agent);
   });
 
   const purgeChannel = db.transaction((channel, by) => {
@@ -1495,6 +1502,7 @@ export function makeStore(db) {
     listChannelFlags: () => q.listChannelFlags.all(),
     /** Only the desks currently hidden — a cleared flag is a row with nothing to say. */
     listDeskFlags: () => q.listDeskFlags.all(),
+    isDeskHidden: (channel, agent) => !!q.deskHidden.get(channel, agent),
 
     // --- saved prompts --------------------------------------------------------
     // The duplicate-title check is a read the caller makes before writing, and

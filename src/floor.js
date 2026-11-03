@@ -1433,7 +1433,18 @@ function applyHostEvent(store, live, hostId, ev) {
     // and is that new desk now.
     const from = ev.from && typeof ev.from === 'object' ? { channel: str(ev.from.channel), agent: str(ev.from.agent) } : null;
     if (from?.channel && from?.agent && (from.channel !== channel || from.agent !== agent)) {
+      // A desk the operator put away (issue #20) is a flag on the seat it
+      // leaves, and `unseat` takes the flag with the seat. Cleared, not
+      // carried: the only way to move a hidden desk is to take it from
+      // another floor's dialog, so the desk on the new floor is one the
+      // operator just asked to see, and a pill there would hide it again.
+      // This is the one door besides the pill that clears a flag, and it is
+      // the operator's own hand — the agent's doors still leave it hidden.
+      // Logged where the hide was (Decided 4: the drawing does not change
+      // without a row), before the seat is gone.
+      const wasHidden = store.isDeskHidden(from.channel, from.agent);
       store.unseat(from.channel, from.agent);
+      if (wasHidden) store.logAdmin(from.channel, 'desk.show', { target: from.agent, detail: `restored by its move to ${channel}/${agent}` });
       store.retireAgent(from.channel, from.agent);
       live.pending.delete(deskKey(from.channel, from.agent));
       live.publish(deskKey(from.channel, from.agent), { type: 'state', state: 'offline' });

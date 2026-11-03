@@ -203,8 +203,11 @@ None of them should have to be discovered by accident:
 - **Hide desk.** Puts that desk away by hand: it becomes a pill carrying the
   agent's name in a row under the storey's last desk, and clicking the pill
   brings it back. It is the server's flag, like archive — shared by every
-  browser, with an audit row — and nothing but the pill clears it: not the
-  agent coming back to life, not a session starting on the floor. A hidden
+  browser, with an audit row — and nothing the agent does clears it: not
+  coming back to life, not a session starting on the floor. The pill
+  clears it, and so does taking the desk onto another floor: the flag
+  belongs to the seat it leaves, the desk arrives on the new floor drawn,
+  and the floor it left gets a restore row saying so. A hidden
   desk still counts in the storey's `N/M here`, still pages you from the
   operator queue when it needs you, and carries its unread count on the
   pill; hiding is a statement about your attention, not about the agent's

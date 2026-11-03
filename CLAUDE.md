@@ -415,9 +415,16 @@ a pill carrying the agent id (and its unread count) in a row under the
 storey's last desk, inside the storey's SVG, which restores. Four rulings
 ride on it, each tested: the payload keeps every desk and every count — a
 hidden desk still counts in `N/M here`, the totals and the operator queue,
-because hiding is not muting; nothing but the pill clears the flag — not
-the agent coming back, not any of `wakeChannel`'s doors, which touch
-`channel_flags` only; archive wins, so a hidden desk on a put-away floor
+because hiding is not muting; nothing the agent does clears the flag —
+not coming back, not any of `wakeChannel`'s doors, which touch
+`channel_flags` only — so the pill restores it, and one other thing does,
+found by QA on PR #30: a move. The flag is on the seat, `unseat` takes
+the flag with the seat, and the handler logs a `desk.show` row on the
+floor the desk left. Cleared rather than carried because the only way to
+move a hidden desk is to take it from another floor's dialog, so the desk
+on the new floor is one the operator just asked to see; left behind, the
+row was found again by a move back, which arrived hidden with no row
+saying why; archive wins, so a hidden desk on a put-away floor
 is neither a desk nor a pill until the floor is back; and hide is not
 retire. Two things that look like gaps and are not: a browser-local hide
 was the minimize removed in #21 and is not to return under this name, and
