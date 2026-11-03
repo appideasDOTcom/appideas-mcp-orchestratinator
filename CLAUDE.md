@@ -122,6 +122,20 @@ event loop, so a wait well past it is the host, not only the board.
 backoff, the re-register after a failure and the events requeue are as
 they were, and the suite says so beside the new assertions.
 
+**The board says when it could not answer** (issue #5 step 3, costmo's
+"Hold + slow request"; `src/server.js`, `test/board-log.mjs`). Staged with
+six 12 s holds of the board's event loop, the host logged six timeouts and
+the board wrote nothing. It now writes `event loop held <N>ms`, a 250 ms tick
+more than a second late, and `slow <METHOD> <path> <N>ms <status>` for a
+request over 2 s. Method and path only. The two event streams are left out,
+and so is the work poll up to its own wait. Read them together: the work
+poll is nearly always mid-wait, so it reads slow on *any* hold, and only
+another route reading slow names a culprit. Requests that arrive during a
+hold read fast. Those lines and Docker Desktop's logs are gone within hours
+(a deploy recreates the container; `monitor.log` keeps about 25 minutes),
+so **capture-a-burst** saves them while a burst is still happening. The
+two lines are the server half and reach the live board only with a rebuild.
+
 **The server is the other half, and it goes stale independently.** The
 **deploy-both-halves** skill is the procedure — its `status.sh` reads both
 halves against the tree, with symbol counts in what is served — and a deploy

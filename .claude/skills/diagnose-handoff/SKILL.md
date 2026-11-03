@@ -372,6 +372,16 @@ timer for nine seconds. The board being slow cannot make the wait longer
 than the limit. Read the wait against the limit before going to the board's
 log.
 
+**The board's side, and the minutes around it.** A board with issue #5's
+step 3 writes `event loop held <N>ms` and `slow <METHOD> <path> <N>ms
+<status>` (`docker logs -t appideas-orchestratinator | grep -E 'event loop
+held|slow '`). Those lines, and Docker Desktop's logs for the same minutes,
+are gone within hours, so do not go looking for them after the fact. The
+**capture-a-burst** skill saves them while the burst is under way into
+`~/.orchestratinator/captures/<first failure>/`, along with probes that tell
+the board, the forwarder, the VM and the host apart. Its SKILL.md has the
+table for reading one.
+
 ## What not to do
 
 - Do not theorise about environment drift, versions, or infrastructure until

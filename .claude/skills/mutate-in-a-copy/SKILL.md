@@ -66,7 +66,8 @@ and why.
 tool's base run, and the base read 19 red. Those were the predicted 11,
 plus 8 in sections nobody touched (the thought, the subagent's words, the
 folder dialog). Read the channel for a QA announcement before believing
-those, and rerun once the ports are quiet.
+those, and rerun once the ports are quiet. Rerun at 20:53Z with nothing
+else on them, it read the predicted 11 and 268 ✓.
 
 Keep the JSON file outside the repo. A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
