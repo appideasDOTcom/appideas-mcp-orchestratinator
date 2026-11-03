@@ -198,8 +198,19 @@ None of them should have to be discovered by accident:
 
 - **The nameplate card.** Click any desk's nameplate for who this desk is —
   the repo, branch and model behind it, and who holds the conversation — plus
-  an **Open conversation** button, **Hide desk** under it, and the door to
-  editing the avatar.
+  an **Open conversation** button, **Move to another floor** and **Hide
+  desk** under it, and the door to editing the avatar.
+- **Move to another floor.** Seats the agent on another floor — one on the
+  board, or a new one by name — without finding its folder first: the desk
+  already knows its folder and its host, so you pick only the floor, and the
+  page goes there with you. It is the same move Take a desk makes when you
+  choose a folder that is bound elsewhere, with the same refusals in the
+  same words (not while a turn is running; not without its host). If the
+  floor holds the agent's window, that window closes and **a new
+  conversation** opens on the new floor — the one it was on stays in its
+  folder, in the session picker and History. With no window open, it opens
+  on its **last conversation**. An agent's name and look go with it. The
+  button is greyed, with the reason under it, on a desk no live host runs.
 - **Hide desk.** Puts that desk away by hand: it becomes a pill carrying the
   agent's name in a row under the storey's last desk, and clicking the pill
   brings it back. It is the server's flag, like archive — shared by every

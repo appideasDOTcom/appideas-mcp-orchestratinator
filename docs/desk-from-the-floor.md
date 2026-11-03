@@ -125,6 +125,19 @@ End to end:
    with the same words `handback` uses — one app holds a conversation, and the
    editor's process would keep the old headers until it restarts. If the desk
    is mid-turn, refuse rather than kill the turn.
+
+   *As built, and since changed (issues #24 and #18, 0.10.10).* A move is
+   Take a desk naming a folder already bound elsewhere, and from 0.10.10 also
+   **Move to another floor** on the desk's nameplate card, whose route
+   (`POST /api/floor/desk/move`, as named here) takes the desk and the floor
+   and reads the folder and host off the board's own record of the desk. A
+   floor-held window is closed and the new floor gets a **new
+   conversation**, not a `--resume`: reopening on the same one was refused
+   every time on the live board, because the window just killed was still in
+   the roster when the reopen asked who held its conversation (task 253 has
+   the measurement). A move with no floor window opens on the desk's last
+   conversation, as before. The editor case is not refused — see "Two design
+   consequences" below.
 5. **Remove a desk** is the same route backwards, and it should be offered:
    a binding that can only be made from the floor and only unmade in a file is
    the old problem with a new front.
@@ -203,7 +216,8 @@ the fallback is the same file: `.mcp.json` is still honoured everywhere.
 
 **A running window keeps its old headers.** MCP config is read at start, so a
 move is a close and a resume, which was measured to keep the conversation but
-does end whatever was on screen. Refuse while the desk is working; do it in
+does end whatever was on screen. (Since 0.10.10 the reopen is on a new
+conversation — issue #24; the close is the same.) Refuse while the desk is working; do it in
 the gap, the same rule `handback` follows.
 
 **"Just a name" is not quite the whole form.** A desk is a checkout, so the
@@ -283,7 +297,9 @@ The second case, rebinding under an already-open chat, split the two clients:
 | **CLI** window (`live-1` → `live-2`), both calls verified as real tool calls in the transcript and on the board | **kept `live-1`** | the CLI holds the connection it made at start; a close and `--resume` is what takes the new binding (measured above) |
 
 Two design consequences. A move on a **floor-held** desk is close + `--resume`,
-as planned. A move on an **editor-held** desk needs no refusal: the host
+as planned — *since 0.10.10, close + a new conversation (issue #24): the
+`--resume` raced the closing window out of the roster and lost, 10 of 10 on
+the live board.* A move on an **editor-held** desk needs no refusal: the host
 rebinds the folder, the editor's chat follows on its next tool call, and the
 new desk adopts that live session — the dialog says so rather than refusing.
 The session picker still refuses an editor-held desk, because a resume means

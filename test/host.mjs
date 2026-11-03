@@ -233,7 +233,27 @@ function fixture() {
     // does; without one it registers under the fixture's constant, which is
     // the id a "fresh" conversation flips the desk to.
     `const resumeAt = process.argv.indexOf('--resume');`,
-    `const MY_ID = resumeAt >= 0 && process.argv[resumeAt + 1] ? process.argv[resumeAt + 1] : SESSION_ID;`,
+    // A fresh-id *file* (read at start, like the flags below) gives a window
+    // started with nothing to resume an id of its own instead of the
+    // constant, so a case can tell "a new conversation" from "the one it was
+    // on" by the id the desk follows — the move does (#24 Decided 2).
+    `const FRESH_ID_FLAG = ${JSON.stringify(`${FIX}/fresh-id.flag`)};`,
+    `let freshId = ''; try { freshId = fs.readFileSync(FRESH_ID_FLAG, 'utf8').trim(); } catch {}`,
+    `const MY_ID = resumeAt >= 0 && process.argv[resumeAt + 1] ? process.argv[resumeAt + 1] : (freshId || SESSION_ID);`,
+    // A window killed under a linger file stays alive — and so in the roster,
+    // which drops only dead pids — for that many ms after its hangup. Claude
+    // Code does not leave the roster the instant tmux kills its pane: the
+    // floor's move asked who held the conversation in that gap and was
+    // refused by the closing window itself, 10 of 10 times on the live board
+    // (issue #24). This stand-in otherwise exits on the hangup, which is why
+    // the suite never met it. Read at the hangup, not at start, so a case can
+    // arm it for a window that is already open.
+    `const LINGER_FLAG = ${JSON.stringify(`${FIX}/linger.flag`)};`,
+    `process.on('SIGHUP', () => {`,
+    `  let ms = 0; try { ms = Number(fs.readFileSync(LINGER_FLAG, 'utf8').trim()) || 0; } catch {}`,
+    `  if (ms > 0) { process.stdin.on('error', () => {}); setTimeout(() => process.exit(0), ms); return; }`,
+    `  process.removeAllListeners('SIGHUP'); process.kill(process.pid, 'SIGHUP');`,
+    `});`,
     `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: MY_ID, name: 'stand-in' }]));`,
     `const READY_DELAY_FLAG = ${JSON.stringify(`${FIX}/ready-delay.flag`)};`,
     `let readyDelay = 0;`,
@@ -854,26 +874,120 @@ try {
 
   // Move: free's folder onto another floor, under its own name. The window
   // is held by the floor and is on SESSION_ID (the fresh conversation from
-  // above), so the move closes it and reopens it there.
+  // above). A running window keeps the headers it started with, so the move
+  // closes it — and opens one on a NEW conversation there (#24 Decided 2,
+  // costmo 2026-11-03: "A new session should be started instead"). It used
+  // to reopen on the conversation it was on, and asking who held that
+  // conversation found the window it had just closed, still in the roster:
+  // refused as outside_tmux, the desk on the new floor with no window, every
+  // same-conversation move on the live board from 2026-10-19 to 11-02. The
+  // linger file is that window, staying in the roster after its pane is
+  // killed; this case went red on it at 9d0e652.
   const sidBeforeMove = deskOf(await floor(), 'free')?.hosted?.session_id;
   eq(sidBeforeMove, SESSION_ID, 'the desk to move is on a known conversation, in a floor-held window');
+  const SESSION_MOVED = 'eeeeeeee-2222-3333-4444-555555555555';
+  writeFileSync(`${FIX}/linger.flag`, '4000');
+  writeFileSync(`${FIX}/fresh-id.flag`, SESSION_MOVED);
   const argvAtMove = argvLog().length;
+  const panesBeforeMove = paneOf();
   const movedOut = await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' });
   eq([movedOut.status, (await movedOut.json()).mode], [200, 'move'], 'taking it onto another floor under its own name is a move');
   eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'renamed' })).status, 400, 'and under another name is refused — the folder names its agent');
   const onNewFloor = (f) => f.channels.find((c) => c.channel === CH2)?.desks.find((d) => d.agent === 'free');
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.live ? true : null), 30000), 'the desk appears on the new floor, hosted');
   assert(/free: bound .*repo-a in local scope/.test(host.log) && /moving it from host-test\/free/.test(host.log), 'the host rebound the folder and said where from');
-  assert(await until(async () => (onNewFloor(await floor())?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'on the same conversation');
-  assert(await until(() => (argvLog().slice(argvAtMove).includes(`--resume ${SESSION_ID}`) ? true : null), 25000),
-    'its window reopened with --resume, because a running window keeps the headers it started with');
+  // A window the floor holds that was not there before the move: for a
+  // moment after the rebind the new floor's desk reads the closing window as
+  // held, and a first cut of this case passed on that at 9d0e652.
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'floor' && paneOf().some((p) => !panesBeforeMove.includes(p)) ? true : null), 30000),
+    'one move seats it there with a window the floor holds — no second Take a desk, though the closing window was still in the roster (#24 Decided 1)');
+  // One line per window started (the stand-in logs nothing else), so none at all reads as [].
+  const launches = (from) => argvLog().slice(from).split('\n').slice(0, -1);
+  const moveArgv = launches(argvAtMove);
+  assert(moveArgv.length > 0 && moveArgv.every((l) => !l.includes('--resume')), `on a new conversation: its window opened with nothing to resume (#24 Decided 2) — ${JSON.stringify(moveArgv)}`);
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.session_id === SESSION_MOVED ? true : null), 30000),
+    'and the desk follows the conversation the new window announces');
+  const turnsOnNew = await json(`/api/floor/turns?channel=${CH2}&agent=free`).then((r) => r.json());
+  eq((turnsOnNew.rows ?? []).filter((r) => r.role === 'error').map((r) => r.text), [], 'its chat on the new floor does not open on a refusal (#24 Decided 2)');
+  assert(!/outside tmux/.test(host.log.slice(host.log.lastIndexOf('moving it from host-test/free'))), 'and the host refused nothing on the way');
+  await json('/api/floor/sessions', { channel: CH2, agent: 'free' });
+  const leftBehind = await until(async () => { const g = await json(`/api/floor/sessions?channel=${CH2}&agent=free`).then((r) => r.json()); return g.at && (g.rows ?? []).some((r) => r.id === SESSION_ID) ? g : null; }, 15000);
+  assert(!!leftBehind, 'the conversation it was on stays in its folder — the session picker on the new floor lists it (#24 Decided 2)');
   eq(deskOf(await floor(), 'free') ?? null, null, 'and its seat has left the old floor');
   eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH2, 'the binding on disk names the new floor');
+  rmSync(`${FIX}/fresh-id.flag`, { force: true });
 
-  // And back, so the sections below find it where they expect it.
+  // And back, so the sections below find it where they expect it — a new
+  // conversation again, which this stand-in announces as SESSION_ID.
+  const argvAtBack = argvLog().length;
   const back = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free' });
   eq((await back.json()).mode, 'move', 'moving it back is a move too');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000), 'and it is home, on its conversation');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' && deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000),
+    'and it is home, with a window, on the conversation that window announces');
+  const backArgv = launches(argvAtBack);
+  assert(backArgv.length > 0 && backArgv.every((l) => !l.includes('--resume')), `opened with nothing to resume, like the move out — ${JSON.stringify(backArgv)}`);
+  rmSync(`${FIX}/linger.flag`, { force: true });
+  await sleep(WATCH_SETTLE_MS);
+
+  // A move whose window is already closed opens on the agent's last
+  // conversation, as it always has (#24 Decided 3, costmo 2026-11-03: "Last
+  // conversation") — there is no closing window for the open to meet. The
+  // window is killed by hand, the one thing the floor will not do, and the
+  // roster the stand-in cannot unwrite is cleared, as the picker section does.
+  const closeByHand = async (on = (f) => deskOf(f, 'free')) => {
+    killTmux();
+    writeFileSync(`${FIX}/roster.json`, '[]');
+    return until(async () => (on(await floor())?.hosted?.held === null ? true : null), 8000);
+  };
+  assert(await closeByHand(), 'with its window closed by hand, the desk is held by nobody');
+  const argvAtClosed = argvLog().length;
+  eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose window is closed is a move');
+  assert(await until(async () => { const d = onNewFloor(await floor()); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000),
+    'it opens on the new floor with a window, on its last conversation (#24 Decided 3)');
+  const closedArgv = launches(argvAtClosed);
+  assert(closedArgv.length === 1 && closedArgv[0].includes(`--resume ${SESSION_ID}`), `resumed by its id, not started fresh — ${JSON.stringify(closedArgv)}`);
+
+  // A real second holder is still refused (#24 Don't break). The move above
+  // never asks who holds the conversation a closing window was on; this
+  // path does, and an editor holding it is a copy nobody is watching, so
+  // the open says so rather than starting a second one. The editor is a
+  // process outside tmux claiming the conversation — what holderOf reads.
+  assert(await closeByHand(onNewFloor), 'its window closed by hand again');
+  const editor = spawn('sleep', ['120'], { stdio: 'ignore' });
+  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: editor.pid, cwd: REPO, kind: 'interactive', startedAt: 2, sessionId: SESSION_ID, name: 'an editor' }]));
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'editor' ? true : null), 8000), 'and the conversation is open in an editor');
+  const argvAtEditor = argvLog().length;
+  const editorMove = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free' });
+  eq([editorMove.status, (await editorMove.json()).mode], [200, 'move'], 'a desk an editor holds can be moved — the editor\'s chat follows the binding on its own');
+  const refusedHere = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && r.text?.includes(`outside tmux (pid ${editor.pid})`)) ?? null, 20000);
+  assert(!!refusedHere, `but no second copy is opened beside it — refused, naming the editor's pid (#24 Don't break) — ${refusedHere?.text?.slice(0, 120)}`);
+  eq(launches(argvAtEditor), [], 'and no window was started');
+  editor.kill();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000), 'the editor gone, nothing holds it');
+
+  // A window that is working is not moved (#24 Don't break): the host reads
+  // the pane before it touches the binding, and quotes it. The board cannot
+  // see the stand-in's status line, so the take is accepted and the host is
+  // the one that refuses.
+  writeFileSync(`${FIX}/busy.flag`, '1');
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'a window is opened on it again, and this one is working');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 30000), 'held by the floor');
+  await sleep(WATCH_SETTLE_MS);
+  const busyPanesBefore = paneOf();
+  const logAtBusy = host.log.length;
+  eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).status, 200, 'the board takes the move — it cannot see the pane');
+  assert(await until(() => (/not moved — the window is still working: .*esc to interrupt/.test(host.log.slice(logAtBusy)) ? true : null), 15000),
+    'the host refuses it, quoting the pane\'s status line');
+  eq(paneOf(), busyPanesBefore, 'and the working window is left exactly as it was');
+  eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH, 'and the binding is not touched');
+  rmSync(`${FIX}/busy.flag`, { force: true });
+
+  // Home, on its conversation, with a window that is not working, for the
+  // sections below.
+  assert(await closeByHand(), 'the working window is closed by hand');
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'and a quiet one opened');
+  assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000), 'home, on its conversation');
   await sleep(WATCH_SETTLE_MS);
 
   /* ── reading a conversation whole (issue #8, Remaining 4) ──────────────────

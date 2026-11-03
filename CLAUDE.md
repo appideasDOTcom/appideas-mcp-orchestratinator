@@ -436,6 +436,70 @@ installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
 
+## Moving a desk to another floor
+
+Issues #24 and #18, 0.10.10 (2026-11-03, task 253; measured on 2.1.300).
+A move is a seat change two doors lead to — Take a desk naming a folder
+bound elsewhere, and **Move to another floor** on the desk's nameplate card
+— and both end in one function, `seatDesk` in [`src/floor.js`](src/floor.js),
+so they refuse the same things in the same words. Four rules, each the
+opposite of what ran before.
+
+- **A move that closes the floor's window starts a new conversation**
+  (costmo, #24 Decided 2). It used to reopen on the one the window had been
+  on, and that was refused every time on the live board — 10 of 10,
+  2026-10-19 → 11-02: `open()` asks `holderOf` who holds the conversation it
+  resumes, and the answer was the window just killed, still in the roster,
+  alive and in no pane, so an editor (`outside_tmux`). On a fresh window the
+  session file goes 4–14 ms after `kill-window` returns and the pid ~0.5 s
+  later, so it is a race; why live windows lose it every time was not found
+  (not swap, not background shells, not another claimant). Two fixes that
+  look available and are not: waiting for the old pid to leave the roster
+  and then resuming (a real second holder must still be refused, and telling
+  the floor's own closing window from one by timing is the brittle part —
+  and it was ruled), and resuming without asking (two copies of one
+  conversation, the thing `holderOf` exists to stop). The old conversation
+  stays in its folder; the picker and History reach it.
+- **A move whose window is already closed opens on the last conversation**
+  (costmo, #24 Decided 3: "Last conversation") — the open path in `bind`,
+  unchanged. There is no closing window for it to meet, and a real second
+  holder (an editor) is still refused there, naming its pid.
+- **A move un-retires the agent's row on the floor it lands on** (#24
+  Decided 1, ruled by QA). Every move retires the row it leaves, a retired
+  agent has no desk, and only that agent's next MCP connect un-retired it —
+  so a move *back* was in no floor's payload until its window connected,
+  and for good when the window never came: 5 of the 10 refused live moves,
+  the reported one among them. The `bound` handler un-retires beside the
+  retire.
+- **The card's route takes no path** (`POST /api/floor/desk/move`
+  `{channel, agent, to}`). The folder and host are the board's own record of
+  the desk (`hosted_desks`), so Take a desk's check — "never a path the board
+  has not seen the host name" — is not widened for anything: this route never
+  reaches it, and every request that carries a path still goes through it.
+  The `bind` work no longer carries `resume`: it said `true` on every move
+  and nothing read it.
+
+Two page facts behind the card. **"All floors" with two or more floors is
+the building, and a storey there is navigation** — a click on a desk rides
+to its floor, so no card is ever open in it; a card opens on one floor, or
+on a board with a single floor, where nothing is collapsed and no floor is
+chosen. `floorOpenDesk(…, { follow: true })` goes to the target from both,
+fetching `/api/floor` first, because a floor named a moment ago is not in
+the payload yet and `render()` drops a filter naming a floor it does not
+have. And **a desk with a hosted row is exactly as live as its host**
+(`live_` in `buildFloor`), so the card's disabled Move — Take a desk's
+`no_host` words under it — is only ever seen on a desk no host runs; a desk
+whose host is gone is not drawn at all (#20).
+
+How it was measured, for next time: `roster-linger.mjs` in
+**measure-a-real-window** times a real window out of the roster after
+`kill-window`; holding a window with `SIGSTOP` across a move reproduces the
+live refusal word for word but not every time (something other than the
+stopped process removes its session file, 6–14 ms after the kill — not
+found); the host suite's stand-in has `linger.flag`, which is the
+deterministic version. `seed-move.mjs` + `check-card-move.mjs` in
+**verify-ui-change** drive the card on both views.
+
 ## History is read off the hosts, not the board
 
 **`turns` is a live tail, not an archive**: the newest 400 rows a desk

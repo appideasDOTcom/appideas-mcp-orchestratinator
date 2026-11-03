@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -779,13 +779,93 @@ try {
   rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: 'other-floor', agent: 'alpha' });
   eq([rr.status, (await rr.json()).mode], [200, 'move'], 'a bound folder taken onto another floor, under its own name, is a move');
   const moveWork = await takeWorkFull();
-  eq(moveWork.map((w) => `${w.kind}:${w.payload.from?.channel}/${w.payload.from?.agent}:${w.payload.resume}:${w.payload.import}`), [`bind:${CH}/alpha:true:true`],
-    'which the host is told where from, and to resume the conversation');
+  eq(moveWork.map((w) => `${w.kind}:${w.payload.from?.channel}/${w.payload.from?.agent}:${w.payload.import}`), [`bind:${CH}/alpha:true`],
+    'which the host is told where from');
+  // It used to say `resume: true` on every move, and nothing read it. Which
+  // conversation a move opens on is the host's to decide from what it finds
+  // — a new one when it closes the window, the last one when there is no
+  // window (#24 Decided 2–3) — and a flag here saying otherwise is a lie.
+  eq(moveWork.map((w) => Object.hasOwn(w.payload, 'resume')), [false], 'and nothing on the work tells the host to resume the conversation (#24 Decided 2)');
+  // An agent with a board row on the floor it leaves — the row a move
+  // retires — and none yet on the floor it goes to.
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`INSERT OR IGNORE INTO agents (channel, agent) VALUES (?, ?)`).run(CH, 'alpha');
+    db.close();
+  }
   eq((await hostEvents([{ type: 'bound', channel: 'other-floor', agent: 'alpha', cwd: '/repo/alpha-older', scope: 'local', session_id: 'sess-alpha', from: { channel: CH, agent: 'alpha' } }])).applied, 1,
     'the host answers bound, saying where from');
   const afterMove = await fetch(`${HOST}/api/floor`).then((x) => x.json());
-  eq(deskOf(afterMove, 'alpha', 'other-floor')?.hosted?.session_id, 'sess-alpha', 'the desk is on the new floor, on its conversation');
+  eq(deskOf(afterMove, 'alpha', 'other-floor')?.hosted?.session_id, 'sess-alpha', 'the desk is on the new floor, on the conversation the host names');
   eq(deskOf(afterMove, 'alpha', CH) ?? null, null, 'and its old seat is gone from the old one');
+  // And back: the floor it left retired its row there, and a retired agent
+  // has no desk. The move un-retires it — the operator seated it there — so
+  // it is drawn on arrival, not when (if ever) its new window connects: a
+  // refused reopen on the live board left a moved-back desk on no floor at
+  // all (task 253, 5 of 10 refused moves).
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH, { readonly: true });
+    eq(db.prepare(`SELECT retired_at IS NOT NULL AS r FROM agents WHERE channel = ? AND agent = ?`).get(CH, 'alpha')?.r, 1, 'the move retired its row on the floor it left');
+    db.close();
+  }
+  eq((await hostEvents([{ type: 'bound', channel: CH, agent: 'alpha', cwd: '/repo/alpha-older', scope: 'local', session_id: null, from: { channel: 'other-floor', agent: 'alpha' } }])).applied, 1,
+    'and moved back, its new window not yet connected');
+  const movedBack = await fetch(`${HOST}/api/floor`).then((x) => x.json());
+  assert(!!deskOf(movedBack, 'alpha', CH), 'a desk moved back to a floor it left by a move is seated there on arrival — its row is the agent\'s again (#24 Decided 1)');
+  eq(deskOf(movedBack, 'alpha', CH)?.hosted?.live, true, 'hosted, and so drawn');
+  eq((await hostEvents([{ type: 'bound', channel: 'other-floor', agent: 'alpha', cwd: '/repo/alpha-older', scope: 'local', session_id: 'sess-alpha', from: { channel: CH, agent: 'alpha' } }])).applied, 1,
+    'and out again, for the cases below');
+
+  /* Move to another floor from the desk's nameplate card (#18): the desk
+   * already names its folder and its host, so the request names only the
+   * desk and where to — and everything after "which folder" is the code
+   * Take a desk runs, so the refusals and the words are the same. */
+  console.log('\nmove to another floor, from the nameplate card');
+  const cardMove = (body) => fetch(`${HOST}/api/floor/desk/move`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  await takeWork();
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha' });
+  eq(rr.status, 400, 'it needs the desk and where to');
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'other-floor' });
+  eq([rr.status, (await rr.json()).code], [400, 'same_floor'], 'and not the floor it is on — that is not a move');
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'has space' });
+  eq([rr.status, (await rr.json()).code], [400, 'bad_name'], 'a new floor is a name, by Take a desk\'s rule');
+  rr = await cardMove({ channel: CH, agent: 'nobody-hosts-me', to: 'other-floor' });
+  const cardNoHost = await rr.json();
+  eq([rr.status, cardNoHost.code, cardNoHost.error], [409, 'no_host', noHostWords(null)], 'a desk no host runs cannot be moved, in Take a desk\'s no_host words (#18 Decided 2)');
+  rr = await take({ host_id: 'nobody', path: '/repo/alpha-older', channel: CH, agent: 'alpha' });
+  eq((await rr.json()).error, noHostWords('nobody'), 'which are the words Take a desk says it in, from the same sentence');
+  await hostEvents([{ type: 'turn', channel: 'other-floor', agent: 'alpha', session_id: 'sess-alpha', role: 'tool', text: 'Bash: make' }]);
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'card-floor' });
+  const cardWorking = await rr.json();
+  eq([rr.status, cardWorking.code, cardWorking.error], [409, 'working', switchable({ agent: 'alpha', state: 'idle', host_seen: new Date().toISOString() }, { role: 'tool' }).error],
+    'a desk mid-turn is not moved — Take a desk\'s refusal, word for word');
+  eq(await takeWork(), [], 'and none of those queued anything');
+  await hostEvents([{ type: 'turn', channel: 'other-floor', agent: 'alpha', session_id: 'sess-alpha', role: 'assistant', text: 'done' }]);
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'card-floor', host_id: 'h-elsewhere', path: '/etc' });
+  eq([rr.status, (await rr.json()).mode], [200, 'move'], 'a hosted desk moves from its card, to a new floor by name (#18 Decided 2)');
+  const cardWork = await takeWorkFull();
+  eq(cardWork.map((w) => ({ kind: w.kind, path: w.payload.path, channel: w.payload.channel, agent: w.payload.agent, from: w.payload.from, import: w.payload.import, open: w.payload.open, resume: Object.hasOwn(w.payload, 'resume') })),
+    [{ kind: 'bind', path: '/repo/alpha-older', channel: 'card-floor', agent: 'alpha', from: { channel: 'other-floor', agent: 'alpha' }, import: true, open: true, resume: false }],
+    'its host is handed Take a desk\'s move: the folder the desk sits at, the agent\'s own name, where from — and not the host or path the request named, which this route does not read (#18: the folder check is not widened, it is not reached)');
+  const cardRows = (await fetch(`${HOST}/api/activity?limit=50&channel=card-floor`).then((r) => r.json())).rows.filter((r) => r.kind === 'admin.desk.take');
+  eq(cardRows.map((r) => r.detail), ['move /repo/alpha-older — from its nameplate card'], 'logged as Take a desk logs a move, saying which door');
+  rr = await take({ host_id: 'h-open', path: '/etc', channel: CH, agent: 'alpha' });
+  eq((await rr.json()).code, 'unknown_folder', 'and Take a desk still refuses a folder its host has not shown');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`INSERT INTO channel_flags (channel, archived_at) VALUES ('card-floor', datetime('now')) ON CONFLICT(channel) DO UPDATE SET archived_at = datetime('now')`).run();
+    db.close();
+  }
+  eq((await floor()).channels.find((c) => c.channel === 'card-floor')?.archived, true, 'the floor it was sent to is put away meanwhile');
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'card-floor' });
+  eq(rr.status, 200, 'and a desk moved there from its card again');
+  eq((await floor()).channels.find((c) => c.channel === 'card-floor')?.archived, false, 'brings the put-away floor back, as Take a desk does (#24 Don\'t break)');
+  await takeWork();
 
   rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', persona: 'Fresh Face' });
   eq(rr.status, 200, 'an unbound folder can be taken');
@@ -915,10 +995,23 @@ try {
     const b = src.indexOf('/* ---------- take a desk: the dialog ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the take-a-desk section was not found in src/ui/app.js between its two section comments');
     const tmp = `./data/desk-dialog-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody };\n`);
     try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
   })();
-  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir } = lifted;
+  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody } = lifted;
+
+  // The card's move dialog (#18), lifted with Take a desk's because it is
+  // Take a desk's move from the other side and shares its sentence.
+  eq(moveFloors(['zeta', 'here', 'alpha', 'zeta'], 'here'), ['alpha', 'zeta'],
+    'the card offers the floors Take a desk offers, less the one the desk is on — that is not a move');
+  eq(moveFloors(null, 'here'), [], 'and none when the board has none yet; the dialog\'s new floor is still there');
+  eq(moveBody({ channel: 'here', agent: 'alpha', to: 'zeta', newChannel: 'ignored' }), { channel: 'here', agent: 'alpha', to: 'zeta' },
+    'what it sends is the desk and where to — no host, no path');
+  eq(moveBody({ channel: 'here', agent: 'alpha', to: '__new__', newChannel: '  brand-new ' }).to, 'brand-new', 'a new floor by the name typed for it, as in Take a desk');
+  const note = moveNoteText('alpha', 'zeta', 'here');
+  assert(/closes and a new conversation opens there/.test(note) && /with no window open, it opens on its last conversation/.test(note),
+    `both doors say what a move does to the conversation — new when it closes the window, the last one when there is none (#24 Decided 2–3) — ${note}`);
+  assert(/stays in its folder, in the session picker and History/.test(note), 'and where the one it was on went');
   eq(savedName(named, 'alpha'), 'Alpha Prime', 'the dialog reads an agent\'s saved name from that map');
   eq(savedName(named, '  alpha '), 'Alpha Prime', 'whatever space was typed around the id');
   eq(savedName(named, 'gamma'), null, 'and reads none for an agent with nothing saved — drawn as "none"');
@@ -2331,10 +2424,16 @@ try {
       const b = src.indexOf('  /* ---------- a desk\'s place on the floor: the drawing ---------- */');
       if (a < 0 || b < 0 || b < a) throw new Error('the desk-place section was not found in src/ui/floor.js between its two section comments');
       const tmp = `./data/desk-place-${process.pid}.mjs`;
-      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows };\n`);
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords };\n`);
       try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     })();
-    const { deskEmpty, deskRows } = lifted;
+    const { deskEmpty, deskRows, moveBlockedWords } = lifted;
+    // The card's Move to another floor (#18), drawn disabled with Take a
+    // desk's no_host words while no live host runs the desk — the page's
+    // copy of the sentence held to the server's.
+    eq(moveBlockedWords({ hosted: { host: 'Test Mac', live: true } }), null, 'a desk its host is running can be moved from its card');
+    eq(moveBlockedWords({ hosted: { host: 'Test Mac', live: false } }), noHostWords('Test Mac'), 'one whose host is not here says so, in the words the route refuses it with');
+    eq(moveBlockedWords({ live: true, hosted: null }), noHostWords(null), 'and one no host runs at all — an editor\'s or a hook\'s desk — the same, without a host to name');
     const CHW = 'wakes';
     const admin = (path, body) =>
       fetch(`${HOST}/api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.status);

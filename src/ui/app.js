@@ -1523,6 +1523,15 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'desk-leave':
       act(() => floorPost('desk/leave', { channel: d.channel, agent: d.agent }));
       break;
+    case 'desk-move': {
+      // The card's move (#18). Accepted, the operator is taken to the floor
+      // the agent is going to — from all floors as well as from one
+      // (Decided 3) — and lands on its desk to watch it come up there.
+      const body = moveBody(ui.moveForm ?? {});
+      if (!body.to) break;
+      act(() => floorPost('desk/move', body).then(() => window.floorOpenDesk?.(body.to, body.agent, { follow: true })));
+      break;
+    }
     // --- the session picker. See sessionDialog below. The floor is told the
     // moment the reopen is queued so its link can spin until the desk's
     // conversation actually changes — the receipt for the click is there,
@@ -1786,6 +1795,37 @@ function rememberDir(storage, hostId, dir) {
 function takeBody(fm) {
   const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true };
+}
+
+/**
+ * What a move does, in one sentence, for both doors onto it — Take a desk's
+ * move and the nameplate card's Move to another floor (#18 Decided 2: the
+ * same essential UX). Plain text; the dialog escapes it.
+ *
+ * A new conversation when the move closes the window the floor holds (#24
+ * Decided 2), the last one when there is no window to close (Decided 3,
+ * costmo's ruling on task 254). The old conversation is not lost, and the
+ * sentence says where it is.
+ */
+function moveNoteText(agent, to, from) {
+  return `Moves it: rebinds the folder as ${agent} on ${to}. If the floor holds its window, that window closes and a new conversation opens there — the one it was on stays in its folder, in the session picker and History; with no window open, it opens on its last conversation. Its seat leaves ${from}. Refused while a turn is running.`;
+}
+
+/**
+ * The floors the card's move offers: the floors Take a desk offers (on the
+ * board, never a put-away one — the caller passes `pickable(...)`), less the
+ * one the desk is on, which is not a move. A new floor by name is the
+ * dialog's last option, as in Take a desk.
+ */
+function moveFloors(names, current) {
+  return [...new Set(names ?? [])].filter((c) => c && c !== current).sort();
+}
+
+/** What the card's move sends: the desk, and where to. No host, no path —
+ *  the board has both on the desk already (POST /api/floor/desk/move). */
+function moveBody(fm) {
+  const to = fm.to === '__new__' ? (fm.newChannel ?? '').trim() : (fm.to ?? '');
+  return { channel: fm.channel, agent: fm.agent, to };
 }
 
 /* ---------- take a desk: the dialog ---------- */
@@ -2145,7 +2185,7 @@ function renderDeskDialog() {
     } else if (mode === 'import') {
       notes.push(`Brings it onto the floor as it is. The binding moves into Claude Code's local scope${bound.scope === 'project' ? ' and the orchestratinator entry comes out of its .mcp.json (other servers stay)' : ''}. A window already open there is not touched.`);
     } else {
-      notes.push(`Moves it: rebinds the folder as <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(channelNow)}</span>, and if the floor holds its window, closes it and reopens it on the same conversation. Its seat leaves <span class="mono">${esc(bound.channel)}</span>. Refused while a turn is running.`);
+      notes.push(esc(moveNoteText(bound.agent, channelNow, bound.channel)));
     }
   }
   const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
@@ -2230,6 +2270,75 @@ function leaveDeskDialog(channel, agent, persona, scope) {
     </div>
   `);
 }
+
+/**
+ * Move to another floor, from a desk's nameplate card (#18): Take a desk's
+ * move, approached from the agent. The desk already names its folder, its
+ * host and its agent, so the only question is the floor — chosen the way
+ * Take a desk chooses it, a floor on the board or a new one by name — and
+ * the board refuses what Take a desk refuses, in the same words, because
+ * both doors end in the same seatDesk. Opened by src/ui/floor.js with what
+ * the card was showing.
+ */
+function moveDeskDialog(channel, agent, { persona = null, host = null, folder = null } = {}) {
+  ui.dlgCtx = { kind: 'move', channel, agent };
+  ui.moveForm = { channel, agent, persona, host, folder, to: null, newChannel: '' };
+  renderMoveDialog();
+}
+
+function renderMoveDialog() {
+  const fm = ui.moveForm;
+  if (!fm) return;
+  const floors = moveFloors(pickable(ui.state?.channels), fm.channel);
+  if (fm.to === null || (fm.to !== '__new__' && !floors.includes(fm.to))) fm.to = floors[0] ?? '__new__';
+  const { to } = moveBody(fm);
+  const where = [fm.folder ? `folder ${fm.folder}` : null, fm.host ? `on ${fm.host}` : null].filter(Boolean).join(' · ');
+  openDialog(`
+    <div class="dlg-head"><h3>Move ${esc(fm.persona ?? fm.agent)} to ${esc(to || '…')}</h3></div>
+    <p class="dlg-sub">from <span class="mono">${esc(fm.channel)}</span>${where ? ` · ${esc(where)}` : ''}</p>
+    <label class="field">
+      <span>Floor</span>
+      <select id="move-to" class="input">
+        ${floors.map((c) => `<option value="${esc(c)}"${c === fm.to ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        <option value="__new__"${fm.to === '__new__' ? ' selected' : ''}>new floor…</option>
+      </select>
+    </label>
+    ${fm.to === '__new__' ? `
+    <label class="field">
+      <span>New floor's name</span>
+      <input id="move-new-channel" class="input" type="text" maxlength="64" value="${esc(fm.newChannel)}" placeholder="my-project" autocomplete="off" spellcheck="false">
+    </label>` : ''}
+    <div class="field desk-name">
+      <span>Agent — set by the folder</span>
+      <output class="desk-name-read mono">${esc(fm.agent)}</output>
+    </div>
+    <p class="dlg-note">${esc(moveNoteText(fm.agent, to || '…', fm.channel))}</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="desk-move"${to ? '' : ' disabled'}>Move to ${esc(to || '…')}</button>
+    </div>
+  `);
+}
+
+// The card's move: a floor picked redraws (the title and the button name
+// it); a new floor's name typed only re-reads the form, so the caret stays.
+el.dlgBody.addEventListener('change', (e) => {
+  if (ui.dlgCtx?.kind !== 'move' || !e.target.matches('#move-to')) return;
+  ui.moveForm.to = e.target.value;
+  renderMoveDialog();
+  if (ui.moveForm.to === '__new__') el.dlgBody.querySelector('#move-new-channel')?.focus();
+});
+el.dlgBody.addEventListener('input', (e) => {
+  if (ui.dlgCtx?.kind !== 'move' || !e.target.matches('#move-new-channel')) return;
+  ui.moveForm.newChannel = e.target.value;
+  const { to } = moveBody(ui.moveForm);
+  const go = el.dlgBody.querySelector('[data-do="desk-move"]');
+  if (go) { go.disabled = !to; go.textContent = `Move to ${to || '…'}`; }
+  const head = el.dlgBody.querySelector('.dlg-head h3');
+  if (head) head.textContent = `Move ${ui.moveForm.persona ?? ui.moveForm.agent} to ${to || '…'}`;
+  const note = el.dlgBody.querySelector('.dlg-note');
+  if (note) note.textContent = moveNoteText(ui.moveForm.agent, to || '…', ui.moveForm.channel);
+});
 
 // Opening a folder — a row, or a crumb back up the path.
 el.dlgBody.addEventListener('click', (e) => {

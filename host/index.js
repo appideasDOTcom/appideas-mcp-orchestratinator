@@ -836,16 +836,42 @@ class Host {
     if (!desk) {
       return fail(`bound ${dir}, but the rescan did not find the desk — is ${this.cfg.url} the board its entry names?`);
     }
-    if (oldLast) await desk.follow(oldLast);
-    await this.register();
-    await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: oldLast, from: p.from ?? null }, true);
-    if (p.open === false) return undefined;
     // A moved desk whose window the floor holds: that window is still on the
-    // old channel, so it is closed and reopened on the same conversation —
-    // the reopen primitive, with nothing replayed. An editor's chat is left
-    // alone; it follows the new binding on its next tool call.
-    if (p.from && (await W.paneFor(desk.cwd))) {
-      await this.reopen(desk, { sessionId: oldLast, known: true });
+    // old channel, so it is closed — and the new floor gets a NEW
+    // conversation (#24 Decided 2, costmo 2026-11-03: "A new session should
+    // be started instead"). The one it was on stays in its folder, where the
+    // session picker and History reach it.
+    //
+    // It used to reopen on the same conversation, and that was refused every
+    // time on the live board (10 of 10, 2026-10-19 → 11-02): open() asks who
+    // holds the conversation it is resuming, and the answer was the window
+    // just killed — still in the roster, alive and in no pane, so an editor
+    // (outside_tmux). A fresh window leaves the roster 4–14 ms after
+    // kill-window, which is a race the live windows lost; the floor's own
+    // window would have to be told from a real second holder by timing, and
+    // a real second holder must still be refused. A new conversation has
+    // no holder to ask about. Measured in task 253.
+    //
+    // So nothing here pins the old id on the new floor, and the reopen's
+    // intent is set before anything else can tick: between this rescan and
+    // the reopen the old window is still running in this folder, and
+    // newest-wins in watch() would adopt it. An editor's chat is left alone;
+    // it follows the new binding on its next tool call. A desk with no floor
+    // window takes the open path below, as it always has, onto its last
+    // conversation (#24 Decided 3, costmo 2026-11-03: "Last conversation") —
+    // there is no closing window there for the reopen to meet.
+    const fresh = !!p.from && p.open !== false && !!(await W.paneFor(desk.cwd));
+    if (fresh) {
+      const since = Date.now();
+      desk.intent = { sessionId: null, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
+    } else if (oldLast) {
+      await desk.follow(oldLast);
+    }
+    await this.register();
+    await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: fresh ? null : oldLast, from: p.from ?? null }, true);
+    if (p.open === false) return undefined;
+    if (fresh) {
+      await this.reopen(desk, { sessionId: null });
       return undefined;
     }
     // Same tail as `open`: a window, its startup questions surfaced on the
@@ -892,8 +918,14 @@ class Host {
 
   /**
    * Put this desk's window on another of its folder's conversations — or on
-   * a new one. The session picker's primitive, and what a move will be built
-   * on: close, then open with `--resume`.
+   * a new one. The session picker's primitive, and a move's (always on a new
+   * one — see bind): close, then open with `--resume` or without.
+   *
+   * Reopening the conversation its own window holds races that window out of
+   * the roster (issue #24): open() can find it still there, alive and in no
+   * pane, and refuse it as an editor. Nothing does that — the picker disables
+   * the current row and a move asks for a new conversation — so it is not
+   * guarded against here; a real second holder must still be refused.
    *
    * Close first, because open() returns early on an existing pane and
    * ignores `resume`; a window that is mid-turn is not closed, and the refusal

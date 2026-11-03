@@ -452,6 +452,21 @@ export const NAME_WHY = 'An agent or channel name is letters, digits, dots, dash
  * not pass editorOk. Working is always a refusal: a rebind mid-turn changes
  * who the agent is halfway through a task.
  */
+/**
+ * A seat change with nobody to make it: Take a desk's `no_host`, and the
+ * nameplate card's Move to another floor, whose button says it before
+ * anything is clicked (#18, Not established — the developer's call: the
+ * button is drawn, disabled, with these words under it, because a missing
+ * button reads as "this desk cannot be moved, ever" and a live host may be
+ * a minute away). The page has its own copy (`moveBlockedWords` in
+ * src/ui/floor.js); test/floor.mjs holds the two to one sentence.
+ */
+export function noHostWords(hostName) {
+  return hostName
+    ? `The host ${hostName} is not on this board right now, so there is nobody to bind it.`
+    : 'No host on this board is running this folder, so there is nobody to bind it.';
+}
+
 export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false } = {}) {
   if (!h) return { error: 'No host on this board is running that repo, so there is no binding here to change.', code: 'not_hosted' };
   if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
@@ -1580,6 +1595,15 @@ function applyHostEvent(store, live, hostId, ev) {
       store.retireAgent(from.channel, from.agent);
       live.pending.delete(deskKey(from.channel, from.agent));
       live.publish(deskKey(from.channel, from.agent), { type: 'state', state: 'offline' });
+      // And the row on the floor it lands on is the agent's again. Every move
+      // retires the row it leaves, so a desk moved back to a floor it was on
+      // before found its row retired there, and a retired agent has no desk:
+      // it was in no floor's payload until its new window's MCP connect
+      // un-retired it — a second on a good move, and for good when that
+      // window never came, which is what the live board's refused moves
+      // showed (5 of 10 were moves back, the reported one among them; task
+      // 253). The move is the operator seating the agent here (#24 Decided 1).
+      store.unretireAgent(channel, agent);
     }
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
@@ -3032,8 +3056,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
    * terminal (docs/desk-from-the-floor.md). Three modes from one route,
    * decided by what the folder is bound as already: `take` (unbound),
    * `import` (bound as these same names in its .mcp.json — the host moves
-   * the entry into local scope), and `move` (bound as some other desk),
-   * which is not available yet and says so.
+   * the entry into local scope), and `move` (bound as some other desk).
    *
    * What is checked here is what the board knows: that the folder is one the
    * host offered (the board never sends a path the host did not name), that
@@ -3049,10 +3072,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     if (!hostId || !path || !channel || !agent) {
       return res.status(400).json({ error: 'host_id, path, channel and agent are required' });
     }
-    const known = new Set([...store.listPersonas().map((p) => p.channel), ...store.listAllAgents().map((a) => a.channel)]);
-    if (!NAME_RE.test(agent) || (!known.has(channel) && !NAME_RE.test(channel))) {
-      return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
-    }
+    if (!NAME_RE.test(agent) || !floorNameOk(channel)) return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
     let persona = null;
     if (req.body?.persona !== undefined && str(req.body.persona)) {
       persona = str(req.body.persona);
@@ -3062,7 +3082,7 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const hostRow = store.listHosts().find((h) => h.host_id === hostId);
     const offered = live.folders.get(hostId);
     if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
-      return res.status(409).json({ error: `The host ${hostRow?.name ?? hostId} is not on this board right now, so there is nobody to bind it.`, code: 'no_host' });
+      return res.status(409).json({ error: noHostWords(hostRow?.name ?? hostId), code: 'no_host' });
     }
     // The folder as the host last described it: the one the picker is
     // standing in, one it listed beside it, or — for a caller with the older
@@ -3076,6 +3096,58 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     if (!folder) {
       return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
     }
+    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false });
+  });
+
+  /**
+   * Move to another floor, from the desk's nameplate card (#18): the move
+   * Take a desk makes, approached from the agent rather than the folder. No
+   * folder step, and no path in the request at all — the folder is the one
+   * this board has the desk sitting at, as its own host reported it
+   * (`hosted_desks.cwd`), and the host is that host.
+   *
+   * That is how it gets past Take a desk's folder check without weakening
+   * it (#18, src/floor.js "Never a path the board has not seen the host
+   * name"). The check is about a path somebody sent; this route takes none,
+   * and every request that does carry one still goes through the check
+   * unchanged. Everything after "which folder" is seatDesk, shared, so the
+   * two doors refuse the same things in the same words (Decided 2).
+   */
+  router.post('/api/floor/desk/move', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    const to = str(req.body?.to);
+    if (!channel || !agent || !to) return res.status(400).json({ error: 'channel, agent and to are required' });
+    if (!floorNameOk(to)) return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
+    if (to === channel) return res.status(400).json({ error: `${agent} is on ${channel} already. Pick another floor.`, code: 'same_floor' });
+    const nowMs = Date.now();
+    const h = store.hostedDesk(channel, agent);
+    const hostRow = h ? store.listHosts().find((x) => x.host_id === h.host_id) ?? null : null;
+    // Movable exactly when the card draws the button live: a hosted row whose
+    // host is here and still running it (the payload's `hosted.live`).
+    if (!h || h.state === 'offline' || !hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: noHostWords(hostRow?.name ?? h?.host_name ?? h?.host_id ?? null), code: 'no_host' });
+    }
+    const folder = { path: h.cwd, bound: { channel, agent, scope: h.scope ?? null }, other_board: null };
+    return seatDesk(res, { hostRow, folder, path: h.cwd, channel: to, agent, nowMs, open: true, via: 'from its nameplate card' });
+  });
+
+  /**
+   * A floor name a seat may go to: one the board knows, or a new one that is
+   * a name. Shared by both doors onto a seat.
+   */
+  function floorNameOk(channel) {
+    const known = new Set([...store.listPersonas().map((p) => p.channel), ...store.listAllAgents().map((a) => a.channel)]);
+    return known.has(channel) || NAME_RE.test(channel);
+  }
+
+  /**
+   * The seat change, once the folder is known — both doors onto it, Take a
+   * desk and the nameplate card's Move to another floor. Refusals, the
+   * `desk.take` row, the archived-floor wake and the host's bind work are
+   * all here, so the card cannot drift from Take a desk (#18 Decided 2).
+   */
+  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null }) {
     if (folder.other_board) {
       return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, not this board. Change it there.`, code: 'other_board' });
     }
@@ -3088,10 +3160,11 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const mode = !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
     let from = null;
     if (mode === 'move') {
-      // The old desk's window is closed and reopened by the host, so the
-      // same rule as leaving applies: not mid-turn, and an editor's chat is
-      // fine — it follows the rebind on its own. A binding no host has
-      // registered yet has nothing to close.
+      // The old desk's window is closed by the host and a new conversation
+      // opened on the new floor (#24 Decided 2), so the same rule as leaving
+      // applies: not mid-turn, and an editor's chat is fine — it follows the
+      // rebind on its own. A binding no host has registered yet has nothing
+      // to close.
       const old = store.hostedDesk(folder.bound.channel, folder.bound.agent);
       const last = store.lastTurns().find((t) => t.channel === folder.bound.channel && t.agent === folder.bound.agent) ?? null;
       const check = switchable(old, last, nowMs, { editorOk: true });
@@ -3109,17 +3182,21 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     // while the host works, and the name it was given is on it when it comes.
     store.ensurePersona(channel, agent);
     if (persona) store.setProfile(channel, agent, { persona });
-    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}` });
+    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}${via ? ` — ${via}` : ''}` });
     // Naming an archived floor in Take a desk brings it back (Decided 6): the
     // operator typed its name, which is the plainest "I want this floor" there is.
     store.wakeChannel(channel, `a desk was taken on it: ${agent}`, 'operator');
-    store.enqueueHostWork(hostId, channel, agent, 'bind', {
-      path, channel, agent, import: mode !== 'take', from, resume: mode === 'move',
-      open: req.body?.open !== false, queued_at: new Date(nowMs).toISOString(),
+    // No `resume`: a move opens a new conversation on the new floor (#24
+    // Decided 2), and an import keeps the one it has — the host decides both
+    // from `from` and the window it finds, never from a flag here. The flag
+    // this used to send said "resume" on every move and nothing read it.
+    store.enqueueHostWork(hostRow.host_id, channel, agent, 'bind', {
+      path, channel, agent, import: mode !== 'take', from,
+      open, queued_at: new Date(nowMs).toISOString(),
     });
-    live.wake(hostId);
-    res.json({ ok: true, mode, host: hostRow.name, channel, agent });
-  });
+    live.wake(hostRow.host_id);
+    return res.json({ ok: true, mode, host: hostRow.name, channel, agent });
+  }
 
   /** Leave a desk: the reverse of taking one. See the host's unbind. */
   router.post('/api/floor/desk/leave', auth.adminGuard, (req, res) => {

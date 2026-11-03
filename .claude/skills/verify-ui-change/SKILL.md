@@ -261,6 +261,38 @@ you on all floors. The assertions themselves are in `test/floor.mjs`
 ("archive is the one way to put a floor away, on both views"); this shows
 the page.
 
+### seed-move.mjs and check-card-move.mjs — the card's move, on both views
+
+Issue #18 (2026-11-03): **Move to another floor** on a desk's nameplate
+card. [`seed-move.mjs`](seed-move.mjs) is the fixture *and* the host: one
+floor (`alpha`) with a desk the host runs (`ann`), one live by its hooks
+with no host (`ed`, the disabled button) and one whose host is two days
+gone (`cy`, not drawn at all — a hosted desk is as live as its host); it
+long-polls the host's work and answers a move's `bind` as `host/index.js`
+does (`bound` with `from`, then a new session), printing every work item as
+a JSON line. [`check-card-move.mjs`](check-card-move.mjs) drives the card
+from all floors and from one floor, the refusal in the dialog, and where
+the page lands, and reads the binds back out of that log:
+
+```bash
+PORT=8906 DB_PATH=/tmp/move.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/seed-move.mjs http://localhost:8906 /tmp/move.db > /tmp/work.jsonl &
+node --experimental-websocket .claude/skills/verify-ui-change/check-card-move.mjs http://localhost:8906 /tmp/shots /tmp/work.jsonl
+# … 23 ✓ · PASS
+```
+
+Two things it taught, both about reading the page rather than the feature:
+
+- **"All floors" is two views.** With two or more floors it is the
+  building, where a click on a desk rides to its floor and no card opens;
+  with one floor nothing is collapsed and no floor is chosen. The seed
+  starts with one floor so the all-floors move is a thing a person can do.
+- **Where the page stands is `localStorage['orch.floor']`, not the lit
+  chip.** The picker draws no chips with one floor on the board, and a move
+  that empties the floor it left can leave exactly one — the first cut
+  waited for a chip that would never be drawn, and timed out on a move
+  that had landed.
+
 ### seed-hide.mjs and check-hide.mjs — empty desks and Hide desk
 
 Issue #20 (2026-11-03): a desk with nothing live behind it is not drawn, a

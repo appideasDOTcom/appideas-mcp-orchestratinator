@@ -377,6 +377,35 @@ What to know before trusting a reading from it:
   on the *live* board if the probe was ever taken there — the persona rows
   stay otherwise.
 
+## How long a closed window stays in the roster
+
+Issue #24 (task 253, 2026-11-03, 2.1.300): a move closed a desk's window
+and reopened the same conversation, and the reopen found the window it had
+just killed still holding it. [`roster-linger.mjs`](roster-linger.mjs)
+times that gap on a throwaway window — every change to the session file and
+the pid after `kill-window`, 5 ms apart, and any other session file naming
+the conversation or the folder:
+
+```bash
+bash -c 'for v in $(env | grep -oE "^CLAUDE[^=]*"); do unset "$v"; done
+  node .claude/skills/measure-a-real-window/roster-linger.mjs "$1" 3' _ "$SP/linger"
+# {"run":1,"shape":"fresh","pid":74106,"killReturnedMs":27,"changes":"27:FP 33:-P 577:--"}
+```
+
+On 2.1.300 the file went 4–14 ms after `kill-window` returned and the pid
+0.5–0.8 s after, on fresh, resumed (a 4.5 MB transcript too) and busy
+windows alike; nothing else claimed the conversation. Against that, the
+live board lost the race 10 times in 10 — so the gap on a long-lived desk
+is longer than any probe showed, and why was not found.
+
+**Holding a window with `kill -STOP` reproduces it, but not every time.**
+Stopped across a move, a real window was refused with its own pid, word for
+word the live line — and on the next try the move went through, because
+something other than the stopped process removed its session file 6–14 ms
+after the kill (no child process, no daemon found). For a red you can rely
+on, the host suite's stand-in has `linger.flag`. `kill -CONT` it afterwards,
+or the window's pid sits stopped with its pane gone.
+
 ## A background session
 
 Claude Code's daemon can hold a conversation with no terminal at all, and
