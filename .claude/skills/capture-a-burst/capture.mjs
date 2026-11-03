@@ -28,7 +28,11 @@
  *     VM), and /health from inside the container (no forwarder);
  *   - CLOSES CLOSE_QUIET_MS after the last failure: a last snapshot, the
  *     machine's sleep/wake lines from `pmset -g log` for the window, and a
- *     summary of readings — counts and the slow moments, no conclusions.
+ *     summary of readings — counts and the slow moments, no conclusions;
+ *   - then POSTS that summary, once, as a message to everyone on this repo's
+ *     channel (costmo's ruling, task 261), queued on disk and retried until
+ *     the board takes it — a board down at the close loses nothing, and the
+ *     close never waits on it.
  *
  * Each capture is a directory under CAPTURE_DIR named for its first failure.
  * Its own log goes to stdout (capture.log under launchd); state.json beside
@@ -42,7 +46,7 @@ import { execFile } from 'node:child_process';
 import { request } from 'node:http';
 import { homedir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const env = process.env;
 const H = homedir();
@@ -65,6 +69,17 @@ const C = {
   probeEvery: num('CAPTURE_PROBE_MS', 2000),
   snapshotEvery: num('CAPTURE_SNAPSHOT_MS', 60_000),
   probeTimeout: num('CAPTURE_PROBE_TIMEOUT_MS', 15_000),
+  // The alert a closed capture posts (task 261). Where to: this repo's own
+  // binding by default — its channel, its board, the board's one key — read
+  // when the alert is sent, the way the host reads a desk's binding every
+  // heartbeat. The three CAPTURE_POST_* overrides are for the staged rig.
+  post: env.CAPTURE_POST !== '0',
+  postFrom: env.CAPTURE_POST_FROM ?? join(dirname(fileURLToPath(import.meta.url)), '../../..'),
+  postUrl: env.CAPTURE_POST_URL ?? null,
+  postKey: env.CAPTURE_POST_KEY ?? null,
+  postChannel: env.CAPTURE_POST_CHANNEL ?? null,
+  postAs: env.CAPTURE_POST_AS ?? 'capture',
+  postRetry: num('CAPTURE_POST_RETRY_MS', 60_000),
 };
 // The Docker Desktop logs worth having, and how each one dates its lines.
 const DOCKER_SOURCES = ['host/com.docker.backend.log', 'host/monitor.log', 'vm/init.log', 'vm/console.log'];
@@ -176,6 +191,9 @@ async function closeCapture() {
   const meta = JSON.parse(readFileSync(join(c.dir, 'meta.json'), 'utf8'));
   writeFileSync(join(c.dir, 'meta.json'), JSON.stringify({ ...meta, closed_at: iso(end), window_end: iso(end), last_failure: iso(c.lastFailure), failure_lines: c.failures }, null, 2));
   say(`closed ${c.dir} — ${c.failures} failure lines, ${iso(c.firstFailure)} → ${iso(c.lastFailure)}`);
+  // The alert is queued on disk and sent beside the loop: a board that is
+  // down when this closes gets it on a later tick, and nothing here waits.
+  if (C.post) writeFileSync(join(c.dir, 'alert.json'), JSON.stringify({ state: 'pending', queued_at: iso(), attempts: 0 }, null, 2));
   open = null;
   failures.length = 0;
 }
@@ -271,7 +289,7 @@ export const inside = async () => {
 
 /* ───────────── the summary: readings, no conclusions ───────────── */
 
-function summarise(c, end, sleeps) {
+export function summarise(c, end, sleeps) {
   const lines = [];
   const read = (f) => { try { return readFileSync(join(c.dir, f), 'utf8').split('\n').filter(Boolean); } catch { return []; } };
   const host = read('host.log');
@@ -281,10 +299,12 @@ function summarise(c, end, sleeps) {
   let overLimit = [];
   for (const l of fails) {
     const m = /\/api\/host\/[a-z]+[^ ]* (refused \(\w+\)|timed out|failed \([^:)]+|→ \d+)/.exec(l);
-    const k = m ? `${m[0].replace(/\?[^ ]*/, '').split(' ')[0]} ${m[1]}` : l.replace(HOST_TS, '').slice(0, 80);
+    // Counted, never quoted: a failure line that is not a board request is
+    // the run loop's warn on some other error, and its words can be anything.
+    const k = m ? `${m[0].replace(/\?[^ ]*/, '').split(' ')[0]} ${m[1]}` : 'another run-loop failure (not a board request; its words are not copied here)';
     by.set(k, (by.get(k) ?? 0) + 1);
     const w = /after (\d+)ms \(limit (\d+)ms\)/.exec(l);
-    if (w && Number(w[1]) > Number(w[2]) + 1000) overLimit.push(l);
+    if (w && Number(w[1]) > Number(w[2]) + 1000) overLimit.push(`${HOST_TS.exec(l)?.[1] ?? '?'} ${m ? m[0].replace(/\?[^ ]*/, '').split(' ')[0] : '?'} waited ${w[1]}ms, limit ${w[2]}ms`);
   }
   lines.push('host failures by route and outcome:');
   for (const [k, n] of [...by].sort((a, b) => b[1] - a[1])) lines.push(`  ${String(n).padStart(5)}  ${k}`);
@@ -307,7 +327,8 @@ function summarise(c, end, sleeps) {
   }
   for (const src of DOCKER_SOURCES) {
     const rows = read(`docker-${src.replace('/', '-')}`);
-    const marked = rows.filter((l) => /8787|gvisor\b.*(stopped|started|accept)|healthcheck failed|exposer\.(Add|Remove)/.test(l));
+    // :8787, the port — a bare 8787 also turns up inside Docker's hex ids.
+    const marked = rows.filter((l) => /:8787\b|gvisor\b.*(stopped|started|accept)|healthcheck failed|exposer\.(Add|Remove)/.test(l));
     lines.push(`docker ${src}: ${rows.length} lines in the window, ${marked.length} about 8787, the forwarder or a failed healthcheck`);
     for (const l of marked.slice(0, 12)) lines.push(`  ${l.slice(0, 240)}`);
     if (src === 'vm/init.log') {
@@ -319,6 +340,78 @@ function summarise(c, end, sleeps) {
   }
   lines.push(`pmset sleep/wake lines in the window: ${sleeps.split('\n').filter(Boolean).length}`);
   return `${lines.join('\n')}\n`;
+}
+
+/* ───────────── the alert: one message on the channel ───────────── */
+
+/**
+ * Where an alert goes and with what key. This repo's own binding unless the
+ * rig says otherwise. The key is read here, used in one header, and never
+ * written anywhere, this log included.
+ */
+async function postTarget() {
+  if (C.postUrl && C.postKey && C.postChannel) return { origin: C.postUrl.replace(/\/+$/, ''), key: C.postKey, channel: C.postChannel };
+  const { discover, originOf } = await import(pathToFileURL(join(C.postFrom, 'host/identity.js')).href);
+  const dir = C.postFrom.replace(/\/+$/, '');
+  const desk = discover([dir], { maxDepth: 1 }).desks.find((d) => d.cwd === dir);
+  if (!desk?.key || !desk.url) throw new Error(`no binding with a key at ${dir}`);
+  return { origin: originOf(desk.url), key: desk.key, channel: desk.channel };
+}
+
+/** One JSON-RPC call on /mcp; the reply may come as JSON or as one SSE event. */
+async function mcp(t, sid, msg) {
+  const res = await fetch(`${t.origin}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json', accept: 'application/json, text/event-stream',
+      'x-channel': t.channel, 'x-agent': C.postAs, 'x-orchestratinator-key': t.key,
+      ...(sid ? { 'mcp-session-id': sid } : {}),
+    },
+    body: JSON.stringify(msg),
+    signal: AbortSignal.timeout(C.probeTimeout),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`POST ${t.origin}/mcp ${msg.method} → ${res.status}`);
+  const data = (res.headers.get('content-type') ?? '').includes('text/event-stream')
+    ? text.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).pop()
+    : text;
+  return { sid: res.headers.get('mcp-session-id') ?? sid, reply: data ? JSON.parse(data) : null };
+}
+
+async function postAlert(dir) {
+  const file = join(dir, 'alert.json');
+  const alert = JSON.parse(readFileSync(file, 'utf8'));
+  alert.attempts = (alert.attempts ?? 0) + 1;
+  alert.last_attempt_at = iso();
+  try {
+    const t = await postTarget();
+    const summary = readFileSync(join(dir, 'summary.txt'), 'utf8');
+    // Readings only: the summary never quotes a host-log line (summarise).
+    const body = `A burst capture closed. Readings only, no host-log lines; an alert from capture.mjs (capture-a-burst skill), not a request for work.\n${dir}\n\n${summary}`;
+    let { sid } = await mcp(t, null, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'orchestratinator-capture', version: '1' } } });
+    if (!sid) throw new Error('the board gave no MCP session');
+    await mcp(t, sid, { jsonrpc: '2.0', method: 'notifications/initialized' });
+    const r = await mcp(t, sid, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'send_message', arguments: { body } } });
+    const said = JSON.parse(r.reply?.result?.content?.[0]?.text ?? 'null');
+    if (r.reply?.result?.isError || !said?.sent) throw new Error(`send_message did not send: ${JSON.stringify(r.reply).slice(0, 200)}`);
+    fetch(`${t.origin}/mcp`, { method: 'DELETE', headers: { 'mcp-session-id': sid, 'x-channel': t.channel, 'x-agent': C.postAs, 'x-orchestratinator-key': t.key }, signal: AbortSignal.timeout(5000) }).catch(() => {});
+    Object.assign(alert, { state: 'posted', posted_at: iso(), message_id: said.id, channel: said.channel, from: said.from, to: said.to, last_error: null });
+    say(`posted the alert for ${dir} as message ${said.id} on ${said.channel} (to everyone, from ${said.from})`);
+  } catch (err) {
+    alert.last_error = `${err?.name ?? 'Error'}: ${err?.cause?.code ?? ''} ${err?.message ?? err}`.replace(/\s+/g, ' ').trim();
+    say(`the alert for ${dir} was not posted (${alert.last_error}); trying again in ${C.postRetry / 1000}s`);
+  }
+  writeFileSync(file, JSON.stringify(alert, null, 2));
+}
+
+/** Every closed capture whose alert has not gone yet, oldest first — read off
+ *  the disk, so a restart in between loses none of them. */
+function pendingAlerts() {
+  let names = [];
+  try { names = readdirSync(C.dir).filter((n) => /^\d{4}-/.test(n)).sort(); } catch { return []; }
+  return names.map((n) => join(C.dir, n)).filter((d) => {
+    try { return JSON.parse(readFileSync(join(d, 'alert.json'), 'utf8')).state === 'pending'; } catch { return false; }
+  });
 }
 
 /* ───────────── the loop ───────────── */
@@ -337,6 +430,9 @@ async function main() {
   for (const l of primeFromTail()) take(l, true);
   say(`watching ${C.hostLog} from byte ${offset}; a capture opens at ${C.openCount} failure lines within ${C.openWindow / 1000}s, into ${C.dir}`);
   let lastState = 0;
+  let posting = null;
+  let postFailed = false;
+  let lastPostTry = 0;
   // The tick never waits on Docker. A snapshot and a close shell out to
   // `docker`, and a VM that is stalling is exactly when those hang — a tick
   // that awaited them would stop the probes at the moment they matter. So
@@ -359,6 +455,18 @@ async function main() {
         }
         if (now - open.lastFailure >= C.closeQuiet) { open.closing = true; behind?.then(() => beside('close', closeCapture)) ?? beside('close', closeCapture); }
         else if (now - open.lastSnapshot >= C.snapshotEvery) beside('snapshot', snapshot);
+      }
+      // An alert goes beside everything else, one at a time, and a failed
+      // one waits postRetry before the next try. The first try is on the
+      // tick after its capture closed.
+      if (C.post && !posting && now - lastPostTry >= (postFailed ? C.postRetry : 0)) {
+        const next = pendingAlerts()[0];
+        if (next) {
+          lastPostTry = now;
+          posting = postAlert(next).then(() => {
+            postFailed = (() => { try { return JSON.parse(readFileSync(join(next, 'alert.json'), 'utf8')).state === 'pending'; } catch { return true; } })();
+          }).catch((err) => { postFailed = true; say(`alert: ${err.message}`); }).finally(() => { posting = null; });
+        }
       }
       if (now - lastState >= 60_000) { lastState = now; writeState(); }
     } catch (err) {

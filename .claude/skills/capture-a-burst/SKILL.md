@@ -61,6 +61,38 @@ capture is open, and QA ruled it in (#2817).
   before 0.10.11) are never counted from that tail: the live file's tail
   holds thousands of them.
 
+## How anyone finds out: the alert
+
+costmo's ruling (task 261): when a capture closes, it posts **one message,
+to everyone**, on `appideas-mcp-orchestratinator`, from agent `capture`. It
+is a broadcast because QA and the coordinator both need it, and the operator
+sees it on the board. It carries the capture's directory and its
+`summary.txt`. The summary is readings only and never quotes a host-log
+line: failures are counted by route, an over-limit wait is its time, route
+and two numbers, and a failure that is not a board request is counted, not
+copied, because the run loop's warn can carry any words.
+
+- **The door is MCP `send_message`.** No other route writes a channel
+  message, and `/mcp` takes the board's one key. The key is read when the
+  alert is sent, from this repo's own binding (`host/identity.js`'s
+  `discover`, the read the host makes every heartbeat). It goes in one
+  header and is never written down.
+- **What one alert writes on the board**, measured on a fresh rig board:
+  the message and an `agents` row for `capture`, and nothing else. The MCP
+  session is closed with a DELETE afterwards.
+- **A board that is down when the capture closes loses nothing.** The close
+  writes `alert.json` (`pending`) and finishes; nothing waits on the post. A
+  try runs beside the loop on the next tick, a failed one waits
+  `CAPTURE_POST_RETRY_MS` (60 s), and it goes on until it lands. The queue is
+  the capture directories on disk, so a restart in between keeps it.
+  `alert.json` ends `posted` with the message id.
+- Staged on 2026-11-03: the rig's target board was down when the capture
+  closed (22:03:12Z). Two tries met `ECONNREFUSED`. The board came up at
+  22:03:37Z, and the third try posted it as message 1 at 22:03:43.850Z.
+- `CAPTURE_POST=0` turns the alert off. `CAPTURE_POST_URL` / `_KEY` /
+  `_CHANNEL` aim it somewhere else, which is how the rig keeps it off the
+  live board.
+
 Everything is an environment variable (`CAPTURE_*`, at the top of
 `capture.mjs`), which is how the staged proof points the same file at a
 private board.
@@ -100,7 +132,10 @@ HOME=$R/home ORCH_HOST_ROOTS=$R/roots ORCH_URL=http://127.0.0.1:8951 ORCH_AUTH_T
   ORCH_TMUX_SESSION=cap-rig-none ORCH_HOST_ID=cap-rig node host/index.js > $R/host.log 2>&1 &
 CAPTURE_HOST_LOG=$R/host.log CAPTURE_DIR=$R/captures CAPTURE_CONTAINER= CAPTURE_BOARD_FILE=$R/board.log \
   CAPTURE_HEALTH_URL=http://127.0.0.1:8951/health CAPTURE_CLOSE_QUIET_MS=60000 CAPTURE_SNAPSHOT_MS=15000 \
+  CAPTURE_POST_URL=http://127.0.0.1:8952 CAPTURE_POST_KEY=rigkey2 CAPTURE_POST_CHANNEL=cap-rig-alerts CAPTURE_POST_RETRY_MS=15000 \
   node .claude/skills/capture-a-burst/capture.mjs > $R/capture.log 2>&1 &
+# the alert's board: a second rig board, started after the close to prove the retry
+# PORT=8952 HOST=127.0.0.1 DB_PATH=$R/board-b.db ORCH_AUTH_TOKEN=rigkey2 ORCH_AUTH_MODE=enforce node src/server.js &
 P=$(pgrep -f "node --import $R/hold.mjs"); for i in 1 2 3 4 5 6; do kill -USR2 $P; sleep 16; done
 ```
 
