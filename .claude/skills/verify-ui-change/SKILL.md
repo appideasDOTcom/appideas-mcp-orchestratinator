@@ -93,6 +93,15 @@ never show that. **Anything about how text is laid out — truncation, bidi,
 wrapping, which end is cut — is only in a screenshot.** Take one with
 `page.shot()` and look at it; the fix there was a `<bdi>` around the path.
 
+**Shooting an element below the fold.** `page.shot(path, selector)` clips
+the viewport at the element's rect, and an element that sits under the
+window's bottom edge comes out as a band of whatever is painted there — the
+floor's pill list at y=1077 in a 913px window was captured as a strip of
+building wall, which read as "the pills are not drawn" while a rect probe
+put them exactly where they belonged (2026-11-02). For anything that may be
+below the fold, probe `getBoundingClientRect()` first, and shoot with
+`shot(path, null, { full: true })`.
+
 **Clicking a button a person could not.** `page.click()` dispatches a
 `MouseEvent`, and a delegated `[data-do]` handler runs for it whether or not
 the button is `disabled`. A check clicked "Choose folder…" while it was
@@ -223,6 +232,34 @@ redraws the lines under the form on `change` and `input`), and read
 once it is ticked. Measured 2026-11-02 for the withdraw note (issue #7,
 round 2): hidden at start, shown with `display: block` the instant the row
 is ticked, hidden again when a pick replaces it, never shown for the multi.
+
+### seed-archive.mjs and check-archive.mjs — archive on both views
+
+Issues #21 and #6 (2026-11-02): archive is the one way to put a floor away,
+the pill lists at the bottom of both views are the only place a put-away
+floor is drawn, and the board and the floor list the same channels.
+[`seed-archive.mjs`](seed-archive.mjs) builds the fixture — two ordinary
+channels, one with unread mail and an open task so a pill has counts to
+carry, and `solo-only`, a desk made by a hook event alone with no agents
+row (the #6 shape) — and keeps a host heartbeat so Take a desk draws its
+dropdown. [`check-archive.mjs`](check-archive.mjs) then drives both views
+through the round trip with [`probe-archive.js`](probe-archive.js) and
+prints what each page drew at every step:
+
+```bash
+PORT=8905 DB_PATH=./data/scratch.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/seed-archive.mjs http://localhost:8905 ./data/scratch.db &
+node --experimental-websocket .claude/skills/verify-ui-change/check-archive.mjs http://localhost:8905 /tmp/shots
+```
+
+Read the output for: no `–` buttons and no archived toggle on the board; a
+put-away floor in neither view's cards, rooms, chips, filter or Floor
+dropdown and in both pill lists with its unread count; "put away" on a
+storey opening the channel dialog; the hook-only floor archived from the
+floor turning up as a pill on the board; a floor archived under you landing
+you on all floors. The assertions themselves are in `test/floor.mjs`
+("archive is the one way to put a floor away, on both views"); this shows
+the page.
 
 ### answering-host.mjs — a host that answers the page's questions
 
@@ -450,7 +487,7 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Teardown, because leftovers poison the next run
 
-`lsof` is not installed on this machine, and env vars do not appear in `ps`, so a
+Neither `lsof` nor `netstat` is installed on this machine, and env vars do not appear in `ps`, so a
 server started as `PORT=… DB_PATH=… node src/server.js` cannot be found by
 either. Match on the script:
 

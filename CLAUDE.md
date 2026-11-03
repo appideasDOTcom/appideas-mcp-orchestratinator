@@ -388,7 +388,13 @@ called at four doors (a hook `SessionStart`, a host's `bound` and `session`
 events, the Take a desk route, an MCP connect) and nowhere else, with an
 audit row naming the door. The boundary is deliberate and tested: an agent
 already on the floor writing does not restore it, because archive is not a
-session kill and must not be undone by the work it does not kill.
+session kill and must not be undone by the work it does not kill. One
+consequence looks like a bug and is not: a server rebuild drops every MCP
+session, every live agent reconnects, and each reconnect is a start — so a
+deploy restores every archived floor that has a working agent on it. QA
+measured it on PR #29 and put it to costmo; ruled keep as built
+(2026-11-03): a reconnect is a session opening, and archive is a statement
+about floors nobody is working on. Do not special-case the reconnect.
 
 **A user record is not all the operator, and the split is the relay's job.**
 Claude Code glues machine-injected context — IDE state, slash-command records —
@@ -501,6 +507,19 @@ QA's review of PR #25 — and green on every rerun. Since 2026-11-02 `drawn()`
 in `test/window.mjs` waits up to 8 s for the pane to show anything instead,
 the same settle-on-an-observable rule the host lives by. A red of that shape
 now means the pane really drew nothing; read it rather than rerunning.
+
+**Stopping a full run halfway takes more than killing `npm test`.** The
+chain is `npm run smoke && npm run test:admin && …`, and on 2026-11-02
+killing `npm test` and the `node test/host.mjs` under it left the chain's
+next link, `node test/window.mjs`, starting on its own with a tmux session
+and a fixture of its own. What a half-run leaves, all named by the suite's
+pid: `node test/<suite>.mjs`, its `node src/server.js`, a tmux session
+`orch-host-test-<pid>` or `orch-test-<pid>`, and `data/host-<pid>*`,
+`data/window-fixture-<pid>` or `data/floor-<pid>*`. Kill the `node test/`
+processes and their servers, `tmux kill-session` each test session, remove
+the fixtures, then check `tmux ls` and `data/` again before the next run.
+`lsof` and `netstat` are not on this machine; match on the command line
+with `ps -Ao pid,command`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
