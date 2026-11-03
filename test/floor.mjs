@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -1125,6 +1125,214 @@ try {
      'a delivery matching a turn from before the send is not that turn arriving — the note stands');
   await hostEvents([{ type: 'turn', channel: CH, agent: 'repeater', role: 'user', text: 'nudge' }]);
   eq(await noteOn('repeater'), null, 'and the turn recorded after the send retires it');
+
+  /* ── slash commands and the window's own actions (issues #9, #10, #15; 0.10.9) ──
+   * The hooks say what the window is doing; the host says what a command's own
+   * receipt was; the chat route says what was asked for. Each is a Want or a
+   * Decided line in the three issues, and each is driven end to end here. */
+  console.log('\nthe window compacting (issue #15)');
+  const sessOf = async (agent) => deskOf(await floor(), agent)?.session ?? null;
+  await post(ev('packer', 's-pack', 'SessionStart', { source: 'startup' }));
+  await post(ev('packer', 's-pack', 'PreCompact', { trigger: 'auto' }));
+  let packer = deskOf(await floor(), 'packer');
+  eq(packer?.session?.compacting?.trigger, 'auto', 'PreCompact puts the desk in a compacting state, with its trigger');
+  eq(packer?.working, true, 'and a compacting desk is a working desk');
+  await post(ev('packer', 's-pack', 'PostCompact', { trigger: 'auto' }));
+  eq((await sessOf('packer'))?.compacting ?? null, null, 'PostCompact ends it');
+  await post(ev('packer', 's-pack', 'PreCompact', { trigger: 'manual' }));
+  await post(ev('packer', 's-pack', 'SessionStart', { source: 'compact', model: 'claude-x' }));
+  eq((await sessOf('packer'))?.compacting ?? null, null, "so does the SessionStart a compaction fires (source compact), should PostCompact never come");
+  eq((await sessOf('packer'))?.model, 'claude-x', 'and that SessionStart carries the model');
+
+  // A StopFailure says what Claude Code said, not a fallback: 2.1.300's
+  // `error` and the words in last_assistant_message.
+  await post(ev('packer', 's-pack', 'StopFailure', { error: 'invalid_request', last_assistant_message: 'Autocompact is thrashing: the context refilled to the limit' }));
+  const packRows = (await turns('packer')).rows ?? [];
+  eq(packRows.at(-1)?.role, 'error', 'a StopFailure is an error turn');
+  eq(packRows.at(-1)?.text, 'invalid_request: Autocompact is thrashing: the context refilled to the limit', 'saying the code and the words, not "the turn ended with an API error"');
+  eq(deskOf(await floor(), 'packer')?.session?.awaiting_message, 'invalid_request: Autocompact is thrashing: the context refilled to the limit', 'and the desk says the same');
+
+  // Only a start is a start: a compaction's SessionStart and a /clear's do
+  // not restore an archived floor (costmo, #15 Decided 2).
+  {
+    const CHC = 'compacts';
+    const archivedC = async () => (await fetch(`${HOST}/api/state`).then((r) => r.json())).channels.find((c) => c.channel === CHC)?.archived ?? null;
+    const adminC = (path, body) => fetch(`${HOST}/api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.status);
+    await post({ ...ev('sleeper', 's-sleep', 'SessionStart', { source: 'startup' }), channel: CHC });
+    eq(await adminC('channel/archive', { channel: CHC }), 200, 'a floor is put away');
+    await post({ ...ev('sleeper', 's-sleep', 'SessionStart', { source: 'compact' }), channel: CHC });
+    eq(await archivedC(), true, "a compaction's SessionStart (source compact) does not bring it back");
+    await post({ ...ev('sleeper', 's-sleep2', 'SessionStart', { source: 'clear' }), channel: CHC });
+    eq(await archivedC(), true, "nor does a /clear's (source clear)");
+    await post({ ...ev('sleeper', 's-sleep3', 'SessionStart', { source: 'resume' }), channel: CHC });
+    eq(await archivedC(), false, 'a resume does — it is a session opening');
+    eq([isSessionStart('startup'), isSessionStart('resume'), isSessionStart(undefined), isSessionStart('compact'), isSessionStart('clear')], [true, true, true, false, false],
+      'the rule, as the route reads it: startup, resume, and an older plugin that says nothing');
+  }
+
+  console.log('\nthe model and the effort, asked for and confirmed (issue #10)');
+  await post(ev('switcher', 's-switch', 'SessionStart', { source: 'startup', model: 'claude-haiku-5-5' }));
+  await post(ev('switcher', 's-switch', 'Stop', { effort_level: 'low' }));
+  eq((await sessOf('switcher'))?.effort, 'low', "the session's effort is read off the hooks' effort_level");
+  await post(ev('switcher', 's-switch', 'PreToolUse', { tool_name: 'Bash' }));
+  eq((await sessOf('switcher'))?.effort, 'low', 'and a hook without it does not blank it');
+  await post(ev('switcher', 's-switch', 'PreModelSwitch', { from_model: 'claude-haiku-5-5', to_model: 'claude-sonnet-5-5', requested_model: 'sonnet', source: 'picker' }));
+  let sw = await sessOf('switcher');
+  eq([sw?.model, sw?.model_requested], ['claude-haiku-5-5', 'claude-sonnet-5-5'], 'PreModelSwitch: asked for, beside what still stands');
+  await post(ev('switcher', 's-switch', 'PostModelSwitch', { from_model: 'claude-haiku-5-5', to_model: 'claude-sonnet-5-5', requested_model: 'sonnet', source: 'picker' }));
+  sw = await sessOf('switcher');
+  eq([sw?.model, sw?.model_requested], ['claude-sonnet-5-5', null], 'PostModelSwitch: confirmed, and the asked-for cleared — the header follows a mid-session change');
+
+  // A /clear: the SessionEnd and the new SessionStart land in the same second,
+  // and the board must show the live session, with the model and effort the
+  // window still has — measured on qa-probe/scratch (2026-11-03): on
+  // updated_at alone the two rows tied, and the floor showed the ended row's
+  // compacting flag or the new row's empty model, depending on which won.
+  await post(ev('clearer', 's-cl-1', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  await post(ev('clearer', 's-cl-1', 'Stop', { effort_level: 'medium' }));
+  await post(ev('clearer', 's-cl-1', 'PreCompact', { trigger: 'manual' }));
+  await post(ev('clearer', 's-cl-1', 'SessionEnd', { reason: 'clear' }));
+  await post(ev('clearer', 's-cl-2', 'SessionStart', { source: 'clear' }));
+  let cl = deskOf(await floor(), 'clearer');
+  eq(cl?.session?.session_id, 's-cl-2', 'after a /clear the desk shows the new session, not the one that ended in the same second');
+  eq([cl?.session?.model, cl?.session?.effort], ['claude-opus-5-5', 'medium'], 'with the model and effort the window still has, carried from the session it closed');
+  eq(cl?.session?.compacting ?? null, null, 'and no compacting flag — the ended session took its own with it');
+  // A compaction the hooks never finish — an older plugin sends no
+  // PostCompact, a /compact that compacts nothing writes no boundary — ends
+  // on the next thing the window does.
+  await post(ev('clearer', 's-cl-2', 'PreCompact', { trigger: 'manual' }));
+  eq((await sessOf('clearer'))?.compacting?.trigger, 'manual', 'a compaction begins');
+  await post(ev('clearer', 's-cl-2', 'UserPromptSubmit', { message: 'next' }));
+  eq((await sessOf('clearer'))?.compacting ?? null, null, 'and a prompt submitted ends it: nothing is typed while the window compacts');
+
+  // The chat route: the floor's commands, and what it refuses.
+  await register({ channel: CH, agent: 'typist', cwd: '/repo/typist', window: '@14' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'typist', session_id: 's-typist', cwd: '/repo/typist' }]);
+  const say = (text) => fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'typist', text }) });
+  let rr2 = await say('/model');
+  eq([rr2.status, (await rr2.json()).code], [400, 'picker'], 'a bare /model is refused — it would open a picker nobody is driving');
+  rr2 = await say('/effort absurd');
+  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the picker does not have is refused');
+  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the picker\'s');
+  rr2 = await say('/model haiku');
+  eq(rr2.status, 200, '/model <name> goes to the host');
+  assert((await takeWork()).includes('chat'), 'as chat work — the host decides it is a picker');
+  eq((await sessOf('typist'))?.model_requested, 'haiku', 'and the desk shows what was asked for');
+  rr2 = await say('/effort xhigh');
+  eq(rr2.status, 200, 'so does /effort <level>');
+  await takeWork();
+  eq((await sessOf('typist'))?.effort_requested, 'xhigh', 'asked for, until the window confirms');
+  eq(commandOf('/btw is it late?'), { name: 'btw', args: 'is it late?' }, 'the route and the host parse a command the same way');
+  eq(FLOOR_COMMANDS.map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'the floor\'s own list');
+
+  // Two live sessions on one desk — the floor's window and an editor tab —
+  // and the window is the one the host drives. The picker's words and the
+  // asked-for value go to the window's session, and the panel shows that
+  // session, not the desk's newest live row (QA, PR #32 finding 1: measured
+  // at 0ad3a17, both landed on the other session).
+  await register({ channel: CH, agent: 'twofold', cwd: '/repo/twofold', window: '@15' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: 's-two-window', cwd: '/repo/twofold' }]);
+  await post(ev('twofold', 's-two-window', 'SessionStart', { source: 'startup', model: 'claude-haiku-5-5' }));
+  await post(ev('twofold', 's-two-editor', 'SessionStart', { source: 'startup', model: 'claude-fable-5-1' }));
+  // The editor's session is the newer by the clock — strictly, since
+  // updated_at is to the second — so "the desk's newest live row" is
+  // provably not the window's; without this gap the two tied and the
+  // assertions below could not tell the fault from the fix.
+  await sleep(1100);
+  await post(ev('twofold', 's-two-editor', 'Stop', {}));
+  let two = deskOf(await floor(), 'twofold');
+  eq(two?.session?.session_id, 's-two-window', "a hosted desk's session is the window's, the roster's id, not the newest live row");
+  const askTwo = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'twofold', text: '/model opus' }) });
+  eq(askTwo.status, 200, '/model opus is accepted for it');
+  await takeWork();
+  eq((await sessOf('twofold'))?.model_requested, 'opus', "and the asked-for value lands on the window's session");
+  // The editor's session newest once more — the ask above touched the
+  // window's row — so the receipt's write, too, can only pass by naming
+  // the window's session rather than "the desk's newest".
+  await sleep(1100);
+  await post(ev('twofold', 's-two-editor', 'Stop', {}));
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 for this session only', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
+  two = await sessOf('twofold');
+  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the picker's words land on the window's session the host named");
+  await post(ev('twofold', 's-two-window', 'SessionEnd', { reason: 'prompt_input_exit' }));
+  await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: null }]);
+  eq((await sessOf('twofold'))?.model, 'claude-fable-5-1', 'and the other live session was never touched');
+
+  // The host's receipts, in the command's own terms (issue #9).
+  const noteOf = async (agent) => deskOf(await floor(), agent)?.delivery ?? null;
+  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 for this session only with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
+  let ty = await sessOf('typist');
+  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "the picker's receipt confirms the effort and clears both asked-fors");
+  eq(ty?.model, 'Haiku 5.5', "and the picker's own words stand as the model until a hook or a reply names the id — the select follows at once");
+  eq((await noteOf('typist'))?.state, 'done', 'and the composer\'s note says the command is done');
+  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 for this session only with xhigh effort', 'in the window\'s words');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 for this session only with xhigh effort', tool_name: 'host' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'assistant', text: '10', via: '/btw' }]);
+  eq((await noteOf('typist'))?.state, 'done', "the command's own lines — the host's sentence, a /btw answer — do not take the note down");
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'user', text: 'the next thing' }]);
+  eq(await noteOf('typist'), null, 'the operator\'s next message does');
+  eq(((await turns('typist')).rows ?? []).find((t) => t.text === '10')?.via, '/btw', 'and a /btw answer is the agent\'s, labeled by the command');
+
+  // The transcript's model, reported by the host when it changes.
+  await hostEvents([{ type: 'model', channel: CH, agent: 'typist', session_id: 's-typist', model: 'claude-opus-5-5' }]);
+  eq((await sessOf('typist'))?.model, 'claude-opus-5-5', "the model that wrote the last reply is the session's model");
+
+  // A compaction the host saw begin and end, for a desk whose plugin never said.
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'compacting the conversation', text: '/compact', compacting: true }]);
+  eq((await sessOf('typist'))?.compacting?.trigger, 'manual', 'a /compact receipt that says the window is compacting puts the desk in that state');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Conversation compacted (manual): 1,000 → 100 tokens in 1.5 s', tool_name: 'compact' }]);
+  eq((await sessOf('typist'))?.compacting ?? null, null, 'and the boundary the transcript writes ends it');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'compacting the conversation', text: '/compact', compacting: true }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'assistant', text: 'back from it' }]);
+  eq((await sessOf('typist'))?.compacting ?? null, null, 'so does any turn the host relays after it — no turn is written while the window compacts');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'compacting the conversation', text: '/compact', compacting: true }]);
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'no compaction ran', text: '/compact', compacting: false, compacted: false }]);
+  eq((await sessOf('typist'))?.compacting ?? null, null, "and so does the end the host watched for, whether or not anything was compacted — a /compact with nothing to compact used to leave the desk compacting for good");
+  const errRow = { type: 'turn', channel: CH, agent: 'typist', role: 'error', text: 'Autocompact is thrashing' };
+  eq((await hostEvents([errRow])).applied, 1, "the record Claude Code writes when a turn ends in an error reaches the floor from the host");
+  eq(((await turns('typist')).rows ?? []).at(-1)?.role, 'error', 'as an error, not as the agent\'s words');
+
+  // A message held by a compaction is said to be held, not timed out.
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'typist', state: 'queued', text: 'while it compacts', held: 'compacting', detail: '3s · ↓ 140 tokens' }]);
+  eq([(await noteOf('typist'))?.held, (await noteOf('typist'))?.detail], ['compacting', '3s · ↓ 140 tokens'], 'the note says the desk is compacting under the message');
+
+  // What the page decides, lifted out of src/ui/floor.js.
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const a = src.indexOf('  /* ---------- chat controls: what the page decides ---------- */');
+    const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
+    const tmp = `./data/chat-controls-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
+    let page;
+    try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
+    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the picker\'s levels');
+    eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'a slash alone offers every command');
+    eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
+    eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
+    eq(page.slashMatches('hello /co'), [], 'a slash anywhere but first is text');
+    eq(page.slashMatches('/co\nmpact'), [], 'and a second line makes it a message');
+    eq(page.modelFamily('claude-sonnet-5-5'), 'sonnet', 'an id reads as its family');
+    eq(page.modelLine({ model: 'claude-haiku-5-5', effort: 'low' }), 'claude-haiku-5-5 · low effort', 'the header line: confirmed model and effort');
+    eq(page.modelLine({ model: 'claude-haiku-5-5', effort: 'low', model_requested: 'sonnet', effort_requested: 'high' }), 'claude-haiku-5-5 · low effort → sonnet, high effort asked', 'with what was asked for, apart');
+    eq(page.modelLine({ model: 'claude-sonnet-5-5', model_requested: 'claude-sonnet-5-5' }), 'claude-sonnet-5-5', 'an ask the window has met is not still asked');
+    eq(page.compactingLine({ since: new Date(Date.now() - 12_000).toISOString(), trigger: 'auto' }), 'compacting (auto) · 12s', 'the compacting line, with its kind and age');
+    eq(page.compactingLine(null), '', 'and nothing when it is not');
+    eq(page.deliveryNote(null, false), 'sending…', 'a message nobody has vouched for is sending');
+    eq(page.deliveryNote(null, true), 'not recorded — send again', 'and past the grace, not recorded');
+    eq(page.deliveryNote({ state: 'queued' }), 'queued — the desk is working', 'queued is the window\'s word');
+    eq(page.deliveryNote({ state: 'queued', held: true }), 'queued — the window took it once it was free', 'held: taken after a wait');
+    eq(page.deliveryNote({ state: 'queued', held: 'compacting' }), 'held — the desk is compacting; it reads this when that ends', 'held by a compaction: said as that');
+    eq(page.deliveryNote({ state: 'done', said: 'a new conversation started' }), 'a new conversation started', 'a command\'s receipt is its own sentence');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5' }), 'haiku', 'the model select shows the confirmed model\'s family');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'opus' }), 'opus', 'and the asked-for one while a change is pending, so one selection sticks (costmo, 2026-11-03)');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'claude-sonnet-5-5' }), 'sonnet', 'an id asked for reads as its family');
+    eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'gpt-9' }), 'haiku', 'but an ask the control has no row for leaves the confirmed one showing');
+    eq(page.modelSelectValue({ model: null }), '', 'and nothing known is nothing selected');
+    eq(page.effortSelectValue({ effort: 'low', effort_requested: 'high' }), 'high', 'the effort select shows the asked-for level while pending');
+    eq(page.effortSelectValue({ effort: 'low' }), 'low', 'else the confirmed one');
+  }
 
   console.log('\nstopping a turn');
   // End to end this time, because the interesting part is that the endpoint and

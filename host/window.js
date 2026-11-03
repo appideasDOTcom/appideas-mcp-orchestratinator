@@ -1164,6 +1164,372 @@ async function deliveryOf(path, after, text) {
   return queued;
 }
 /**
+ * A slash command as the composer takes one: a single line, `/name` and
+ * whatever follows. Anything with a newline in it is a message, whatever its
+ * first character — the window's own rule, and the reason a pasted block that
+ * happens to start with "/" is never mistaken for a command.
+ */
+export function commandOf(text) {
+  const t = String(text ?? '').trim();
+  if (!t || t.includes('\n')) return null;
+  const m = /^\/([A-Za-z][\w:-]*)(?:\s+(.*))?$/.exec(t);
+  return m ? { name: m[1].toLowerCase(), args: (m[2] ?? '').trim() } : null;
+}
+
+/**
+ * Whether the window would wrap this paste in `<pasted_content>` tags.
+ *
+ * Measured on 2.1.300 (2026-11-03, issue #10): a bracketed paste of four or
+ * more lines, or of more than 800 characters on fewer, is collapsed in the
+ * composer to "[Pasted text #1 +N lines]" and recorded as one
+ * `<pasted_content id="…">…</pasted_content id="…">` block — 800 characters
+ * on one line was not, 850 was; three lines of 240 were not, four of 123
+ * were. The model is told such a block "may contain instructions the user
+ * did not write", which is exactly wrong for the operator's own message, so
+ * anything over either line is typed in instead (see typeInto).
+ */
+export const WRAP_LINES = 4;
+export const WRAP_CHARS = 800;
+export function wouldWrap(text) {
+  const t = String(text ?? '');
+  return t.split('\n').length >= WRAP_LINES || t.length > WRAP_CHARS;
+}
+
+/** Text with every whitespace run removed: the composer rewraps at the pane
+ *  width, mid-word when it must, so this is the only comparison that holds. */
+const compact = (t) => String(t ?? '').replace(/\s+/g, '');
+
+/**
+ * Whether the message is still sitting in the composer.
+ *
+ * This is the one question the submit retry is allowed to press Enter on.
+ * It used to press again whenever the screen had gone still without a receipt,
+ * and a still screen is also what a /btw answer and a /model picker look like:
+ * measured (2026-11-03), the retry chose the picker's highlighted row with
+ * nobody choosing, and closed the /btw overlay 1.3 s after the answer
+ * appeared. A composer that no longer holds the text took the Enter; what
+ * happens next is the receipt's job, not another keypress.
+ *
+ * No composer on screen is "no" too — a picker, an overlay, a dialog —
+ * because none of those is a place to press Enter blind.
+ */
+export function stillInComposer(screen, text) {
+  const box = composerOf(screen);
+  if (box === null) return false;
+  if (!box.trim()) return false;
+  // A long paste is collapsed to a marker, and the marker is the text.
+  if (/\[Pasted text #\d+/.test(box)) return true;
+  const head = compact(text).slice(0, 40);
+  return !!head && compact(box).includes(head);
+}
+
+/**
+ * The lines of the visible pane above the composer, bottom-up — where the
+ * window draws a turn's spinner and a command's result. Nothing in the
+ * conversation can fake these positions, which is the same rule footOf
+ * lives by.
+ */
+function aboveComposer(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
+  const rule = /^[\s│|]*[─━—-]{20,}/;
+  let at = -1;
+  for (let n = lines.length - 1; n >= 0; n--) {
+    if (/^\s*[❯>]/.test(lines[n])) { at = n; break; }
+  }
+  if (at < 0) return [];
+  let top = at - 1;
+  while (top >= 0 && !rule.test(lines[top])) top--;
+  if (top < 0) return [];
+  return lines.slice(0, top).filter((l) => l.trim()).reverse();
+}
+
+/**
+ * Whether the window is compacting, with what its spinner says.
+ *
+ * Measured on 2.1.300: the bottom line keeps "esc to interrupt" for the whole
+ * of a compaction, so busy() is true and says nothing more. What says more is
+ * the spinner line directly above the composer — "✻ Compacting conversation…
+ * (7s · ↓ 599 tokens)", then "✳ Running PostCompact hooks…" — read
+ * positionally as the last line above the composer's rule. The elapsed
+ * seconds and the summary's streamed tokens are all the window exposes; there
+ * is no percentage (the binary's applyCompactProgress never reaches the
+ * line). Manual and auto draw the same line (15 s for 136k tokens; 9–16 s a
+ * round at 66–71k).
+ */
+export function compactingOf(screen) {
+  const line = aboveComposer(screen)[0] ?? '';
+  const m = /^\s*[^\w\s(]?\s*(Compacting conversation…|Running (?:Pre|Post)Compact hooks…)\s*(?:\((.*)\))?/.exec(line);
+  return m ? { what: m[1], detail: m[2] ?? '' } : null;
+}
+
+/**
+ * The /btw overlay, if the window is showing one.
+ *
+ * /btw is answered in the window and written nowhere: no transcript record,
+ * no hook, only an overlay in the conversation area — the question, the
+ * answer, and a footer "Esc to close" that gains "c to copy · f to fork"
+ * once the answer is complete — "↑/↓ to scroll · c to copy · f to fork · Esc
+ * to close" on the first /btw of a session, "⇧←/→ to browse · c to copy · f
+ * to fork · x to clear history · Esc to close" once there is a history
+ * (both measured 2026-11-03). The footer is the bottom line, so it is read
+ * as one; "c to copy" is the mark of a finished answer, and the answer is
+ * what stands between the question's echo and that footer.
+ */
+export function btwOverlayOf(screen, question = '') {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
+  const nonEmpty = lines.filter((l) => l.trim());
+  const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
+  if (!/Esc to close/i.test(foot)) return null;
+  const complete = /c to copy/i.test(foot);
+  const body = nonEmpty.slice(0, -1);
+  const q = compact(question).slice(0, 30);
+  let from = 0;
+  for (let n = body.length - 1; n >= 0; n--) {
+    if (q && compact(body[n]).includes(q)) { from = n + 1; break; }
+  }
+  const answer = body.slice(from).map((l) => l.trim()).join('\n').trim();
+  return { complete, answer };
+}
+
+/**
+ * A screen a command opened in the window, when the composer is gone and the
+ * bottom line offers Esc: /cost's usage report, /btw's answer, a picker, a
+ * dialog. Its text is what stands under the last rule the window drew (the
+ * ▔▔▔ that tops an overlay) and above the footer. Read so the desk can carry
+ * what the window showed, since nothing writes it anywhere else (measured
+ * 2026-11-03: /cost writes no record in any file).
+ */
+export function overlayOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
+  if (composerOf(screen) !== null) return null;
+  const nonEmpty = lines.filter((l) => l.trim());
+  const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
+  if (!/Esc to (close|cancel)/i.test(foot)) return null;
+  let from = 0;
+  for (let n = nonEmpty.length - 2; n >= 0; n--) {
+    if (/^[\s▔─━]{20,}$/.test(nonEmpty[n])) { from = n + 1; break; }
+  }
+  return { foot, text: nonEmpty.slice(from, -1).map((l) => l.trim()).join('\n').trim() };
+}
+
+/**
+ * The model picker, read off the pane: numbered rows, which one the cursor is
+ * on, which one is current (✔). Its footer is the bottom line — "Enter to set
+ * as default · s to use this session only · Esc to cancel" — and that line is
+ * what makes it a picker; the rows are read only once it is.
+ */
+export function pickerOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
+  const nonEmpty = lines.filter((l) => l.trim());
+  const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
+  if (!/s to use this session only/i.test(foot)) return null;
+  const rows = [];
+  for (const l of nonEmpty) {
+    const m = /^\s*(❯)?\s*[↑↓]?\s*(\d+)\.\s+(.+?)(?:\s{2,}(.*))?$/.exec(l);
+    if (!m) continue;
+    rows.push({ n: Number(m[2]), label: m[3].replace(/\s*✔\s*$/, '').trim(), current: /✔/.test(m[3]), cursor: !!m[1], description: (m[4] ?? '').trim() });
+  }
+  return rows.length ? { rows, cursor: rows.find((r) => r.cursor)?.n ?? null } : null;
+}
+
+/** The cache warning a session-only switch raises on a conversation that is
+ *  cached for the current model: "Switch model? … 1. Yes, switch to X / 2. No,
+ *  go back". Measured 2026-11-03; the digit answers it. */
+export function switchConfirmOf(screen) {
+  const text = String(screen ?? '');
+  if (!/Switch model\?/.test(text)) return null;
+  const m = /❯?\s*1\.\s*(Yes, switch to [^\n]*)/.exec(text);
+  return { yes: m ? m[1].trim() : 'Yes' };
+}
+
+/** Complete JSONL records written past a byte offset. Never mid-line, for the
+ *  reason readTranscript gives. */
+async function recordsSince(path, after) {
+  if (!existsSync(path)) return [];
+  const { readFile, stat } = await import('node:fs/promises');
+  const { size } = await stat(path);
+  if (size <= after) return [];
+  const buf = await readFile(path);
+  const out = [];
+  for (const line of buf.subarray(after).toString('utf8').split('\n').slice(0, -1)) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch { /* a torn line is the next read's */ }
+  }
+  return out;
+}
+
+const SGR = /\x1b\[[0-9;]*m/g;
+/** The `<local-command-stdout>` of a command, as the window printed it, with the
+ *  tags and the SGR codes the window wrote inside them taken off. */
+function stdoutOf(records) {
+  for (const d of records) {
+    if (d.type !== 'user' || d.isMeta) continue;
+    const t = textOf(d.message?.content);
+    const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(t);
+    if (m) return m[1].replace(SGR, '').trim();
+  }
+  return null;
+}
+
+/** Whether these records carry the window's own record of `/name` having run:
+ *  the `<command-name>/name</command-name>` user record it writes for every
+ *  built-in command (not isMeta on 2.1.258–2.1.300). */
+function commandRecordIn(records, name) {
+  return records.some((d) => d.type === 'user' && !d.isMeta
+    && new RegExp(`<command-name>/${name}</command-name>`, 'i').test(textOf(d.message?.content)));
+}
+
+/**
+ * The receipt a slash command actually produces, read where it is actually
+ * written. Each is measured (2026-11-03, 2.1.300, issue #9), and none of them
+ * is "a user record containing the text", which is what deliveryOf looks for
+ * and why every command with an argument used to be reported as not
+ * delivered twenty seconds after it had done its job:
+ *
+ *   /clear    nothing in the file being watched — a NEW session's file, with
+ *             `<command-name>/clear` as its first record (the issue's "writes
+ *             nothing" counted the old file)
+ *   /compact  `<command-name>/compact` in the same file, then the window is
+ *             compacting (see compactingOf) for 10–150 s
+ *   /model X  `<command-name>/model…<command-args>X` plus a stdout record
+ *             "Set model to `Sonnet 5.5` and saved as your default…", in the
+ *             same millisecond; the args are in their own tag, so the text
+ *             "/model X" is in no record
+ *   /effort X the same shape: "Set effort level to low (saved as your default…"
+ *   /btw      nothing in any file; the overlay (btwOverlayOf)
+ *   other     the command record, with whatever stdout followed it
+ *
+ * Returns null while nothing has happened yet, else what did, in the
+ * command's own terms.
+ */
+async function commandReceipt(cmd, { path, before, projectDir: dir, since, screen }) {
+  const records = path ? await recordsSince(path, before) : [];
+  const stdout = stdoutOf(records);
+  switch (cmd.name) {
+    case 'clear': {
+      // A new file in the project directory, written since the command went
+      // in, whose records say /clear. The old file gets a cost-state line and
+      // nothing else; the session id changes under the pane.
+      if (!dir || !existsSync(dir)) return null;
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith('.jsonl')) continue;
+        const p = join(dir, name);
+        if (p === path) continue;
+        let m; try { m = (await import('node:fs/promises')).stat(p); m = await m; } catch { continue; }
+        if (m.mtimeMs < since) continue;
+        if (commandRecordIn(await recordsSince(p, 0), 'clear')) {
+          return { state: 'done', said: 'a new conversation started', session_id: name.slice(0, -'.jsonl'.length) };
+        }
+      }
+      return null;
+    }
+    case 'compact': {
+      // `compacting` is whether the window is at it *now*: the hooks report
+      // the state as it runs, and a receipt that arrived after PostCompact
+      // once set the desk compacting after it had finished.
+      const running = !!compactingOf(screen);
+      if (running) return { state: 'done', said: 'compacting the conversation', compacting: true };
+      if (commandRecordIn(records, 'compact')) {
+        const boundary = records.some((d) => d.type === 'system' && d.subtype === 'compact_boundary');
+        return { state: 'done', said: boundary ? 'compacted the conversation' : 'compacting the conversation', compacting: false };
+      }
+      return null;
+    }
+    case 'model':
+    case 'effort': {
+      if (stdout) return { state: 'done', said: stdout.split('\n')[0] };
+      return null;
+    }
+    case 'btw': {
+      const o = btwOverlayOf(screen, cmd.args);
+      if (o?.complete) return { state: 'done', said: 'answered in the window', answer: o.answer, overlay: true };
+      return null;
+    }
+    default: {
+      if (commandRecordIn(records, cmd.name)) return { state: 'done', said: stdout ? `${stdout.split('\n')[0]}` : `ran /${cmd.name}`, stdout };
+      // A command that opened a screen instead — /cost, /help, a dialog —
+      // writes nothing; the screen is the receipt, and its text goes to the
+      // desk since the window is the only other place it exists. The overlay
+      // is closed afterwards (see send), because a dialog left standing
+      // takes the next message instead of the composer.
+      const o = overlayOf(screen);
+      if (o && !/Running (Pre|Post)[A-Za-z]+ hooks/.test(o.foot)) return { state: 'done', said: 'shown in the window', screen: o.text, overlay: true };
+      // An unknown name is sent as a message, and the window records it as one.
+      if (records.some((d) => d.type === 'user' && !d.isMeta && squash(textOf(d.message?.content)).includes(squash(cmd.args ? `/${cmd.name} ${cmd.args}` : `/${cmd.name}`)))) {
+        return { state: 'sent', said: null };
+      }
+      return null;
+    }
+  }
+}
+
+/**
+ * Type the message in, line by line, and prove each line is there.
+ *
+ * The alternative to a paste for anything the window would wrap (wouldWrap).
+ * `send-keys -l` types; `M-Enter` is the composer's own newline, so a message
+ * with newlines in it stays one message (a bare newline would submit half of
+ * it — the rule at the top of send()). Measured 2026-11-03: a three-line
+ * message typed this way was recorded verbatim, newlines and all, with no
+ * wrapper — and one of two runs typed at 0.3 s a line lost its third line,
+ * which is why every line is confirmed in the composer before the next goes
+ * in. A line that does not appear is retried once; a message that still does
+ * not match is cleared, and the caller pastes instead — wrapped is worse than
+ * typed, and far better than lost. Long lines go in pieces (TYPE_CHUNK): a
+ * burst is a paste to the window whether or not it was bracketed.
+ */
+/** How much of a line is typed in one send-keys, and the pause between
+ *  pieces. Claude Code reads a burst of keys as a paste — 900 characters in
+ *  one send-keys became "[Pasted text #1]" and a wrapped record — and did not
+ *  at 100 characters 60 ms apart, nor at 40 characters 30 ms apart (measured
+ *  2026-11-03). The larger piece, because fewer pieces is fewer places to be
+ *  interrupted. */
+const TYPE_CHUNK = Number(process.env.ORCH_TYPE_CHUNK ?? 100);
+const TYPE_CHUNK_MS = Number(process.env.ORCH_TYPE_CHUNK_MS ?? 60);
+
+async function typeInto(target, text) {
+  const lines = String(text).split('\n');
+  const stop = Date.now() + PASTE_TIMEOUT_MS;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const before = compact(composerOf(await screenOf(target)) ?? '');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      for (let at = 0; at < line.length; at += TYPE_CHUNK) {
+        const typed = await tmux(['send-keys', '-t', target, '-l', '--', line.slice(at, at + TYPE_CHUNK)]);
+        if (!typed.ok) return { ok: false, error: typed.error };
+        if (at + TYPE_CHUNK < line.length) await sleep(TYPE_CHUNK_MS);
+      }
+      const want = before + compact(line);
+      const by = Date.now() + PASTE_CONFIRM_MS;
+      let seen = !line;
+      while (!seen && Date.now() < by) {
+        await sleep(150);
+        const now = compact(composerOf(await screenOf(target)) ?? '');
+        if (now === want) seen = true;
+      }
+      if (seen) break;
+      if (attempt === 1 || Date.now() > stop) return { ok: false, code: 'typed_lost', error: `line ${i + 1} of ${lines.length} did not appear in the composer` };
+      // Not re-typed onto a half-arrived line: what is there is cleared first.
+      for (let k = 0; k < 8; k++) await tmux(['send-keys', '-t', target, 'C-u']);
+      await sleep(150);
+    }
+    if (i < lines.length - 1) {
+      await tmux(['send-keys', '-t', target, 'M-Enter']);
+      await sleep(120);
+    }
+  }
+  const final = compact(composerOf(await screenOf(target)) ?? '');
+  if (final !== compact(text)) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
+  return { ok: true, typed: true };
+}
+
+/** Clear the composer, whatever is in it. One Ctrl-U per line; a collapsed
+ *  paste is one line however long. */
+async function clearComposer(target) {
+  for (let i = 0; i < 8; i++) await tmux(['send-keys', '-t', target, 'C-u']);
+}
+
+/**
  * Open this repo's Claude Code in a pane, or hand back the one already there.
  *
  * `resume` continues a specific conversation; without it Claude Code does what
@@ -1302,8 +1668,15 @@ export async function open(cwd, { resume = null } = {}) {
  * pane. Bracketed paste arrives as one block, which is what a person pasting
  * into Claude Code gets, and then Enter sends it.
  */
-export async function send(cwd, text, { open: autoOpen = false, resume = null } = {}) {
-  if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
+/**
+ * The window a message to this repo goes into, opening one when allowed.
+ *
+ * The first half of send(), on its own because the model picker needs the
+ * same window the same way. Returns the pane, the conversation's transcript
+ * path (null for a stand-in with no session, which is what the tests drive),
+ * and what opening it had to say.
+ */
+async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
   const here = canonical(cwd);
 
   // Which window, if any, is running this conversation — and whether it is one
@@ -1350,6 +1723,27 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     ?? (await sessionFor(here)).session
     ?? null;
   const path = live?.sessionId ? transcriptPath(here, live.sessionId) : null;
+  return { ok: true, here, pane, path, note: opened?.note ?? null };
+}
+
+/** How long a /btw answer is left on the window's screen before the host
+ *  closes the overlay, for a person who happens to be looking at it. */
+const BTW_LINGER_MS = Number(process.env.ORCH_BTW_LINGER_MS ?? 3000);
+
+export async function send(cwd, text, { open: autoOpen = false, resume = null } = {}) {
+  if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
+  const cmd = commandOf(text);
+  // A bare /model opens a picker in the window, and a picker is not something
+  // to leave standing behind a desk — the next paste would land in it. The
+  // floor changes a model with pickModel (this session only, costmo's ruling
+  // 2026-11-03); a caller that sends the bare command is told so instead.
+  if (cmd?.name === 'model' && !cmd.args) {
+    return { ok: false, code: 'picker', error: 'a bare /model opens a picker in the window — name the model (/model sonnet), or use the model control on the desk' };
+  }
+  const w = await windowFor(cwd, { open: autoOpen, resume });
+  if (!w.ok) return w;
+  const { here, pane, path } = w;
+  const opened = { note: w.note };
 
   // A working window is typed into, not waited for.
   //
@@ -1376,14 +1770,25 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // then be behind the offset and invisible to deliveryOf() — the message would
   // be in the conversation and still reported lost.
   const before = path ? await transcriptSize(path) : null;
+  const since = Date.now();
 
   // Get the text into the composer, and confirm it is there before pressing
-  // anything. This is a paste that can be silently dropped, not a write that
-  // either works or errors — see pasteInto().
-  const typed = await pasteInto(pane.target, text);
-  if (!typed.ok) return { ...typed, target: pane.target };
+  // anything. Typed, line by line, when a paste would be wrapped in
+  // <pasted_content> tags and read to the agent as something the operator did
+  // not write (wouldWrap); pasted otherwise, and pasted anyway if typing could
+  // not be confirmed — a paste can be silently dropped, not a write that
+  // either works or errors, see pasteInto().
+  let typed = null;
+  if (wouldWrap(text)) {
+    typed = await typeInto(pane.target, text);
+    if (!typed.ok) await clearComposer(pane.target);
+  }
+  if (!typed?.ok) {
+    typed = await pasteInto(pane.target, text);
+    if (!typed.ok) return { ...typed, target: pane.target };
+  }
 
-  // Submit, and prove it went by finding the message itself in the transcript.
+  // Submit, and prove it went by finding the message's own receipt.
   //
   // This used to watch the transcript merely *grow*, which anything at all
   // satisfies — a tool result, a subagent, a second process writing the same
@@ -1398,9 +1803,13 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // it and the two are submitted as one.
   //
   // A fixed delay is a magic number that a slower machine breaks, so this
-  // confirms instead: the transcript growing is proof the turn was accepted,
-  // and until it does, Enter is pressed again. Enter on an empty composer does
-  // nothing, so a retry after a submission that did land is harmless.
+  // confirms instead: the receipt is proof the message was accepted, and
+  // until it comes, Enter is pressed again — but only while the message is
+  // still in the composer (stillInComposer). The retry used to press on any
+  // screen that had gone still, and a still screen is also a /btw answer and
+  // a /model picker: it closed the one and chose from the other. Enter on an
+  // empty composer does nothing, so a retry after a submission that did land
+  // is harmless; Enter on a picker is a choice.
   //
   // A stand-in that just reads stdin cannot reproduce any of this — it accepts
   // the Enter a TUI drops — so the tests cannot prove it. It was found by
@@ -1412,8 +1821,22 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // already in and confirmed by now; this is only guarding the Enter.
   await settled(pane.target, wasBusy ? { quiet: 1, tries: 3 } : {});
 
-  let got = null;                 // 'sent' | 'queued', once the window says so
-  let last = await screenOf(pane.target);
+  // The receipt: a command has its own (commandReceipt), a message has the
+  // turn or the queue (deliveryOf). Each is read where it is written.
+  const receipt = async () => {
+    // A command that closes the window (/exit) has the pane's absence as its
+    // receipt; a message cannot be received by a pane that is gone.
+    if (cmd && !(await tmux(['display', '-p', '-t', pane.target, '#{pane_id}'])).ok) {
+      return { state: 'done', said: 'the window closed' };
+    }
+    const screen = await screenOf(pane.target);
+    if (cmd) return commandReceipt(cmd, { path, before, projectDir: projectDir(here), since, screen });
+    const got = path ? await deliveryOf(path, before, text) : null;
+    return got ? { state: got } : null;
+  };
+
+  let got = null;                 // the receipt, once the window gives one
+  let compacting = null;          // the window went off to compact under the message
   const stop = Date.now() + LAND_TIMEOUT_MS;
   for (let press = 0; press < SUBMIT_ATTEMPTS && !got && Date.now() < stop; press++) {
     const enter = await tmux(['send-keys', '-t', pane.target, 'Enter']);
@@ -1421,26 +1844,39 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     // Nothing to check against: the pane is running something with no Claude
     // Code session to find. A real desk always has one, because waitReady does
     // not return without it, so this is the stand-in the tests drive.
-    if (!path) return { ok: true, target: pane.target, confirmed: false, unverified: true, note: opened?.note ?? null };
+    if (!path && !cmd) return { ok: true, target: pane.target, confirmed: false, unverified: true, note: opened?.note ?? null };
 
-    // Press Enter again only if the window has gone completely still without
-    // the message appearing. Retrying blind is worse than not retrying: an
-    // Enter that Claude Code reads as part of the paste becomes a newline in
-    // the composer, so a message once arrived carrying the eight carriage
-    // returns of the eight retries that "delivered" it.
+    // Press Enter again only if the message is still sitting in the composer
+    // and the window has gone completely still. Retrying blind is worse than
+    // not retrying: an Enter that Claude Code reads as part of the paste
+    // becomes a newline in the composer, so a message once arrived carrying
+    // the eight carriage returns of the eight retries that "delivered" it.
     //
     // A working window never goes still, so it is never pressed twice — which
     // is right, and not by accident: its receipt is the enqueue, and that is
     // written in the same millisecond as the keypress.
     let frozen = 0;
+    let last = await screenOf(pane.target);
     while (!got && Date.now() < stop && frozen < 4) {
       await sleep(250);
-      got = await deliveryOf(path, before, text);
+      got = await receipt();
       if (got) break;
       const now = await screenOf(pane.target);
+      if (!stillInComposer(now, text)) {
+        // The window took it. A compaction under it is the one thing that
+        // keeps a taken message from its receipt for longer than the budget:
+        // the enqueue record carries no text on 2.1.300, and the user record
+        // comes only at the end (measured: 12 s into a 15 s compaction; real
+        // desks compact for 37–150 s). Said as held, not timed out.
+        compacting = compactingOf(now);
+        if (compacting) break;
+        frozen = 0;
+        continue;
+      }
       if (now === last) frozen++;
       else { frozen = 0; last = now; }
     }
+    if (compacting) break;
   }
 
   // Running out of presses is not running out of time. The loop above stops
@@ -1451,9 +1887,17 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   //
   // Nothing more is pressed here. The message is in, the Enters have gone; what
   // is left is waiting for the write to show up.
-  while (!got && Date.now() < stop) {
+  while (!got && !compacting && Date.now() < stop) {
     await sleep(250);
-    got = await deliveryOf(path, before, text);
+    got = await receipt();
+    if (!got) compacting = compactingOf(await screenOf(pane.target));
+  }
+
+  if (compacting && !got) {
+    return {
+      ok: true, target: pane.target, confirmed: false, queued: true, held: 'compacting',
+      detail: compacting.detail, command: cmd?.name ?? null, note: opened?.note ?? null,
+    };
   }
 
   if (!got) {
@@ -1465,21 +1909,22 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     // here rather than handed back, and goes in when the window frees up.
     // Nothing is re-pasted: the text is already in the box, and pasting again
     // is how one message becomes two.
-    const stuck = (composerOf(await screenOf(pane.target)) ?? '').includes(text.trim().split('\n')[0].slice(0, 40));
+    const stuck = stillInComposer(await screenOf(pane.target), text);
     if (stuck && await waitIdle(pane.target)) {
       const held = Date.now() + LAND_TIMEOUT_MS;
       for (let press = 0; press < SUBMIT_ATTEMPTS && !got && Date.now() < held; press++) {
+        if (!stillInComposer(await screenOf(pane.target), text)) break;
         await tmux(['send-keys', '-t', pane.target, 'Enter']);
         while (!got && Date.now() < held) {
           await sleep(250);
-          got = await deliveryOf(path, before, text);
+          got = await receipt();
           if (got) break;
         }
       }
       // Said as held, not merely as sent. A message that arrived a minute late
       // is not the same event as one that went straight through, and the
       // operator watching the desk is entitled to know which they got.
-      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued', held: true, note: opened?.note ?? null };
+      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', held: true, command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null };
     }
     // Say which of the two this is instead of asserting the one that reads
     // worse. The text still being in the composer is checkable, and when it is
@@ -1492,13 +1937,221 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       note: opened?.note ?? null,
       error: stuck
         ? `the window took the message but never submitted it — it is still in the composer, not in the conversation. Attach with \`tmux attach -t ${SESSION}\` and press Enter to send it.`
-        : `the message went in but the conversation did not confirm it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer, so it may well have been sent. Check the window before retyping it.`,
+        : cmd
+          ? `/${cmd.name} went in, and the window gave no sign of running it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer. Check the window.`
+          : `the message went in but the conversation did not confirm it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer, so it may well have been sent. Check the window before retyping it.`,
     };
+  }
+  // A /btw answer lives only on the screen, in an overlay nothing else can
+  // read: it is read here, left for a moment for anyone looking at the
+  // window, then closed, so the composer is back for the next message. The
+  // host used to close it by accident, 1.3 s after it appeared, with the
+  // blind retry that is gone now.
+  if (got.overlay) {
+    await sleep(BTW_LINGER_MS);
+    await tmux(['send-keys', '-t', pane.target, 'Escape']);
   }
   // `queued` is the honest word for what happened, and the floor says it: the
   // window has the message and will read it at its next step, which is not the
   // same as it already being a turn in the conversation.
-  return { ok: true, target: pane.target, confirmed: true, queued: got === 'queued', note: opened?.note ?? null };
+  return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null };
+}
+
+/** How long a compaction is watched for its end. Real ones run 10–150 s. */
+const COMPACT_WATCH_MS = Number(process.env.ORCH_COMPACT_WATCH_MS ?? 300_000);
+
+/**
+ * Wait for a compaction the window has started to end, and say how.
+ *
+ * The /compact receipt is the spinner showing; this is the other half. A
+ * /compact on a session with nothing to compact shows the spinner for a
+ * moment and writes no boundary and no summary (qa-probe/scratch, 2026-11-03
+ * 14:41: the command record and nothing else), so a desk that went by the
+ * start alone said "compacting" until something else happened. The end is
+ * the spinner gone from above the composer; what happened is the window's
+ * own stdout line for the command — "Compacted (ctrl+o to see full
+ * summary)…" or its error — or, with no such line, the boundary record.
+ */
+export async function awaitCompaction(cwd, { path = null, before = 0 } = {}) {
+  const pane = await paneFor(canonical(cwd));
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+  const stop = Date.now() + COMPACT_WATCH_MS;
+  let seen = false;
+  while (Date.now() < stop) {
+    const running = compactingOf(await screenOf(pane.target));
+    if (running) seen = true;
+    else if (seen || Date.now() > stop - COMPACT_WATCH_MS + 3000) break;
+    await sleep(500);
+  }
+  // A moment for the record the window writes as the spinner goes.
+  await sleep(600);
+  const records = path ? await recordsSince(path, before) : [];
+  const stdout = stdoutOf(records);
+  const boundary = records.find((d) => d.type === 'system' && d.subtype === 'compact_boundary');
+  const n = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString('en-US') : null);
+  if (stdout) return { ok: true, said: stdout.split('\n')[0], compacted: /^Compacted/i.test(stdout) || !!boundary };
+  if (boundary) {
+    const m = boundary.compactMetadata ?? {};
+    return { ok: true, compacted: true, said: `compacted the conversation${n(m.preTokens) && n(m.postTokens) ? `: ${n(m.preTokens)} → ${n(m.postTokens)} tokens` : ''}` };
+  }
+  return { ok: true, compacted: false, said: seen ? 'the compaction ended without a record of what it did' : 'no compaction ran' };
+}
+
+/** How long the picker is given to appear, and a switch to be confirmed. */
+const PICKER_MS = Number(process.env.ORCH_PICKER_MS ?? 8000);
+
+/**
+ * Which picker row a model name means. "sonnet", "Sonnet 5.5" and
+ * "claude-sonnet-5-5" all name the same row; the "Default (recommended)"
+ * row is never the answer to a name, because it is the operator's default
+ * under whatever name, not the model asked for.
+ */
+export function pickerRowFor(rows, name) {
+  const want = String(name ?? '').trim().toLowerCase();
+  if (!want) return null;
+  const idm = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(want);
+  const family = idm ? idm[1] : want.split(/[\s-]+/)[0];
+  const version = idm ? (idm[3] ? `${idm[2]}.${idm[3]}` : idm[2]) : (want.match(/\d+(?:\.\d+)?/)?.[0] ?? null);
+  const candidates = rows.filter((r) => !/^default\b/i.test(r.label));
+  const exact = candidates.find((r) => r.label.toLowerCase() === want);
+  if (exact) return exact;
+  const byBoth = candidates.filter((r) => r.label.toLowerCase().includes(family) && (!version || r.label.includes(version)));
+  if (byBoth.length) return byBoth[0];
+  if (!version) return candidates.find((r) => r.label.toLowerCase().startsWith(family)) ?? null;
+  return null;
+}
+
+/**
+ * Change this session's model through the window's own picker — this session
+ * only.
+ *
+ * `/model <name>` as a command writes the person's default for every new
+ * session on the machine (~/.claude/settings.json `model`; the window says
+ * "saved as your default for new sessions"), and a partner switching a desk
+ * from the floor must not reset the operator's machine — costmo's ruling
+ * (#10 Decided 4, 2026-11-03). The picker's `s` is the window's own
+ * session-only switch, so that is what is pressed. Measured on 2.1.300:
+ * `/model` + Enter draws the picker with the cursor on the current row; ↑/↓
+ * move it; a digit SELECTS (and starts the switch, as default), so digits
+ * are never pressed here; `s` on a conversation cached for the current
+ * model raises "Switch model? … 1. Yes, switch to X / 2. No, go back", and
+ * `1` answers it; the receipt is the stdout record "Set model to `X` for
+ * this session only", with PreModelSwitch/PostModelSwitch around it.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** The picker's effort row — "◐ Medium effort (default) ←/→ to adjust" — as
+ *  the level it reads, or null when the picker shows none. */
+export function effortRowOf(screen) {
+  const m = /^\s*[^\w\s]?\s*([A-Za-z]+) effort(?: \(default\))?\s+←\/→ to adjust/m.exec(String(screen ?? ''));
+  return m ? m[1].toLowerCase() : null;
+}
+
+export async function pickModel(cwd, name, opts = {}) {
+  return pick(cwd, { model: name }, opts);
+}
+
+/**
+ * The same picker, for the effort level: its "○ Low effort ←/→ to adjust" row
+ * moves with ←/→, and `s` applies the row and the model together — measured
+ * 2026-11-03 as "Set model to `Haiku 5.5` for this session only with
+ * `medium` effort", with nothing written to settings.json. `/effort <level>`
+ * as a command saves the person's default instead, which is why it is not
+ * what the floor sends.
+ */
+export async function pickEffort(cwd, level, opts = {}) {
+  return pick(cwd, { effort: level }, opts);
+}
+
+export async function pick(cwd, { model = null, effort = null } = {}, { open: autoOpen = false, resume = null } = {}) {
+  const name = typeof model === 'string' && model.trim() ? model.trim() : null;
+  const level = typeof effort === 'string' && effort.trim() ? effort.trim().toLowerCase() : null;
+  if (!name && !level) return { ok: false, error: 'name a model or an effort level' };
+  if (level && !EFFORT_LEVELS.includes(level)) return { ok: false, code: 'bad_effort', error: `effort is one of ${EFFORT_LEVELS.join(', ')}, not "${effort}"` };
+  const w = await windowFor(cwd, { open: autoOpen, resume });
+  if (!w.ok) return w;
+  const { pane, path } = w;
+  // Only measured on an idle window. A picker over a running turn is a
+  // dialog nobody asked for in the middle of work.
+  if (await busy(pane.target)) return { ok: false, code: 'busy', error: 'the desk is working — change the model when the turn ends' };
+  const before = path ? await transcriptSize(path) : 0;
+  const put = await pasteInto(pane.target, '/model');
+  if (!put.ok) return { ...put, target: pane.target };
+  await settled(pane.target, {});
+  await tmux(['send-keys', '-t', pane.target, 'Enter']);
+  let picker = null;
+  let stop = Date.now() + PICKER_MS;
+  let pressed = 1;
+  while (!picker && Date.now() < stop) {
+    await sleep(200);
+    const screen = await screenOf(pane.target, 40);
+    picker = pickerOf(screen);
+    if (!picker && pressed < SUBMIT_ATTEMPTS && stillInComposer(screen, '/model')) {
+      await tmux(['send-keys', '-t', pane.target, 'Enter']);
+      pressed++;
+    }
+  }
+  if (!picker) {
+    await clearComposer(pane.target);
+    return { ok: false, code: 'no_picker', error: 'the window did not open its model picker', target: pane.target };
+  }
+  const row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
+  if (!row) {
+    await tmux(['send-keys', '-t', pane.target, 'Escape']);
+    return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${picker.rows.filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label).join(', ')}` };
+  }
+  // Walk the cursor to the row, one key at a time, reading the pane after
+  // each: the same rule as answerQuestion, and for the same reason.
+  for (let i = 0; i < 20 && picker.cursor !== row.n; i++) {
+    const beforeKey = await screenOf(pane.target, 40);
+    await tmux(['send-keys', '-t', pane.target, row.n > picker.cursor ? 'Down' : 'Up']);
+    await reacted(pane.target, beforeKey);
+    picker = pickerOf(await screenOf(pane.target, 40));
+    if (!picker) return { ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the cursor was being moved' };
+  }
+  if (picker.cursor !== row.n) {
+    await tmux(['send-keys', '-t', pane.target, 'Escape']);
+    return { ok: false, code: 'picker_cursor', target: pane.target, error: `could not put the cursor on ${row.label}` };
+  }
+  if (level) {
+    // ←/→ along the effort row until it reads the level, one key at a time.
+    let at = effortRowOf(await screenOf(pane.target, 40));
+    if (!at) {
+      await tmux(['send-keys', '-t', pane.target, 'Escape']);
+      return { ok: false, code: 'no_effort_row', target: pane.target, error: 'the picker shows no effort row to adjust' };
+    }
+    for (let i = 0; i < 12 && at !== level; i++) {
+      const beforeKey = await screenOf(pane.target, 40);
+      await tmux(['send-keys', '-t', pane.target, EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(at) ? 'Right' : 'Left']);
+      await reacted(pane.target, beforeKey);
+      at = effortRowOf(await screenOf(pane.target, 40));
+      if (!at) return { ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
+    }
+    if (at !== level) {
+      await tmux(['send-keys', '-t', pane.target, 'Escape']);
+      return { ok: false, code: 'effort_unreached', target: pane.target, error: `the effort row would not move to ${level} (it reads ${at})` };
+    }
+  }
+  await tmux(['send-keys', '-t', pane.target, '-l', 's']);
+  let confirmed = false;
+  stop = Date.now() + PICKER_MS;
+  while (Date.now() < stop) {
+    await sleep(200);
+    const stdout = path ? stdoutOf(await recordsSince(path, before)) : null;
+    if (stdout && /model/i.test(stdout)) {
+      const em = /with `?([a-z]+)`? effort/i.exec(stdout);
+      return {
+        ok: true, target: pane.target, confirmed: true, command: name ? 'model' : 'effort', said: stdout.split('\n')[0].replace(/`/g, ''),
+        model: row.label, effort: em ? em[1].toLowerCase() : (level ?? null), session_only: /this session only/i.test(stdout),
+      };
+    }
+    const screen = await screenOf(pane.target, 40);
+    if (!confirmed && switchConfirmOf(screen)) {
+      await tmux(['send-keys', '-t', pane.target, '1']);
+      confirmed = true;
+    }
+  }
+  return { ok: false, code: 'model_unconfirmed', target: pane.target, error: `pressed s on ${row.label} and the window gave no sign of switching within ${Math.round(PICKER_MS / 1000)}s` };
 }
 
 /**
@@ -2834,6 +3487,22 @@ function textOf(content) {
  * so nobody's prose is parsed — the worst case, a person whose entire message
  * is one tagged block, renders labeled as context: visible, never lost.
  */
+/**
+ * The words inside the window's own paste wrapper, with the wrapper gone.
+ *
+ * Since 2.1.29x a long paste is recorded as
+ * `<pasted_content id="4a60">…</pasted_content id="4a60">` — the operator's
+ * message, with tags on it that contextTagOf does not match (the tag carries
+ * an attribute, and the closing one does too) — so the floor drew the tags
+ * as the operator's words. Every pair is unwrapped, by its id, wherever it
+ * stands in the block; the wrapper is the window's, the words are the
+ * person's. What is sent from the floor avoids the wrapper altogether now
+ * (wouldWrap / typeInto); this is for what was pasted by hand.
+ */
+export function unwrapPaste(s) {
+  return String(s ?? '').replace(/<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content id="\1">/g, '$2');
+}
+
 function contextTagOf(s) {
   const m = /^\s*<([A-Za-z][\w-]*)>[\s\S]*<\/[A-Za-z][\w-]*>\s*$/.exec(s);
   return m ? m[1] : null;
@@ -2901,9 +3570,14 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
       if (text.trim()) turns.push({ role: 'user', text, at, uuid });
       human = [];
     };
-    for (const s of blocks) {
+    for (const raw of blocks) {
+      // The wrapper the window puts round a long paste is not the person's
+      // words, and the words inside it are — see unwrapPaste.
+      const s = unwrapPaste(raw);
       const tag = contextTagOf(s);
-      if (tag) { flush(); turns.push({ role: 'context', text: s.trim(), tool_name: tag, at, uuid }); }
+      // A command's stdout carries the SGR codes the window printed it with
+      // ("\u001b[2mCompacted…"); a context line is read, not rendered.
+      if (tag) { flush(); turns.push({ role: 'context', text: s.replace(SGR, '').trim(), tool_name: tag, at, uuid }); }
       else human.push(s);
     }
     flush();
@@ -2956,6 +3630,20 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
       continue;
     }
 
+    // The boundary Claude Code writes when it compacts: a system record, with
+    // how much and how long in compactMetadata. Filed as a context line in
+    // the compaction's own terms, so the floor can say what happened where
+    // it happened; the state while it ran is the hooks' (PreCompact /
+    // PostCompact), not this record's — it is written only at the end.
+    if (d.type === 'system' && d.subtype === 'compact_boundary' && !via) {
+      const m = d.compactMetadata ?? {};
+      const n = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString('en-US') : null);
+      const secs = Number.isFinite(Number(m.durationMs)) ? `${(Number(m.durationMs) / 1000).toFixed(1)} s` : null;
+      const text = `Conversation compacted${m.trigger ? ` (${m.trigger})` : ''}` +
+        (n(m.preTokens) && n(m.postTokens) ? `: ${n(m.preTokens)} → ${n(m.postTokens)} tokens` : '') + (secs ? ` in ${secs}` : '');
+      turns.push({ role: 'context', text, tool_name: 'compact', at: d.timestamp ?? null, uuid: d.uuid ?? null });
+      continue;
+    }
     if (d.type !== 'user' && d.type !== 'assistant') continue;
     // Sidechain is a subagent's own conversation. In the session's transcript
     // it is skipped: it belongs inside the tool call that owns it, not beside
@@ -2976,11 +3664,32 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
       // Agent tool line that spawned it — and its tool results. Neither is a
       // person speaking, so neither is a turn.
       if (via) continue;
+      // The summary a compaction leaves behind — "This session is being
+      // continued from a previous conversation…", 5–19k characters — is a
+      // user record by shape and nobody's words by any other measure. It
+      // used to be drawn as "you:" (issue #15). A system record, labeled, for
+      // the page to draw collapsed.
+      if (d.isCompactSummary) {
+        const text = textOf(d.message?.content);
+        if (text.trim()) turns.push({ role: 'context', text, tool_name: 'compact-summary', at, uuid });
+        continue;
+      }
       // A user record is not all the operator — see personTurns.
       personTurns(blocksOf(d.message?.content), at, uuid);
       continue;
     }
     const content = d.message?.content;
+    // Not the agent either: the record Claude Code writes when a turn ends in
+    // an API error is an assistant record flagged isApiErrorMessage with
+    // model "<synthetic>" — measured on an auto-compact that thrashed, whose
+    // text ("Autocompact is thrashing: …") the floor had drawn as the agent's
+    // own words beside an error saying nothing. Its own role, so the desk
+    // reads it as what it is.
+    if (d.isApiErrorMessage) {
+      const text = textOf(content);
+      if (text.trim()) turns.push({ role: 'error', text, at, uuid, ...(via ? { via } : {}) });
+      continue;
+    }
     // What the agent thought before it spoke — Claude Code's thinking blocks,
     // which the window draws in dim text ahead of each step. On 2.1.258 they
     // are a sentence or two of narration ("I'll leave the console checkboxes
@@ -2994,7 +3703,12 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
       turns.push({ role: 'thinking', text: block.thinking, at, uuid, ...(via ? { via } : {}) });
     }
     const text = textOf(content);
-    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid, ...(via ? { via } : {}) });
+    // Every assistant record names the model that wrote it. Carried on the
+    // turn so the desk can follow a mid-session /model — the session's model
+    // column is otherwise written once, at SessionStart (issue #10).
+    const model = typeof d.message?.model === 'string' && d.message.model && d.message.model !== '<synthetic>' ? d.message.model : null;
+    if (text.trim()) turns.push({ role: 'assistant', text, at, uuid, ...(model ? { model } : {}), ...(via ? { via } : {}) });
+    else if (model && !via) turns.push({ role: 'model', text: '', model, at, uuid });
     for (const block of Array.isArray(content) ? content : []) {
       if (block?.type !== 'tool_use') continue;
       turns.push({ role: 'tool', text: '', tool_name: block.name ?? 'tool', tool_input: reduceToolInput(block.input), at, uuid, ...(via ? { via } : {}) });

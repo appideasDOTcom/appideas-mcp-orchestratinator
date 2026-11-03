@@ -313,6 +313,19 @@ export function openDb(path) {
   addColumn(db, 'agent_sessions', 'runner', 'TEXT');
   addColumn(db, 'agent_sessions', 'pid', 'INTEGER');
   addColumn(db, 'agent_sessions', 'parent_session', 'TEXT');
+  // What the floor's chat controls show (issues #10 and #15, 0.10.9). `effort`
+  // is the session's level as the hooks report it (`effort.level` on every
+  // tool-context event); `model_requested` / `effort_requested` are what the
+  // floor asked for and the window has not yet confirmed — set by the chat
+  // route, cleared by the hook or the host receipt that confirms it, so the
+  // page can show asked-for and confirmed apart. `compacting_since` /
+  // `compacting_trigger` are the window's PreCompact, cleared by PostCompact
+  // (and by the boundary the transcript writes, in case the hook never came).
+  addColumn(db, 'agent_sessions', 'effort', 'TEXT');
+  addColumn(db, 'agent_sessions', 'model_requested', 'TEXT');
+  addColumn(db, 'agent_sessions', 'effort_requested', 'TEXT');
+  addColumn(db, 'agent_sessions', 'compacting_since', 'TEXT');
+  addColumn(db, 'agent_sessions', 'compacting_trigger', 'TEXT');
   // A desk used to have a *driver* — 'floor' or 'terminal' — because a window
   // somebody had open was believed to own its session outright, so the host had
   // to stand aside and the floor became a copy-and-paste box. That was never
@@ -875,15 +888,16 @@ export function makeStore(db) {
       // common fields, and a Stop must not blank the model a SessionStart knew.
       `INSERT INTO agent_sessions
          (session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch,
-          runner, pid, parent_session, updated_at)
+          runner, pid, parent_session, effort, updated_at)
        VALUES (@session_id, @channel, @agent, @cwd, @transcript, @model, @permission_mode,
-               @git_branch, @runner, @pid, @parent_session, datetime('now'))
+               @git_branch, @runner, @pid, @parent_session, @effort, datetime('now'))
        ON CONFLICT(session_id) DO UPDATE SET
          channel         = excluded.channel,
          agent           = excluded.agent,
          cwd             = COALESCE(excluded.cwd, cwd),
          transcript      = COALESCE(excluded.transcript, transcript),
          model           = COALESCE(excluded.model, model),
+         effort          = COALESCE(excluded.effort, effort),
          permission_mode = COALESCE(excluded.permission_mode, permission_mode),
          git_branch      = COALESCE(excluded.git_branch, git_branch),
          runner          = COALESCE(excluded.runner, runner),
@@ -920,6 +934,65 @@ export function makeStore(db) {
               updated_at = datetime('now')
         WHERE session_id = @session_id`
     ),
+    // The chat controls' columns — see the migration above for what each is.
+    // Asked-for is set by desk (the newest session is the one the panel shows),
+    // confirmed by session (the hook names it) or by desk (a host receipt does
+    // not).
+    setRequested: db.prepare(
+      `UPDATE agent_sessions
+          SET model_requested  = CASE WHEN @model IS NULL THEN model_requested ELSE @model END,
+              effort_requested = CASE WHEN @effort IS NULL THEN effort_requested ELSE @effort END,
+              updated_at = datetime('now')
+        WHERE session_id = (SELECT session_id FROM agent_sessions
+                             WHERE channel = @channel AND agent = @agent
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
+    ),
+    // By session, for the route: the window's session is the one the host
+    // drives (the roster's, on the hosted desk), and with two live sessions on
+    // one desk "the newest live" was the other one (QA, PR #32 finding 1).
+    setRequestedFor: db.prepare(
+      `UPDATE agent_sessions
+          SET model_requested  = CASE WHEN @model IS NULL THEN model_requested ELSE @model END,
+              effort_requested = CASE WHEN @effort IS NULL THEN effort_requested ELSE @effort END,
+              updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    setModel: db.prepare(
+      `UPDATE agent_sessions
+          SET model = @model, model_requested = NULL, updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    setEffort: db.prepare(
+      `UPDATE agent_sessions
+          SET effort = @effort, effort_requested = NULL, updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    setDeskEffort: db.prepare(
+      `UPDATE agent_sessions
+          SET effort = @effort, effort_requested = NULL, updated_at = datetime('now')
+        WHERE session_id = (SELECT session_id FROM agent_sessions
+                             WHERE channel = @channel AND agent = @agent
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
+    ),
+    setCompacting: db.prepare(
+      `UPDATE agent_sessions
+          SET compacting_since = datetime('now'), compacting_trigger = @trigger, updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    clearCompacting: db.prepare(
+      `UPDATE agent_sessions
+          SET compacting_since = NULL, compacting_trigger = NULL, updated_at = datetime('now')
+        WHERE session_id = @session_id`
+    ),
+    // No touch of updated_at: clearing a flag on an older row must not make
+    // it the desk's newest — measured on the probe, a stale flag on the
+    // conversation before a /clear was cleared and the panel flipped to that
+    // conversation for a second.
+    clearDeskCompacting: db.prepare(
+      `UPDATE agent_sessions
+          SET compacting_since = NULL, compacting_trigger = NULL
+        WHERE channel = @channel AND agent = @agent AND compacting_since IS NOT NULL`
+    ),
     // Raise and clear addressed by *desk* rather than by session, for callers
     // that are not the hook — the operator answering a prompt, and the host
     // reporting that an answer never landed.
@@ -948,7 +1021,7 @@ export function makeStore(db) {
               updated_at       = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions
                              WHERE channel = @channel AND agent = @agent
-                             ORDER BY updated_at DESC LIMIT 1)`
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     clearDeskAwaiting: db.prepare(
       `UPDATE agent_sessions
@@ -956,13 +1029,30 @@ export function makeStore(db) {
               updated_at = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions
                              WHERE channel = @channel AND agent = @agent
-                             ORDER BY updated_at DESC LIMIT 1)`
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     endSession: db.prepare(
       `UPDATE agent_sessions
           SET ended_at = datetime('now'), awaiting_kind = NULL, awaiting_message = NULL,
-              awaiting_since = NULL, updated_at = datetime('now')
+              awaiting_since = NULL, compacting_since = NULL, compacting_trigger = NULL,
+              updated_at = datetime('now')
         WHERE session_id = @session_id`
+    ),
+    // The desk's last ended session: what a /clear carries forward. The
+    // window keeps its process, and with it the model and effort it had
+    // (measured on the probe: the first reply after /clear named the model
+    // picked for the session before it).
+    lastEndedSession: db.prepare(
+      `SELECT session_id, model, effort FROM agent_sessions
+        WHERE channel = ? AND agent = ? AND ended_at IS NOT NULL
+        ORDER BY ended_at DESC, updated_at DESC LIMIT 1`
+    ),
+    setDeskModel: db.prepare(
+      `UPDATE agent_sessions
+          SET model = @model, model_requested = NULL, updated_at = datetime('now')
+        WHERE session_id = (SELECT session_id FROM agent_sessions
+                             WHERE channel = @channel AND agent = @agent
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     insertTurn: db.prepare(
       `INSERT INTO turns (channel, agent, session_id, role, text, tool_name, via)
@@ -985,10 +1075,16 @@ export function makeStore(db) {
     ),
     floorSessions: db.prepare(
       `SELECT session_id, channel, agent, cwd, transcript, model, permission_mode, git_branch,
-              runner, pid, parent_session,
+              runner, pid, parent_session, effort, model_requested, effort_requested,
+              compacting_since, compacting_trigger,
               awaiting_kind, awaiting_message, awaiting_since, ended_at, started_at, updated_at
          FROM agent_sessions
-        ORDER BY updated_at DESC`
+        -- A live session outranks an ended one whatever the clock says. A
+        -- /clear ends one session and starts the next in the same second,
+        -- and on updated_at alone the two tied — the board showed the old
+        -- row's compacting flag or the new row's empty model depending on
+        -- which won (costmo, qa-probe/scratch, 2026-11-03).
+        ORDER BY (ended_at IS NULL) DESC, updated_at DESC`
     ),
     getSession: db.prepare(
       `SELECT session_id, channel, agent, cwd, runner, pid, parent_session,
@@ -1549,8 +1645,23 @@ export function makeStore(db) {
         runner: s.runner ?? null,
         pid: s.pid ?? null,
         parent_session: s.parent_session ?? null,
+        effort: s.effort ?? null,
       }).changes,
     getSession: (sessionId) => q.getSession.get(sessionId) ?? null,
+    // The chat controls' columns (issues #10 / #15). Asked-for by desk,
+    // confirmed by session or by desk — see the statements.
+    setRequested: (channel, agent, { model = null, effort = null } = {}) =>
+      q.setRequested.run({ channel, agent, model, effort }).changes,
+    setRequestedFor: (sessionId, { model = null, effort = null } = {}) =>
+      q.setRequestedFor.run({ session_id: sessionId, model, effort }).changes,
+    setModel: (sessionId, model) => q.setModel.run({ session_id: sessionId, model }).changes,
+    setEffort: (sessionId, effort) => q.setEffort.run({ session_id: sessionId, effort }).changes,
+    setDeskEffort: (channel, agent, effort) => q.setDeskEffort.run({ channel, agent, effort }).changes,
+    setDeskModel: (channel, agent, model) => q.setDeskModel.run({ channel, agent, model }).changes,
+    lastEndedSession: (channel, agent) => q.lastEndedSession.get(channel, agent) ?? null,
+    setCompacting: (sessionId, trigger = null) => q.setCompacting.run({ session_id: sessionId, trigger }).changes,
+    clearCompacting: (sessionId) => q.clearCompacting.run({ session_id: sessionId }).changes,
+    clearDeskCompacting: (channel, agent) => q.clearDeskCompacting.run({ channel, agent }).changes,
     liveHookSessions: (channel, agent) => q.liveHookSessions.all(channel, agent),
     /** A conversation's session ids, newest first: the session and the ones it was forked from. */
     sessionChain: (sessionId) => {

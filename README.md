@@ -289,6 +289,15 @@ start with Claude Code's session survey (*"How is Claude doing this session?"*)
 switched off: nobody is sitting at them to answer it, and it looked like a
 desk stuck on a question the floor could not see.
 
+The composer takes a slash command too: `/clear`, `/compact`, `/btw <question>`
+and anything else Claude Code knows, each confirmed on the window's own
+receipt and said in its own terms — a new conversation started, compacting,
+answered in the window (with the answer). The model and effort controls on
+the panel's foot change **this session only**, through the window's own
+picker; your machine-wide default is never touched from the floor. While a
+desk compacts, the floor says so, and a message sent meanwhile is held and
+read when the compaction ends.
+
 **8. Take a conversation back whenever you want** — for any feature the floor
 chat doesn't provide. **Open in VS Code** moves it to your editor with everything
 you did from the floor already in it; **Open in Claude** lands a terminal on the
