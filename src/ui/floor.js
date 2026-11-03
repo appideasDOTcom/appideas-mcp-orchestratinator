@@ -3186,7 +3186,12 @@
     // `ui.sending` stands for it, so it is drawn from the server's note
     // instead: the same bubble, already queued, and gone the moment the note
     // is — a turn retires it there, exactly as a turn retires the others here.
-    if (ui.delivery && !ui.sending.some((p) => deliveredNow(p.text))) {
+    // Not for a command that is done: its bubble would read as a message
+    // still waiting to go, with the receipt as its caption and "you" over it
+    // (costmo, 2026-11-03: "an artifact outlined in white saying /model
+    // opus"). What was typed and what happened are one line labeled `host`
+    // in the conversation already; the bubble has nothing left to say.
+    if (ui.delivery && ui.delivery.state !== 'done' && !ui.sending.some((p) => deliveredNow(p.text))) {
       box.insertBefore(pendingNode(ui.delivery.text, ui.delivery, false), partialNode);
     }
 
@@ -3439,8 +3444,9 @@
         // message already delivered is the whole complaint this answers.
         ui.delivery = ev.delivery ?? null;
         // A command's receipt ends its send outright: there is no user turn
-        // coming to retire the bubble, so the note is the bubble from here
-        // (drawn from ui.delivery) and the grace clock never runs on it.
+        // coming to retire the bubble, and the bubble is not kept — the
+        // host's line in the conversation says what was typed and what
+        // happened — so the grace clock never runs on it.
         if (ui.delivery?.state === 'done') ui.sending = ui.sending.filter((p) => !squash(ui.delivery.text).includes(squash(p.text)));
         renderPanel();
       } else if (ev.type === 'sessions') {

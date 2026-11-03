@@ -461,7 +461,7 @@ try {
     return rows.some((r) => r.via === '/btw') ? rows : null;
   }, 15000);
   eq(btwRows?.find((r) => r.via === '/btw')?.text, '42', "the answer is read off the window's overlay and is the agent's, labeled by the command");
-  assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === 'answered in the window'), 'the desk says where the answer went');
+  assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/btw what is 6*7? — answered in the window'), 'the desk says what was typed and where the answer went, as one line labeled host');
   assert(!(btwRows ?? []).some((r) => r.role === 'error'), 'and no error turn says it did not confirm');
 
   console.log('\nreading the conversation back');

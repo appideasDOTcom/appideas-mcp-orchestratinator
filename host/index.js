@@ -468,8 +468,11 @@ class Desk {
     } else if (r.command && r.said) {
       // A command's receipt, in its own terms — a new conversation started,
       // compacting, the model set, answered in the window. Said on the desk
-      // as a line labeled host, and to the composer as the end of its wait.
-      this.told(r.said, r.session_id ?? id);
+      // as one line labeled host carrying what was typed and what happened
+      // ("/model opus — Set model to Opus 5.5 for this session only"): the
+      // page draws no bubble for a done command, so this line is the record
+      // of it. And to the composer, as the end of its wait.
+      this.told(`${text.trim()} — ${r.said}`, r.session_id ?? id);
       this.host.emit({
         type: 'receipt', channel: this.channel, agent: this.agent, command: r.command, said: r.said, text,
         session_id: r.session_id ?? null, model: r.model ?? null, effort: r.effort ?? null, compacting: !!r.compacting,
