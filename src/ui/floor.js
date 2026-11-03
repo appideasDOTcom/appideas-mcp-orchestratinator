@@ -2780,13 +2780,17 @@
         ...(!s.model ? ['<option value="">model…</option>'] : []),
         ...MODEL_CHOICES.map((m) => `<option value="${m.value}">${m.label}</option>`),
       ].join('');
-      modelSel.value = s.model ? fam : '';
+      // While a change is asked for, the select shows it rather than snapping
+      // back to the old value until the window confirms; the asked-for note
+      // beside it says which it is.
+      const askedFam = s.model_requested ? modelFamily(s.model_requested) : null;
+      modelSel.value = askedFam && MODEL_CHOICES.some((m) => m.value === askedFam) ? askedFam : s.model ? fam : '';
       modelSel.disabled = !canChat;
       effortSel.innerHTML = [
         ...(!s.effort ? ['<option value="">effort…</option>'] : []),
         ...EFFORT_LEVELS.map((l) => `<option value="${l}">${l}</option>`),
       ].join('');
-      effortSel.value = s.effort ?? '';
+      effortSel.value = s.effort_requested ?? s.effort ?? '';
       effortSel.disabled = !canChat;
       const asked = wrap.querySelector('.p-asked');
       const askedText = [

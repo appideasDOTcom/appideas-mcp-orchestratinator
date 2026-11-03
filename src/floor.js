@@ -1037,6 +1037,12 @@ export function ingestHookEvent(store, body, live = null) {
   // Ordered so the clear happens before anything that might set it again.
   if (CLEARS_AWAITING.has(event)) {
     store.clearAwaiting(sessionId);
+    // A prompt, a reply, a tool: none of these happens while the window
+    // compacts, so any of them ends a compaction the hooks never finished —
+    // a window on an older plugin sends no PostCompact at all, and a
+    // /compact that compacted nothing writes no boundary (measured on
+    // qa-probe/scratch, 2026-11-03: a flag that stood for six minutes).
+    if (event !== 'SessionStart' && store.clearCompacting(sessionId)) live?.publish(key, { type: 'compacting', compacting: null });
     // A prompt that was open is closed by work happening, whether it was
     // answered from the floor or by the person sitting at the window.
     if (live?.pending.has(key)) {
@@ -1059,6 +1065,16 @@ export function ingestHookEvent(store, body, live = null) {
       if (source === 'compact') {
         store.clearCompacting(sessionId);
         live?.publish(key, { type: 'compacting', compacting: null });
+      }
+      // A /clear keeps the window's process, and with it the model and
+      // effort the session before it had — the SessionStart it fires
+      // carries neither, and the floor showed "model…" / "effort…" until the
+      // next reply (costmo, 2026-11-03). Carried forward from the row the
+      // SessionEnd just closed, unless this start names its own.
+      if (source === 'clear') {
+        const prev = store.lastEndedSession(channel, agent);
+        if (prev?.model && !str(body.model)) store.setModel(sessionId, prev.model);
+        if (prev?.effort && !str(body.effort_level)) store.setEffort(sessionId, prev.effort);
       }
       break;
 
@@ -1736,6 +1752,9 @@ function applyHostEvent(store, live, hostId, ev) {
       // StopFailure uses — one role for the desk to read either by.
       else if (role === 'user' || role === 'assistant' || role === 'thinking' || role === 'error') turn(role, ev.text, null, via);
       else return false;
+      // No turn is written while the window compacts, so a turn is the end of
+      // any compaction still on the desk — the belt to the boundary's braces.
+      if (role !== 'context' && store.clearDeskCompacting(channel, agent)) live.publish(key, { type: 'compacting', compacting: null });
       // A command's receipt note stands until the operator says the next
       // thing. Not until any turn: the command's own lines — the host's
       // sentence, a /btw answer, a /cost screen — arrive in the same second
@@ -1826,13 +1845,21 @@ function applyHostEvent(store, live, hostId, ev) {
         // either way. Effort has no hook of its own: the picker's word, and
         // the next Stop's effort.level, are its only confirmations.
         if (str(ev.effort)) store.setDeskEffort(channel, agent, str(ev.effort));
-        if (str(ev.model)) store.setRequested(channel, agent, { model: '' });
+        // The picker's own words ("Opus 5.5") stand as the model until a hook
+        // or the next reply names the id — a window on the older plugin
+        // sends no PostModelSwitch, and the select snapped back to the
+        // previous model until the reply came (costmo, 2026-11-03).
+        if (str(ev.model)) store.setDeskModel(channel, agent, str(ev.model));
         live.publish(key, { type: 'session', session_id: sid });
       }
       if (ev.compacting) {
         store.setCompacting(sid, 'manual');
         state('working');
         live.publish(key, { type: 'compacting', compacting: { since: now, trigger: 'manual' } });
+      } else if (command === 'compact') {
+        // The end the host watched for: cleared whether the window compacted
+        // or had nothing to compact — the sentence says which.
+        if (store.clearDeskCompacting(channel, agent)) live.publish(key, { type: 'compacting', compacting: null });
       }
       const text = str(ev.text) ?? `/${command}`;
       live.delivery.set(key, { state: 'done', text, said: str(ev.said), command, at: now });

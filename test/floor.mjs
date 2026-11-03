@@ -1183,6 +1183,28 @@ try {
   sw = await sessOf('switcher');
   eq([sw?.model, sw?.model_requested], ['claude-sonnet-5-5', null], 'PostModelSwitch: confirmed, and the asked-for cleared — the header follows a mid-session change');
 
+  // A /clear: the SessionEnd and the new SessionStart land in the same second,
+  // and the board must show the live session, with the model and effort the
+  // window still has — measured on qa-probe/scratch (2026-11-03): on
+  // updated_at alone the two rows tied, and the floor showed the ended row's
+  // compacting flag or the new row's empty model, depending on which won.
+  await post(ev('clearer', 's-cl-1', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  await post(ev('clearer', 's-cl-1', 'Stop', { effort_level: 'medium' }));
+  await post(ev('clearer', 's-cl-1', 'PreCompact', { trigger: 'manual' }));
+  await post(ev('clearer', 's-cl-1', 'SessionEnd', { reason: 'clear' }));
+  await post(ev('clearer', 's-cl-2', 'SessionStart', { source: 'clear' }));
+  let cl = deskOf(await floor(), 'clearer');
+  eq(cl?.session?.session_id, 's-cl-2', 'after a /clear the desk shows the new session, not the one that ended in the same second');
+  eq([cl?.session?.model, cl?.session?.effort], ['claude-opus-5-5', 'medium'], 'with the model and effort the window still has, carried from the session it closed');
+  eq(cl?.session?.compacting ?? null, null, 'and no compacting flag — the ended session took its own with it');
+  // A compaction the hooks never finish — an older plugin sends no
+  // PostCompact, a /compact that compacts nothing writes no boundary — ends
+  // on the next thing the window does.
+  await post(ev('clearer', 's-cl-2', 'PreCompact', { trigger: 'manual' }));
+  eq((await sessOf('clearer'))?.compacting?.trigger, 'manual', 'a compaction begins');
+  await post(ev('clearer', 's-cl-2', 'UserPromptSubmit', { message: 'next' }));
+  eq((await sessOf('clearer'))?.compacting ?? null, null, 'and a prompt submitted ends it: nothing is typed while the window compacts');
+
   // The chat route: the floor's commands, and what it refuses.
   await register({ channel: CH, agent: 'typist', cwd: '/repo/typist', window: '@14' });
   await hostEvents([{ type: 'session', channel: CH, agent: 'typist', session_id: 's-typist', cwd: '/repo/typist' }]);
@@ -1208,6 +1230,7 @@ try {
   eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 for this session only with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
   let ty = await sessOf('typist');
   eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "the picker's receipt confirms the effort and clears both asked-fors");
+  eq(ty?.model, 'Haiku 5.5', "and the picker's own words stand as the model until a hook or a reply names the id — the select follows at once");
   eq((await noteOf('typist'))?.state, 'done', 'and the composer\'s note says the command is done');
   eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 for this session only with xhigh effort', 'in the window\'s words');
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 for this session only with xhigh effort', tool_name: 'host' }]);
@@ -1226,6 +1249,12 @@ try {
   eq((await sessOf('typist'))?.compacting?.trigger, 'manual', 'a /compact receipt that says the window is compacting puts the desk in that state');
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Conversation compacted (manual): 1,000 → 100 tokens in 1.5 s', tool_name: 'compact' }]);
   eq((await sessOf('typist'))?.compacting ?? null, null, 'and the boundary the transcript writes ends it');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'compacting the conversation', text: '/compact', compacting: true }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'assistant', text: 'back from it' }]);
+  eq((await sessOf('typist'))?.compacting ?? null, null, 'so does any turn the host relays after it — no turn is written while the window compacts');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'compacting the conversation', text: '/compact', compacting: true }]);
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'compact', said: 'no compaction ran', text: '/compact', compacting: false, compacted: false }]);
+  eq((await sessOf('typist'))?.compacting ?? null, null, "and so does the end the host watched for, whether or not anything was compacted — a /compact with nothing to compact used to leave the desk compacting for good");
   const errRow = { type: 'turn', channel: CH, agent: 'typist', role: 'error', text: 'Autocompact is thrashing' };
   eq((await hostEvents([errRow])).applied, 1, "the record Claude Code writes when a turn ends in an error reaches the floor from the host");
   eq(((await turns('typist')).rows ?? []).at(-1)?.role, 'error', 'as an error, not as the agent\'s words');

@@ -945,7 +945,7 @@ export function makeStore(db) {
               updated_at = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions
                              WHERE channel = @channel AND agent = @agent
-                             ORDER BY updated_at DESC LIMIT 1)`
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     setModel: db.prepare(
       `UPDATE agent_sessions
@@ -962,7 +962,7 @@ export function makeStore(db) {
           SET effort = @effort, effort_requested = NULL, updated_at = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions
                              WHERE channel = @channel AND agent = @agent
-                             ORDER BY updated_at DESC LIMIT 1)`
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     setCompacting: db.prepare(
       `UPDATE agent_sessions
@@ -1011,7 +1011,7 @@ export function makeStore(db) {
               updated_at       = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions
                              WHERE channel = @channel AND agent = @agent
-                             ORDER BY updated_at DESC LIMIT 1)`
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     clearDeskAwaiting: db.prepare(
       `UPDATE agent_sessions
@@ -1019,13 +1019,30 @@ export function makeStore(db) {
               updated_at = datetime('now')
         WHERE session_id = (SELECT session_id FROM agent_sessions
                              WHERE channel = @channel AND agent = @agent
-                             ORDER BY updated_at DESC LIMIT 1)`
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     endSession: db.prepare(
       `UPDATE agent_sessions
           SET ended_at = datetime('now'), awaiting_kind = NULL, awaiting_message = NULL,
-              awaiting_since = NULL, updated_at = datetime('now')
+              awaiting_since = NULL, compacting_since = NULL, compacting_trigger = NULL,
+              updated_at = datetime('now')
         WHERE session_id = @session_id`
+    ),
+    // The desk's last ended session: what a /clear carries forward. The
+    // window keeps its process, and with it the model and effort it had
+    // (measured on the probe: the first reply after /clear named the model
+    // picked for the session before it).
+    lastEndedSession: db.prepare(
+      `SELECT session_id, model, effort FROM agent_sessions
+        WHERE channel = ? AND agent = ? AND ended_at IS NOT NULL
+        ORDER BY ended_at DESC, updated_at DESC LIMIT 1`
+    ),
+    setDeskModel: db.prepare(
+      `UPDATE agent_sessions
+          SET model = @model, model_requested = NULL, updated_at = datetime('now')
+        WHERE session_id = (SELECT session_id FROM agent_sessions
+                             WHERE channel = @channel AND agent = @agent
+                             ORDER BY (ended_at IS NULL) DESC, updated_at DESC LIMIT 1)`
     ),
     insertTurn: db.prepare(
       `INSERT INTO turns (channel, agent, session_id, role, text, tool_name, via)
@@ -1052,7 +1069,12 @@ export function makeStore(db) {
               compacting_since, compacting_trigger,
               awaiting_kind, awaiting_message, awaiting_since, ended_at, started_at, updated_at
          FROM agent_sessions
-        ORDER BY updated_at DESC`
+        -- A live session outranks an ended one whatever the clock says. A
+        -- /clear ends one session and starts the next in the same second,
+        -- and on updated_at alone the two tied — the board showed the old
+        -- row's compacting flag or the new row's empty model depending on
+        -- which won (costmo, qa-probe/scratch, 2026-11-03).
+        ORDER BY (ended_at IS NULL) DESC, updated_at DESC`
     ),
     getSession: db.prepare(
       `SELECT session_id, channel, agent, cwd, runner, pid, parent_session,
@@ -1623,6 +1645,8 @@ export function makeStore(db) {
     setModel: (sessionId, model) => q.setModel.run({ session_id: sessionId, model }).changes,
     setEffort: (sessionId, effort) => q.setEffort.run({ session_id: sessionId, effort }).changes,
     setDeskEffort: (channel, agent, effort) => q.setDeskEffort.run({ channel, agent, effort }).changes,
+    setDeskModel: (channel, agent, model) => q.setDeskModel.run({ channel, agent, model }).changes,
+    lastEndedSession: (channel, agent) => q.lastEndedSession.get(channel, agent) ?? null,
     setCompacting: (sessionId, trigger = null) => q.setCompacting.run({ session_id: sessionId, trigger }).changes,
     clearCompacting: (sessionId) => q.clearCompacting.run({ session_id: sessionId }).changes,
     clearDeskCompacting: (channel, agent) => q.clearDeskCompacting.run({ channel, agent }).changes,

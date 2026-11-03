@@ -1957,6 +1957,46 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null };
 }
 
+/** How long a compaction is watched for its end. Real ones run 10–150 s. */
+const COMPACT_WATCH_MS = Number(process.env.ORCH_COMPACT_WATCH_MS ?? 300_000);
+
+/**
+ * Wait for a compaction the window has started to end, and say how.
+ *
+ * The /compact receipt is the spinner showing; this is the other half. A
+ * /compact on a session with nothing to compact shows the spinner for a
+ * moment and writes no boundary and no summary (qa-probe/scratch, 2026-11-03
+ * 14:41: the command record and nothing else), so a desk that went by the
+ * start alone said "compacting" until something else happened. The end is
+ * the spinner gone from above the composer; what happened is the window's
+ * own stdout line for the command — "Compacted (ctrl+o to see full
+ * summary)…" or its error — or, with no such line, the boundary record.
+ */
+export async function awaitCompaction(cwd, { path = null, before = 0 } = {}) {
+  const pane = await paneFor(canonical(cwd));
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+  const stop = Date.now() + COMPACT_WATCH_MS;
+  let seen = false;
+  while (Date.now() < stop) {
+    const running = compactingOf(await screenOf(pane.target));
+    if (running) seen = true;
+    else if (seen || Date.now() > stop - COMPACT_WATCH_MS + 3000) break;
+    await sleep(500);
+  }
+  // A moment for the record the window writes as the spinner goes.
+  await sleep(600);
+  const records = path ? await recordsSince(path, before) : [];
+  const stdout = stdoutOf(records);
+  const boundary = records.find((d) => d.type === 'system' && d.subtype === 'compact_boundary');
+  const n = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString('en-US') : null);
+  if (stdout) return { ok: true, said: stdout.split('\n')[0], compacted: /^Compacted/i.test(stdout) || !!boundary };
+  if (boundary) {
+    const m = boundary.compactMetadata ?? {};
+    return { ok: true, compacted: true, said: `compacted the conversation${n(m.preTokens) && n(m.postTokens) ? `: ${n(m.preTokens)} → ${n(m.postTokens)} tokens` : ''}` };
+  }
+  return { ok: true, compacted: false, said: seen ? 'the compaction ended without a record of what it did' : 'no compaction ran' };
+}
+
 /** How long the picker is given to appear, and a switch to be confirmed. */
 const PICKER_MS = Number(process.env.ORCH_PICKER_MS ?? 8000);
 

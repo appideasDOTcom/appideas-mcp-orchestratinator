@@ -1220,7 +1220,7 @@ async function main() {
       // inside it on a loaded machine (2.5 s was not, in a full run), short
       // enough to wait out. A real compaction runs 10–150 s.
       `    compactUntil = Date.now() + 6000;`,
-      `    setTimeout(() => { rec({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', compactMetadata: { trigger: 'manual', preTokens: 1000, postTokens: 100, durationMs: 6000 } }); if (pending?.held) { rec({ type: 'user', message: { role: 'user', content: pending.held } }); pending = null; } draw(); }, 6100);`,
+      `    setTimeout(() => { rec({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', compactMetadata: { trigger: 'manual', preTokens: 1000, postTokens: 100, durationMs: 6000 } }); rec({ type: 'user', message: { role: 'user', content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' } }); if (pending?.held) { rec({ type: 'user', message: { role: 'user', content: pending.held } }); pending = null; } draw(); }, 6100);`,
       `    return draw();`,
       `  }`,
       `  if (Date.now() < compactUntil) { pending = { held: text }; rec({ type: 'queue-operation', operation: 'enqueue' }); return draw(); }`,
@@ -1326,12 +1326,15 @@ async function main() {
 
     // /compact: confirmed on the command's record while the window compacts,
     // and a message behind it is said to be held — not timed out.
+    const compactMark = readFileSync(cpJsonl).length;
     const comp = await W.send(CP_DIR, '/compact');
     assert(comp.ok && comp.command === 'compact', `/compact is confirmed${comp.ok ? '' : ` — ${comp.error}`}`);
     eq([comp.said, comp.compacting], ['compacting the conversation', true], 'as compacting, since the window is');
     const behind = await W.send(CP_DIR, 'sent while it compacts');
     assert(behind.ok && behind.queued, `a message sent into a compaction is taken${behind.ok ? '' : ` — ${behind.error}`}`);
     eq(behind.held, 'compacting', 'and said to be held by the compaction, with no twenty-second wait');
+    const compactEnd = await W.awaitCompaction(CP_DIR, { path: cpJsonl, before: compactMark });
+    eq([compactEnd.ok, compactEnd.compacted, compactEnd.said], [true, true, 'Compacted (ctrl+o to see full summary)'], "the compaction's end is watched for and said in the window's own words");
     assert(await until(() => cpRecords().some((r) => r.type === 'user' && r.message?.content === 'sent while it compacts'), 10000),
       'and the window reads it when the compaction ends');
 
