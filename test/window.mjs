@@ -33,6 +33,9 @@ process.env.ORCH_HOST_CLAUDE = `${FIX}/stand-in.sh`;
 const CLAUDE_HOME = `${FIX}/claude`;
 process.env.ORCH_CLAUDE_HOME = CLAUDE_HOME;
 process.env.ORCH_LAND_TIMEOUT_MS = '4000';
+// A /btw answer is left on the screen for a moment before the host closes the
+// overlay; the moment is three seconds on a real desk and need not be here.
+process.env.ORCH_BTW_LINGER_MS = '300';
 
 let failures = 0;
 const assert = (cond, msg) => {
@@ -1071,6 +1074,266 @@ async function main() {
     // The old code waited ORCH_IDLE_TIMEOUT_MS — five minutes — before typing a
     // character. Anything near that is the wait having come back.
     assert(tookMs < 30_000, `and did not wait out the turn to do it — ${(tookMs / 1000).toFixed(1)}s`);
+
+    /* ── slash commands, the paste wrapper, and what the window draws ───────
+     * Issues #9, #10 and #15 (0.10.9). Every reader below was written against
+     * a capture of Claude Code 2.1.300 on a probe desk (2026-11-03), and the
+     * fixtures are those captures, trimmed. */
+    console.log('\n  what a message is: a command, or a paste the window would wrap');
+    eq(W.commandOf('/clear'), { name: 'clear', args: '' }, 'a bare slash word is a command');
+    eq(W.commandOf('/model sonnet'), { name: 'model', args: 'sonnet' }, 'with its argument');
+    eq(W.commandOf('  /btw what is 2+2? '), { name: 'btw', args: 'what is 2+2?' }, 'whitespace around it is not part of it');
+    eq(W.commandOf('/btw first\nsecond'), null, 'a message with a newline in it is a message, whatever its first character');
+    eq(W.commandOf('look at /tmp/x'), null, 'and so is a slash anywhere but first');
+    eq(W.commandOf(''), null, 'nothing is not a command');
+    eq(W.wouldWrap('a'.repeat(800)), false, '800 characters on one line are pasted as they are');
+    eq(W.wouldWrap('a'.repeat(801)), true, 'one more is wrapped in <pasted_content> (850 was, measured)');
+    eq(W.wouldWrap('one\ntwo\nthree'), false, 'three lines are not wrapped');
+    eq(W.wouldWrap('one\ntwo\nthree\nfour'), true, 'four are');
+    eq(W.unwrapPaste('<pasted_content id="4a60">\nhello there\n</pasted_content id="4a60">'), 'hello there',
+      'the wrapper the window puts round a long paste comes off, by its id');
+    eq(W.unwrapPaste('look:\n<pasted_content id="1">\nA\n</pasted_content id="1">\nand <pasted_content id="2">B</pasted_content id="2">'), 'look:\nA\nand B',
+      'every pair in a block, wherever it stands');
+    eq(W.unwrapPaste('<pasted_content id="1">\nA\n</pasted_content id="2">'), '<pasted_content id="1">\nA\n</pasted_content id="2">',
+      'and a pair whose ids differ is not a pair');
+
+    console.log('\n  the composer still holding the message — the one thing a retry may press Enter on');
+    const RULE2 = '─'.repeat(80);
+    const screenWith = (...rows) => [RULE2, ...rows, RULE2, '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+    eq(W.stillInComposer(screenWith('❯ ship it now'), 'ship it now'), true, 'the text in the box: still there');
+    eq(W.stillInComposer(screenWith('❯ ship it', '  now'), 'ship it now'), true, 'rewrapped across lines: still there');
+    eq(W.stillInComposer(screenWith('❯ [Pasted text #1 +39 lines]'), 'a long message'), true, 'a collapsed paste is the message under another name');
+    eq(W.stillInComposer(screenWith('❯ '), 'ship it now'), false, 'an empty box took it');
+    eq(W.stillInComposer(screenWith('❯ something else'), 'ship it now'), false, 'a box holding something else did too');
+    const PICKER = [
+      '▔'.repeat(80),
+      '   Select model',
+      '   Switch between Claude models. Your pick becomes the default for new sessions.',
+      '     1.  Default (recommended)  Fable 5.1',
+      '     2.  Opus 5.5               For complex work and everyday tasks',
+      '     3.  Fable 5.1              For your toughest challenges',
+      '   ❯ 4.  Sonnet 5.5 ✔           Most efficient for simpler tasks',
+      '     5.  Haiku 5.5              Fastest for quick answers',
+      '   ↓ 8.  Opus 5                 Best for everyday, complex tasks',
+      '      … +5 models',
+      '   ○ Low effort ←/→ to adjust',
+      '   Enter to set as default · s to use this session only · Esc to cancel',
+    ].join('\n');
+    eq(W.stillInComposer(PICKER, '/model'), false, 'a picker is not a composer: nothing is pressed into it');
+    eq(W.composerOf(PICKER), null, '(the box reader agrees)');
+
+    console.log('\n  the model picker, read off the pane');
+    const pickerRead = W.pickerOf(PICKER);
+    eq(pickerRead?.cursor, 4, 'the cursor row');
+    eq(pickerRead?.rows.map((r) => r.n), [1, 2, 3, 4, 5, 8], 'every numbered row, including one under the scroll mark');
+    eq(pickerRead?.rows.find((r) => r.n === 4), { n: 4, label: 'Sonnet 5.5', current: true, cursor: true, description: 'Most efficient for simpler tasks' }, 'the current row carries its tick, without it in the label');
+    eq(W.pickerOf(screenWith('❯ /model')), null, 'a composer is not a picker');
+    eq(W.pickerRowFor(pickerRead.rows, 'sonnet')?.n, 4, '"sonnet" is the Sonnet row');
+    eq(W.pickerRowFor(pickerRead.rows, 'claude-haiku-5-5')?.n, 5, 'an id names its row');
+    eq(W.pickerRowFor(pickerRead.rows, 'Opus 5')?.n, 8, 'a versioned name is exact about the version');
+    eq(W.pickerRowFor(pickerRead.rows, 'opus')?.n, 2, 'and an unversioned one takes the first of the family');
+    eq(W.pickerRowFor(pickerRead.rows, 'fable')?.n, 3, 'never the Default row, which is a default under whatever name');
+    eq(W.pickerRowFor(pickerRead.rows, 'gpt'), null, 'a model the picker does not offer is nothing');
+    eq(W.effortRowOf(PICKER), 'low', 'the effort row reads as its level');
+    eq(W.effortRowOf(PICKER.replace('○ Low effort', '◐ Medium effort (default)')), 'medium', 'with or without the default mark');
+    eq(W.switchConfirmOf('   Switch model?\n   Your next response will be slower\n   ❯ 1. Yes, switch to Haiku 5.5\n     2. No, go back')?.yes, 'Yes, switch to Haiku 5.5',
+      'the cache warning a session-only switch raises is read, with its yes');
+    eq(W.switchConfirmOf(PICKER), null, 'and the picker is not it');
+
+    console.log('\n  what the window draws for a compaction, a /btw, a /cost');
+    const COMPACTING = [
+      '❯ /compact',
+      '✻ Compacting conversation… (7s · ↓ 599 tokens)',
+      RULE2, '❯ ', RULE2,
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents',
+    ].join('\n');
+    eq(W.compactingOf(COMPACTING), { what: 'Compacting conversation…', detail: '7s · ↓ 599 tokens' }, 'the spinner line above the composer, with its elapsed time and tokens');
+    eq(W.compactingOf(COMPACTING.replace(/✻ Compacting.*\n/, '✳ Running PostCompact hooks… (running PostCompact hook · 15s)\n'))?.what, 'Running PostCompact hooks…', 'and the hooks running after it');
+    assert(/esc to interrupt/i.test(W.footOf(COMPACTING)), 'while the bottom line says only that the window is busy');
+    eq(W.compactingOf(COMPACTING.replace('❯ /compact\n', '❯ /compact\n⏺ quoting: Compacting conversation… (1s)\n').replace('✻ Compacting conversation… (7s · ↓ 599 tokens)', '⏺ done')), null,
+      'a conversation quoting the words is not compacting — the line is read by position, directly above the box');
+    const BTW_FIRST = [
+      '❯ /clear', '▔'.repeat(80),
+      '    /btw what is 2+2? reply with just the number', '      4',
+      '    ↑/↓ to scroll · c to copy · f to fork · Esc to close',
+    ].join('\n');
+    eq(W.btwOverlayOf(BTW_FIRST, 'what is 2+2? reply with just the number'), { complete: true, answer: '4' }, "a session's first /btw: the answer under the question, complete");
+    const BTW_LATER = BTW_FIRST.replace('    /btw what is 2+2? reply with just the number', '    /btw what is 2+2? reply with just the number\n    /btw what is 3+3? reply with just the number').replace('      4', '      6')
+      .replace('↑/↓ to scroll · c to copy · f to fork · Esc to close', '⇧←/→ to browse · c to copy · f to fork · x to clear history · Esc to close');
+    eq(W.btwOverlayOf(BTW_LATER, 'what is 3+3? reply with just the number'), { complete: true, answer: '6' }, 'a later one, with the history browse in its footer: the answer to this question, not the last');
+    eq(W.btwOverlayOf(BTW_LATER.replace(' · c to copy · f to fork', ''), 'what is 3+3?')?.complete, false, 'without "c to copy" the answer is still being written');
+    eq(W.btwOverlayOf(COMPACTING, 'x'), null, 'a composer is no overlay');
+    const COST = ['❯ /cost', '▔'.repeat(80), '   Total cost:            $0.0066', '   Total duration (API):  12s', '   Esc to cancel'].join('\n');
+    eq(W.overlayOf(COST), { foot: 'Esc to cancel', text: 'Total cost:            $0.0066\nTotal duration (API):  12s' }, "a screen a command opened: what is under the window's rule, above its footer");
+    eq(W.overlayOf(COMPACTING), null, 'and a composer is not one');
+
+    /* ── a composer pane: the receipts, against a real pane ───────────────
+     * A node stand-in on the alternate screen that draws what Claude Code
+     * draws — a composer box, a /btw overlay, the model picker, the
+     * compaction spinner — and writes the records Claude Code writes, so
+     * send() and pick() are driven exactly as on a desk. It logs every key it
+     * is sent, which is how the rule "no Enter after a command that opened
+     * something" is proved rather than assumed. */
+    console.log('\n  slash commands against a composer pane');
+    const CP_DIR = `${FIX}/composer-desk`;
+    mkdirSync(CP_DIR, { recursive: true });
+    const cpSession = 'composer-test';
+    const cpJsonl = W.transcriptPath(W.canonical(CP_DIR), cpSession);
+    mkdirSync(dirname(cpJsonl), { recursive: true });
+    writeFileSync(cpJsonl, '');
+    const cpKeys = `${CP_DIR}/keys.log`;
+    writeFileSync(cpKeys, '');
+    writeFileSync(`${CP_DIR}/run.cjs`, [
+      `const fs = require('fs');`,
+      `const T = ${JSON.stringify(cpJsonl)}; const K = ${JSON.stringify(cpKeys)};`,
+      `const rule = '\\u2500'.repeat(80); const top = '\\u2594'.repeat(80);`,
+      `let composer = '', mode = 'composer', picker = null, compactUntil = 0, pending = null, firstEnter = true, n = 0;`,
+      `const rec = (o) => fs.appendFileSync(T, JSON.stringify({ uuid: 'c' + (++n), timestamp: new Date().toISOString(), ...o }) + '\\n');`,
+      `const key = (s) => fs.appendFileSync(K, mode + '\\t' + JSON.stringify(s) + '\\n');`,
+      `const MODELS = ['Default (recommended)  Fable 5.1', 'Opus 5.5', 'Fable 5.1', 'Sonnet 5.5', 'Haiku 5.5'];`,
+      `const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];`,
+      `function draw() {`,
+      `  let out = '\\x1b[H\\x1b[2J';`,
+      // The answer is drawn 1.5 s after the question, under a footer without
+      // "c to copy" until then — the shape the real window has (measured 1.3 s
+      // between the overlay and the answer), and the shape a blind retry on a
+      // still screen would press Enter into.
+      `  if (mode === 'btw') out += '\\u276f /clear\\r\\n' + top + '\\r\\n    /btw ' + pending.q + '\\r\\n' + (pending.done ? '      42\\r\\n    \\u2191/\\u2193 to scroll \\u00b7 c to copy \\u00b7 f to fork \\u00b7 Esc to close' : '    Esc to close');`,
+      `  else if (mode === 'cost') out += '\\u276f /cost\\r\\n' + top + '\\r\\n   Total cost:            $0.0066\\r\\n   Esc to cancel';`,
+      `  else if (mode === 'picker') out += top + '\\r\\n   Select model\\r\\n' + MODELS.map((m, i) => '   ' + (picker.cursor === i + 1 ? '\\u276f ' : '  ') + (i + 1) + '.  ' + m + (i === 1 ? ' \\u2714' : '') + '           For things').join('\\r\\n') + '\\r\\n   \\u25cb ' + LEVELS[picker.effort][0].toUpperCase() + LEVELS[picker.effort].slice(1) + ' effort \\u2190/\\u2192 to adjust\\r\\n   Enter to set as default \\u00b7 s to use this session only \\u00b7 Esc to cancel';`,
+      `  else {`,
+      `    const lines = composer.split('\\n');`,
+      `    const busy = Date.now() < compactUntil;`,
+      `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + rule + '\\r\\n\\u276f ' + lines[0] + lines.slice(1).map((l) => '\\r\\n  ' + l).join('') + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
+      `  }`,
+      `  process.stdout.write(out);`,
+      `}`,
+      `function submit() {`,
+      `  const text = composer; composer = '';`,
+      `  const cmd = /^\\/(\\w+)(?:\\s+(.*))?$/s.exec(text.trim());`,
+      `  if (cmd && cmd[1] === 'btw') { mode = 'btw'; pending = { q: cmd[2] ?? '', done: false }; setTimeout(() => { if (mode === 'btw' && pending) { pending.done = true; draw(); } }, 1500); return draw(); }`,
+      `  if (cmd && cmd[1] === 'cost') { mode = 'cost'; return draw(); }`,
+      `  if (cmd && cmd[1] === 'model' && !cmd[2]) { mode = 'picker'; picker = { cursor: 2, effort: 0 }; return draw(); }`,
+      `  if (cmd && cmd[1] === 'compact') {`,
+      `    rec({ type: 'user', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args>' } });`,
+      // Six seconds: long enough that the message sent behind /compact lands
+      // inside it on a loaded machine (2.5 s was not, in a full run), short
+      // enough to wait out. A real compaction runs 10–150 s.
+      `    compactUntil = Date.now() + 6000;`,
+      `    setTimeout(() => { rec({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', compactMetadata: { trigger: 'manual', preTokens: 1000, postTokens: 100, durationMs: 6000 } }); if (pending?.held) { rec({ type: 'user', message: { role: 'user', content: pending.held } }); pending = null; } draw(); }, 6100);`,
+      `    return draw();`,
+      `  }`,
+      `  if (Date.now() < compactUntil) { pending = { held: text }; rec({ type: 'queue-operation', operation: 'enqueue' }); return draw(); }`,
+      `  rec({ type: 'user', message: { role: 'user', content: text } });`,
+      `  draw();`,
+      `}`,
+      `process.stdout.write('\\x1b[?1049h\\x1b[?2004h');`,
+      `draw();`,
+      `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+      `process.stdin.resume();`,
+      `let acc = '';`,
+      `process.stdin.on('data', (buf) => {`,
+      `  acc += buf.toString('utf8');`,
+      `  for (;;) {`,
+      `    const at = acc.indexOf('\\x1b[200~');`,
+      `    if (at === 0) { const end = acc.indexOf('\\x1b[201~'); if (end < 0) return; const body = acc.slice(6, end); acc = acc.slice(end + 6); key('paste:' + body.length); composer += body; draw(); continue; }`,
+      `    if (!acc.length) return;`,
+      `    if (acc.startsWith('\\x1b[A') || acc.startsWith('\\x1b[B') || acc.startsWith('\\x1b[C') || acc.startsWith('\\x1b[D')) {`,
+      `      const k = acc.slice(0, 3); acc = acc.slice(3); key(k);`,
+      `      if (mode === 'picker') { if (k === '\\x1b[A') picker.cursor = Math.max(1, picker.cursor - 1); if (k === '\\x1b[B') picker.cursor = Math.min(MODELS.length, picker.cursor + 1); if (k === '\\x1b[C') picker.effort = Math.min(LEVELS.length - 1, picker.effort + 1); if (k === '\\x1b[D') picker.effort = Math.max(0, picker.effort - 1); draw(); }`,
+      `      continue;`,
+      `    }`,
+      `    if (acc.startsWith('\\x1b\\r')) { acc = acc.slice(2); key('M-Enter'); if (mode === 'composer') { composer += '\\n'; draw(); } continue; }`,
+      `    if (acc.startsWith('\\x1b') && acc.length === 1) { acc = ''; key('Escape'); if (mode !== 'composer') { mode = 'composer'; pending = null; draw(); } continue; }`,
+      `    if (acc.startsWith('\\x1b')) { const m = /^\\x1b\\[[0-9;]*[A-Za-z~]/.exec(acc); if (!m) return; acc = acc.slice(m[0].length); key(m[0]); continue; }`,
+      `    const ch = acc[0]; acc = acc.slice(1);`,
+      `    if (ch === '\\r') { key('Enter'); if (mode !== 'composer') continue; if (firstEnter) { firstEnter = false; continue; } submit(); continue; }`,
+      `    if (ch === '\\x15') { key('C-u'); composer = ''; draw(); continue; }`,
+      `    key(ch);`,
+      `    if (mode === 'picker' && ch === 's') { const label = MODELS[picker.cursor - 1].replace(/^Default \\(recommended\\)\\s+/, ''); rec({ type: 'user', message: { role: 'user', content: '<local-command-stdout>Set model to \`' + label + '\` for this session only' + (picker.effort ? ' with \`' + LEVELS[picker.effort] + '\` effort' : '') + '</local-command-stdout>' } }); mode = 'composer'; draw(); continue; }`,
+      `    if (mode === 'composer') { composer += ch; draw(); }`,
+      `  }`,
+      `});`,
+      `setTimeout(() => process.exit(0), 180000);`,
+    ].join('\n'));
+    await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', CP_DIR, `${process.execPath} ${CP_DIR}/run.cjs`]).catch(() => {});
+    await drawn(CP_DIR);
+    const cpPane = (await run('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_current_path}\t#{pane_pid}\t#{pane_id}'])).stdout
+      .split('\n').map((l) => l.split('\t')).find(([path]) => path === CP_DIR);
+    const cpPid = Number(cpPane?.[1]);
+    const cpTarget = cpPane?.[2];
+    writeFileSync(`${CLAUDE_HOME}/sessions/${cpPid}.json`, JSON.stringify({ pid: cpPid, sessionId: cpSession, cwd: CP_DIR, kind: 'interactive', startedAt: Date.now() }));
+    const cpRecords = () => readFileSync(cpJsonl, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const cpKeyLog = () => readFileSync(cpKeys, 'utf8').split('\n').filter(Boolean).map((l) => l.split('\t'));
+    const keysSince = (from) => cpKeyLog().slice(from);
+
+    // A plain message, into a pane that drops the first Enter the way Claude
+    // Code drops one that lands inside a paste: the text is still in the box,
+    // so the retry presses again, and the message lands once.
+    const plain = await W.send(CP_DIR, 'a plain message');
+    assert(plain.ok && plain.confirmed, `a message lands${plain.ok ? '' : ` — ${plain.error}`}`);
+    eq(cpRecords().filter((r) => r.type === 'user').map((r) => r.message.content), ['a plain message'], 'once, though the first Enter was dropped');
+    assert(cpKeyLog().filter((k) => k[1] === '"Enter"').length >= 2, 'because the retry pressed again while the text was still in the composer');
+
+    // Four lines: typed, not pasted, and recorded verbatim with no wrapper.
+    let mark = cpKeyLog().length;
+    const fourLines = 'one\ntwo\nthree\nfour lines, so a paste would be wrapped';
+    const typed = await W.send(CP_DIR, fourLines);
+    assert(typed.ok && typed.confirmed, `a message the window would wrap is still delivered${typed.ok ? '' : ` — ${typed.error}`}`);
+    eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, fourLines, 'as itself: every line, no <pasted_content>');
+    assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'typed in, not pasted');
+    eq(keysSince(mark).filter((k) => k[1] === '"M-Enter"').length, 3, 'with the composer\'s own newline between lines');
+
+    // /btw: the overlay is the receipt, the answer is read off it, and no
+    // Enter is pressed while it stands — the host used to close it with one.
+    mark = cpKeyLog().length;
+    const btw = await W.send(CP_DIR, '/btw what is 6*7?');
+    assert(btw.ok && btw.command === 'btw', `/btw is confirmed on its overlay${btw.ok ? '' : ` — ${btw.error}`}`);
+    eq([btw.said, btw.answer], ['answered in the window', '42'], 'with the answer read off the window');
+    eq(keysSince(mark).filter((k) => k[0] === 'btw' && k[1] === '"Enter"').length, 0, 'and nothing pressed Enter into the overlay');
+    eq(keysSince(mark).filter((k) => k[0] === 'btw' && k[1] === '"Escape"').length, 1, 'which the host closed afterwards, once');
+    assert(await until(async () => W.composerOf((await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout) !== null), 'so the composer is back');
+
+    // /cost: a screen the host cannot name, carried to the desk and closed.
+    const cost = await W.send(CP_DIR, '/cost');
+    assert(cost.ok && cost.command === 'cost', `/cost is confirmed on the screen it opened${cost.ok ? '' : ` — ${cost.error}`}`);
+    eq(cost.said, 'shown in the window', 'said as shown');
+    assert(/Total cost/.test(cost.screen ?? ''), 'with the screen\'s text');
+
+    // A bare /model never reaches the window.
+    mark = cpKeyLog().length;
+    const bareModel = await W.send(CP_DIR, '/model');
+    eq([bareModel.ok, bareModel.code], [false, 'picker'], 'a bare /model is refused before anything is typed');
+    eq(keysSince(mark).length, 0, 'and the window saw no key for it');
+
+    // /model <name>: the picker, the cursor walked to the row, `s` — never a
+    // digit, never Enter, never the command that saves a default.
+    mark = cpKeyLog().length;
+    const picked = await W.pick(CP_DIR, { model: 'sonnet' });
+    assert(picked.ok && picked.session_only, `the model is picked for this session only${picked.ok ? '' : ` — ${picked.error}`}`);
+    eq(picked.said, 'Set model to Sonnet 5.5 for this session only', 'in the window\'s own words');
+    const pickerKeys = keysSince(mark).filter((k) => k[0] === 'picker').map((k) => k[1]);
+    eq(pickerKeys, ['"\\u001b[B"', '"\\u001b[B"', '"s"'], 'two Downs from Opus to Sonnet, then s — no digit, no Enter');
+    assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:') && k[1] !== '"paste:6"'), 'and the only paste was /model itself');
+
+    // /effort <level>: the same picker, its effort row walked with →.
+    mark = cpKeyLog().length;
+    const effort = await W.pick(CP_DIR, { effort: 'high' });
+    assert(effort.ok, `the effort is picked${effort.ok ? '' : ` — ${effort.error}`}`);
+    eq([effort.effort, effort.session_only], ['high', true], 'this session only, at the level asked');
+    eq(keysSince(mark).filter((k) => k[0] === 'picker').map((k) => k[1]), ['"\\u001b[C"', '"\\u001b[C"', '"s"'], 'two Rights from low to high, then s');
+    eq((await W.pick(CP_DIR, { effort: 'absurd' })).code, 'bad_effort', 'a level the picker has no row for is refused without a key');
+
+    // /compact: confirmed on the command's record while the window compacts,
+    // and a message behind it is said to be held — not timed out.
+    const comp = await W.send(CP_DIR, '/compact');
+    assert(comp.ok && comp.command === 'compact', `/compact is confirmed${comp.ok ? '' : ` — ${comp.error}`}`);
+    eq([comp.said, comp.compacting], ['compacting the conversation', true], 'as compacting, since the window is');
+    const behind = await W.send(CP_DIR, 'sent while it compacts');
+    assert(behind.ok && behind.queued, `a message sent into a compaction is taken${behind.ok ? '' : ` — ${behind.error}`}`);
+    eq(behind.held, 'compacting', 'and said to be held by the compaction, with no twenty-second wait');
+    assert(await until(() => cpRecords().some((r) => r.type === 'user' && r.message?.content === 'sent while it compacts'), 10000),
+      'and the window reads it when the compaction ends');
 
     // The failure a person is most likely to actually hit: `claude` is not on
     // PATH, or whatever runs in its place dies on its first line. That used to

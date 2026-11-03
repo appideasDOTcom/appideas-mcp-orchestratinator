@@ -161,6 +161,47 @@ const ANSWER_ECHO_MS = 15_000;
  */
 const CLEARS_AWAITING = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'PreToolUse']);
 
+/**
+ * A slash command as the composer takes one: a single line, `/name` and
+ * whatever follows. The host has the same function (commandOf in
+ * host/window.js); they cannot share code, so a change here is a change
+ * there.
+ */
+export function commandOf(text) {
+  const t = String(text ?? '').trim();
+  if (!t || t.includes('\n')) return null;
+  const m = /^\/([A-Za-z][\w:-]*)(?:\s+(.*))?$/.exec(t);
+  return m ? { name: m[1].toLowerCase(), args: (m[2] ?? '').trim() } : null;
+}
+
+/**
+ * The commands the floor offers in its composer, each with the receipt it
+ * confirms on and the sentence it says (issue #9). A floor list, versioned
+ * with the plugin — the window's own list is a table inside its binary with
+ * no way to read it from outside — and anything not on it passes through as
+ * typed, confirmed on the window's record of having run it.
+ *
+ * `/model` and `/effort` are not sent as commands at all: as commands they
+ * save the person's machine-wide default ("saved as your default for new
+ * sessions"), and a change from the floor is this session's only (costmo,
+ * #10 Decided 4, 2026-11-03). The host drives the window's picker instead.
+ */
+export const FLOOR_COMMANDS = [
+  { name: 'clear', args: false, hint: 'start a new conversation on this desk', receipt: 'the new conversation\u2019s first record' },
+  { name: 'compact', args: false, hint: 'summarise the conversation to free context', receipt: 'the window compacting' },
+  { name: 'model', args: 'name', hint: 'change the model for this session only', receipt: 'the window\u2019s own picker' },
+  { name: 'effort', args: 'level', hint: 'change the effort level for this session only', receipt: 'the window\u2019s own picker' },
+  { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
+];
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** Which SessionStart sources are a session starting. A compaction and a
+ *  /clear fire SessionStart too (source compact / clear, measured 2.1.300),
+ *  and neither is a session opening — costmo, #15 Decided 2: only startup and
+ *  resume wake an archived floor (#21 Decided 6). An older plugin sends no
+ *  source, and is taken at its word. */
+export const isSessionStart = (source) => !source || source === 'startup' || source === 'resume';
+
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
 /* Whitespace is not meaningful when matching a message against the turn it
    became: a composer rewraps, and a transcript records what was submitted
@@ -938,12 +979,19 @@ export function ingestHookEvent(store, body, live = null) {
     git_branch: str(body.git_branch),
     runner: 'hook',
     pid,
+    // Every tool-context hook carries the session's effort level; COALESCEd
+    // like the model, so an event without it does not blank it.
+    effort: str(body.effort_level),
   });
   const persona = store.ensurePersona(channel, agent);
+  const source = str(body.source);
   // A session starting under an archived floor's name brings the floor back
   // (Decided 6). Only the start: every other hook event is an agent already on
   // the floor working, and archive is not a session kill — those stay put away.
-  if (event === 'SessionStart') store.wakeChannel(channel, `a session started on it: ${agent}`, agent);
+  // And only a start that is one: SessionStart also fires with source
+  // `compact` at every compaction and `clear` on /clear (see isSessionStart).
+  const starting = event === 'SessionStart' && isSessionStart(source);
+  if (starting) store.wakeChannel(channel, `a session started on it: ${agent}`, agent);
 
   /**
    * Whether a host is tailing this repo's transcript right now.
@@ -962,7 +1010,7 @@ export function ingestHookEvent(store, body, live = null) {
   // A session starting in a repo no host runs is the moment one might be able
   // to: the binding that names this desk was most likely just written. Ask
   // every host here to look — once per throttle window, see askRescan.
-  if (event === 'SessionStart' && !mirrored && live) {
+  if (starting && !mirrored && live) {
     askRescan(store, live, { channel, agent, why: 'a session started on a desk no host runs' });
   }
 
@@ -1003,10 +1051,63 @@ export function ingestHookEvent(store, body, live = null) {
 
   let recorded = null;
   switch (event) {
+    case 'SessionStart':
+      // A compaction's SessionStart is its end from the window's side (it
+      // comes 30 ms before PostCompact, and carries the model); cleared here
+      // too, so a PostCompact that never arrives cannot leave a desk
+      // compacting for ever.
+      if (source === 'compact') {
+        store.clearCompacting(sessionId);
+        live?.publish(key, { type: 'compacting', compacting: null });
+      }
+      break;
+
     case 'SessionEnd':
       store.endSession(sessionId);
       live?.pending.delete(key);
       state('idle');
+      break;
+
+    /**
+     * The window is compacting. From PreCompact to PostCompact the desk is
+     * busy and nothing it is sent is read — measured 15 s for 136k tokens on
+     * a probe, 37–150 s on real desks — and the floor used to show nothing at
+     * all for it: the desk read idle, a message sent meanwhile errored after
+     * twenty seconds, and the summary arrived as a wall of the operator's
+     * words (issue #15). State, which is the hooks' to report; the summary is
+     * the transcript's and the host files it as a system record.
+     */
+    case 'PreCompact':
+      store.setCompacting(sessionId, str(body.trigger));
+      state('working');
+      live?.publish(key, { type: 'compacting', compacting: { since: new Date().toISOString(), trigger: str(body.trigger) } });
+      break;
+
+    case 'PostCompact':
+      store.clearCompacting(sessionId);
+      live?.publish(key, { type: 'compacting', compacting: null });
+      break;
+
+    /**
+     * A model switch, from the window: `requested_model` is what was asked
+     * for (a name, "sonnet"), `to_model` the id it resolved to, `source`
+     * command / picker / sdk / auto / resume. Asked-for on Pre, confirmed on
+     * Post — the page shows the two apart (issue #10), and the session's
+     * `model` column, written once at SessionStart before this, follows a
+     * mid-session change at last.
+     */
+    case 'PreModelSwitch':
+      if (str(body.to_model) || str(body.requested_model)) {
+        store.setRequested(channel, agent, { model: str(body.to_model) ?? str(body.requested_model) });
+        live?.publish(key, { type: 'session', session_id: sessionId });
+      }
+      break;
+
+    case 'PostModelSwitch':
+      if (str(body.to_model)) {
+        store.setModel(sessionId, str(body.to_model));
+        live?.publish(key, { type: 'session', session_id: sessionId });
+      }
       break;
 
     case 'UserPromptSubmit':
@@ -1128,13 +1229,28 @@ export function ingestHookEvent(store, body, live = null) {
       break;
     }
 
-    case 'StopFailure':
+    case 'StopFailure': {
       // An API error is not a human-blocking prompt, but it is the other way a
       // window silently stops making progress, and it reads the same from across
       // the room. It goes in the queue so nobody waits on a dead turn.
-      recorded = turn('error', str(body.error_message) ?? str(body.error_type) ?? 'the turn ended with an API error');
-      store.setAwaiting(sessionId, 'error', clip(body.error_message ?? body.error_type, 500));
+      //
+      // What Claude Code says about it: on 2.1.300 `error` is a short code
+      // ("invalid_request") and the words are `last_assistant_message`
+      // ("Autocompact is thrashing: the context refilled to the limit within
+      // 3 turns…"); `error_details` is there when it is; `error_type` /
+      // `error_message` are what 2.1.2xx sent. None of the new ones were read,
+      // so nine of the thirty-two error turns on the live board said only
+      // "the turn ended with an API error" (issue #15). Whatever it was, it
+      // is said here. The turn itself comes from the transcript on a mirrored
+      // desk — the same record, flagged isApiErrorMessage, filed by the host
+      // as an error — and from here on one no host reads.
+      const code = str(body.error) ?? str(body.error_type);
+      const words = str(body.last_assistant_message) ?? str(body.error_message) ?? str(body.error_details);
+      const said = code && words ? `${code}: ${words}` : words ?? code ?? 'the turn ended with an API error';
+      if (!mirrored) recorded = turn('error', said);
+      store.setAwaiting(sessionId, 'error', clip(said, 500));
       break;
+    }
 
     default:
       break;
@@ -1603,12 +1719,32 @@ function applyHostEvent(store, live, hostId, ev) {
       // Machine-injected context riding a user record — IDE state, slash-command
       // records. Its own role, with the tag in tool_name as the label, so no
       // surface can attribute the system's words to the person.
-      else if (role === 'context') turn('context', ev.text, str(ev.tool_name));
+      else if (role === 'context') {
+        turn('context', ev.text, str(ev.tool_name));
+        // The boundary the transcript writes at a compaction's end is the
+        // receipt for one the hooks never finished reporting.
+        if (str(ev.tool_name) === 'compact') {
+          store.clearDeskCompacting(channel, agent);
+          live.publish(key, { type: 'compacting', compacting: null });
+        }
+      }
       // Thinking is its own role — see readTranscript — and goes in as text,
       // labeled by the role alone: the panel draws it quietly, apart from what
       // the agent said, and the bubble quotes it like a reply.
-      else if (role === 'user' || role === 'assistant' || role === 'thinking') turn(role, ev.text, null, via);
+      // An error is the record Claude Code writes when a turn ends in one
+      // (isApiErrorMessage), or the host's own, in the same role the hook's
+      // StopFailure uses — one role for the desk to read either by.
+      else if (role === 'user' || role === 'assistant' || role === 'thinking' || role === 'error') turn(role, ev.text, null, via);
       else return false;
+      // A command's receipt note stands until the operator says the next
+      // thing. Not until any turn: the command's own lines — the host's
+      // sentence, a /btw answer, a /cost screen — arrive in the same second
+      // as the note and used to take it down before anyone read it.
+      const done = live.delivery.get(key);
+      if (done?.state === 'done' && role === 'user') {
+        live.delivery.delete(key);
+        live.publish(key, { type: 'delivery', delivery: null });
+      }
       // A queued message stops being queued when it becomes a turn.
       //
       // Matched on the text, for the same reason the browser retires its
@@ -1660,10 +1796,65 @@ function applyHostEvent(store, live, hostId, ev) {
       live.delivery.set(key, {
         state: str(ev.state) ?? 'queued',
         text,
-        held: !!ev.held,
+        // true: the window took it once it was free. 'compacting': it took
+        // it and went off to compact, and reads it when that ends.
+        held: typeof ev.held === 'string' ? ev.held : !!ev.held,
+        detail: str(ev.detail),
         at: now,
       });
       live.publish(key, { type: 'delivery', delivery: live.delivery.get(key) });
+      break;
+    }
+
+    /**
+     * A slash command did its job, in its own terms: the host read the
+     * command's own receipt (a new conversation's first record, the window
+     * compacting, the picker's "Set model to … for this session only", the
+     * /btw overlay) and says so here. The sentence is already on the desk as
+     * a line labeled host; this is the structured half — the session the
+     * desk moved to, the model or effort confirmed — and the note that ends
+     * the composer's wait (issue #9: never "did not confirm within 20s" for a
+     * command that did its job).
+     */
+    case 'receipt': {
+      const command = str(ev.command);
+      if (!command) return false;
+      const sid = str(ev.session_id) ?? sessionId;
+      if (str(ev.model) || str(ev.effort)) {
+        // The picker names a model by its label ("Haiku 5.5"), the hooks by
+        // id; the id wins when the hook arrives, and clears the asked-for
+        // either way. Effort has no hook of its own: the picker's word, and
+        // the next Stop's effort.level, are its only confirmations.
+        if (str(ev.effort)) store.setDeskEffort(channel, agent, str(ev.effort));
+        if (str(ev.model)) store.setRequested(channel, agent, { model: '' });
+        live.publish(key, { type: 'session', session_id: sid });
+      }
+      if (ev.compacting) {
+        store.setCompacting(sid, 'manual');
+        state('working');
+        live.publish(key, { type: 'compacting', compacting: { since: now, trigger: 'manual' } });
+      }
+      const text = str(ev.text) ?? `/${command}`;
+      live.delivery.set(key, { state: 'done', text, said: str(ev.said), command, at: now });
+      live.publish(key, { type: 'delivery', delivery: live.delivery.get(key) });
+      break;
+    }
+
+    /**
+     * The model that wrote the conversation's latest reply, read off the
+     * transcript by the host. The session's `model` was written once, at
+     * SessionStart, and a /model typed into the window never reached it
+     * (221 of 360 rows null on the live board, issue #10); every assistant
+     * record carries `message.model`, and this is the host reporting it when
+     * it changes.
+     */
+    case 'model': {
+      const model = str(ev.model);
+      if (!model) return false;
+      const sid = str(ev.session_id) ?? sessionId;
+      store.upsertSession({ session_id: sid, channel, agent, cwd: desk.cwd });
+      store.setModel(sid, model);
+      live.publish(key, { type: 'session', session_id: sid });
       break;
     }
 
@@ -2171,7 +2362,10 @@ export function buildFloor(store, live = null, sessions = null) {
           // Whether a turn is running, said once. The desk is drawn from this
           // and the chat panel's stop sign is lit from it, so they cannot
           // disagree about whether there is anything to stop.
-          working: isWorking(h, t),
+          // A compaction is work — the window is busy for the whole of it
+          // (busy() reads "esc to interrupt" throughout) — so the desk draws
+          // as working and the stop sign lights, with the hooks' word for it.
+          working: isWorking(h, t) || !!s?.compacting_since,
           // And whether that turn can be stopped, decided here for the same
           // reason `nudge` is: the endpoint refuses on exactly this, so a sign
           // that made its own mind up would eventually be live over a 409.
@@ -2213,6 +2407,18 @@ export function buildFloor(store, live = null, sessions = null) {
                 cwd: s.cwd,
                 window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
                 model: s.model,
+                // The chat controls' state (issue #10): asked-for stands
+                // beside confirmed until the window confirms or the hook
+                // clears it. An empty string is "cleared" from a host
+                // receipt and reads as nothing asked.
+                effort: s.effort,
+                model_requested: s.model_requested || null,
+                effort_requested: s.effort_requested || null,
+                // The window is compacting (issue #15): from PreCompact to
+                // PostCompact, with which kind.
+                compacting: s.compacting_since
+                  ? { since: iso(s.compacting_since), trigger: s.compacting_trigger ?? null }
+                  : null,
                 permission_mode: s.permission_mode,
                 git_branch: s.git_branch,
                 started_at: iso(s.started_at),
@@ -2678,10 +2884,26 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
     if (!channel || !agent || !text) return res.status(400).json({ error: 'channel, agent and text are required' });
     if (text.length > CHAT_MAX) return res.status(400).json({ error: `text must be ${CHAT_MAX} characters or fewer` });
+    // A slash command goes to the window as typed, and the host confirms it
+    // on the command's own receipt (FLOOR_COMMANDS). Two are checked here,
+    // because their failure would otherwise be a dialog left standing in
+    // somebody's window: a bare /model opens a picker nobody is driving, and
+    // an effort level the picker does not have cannot be reached.
+    const cmd = commandOf(text);
+    if (cmd?.name === 'model' && !cmd.args) {
+      return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. A bare /model opens a picker in the window.', code: 'picker' });
+    }
+    if (cmd?.name === 'effort' && cmd.args && !EFFORT_LEVELS.includes(cmd.args.toLowerCase())) {
+      return res.status(400).json({ error: `Effort is one of ${EFFORT_LEVELS.join(', ')}.`, code: 'bad_effort' });
+    }
     const check = hostedOrWhyNot(channel, agent);
     if (check.error) return res.status(409).json(check);
 
     const h = check.hosted;
+    // What the floor asked for, shown apart from what the window confirms —
+    // the picker's receipt or the hook clears it.
+    if (cmd?.name === 'model' && cmd.args) store.setRequested(channel, agent, { model: cmd.args });
+    if (cmd?.name === 'effort' && cmd.args) store.setRequested(channel, agent, { effort: cmd.args.toLowerCase() });
     // The message is not written down here.
     //
     // It used to be, the moment it was accepted, and it was then written a

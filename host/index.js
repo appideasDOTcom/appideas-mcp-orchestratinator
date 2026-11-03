@@ -183,6 +183,9 @@ class Desk {
     // readiness budget so a window that never registers cannot freeze the
     // desk on a conversation nothing is running.
     this.intent = null;
+    // The model the conversation's last reply named, so a change is reported
+    // once rather than on every turn.
+    this.model = null;
   }
 
   get label() { return `${this.channel}/${this.agent}`; }
@@ -217,6 +220,7 @@ class Desk {
     else if (mode === false) mode = 'end';
     this.lastSessionId = id;
     this.subOffsets = new Map();
+    this.model = null;
     if (!id) { this.offset = 0; return; }
     const path = W.transcriptPath(this.cwd, id);
     const size = await W.transcriptSize(path);
@@ -381,6 +385,15 @@ class Desk {
     // order. The sort is stable, so equal times keep it too.
     if (turns.every((t) => Number.isFinite(Date.parse(t.at)))) turns.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     for (const turn of turns) {
+      // Which model answered, read off the reply itself. Reported when it
+      // changes, as its own event rather than a field on the turn: the
+      // session's model is state, and a column on every turn would cross the
+      // eight places CLAUDE.md lists for nothing the page draws per turn.
+      if (turn.model && !turn.via && turn.model !== this.model) {
+        this.model = turn.model;
+        this.host.emit({ type: 'model', channel: this.channel, agent: this.agent, session_id: this.lastSessionId, model: turn.model }, true);
+      }
+      if (turn.role === 'model') continue;
       this.host.emit({
         type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,
         role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
@@ -442,10 +455,54 @@ class Desk {
     // have a window open — those differ for exactly as long as it takes to
     // switch apps, which is when the floor is used.
     const id = await this.resumeId();
-    const r = await W.send(this.cwd, text, { open: true, resume: id });
+    const cmd = W.commandOf(text);
+    // A model or effort change is this session's only, never the machine's
+    // default (costmo, #10 Decided 4): the window's picker and its `s`, not
+    // the command, which saves a default. See pick() in window.js.
+    const r = cmd?.name === 'model' && cmd.args ? await W.pick(this.cwd, { model: cmd.args }, { open: true, resume: id })
+      : cmd?.name === 'effort' && cmd.args ? await W.pick(this.cwd, { effort: cmd.args }, { open: true, resume: id })
+      : await W.send(this.cwd, text, { open: true, resume: id });
     if (r.note) this.told(r.note, id);
     if (!r.ok) {
       this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
+    } else if (r.command && r.said) {
+      // A command's receipt, in its own terms — a new conversation started,
+      // compacting, the model set, answered in the window. Said on the desk
+      // as a line labeled host, and to the composer as the end of its wait.
+      this.told(r.said, r.session_id ?? id);
+      this.host.emit({
+        type: 'receipt', channel: this.channel, agent: this.agent, command: r.command, said: r.said, text,
+        session_id: r.session_id ?? null, model: r.model ?? null, effort: r.effort ?? null, compacting: !!r.compacting,
+      }, true);
+      // The /btw answer, read off the window's overlay — the one place it
+      // exists. Drawn as the agent's, labeled by the command, so the floor
+      // shows the answer and where it came from.
+      if (r.answer) {
+        this.host.emit({
+          type: 'turn', channel: this.channel, agent: this.agent, session_id: id,
+          role: 'assistant', text: r.answer, at: new Date().toISOString(), uuid: null,
+          tool_name: null, tool_input: null, via: '/btw',
+        }, true);
+      }
+      // What a command showed on the window's screen (/cost, /help…): the
+      // window's words, not the agent's, labeled by the command.
+      if (r.screen) {
+        this.host.emit({
+          type: 'turn', channel: this.channel, agent: this.agent, session_id: id,
+          role: 'context', text: r.screen, at: new Date().toISOString(), uuid: null,
+          tool_name: `/${r.command}`, tool_input: null, via: null,
+        }, true);
+      }
+      log(`${this.label}: /${r.command} — ${r.said}`);
+    } else if (r.held === 'compacting') {
+      // The window took the message and went off to compact under it. The
+      // enqueue record carries no text on 2.1.300, so the only receipt is the
+      // user record at the end — 37–150 s away on a real desk. Said as held.
+      this.host.emit({
+        type: 'delivery', channel: this.channel, agent: this.agent,
+        state: 'queued', text, held: 'compacting', detail: r.detail ?? null,
+      }, true);
+      log(`${this.label}: the window is compacting under the message (${r.detail ?? ''}); it reads it when that ends`);
     } else if (r.unverified) {
       // Delivered, but with no transcript to check it against. The floor is
       // not told a message failed when it may well have arrived — but this

@@ -288,6 +288,24 @@ function fixture() {
     `    if (submit >= 0) {`,
     `      const text = (composer + acc.slice(0, submit)).trim();`,
     `      composer = ''; acc = acc.slice(submit + 1);`,
+    // A slash command, as Claude Code records one (measured 2.1.300,
+    // 2026-11-03): /clear starts a NEW session file whose first record is
+    // the command, and the roster follows it; /btw writes nothing and draws
+    // an overlay with the answer; any other command writes its
+    // <command-name> record. A message is a user record, as before.
+    `      const cmd = /^\\/(\\w+)(?:\\s+(.*))?$/.exec(text);`,
+    `      if (cmd && cmd[1] === 'clear') {`,
+    `        const next = 'cleared-' + Date.now();`,
+    `        const file = require('path').join(require('path').dirname(TRANSCRIPT), next + '.jsonl');`,
+    `        fs.writeFileSync(file, JSON.stringify({ type: 'user', uuid: 'c1', timestamp: new Date().toISOString(), message: { content: '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>' } }) + '\\n');`,
+    `        fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: next, name: 'stand-in' }]));`,
+    `        continue;`,
+    `      }`,
+    `      if (cmd && cmd[1] === 'btw') {`,
+    String.raw`        process.stdout.write('\n' + '\u2594'.repeat(60) + '\n    /btw ' + (cmd[2] || '') + '\n      42\n    \u2191/\u2193 to scroll \u00b7 c to copy \u00b7 f to fork \u00b7 Esc to close\n');`,
+    `        continue;`,
+    `      }`,
+    `      if (cmd) { fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/' + cmd[1] + '</command-name><command-message>' + cmd[1] + '</command-message><command-args>' + (cmd[2] || '') + '</command-args>' } }) + '\\n'); continue; }`,
     String.raw`      if (text) fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: text } }) + '\n');`,
     `      continue;`,
     `    }`,
@@ -431,6 +449,21 @@ try {
   assert(await until(() => (clean(received()).includes('second line') ? true : null)), 'and every line arrives');
   assert(/\x1b\[200~/.test(received()), 'delivered as one bracketed paste, so it is one turn and not two');
 
+  /* A slash command is confirmed on its own receipt (issue #9). /btw writes
+   * nothing anywhere — its answer is an overlay on the pane — and used to be
+   * an error twenty seconds later; the host reads the answer off the window
+   * and the desk shows it. */
+  console.log('\n  a command confirmed on its own receipt');
+  const btwSent = await chat('free', '/btw what is 6*7?');
+  eq(btwSent.status, 200, '/btw is accepted');
+  const btwRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.via === '/btw') ? rows : null;
+  }, 15000);
+  eq(btwRows?.find((r) => r.via === '/btw')?.text, '42', "the answer is read off the window's overlay and is the agent's, labeled by the command");
+  assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === 'answered in the window'), 'the desk says where the answer went');
+  assert(!(btwRows ?? []).some((r) => r.role === 'error'), 'and no error turn says it did not confirm');
+
   console.log('\nreading the conversation back');
   // What Claude Code writes is what the floor shows — including a turn nobody
   // on the floor typed, which is the case that used to need a whole driver.
@@ -453,6 +486,27 @@ try {
   const thought = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'thinking'));
   eq(thought?.text, 'run the suite before touching anything else', "the agent's thinking reaches the floor as its own kind of row");
   eq(deskOf(await floor(), 'free')?.last_message?.text, 'run the suite before touching anything else', 'and the thought bubble picks it up');
+
+  /* What a compaction leaves behind, what a long paste is wrapped in, and the
+   * record an API error is written as — each used to be filed as somebody
+   * speaking (issues #10 and #15, measured 2.1.300). */
+  appendTurn({ type: 'user', uuid: 'cs-1', isCompactSummary: true, isVisibleInTranscriptOnly: true, timestamp: new Date().toISOString(), message: { role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. Summary: …' } });
+  appendTurn({ type: 'system', subtype: 'compact_boundary', uuid: 'cb-1', timestamp: new Date().toISOString(), content: 'Conversation compacted', level: 'info', compactMetadata: { trigger: 'auto', preTokens: 71299, postTokens: 12473, durationMs: 16124 } });
+  appendTurn({ type: 'user', uuid: 'pc-1', timestamp: new Date().toISOString(), message: { role: 'user', content: '<pasted_content id="4a60">\nfour lines of mine\nthat the window wrapped\n</pasted_content id="4a60">' } });
+  appendTurn({ type: 'assistant', uuid: 'ae-1', isApiErrorMessage: true, timestamp: new Date().toISOString(), message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Autocompact is thrashing: the context refilled to the limit' }] } });
+  appendTurn({ type: 'assistant', uuid: 'am-1', timestamp: new Date().toISOString(), message: { role: 'assistant', model: 'claude-test-9', content: [{ type: 'text', text: 'and the model that said this is new' }] } });
+  const filed = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.text === 'and the model that said this is new') ? rows : null;
+  });
+  const summaryRow = (filed ?? []).find((r) => (r.text ?? '').startsWith('This session is being continued'));
+  eq([summaryRow?.role, summaryRow?.tool_name], ['context', 'compact-summary'], 'the compaction summary is a system record labeled as one, not "you:"');
+  eq((filed ?? []).find((r) => r.tool_name === 'compact')?.text, 'Conversation compacted (auto): 71,299 → 12,473 tokens in 16.1 s', 'the boundary is a line in the compaction\'s own terms');
+  eq((filed ?? []).find((r) => r.text === 'four lines of mine\nthat the window wrapped')?.role, 'user', 'a wrapped paste is the operator\'s words with the wrapper gone');
+  assert(!(filed ?? []).some((r) => (r.text ?? '').includes('<pasted_content')), 'and the tags are nowhere');
+  const apiErr = (filed ?? []).find((r) => r.text === 'Autocompact is thrashing: the context refilled to the limit');
+  eq(apiErr?.role, 'error', 'the record an API error is written as is an error turn, not the agent speaking');
+  eq(deskOf(await floor(), 'free')?.session?.model, 'claude-test-9', 'and the model that wrote the latest reply is the session\'s model on the floor');
 
   appendTurn({ type: 'assistant', uuid: 'a-3', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent chatter' }] } });
   await sleep(600);

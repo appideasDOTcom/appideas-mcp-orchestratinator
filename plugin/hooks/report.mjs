@@ -363,9 +363,31 @@ async function main() {
     tool_input: reduceToolInput(ev.tool_input),
     notification_type: ev.notification_type,
     notification_message: clip(ev.notification_message, 500),
+    // StopFailure on 2.1.300 carries `error` (a short code such as
+    // "invalid_request") and the words in `last_assistant_message`;
+    // `error_type` / `error_message` are what 2.1.2xx sent and are kept for a
+    // window that still does. Measured 2026-11-03 on a probe: an auto-compact
+    // that thrashed three times ended in exactly that shape, and the floor
+    // drew "the turn ended with an API error" because neither old field came.
+    error: clip(ev.error, 2000),
+    error_details: clip(typeof ev.error_details === 'string' ? ev.error_details : ev.error_details == null ? ev.error_details : JSON.stringify(ev.error_details), 2000),
     error_type: ev.error_type,
     error_message: clip(ev.error_message, 2000),
     reason: ev.reason,
+    // Every tool-context hook (UserPromptSubmit, Stop, PreToolUse…) carries
+    // the session's effort as `effort.level`; it is the only receipt a
+    // /effort has besides the window's own stdout line.
+    effort_level: typeof ev.effort?.level === 'string' ? ev.effort.level : null,
+    // PreCompact / PostCompact: `trigger` is manual or auto. The summary
+    // PostCompact carries is deliberately not sent — content is the
+    // transcript's, and the host files it from there as a system record.
+    trigger: ev.trigger,
+    // PreModelSwitch / PostModelSwitch. `source` rides the common `source`
+    // field above (command / picker / sdk / auto / resume), the same slot a
+    // SessionStart's startup / resume / clear / compact uses.
+    from_model: ev.from_model,
+    to_model: ev.to_model,
+    requested_model: ev.requested_model,
   };
 
   const headers = { 'content-type': 'application/json' };

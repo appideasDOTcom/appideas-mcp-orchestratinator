@@ -1802,7 +1802,9 @@
     // minutes the bubble was still showing its answer to the previous
     // question — so a desk given new work looked exactly like one that had not
     // heard you. This is the one case where the bubble is not a quotation.
-    const said = d.heard ? THINKING : d.last_message?.text;
+    // A compacting desk says so in its bubble: it is doing nothing else, and
+    // for 10–150 s a quotation of its last reply would read as idle.
+    const said = d.session?.compacting ? `Compacting the conversation (${d.session.compacting.trigger ?? 'auto'})…` : d.heard ? THINKING : d.last_message?.text;
     if (said) {
       const lines = wrap(said, PER_LINE, BUBBLE_LINES);
       if (lines.length) {
@@ -2403,6 +2405,16 @@
       const note = noteNode(t);
       if (note) return note;
     }
+    if (t.role === 'context' && t.tool_name === 'compact-summary') {
+      // The summary a compaction leaves behind: a system record, 5–19k
+      // characters, drawn closed — it is what the agent was handed, not
+      // anything anyone said, and it used to arrive as "you:" (issue #15).
+      const text = t.text ?? '';
+      div.className = 't t-tool t-context t-compact';
+      div.innerHTML = `<details><summary><span class="t-dot"></span><span class="t-text mono">compaction summary · ${text.length.toLocaleString('en-US')} characters</span></summary><pre class="t-compact-body"></pre></details>`;
+      div.querySelector('pre').textContent = text;
+      return div;
+    }
     if (t.role === 'context') {
       // The system talking, not the person: IDE state, slash-command records.
       // Same quiet line as a tool call, labeled by its tag. Every wrapper
@@ -2485,6 +2497,10 @@
              It belongs against the box. -->
         <div class="p-alert-slot"></div>
         <textarea id="p-text" class="input" rows="3"></textarea>
+        <!-- The commands the floor offers, drawn while the box holds the
+             start of one. Tab or a click completes; Enter sends what is
+             typed, as it always has. -->
+        <div class="p-slash hidden" role="listbox"></div>
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
@@ -2519,6 +2535,13 @@
              the desk rather than move the seat, and six links in a column
              read as a menu nobody asked for. -->
         <div class="p-desk">
+          <!-- The model and the effort level, for this session only: the host
+               drives the window's own picker and presses s. What the window
+               confirmed is selected; what was asked for shows beside it until
+               the picker says so. -->
+          <span class="p-asked mono muted hidden"></span>
+          <select class="input p-sel" data-act="set-model" title="Change the model for this session only — the window's own picker, with s" aria-label="Model for this session"></select>
+          <select class="input p-sel" data-act="set-effort" title="Change the effort level for this session only — the window's own picker, with s" aria-label="Effort for this session"></select>
           <button class="btn" data-act="sessions" title="Pick another of this folder's conversations for the desk, or start a new one">${LINK_LABEL.sessions}</button>
           <!-- The reverse of taking a desk: the binding goes, the window
                closes, the seat stays. Always confirmed in a dialog first.
@@ -2731,13 +2754,46 @@
     // Deliberately looser than the bell: a message may open a window, so a desk
     // with none is still worth typing into. See nudgeable() on the server.
     const canChat = !!h?.live && !held;
+    const compacting = compactingLine(s.compacting);
     const presence = h
-      ? (h.live ? `on ${h.host}${h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
+      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
       : d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
     wrap.querySelector('.p-persona').textContent = d.persona;
+    const models = modelLine(s);
     wrap.querySelector('.p-meta').textContent =
-      `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${s.model ? ` · ${s.model}` : ''}` +
+      `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${models ? ` · ${models}` : ''}` +
       ` · ${presence} · ${d.turns} turn${d.turns === 1 ? '' : 's'}`;
+    // The model and effort controls: the window's confirmed value selected,
+    // what was asked for beside it until the picker confirms. Both change
+    // this session only (costmo, #10 Decided 4) — the host drives the
+    // window's own picker and presses `s`, never the command that saves a
+    // machine-wide default.
+    const modelSel = wrap.querySelector('[data-act="set-model"]');
+    const effortSel = wrap.querySelector('[data-act="set-effort"]');
+    if (modelSel && effortSel) {
+      const fam = modelFamily(s.model);
+      const known = MODEL_CHOICES.some((m) => m.value === fam);
+      modelSel.innerHTML = [
+        ...(s.model && !known ? [`<option value="${esc(fam)}">${esc(s.model)}</option>`] : []),
+        ...(!s.model ? ['<option value="">model…</option>'] : []),
+        ...MODEL_CHOICES.map((m) => `<option value="${m.value}">${m.label}</option>`),
+      ].join('');
+      modelSel.value = s.model ? fam : '';
+      modelSel.disabled = !canChat;
+      effortSel.innerHTML = [
+        ...(!s.effort ? ['<option value="">effort…</option>'] : []),
+        ...EFFORT_LEVELS.map((l) => `<option value="${l}">${l}</option>`),
+      ].join('');
+      effortSel.value = s.effort ?? '';
+      effortSel.disabled = !canChat;
+      const asked = wrap.querySelector('.p-asked');
+      const askedText = [
+        s.model_requested && modelFamily(s.model_requested) !== fam ? `${s.model_requested} asked` : '',
+        s.effort_requested && s.effort_requested !== s.effort ? `${s.effort_requested} effort asked` : '',
+      ].filter(Boolean).join(' · ');
+      asked.textContent = askedText;
+      asked.classList.toggle('hidden', !askedText);
+    }
 
     // The alert is rebuilt only when what it says changes; its age ticks in
     // place. On a hosted desk a permission prompt carries its answer buttons:
@@ -3182,6 +3238,95 @@
    */
   const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 
+  /* ---------- chat controls: what the page decides ---------- */
+  // Pure, and lifted into test/floor.mjs by the two markers around this
+  // section — see CLAUDE.md on page logic. Issues #9, #10 and #15 (0.10.9).
+
+  /** The commands the composer offers. The same list as the server's
+   *  FLOOR_COMMANDS; a floor list, versioned with the plugin. Anything else
+   *  typed after a slash passes through as typed. */
+  const FLOOR_COMMANDS = [
+    { name: 'clear', args: '', hint: 'start a new conversation on this desk' },
+    { name: 'compact', args: '', hint: 'summarise the conversation to free context' },
+    { name: 'model', args: 'name', hint: 'change the model — this session only' },
+    { name: 'effort', args: 'level', hint: 'change the effort level — this session only' },
+    { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools' },
+  ];
+  const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  /** The picker's rows the floor offers by name; the host matches the name
+   *  against the window's own picker, so a model not here still works typed. */
+  const MODEL_CHOICES = [
+    { value: 'fable', label: 'Fable 5.1' },
+    { value: 'opus', label: 'Opus 5.5' },
+    { value: 'sonnet', label: 'Sonnet 5.5' },
+    { value: 'haiku', label: 'Haiku 5.5' },
+  ];
+
+  /**
+   * Which commands the composer's text is the start of: a single line, a
+   * slash, and no space yet — once a space is typed the command is chosen
+   * and the rest is its argument. Empty for anything else, including a
+   * message that merely starts with "/" on its second line.
+   */
+  function slashMatches(text) {
+    const t = String(text ?? '');
+    if (!t.startsWith('/') || t.includes('\n') || /\s/.test(t)) return [];
+    const prefix = t.slice(1).toLowerCase();
+    return FLOOR_COMMANDS.filter((c) => c.name.startsWith(prefix));
+  }
+
+  /** A model id as the control names it: "claude-haiku-5-5" is "haiku". */
+  function modelFamily(model) {
+    const m = /^claude-([a-z]+)/i.exec(String(model ?? ''));
+    return m ? m[1].toLowerCase() : String(model ?? '').toLowerCase().split(/[\s-]+/)[0];
+  }
+
+  /**
+   * The header's model line: what the window confirmed, then what the floor
+   * asked for and the window has not confirmed yet. Asked-for and confirmed
+   * are shown apart on purpose — a /model typed into the window never
+   * reached the header before (issue #10), and a change asked from here is
+   * not a change until the picker says so.
+   */
+  function modelLine(s) {
+    if (!s) return '';
+    const parts = [];
+    if (s.model) parts.push(s.model);
+    if (s.effort) parts.push(`${s.effort} effort`);
+    const asked = [];
+    if (s.model_requested && modelFamily(s.model_requested) !== modelFamily(s.model)) asked.push(s.model_requested);
+    if (s.effort_requested && s.effort_requested !== s.effort) asked.push(`${s.effort_requested} effort`);
+    let line = parts.join(' · ');
+    if (asked.length) line += `${line ? ' ' : ''}→ ${asked.join(', ')} asked`;
+    return line;
+  }
+
+  /** The compacting line: which kind, and for how long. */
+  function compactingLine(c, nowMs = Date.now()) {
+    if (!c?.since) return '';
+    const secs = Math.max(0, Math.round((nowMs - Date.parse(c.since)) / 1000));
+    return `compacting${c.trigger ? ` (${c.trigger})` : ''} · ${secs}s`;
+  }
+
+  /**
+   * What a pending bubble says. Three things the window can have said about
+   * a message, and the difference between them is who has it: `queued` is the
+   * window's own word (it took the message while working and reads it at its
+   * next step — never stale, the desk said so); `held` is queued after a wait
+   * for the window, or 'compacting' when it took the message and went off to
+   * compact under it; `done` is a command's own receipt, in its own terms.
+   */
+  function deliveryNote(d, stale = false) {
+    if (d?.state === 'done') return d.said || 'done';
+    if (d) {
+      if (d.held === 'compacting') return 'held — the desk is compacting; it reads this when that ends';
+      if (d.held) return 'queued — the window took it once it was free';
+      return 'queued — the desk is working';
+    }
+    return stale ? 'not recorded — send again' : 'sending…';
+  }
+  /* ---------- chat controls: the drawing ---------- */
+
   /**
    * Has the window vouched for this pending message?
    *
@@ -3211,10 +3356,9 @@
     node.className = 't t-user t-pending';
     node.classList.toggle('stale', stale);
     node.classList.toggle('queued', !!queued);
-    const said = queued
-      ? (queued.held ? 'queued — the window took it once it was free' : 'queued — the desk is working')
-      : (stale ? 'not recorded — send again' : 'sending…');
-    node.innerHTML = `<div class="t-who">you<span class="t-when mono">${said}</span></div>` +
+    const said = deliveryNote(queued, stale);
+    node.classList.toggle('done', queued?.state === 'done');
+    node.innerHTML = `<div class="t-who">you<span class="t-when mono">${esc(said)}</span></div>` +
       ' <div class="t-body"></div>';
     node.querySelector('.t-body').textContent = text;
     return node;
@@ -3292,13 +3436,17 @@
         // bubble is waiting to hear, and two seconds of "sending…" over a
         // message already delivered is the whole complaint this answers.
         ui.delivery = ev.delivery ?? null;
+        // A command's receipt ends its send outright: there is no user turn
+        // coming to retire the bubble, so the note is the bubble from here
+        // (drawn from ui.delivery) and the grace clock never runs on it.
+        if (ui.delivery?.state === 'done') ui.sending = ui.sending.filter((p) => !squash(ui.delivery.text).includes(squash(p.text)));
         renderPanel();
       } else if (ev.type === 'sessions') {
         // A host listed this desk's conversations: the picker, if open, reads
         // them now rather than at its next second.
         window.sessionsArrived?.();
-      } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session') {
-        // Both change what the desk and the queue say; the cheapest correct
+      } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session' || ev.type === 'compacting') {
+        // All change what the desk and the queue say; the cheapest correct
         // thing is to fetch the floor again rather than mirror the logic here.
         tick();
       }
@@ -3986,10 +4134,11 @@
    * generic failure, because "the host is offline" is something the person can
    * act on and "failed" is not.
    */
-  async function sendChat() {
-    const text = $('p-text')?.value ?? '';
+  async function sendChat(given = null) {
+    const text = typeof given === 'string' ? given : ($('p-text')?.value ?? '');
     const btn = document.querySelector('#floor-panel [data-act="send"]');
     if (!text.trim() || !btn || !ui.open || btn.disabled) return;
+    const fromBox = typeof given !== 'string';
     btn.disabled = true;
     try {
       const r = await fetch('./api/floor/chat', {
@@ -4002,8 +4151,11 @@
       // Accepted by the board is not the same as in the conversation, so it
       // shows as sending until the window itself reports it.
       ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
-      $('p-text').value = '';
-      stashDraft();   // handed over: no longer a draft
+      if (fromBox) {
+        $('p-text').value = '';
+        stashDraft();   // handed over: no longer a draft
+        drawSlash();
+      }
       ui.stick = true;
       renderPanel();
       await tick();
@@ -4185,8 +4337,41 @@
   // Every keystroke into the box is filed under its desk as it happens, so no
   // moment — a click on another desk, a reload, a closed tab — can be the one
   // that loses it. See the drafts note above stashDraft.
+  /** The slash menu, drawn from what the box holds right now. */
+  function drawSlash() {
+    const box = $('p-text');
+    const menu = document.querySelector('#floor-panel .p-slash');
+    if (!box || !menu) return;
+    const matches = slashMatches(box.value);
+    menu.classList.toggle('hidden', !matches.length);
+    menu.innerHTML = matches.map((c, i) => `<button type="button" class="p-slash-row${i === 0 ? ' is-first' : ''}" role="option" data-slash="${esc(c.name)}">` +
+      `<span class="mono">/${esc(c.name)}${c.args ? ` <i>${esc(c.args)}</i>` : ''}</span><span class="muted">${esc(c.hint)}</span></button>`).join('');
+  }
+  /** Put a command in the box: `/name ` for one that takes an argument, `/name` for one that does not. */
+  function takeSlash(name) {
+    const box = $('p-text');
+    const c = FLOOR_COMMANDS.find((x) => x.name === name);
+    if (!box || !c) return;
+    box.value = `/${c.name}${c.args ? ' ' : ''}`;
+    stashDraft();
+    drawSlash();
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+  document.addEventListener('click', (e) => {
+    const row = e.target?.closest?.('.p-slash-row');
+    if (row) { e.preventDefault(); takeSlash(row.dataset.slash); }
+  });
+  document.addEventListener('change', (e) => {
+    const act = e.target?.dataset?.act;
+    if (act !== 'set-model' && act !== 'set-effort') return;
+    const v = e.target.value;
+    if (!v) return;
+    sendChat(act === 'set-model' ? `/model ${v}` : `/effort ${v}`);
+  });
+
   document.addEventListener('input', (e) => {
-    if (e.target?.id === 'p-text') stashDraft();
+    if (e.target?.id === 'p-text') { stashDraft(); drawSlash(); }
     // Typing into a free-text choice is what turns it into an answer, so the
     // count under the form follows the words.
     const form = e.target?.classList?.contains('p-other') ? e.target.closest('.p-ask') : null;
@@ -4195,6 +4380,11 @@
 
   document.addEventListener('keydown', (e) => {
     if (!ui.on) return;
+    // Tab completes the first command the box is the start of.
+    if (e.target?.id === 'p-text' && e.key === 'Tab' && !e.shiftKey) {
+      const first = slashMatches(e.target.value)[0];
+      if (first) { e.preventDefault(); takeSlash(first.name); return; }
+    }
     // Enter sends; Shift+Enter is a newline, the way every chat box works.
     if (e.target?.id === 'p-text' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();

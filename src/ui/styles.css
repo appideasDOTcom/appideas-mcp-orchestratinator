@@ -1497,6 +1497,24 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .t-pending.queued { opacity: 0.8; }
 .t-pending.queued .t-when { color: var(--busy); }
 .t-pending.queued .t-body { border-style: solid; }
+/* A command's receipt, in its own terms: solid like queued, and the note is
+   the sentence rather than a state. */
+.t-pending.done { opacity: 0.9; }
+.t-pending.done .t-when { color: var(--muted); }
+.t-pending.done .t-body { border-style: solid; }
+/* The compaction summary, closed by default. */
+.t-compact details > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; }
+.t-compact details > summary::-webkit-details-marker { display: none; }
+.t-compact details[open] > summary .t-text::after { content: ' · close'; }
+.t-compact-body { white-space: pre-wrap; font-size: 11px; color: var(--muted); margin: 4px 0 0 11px; max-height: 40vh; overflow: auto; }
+/* The slash menu under the compose box. */
+.p-slash { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: var(--panel, transparent); }
+.p-slash-row { display: flex; justify-content: space-between; gap: 10px; background: none; border: 0; padding: 3px 6px; text-align: left; cursor: pointer; color: inherit; font-size: 11.5px; border-radius: 4px; }
+.p-slash-row:hover, .p-slash-row.is-first { background: color-mix(in srgb, var(--busy) 12%, transparent); }
+.p-slash-row i { font-style: normal; color: var(--muted); }
+/* The model and effort controls on the panel's foot. */
+.p-sel { height: 28px; font-size: 11px; padding: 0 4px; max-width: 110px; }
+.p-asked { font-size: 10.5px; }
 .t-partial .t-body { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
 .t-partial .t-body::after { content: '▍'; color: var(--accent); animation: caret 1s steps(2) infinite; }
 @keyframes caret { 50% { opacity: 0; } }

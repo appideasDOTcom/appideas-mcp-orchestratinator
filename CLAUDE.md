@@ -314,6 +314,109 @@ Two things follow, and both were bugs before they were rules:
   order, because the host's two loops do not wait for each other and the relay
   genuinely does publish the turn first sometimes. It did, on the real board.
 
+## A slash command, the model, and a compaction
+
+Issues #9, #10 and #15, shipped as 0.10.9 (2026-11-03, measured on 2.1.300
+on a probe desk through the host's own `send()`; the table is in the task's
+record, the readers are in [`host/window.js`](host/window.js) and every one
+was written against a capture). Each rule here replaced something that had
+a reasonable argument behind it.
+
+- **A command is confirmed on its own receipt, and each receipt is read
+  where it is written** (`commandReceipt`). `deliveryOf` looks for a user
+  record containing the text, and a command writes no such record: `/model
+  sonnet` is a `<command-name>` record with the argument in its own tag,
+  `/clear` writes into a *new* session's file (the issue's "writes nothing"
+  counted the old one), `/btw` and `/cost` write nothing anywhere. So:
+  `/clear` is the new file's first record; `/compact` is the command record
+  and the window compacting; `/model` and `/effort` are the window's own
+  stdout line; `/btw` is its overlay; anything else is its command record
+  or the screen it opened (`overlayOf`), whose text goes to the desk as a
+  line labeled by the command. A command that closes the window (`/exit`)
+  has the pane's absence as its receipt. The sentence the desk shows is the
+  window's own words where it has any.
+- **Enter is pressed again only while the message is still in the composer**
+  (`stillInComposer`). The retry used to press on any screen that had gone
+  still, and a still screen is also a `/btw` answer and a `/model` picker:
+  measured, it chose the picker's highlighted row with nobody choosing, and
+  closed the overlay 1.3 s after the answer appeared. No composer on screen
+  is "no" too. A `/btw` answer is read off the overlay, left
+  `ORCH_BTW_LINGER_MS` for anyone looking at the window, then closed with
+  Escape — the host does close it, on purpose, because a dialog left
+  standing takes the next message instead of the composer.
+- **A model or effort change from the floor is this session's only**
+  (costmo, #10 Decided 4). `/model <name>` and `/effort <level>` as commands
+  write the person's machine-wide default (`~/.claude/settings.json`
+  `model`, `modelSettings.<model>.effortLevel` — "saved as your default for
+  new sessions"); the probe changed the operator's and they had to be put
+  back by hand. The window's picker has `s` for this session only, so the
+  host drives it (`pick`): `/model` + Enter, ↑/↓ to the row (a digit
+  SELECTS and starts the switch, so digits are never pressed), ←/→ along
+  the effort row, `s`, and `1` on the "Switch model?" cache warning. The
+  chat route refuses a bare `/model` (a picker nobody is driving) and an
+  effort level the picker has no row for; the page offers both as controls
+  and shows asked-for beside confirmed until the window confirms —
+  PreModelSwitch/PostModelSwitch, the stdout record, and the `model` on the
+  transcript's next reply, which is how the header follows a `/model`
+  typed into the window.
+- **A paste of four or more lines, or of more than 800 characters, is
+  wrapped in `<pasted_content>`** and the model is told it "may contain
+  instructions the user did not write" — exactly wrong for the operator's
+  own message. Such a message is typed instead (`typeInto`): `send-keys -l`
+  in 100-character pieces 60 ms apart (a 900-character burst in one
+  send-keys was read as a paste and wrapped anyway), `M-Enter` between
+  lines, every line confirmed in the composer before the next (one of two
+  runs at 0.3 s a line lost a line); if it cannot be confirmed the message
+  is pasted after all. What was pasted by hand is unwrapped on the way to
+  the floor (`unwrapPaste`), by id, wherever the pair stands in a block.
+- **A compaction is busy, and the hooks own its state.** The bottom line
+  keeps "esc to interrupt" throughout, so `busy()` says only that; what
+  says more is the spinner line directly above the composer, "Compacting
+  conversation… (7s · ↓ 599 tokens)", read positionally (`compactingOf`) —
+  elapsed seconds and the summary's tokens, no percentage, because the
+  binary's progress never reaches the line. The desk's compacting state
+  comes from PreCompact / PostCompact (and the SessionStart a compaction
+  fires 30 ms before PostCompact, in case that never comes), the summary
+  from the transcript (`isCompactSummary` → a `context` turn labeled
+  `compact-summary`, drawn closed), the boundary from `compact_boundary`
+  (a `context` line in the compaction's terms, which also ends the state).
+  A message sent into one is taken, enqueued with no text (2.1.300 writes
+  `queue-operation` records without `content`), and written as a turn only
+  at the end — 37–150 s on real desks — so `send()` returns `held:
+  'compacting'` the moment the spinner shows under it rather than erroring
+  at twenty seconds. A `/compact` receipt says `compacting` only if the
+  window is still at it; one that arrived after PostCompact once re-set the
+  flag after the fact.
+- **A StopFailure fires when auto-compact thrashes, not when it works.**
+  Three rounds inside three turns (71k→12k, 69k→12k, 66k→9k, provoked
+  with `/autocompact 100k`) ended in `{ error: "invalid_request",
+  last_assistant_message: "Autocompact is thrashing: …" }` — 2.1.300's
+  fields, which the plugin never forwarded, hence "the turn ended with an
+  API error" on nine of the live board's thirty-two error turns. Its twin
+  in the transcript is an `assistant` record flagged `isApiErrorMessage`
+  with `model: "<synthetic>"`, which the relay now files as an `error` turn
+  rather than the agent's words; the hook's turn is for a desk no host
+  reads.
+- **Only `startup` and `resume` are a session starting** (costmo, #15
+  Decided 2; `isSessionStart`). SessionStart also fires with `source:
+  compact` at every compaction and `clear` on `/clear`, and every
+  SessionStart used to wake an archived floor and ask a rescan.
+- **A command's receipt note stands until the operator's next message.**
+  The command's own lines — the host's sentence, a `/btw` answer, a `/cost`
+  screen — arrive in the same second as the note and took it down before
+  anyone read it when any turn cleared it.
+
+How this was built without deploying it: a throwaway server on :8905
+running the tree's code, the probe folder rebound to it with `claude mcp
+remove`/`add -s local`, a second host process pointed at it (the live host
+then skips the folder as another board's), and the tree's `report.mjs`
+registered in the probe's own `.claude/settings.json` beside the installed
+plugin — so the real window, the real hooks and the new code met end to end
+on the operator's machine with the live board untouched. The plugin cache
+installs from the tree on `claude plugin update`; until then the installed
+plugin's hooks fire for the old eight events only, and a desk's compacting
+state and model switch reach the live board only from the transcript.
+
 ## History is read off the hosts, not the board
 
 **`turns` is a live tail, not an archive**: the newest 400 rows a desk
@@ -629,7 +732,7 @@ silence — `hooks.json` runs it detached with every stream sent to `/dev/null`,
 a fault there shows up as prompts quietly never reaching the floor while the
 conversation keeps relaying. Most of its assertions are about what is *not* sent.
 It drives `hooks.json`'s own shell line under real `sh` too, and asserts all
-eight events carry the identical command — editing one and not the rest is the
+twelve events carry the identical command — editing one and not the rest is the
 drift it guards against.
 Its fixture lives in `tmpdir()`, not `data/`: the hook walks six levels up
 looking for `.mcp.json`, and a fixture inside the repo reaches this repo's own —

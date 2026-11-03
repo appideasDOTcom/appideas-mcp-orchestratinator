@@ -1,5 +1,5 @@
 {
-  "description": "Report this session's state to the orchestratinator floor. Every event reads stdin and detaches, so nothing is on the critical path of a turn. The floor reads the conversation itself from Claude Code's own transcript; these hooks say what is happening, not what was said.",
+  "description": "Report this session's state to the orchestratinator floor. Every event reads stdin and detaches, so nothing is on the critical path of a turn — a PreCompact hook that waited would be a slower compaction. The floor reads the conversation itself from Claude Code's own transcript; these hooks say what is happening, not what was said: a prompt is open, a turn ended, a compaction or a model switch started and finished.",
   "hooks": {
     "SessionStart": [
       {
@@ -79,6 +79,50 @@
       }
     ],
     "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
       {
         "hooks": [
           {

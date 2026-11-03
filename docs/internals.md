@@ -102,6 +102,19 @@ just means a client opens a session per turn, which is normal and handled.
   `saved_prompts`. See [`src/db.js`](../src/db.js). A channel is never a row of
   its own; it's a key shared across those tables, which is why archiving needs
   a flag table and deleting has to sweep all of them in one transaction.
+- **The floor's chat controls (0.10.9):** `agent_sessions` carries `effort`,
+  `model_requested`, `effort_requested`, `compacting_since` and
+  `compacting_trigger`. The hooks write the confirmed side (PreCompact /
+  PostCompact, PreModelSwitch / PostModelSwitch, `effort_level` on every
+  tool-context event, SessionStart with `source`); `POST /api/floor/chat`
+  writes the asked-for side when the text is `/model <name>` or `/effort
+  <level>`, refuses a bare `/model` and an unknown level, and hands every
+  slash command to the host as chat work. The host answers with two events
+  of its own: `receipt` (a command confirmed on its own receipt — the
+  sentence, and for the picker the model and effort it set) and `model`
+  (the model the transcript's latest reply names). `FLOOR_COMMANDS` in
+  [`src/floor.js`](../src/floor.js) is the list the composer offers; the
+  page carries the same list, and `test/floor.mjs` checks the two agree.
 - **Dashboard:** a separate Express router on the same port. `GET /api/state`
   builds the channel/agent view; `GET /api/activity` is a `UNION ALL` over
   messages, task transitions, contract history and operator actions, ordered

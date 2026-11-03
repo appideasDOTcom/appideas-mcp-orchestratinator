@@ -451,6 +451,43 @@ async function main() {
     eq(received[0]?.body?.git_branch, null, 'a detached HEAD is null, not a sha pretending to be a branch');
 
     // ================================================================
+    console.log('\nwhat the 2.1.300 hooks carry (issues #9, #10, #15)');
+
+    // StopFailure on 2.1.300 says `error` (a code) and puts the words in
+    // last_assistant_message; the floor drew "the turn ended with an API
+    // error" for every one because only the 2.1.2xx fields were read.
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'StopFailure', cwd: `${FIX}/repo`, error: 'invalid_request', error_details: { status: 400 }, last_assistant_message: 'Autocompact is thrashing' });
+    await settle();
+    eq(received[0]?.body?.error, 'invalid_request', 'a StopFailure\'s `error` is forwarded');
+    eq(received[0]?.body?.error_details, '{"status":400}', 'and its details, as text');
+    eq(received[0]?.body?.last_assistant_message, 'Autocompact is thrashing', 'with the words');
+
+    // Every tool-context hook carries the session's effort; it is the only
+    // receipt /effort has besides the window's own stdout line.
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'Stop', cwd: `${FIX}/repo`, effort: { level: 'xhigh' } });
+    await settle();
+    eq(received[0]?.body?.effort_level, 'xhigh', 'effort.level is forwarded as effort_level');
+
+    // The compaction hooks: the trigger goes up, the summary does not — content
+    // is the transcript's, and the host files the summary from there.
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'PreCompact', cwd: `${FIX}/repo`, trigger: 'auto', custom_instructions: null });
+    await fire({ session_id: SID, hook_event_name: 'PostCompact', cwd: `${FIX}/repo`, trigger: 'manual', compact_summary: 'S'.repeat(6000) });
+    await settle();
+    eq(received[0]?.body?.trigger, 'auto', 'PreCompact carries its trigger');
+    eq(received[1]?.body?.trigger, 'manual', 'so does PostCompact');
+    eq(received[1]?.body?.compact_summary, undefined, 'and the summary is not sent — the transcript owns it');
+
+    // A model switch: what was asked for, what it resolved to, and from where.
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'PreModelSwitch', cwd: `${FIX}/repo`, from_model: 'claude-a', to_model: 'claude-b', requested_model: 'b', source: 'picker' });
+    await settle();
+    eq([received[0]?.body?.from_model, received[0]?.body?.to_model, received[0]?.body?.requested_model, received[0]?.body?.source],
+      ['claude-a', 'claude-b', 'b', 'picker'], 'PreModelSwitch\'s from, to, requested and source are forwarded');
+
+    // ================================================================
     console.log('\nfinding the identity');
 
     // Header names in hand-written JSON are whatever the person typing felt
@@ -598,8 +635,9 @@ async function main() {
     // the wrapper itself needs the same assertions as the script.
 
     const hooksJson = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8'));
-    const EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'Stop', 'StopFailure'];
-    eq(Object.keys(hooksJson.hooks).sort(), [...EVENTS].sort(), 'exactly the eight events the floor reads are hooked');
+    const EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'Stop', 'StopFailure',
+      'PreCompact', 'PostCompact', 'PreModelSwitch', 'PostModelSwitch'];
+    eq(Object.keys(hooksJson.hooks).sort(), [...EVENTS].sort(), 'exactly the twelve events the floor reads are hooked');
     const commands = EVENTS.map((e) => hooksJson.hooks[e]?.[0]?.hooks?.[0]);
     assert(commands.every((c) => c?.type === 'command' && c?.timeout === 5), 'every event runs a command with the same short timeout');
     eq(new Set(commands.map((c) => c?.command)).size, 1, 'and every event runs the identical line — editing one and not the rest is drift');
