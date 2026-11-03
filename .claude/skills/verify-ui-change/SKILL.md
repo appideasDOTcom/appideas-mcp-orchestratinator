@@ -289,6 +289,24 @@ The check tells the two "the click did nothing" causes apart — the card's
 own click branch swallows a button it does not name, which is how the
 first cut of Hide desk failed here and not in the suite.
 
+### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
+
+```bash
+node --experimental-websocket .claude/skills/verify-ui-change/check-chat-controls.mjs http://localhost:8905 /tmp/out lab bo k h1
+```
+
+Against `seed-desk.mjs`'s desk: the slash menu and Tab, a /btw from the box
+with the host's receipt and `host` line posted as the seed host (`h1`),
+the model select showing the ask and the hooks confirming it, a same-second
+/clear carrying model and effort, the foot as two rows of two. Two doors it
+uses that other checks do not: hook state goes in through `/api/ingest`
+with the seed's key (`PreModelSwitch`, `PreCompact`, `SessionEnd` +
+`SessionStart {source: 'clear'}`), host events through `/api/host/events`
+as the seed host — the same doors a plugin and a host use, so nothing here
+is a state no host could have produced. `probe-chat-panel.js` reads the
+meta line, both selects, the asked-for note, the slash rows and the last
+rows (with the compaction summary's open/closed) in one call.
+
 ### answering-host.mjs — a host that answers the page's questions
 
 `seed-desk.mjs` and `seed-folders.mjs` put state on the board; neither takes

@@ -401,10 +401,29 @@ a reasonable argument behind it.
   Decided 2; `isSessionStart`). SessionStart also fires with `source:
   compact` at every compaction and `clear` on `/clear`, and every
   SessionStart used to wake an archived floor and ask a rescan.
-- **A command's receipt note stands until the operator's next message.**
-  The command's own lines — the host's sentence, a `/btw` answer, a `/cost`
-  screen — arrive in the same second as the note and took it down before
-  anyone read it when any turn cleared it.
+- **A command's receipt leaves one line, not a bubble.** The receipt note
+  first stood as the pending bubble with the sentence as its caption, and
+  costmo read it as "an artifact outlined in white saying /model opus … a
+  message that has not yet sent". So: a done command draws no bubble, and
+  the line labeled `host` carries what was typed and what happened —
+  "/model opus — Set model to Opus 5.5 for this session only".
+- **A live session outranks an ended one, and a hosted desk's session is
+  its window's.** A `/clear` ends one session and starts the next in the
+  same second, and on `updated_at` alone the two tied: the floor showed the
+  ended row's compacting flag or the new row's empty model, by chance (his
+  "works sometimes, not others"). Every "the desk's newest session" read
+  orders `(ended_at IS NULL) DESC, updated_at DESC`, `buildFloor` shows the
+  roster's `sdk_session_id` row while it is live, and the host names the
+  window's session on every receipt — two live sessions on one desk (an
+  editor tab beside the floor's window) put the picker's words on the other
+  one until QA measured it (PR #32). A `/clear` carries the model and effort
+  forward from the row it closed, because the window keeps its process
+  (measured: the first reply after `/clear` named the model picked before
+  it). And a compaction ends on any prompt, turn or tool, hook or relayed,
+  and a floor `/compact` is watched to its end (`awaitCompaction`) and said
+  in the window's closing words — a `/compact` with nothing to compact
+  shows the spinner for a moment, writes nothing, and left the desk
+  "compacting" for six minutes.
 
 How this was built without deploying it: a throwaway server on :8905
 running the tree's code, the probe folder rebound to it with `claude mcp
@@ -726,6 +745,21 @@ refuses to edit a git checkout. The working tree is the commit surface at
 every moment: on 2026-10-01 a mutation run edited `host/index.js` in place
 with a restore step, the commit landed mid-run, and `8788a6d` reached
 `origin/develop` with a line deliberately removed.
+
+**A composer pane and a command-aware stand-in, since 0.10.9.** The window
+suite's `composer-desk` pane (`run.cjs` in `test/window.mjs`) is a node
+program on the alternate screen that draws what Claude Code draws — a
+composer box, the `/btw` overlay with its answer arriving late, the model
+picker with its effort row, the compaction spinner — writes the records
+Claude Code writes, drops the first Enter the way a paste-consumed one is
+dropped, and logs every key it is sent by mode. That log is how "no Enter
+after a command that opened something" and "two Downs then `s`, never a
+digit" are asserted rather than assumed. The host suite's stand-in answers
+`/clear` with a new session file and a roster change, `/btw` with an
+overlay, and any other command with its `<command-name>` record. Neither
+has a composer the way the real window does for a *typed* message, so the
+typed delivery (`typeInto`) is proved on the composer pane and on a real
+probe, and the plain stand-in gets a paste.
 
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so

@@ -311,6 +311,72 @@ Timing on a probe is the floor of it, not the case: last digit to "Ready to
 submit your answers?" was 28–57 ms on a window with a short conversation. A
 desk with a long one was not measured — forms are not raised on his desks.
 
+## A probe desk on a throwaway board — the whole path, without deploying
+
+The probe above answers "what does Claude Code do". When the question is
+"what does *our* code do with it" — a receipt in `send()`, a hook the plugin
+forwards, a state the page draws — the throwaway window is not enough: the
+host's `send()`, the server's `ingestHookEvent` and the page all have to be
+in the loop, and the live board is the operator's. This is how the 0.10.9
+round (issues #9/#10/#15, 2026-11-03) was built and driven end to end with
+the live board untouched; the tools are in [`probe-desk/`](probe-desk/).
+
+```bash
+D=.claude/skills/measure-a-real-window/probe-desk
+P=/Users/costmo/Documents/dev/appideas/coord-probe-NNN        # under the host's roots, a name of your own
+$D/make-probe.sh "$P"                                         # hooks → $P/hooks.log, a CLAUDE.md, filler.txt
+
+# the throwaway server, from the tree, on a private port, with its own key
+PORT=8905 DB_PATH=./data/scratch-NNN.db ORCH_AUTH_TOKEN=probe-NNN ORCH_AUTH_MODE=enforce node src/server.js &
+# bind the probe to it (Claude Code's own CLI; the live host then skips the folder as "another board")
+( cd "$P" && claude mcp add -s local --transport http orchestratinator http://localhost:8905/mcp \
+    -H "X-Channel: coord-probe" -H "X-Agent: probe" -H "X-Orchestratinator-Key: probe-NNN" )
+# a second host, from the tree, pointed at it — it discovers only the probe (every other desk is another board's)
+ORCH_URL=http://localhost:8905 ORCH_AUTH_TOKEN=probe-NNN ORCH_HOST_ROOTS=/Users/costmo/Documents/dev/appideas \
+  ORCH_HOST_ID=probe-host ORCH_HOST_NAME='probe host' ORCH_TMUX_SESSION=orch ORCH_HOST_CONFIG=/nonexistent/host.json \
+  node host/index.js 2>&1 | while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done > rec/host.log &
+# open the window from the floor: POST /api/floor/open {channel, agent}; the pane is orch:<folder name>
+# the tree's hook, beside the installed plugin's, so the new events reach the throwaway board
+#   (the installed plugin fires only the events its cached hooks.json names; the probe's own
+#    settings.json can run plugin/hooks/report.mjs from the tree for all twelve — see make-probe.sh's output)
+
+mkdir -p rec
+$D/pane-recorder.sh rec/pane.log orch:coord-probe-NNN &                     # every change, 150 ms
+$D/floor-recorder.sh rec/floor.log http://localhost:8905 coord-probe probe & # the desk, on change
+PROBE_DIR="$P" REC="$PWD/rec" BOARD=8905 CHANNEL=coord-probe AGENT=probe \
+  node $D/probe-send.mjs send '/btw what is 2+2?' 25     # → host log, floor changes, hooks, every record, pane frames
+node $D/size-matrix.mjs 3 240                             # a 3-line 240-char message for the wrapper matrix
+```
+
+What to know before trusting a reading from it:
+
+- **Which plugin a window runs is decided at its start.** The installed
+  plugin fires only the events its cached `hooks.json` names; the window has
+  to be reopened to take a new one (`claude plugin update` says "Restart to
+  apply"). Register the tree's `report.mjs` in the probe's *own*
+  `.claude/settings.json` for the events under test, and `/exit` + reopen
+  from the floor when the settings change.
+- **`/model <name>` and `/effort <level>` as commands write the operator's
+  machine-wide default** (`~/.claude/settings.json` `model`,
+  `modelSettings.<model>.effortLevel`). The probe changed his, twice, and
+  they were put back by hand — read that file before and after any
+  measurement that touches a model, and restore it. The picker's `s` does
+  not write it.
+- **A compaction needs a context behind it.** Read `filler.txt` once (~85k
+  tokens) for a 10–15 s manual one; `/autocompact 100k` and two reads
+  provoked an auto one that thrashed three times and ended in a StopFailure
+  — which is the measurement you want for that error, and costs about a
+  dollar on Sonnet.
+- **The pane's width is whoever is attached.** The `orch` session had a
+  client, so the probe pane was 180 columns, not 80 — read footers rejoined.
+- **Tear down everything, by name.** Leave the desk through the floor
+  (`POST /api/floor/desk/leave`: the host closes the window and removes the
+  binding), kill the second host and the server, the recorders and any
+  headless Chrome (`pkill -f orch-cdp`), delete the scratch DB and the probe
+  folder, and `POST /api/admin/channel/delete {channel, confirm: channel}`
+  on the *live* board if the probe was ever taken there — the persona rows
+  stay otherwise.
+
 ## A background session
 
 Claude Code's daemon can hold a conversation with no terminal at all, and
