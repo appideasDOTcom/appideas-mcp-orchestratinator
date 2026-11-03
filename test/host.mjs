@@ -249,10 +249,25 @@ function fixture() {
     // (issue #24). This stand-in otherwise exits on the hangup, which is why
     // the suite never met it. Read at the hangup, not at start, so a case can
     // arm it for a window that is already open.
+    //
+    // The linger ends by a watchdog, not by a timer of its own. A
+    // setTimeout(process.exit) here never fired: after the hangup Node
+    // reopens the dead pane's tty (uv_tty_init → open()) and on macOS that
+    // open never returns, so the loop never ran again — measured with
+    // `sample`, 775 of 775 on the main thread (task 263, 2026-11-03). Every
+    // run left the two windows the move case closes under this flag alive,
+    // parented to the tmux server, 105 of them by one evening. The watchdog
+    // is a detached sh that kills this pid when the linger is up, and only
+    // if the pid is still this stand-in: pids are reused.
     `const LINGER_FLAG = ${JSON.stringify(`${FIX}/linger.flag`)};`,
     `process.on('SIGHUP', () => {`,
     `  let ms = 0; try { ms = Number(fs.readFileSync(LINGER_FLAG, 'utf8').trim()) || 0; } catch {}`,
-    `  if (ms > 0) { process.stdin.on('error', () => {}); setTimeout(() => process.exit(0), ms); return; }`,
+    `  if (ms > 0) {`,
+    `    process.stdin.on('error', () => {});`,
+    `    const me = String(process.pid), script = process.argv[1];`,
+    `    require('child_process').spawn('/bin/sh', ['-c', 'sleep "$1"; ps -o command= -p "$2" | grep -qF -- "$3" && kill -9 "$2"', 'linger', String(ms / 1000), me, script], { detached: true, stdio: 'ignore' }).unref();`,
+    `    return;`,
+    `  }`,
     `  process.removeAllListeners('SIGHUP'); process.kill(process.pid, 'SIGHUP');`,
     `});`,
     `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: MY_ID, name: 'stand-in' }]));`,
