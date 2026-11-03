@@ -1234,12 +1234,23 @@ try {
   await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: 's-two-window', cwd: '/repo/twofold' }]);
   await post(ev('twofold', 's-two-window', 'SessionStart', { source: 'startup', model: 'claude-haiku-5-5' }));
   await post(ev('twofold', 's-two-editor', 'SessionStart', { source: 'startup', model: 'claude-fable-5-1' }));
+  // The editor's session is the newer by the clock — strictly, since
+  // updated_at is to the second — so "the desk's newest live row" is
+  // provably not the window's; without this gap the two tied and the
+  // assertions below could not tell the fault from the fix.
+  await sleep(1100);
+  await post(ev('twofold', 's-two-editor', 'Stop', {}));
   let two = deskOf(await floor(), 'twofold');
   eq(two?.session?.session_id, 's-two-window', "a hosted desk's session is the window's, the roster's id, not the newest live row");
   const askTwo = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'twofold', text: '/model opus' }) });
   eq(askTwo.status, 200, '/model opus is accepted for it');
   await takeWork();
   eq((await sessOf('twofold'))?.model_requested, 'opus', "and the asked-for value lands on the window's session");
+  // The editor's session newest once more — the ask above touched the
+  // window's row — so the receipt's write, too, can only pass by naming
+  // the window's session rather than "the desk's newest".
+  await sleep(1100);
+  await post(ev('twofold', 's-two-editor', 'Stop', {}));
   await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 for this session only', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
   two = await sessOf('twofold');
   eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the picker's words land on the window's session the host named");
