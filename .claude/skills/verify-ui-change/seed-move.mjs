@@ -20,8 +20,9 @@
  *
  * It is also that live host. It long-polls /api/host/work for testbox and
  * answers a move's bind the way host/index.js does — `bound` with `from`,
- * then the new conversation's `session` — and prints every work item as a
- * JSON line, which is how the check reads what the page sent. The host's
+ * then the new conversation's `session`; or, for a floor named `refuse-…`,
+ * a refusal said on the desk it was leaving — and prints every work item as
+ * a JSON line, which is how the check reads what the page sent. The host's
  * heartbeat runs for as long as this does.
  *
  *   PORT=8905 DB_PATH=./data/scratch.db ORCH_AUTH_TOKEN=k node src/server.js &
@@ -85,6 +86,13 @@ for (;;) {
     if (w.kind !== 'bind') continue;
     const p = w.payload ?? {};
     await new Promise((r) => setTimeout(r, 400));
+    // A floor named `refuse-…` is a move this host refuses, as bind() does
+    // when the window turns out to be working: said on the desk it was
+    // leaving, which is the one the board has a hosted row for (PR #33).
+    if (p.from && /^refuse-/.test(p.channel)) {
+      await events([{ type: 'error', channel: p.from.channel, agent: p.from.agent, code: 'bind_refused', message: `not moved to ${p.channel} — the window is still working: ✳ Baking… (esc to interrupt)` }]);
+      continue;
+    }
     await events([{ type: 'bound', channel: p.channel, agent: p.agent, cwd: p.path, scope: 'local', session_id: null, from: p.from ?? null }]);
     await new Promise((r) => setTimeout(r, 600));
     await events([{ type: 'session', channel: p.channel, agent: p.agent, session_id: `s-${p.agent}-new-${++n}`, cwd: p.path, pid: 4000 + n }]);

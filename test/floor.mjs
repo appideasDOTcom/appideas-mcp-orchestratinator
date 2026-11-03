@@ -1017,10 +1017,26 @@ try {
     const b = src.indexOf('/* ---------- take a desk: the dialog ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the take-a-desk section was not found in src/ui/app.js between its two section comments');
     const tmp = `./data/desk-dialog-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome };\n`);
     try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
   })();
-  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody } = lifted;
+  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome } = lifted;
+
+  // A move the board accepted is not yet made: the page follows the agent
+  // only once its host has seated it on the target, and says the host's
+  // refusal when that comes instead — on the floor the desk is still on
+  // (QA, PR #33 finding 1; host/index.js bind() says it there).
+  const payload = (here, there) => ({ channels: [
+    { channel: 'here', desks: here ? [{ agent: 'alpha', ...here }] : [] },
+    { channel: 'there', desks: there ? [{ agent: 'alpha', ...there }] : [] },
+  ] });
+  const mv = { channel: 'here', agent: 'alpha', to: 'there' };
+  eq(moveOutcome(payload({ hosted: { live: true }, last_turn: { id: 7, role: 'assistant' } }, null), mv, 7), null, 'a move the board took but the host has not made is neither seated nor refused — the page waits');
+  eq(moveOutcome(payload({ hosted: { live: true } }, { hosted: null }), mv, null), null, 'a seat on the target with no host running it yet is not seated');
+  eq(moveOutcome(payload(null, { hosted: { live: true } }), mv, 7), 'seated', 'seated once its host runs it on the target — then the page follows');
+  eq(moveOutcome(payload({ hosted: { live: true }, last_turn: { id: 9, role: 'error', text: 'not moved to there — the window is still working: esc to interrupt' } }, null), mv, 7),
+    { refused: 'not moved to there — the window is still working: esc to interrupt' }, 'refused when the desk it was leaving says a newer error — in the host\'s words, and the page stays');
+  eq(moveOutcome(payload({ hosted: { live: true }, last_turn: { id: 7, role: 'error', text: 'an old error' } }, null), mv, 7), null, 'an error from before the move is not its refusal');
 
   // The card's move dialog (#18), lifted with Take a desk's because it is
   // Take a desk's move from the other side and shares its sentence.

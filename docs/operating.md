@@ -211,6 +211,11 @@ None of them should have to be discovered by accident:
   folder, in the session picker and History. With no window open, it opens
   on its **last conversation**. An agent's name and look go with it. The
   button is greyed, with the reason under it, on a desk no live host runs.
+  The dialog stays open until the agent is seated on the new floor, then
+  takes you there; if its host refuses the move — its window turns out to be
+  mid-turn, say — the dialog says so in the host's words, the agent stays
+  where it was, and its desk there says so too. Take a desk's move waits the
+  same way.
 - **Hide desk.** Puts that desk away by hand: it becomes a pill carrying the
   agent's name in a row under the storey's last desk, and clicking the pill
   brings it back. It is the server's flag, like archive — shared by every

@@ -16,6 +16,9 @@
  *   2. The card on `ann`: the button live; the dialog — its floors, the
  *      sentence, the agent fixed.
  *   3. ann mid-turn: Move is refused in the dialog with Take a desk's words.
+ *   3b. The board takes a move the host then refuses (a floor named
+ *      `refuse-…`, see seed-move.mjs): the dialog stays with the host's words,
+ *      and the page goes nowhere (PR #33 finding 1).
  *   4. A new floor by name, from all floors: the page lands on that floor
  *      with ann's panel open, and ann drawn there and nowhere else
  *      (Decided 3: from the all-floors view).
@@ -110,6 +113,20 @@ check(binds().length === 0, 'and nothing went to the host');
 await page.shot(`${out}/move-refused.png`, '#dlg', { scale: 2 });
 await events([{ type: 'turn', channel: 'alpha', agent: 'ann', session_id: 's-ann', role: 'assistant', text: 'done' }]);
 
+// 3b — the board takes it, the host refuses it (PR #33 finding 1): the page
+// does not go anywhere, and the dialog says the host's words
+await page.evalJs(`(() => { const i = document.getElementById('move-new-channel'); i.value = 'refuse-me'; i.dispatchEvent(new Event('input', { bubbles: true })); return 'ok'; })()`);
+await page.click('#dlg-body [data-do="desk-move"]');
+await page.waitFor(`(() => { const e = document.querySelector('#dlg-body .dlg-err'); return e && !e.hidden && /refuse-me/.test(e.textContent); })()`, { timeout: 15000 });
+r = await look(page, 'a move the host refuses');
+check(r.dialog?.err === 'not moved to refuse-me — the window is still working: ✳ Baking… (esc to interrupt)', 'the dialog stays, saying the host\'s refusal, which was said on the desk it was leaving');
+check(r.floor === null && r.panel === null, 'and the page did not go anywhere');
+check(/^Moves it:/.test(r.dialog?.note ?? ''), 'its sentence back where the waiting line was');
+const afterRefusal = await fetch(`${base}/api/floor`).then((x) => x.json());
+check(afterRefusal.channels.find((c) => c.channel === 'alpha')?.desks.some((d) => d.agent === 'ann' && d.hosted?.live), 'ann still sits on alpha, hosted');
+await page.shot(`${out}/move-host-refused.png`, '#dlg', { scale: 2 });
+await page.evalJs(`(() => { const i = document.getElementById('move-new-channel'); i.value = 'beta-new'; i.dispatchEvent(new Event('input', { bubbles: true })); return 'ok'; })()`);
+
 // 4 — from all floors, to a new floor by name
 await page.click('#dlg-body [data-do="desk-move"]');
 await page.waitFor(`localStorage.getItem('orch.floor') === 'beta-new' && document.getElementById('floor-panel')?.dataset?.agent === 'ann'`, { timeout: 15000 });
@@ -129,7 +146,10 @@ await cardOn(page, 'ann');
 await page.click('#desk-pop [data-act="move-desk"]');
 await page.waitFor(`document.getElementById('dlg')?.open && !!document.getElementById('move-to')`);
 r = await look(page, 'the dialog on beta-new');
-check(JSON.stringify(r.dialog?.floors) === JSON.stringify(['alpha*', '__new__']), 'a floor on the board is offered first, the new floor after — beta-new, where it is, is not');
+// refuse-me is on the list too: the refused move's seat, made when the board
+// took it — undrawn (#20), but a floor all the same. Not this check's subject.
+check(r.dialog?.floors?.[0] === 'alpha*' && !r.dialog.floors.some((f) => f.startsWith('beta-new')) && r.dialog.floors.at(-1) === '__new__',
+  `a floor on the board is offered and chosen first, the new floor last — beta-new, where it is, is not — ${JSON.stringify(r.dialog?.floors)}`);
 await page.click('#dlg-body [data-do="desk-move"]');
 await page.waitFor(`localStorage.getItem('orch.floor') === 'alpha' && document.getElementById('floor-panel')?.dataset?.agent === 'ann' && !!document.querySelector('#floor-rooms svg.room[data-channel="alpha"] .desk[data-agent="ann"]')`, { timeout: 15000 });
 r = await look(page, 'moved from one floor back to alpha');

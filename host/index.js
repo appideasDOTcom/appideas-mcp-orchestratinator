@@ -788,9 +788,18 @@ class Host {
     const { channel, agent } = item;
     const p = item.payload ?? {};
     const path = typeof p.path === 'string' ? p.path : '';
+    // Where a refusal is said. A move that has not rebound anything yet is
+    // said on the desk it is moving FROM — where the agent still is, and the
+    // only one of the two the board has a hosted row for. Said on the target,
+    // as it was, the board dropped it (no row there until `bound`), so a move
+    // the host refused reached no floor at all (QA, PR #33 finding 1). Once
+    // the folder is bound to the new names the target is where it belongs.
+    let rebound = false;
     const fail = (message, code = 'bind_failed') => {
-      warn(`${channel}/${agent}: ${message}`);
-      return this.emit({ type: 'error', channel, agent, code, message }, true);
+      const at = p.from && !rebound ? p.from : { channel, agent };
+      const said = at === p.from && !message.startsWith('not moved') ? `not moved to ${channel}: ${message}` : message;
+      warn(`${channel}/${agent}: ${said}`);
+      return this.emit({ type: 'error', channel: at.channel, agent: at.agent, code, message: said }, true);
     };
     // Any folder the picker showed can be a desk. The roots used to fence
     // this; the board runs on localhost and that is the security model, so
@@ -808,7 +817,7 @@ class Host {
     // the pane rather than guessing why it is busy.
     if (p.from) {
       const at = await W.busyAt(dir);
-      if (at.pane && at.busy) return fail(`not moved — the window is still working: ${at.foot}`, 'bind_refused');
+      if (at.pane && at.busy) return fail(`not moved to ${channel} — the window is still working: ${at.foot}`, 'bind_refused');
     }
     log(`${channel}/${agent}: binding ${dir}${p.import ? ' — importing its .mcp.json entry' : ''}${p.from ? ` — moving it from ${p.from.channel}/${p.from.agent}` : ''}`);
     // A desk already at this folder — the import case — keeps its conversation:
@@ -829,6 +838,7 @@ class Host {
     }
     const added = await M.mcpAdd(dir, { url: `${this.cfg.url}/mcp`, channel, agent, key: this.cfg.token });
     if (!added.ok) return fail(`could not bind ${dir}: ${added.error}`);
+    rebound = true;
     log(`${channel}/${agent}: bound ${dir} in local scope`);
     this.addRoot(dir);
     await this.rescan(`bound from the floor — ${channel}/${agent}`);

@@ -988,10 +988,18 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 30000), 'held by the floor');
   await sleep(WATCH_SETTLE_MS);
   const busyPanesBefore = paneOf();
-  const logAtBusy = host.log.length;
+  const errorIds = async (ch) => new Set(((await json(`/api/floor/turns?channel=${ch}&agent=free`).then((r) => r.json())).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+  const [errorsHereBefore, errorsThereBefore] = [await errorIds(CH), await errorIds(CH2)];
   eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).status, 200, 'the board takes the move — it cannot see the pane');
-  assert(await until(() => (/not moved — the window is still working: .*esc to interrupt/.test(host.log.slice(logAtBusy)) ? true : null), 15000),
-    'the host refuses it, quoting the pane\'s status line');
+  // Said on the floor the desk is still on, which is the one the board has a
+  // hosted row for. It used to be said for the target desk, which has no row
+  // until `bound`, so the board dropped it and no floor said anything — this
+  // case read the refusal off the host's log and passed (QA, PR #33 finding 1).
+  const refusedMove = await until(async () => ((await json(`/api/floor/turns?channel=${CH}&agent=free`).then((r) => r.json())).rows ?? [])
+    .find((r) => r.role === 'error' && !errorsHereBefore.has(r.id)) ?? null, 15000);
+  assert(/^not moved to host-test-2 — the window is still working: .*esc to interrupt/.test(refusedMove?.text ?? ''),
+    `the host refuses it, and the floor the desk is still on says so — naming where it was going, quoting the pane's status line (PR #33 finding 1) — ${refusedMove?.text}`);
+  eq([...(await errorIds(CH2))].filter((id) => !errorsThereBefore.has(id)), [], 'and nothing is said for a desk on the floor it did not reach');
   eq(paneOf(), busyPanesBefore, 'and the working window is left exactly as it was');
   eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH, 'and the binding is not touched');
   rmSync(`${FIX}/busy.flag`, { force: true });

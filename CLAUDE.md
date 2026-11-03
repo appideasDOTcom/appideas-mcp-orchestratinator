@@ -478,6 +478,20 @@ opposite of what ran before.
   reaches it, and every request that carries a path still goes through it.
   The `bind` work no longer carries `resume`: it said `true` on every move
   and nothing read it.
+- **A move the host refuses is said where the agent still is, and the page
+  waits to find out** (QA, PR #33 finding 1). The board accepting a move is
+  not the move: the host can still refuse it — a window the board took for
+  idle is working, an `mcp add` fails. `bind()` used to say that for the
+  *target* desk, which has no hosted row until `bound`, so the board dropped
+  it (`applyHostEvent`'s ownership check) and no floor said anything — while
+  the card's move had already taken the operator to the target. Now a
+  refusal before anything is rebound is said on the desk it was moving
+  *from* ("not moved to <floor> — …"), and both doors onto a move keep their
+  dialog open until `moveOutcome` in `src/ui/app.js` reads the desk seated on
+  the target (then the page follows) or that refusal (then the dialog shows
+  it, and the page stays). The target's seat, made when the board took the
+  move, stays behind undrawn (#20) — a new floor named in a refused move is
+  an empty storey until removed, as with any take the host refuses.
 
 Two page facts behind the card. **"All floors" with two or more floors is
 the building, and a storey there is navigation** — a click on a desk rides
