@@ -843,6 +843,28 @@ try {
   const cardWorking = await rr.json();
   eq([rr.status, cardWorking.code, cardWorking.error], [409, 'working', switchable({ agent: 'alpha', state: 'idle', host_seen: new Date().toISOString() }, { role: 'tool' }).error],
     'a desk mid-turn is not moved — Take a desk\'s refusal, word for word');
+  // A desk its host has stopped running — the host is here, the row says
+  // offline — is not movable either, and in the same words: the card draws
+  // its button disabled exactly when `hosted.live` is false, which this is
+  // (QA's S3 on 021eedc: the route's arm for it had no fixture).
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`UPDATE hosted_desks SET state = 'offline' WHERE channel = 'other-floor' AND agent = 'alpha'`).run();
+    db.close();
+  }
+  const droppedDesk = deskOf(await floor(), 'alpha', 'other-floor');
+  eq(droppedDesk?.hosted?.live, false, 'a desk whose host has dropped it is not hosted live');
+  rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'card-floor' });
+  const cardDropped = await rr.json();
+  eq([rr.status, cardDropped.code, cardDropped.error], [409, 'no_host', noHostWords(droppedDesk?.hosted?.host)],
+    'and is not moved from its card — the no_host words, naming the host, as its disabled button says them');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH);
+    db.prepare(`UPDATE hosted_desks SET state = 'idle' WHERE channel = 'other-floor' AND agent = 'alpha'`).run();
+    db.close();
+  }
   eq(await takeWork(), [], 'and none of those queued anything');
   await hostEvents([{ type: 'turn', channel: 'other-floor', agent: 'alpha', session_id: 'sess-alpha', role: 'assistant', text: 'done' }]);
   rr = await cardMove({ channel: 'other-floor', agent: 'alpha', to: 'card-floor', host_id: 'h-elsewhere', path: '/etc' });

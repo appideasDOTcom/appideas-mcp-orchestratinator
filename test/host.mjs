@@ -907,6 +907,19 @@ try {
   assert(moveArgv.length > 0 && moveArgv.every((l) => !l.includes('--resume')), `on a new conversation: its window opened with nothing to resume (#24 Decided 2) — ${JSON.stringify(moveArgv)}`);
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.session_id === SESSION_MOVED ? true : null), 30000),
     'and the desk follows the conversation the new window announces');
+  // Nothing pins the conversation it left to the new floor, even for the
+  // moment before the new window registers: a `bound` naming it is filed as
+  // that conversation's session on the new desk, and the row stays — the
+  // floor would then hold a conversation that never ran there. (A mutant
+  // that put the old id back on `bound` survived every other assertion here,
+  // because the new window's session overwrites the desk a moment later.)
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(DB_PATH, { readonly: true });
+    const onNew = db.prepare(`SELECT session_id FROM agent_sessions WHERE channel = ? AND agent = ?`).all(CH2, 'free').map((r) => r.session_id);
+    db.close();
+    assert(!onNew.includes(SESSION_ID), `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+  }
   const turnsOnNew = await json(`/api/floor/turns?channel=${CH2}&agent=free`).then((r) => r.json());
   eq((turnsOnNew.rows ?? []).filter((r) => r.role === 'error').map((r) => r.text), [], 'its chat on the new floor does not open on a refusal (#24 Decided 2)');
   assert(!/outside tmux/.test(host.log.slice(host.log.lastIndexOf('moving it from host-test/free'))), 'and the host refused nothing on the way');
