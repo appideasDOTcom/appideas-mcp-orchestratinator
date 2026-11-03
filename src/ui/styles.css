@@ -1459,6 +1459,11 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    thing this card offers, not the first. */
 .dp-hide { margin-top: 6px; background: var(--surface-2); border-color: var(--border); color: var(--muted); font-weight: 500; }
 .dp-hide:hover { background: var(--surface-2); border-color: var(--accent); color: var(--text); }
+/* Move to another floor (#18) sits with Hide desk's quieter look, and is
+   drawn disabled — with the reason under it — while no live host runs the
+   desk: a reason is the useful part of a button that cannot be pressed. */
+.dp-move:disabled, .dp-move:disabled:hover { cursor: not-allowed; opacity: .55; border-color: var(--border); color: var(--muted); }
+.dp-move-why { margin: 4px 2px 0; font: 11px/1.35 var(--sans); color: var(--muted); }
 
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor,

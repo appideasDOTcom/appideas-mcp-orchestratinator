@@ -553,6 +553,15 @@
       `</div>${bits.join('')}` +
       `<div class="dp-foot"><button type="button" class="dp-open" data-act="open"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button>` +
+      // Move to another floor (#18, Decided 1): Take a desk's move from the
+      // agent's side — this desk's folder and host, only the floor to pick.
+      // Disabled, with the reason under it, while no live host runs the
+      // desk; see moveBlockedWords.
+      `<button type="button" class="dp-open dp-hide dp-move" data-act="move-desk"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
+      (moveBlockedWords(d) ? ' disabled' : '') +
+      ` title="${esc(moveBlockedWords(d) ?? 'Seat this agent on another floor: its folder is rebound there. A window the floor holds closes and a new conversation opens on the new floor; with no window open, it opens on its last conversation.')}">Move to another floor</button>` +
+      (moveBlockedWords(d) ? `<p class="dp-move-why">${esc(moveBlockedWords(d))}</p>` : '') +
       // Put this desk away (#20, Decided 2): under "Open conversation", for
       // any desk this card is open on. It becomes a pill under the storey,
       // and stays one until that pill is clicked, whatever the agent does.
@@ -1916,6 +1925,28 @@
       drawn: desks.filter((d) => !d.hidden && !deskEmpty(d)),
       pills: desks.filter((d) => d.hidden),
     };
+  }
+
+  /**
+   * Why the nameplate card's Move to another floor cannot be pressed (#18),
+   * or null when it can. A move is a host rebinding the desk's folder, so it
+   * needs the desk's host here and running it — `hosted.live`, exactly when
+   * POST /api/floor/desk/move accepts it. The words are Take a desk's
+   * `no_host` (noHostWords in src/floor.js), the same sentence either way;
+   * test/floor.mjs holds the two copies to it.
+   *
+   * Drawn disabled with this under it, not left off (the issue's Not
+   * established line, the developer's call): a desk drawn without a live
+   * host is one that is reporting through an editor or a hook, its host may
+   * be a restart away, and a button that is simply absent reads as "this
+   * desk can never be moved" — the reason is the useful part.
+   */
+  function moveBlockedWords(d) {
+    if (d?.hosted?.live) return null;
+    const host = d?.hosted?.host ?? null;
+    return host
+      ? `The host ${host} is not on this board right now, so there is nobody to bind it.`
+      : 'No host on this board is running this folder, so there is nobody to bind it.';
   }
 
   /* ---------- a desk's place on the floor: the drawing ---------- */
@@ -3700,6 +3731,22 @@
         openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
         return;
       }
+      // "Move to another floor" (#18). The card closes first, as Hide desk's
+      // does: the desk it describes is about to leave this floor, and the
+      // dialog would otherwise sit over a card for a desk that has gone. A
+      // disabled button is read off the button, because a dispatched click
+      // reaches this handler whether or not a person could have pressed it.
+      const moveBtn = e.target.closest?.('[data-act="move-desk"]');
+      if (moveBtn) {
+        if (moveBtn.disabled || typeof window.moveDeskDialog !== 'function') return;
+        const c = floor.channels.find((x) => x.channel === moveBtn.dataset.channel);
+        const d = c?.desks.find((x) => x.agent === moveBtn.dataset.agent);
+        ui.details = null;
+        renderDetails();
+        window.moveDeskDialog(moveBtn.dataset.channel, moveBtn.dataset.agent,
+          { persona: d?.persona ?? null, host: d?.hosted?.host ?? null, folder: d?.hosted?.window ?? null });
+        return;
+      }
       // "Hide desk" (#20). The card closes now rather than on the next poll:
       // it is about to describe a desk that is not drawn, and the click
       // should read as having worked.
@@ -4118,8 +4165,18 @@
     tick();
   };
 
-  window.floorOpenDesk = (channel, agent) => {
-    if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
+  // `follow`: go to the desk's floor whatever is being shown, all floors
+  // included — the card's move (#18 Decided 3), which is the operator
+  // sending an agent somewhere and going with it. The payload is fetched
+  // first because the floor may be one this page has not seen yet (a new
+  // one by name), and a floor filter naming a floor the payload lacks is
+  // dropped back to all floors by render(). Take a desk's call is as it was:
+  // from all floors it opens the panel and leaves the view where it is.
+  window.floorOpenDesk = async (channel, agent, { follow = false } = {}) => {
+    if (follow) {
+      await tick();
+      if (ui.floorFilter !== channel) setFloor(channel);
+    } else if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
     openDesk(channel, agent);
   };
   /**

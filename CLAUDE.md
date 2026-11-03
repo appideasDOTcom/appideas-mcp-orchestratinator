@@ -401,10 +401,29 @@ a reasonable argument behind it.
   Decided 2; `isSessionStart`). SessionStart also fires with `source:
   compact` at every compaction and `clear` on `/clear`, and every
   SessionStart used to wake an archived floor and ask a rescan.
-- **A command's receipt note stands until the operator's next message.**
-  The command's own lines — the host's sentence, a `/btw` answer, a `/cost`
-  screen — arrive in the same second as the note and took it down before
-  anyone read it when any turn cleared it.
+- **A command's receipt leaves one line, not a bubble.** The receipt note
+  first stood as the pending bubble with the sentence as its caption, and
+  costmo read it as "an artifact outlined in white saying /model opus … a
+  message that has not yet sent". So: a done command draws no bubble, and
+  the line labeled `host` carries what was typed and what happened —
+  "/model opus — Set model to Opus 5.5 for this session only".
+- **A live session outranks an ended one, and a hosted desk's session is
+  its window's.** A `/clear` ends one session and starts the next in the
+  same second, and on `updated_at` alone the two tied: the floor showed the
+  ended row's compacting flag or the new row's empty model, by chance (his
+  "works sometimes, not others"). Every "the desk's newest session" read
+  orders `(ended_at IS NULL) DESC, updated_at DESC`, `buildFloor` shows the
+  roster's `sdk_session_id` row while it is live, and the host names the
+  window's session on every receipt — two live sessions on one desk (an
+  editor tab beside the floor's window) put the picker's words on the other
+  one until QA measured it (PR #32). A `/clear` carries the model and effort
+  forward from the row it closed, because the window keeps its process
+  (measured: the first reply after `/clear` named the model picked before
+  it). And a compaction ends on any prompt, turn or tool, hook or relayed,
+  and a floor `/compact` is watched to its end (`awaitCompaction`) and said
+  in the window's closing words — a `/compact` with nothing to compact
+  shows the spinner for a moment, writes nothing, and left the desk
+  "compacting" for six minutes.
 
 How this was built without deploying it: a throwaway server on :8905
 running the tree's code, the probe folder rebound to it with `claude mcp
@@ -416,6 +435,84 @@ on the operator's machine with the live board untouched. The plugin cache
 installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
+
+## Moving a desk to another floor
+
+Issues #24 and #18, 0.10.10 (2026-11-03, task 253; measured on 2.1.300).
+A move is a seat change two doors lead to — Take a desk naming a folder
+bound elsewhere, and **Move to another floor** on the desk's nameplate card
+— and both end in one function, `seatDesk` in [`src/floor.js`](src/floor.js),
+so they refuse the same things in the same words. Four rules, each the
+opposite of what ran before.
+
+- **A move that closes the floor's window starts a new conversation**
+  (costmo, #24 Decided 2). It used to reopen on the one the window had been
+  on, and that was refused every time on the live board — 10 of 10,
+  2026-10-19 → 11-02: `open()` asks `holderOf` who holds the conversation it
+  resumes, and the answer was the window just killed, still in the roster,
+  alive and in no pane, so an editor (`outside_tmux`). On a fresh window the
+  session file goes 4–14 ms after `kill-window` returns and the pid ~0.5 s
+  later, so it is a race; why live windows lose it every time was not found
+  (not swap, not background shells, not another claimant). Two fixes that
+  look available and are not: waiting for the old pid to leave the roster
+  and then resuming (a real second holder must still be refused, and telling
+  the floor's own closing window from one by timing is the brittle part —
+  and it was ruled), and resuming without asking (two copies of one
+  conversation, the thing `holderOf` exists to stop). The old conversation
+  stays in its folder; the picker and History reach it.
+- **A move whose window is already closed opens on the last conversation**
+  (costmo, #24 Decided 3: "Last conversation") — the open path in `bind`,
+  unchanged. There is no closing window for it to meet, and a real second
+  holder (an editor) is still refused there, naming its pid.
+- **A move un-retires the agent's row on the floor it lands on** (#24
+  Decided 1, ruled by QA). Every move retires the row it leaves, a retired
+  agent has no desk, and only that agent's next MCP connect un-retired it —
+  so a move *back* was in no floor's payload until its window connected,
+  and for good when the window never came: 5 of the 10 refused live moves,
+  the reported one among them. The `bound` handler un-retires beside the
+  retire.
+- **The card's route takes no path** (`POST /api/floor/desk/move`
+  `{channel, agent, to}`). The folder and host are the board's own record of
+  the desk (`hosted_desks`), so Take a desk's check — "never a path the board
+  has not seen the host name" — is not widened for anything: this route never
+  reaches it, and every request that carries a path still goes through it.
+  The `bind` work no longer carries `resume`: it said `true` on every move
+  and nothing read it.
+- **A move the host refuses is said where the agent still is, and the page
+  waits to find out** (QA, PR #33 finding 1). The board accepting a move is
+  not the move: the host can still refuse it — a window the board took for
+  idle is working, an `mcp add` fails. `bind()` used to say that for the
+  *target* desk, which has no hosted row until `bound`, so the board dropped
+  it (`applyHostEvent`'s ownership check) and no floor said anything — while
+  the card's move had already taken the operator to the target. Now a
+  refusal before anything is rebound is said on the desk it was moving
+  *from* ("not moved to <floor> — …"), and both doors onto a move keep their
+  dialog open until `moveOutcome` in `src/ui/app.js` reads the desk seated on
+  the target (then the page follows) or that refusal (then the dialog shows
+  it, and the page stays). The target's seat, made when the board took the
+  move, stays behind undrawn (#20) — a new floor named in a refused move is
+  an empty storey until removed, as with any take the host refuses.
+
+Two page facts behind the card. **"All floors" with two or more floors is
+the building, and a storey there is navigation** — a click on a desk rides
+to its floor, so no card is ever open in it; a card opens on one floor, or
+on a board with a single floor, where nothing is collapsed and no floor is
+chosen. `floorOpenDesk(…, { follow: true })` goes to the target from both,
+fetching `/api/floor` first, because a floor named a moment ago is not in
+the payload yet and `render()` drops a filter naming a floor it does not
+have. And **a desk with a hosted row is exactly as live as its host**
+(`live_` in `buildFloor`), so the card's disabled Move — Take a desk's
+`no_host` words under it — is only ever seen on a desk no host runs; a desk
+whose host is gone is not drawn at all (#20).
+
+How it was measured, for next time: `roster-linger.mjs` in
+**measure-a-real-window** times a real window out of the roster after
+`kill-window`; holding a window with `SIGSTOP` across a move reproduces the
+live refusal word for word but not every time (something other than the
+stopped process removes its session file, 6–14 ms after the kill — not
+found); the host suite's stand-in has `linger.flag`, which is the
+deterministic version. `seed-move.mjs` + `check-card-move.mjs` in
+**verify-ui-change** drive the card on both views.
 
 ## History is read off the hosts, not the board
 
@@ -726,6 +823,21 @@ refuses to edit a git checkout. The working tree is the commit surface at
 every moment: on 2026-10-01 a mutation run edited `host/index.js` in place
 with a restore step, the commit landed mid-run, and `8788a6d` reached
 `origin/develop` with a line deliberately removed.
+
+**A composer pane and a command-aware stand-in, since 0.10.9.** The window
+suite's `composer-desk` pane (`run.cjs` in `test/window.mjs`) is a node
+program on the alternate screen that draws what Claude Code draws — a
+composer box, the `/btw` overlay with its answer arriving late, the model
+picker with its effort row, the compaction spinner — writes the records
+Claude Code writes, drops the first Enter the way a paste-consumed one is
+dropped, and logs every key it is sent by mode. That log is how "no Enter
+after a command that opened something" and "two Downs then `s`, never a
+digit" are asserted rather than assumed. The host suite's stand-in answers
+`/clear` with a new session file and a roster change, `/btw` with an
+overlay, and any other command with its `<command-name>` record. Neither
+has a composer the way the real window does for a *typed* message, so the
+typed delivery (`typeInto`) is proved on the composer pane and on a real
+probe, and the plain stand-in gets a paste.
 
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so

@@ -99,6 +99,15 @@ Say plainly what stayed untested and why — "a newer search ending an older
 one: the fixture's searches finish in 40 ms, nothing observes it" — rather
 than leaving a survivor out of the report.
 
+**A survivor can be the test's clock, not the code's** (PR #32, 2026-11-03):
+"two live sessions on one desk" wrote both rows in the same second, so "the
+desk's newest" and "the window's session" were the same row and three
+mutants that moved a write between them stayed green. The fix was in the
+test — `sleep(1100)` and a touch to make the other row strictly newer,
+before *each* write under test (the ask itself bumps the window row's
+clock, so the second write needed its own gap). When a mutant survives,
+read the fixture for a tie before reading the code for a reason.
+
 ## Page logic
 
 `src/ui/app.js` is a classic browser script with no exports, so its logic

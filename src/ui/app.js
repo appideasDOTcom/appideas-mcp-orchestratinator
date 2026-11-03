@@ -1517,12 +1517,39 @@ el.dlgBody.addEventListener('click', (e) => {
       // Where this folder sits is where the next dialog opens — however it
       // was chosen, the dialog, a recent row or the page's own list.
       rememberDir(localStorage, body.host_id, ui.deskForm.listing?.parent ?? null);
-      act(() => floorPost('desk', body).then(() => { window.floorOpenDesk?.(body.channel, body.agent); }));
+      // A move — the folder bound as this agent on another floor — waits for
+      // the host the way the card's does, and is said in the dialog if it is
+      // refused (PR #33 finding 1). A take or an import lands at once, as it
+      // always has: the operator watches the desk come up.
+      const was = ui.deskForm.listing?.self?.bound ?? null;
+      const moving = was && was.agent === body.agent && was.channel !== body.channel ? { channel: was.channel, agent: body.agent, to: body.channel } : null;
+      const hostName = (ui.deskForm.hosts ?? []).find((h) => h.host_id === body.host_id)?.name ?? null;
+      act(async () => {
+        const before = moving ? await lastTurnIdOf(moving.channel, moving.agent) : null;
+        const r = await floorPost('desk', body);
+        if (moving && r.mode === 'move') await waitForMove(moving, before, hostName);
+        window.floorOpenDesk?.(body.channel, body.agent);
+      });
       break;
     }
     case 'desk-leave':
       act(() => floorPost('desk/leave', { channel: d.channel, agent: d.agent }));
       break;
+    case 'desk-move': {
+      // The card's move (#18). Accepted, the operator is taken to the floor
+      // the agent is going to — from all floors as well as from one
+      // (Decided 3) — and lands on its desk to watch it come up there.
+      const body = moveBody(ui.moveForm ?? {});
+      if (!body.to) break;
+      const host = ui.moveForm?.host ?? null;
+      act(async () => {
+        const before = await lastTurnIdOf(body.channel, body.agent);
+        await floorPost('desk/move', body);
+        await waitForMove(body, before, host);
+        await window.floorOpenDesk?.(body.to, body.agent, { follow: true });
+      });
+      break;
+    }
     // --- the session picker. See sessionDialog below. The floor is told the
     // moment the reopen is queued so its link can spin until the desk's
     // conversation actually changes — the receipt for the click is there,
@@ -1786,6 +1813,59 @@ function rememberDir(storage, hostId, dir) {
 function takeBody(fm) {
   const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true };
+}
+
+/**
+ * What a move does, in one sentence, for both doors onto it — Take a desk's
+ * move and the nameplate card's Move to another floor (#18 Decided 2: the
+ * same essential UX). Plain text; the dialog escapes it.
+ *
+ * A new conversation when the move closes the window the floor holds (#24
+ * Decided 2), the last one when there is no window to close (Decided 3,
+ * costmo's ruling on task 254). The old conversation is not lost, and the
+ * sentence says where it is.
+ */
+function moveNoteText(agent, to, from) {
+  return `Moves it: rebinds the folder as ${agent} on ${to}. If the floor holds its window, that window closes and a new conversation opens there — the one it was on stays in its folder, in the session picker and History; with no window open, it opens on its last conversation. Its seat leaves ${from}. Refused while a turn is running.`;
+}
+
+/**
+ * The floors the card's move offers: the floors Take a desk offers (on the
+ * board, never a put-away one — the caller passes `pickable(...)`), less the
+ * one the desk is on, which is not a move. A new floor by name is the
+ * dialog's last option, as in Take a desk.
+ */
+function moveFloors(names, current) {
+  return [...new Set(names ?? [])].filter((c) => c && c !== current).sort();
+}
+
+/** What the card's move sends: the desk, and where to. No host, no path —
+ *  the board has both on the desk already (POST /api/floor/desk/move). */
+function moveBody(fm) {
+  const to = fm.to === '__new__' ? (fm.newChannel ?? '').trim() : (fm.to ?? '');
+  return { channel: fm.channel, agent: fm.agent, to };
+}
+
+/**
+ * Whether a move the board has accepted has been made, read off the floor
+ * payload: 'seated' once the desk is on the target floor with its host
+ * running it there (the host's `bound`), `{ refused }` once the desk it was
+ * moving from has said an error newer than `beforeId` (the host's refusal is
+ * said there — see bind() in host/index.js), and null while neither.
+ *
+ * The board accepting a move is not the move: the host can still refuse it
+ * (a window the board took for idle is working, an `mcp add` fails), and
+ * the page used to take the operator to the target floor on the board's 200
+ * alone — onto a floor the agent never reached, with nothing there saying
+ * why (QA, PR #33 finding 1). "When the move is made, the operator is taken
+ * to the floor" (#18 Decided 3) is this function saying 'seated'.
+ */
+function moveOutcome(floor, { channel, agent, to }, beforeId) {
+  const deskOn = (ch) => (floor?.channels ?? []).find((c) => c.channel === ch)?.desks?.find((d) => d.agent === agent) ?? null;
+  if (deskOn(to)?.hosted?.live) return 'seated';
+  const t = deskOn(channel)?.last_turn;
+  if (t?.role === 'error' && (beforeId == null || t.id > beforeId)) return { refused: t.text };
+  return null;
 }
 
 /* ---------- take a desk: the dialog ---------- */
@@ -2145,7 +2225,7 @@ function renderDeskDialog() {
     } else if (mode === 'import') {
       notes.push(`Brings it onto the floor as it is. The binding moves into Claude Code's local scope${bound.scope === 'project' ? ' and the orchestratinator entry comes out of its .mcp.json (other servers stay)' : ''}. A window already open there is not touched.`);
     } else {
-      notes.push(`Moves it: rebinds the folder as <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(channelNow)}</span>, and if the floor holds its window, closes it and reopens it on the same conversation. Its seat leaves <span class="mono">${esc(bound.channel)}</span>. Refused while a turn is running.`);
+      notes.push(esc(moveNoteText(bound.agent, channelNow, bound.channel)));
     }
   }
   const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
@@ -2230,6 +2310,114 @@ function leaveDeskDialog(channel, agent, persona, scope) {
     </div>
   `);
 }
+
+/**
+ * The two halves of a move the page waits on: the board accepting it, then
+ * the host making it or refusing it (moveOutcome). Used by both doors onto a
+ * move — the card's and Take a desk's — so neither lands the operator on a
+ * floor the agent never reached. While it waits the dialog says so; a
+ * refusal comes back as the error act() shows in the dialog, in the host's
+ * words; so does a host that has said nothing either way in MOVE_WAIT_MS,
+ * which is stated as what was seen rather than guessed at.
+ */
+const MOVE_WAIT_MS = 30_000;
+async function floorNow() {
+  return fetch('./api/floor', { headers: { accept: 'application/json' } }).then((r) => r.json()).catch(() => null);
+}
+async function lastTurnIdOf(channel, agent) {
+  const f = await floorNow();
+  return (f?.channels ?? []).find((c) => c.channel === channel)?.desks?.find((d) => d.agent === agent)?.last_turn?.id ?? null;
+}
+async function waitForMove(move, beforeId, host) {
+  const note = el.dlgBody.querySelector('.dlg-note');
+  const said = note?.textContent ?? null;
+  if (note) note.textContent = `Asked ${host ?? 'the host'} to move ${move.agent} — waiting for it to sit down on ${move.to}…`;
+  const until = Date.now() + MOVE_WAIT_MS;
+  try {
+    for (;;) {
+      const out = moveOutcome(await floorNow(), move, beforeId);
+      if (out === 'seated') return;
+      if (out?.refused) throw new Error(out.refused);
+      if (Date.now() > until) {
+        throw new Error(`No seat on ${move.to} and no refusal from ${host ?? 'the host'} after ${MOVE_WAIT_MS / 1000}s. ${move.agent} is still on ${move.channel}; the move may yet arrive.`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  } catch (e) {
+    // The form stays, with what a move does, and the error above its buttons.
+    if (note && said !== null) note.textContent = said;
+    throw e;
+  }
+}
+
+/**
+ * Move to another floor, from a desk's nameplate card (#18): Take a desk's
+ * move, approached from the agent. The desk already names its folder, its
+ * host and its agent, so the only question is the floor — chosen the way
+ * Take a desk chooses it, a floor on the board or a new one by name — and
+ * the board refuses what Take a desk refuses, in the same words, because
+ * both doors end in the same seatDesk. Opened by src/ui/floor.js with what
+ * the card was showing.
+ */
+function moveDeskDialog(channel, agent, { persona = null, host = null, folder = null } = {}) {
+  ui.dlgCtx = { kind: 'move', channel, agent };
+  ui.moveForm = { channel, agent, persona, host, folder, to: null, newChannel: '' };
+  renderMoveDialog();
+}
+
+function renderMoveDialog() {
+  const fm = ui.moveForm;
+  if (!fm) return;
+  const floors = moveFloors(pickable(ui.state?.channels), fm.channel);
+  if (fm.to === null || (fm.to !== '__new__' && !floors.includes(fm.to))) fm.to = floors[0] ?? '__new__';
+  const { to } = moveBody(fm);
+  const where = [fm.folder ? `folder ${fm.folder}` : null, fm.host ? `on ${fm.host}` : null].filter(Boolean).join(' · ');
+  openDialog(`
+    <div class="dlg-head"><h3>Move ${esc(fm.persona ?? fm.agent)} to ${esc(to || '…')}</h3></div>
+    <p class="dlg-sub">from <span class="mono">${esc(fm.channel)}</span>${where ? ` · ${esc(where)}` : ''}</p>
+    <label class="field">
+      <span>Floor</span>
+      <select id="move-to" class="input">
+        ${floors.map((c) => `<option value="${esc(c)}"${c === fm.to ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        <option value="__new__"${fm.to === '__new__' ? ' selected' : ''}>new floor…</option>
+      </select>
+    </label>
+    ${fm.to === '__new__' ? `
+    <label class="field">
+      <span>New floor's name</span>
+      <input id="move-new-channel" class="input" type="text" maxlength="64" value="${esc(fm.newChannel)}" placeholder="my-project" autocomplete="off" spellcheck="false">
+    </label>` : ''}
+    <div class="field desk-name">
+      <span>Agent — set by the folder</span>
+      <output class="desk-name-read mono">${esc(fm.agent)}</output>
+    </div>
+    <p class="dlg-note">${esc(moveNoteText(fm.agent, to || '…', fm.channel))}</p>
+    <div class="dlg-foot">
+      <button type="button" class="btn" data-do="cancel">Cancel</button>
+      <button type="button" class="btn primary" data-do="desk-move"${to ? '' : ' disabled'}>Move to ${esc(to || '…')}</button>
+    </div>
+  `);
+}
+
+// The card's move: a floor picked redraws (the title and the button name
+// it); a new floor's name typed only re-reads the form, so the caret stays.
+el.dlgBody.addEventListener('change', (e) => {
+  if (ui.dlgCtx?.kind !== 'move' || !e.target.matches('#move-to')) return;
+  ui.moveForm.to = e.target.value;
+  renderMoveDialog();
+  if (ui.moveForm.to === '__new__') el.dlgBody.querySelector('#move-new-channel')?.focus();
+});
+el.dlgBody.addEventListener('input', (e) => {
+  if (ui.dlgCtx?.kind !== 'move' || !e.target.matches('#move-new-channel')) return;
+  ui.moveForm.newChannel = e.target.value;
+  const { to } = moveBody(ui.moveForm);
+  const go = el.dlgBody.querySelector('[data-do="desk-move"]');
+  if (go) { go.disabled = !to; go.textContent = `Move to ${to || '…'}`; }
+  const head = el.dlgBody.querySelector('.dlg-head h3');
+  if (head) head.textContent = `Move ${ui.moveForm.persona ?? ui.moveForm.agent} to ${to || '…'}`;
+  const note = el.dlgBody.querySelector('.dlg-note');
+  if (note) note.textContent = moveNoteText(ui.moveForm.agent, to || '…', ui.moveForm.channel);
+});
 
 // Opening a folder — a row, or a crumb back up the path.
 el.dlgBody.addEventListener('click', (e) => {
