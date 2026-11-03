@@ -48,7 +48,7 @@ const PROBE = `JSON.stringify({
   chips: [...document.querySelectorAll('#floor-pick [data-floor]')].map((b) => b.dataset.floor),
   rooms: [...document.querySelectorAll('#floor-rooms svg.room')].map((r) => ({ ch: r.dataset.channel, collapsed: r.classList.contains('collapsed'), desks: [...r.querySelectorAll('.desk')].map((d) => d.dataset.agent) })),
   card: (() => { const p = document.getElementById('desk-pop'); if (!p) return null;
-    return { head: p.querySelector('.dp-head strong')?.textContent, buttons: [...p.querySelectorAll('.dp-foot button')].map((b) => b.textContent + (b.disabled ? ' [disabled]' : '')), why: p.querySelector('.dp-move-why')?.textContent ?? null }; })(),
+    return { head: p.querySelector('.dp-head strong')?.textContent, buttons: [...p.querySelectorAll('.dp-foot button')].map((b) => b.textContent + (b.disabled ? ' [disabled]' : '')), why: p.querySelector('.dp-move-why')?.textContent ?? null, moveTitle: p.querySelector('[data-act="move-desk"]')?.title ?? null }; })(),
   dialog: (() => { const d = document.getElementById('dlg'); if (!d?.open) return null; const b = document.getElementById('dlg-body');
     return { title: b.querySelector('h3')?.textContent, sub: b.querySelector('.dlg-sub')?.textContent, floors: [...b.querySelectorAll('#move-to option')].map((o) => o.value + (o.selected ? '*' : '')), agent: b.querySelector('.desk-name output')?.textContent, note: b.querySelector('.dlg-note')?.textContent, go: (() => { const g = b.querySelector('[data-do="desk-move"]'); return g ? g.textContent + (g.disabled ? ' [disabled]' : '') : null; })(), err: (() => { const e = b.querySelector('.dlg-err'); return e && !e.hidden ? e.textContent : null; })() }; })(),
   panel: document.getElementById('floor-panel')?.dataset?.agent ?? null,
@@ -84,6 +84,8 @@ await cardOn(page, 'ann');
 r = await look(page, 'the card on ann — hosted on testbox');
 check(r.card?.buttons.join(' | ') === 'Open conversation | Move to another floor | Hide desk', `beside Open conversation and Hide desk (Edit avatar is in the card's head) — ${r.card?.buttons.join(' | ')}`);
 check(!r.card?.why, 'enabled, no reason drawn');
+check(/a new conversation opens on the new floor/.test(r.card?.moveTitle ?? '') && /with no window open, it opens on its last conversation/.test(r.card?.moveTitle ?? ''),
+  `its title says what happens to the conversation both ways, as the dialog does (#24 Decided 2–3) — ${r.card?.moveTitle}`);
 await page.shot(`${out}/move-card.png`, '#desk-pop', { scale: 2 });
 await page.click('#desk-pop [data-act="move-desk"]');
 await page.waitFor(`document.getElementById('dlg')?.open && !!document.getElementById('move-to')`);

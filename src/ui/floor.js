@@ -560,7 +560,7 @@
       `<button type="button" class="dp-open dp-hide dp-move" data-act="move-desk"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
       (moveBlockedWords(d) ? ' disabled' : '') +
-      ` title="${esc(moveBlockedWords(d) ?? 'Seat this agent on another floor: its folder is rebound there, and the floor\'s window closes and opens a new conversation on the new floor.')}">Move to another floor</button>` +
+      ` title="${esc(moveBlockedWords(d) ?? 'Seat this agent on another floor: its folder is rebound there. A window the floor holds closes and a new conversation opens on the new floor; with no window open, it opens on its last conversation.')}">Move to another floor</button>` +
       (moveBlockedWords(d) ? `<p class="dp-move-why">${esc(moveBlockedWords(d))}</p>` : '') +
       // Put this desk away (#20, Decided 2): under "Open conversation", for
       // any desk this card is open on. It becomes a pill under the storey,
