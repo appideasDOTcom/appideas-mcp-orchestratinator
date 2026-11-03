@@ -571,6 +571,24 @@ been touched. The cause was not found; it is recorded here so the next one
 is recognised, not so it is waved through — rerun, and if it repeats, read
 the pane.
 
+**QA's clean-clone runs share this machine's CPU, not its ports.** Their
+suite announces itself on the channel with its ports (8896–8901, or 8871/
+8872 when they stay off yours); a full run of yours overlapping it went
+red in six `test:host` cases — "typing from the floor" and "reading the
+conversation back", real panes — at load 5.5, and `test:host` alone
+straight after was green (2026-11-03, task 247). Read the channel for
+their announcement before a full run, and if you overlapped, rerun the
+red suite alone before reading the pane.
+
+**The activity feed is newest-first, and a kind prefix is wider than it
+looks.** `/api/activity` returns rows newest first, so `.slice(before)`
+on it hands you the *oldest* rows; and `admin.desk.*` matches
+`desk.moved` and `desk.bound` as well as `desk.hide` / `desk.show`. A
+first cut of the move test asserted both ways, costmo pushed the tree
+while its suite ran, and QA measured a red at that SHA (0d18a9f). Name the
+kinds you mean, and find the new rows by diffing a set of the rows that
+were there before — by identity, not by position or count.
+
 **A fixture pane lives as long as its `sleep`, and the section around it
 grows.** The answer-a-prompt panes end in `sleep 30`. On 2026-10-01 new cases
 that each wait several seconds on a window were added above a later use of
