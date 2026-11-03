@@ -45,6 +45,7 @@ import * as W from './window.js';
 import * as M from './mcp.js';
 import * as D from './dialog.js';
 import * as H from './history.js';
+import { log, warn, error, failureOf, requestFailed } from './log.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
 /** How long a queued permission answer stays worth delivering. */
@@ -60,7 +61,9 @@ const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
 const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
 // The picker's list: newest first, by file. See sessionsIn in window.js.
 const SESSIONS_LIMIT = Number(process.env.ORCH_SESSIONS_LIMIT ?? 30);
-const REQUEST_TIMEOUT_MS = 5_000;
+// Settable only so the host suite can watch a request time out without
+// waiting five seconds for each one; nothing installed sets it.
+const REQUEST_TIMEOUT_MS = Number(process.env.ORCH_REQUEST_TIMEOUT_MS ?? 5_000);
 // A conversation read whole goes up in pages: so many turns, or so many
 // characters, whichever comes first — one long reply must not make a page
 // the board's body limit refuses.
@@ -103,9 +106,6 @@ const ANSWER_KEY = { allow: '1', deny: 'Escape', cancel: 'Escape' };
    "interrupt" is not here because it already has its own path, which stops the
    turn rather than guessing at an answer. */
 const PRESS_KEY = { yes: '1', no: 'Escape' };
-
-const log = (...a) => console.log('[host]', ...a);
-const warn = (...a) => console.warn('[host]', ...a);
 
 /* ───────────────────────── configuration ───────────────────────── */
 
@@ -592,15 +592,34 @@ class Host {
     this.searching = null;
   }
 
+  /**
+   * One request to the board. A failure is thrown as one sentence naming the
+   * request, the board, what failed and how long it waited (requestFailed in
+   * host/log.js) — and every caller logs err.message as it always has, so
+   * the run loop's one warn and the events warn say it without being told.
+   * Until issue #5 only a non-2xx reply named even its path; a refusal and a
+   * timeout reached the log as `fetch failed` and "The operation was aborted
+   * due to timeout", for the register, the work poll and the events alike.
+   */
   async request(path, { method = 'GET', body, timeout = REQUEST_TIMEOUT_MS } = {}) {
-    const res = await fetch(`${this.cfg.url}${path}`, {
-      method,
-      headers: { 'content-type': 'application/json', 'x-orchestratinator-key': this.cfg.token ?? '' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeout),
-    });
-    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
-    return res.json();
+    const url = `${this.cfg.url}${path}`;
+    const started = Date.now();
+    const failed = (what) => new Error(requestFailed({ method, url, what, waitedMs: Date.now() - started, limitMs: timeout }));
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: { 'content-type': 'application/json', 'x-orchestratinator-key': this.cfg.token ?? '' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeout),
+      });
+    } catch (err) {
+      throw failed(failureOf(err));
+    }
+    if (!res.ok) throw failed(`→ ${res.status}`);
+    // The signal covers the body too, so a board that sends its headers and
+    // then stalls times out here, after the status said 200.
+    try { return await res.json(); } catch (err) { throw failed(`→ ${res.status}, body ${failureOf(err)}`); }
   }
 
   emit(ev, now = false) {
@@ -1613,7 +1632,10 @@ class Host {
     this.picking?.close();
     try { this.searching?.child.kill('SIGTERM'); } catch { /* already gone */ }
     await this.flush();
-    try { await this.request('/api/host/unregister', { method: 'POST', body: { host_id: this.cfg.hostId }, timeout: 2000 }); } catch { /* best effort */ }
+    // Best effort — the board reads a host whose heartbeat has stopped as
+    // gone anyway (HOST_STALE_SECONDS) — but said, like every other request
+    // that fails.
+    try { await this.request('/api/host/unregister', { method: 'POST', body: { host_id: this.cfg.hostId }, timeout: 2000 }); } catch (err) { warn(`unregister not delivered (${err.message})`); }
   }
 }
 
@@ -1623,7 +1645,7 @@ async function main() {
   const cfg = loadConfig();
 
   if (!(await W.tmuxAvailable())) {
-    console.error('[host] tmux is not installed. The floor drives Claude Code through it — install it with `brew install tmux` (or your package manager) and start this again.');
+    error('tmux is not installed. The floor drives Claude Code through it — install it with `brew install tmux` (or your package manager) and start this again.');
     process.exit(1);
   }
 
@@ -1641,18 +1663,18 @@ async function main() {
   const origins = [...new Set(found.map((d) => originOf(d.url)).filter(Boolean))];
   if (!cfg.url && origins.length === 1) cfg.url = origins[0];
   if (!cfg.url && origins.length > 1) {
-    console.error(`[host] the desks under ${cfg.roots.join(', ')} point at ${origins.length} different boards, and nothing here says which one this host serves:`);
+    error(`the desks under ${cfg.roots.join(', ')} point at ${origins.length} different boards, and nothing here says which one this host serves:`);
     for (const o of origins) {
       const names = found.filter((d) => originOf(d.url) === o).map((d) => `${d.channel}/${d.agent}`);
       const shown = names.slice(0, 3).join(', ') + (names.length > 3 ? `, +${names.length - 3} more` : '');
-      console.error(`[host]   ${o}  — ${names.length} desk${names.length === 1 ? '' : 's'}: ${shown}`);
+      error(`  ${o}  — ${names.length} desk${names.length === 1 ? '' : 's'}: ${shown}`);
     }
-    console.error('[host] pick one:  ./host/install.sh --url <board> <your projects dir>');
-    console.error(`[host] or set ORCH_URL, or add "url" to ${CONFIG_FILE}`);
+    error('pick one:  ./host/install.sh --url <board> <your projects dir>');
+    error(`or set ORCH_URL, or add "url" to ${CONFIG_FILE}`);
     process.exit(1);
   }
   if (!cfg.url) {
-    console.error('[host] no server: set ORCH_URL, or put a repo with an orchestratinator .mcp.json under ORCH_HOST_ROOTS');
+    error('no server: set ORCH_URL, or put a repo with an orchestratinator .mcp.json under ORCH_HOST_ROOTS');
     process.exit(1);
   }
   cfg.url = cfg.url.replace(/\/+$/, '');
@@ -1704,6 +1726,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('[host] fatal:', err?.stack ?? err);
+  error('fatal:', err?.stack ?? err);
   process.exit(1);
 });

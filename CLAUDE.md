@@ -105,6 +105,23 @@ and a running process older than the file is the most common reason a fix
 "didn't work". Compare `ps -o lstart=` against the file's mtime rather than
 assuming.
 
+**Every line it writes carries a UTC time, and a failed request names
+itself** (issue #5, steps 1–2; `host/log.js`). Before that, the file
+held 7,379 failure lines in 11,745 and not one time, and each failure read
+`fetch failed` or "The operation was aborted due to timeout" for the
+register, the work poll and the events alike. So a burst could be counted
+but never lined up with `docker logs -t` or put against a route. The time
+goes *after* the tag (`[host] 2026-11-03T19:54:18.123Z …`), because the file
+is append-only and still holds every untimed line. Anything anchored on
+`^\[host\]` reads both shapes; status.sh's desk-line pattern was widened for
+the indent that now follows the time. A failure reads `<METHOD> <board><path>
+<refused|timed out|failed (code)|→ status> after Nms`, with the limit beside
+a timeout. Read the wait against the limit: the timer runs on the host's own
+event loop, so a wait well past it is the host, not only the board.
+**diagnose-handoff** has the greps. Nothing else changed with it: the
+backoff, the re-register after a failure and the events requeue are as
+they were, and the suite says so beside the new assertions.
+
 **The server is the other half, and it goes stale independently.** The
 **deploy-both-halves** skill is the procedure — its `status.sh` reads both
 halves against the tree, with symbol counts in what is served — and a deploy

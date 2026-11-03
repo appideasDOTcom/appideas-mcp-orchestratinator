@@ -301,8 +301,8 @@ node .claude/skills/diagnose-handoff/match-answer.mjs qa-probe issue7-probe-c --
 The server's `admin_events` row is the desk, the second and what was pressed;
 the desk's transcript is the proof — a `tool_result` for the call means it
 submitted, none means it is standing. The host log line ("answered with N of
-N step(s)") carries no timestamp, and the board's `turns` never holds the
-result, so neither settles it alone. On the deployed code since 2026-11-02 a
+N step(s)") carries its time only from a host running the issue #5 code, and
+the board's `turns` never holds the result, so neither settles it alone. On the deployed code since 2026-11-02 a
 form still there after 8 s is logged "the form was not submitted"
 (`still_asking`) rather than "answered"; a report against an older host is
 read against that host's own log.
@@ -314,8 +314,11 @@ The question in issue #24 (task 253): a reopen was refused "outside tmux
 second holder? The pid is gone and the session file with it. Three things
 still answer it, all read-only:
 
-- **When it happened.** `host.log` has no timestamps. `/api/activity` does,
-  to the second, newest first, a thousand rows a page: page it with
+- **When it happened.** A `host.log` line written by a host running the
+  issue #5 code carries its UTC time after the tag (`[host]
+  2026-11-03T19:54:18.123Z …`); every line before that host's first start
+  has none, and the file holds both. For an untimed stretch, `/api/activity`
+  has times to the second, newest first, a thousand rows a page: page it with
   `?limit=1000&offset=N` and keep the `admin.desk.*` rows (`desk.take` with
   its mode, `desk.moved`, `desk.bound`, `desk.new`), then line them up
   against the log's order. The log's refusal comes straight after its
@@ -334,6 +337,40 @@ still answer it, all read-only:
   out an editor tab.
 
 `ps -o pid= -p N` only tells you N is gone, which it always is by then.
+
+## The host could not reach the board — which request, and when
+
+Issue #5 (steps 1–2). Every line the host writes carries its UTC time after
+the tag, and a failed host→board request is one sentence naming its method,
+the whole URL (board and path in one token), what failed and how long it
+waited (`request()` in `host/index.js`, the words in `host/log.js`):
+
+```
+[host] 2026-11-03T19:54:18.123Z POST http://localhost:8787/api/host/register refused (ECONNREFUSED) after 2ms; retrying in 1s
+[host] 2026-11-03T19:55:02.410Z GET http://localhost:8787/api/host/work?host_id=…&wait=1 timed out after 10703ms (limit 10700ms); retrying in 1s
+[host] 2026-11-03T19:55:09.002Z events not delivered (POST http://localhost:8787/api/host/events → 503 after 4ms); will retry with the next batch
+```
+
+`refused` is said only for ECONNREFUSED. Any other socket fault is named by
+its own code (`failed (UND_ERR_SOCKET: other side closed)`), and a 200 whose
+body never parsed reads `→ 200, body failed (…)` or `→ 200, body timed out`.
+The `retrying in Ns` after a run-loop failure is still the backoff step. It
+is back at 1 s only after a work poll got through and every item in it was
+handled, or in a fresh process. What the counts are by:
+
+```bash
+L=~/.orchestratinator/log/host.log
+grep -oE '(GET|POST) [^ ]+/api/host/[a-z]+' $L | sort | uniq -c                    # by route and board
+grep -oE '/api/host/[a-z]+[^ ]* (refused|timed out|failed|→ [0-9]+)' $L | sed -E 's/\?[^ ]*//' | sort | uniq -c   # by route and outcome
+grep -E 'timed out after' $L | awk '{print $2}' | cut -c1-16 | uniq -c                   # timeouts per minute, to line up with docker logs -t
+```
+
+**A timeout that waited well past its limit is not only the board.** The
+timer that ends the wait runs on the host's own event loop, so `timed out
+after 14210ms (limit 5000ms)` is a host that could not get to its own
+timer for nine seconds. The board being slow cannot make the wait longer
+than the limit. Read the wait against the limit before going to the board's
+log.
 
 ## What not to do
 

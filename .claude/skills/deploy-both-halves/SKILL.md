@@ -117,8 +117,9 @@ When nothing under `host/` changed since the last deploy, the task says
 "server half only" (tasks 243 and 248, 2026-11-03): rebuild the container,
 leave the host up, and say in the note that the host was not restarted and
 why (`git log -1 -- host/` against the host pid's start time). The host
-rides out the swap on its own — its log shows one `[host] fetch failed;
-retrying in 1s` and then carries on; `/api/floor` reads the host live again
+rides out the swap on its own — its log shows one failure naming the
+request (a host from before issue #5 writes it as `[host] fetch failed;
+retrying in 1s`) and then carries on; `/api/floor` reads the host live again
 within seconds. Restarting it anyway blanks nothing extra, but it is a
 restart of something that did not change, and the note has to explain it.
 
