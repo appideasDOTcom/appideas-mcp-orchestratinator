@@ -48,6 +48,26 @@ node .claude/skills/mutate-in-a-copy/run-mutants.mjs /tmp/mutants.json > /tmp/mu
 # [["a pill is not the restore control", "floor", "src/ui/app.js", "data-act=\"unarchive\" data-channel", "data-act=\"restore\" data-channel"], …]
 ```
 
+**Red at the old SHA, and batches, are [`run-batches.mjs`](run-batches.mjs).**
+A task that asks for "a named test, red at <sha>" wants the new tests run
+against the old code. `--base <sha> --base-paths host/ --base-suite host`
+puts those paths back to that SHA in a fresh copy, removing files that did
+not exist then, and runs today's tests. It is the only honest form of the
+claim. Then each batch is a list of mutants applied together for one suite
+run, with an empty list as the control. From task 255 (issue #5): fourteen
+host mutants went as one base run and five batches, about eight minutes in
+all. The base read 11 of 14 new assertions red and the 3 guarding unchanged
+behaviour green. Every batch's reds were the ones predicted for its mutants.
+In the report, say which assertions are expected to stay green at the base
+and why.
+
+**A red you did not predict in an older section is load first** (task 255,
+20:27Z): QA's clean-clone suite started on the same ports during the
+tool's base run, and the base read 19 red. Those were the predicted 11,
+plus 8 in sections nobody touched (the thought, the subagent's words, the
+folder dialog). Read the channel for a QA announcement before believing
+those, and rerun once the ports are quiet.
+
 Keep the JSON file outside the repo. A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
 that way on 2026-11-02 and had to be discounted in the report; say so if
