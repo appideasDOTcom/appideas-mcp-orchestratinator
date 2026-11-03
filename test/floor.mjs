@@ -2109,12 +2109,153 @@ try {
     eq((await floor()).channels.find((c) => c.channel === CHW)?.archived, false, 'and the floor payload agrees, so the pill leaves both lists on the next poll');
   }
 
+  // Issue #20: an empty desk is not drawn, and the operator can put any desk
+  // away by hand. The server carries the flag and keeps every count; the page
+  // decides what is drawn, and that decision is lifted out of floor.js here
+  // so "empty" is tested as the nameplate's three readings and nothing else,
+  // over desks the server really built. If the slice fails, the section
+  // moved: fix the markers, do not route around the test.
+  console.log('\nan empty desk is not drawn; a hidden desk is a pill');
+  {
+    const lifted = await (async () => {
+      const src = readFileSync('src/ui/floor.js', 'utf8');
+      const a = src.indexOf('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */');
+      const b = src.indexOf('  /* ---------- a desk\'s place on the floor: the drawing ---------- */');
+      if (a < 0 || b < 0 || b < a) throw new Error('the desk-place section was not found in src/ui/floor.js between its two section comments');
+      const tmp = `./data/desk-place-${process.pid}.mjs`;
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows };\n`);
+      try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    })();
+    const { deskEmpty, deskRows } = lifted;
+    const CHW = 'wakes';
+    const admin = (path, body) =>
+      fetch(`${HOST}/api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.status);
+    const channelOf = (payload, name = CH) => payload.channels.find((c) => c.channel === name);
+
+    // One desk per reading, each made the way the floor really makes them.
+    await post(ev('present', 's-present', 'SessionStart'));
+    await post(ev('present', 's-present', 'UserPromptSubmit', { message: 'here' }));
+    await post(ev('gone', 's-gone', 'SessionStart'));
+    await post(ev('gone', 's-gone', 'SessionEnd'));
+    await post(ev('waiter', 's-waiter', 'SessionStart'));
+    await post(ev('waiter', 's-waiter', 'Notification', { notification_type: 'permission_prompt', notification_message: 'may I?' }));
+    await registerWith({ roots: ['/repo'], folders: offered });
+    eq((await hostEvents([
+      { type: 'bound', channel: CH, agent: 'warm', cwd: '/repo/warm', scope: 'local' },
+      { type: 'bound', channel: CH, agent: 'cold', cwd: '/repo/cold', scope: 'local' },
+    ])).applied, 2, 'two hosted desks');
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH);
+      // What the board writes when a host stops naming a desk (see "a host
+      // that looks again", below) — written directly, so this section does
+      // not have to re-register the host and disturb that one.
+      db.prepare(`UPDATE hosted_desks SET state = 'offline' WHERE channel = ? AND agent = 'cold'`).run(CH);
+      db.close();
+    }
+
+    let fl = await floor();
+    const d = (agent) => deskOf(fl, agent);
+    // The nameplate's three readings, as the page reads them off the desk.
+    const reading = (x) => x.hosted ? (x.hosted.live ? 'ready' : 'host offline') : x.live ? 'here' : x.reporting ? 'away' : 'not reporting';
+    eq(reading(d('cold')), 'host offline', 'a hosted desk whose host is gone reads "host offline"');
+    eq(reading(d('boardonly')), 'not reporting', 'a desk no window has ever reported from reads "not reporting"');
+    eq(reading(d('gone')), 'away', 'a desk whose session ended reads as the name alone — "away" on the card');
+    eq([deskEmpty(d('cold')), deskEmpty(d('boardonly')), deskEmpty(d('gone'))], [true, true, true],
+      'and those three are empty: nothing live behind the desk');
+    eq(reading(d('warm')), 'ready', 'a hosted desk with a live host reads "ready"');
+    eq(reading(d('present')), 'here', 'a desk whose hooks were just heard is here');
+    eq([d('waiter').live, d('waiter').session?.awaiting_kind != null], [true, true], 'a desk waiting on a person is live, however long it waits');
+    eq([deskEmpty(d('warm')), deskEmpty(d('present')), deskEmpty(d('waiter'))], [false, false, false],
+      'and none of those is empty — the readings are the whole of the rule, and nothing else makes a desk empty');
+    eq(fl.channels.every((c) => c.desks.every((x) => deskEmpty(x) === (!x.live && !x.hosted?.live))), true,
+      'over every desk the server built: empty is exactly !live && !hosted.live');
+
+    // What a storey draws, off those same desks.
+    let rows = deskRows(channelOf(fl));
+    assert(['warm', 'present', 'waiter'].every((a) => rows.drawn.some((x) => x.agent === a)), 'the desks with something live behind them are drawn');
+    assert(['cold', 'boardonly', 'gone'].every((a) => !rows.drawn.some((x) => x.agent === a)), 'the empty ones are not');
+    eq(rows.pills.length, 0, 'and an empty desk is not a pill — nobody put it away, so there is nothing to bring back');
+    assert(channelOf(fl).desks.length > rows.drawn.length, `the payload keeps every desk (${channelOf(fl).desks.length}) while the storey draws fewer (${rows.drawn.length})`);
+
+    // Back by itself: the empty desk's host returns, and it is drawn again
+    // with nothing clicked and nothing written.
+    const hidesBefore = (await fetch(`${HOST}/api/activity?limit=500&channel=${CH}`).then((r) => r.json())).rows.filter((r) => r.kind.startsWith('admin.desk.')).length;
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH);
+      db.prepare(`UPDATE hosted_desks SET state = 'idle' WHERE channel = ? AND agent = 'cold'`).run(CH);
+      db.close();
+    }
+    fl = await floor();
+    assert(deskRows(channelOf(fl)).drawn.some((x) => x.agent === 'cold'), 'an empty desk comes back the moment something is live behind it');
+    const wasLive = channelOf(fl).live;
+    const wasDesks = channelOf(fl).desks.length;
+    eq((await fetch(`${HOST}/api/activity?limit=500&channel=${CH}`).then((r) => r.json())).rows.filter((r) => r.kind.startsWith('admin.desk.')).length, hidesBefore,
+      'with nothing on the log — the automatic hide is a drawing decision, not a record');
+
+    // Put away by hand: the flag round trip, read on the floor payload.
+    eq(await admin('desk/hide', { channel: CH, agent: 'waiter' }), 200, 'the operator hides a live desk — one waiting on them, even');
+    eq(await admin('desk/hide', { channel: CH, agent: 'boardonly' }), 200, 'and an empty one');
+    fl = await floor();
+    assert(!!d('waiter') && !!d('boardonly'), 'both desks are still in the payload — a desk dropped from it has no pill and no way back');
+    eq([d('waiter').hidden, d('boardonly').hidden, d('present').hidden], [true, true, false], 'flagged hidden on the desk, and only on those');
+    eq([channelOf(fl).live, channelOf(fl).desks.length], [wasLive, wasDesks], 'the storey\'s counts are the server\'s and count what is on the floor, not what is drawn');
+    eq(fl.queue.some((q) => q.agent === 'waiter'), true, 'a hidden desk that needs you is still in the operator queue — hiding is not muting');
+    rows = deskRows(channelOf(fl));
+    eq(rows.pills.map((x) => x.agent).sort(), ['boardonly', 'waiter'], 'the storey draws each as a pill — the live one and the empty one alike');
+    assert(!rows.drawn.some((x) => x.agent === 'waiter'), 'and not as a desk');
+    assert(d('waiter').persona && d('waiter').seat != null, 'hide is not retire: the desk keeps its name and its seat for when it is back');
+
+    // Decided 5: a desk hidden by hand stays a pill whatever its agent does
+    // — the same three doors that bring an archived floor back, plus the
+    // agent simply working, and none of them clears the flag. The MCP door
+    // is in test/admin.mjs, where there is an MCP client.
+    await post(ev('waiter', 's-waiter', 'UserPromptSubmit', { message: 'yes' }));
+    await post(ev('waiter', 's-waiter-2', 'SessionStart'));
+    eq(deskOf(await floor(), 'waiter').hidden, true, 'the agent answering and a new session starting on the desk leave it hidden');
+    eq(await admin('desk/hide', { channel: CHW, agent: 'riser' }), 200, 'a hosted desk hidden on the floor the doors were measured on');
+    eq((await hostEvents([{ type: 'bound', channel: CHW, agent: 'riser', cwd: '/repo/riser', scope: 'local' }])).applied, 1, 'its host binds it again');
+    eq((await hostEvents([{ type: 'session', channel: CHW, agent: 'riser', session_id: 's-rise-4', cwd: '/repo/riser' }])).applied, 1, 'and opens a session on it');
+    eq(deskOf(await floor(), 'riser', CHW).hidden, true, 'still a pill');
+    eq(await admin('desk/hide', { channel: CHW, agent: 'taker' }), 200, 'a desk the operator took is hidden');
+    rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CHW, agent: 'taker' });
+    eq(rr.status, 200, 'and taken again');
+    await takeWorkFull();
+    eq(deskOf(await floor(), 'taker', CHW).hidden, true, 'still a pill — the one door that is the operator\'s own word restores a floor, and does not restore a desk');
+
+    // Archive still wins: a hidden desk on a put-away floor is neither a
+    // desk nor a pill, because the pills sit inside the storey.
+    eq(await admin('channel/archive', { channel: CHW }), 200, 'the floor with two hidden desks is put away');
+    fl = await floor();
+    eq(channelOf(fl, CHW).desks.filter((x) => x.hidden).length, 2, 'the payload still carries both flags');
+    eq(deskRows(channelOf(fl, CHW)), { drawn: [], pills: [] }, 'and the storey draws nothing — no desks, and no pills either');
+    eq(await admin('channel/unarchive', { channel: CHW }), 200, 'restored');
+    eq(deskRows(channelOf(await floor(), CHW)).pills.length, 2, 'and the pills are back under it, both still hidden');
+
+    // Restore is the pill, and only the pill.
+    eq(await admin('desk/show', { channel: CH, agent: 'waiter' }), 200, 'the pill is clicked');
+    fl = await floor();
+    eq(d('waiter').hidden, false, 'the flag is cleared');
+    assert(deskRows(channelOf(fl)).drawn.some((x) => x.agent === 'waiter'), 'and the desk is drawn again, in the same seat, with the same face');
+    eq(await admin('desk/show', { channel: CH, agent: 'boardonly' }), 200, 'the empty one is restored too');
+    rows = deskRows(channelOf(await floor()));
+    eq(rows.pills.length, 0, 'no pill for it any more');
+    assert(!rows.drawn.some((x) => x.agent === 'boardonly'), 'and no desk either — it is empty, so it is back to not being drawn, which is where an empty desk nobody hid belongs');
+    for (const agent of ['riser', 'taker']) await admin('desk/show', { channel: CHW, agent });
+    const log = (await fetch(`${HOST}/api/activity?limit=500&channel=${CH}`).then((r) => r.json())).rows;
+    eq([log.filter((r) => r.kind === 'admin.desk.hide').length, log.filter((r) => r.kind === 'admin.desk.show').length], [2, 2],
+      'each hide and each restore is on the log, by the operator, naming the desk');
+    assert(log.filter((r) => r.kind === 'admin.desk.hide').every((r) => r.actor === 'operator' && /waiter|boardonly/.test(JSON.stringify(r))), 'with the desk named on each row');
+  }
+
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();
   const tables = Object.keys(backup.tables ?? {});
   assert(!tables.includes('turns'), 'turns are NOT in a backup — it holds what people typed, and the file is meant to be safe to email yourself');
   assert(!tables.includes('agent_sessions'), 'nor are sessions');
   assert(tables.includes('personas'), 'but names are, because a rename is an operator decision that would otherwise be lost');
+  assert(tables.includes('desk_flags'), 'and so is a desk put away by hand — an operator decision, like archive, that a restore would otherwise lose');
 
   /* ── a host that looks again ────────────────────────────────────────────────
    * Desks used to be discovered once, when a host started. Binding a repo to

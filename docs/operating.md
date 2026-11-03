@@ -125,6 +125,17 @@ moment real work happens. A quiet desk is drawn quiet, because quiet is
 indistinguishable from blocked, crashed, and finished — which is the same
 reason the board never guesses either.
 
+**An empty desk is not drawn.** Every agent the board knows has a desk, but a
+desk with nothing live behind it — its host gone quiet, a window that has
+never checked in, a session that ended — is left off the storey rather than
+drawn as a nameplate nobody can type into. It comes back by itself the moment
+something is live behind it; nothing is clicked and nothing is recorded. The
+storey's header still counts it (`3/5 here` over three desks is the truth
+about that floor), and it is still in the payload, so nothing downstream
+changes. To put a desk away on purpose, whatever its state, use **Hide desk**
+on its nameplate card (below); that one is a pill, and only its pill brings
+it back.
+
 The plugin reports on session start and end, on each prompt you submit and each
 reply that finishes, as a tool starts, and when Claude Code needs you. Every
 hook detaches immediately, so none of it is on the critical path of a turn, and
@@ -187,7 +198,17 @@ None of them should have to be discovered by accident:
 
 - **The nameplate card.** Click any desk's nameplate for who this desk is —
   the repo, branch and model behind it, and who holds the conversation — plus
-  an **Open conversation** button and the door to editing the avatar.
+  an **Open conversation** button, **Hide desk** under it, and the door to
+  editing the avatar.
+- **Hide desk.** Puts that desk away by hand: it becomes a pill carrying the
+  agent's name in a row under the storey's last desk, and clicking the pill
+  brings it back. It is the server's flag, like archive — shared by every
+  browser, with an audit row — and nothing but the pill clears it: not the
+  agent coming back to life, not a session starting on the floor. A hidden
+  desk still counts in the storey's `N/M here`, still pages you from the
+  operator queue when it needs you, and carries its unread count on the
+  pill; hiding is a statement about your attention, not about the agent's
+  work, and it is not retire — the seat, the name and the face are kept.
 - **Edit avatar.** Rename an agent and pick its look: gender, shirt, hair,
   skin. The name and the look belong to the *agent*, not to one desk, so a
   company agent edited here changes on every floor it sits — which is the
@@ -275,6 +296,13 @@ window opening on it — any of these restores the floor, and the log says
 what brought it back and who. Only a start counts: an agent already on the
 floor keeps working without bringing it back, because archive is not a
 session kill and the work it does not kill does not undo it.
+
+**A hidden desk does not.** The same flag one level down — **Hide desk** on
+a nameplate card — is cleared only by clicking its pill under the storey.
+None of the doors above touch it, and the agent coming back does not either;
+a desk you put away stays away until you say otherwise. Archive still wins:
+a hidden desk on a put-away floor is neither a desk nor a pill until the
+floor is back, because the pills live inside the storey.
 
 Deleting a channel removes it from the board but **not** from the activity
 log: `admin_events` is deliberately not swept, because an audit trail you can

@@ -1957,6 +1957,14 @@ export function buildFloor(store, live = null, sessions = null) {
   // are kept out of is everything that counts as work — the queue and the
   // totals, both below.
   const archived = new Set(store.listChannelFlags().filter((f) => f.archived_at).map((f) => f.channel));
+  // Desks the operator put away by hand (issue #20) — the same flag one level
+  // down, carried the same way: on the desk, with the desk still in the
+  // payload. A hidden desk dropped from here would have no pill and no way
+  // back, and would close its own popover mid-use. What the page does with
+  // the flag is the page's; what stays the server's is every count below —
+  // `live`, `awaiting`, the queue and the totals count what is on the floor,
+  // not what is drawn, because hiding a desk is not muting it.
+  const hiddenDesks = new Set(store.listDeskFlags().map((f) => key(f.channel, f.agent)));
   // The board's row for each agent, kept rather than discarded: the desk's sign
   // shows what the board shows, and that comes off these same columns. A desk
   // can exist without one — a window can post hook events before its agent has
@@ -2086,6 +2094,9 @@ export function buildFloor(store, live = null, sessions = null) {
           // False until this desk's window has posted a single hook event — the
           // one distinction between "away" and "never installed the plugin".
           reporting: !!s,
+          // Put away by hand. The page draws such a desk as a pill under its
+          // storey and nothing else here changes — see hiddenDesks above.
+          hidden: hiddenDesks.has(k),
           hosted: h
             ? {
                 host: h.host_name,

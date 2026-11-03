@@ -318,6 +318,46 @@ try {
     eq((await state()).totals.channels, 1, 'and it counts again');
   }
 
+  // The same flag one level down (issue #20): a desk put away by hand. The
+  // route, its audit row, and the one door this suite can open — an MCP
+  // session connecting, which restores an archived floor and must not restore
+  // a hidden desk (Decided 5). The hook, host and take doors, and what the
+  // page draws, are in test/floor.mjs.
+  console.log('\nhide a desk');
+  {
+    const floorChan = async () => (await fetch(`${HOST}/api/floor`).then((r) => r.json())).channels.find((c) => c.channel === CHANNEL) ?? null;
+    const floorDesk = async (agent = 'alpha') => (await floorChan())?.desks.find((d) => d.agent === agent) ?? null;
+    const was = await floorChan();
+    assert(!!(await floorDesk()), 'alpha has a desk on the floor — every agent the board knows gets one');
+    eq((await floorDesk()).hidden, false, 'and it starts out not hidden, and says so');
+
+    eq((await postJson('desk/hide', { channel: CHANNEL })).status, 400, 'hide without an agent → 400');
+    eq((await postJson('desk/hide', { agent: 'alpha' })).status, 400, 'hide without a channel → 400');
+    eq((await postJson('desk/hide', { channel: CHANNEL, agent: 'alpha' })).status, 200, 'hide accepted');
+    let d = await floorDesk();
+    assert(!!d, 'the desk is still in the floor payload — one dropped from it would have no pill and no way back');
+    eq(d.hidden, true, 'flagged hidden');
+    const now = await floorChan();
+    eq([now.desks.length, now.live, now.awaiting], [was.desks.length, was.live, was.awaiting], 'and the storey\'s counts are untouched — hiding is a statement about attention, not about work');
+    let row = (await activity()).rows.find((r) => r.kind === 'admin.desk.hide');
+    assert(!!row && row.actor === 'operator' && JSON.stringify(row).includes('alpha'), 'with an audit row naming the desk and the operator');
+    eq(row?.channel, CHANNEL, 'on the desk\'s channel');
+
+    // The MCP door: the agent connecting again brings an archived floor back
+    // (above) and leaves a hidden desk exactly where it is.
+    await close(alpha.transport);
+    alpha = await makeClient('alpha');
+    await call(alpha.client, 'whoami');
+    eq((await floorDesk()).hidden, true, 'the agent connecting again does not restore its desk — only the operator\'s own Restore does');
+    await call(alpha.client, 'send_message', { body: 'working while hidden' });
+    eq((await floorDesk()).hidden, true, 'nor does it working');
+
+    eq((await postJson('desk/show', { channel: CHANNEL, agent: 'alpha' })).status, 200, 'show accepted');
+    eq((await floorDesk()).hidden, false, 'and the desk is back');
+    row = (await activity()).rows.find((r) => r.kind === 'admin.desk.show');
+    assert(!!row && JSON.stringify(row).includes('alpha'), 'with its own audit row');
+  }
+
   console.log('\ndelete a channel');
   {
     const before = await chan();

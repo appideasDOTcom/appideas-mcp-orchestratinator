@@ -261,6 +261,34 @@ you on all floors. The assertions themselves are in `test/floor.mjs`
 ("archive is the one way to put a floor away, on both views"); this shows
 the page.
 
+### seed-hide.mjs and check-hide.mjs — empty desks and Hide desk
+
+Issue #20 (2026-11-03): a desk with nothing live behind it is not drawn, a
+desk the operator hides is a pill under its storey, and the pill restores.
+[`seed-hide.mjs`](seed-hide.mjs) builds one floor with a desk per nameplate
+reading — hosted and ready, live by hooks with unread mail, an agents row
+alone, hosted on a host two days dead, a session that ended — plus a floor
+with one live desk and one whose only desk is empty, and keeps the live
+host's heartbeat. [`check-hide.mjs`](check-hide.mjs) drives the floor with
+[`probe-hide.js`](probe-hide.js):
+
+```bash
+PORT=8905 DB_PATH=./data/scratch.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/seed-hide.mjs http://localhost:8905 ./data/scratch.db &
+node --experimental-websocket .claude/skills/verify-ui-change/check-hide.mjs http://localhost:8905 /tmp/shots ./data/scratch.db
+```
+
+Read the output for: two desks drawn of five with `2/5 here` on the header
+and the all-empty storey ending at its header band (`h=88`); Hide desk on
+the card and the card gone on the click; the pill with its count under the
+last desk, `N/M here` unchanged; an empty desk hidden by API as a pill and
+restored to *nothing* (it is empty); the host coming back drawing a desk
+with nothing clicked; archive leaving neither desk nor pill, and the pill
+back on restore, under the collapsed storey too; Enter on a focused pill.
+The check tells the two "the click did nothing" causes apart — the card's
+own click branch swallows a button it does not name, which is how the
+first cut of Hide desk failed here and not in the suite.
+
 ### answering-host.mjs — a host that answers the page's questions
 
 `seed-desk.mjs` and `seed-folders.mjs` put state on the board; neither takes
