@@ -76,6 +76,7 @@ discriminate:
 |---|---|
 | `timed out after N ms (limit L ms)` with N well past L | the host's own loop (the timer runs on it) |
 | board `event loop held N ms` beside it | the board's loop. A `slow <METHOD> <path>` other than the work poll names the route. Only the work poll slow means it was not a request (the poll is nearly always mid-wait, so it reads slow on any hold) |
+| a `slow` line with no hold beside it | that request waited on something other than the loop, such as its own client. Staged on the live board, read-only, by sending a small body in two halves 3 s apart (task 260): `slow POST /staged-slow-request-task-260 3001ms 404` and no hold |
 | outside probe slow, inside probe fast, docker-ping fast, no hold line | the forwarder |
 | docker-ping slow too, or `vm/init.log` gaps over 9 s (normal quiet is ≤ ~8.9 s) | the VM |
 | `main.gvisor … stopped` / `started`, `exposer.Add` for 8787 | the forwarder was restarted (a container swap does exactly this) |

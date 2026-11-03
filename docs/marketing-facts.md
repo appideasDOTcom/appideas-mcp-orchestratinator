@@ -1,7 +1,7 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `0acf764`
+code. Every fact names the file and line that holds it, at commit `08a0641`
 (branch `develop`, 2026-11-03; first written at `0ce4f1e`, 2026-10-17;
 re-anchored at `c6f9474` on 2026-11-02 — sixteen references had moved, none
 had changed — at `8f4a703` on 2026-11-03 — six moved and one was placed by
@@ -22,12 +22,14 @@ placed by hand; the version changed and one per-desk row was added, moving
 a desk from its nameplate card — and at `0acf764` for issue #5 steps 1–2,
 0.10.11: six moved and one placed by hand, the host's one `fetch`, which
 now sits inside `request()`'s failure handling; the version changed,
-nothing else). Cite
+nothing else — and at `08a0641` for issue #5 step 3, 0.10.12: one moved,
+the `POST /mcp` route, below the board's new hold and slow-request lines;
+none placed by hand; the version changed, nothing else). Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `0acf764`. A later commit may move them; the file names
+Line numbers are for `08a0641`. A later commit may move them; the file names
 will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
 reference whose line is found once at the new commit and lists the rest.
 
@@ -40,7 +42,7 @@ volume. Runs anywhere Docker runs. Without Docker it runs as `npm start` on
 Node 20 or later.
 
 - Docker: `Dockerfile:1` (`node:22-bookworm-slim`), `docker-compose.yml:1-39`.
-- Transport and tools: `src/server.js:212` (`POST /mcp`), `src/tools.js:28`.
+- Transport and tools: `src/server.js:251` (`POST /mcp`), `src/tools.js:28`.
 - Node floor: `package.json` `engines.node` `>=20`; `docs/internals.md:27-33`
   for the no-Docker path.
 - Dashboard and floor pages: `src/ui/index.html`, `src/ui/app.js`,
@@ -241,7 +243,7 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.10.11** at `0acf764`, in all three places that carry it:
+- **Version: 0.10.12** at `08a0641`, in all three places that carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
   They are kept equal by `npm run set-version` (`scripts/set-version.mjs`)
   and `npm run smoke` asserts it. The dashboard header reports the server's.
