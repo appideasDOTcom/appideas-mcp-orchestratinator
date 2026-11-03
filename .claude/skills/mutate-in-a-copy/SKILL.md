@@ -120,6 +120,28 @@ section (`recentFolders`, `savedName`, `takeBody`, `coverageText`,
 show — what is drawn, in what order, with what focus — goes through
 `verify-ui-change` and is reported as measured there, not as tested.
 
+**A page check can be mutation-tested too**, and the DOM callers are
+exactly what the lifted tests cannot see: in task 253, "`follow` ignored",
+"a disabled button's click not refused" and "the card follows on the
+board's 200 instead of waiting for the host" all stayed green in every
+suite (QA predicted them green). [`run-page-mutant.sh`](run-page-mutant.sh)
+applies the mutant in a copy, serves *the copy* on a private port, runs the
+check against it and reports the check's reds; its header carries the
+command for `check-card-move.mjs`. Use its own `--dest`-style copy
+directory (`copy-repo.sh "$TMPDIR/orch-page-copy"`) — a page mutant can run
+beside a suite mutant, since the ports differ, but never in the same copy.
+
+## Running more than one at a time
+
+`copy-repo.sh` with no argument always makes the same directory, and
+deletes it first. A second run started while the first is in its suite
+pulls the tree out from under it. Give each concurrent run its own
+destination (`run-mutants.mjs <json> --dest <dir>`, `copy-repo.sh <dir>`);
+the suites' own ports (host 8896, floor 8897, page checks wherever you put
+them) decide what can share the CPU, and the host and window suites should
+still run alone — under load their pane cases go red on timing (CLAUDE.md,
+Tests).
+
 ## What goes in the report
 
 For each item: the test's section and wording, and the mutant that turned

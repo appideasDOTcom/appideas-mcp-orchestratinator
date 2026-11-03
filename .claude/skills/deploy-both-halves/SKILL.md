@@ -97,6 +97,20 @@ to prove it. Say in the note which event hooks the running windows still
 have, and that until they restart the board gets those events only from
 the host's transcript side (compaction state, model switches on 0.10.9).
 
+**When only the manifest's version moved** (`npm run set-version` bumps
+all three files; 0.10.10 changed no hook), still update — the cache's
+number is what `npm run smoke`'s agreement is about on the next install —
+and then compare the hooks the windows run with the new ones:
+
+```bash
+C=~/.claude/plugins/cache/appideas-orchestratinator/orchestratinator-floor
+diff "$C/<old>/hooks/hooks.json" "$C/<new>/hooks/hooks.json" && echo identical
+```
+
+Identical (0.10.9 → 0.10.10, 2026-11-03) means running windows lose
+nothing by keeping what they loaded, and the note says so instead of asking
+anyone to restart a window.
+
 ## The server half alone
 
 When nothing under `host/` changed since the last deploy, the task says

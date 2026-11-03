@@ -839,6 +839,22 @@ has a composer the way the real window does for a *typed* message, so the
 typed delivery (`typeInto`) is proved on the composer pane and on a real
 probe, and the plain stand-in gets a paste.
 
+**The host suite's stand-in can be slow to die, and can start fresh under
+an id of its own, since 0.10.10** — two flag files, read the way the others
+are because a pane's environment is the tmux server's (above).
+`linger.flag` (ms) is read *at the hangup*, so it can be armed on a window
+already open: the killed stand-in stays alive, and so in the roster, for
+that long — the closing window a move's reopen used to meet (issue #24);
+the suite never met it before because the stand-in died on the instant.
+`fresh-id.flag` gives a window started with nothing to resume that id
+instead of the constant, so "a new conversation" is an id the desk can be
+seen to follow. Remove both when the case is done; the sections below
+expect the constant. And **`argv.log` is one line per window started, and
+a fresh one with no arguments is an empty line**: count launches with
+`.split('\n').slice(0, -1)`, never `.trim().split('\n')`, which reads "no
+window at all" as one launch with nothing to resume and passes a case that
+should be red.
+
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the

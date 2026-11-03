@@ -377,6 +377,48 @@ What to know before trusting a reading from it:
   on the *live* board if the probe was ever taken there — the persona rows
   stay otherwise.
 
+### Tighter isolation, and a move measured end to end (task 253)
+
+The recipe above shares two things with the operator: the probe pane lands
+in his `orch` tmux session, and the probe folder sits under the live host's
+roots, kept off his board only by the "another board" skip. For issue #24
+both were taken away, and nothing of the probe was ever visible to the live
+host:
+
+```bash
+E=$SP/e2e; mkdir -p $E/root $E/rec
+$D/make-probe.sh $E/root/probe-desk                        # the scratchpad: no host's roots reach it
+printf '#!/bin/sh\nexec tmux -L probe253e "$@"\n' > $E/tmuxw; chmod +x $E/tmuxw   # a tmux server of its own
+# the second host: ORCH_TMUX names the wrapper, ORCH_HOST_ROOTS only the probe's parent,
+# and every line stamped to the millisecond, because a race is read off this log
+ORCH_TMUX=$E/tmuxw ORCH_TMUX_SESSION=orch ORCH_HOST_ROOTS=$E/root ORCH_URL=http://localhost:8905 … node host/index.js 2>&1 \
+  | perl -MTime::HiRes=time -ne 'BEGIN{$|=1} my $t=time; my @g=gmtime($t); printf "%02d:%02d:%02d.%03d %s",$g[2],$g[1],$g[0],($t-int($t))*1000,$_' > $E/rec/host.log &
+# take the desk through the floor's own routes — POST /api/floor/browse {host_id, path: $E/root}, then
+# POST /api/floor/desk {host_id, path, channel, agent} — which runs the real `claude mcp add`;
+# answer the trust question on the wrapper's socket (Down, Enter), since nobody else can see it
+```
+
+Strip the `CLAUDE*` environment from the host's shell as for any probe —
+the host passes it on to every window it opens. Its tmux pane is then
+`$E/tmuxw list-panes -a`, its sessions `rec-roster.mjs`, its desk on every
+floor `rec-floor.mjs`, and a move with the window held is
+[`held-move.mjs`](probe-desk/held-move.mjs):
+
+```bash
+node $D/rec-floor.mjs  $E/rec/floor.log  http://localhost:8905 probe 600 &      # the desk on every floor, 100 ms
+node $D/rec-roster.mjs $E/rec/roster.log <session-prefix> probe-desk 600 &     # the roster, 5 ms
+ORCH_CDP_PORT=9253 node --experimental-websocket $D/held-move.mjs http://localhost:8905 probe-host \
+  $E/root/probe-desk $E/tmuxw probe coord-probe-a coord-probe-b 6000 $E/shots card
+```
+
+What reading those four side by side showed, at 9d0e652 and then on the
+fix: the closing window out of the roster 4–14 ms after the host's "closed
+its window" line, the reopen 78–85 ms after it, and — the thing nobody had
+predicted — a desk moved back to a floor it had left by a move missing from
+*every* floor's payload, because the move had retired its row there. Give
+the recorders a deadline (`seconds`) longer than the session you plan: they
+stopped at ten minutes here, one move before the last reading was taken.
+
 ## How long a closed window stays in the roster
 
 Issue #24 (task 253, 2026-11-03, 2.1.300): a move closed a desk's window

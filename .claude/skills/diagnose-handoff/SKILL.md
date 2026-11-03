@@ -307,6 +307,34 @@ form still there after 8 s is logged "the form was not submitted"
 (`still_asking`) rather than "answered"; a report against an older host is
 read against that host's own log.
 
+## Who held a conversation that is gone — after the fact
+
+The question in issue #24 (task 253): a reopen was refused "outside tmux
+(pid N)" days ago; was pid N the window the host had just closed, or a real
+second holder? The pid is gone and the session file with it. Three things
+still answer it, all read-only:
+
+- **When it happened.** `host.log` has no timestamps. `/api/activity` does,
+  to the second, newest first, a thousand rows a page: page it with
+  `?limit=1000&offset=N` and keep the `admin.desk.*` rows (`desk.take` with
+  its mode, `desk.moved`, `desk.bound`, `desk.new`), then line them up
+  against the log's order. The log's refusal comes straight after its
+  "closed its window to reopen on <id>".
+- **When the conversation's process ended.** Claude Code writes
+  `last-prompt` and a `cost-state` record into the transcript as it exits,
+  and on a window that was not resumed `cost-state.startTime +
+  totalDuration` is the moment its exit handler ran, to the millisecond
+  (measured: a probe killed at .311 wrote .328). For the coordinator move on
+  2026-11-02 that put the process's end at 19:23:24.922, in the same second
+  as `desk.moved`: the window the host closed. On a resumed window
+  `startTime` is the conversation's first start and the sum is not a clock —
+  check the `cost-state` count against the kills you expect instead.
+- **Who else wrote.** Every record carries `entrypoint` (`cli`,
+  `claude-vscode`, …) and `version`. One `cli` writer and nothing else rules
+  out an editor tab.
+
+`ps -o pid= -p N` only tells you N is gone, which it always is by then.
+
 ## What not to do
 
 - Do not theorise about environment drift, versions, or infrastructure until

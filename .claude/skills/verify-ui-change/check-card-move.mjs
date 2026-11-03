@@ -27,13 +27,14 @@
  * Every bind the page caused is read back out of the seed's work log: the
  * desk's own folder, the target floor, where from.
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { open } from './drive.mjs';
 
 const base = process.argv[2] ?? 'http://localhost:8905';
 const out = process.argv[3] ?? tmpdir();
 const WORK = process.argv[4] ?? null;
+mkdirSync(out, { recursive: true });
 const KEY = process.env.ORCH_AUTH_TOKEN ?? 'k';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
