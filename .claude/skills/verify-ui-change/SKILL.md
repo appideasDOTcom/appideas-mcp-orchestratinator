@@ -339,6 +339,86 @@ is a state no host could have produced. `probe-chat-panel.js` reads the
 meta line, both selects, the asked-for note, the slash rows and the last
 rows (with the compaction summary's open/closed) in one call.
 
+### check-backdrop.mjs — a click outside a dialog's contents (issue #11)
+
+Every dialog on the board, four gestures each, through `press()` and
+`key()` in `drive.mjs` — real input, because a dispatched click names its
+own target and the target is the whole question here. A click goes to the
+nearest common ancestor of where the button went down and where it came
+up, so a drag out of a field onto the backdrop is a click on the `<dialog>`;
+so is a click in the dialog's own padding, inside its visible box.
+
+```bash
+node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8905 &
+node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 &
+node --experimental-websocket .claude/skills/verify-ui-change/check-backdrop.mjs http://localhost:8905 --expect after
+# rename  backdrop  open  kept   0 close  ✓ … close, then wait … PASS · 65 of 65
+```
+
+`--expect after` is #11's ruling: a dialog carrying a text field stays
+open with its text on backdrop, drag-out and padding and closes on Escape;
+one without closes on all four. `--expect before` is what the issue
+reported, and it read every dialog closing on every gesture (2026-11-03,
+0.10.12). Each row counts the `close` events its gesture fired, and `open`
+passes only with none: a dialog waiting on its host used to be drawn back
+open by the host's answer inside the row's 120 ms, so "closed and drawn
+back" read as "never closed" (PR #36, QA finding 2, mutant P4).
+
+Then **close, then wait** (PR #36, QA finding 1): History, Sessions and
+Take a desk (opened on a folder, so its host is asked a `browse`), each
+closed 150 ms after opening with Escape and with its own Close button,
+watched for ten seconds, against the task list as a control. Before the
+fix all three came back; History within a second. A close-then-wait row
+only catches a redraw that happens to land between `close()` and the late
+`close` event about one run in three, so three more rows put it there
+every time: each dialog closed and redrawn in the same task. One closes
+Sessions and opens Retire while Sessions' loop is still running, which must
+not draw over it. Last, one row closes History and opens it again in the
+same task, which the late `close` must leave drawn. Under a red row the
+check prints the page's own log of every `showModal`, `close()` and
+`close` event with its time, which is how the gap was found.
+
+Six things it taught, each a red that was the check:
+
+- **A `close` event is a queued task**, and the page's handler for it
+  empties `#dlg-body`. Closing one dialog and opening the next in the same
+  breath drew the second and then wiped it: an open dialog with nothing in
+  it, on some runs and not others. Let the event loop turn between them.
+  The handler now leaves a dialog that is open again alone, and the
+  same-breath row holds it to that; the check still turns the loop, so a
+  row measures its gesture and not the one before.
+- **A gesture is not done when `press()` returns, and its `close` event
+  is later still.** A drag is ten input events. Its `close()` landed
+  about 320 ms after the gesture started, and the event came about
+  100 ms after that. A fixed 120 ms read saw the dialog shut with no close
+  counted, and failed a working dialog, 1–2 rows in 2 control runs. A row
+  now waits for the close to be counted, and gives a row that should stay
+  open 600 ms. And Take a desk redraws taller when its host list arrives,
+  so its Cancel is pressed only once the button has held still.
+- **Sessions redraws whole when its host answers**, and the redraw takes
+  focus out of the filter; the value survives in the form's state. So the
+  marker is typed and focused until the same field element has held it
+  across two polls.
+- **A non-empty `type="search"` field spends the first Escape clearing
+  itself.** That is the browser's (History's query has no handler for it),
+  so the row says `escape×2` rather than calling Escape broken.
+- **A click held across a redraw is no click** (QA, PR #36 N1). `press()`
+  used to send a click's six moves too, which made press to release take
+  300–600 ms under load. Take a desk, opened on a folder, redraws
+  `#dlg-body` when its listing arrives, 525–590 ms after opening. When
+  that fell inside the press, the button went down on one Cancel and up on
+  another element, so no click fired and the Close-button row read "the
+  close never landed" on a correct build, in 3 of QA's 11 runs. A press
+  at one point is now a plain click with no moves, 1–2 ms from press to
+  release. A drag keeps its moves. Measured with the dialog's own render
+  pinned 50 ms after the press: no moves lost 0 of 10, the six moves lost
+  10 of 10.
+- **A row that stops watching early hands the next row a throttle** (QA,
+  PR #36 N2). History and Sessions ask their host at most once per 5 s.
+  When a row stopped at the comeback, History's Close-button row opened
+  inside its Escape row's window at the base, asked nobody, and could not
+  come back. Every close-then-wait row now watches the full ten seconds.
+
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
 Task 264 (2026-11-03). [`hold-proxy.mjs`](hold-proxy.mjs) stands in for a

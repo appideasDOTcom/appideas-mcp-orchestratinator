@@ -672,6 +672,32 @@ button on the card goes there and not in the generic `[data-act]` chain —
 the first cut put it in the chain and the button did nothing, which the
 page check caught and the suite could not.
 
+**A dialog holding a text field closes only from its own buttons and on
+Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
+2026-11-04). A click on the `<dialog>` element closes it only when it
+carries no plain-text field (`holdsTyping` in `src/ui/app.js`, asked at the
+click). That element is the target of three gestures, measured with real
+input: the backdrop, a drag out of a field past the edge (a click goes to
+the common ancestor of press and release), and a click in the dialog's own
+padding. Two rulings ride on it. costmo ruled "Exactly as Decided": a
+dialog with no field keeps all three, padding and drag-out included, and
+narrowing those to a true backdrop click was offered and declined. And
+costmo ruled "keep as built" on Sessions and History (QA's Info 3), whose
+text box is always drawn, so they never close on a click outside. Do not
+re-propose either. The second half came out of QA's review: History,
+Sessions and Take a desk ask a host and draw its answer later, and a close
+never cleared `ui.dlgCtx`, so the answer reopened a dialog the person had
+just closed (History within a second; at the base too). Each of the three
+now draws only while it is the current dialog *and open* (`drawsNow`),
+and the `close` handler clears the context (`forgetDialog`) unless the
+dialog is open again. Both halves are needed, because the `close` event is
+not prompt: about 100 ms after the close here, and History's poll redrew
+inside that gap on the first cut, which had only the event. `el.dlg.open`
+is the one signal that is synchronous for every way a dialog closes,
+Escape included. Both are in `check-backdrop.mjs` in **verify-ui-change**,
+which is the only tier that sees them; the suite pins the decision and the
+handlers' text.
+
 **A user record is not all the operator, and the split is the relay's job.**
 Claude Code glues machine-injected context — IDE state, slash-command records —
 onto the person's message, and joining the blocks once put
