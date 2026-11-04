@@ -319,13 +319,16 @@ console.log('\na minimized popout stays out (QA, PR #41 finding 1)');
   await pop.windowState('minimized');
   await pop.waitFor(`document.visibilityState === 'hidden'`, { timeout: 5000 });
   const samples = [];
-  for (let i = 0; i < 20; i++) {
+  // 150 s: QA measured the beats holding at 2 s for about 65 s after the
+  // minimize before the minute-long gaps began, and a first cut sampling
+  // 100 s saw a longest gap of 14 s, which proves nothing.
+  for (let i = 0; i < 30; i++) {
     await sleep(5000);
     samples.push(await floor.evalJs(`document.querySelector('#floor-panel')?.dataset.agent === 'bo' && !!document.querySelector('#floor-panel [data-act="bring-back"]') && !document.querySelector('#p-text')`));
   }
   const gap = await pop.evalJs(`(() => { const t = window.__ticks; let g = 0; for (let i = 1; i < t.length; i++) g = Math.max(g, t[i] - t[i - 1]); return g; })()`);
   ok(gap >= 20_000, `the hidden popout's timers were throttled (longest gap ${gap} ms) — or this step proves nothing`);
-  ok(samples.every(Boolean), `the floor kept bo out, with no composer of its own, in ${samples.filter(Boolean).length} of ${samples.length} samples over 100 s`);
+  ok(samples.every(Boolean), `the floor kept bo out, with no composer of its own, in ${samples.filter(Boolean).length} of ${samples.length} samples over 150 s`);
   // The stream: a turn while it is still hidden reaches it at once. Its own
   // poll is throttled to once a minute, so only the hub can have brought it.
   const t0 = Date.now();
