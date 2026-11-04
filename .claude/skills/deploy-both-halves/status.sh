@@ -31,4 +31,8 @@ echo "newest host/*.js: $(ls -t host/*.js | head -1) modified $(stat -f '%Sm' "$
 line=$(grep -n '\[host\] costmo4\|\[host\] .* → http' ~/.orchestratinator/log/host.log | tail -1)
 echo "last registration: ${line:-none}"
 n=${line%%:*}
-if [ -n "$n" ]; then tail -n +"$n" ~/.orchestratinator/log/host.log | grep -v '^\[host\]   ' | grep -i 'warn\|error\|skipping' | head -3; fi
+# The desk list under the banner is indented after the tag, and is left out so
+# a folder name cannot pass for a warning. Since issue #5 a line carries its
+# UTC time between the tag and the words (`[host] 2026-11-03T19:54:18.123Z …`)
+# and the file holds both shapes, so the indent is looked for after either.
+if [ -n "$n" ]; then tail -n +"$n" ~/.orchestratinator/log/host.log | grep -Ev '^\[host\] ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z )?  ' | grep -i 'warn\|error\|skipping' | head -3; fi

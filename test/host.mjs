@@ -19,6 +19,7 @@
 // on the floor or you type in the window, and both land in the same session.
 //   npm run test:host
 import { spawn, execFileSync } from 'node:child_process';
+import http from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -248,10 +249,25 @@ function fixture() {
     // (issue #24). This stand-in otherwise exits on the hangup, which is why
     // the suite never met it. Read at the hangup, not at start, so a case can
     // arm it for a window that is already open.
+    //
+    // The linger ends by a watchdog, not by a timer of its own. A
+    // setTimeout(process.exit) here never fired: after the hangup Node
+    // reopens the dead pane's tty (uv_tty_init → open()) and on macOS that
+    // open never returns, so the loop never ran again — measured with
+    // `sample`, 775 of 775 on the main thread (task 263, 2026-11-03). Every
+    // run left the two windows the move case closes under this flag alive,
+    // parented to the tmux server, 105 of them by one evening. The watchdog
+    // is a detached sh that kills this pid when the linger is up, and only
+    // if the pid is still this stand-in: pids are reused.
     `const LINGER_FLAG = ${JSON.stringify(`${FIX}/linger.flag`)};`,
     `process.on('SIGHUP', () => {`,
     `  let ms = 0; try { ms = Number(fs.readFileSync(LINGER_FLAG, 'utf8').trim()) || 0; } catch {}`,
-    `  if (ms > 0) { process.stdin.on('error', () => {}); setTimeout(() => process.exit(0), ms); return; }`,
+    `  if (ms > 0) {`,
+    `    process.stdin.on('error', () => {});`,
+    `    const me = String(process.pid), script = process.argv[1];`,
+    `    require('child_process').spawn('/bin/sh', ['-c', 'sleep "$1"; ps -o command= -p "$2" | grep -qF -- "$3" && kill -9 "$2"', 'linger', String(ms / 1000), me, script], { detached: true, stdio: 'ignore' }).unref();`,
+    `    return;`,
+    `  }`,
     `  process.removeAllListeners('SIGHUP'); process.kill(process.pid, 'SIGHUP');`,
     `});`,
     `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: MY_ID, name: 'stand-in' }]));`,
@@ -395,9 +411,42 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
 
 const killTmux = () => { try { execFileSync('tmux', ['kill-session', '-t', TMUX_SESSION], { stdio: 'ignore' }); } catch { /* none */ } };
 
+/* This run's stand-in claudes, by this run's fixture path, so a run beside
+ * it (QA's clone, a mutant copy) is neither counted nor killed by it. Only
+ * `node <FIX>/claude.cjs` itself: the linger watchdog's sh names the script
+ * too, and is not a stand-in. A run leaves none (task 263) — the pane ones
+ * live on the tmux server, not under this process, so nothing else would
+ * reach them once their window is gone. */
+const STAND_IN = `${FIX}/claude.cjs`;
+const standIns = () => {
+  let out = '';
+  try { out = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }); } catch { return []; }
+  return out.split('\n').map((l) => l.trim().split(/\s+/)).filter(([, exe, script]) => /(^|\/)node$/.test(exe ?? '') && script === STAND_IN).map(([pid]) => Number(pid));
+};
+const sweep = () => { for (const p of standIns()) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } };
+const childrenOf = (ppid) => {
+  try { return execFileSync('ps', ['-Ao', 'pid=,ppid='], { encoding: 'utf8' }).split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter(([, pp]) => pp === ppid).map(([p]) => p); } catch { return []; }
+};
+
 let server = null;
 let host = null;
 let hostLog = '';
+
+// An interrupted run cleans up after itself too: Ctrl-C, or a kill of the
+// suite, lands here instead of leaving its server, its hosts, its tmux
+// session and its stand-ins running (task 263). The finally below does not
+// run on a signal.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    for (const p of childrenOf(process.pid)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+    killTmux();
+    sweep();
+    rmDb(DB_PATH);
+    rmSync(FIX, { recursive: true, force: true });
+    console.log(`\nhost: interrupted by ${sig}; its server, hosts, tmux session and stand-ins are gone`);
+    process.exit(130);
+  });
+}
 
 try {
   try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); } catch {
@@ -1457,6 +1506,141 @@ try {
   const none = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', until: /shared secret/ });
   assert(/no shared secret/.test(none.out) && /install\.sh --token/.test(none.out),
     'and with nothing at all the host says so, and how to give it one');
+
+  /* ── what the host log says ─────────────────────────────────────────────────
+   * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
+   * it held 7,379 failure lines without a time among them, each reading
+   * `fetch failed` or "The operation was aborted due to timeout" — countable,
+   * but never lined up with the board's own log for the same minutes, and
+   * never put against a route. Step 1: every line carries a UTC time. Step 2:
+   * a failed request names its method, URL, what failed and how long it
+   * waited. Run against a stand-in board in this process, so each way a
+   * request fails is one the case chose, and the backoff and the events
+   * requeue are asserted beside it: this round adds evidence, not behaviour. */
+  console.log('\n  what the host log says');
+  const STAMP = /^\[host\] (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z) /;
+  const timedLines = (out, from, to) => {
+    const lines = out.split('\n').filter(Boolean);
+    const bad = lines.filter((l) => {
+      const m = STAMP.exec(l);
+      return !m || Date.parse(m[1]) < from - 1000 || Date.parse(m[1]) > to + 1000;
+    });
+    return lines.length && !bad.length ? true : `${lines.length} lines, untimed or out of range: ${JSON.stringify(bad.slice(0, 2))}`;
+  };
+
+  // The lines a host writes before it stops on an error are console.error,
+  // not log/warn — the issue's :1626–1707.
+  deskAt(`${boards}/two`, 'board-b', 'http://127.0.0.1:9922');
+  let from = Date.now();
+  const splitAgain = await runHost(boards);
+  eq([splitAgain.code, /different boards/.test(splitAgain.out), timedLines(splitAgain.out, from, Date.now())], [1, true, true],
+    'every line a host writes as it stops on an error carries the time it was written, in UTC');
+  rmSync(`${boards}/two`, { recursive: true, force: true });
+
+  // A stack trace is one call and many lines; each of them is the host's.
+  const L = await import('../host/log.js').catch(() => ({}));
+  eq(L.stamp?.(['fatal:', 'Error: gone\n    at main (index.js:1:1)'], new Date(0)),
+    '[host] 1970-01-01T00:00:00.000Z fatal: Error: gone\n[host] 1970-01-01T00:00:00.000Z     at main (index.js:1:1)',
+    'and a message of several lines is tagged and timed on every one of them');
+
+  // Nothing listening: the socket's own refusal, said as one.
+  from = Date.now();
+  const noBoard = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', ORCH_AUTH_TOKEN: 'k', until: /retrying in 2s/ });
+  eq(timedLines(noBoard.out, from, Date.now()), true, 'so does every line of a running host, its failures among them');
+  assert(/POST http:\/\/127\.0\.0\.1:9911\/api\/host\/register refused \(ECONNREFUSED\) after \d+ms; retrying in 1s/.test(noBoard.out),
+    'a refused request names its method, its board and path, that it was refused and how long it waited');
+  eq([...noBoard.out.matchAll(/retrying in (\d+)s/g)].map((m) => Number(m[1])).slice(0, 2), [1, 2], 'and the backoff after it is what it was');
+
+  // A board that does what each case says, one route at a time: a status
+  // code, `hang` (never answers), `drop` (closes the socket), `not-json`.
+  // An array is a queue, used up one request at a time; empty, it answers.
+  const stand = { seen: [], hand: [] };
+  const board = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      const route = req.url.split('?')[0].replace('/api/host/', '');
+      stand.seen.push({ route, url: req.url, body });
+      const how = Array.isArray(stand[route]) ? stand[route].shift() : stand[route];
+      if (how === 'hang') return;
+      if (how === 'drop') { req.socket.destroy(); return; }
+      const send = (status, text) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(text); };
+      if (typeof how === 'number') { send(how, '{}'); return; }
+      if (how === 'not-json') { send(200, '<html>'); return; }
+      const reply = route === 'register' ? { ok: true, desks: [] } : route === 'work' ? { work: stand.hand.splice(0) } : { ok: true };
+      // The real work route holds the poll; this one only slows it enough
+      // that a host with nothing to do is not a tight loop.
+      setTimeout(() => send(200, JSON.stringify(reply)), route === 'work' ? 150 : 0);
+    });
+  });
+  await new Promise((r) => board.listen(0, '127.0.0.1', r));
+  const BOARD = `http://127.0.0.1:${board.address().port}`;
+  const BOARD_RE = BOARD.replace(/[.:/]/g, (c) => `\\${c}`);
+  const against = (behaviour, marker) => {
+    Object.assign(stand, { seen: [], hand: [], register: undefined, work: undefined, events: undefined, unregister: undefined }, behaviour);
+    return runHost(emptyRoot, { ORCH_URL: BOARD, ORCH_AUTH_TOKEN: 'k', ORCH_REQUEST_TIMEOUT_MS: '300', until: marker });
+  };
+
+  const hung = await against({ register: 'hang' }, /retrying in 1s/);
+  const hungAt = new RegExp(`POST ${BOARD_RE}\\/api\\/host\\/register timed out after (\\d+)ms \\(limit 300ms\\); retrying in 1s`).exec(hung.out);
+  assert(!!hungAt && Number(hungAt[1]) >= 300, 'a request the board never answers names itself, says it timed out, after how long, and against what limit');
+
+  const status = await against({ register: 503 }, /retrying in 1s/);
+  assert(new RegExp(`POST ${BOARD_RE}\\/api\\/host\\/register → 503 after \\d+ms; retrying in 1s`).test(status.out),
+    'a refusal by status names the board as well as the path, and how long it took');
+
+  const polled = await against({ work: 500 }, /retrying in 2s/);
+  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1 → 500 after \\d+ms; retrying in 1s`).test(polled.out),
+    'the work poll is told apart from the register that shares its warning');
+  eq(stand.seen.map((s) => s.route).slice(0, 4), ['register', 'work', 'register', 'work'],
+    'and a failed poll still re-registers before the next, as it did');
+
+  const dropped = await against({ register: 'drop' }, /retrying in 1s/);
+  const droppedLine = dropped.out.split('\n').find((l) => /retrying in 1s/.test(l)) ?? '';
+  assert(new RegExp(`POST ${BOARD_RE}\\/api\\/host\\/register failed \\(UND_ERR_SOCKET: other side closed\\) after \\d+ms`).test(droppedLine) && !/refused/.test(droppedLine),
+    'a socket the board closed is named by its own code — not called a refusal');
+
+  const garbled = await against({ register: 'not-json' }, /retrying in 1s/);
+  assert(new RegExp(`POST ${BOARD_RE}\\/api\\/host\\/register → 200, body failed \\(SyntaxError: `).test(garbled.out),
+    'and a 200 whose body is not JSON says so, rather than a parse error naming nothing');
+
+  // The two that need the host kept running past its first failure: started
+  // here rather than through runHost, which ends a host on its marker.
+  const running = (behaviour) => {
+    Object.assign(stand, { seen: [], hand: [], register: undefined, work: undefined, events: undefined, unregister: undefined }, behaviour);
+    const p = spawn('node', ['host/index.js'], {
+      env: { ...process.env, HOME, ORCH_HOST_ROOTS: emptyRoot, ORCH_TMUX_SESSION: TMUX_SESSION, ORCH_HOST_CONFIG: '/nonexistent/host.json',
+        ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_URL: BOARD, ORCH_AUTH_TOKEN: 'k' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { out += d; });
+    const exited = new Promise((r) => p.on('exit', r));
+    return {
+      out: () => out,
+      stop: async (signal = 'SIGKILL') => { p.kill(signal); await Promise.race([exited, sleep(5000)]); try { p.kill('SIGKILL'); } catch { /* gone */ } return out; },
+    };
+  };
+
+  // The events warn (:621) is the relay's, not the loop's. A `recent` asks
+  // for one `history` event with no desk needed, and the first batch is refused.
+  const relaying = running({ events: [503] });
+  stand.hand.push({ id: 1, kind: 'recent', payload: { request_id: 'log-events-1' } });
+  const twice = await until(() => stand.seen.filter((s) => s.route === 'events' && s.body.includes('log-events-1')).length >= 2, 8000);
+  const eventsOut = await relaying.stop();
+  assert(new RegExp(`events not delivered \\(POST ${BOARD_RE}\\/api\\/host\\/events → 503 after \\d+ms\\); will retry with the next batch`).test(eventsOut),
+    'the events warning names the request it is about');
+  assert(!!twice, 'and the batch the board refused is posted again with the next one, as it was');
+
+  // stop() unregisters, and a refusal there used to go without a word.
+  const quitting = running({ unregister: 503 });
+  await until(() => stand.seen.some((s) => s.route === 'work'), 8000);
+  const quitOut = await quitting.stop('SIGTERM');
+  assert(new RegExp(`unregister not delivered \\(POST ${BOARD_RE}\\/api\\/host\\/unregister → 503 after \\d+ms\\)`).test(quitOut),
+    'and an unregister the board refused as the host stops is said too');
+  board.closeAllConnections();
+  board.close();
 } catch (err) {
   console.error(err);
   failures++;
@@ -1485,6 +1669,14 @@ try {
   try { host?.kill('SIGKILL'); } catch { /* gone */ }
   try { server?.kill('SIGKILL'); } catch { /* gone */ }
   killTmux();
+  // Counted before the sweep, or the sweep would hide a leak: a window the
+  // move case closed under the linger flag is gone by now (its watchdog
+  // fires 4 s after), and every other one goes on the kill-session above.
+  console.log('\n  what the run leaves behind');
+  await until(() => (standIns().length === 0 ? true : null), 8000);
+  const left = standIns();
+  eq(left.length, 0, `a run leaves no stand-in claude running${left.length ? ` (pids ${left.join(', ')})` : ''}`);
+  sweep();
   rmDb(DB_PATH);
   rmSync(FIX, { recursive: true, force: true });
 }

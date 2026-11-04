@@ -48,6 +48,27 @@ node .claude/skills/mutate-in-a-copy/run-mutants.mjs /tmp/mutants.json > /tmp/mu
 # [["a pill is not the restore control", "floor", "src/ui/app.js", "data-act=\"unarchive\" data-channel", "data-act=\"restore\" data-channel"], …]
 ```
 
+**Red at the old SHA, and batches, are [`run-batches.mjs`](run-batches.mjs).**
+A task that asks for "a named test, red at <sha>" wants the new tests run
+against the old code. `--base <sha> --base-paths host/ --base-suite host`
+puts those paths back to that SHA in a fresh copy, removing files that did
+not exist then, and runs today's tests. It is the only honest form of the
+claim. Then each batch is a list of mutants applied together for one suite
+run, with an empty list as the control. From task 255 (issue #5): fourteen
+host mutants went as one base run and five batches, about eight minutes in
+all. The base read 11 of 14 new assertions red and the 3 guarding unchanged
+behaviour green. Every batch's reds were the ones predicted for its mutants.
+In the report, say which assertions are expected to stay green at the base
+and why.
+
+**A red you did not predict in an older section is load first** (task 255,
+20:27Z): QA's clean-clone suite started on the same ports during the
+tool's base run, and the base read 19 red. Those were the predicted 11,
+plus 8 in sections nobody touched (the thought, the subagent's words, the
+folder dialog). Read the channel for a QA announcement before believing
+those, and rerun once the ports are quiet. Rerun at 20:53Z with nothing
+else on them, it read the predicted 11 and 268 ✓.
+
 Keep the JSON file outside the repo. A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
 that way on 2026-11-02 and had to be discounted in the report; say so if
@@ -119,6 +140,28 @@ section (`recentFolders`, `savedName`, `takeBody`, `coverageText`,
 `markHits`) and leave the DOM code as a caller. What only a real page can
 show — what is drawn, in what order, with what focus — goes through
 `verify-ui-change` and is reported as measured there, not as tested.
+
+**A page check can be mutation-tested too**, and the DOM callers are
+exactly what the lifted tests cannot see: in task 253, "`follow` ignored",
+"a disabled button's click not refused" and "the card follows on the
+board's 200 instead of waiting for the host" all stayed green in every
+suite (QA predicted them green). [`run-page-mutant.sh`](run-page-mutant.sh)
+applies the mutant in a copy, serves *the copy* on a private port, runs the
+check against it and reports the check's reds; its header carries the
+command for `check-card-move.mjs`. Use its own `--dest`-style copy
+directory (`copy-repo.sh "$TMPDIR/orch-page-copy"`) — a page mutant can run
+beside a suite mutant, since the ports differ, but never in the same copy.
+
+## Running more than one at a time
+
+`copy-repo.sh` with no argument always makes the same directory, and
+deletes it first. A second run started while the first is in its suite
+pulls the tree out from under it. Give each concurrent run its own
+destination (`run-mutants.mjs <json> --dest <dir>`, `copy-repo.sh <dir>`);
+the suites' own ports (host 8896, floor 8897, page checks wherever you put
+them) decide what can share the CPU, and the host and window suites should
+still run alone — under load their pane cases go red on timing (CLAUDE.md,
+Tests).
 
 ## What goes in the report
 

@@ -37,6 +37,45 @@ const store = makeStore(db);
 const auth = createAuth();
 
 const app = express();
+
+/*
+ * What the board says when it could not answer (issue #5 step 3, costmo's
+ * "Hold + slow request"). Staged on a private board — six 12 s holds of this
+ * process's event loop — the host logged six timeouts and the board wrote
+ * nothing at all. So, two lines:
+ *   - the loop held: a 250 ms tick more than a second late. Any synchronous
+ *     stall — a better-sqlite3 lock wait, a heavy route, the prune — holds
+ *     every timer, this one included;
+ *   - a slow request: one more than 2 s from arrival to its answer. The one
+ *     that held the loop reads slow, and so does any request already waiting
+ *     on a timer when the hold began — the host's work poll nearly always is
+ *     (staged: every hold wrote `slow GET /api/host/work` beside it). The
+ *     requests that arrived during the hold are only parsed once it lets go,
+ *     so they read fast. A hold with nothing slow beside it but the work
+ *     poll was not a request.
+ * Method and path only, never a body or a query value. Not slow: the two
+ * event streams, open for as long as someone watches, and the host's work
+ * poll up to the wait it asked for. Named by route because a stream's
+ * content-type is passed to writeHead, where getHeader cannot see it.
+ */
+let loopAt = performance.now();
+setInterval(() => {
+  const held = performance.now() - loopAt - 250;
+  loopAt = performance.now();
+  if (held > 1000) console.warn(`[orchestratinator] event loop held ${Math.round(held)}ms`);
+}, 250).unref();
+const STREAMS = new Set(['GET /api/floor/stream', 'GET /mcp']);
+app.use((req, res, next) => {
+  const t0 = performance.now();
+  const what = `${req.method} ${req.path}`;
+  const allowed = 2000 + (req.path === '/api/host/work' ? 1000 * (Number(req.query.wait) || 0) : 0);
+  res.on('close', () => {
+    const ms = Math.round(performance.now() - t0);
+    if (ms > allowed && !STREAMS.has(what)) console.warn(`[orchestratinator] slow ${what} ${ms}ms ${res.writableFinished ? res.statusCode : 'unfinished'}`);
+  });
+  next();
+});
+
 // Only affects what req.ip reports, which is what the auth warnings name when an
 // agent presents a bad key. Left configurable because those log lines are useless
 // if every request appears to come from a proxy.

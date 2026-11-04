@@ -97,14 +97,29 @@ to prove it. Say in the note which event hooks the running windows still
 have, and that until they restart the board gets those events only from
 the host's transcript side (compaction state, model switches on 0.10.9).
 
+**When only the manifest's version moved** (`npm run set-version` bumps
+all three files; 0.10.10 changed no hook), still update — the cache's
+number is what `npm run smoke`'s agreement is about on the next install —
+and then compare the hooks the windows run with the new ones:
+
+```bash
+C=~/.claude/plugins/cache/appideas-orchestratinator/orchestratinator-floor
+diff "$C/<old>/hooks/hooks.json" "$C/<new>/hooks/hooks.json" && echo identical
+```
+
+Identical (0.10.9 → 0.10.10, 2026-11-03) means running windows lose
+nothing by keeping what they loaded, and the note says so instead of asking
+anyone to restart a window.
+
 ## The server half alone
 
 When nothing under `host/` changed since the last deploy, the task says
 "server half only" (tasks 243 and 248, 2026-11-03): rebuild the container,
 leave the host up, and say in the note that the host was not restarted and
 why (`git log -1 -- host/` against the host pid's start time). The host
-rides out the swap on its own — its log shows one `[host] fetch failed;
-retrying in 1s` and then carries on; `/api/floor` reads the host live again
+rides out the swap on its own — its log shows one failure naming the
+request (a host from before issue #5 writes it as `[host] fetch failed;
+retrying in 1s`) and then carries on; `/api/floor` reads the host live again
 within seconds. Restarting it anyway blanks nothing extra, but it is a
 restart of something that did not change, and the note has to explain it.
 

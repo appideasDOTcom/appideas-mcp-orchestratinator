@@ -105,6 +105,37 @@ and a running process older than the file is the most common reason a fix
 "didn't work". Compare `ps -o lstart=` against the file's mtime rather than
 assuming.
 
+**Every line it writes carries a UTC time, and a failed request names
+itself** (issue #5, steps 1–2; `host/log.js`). Before that, the file
+held 7,379 failure lines in 11,745 and not one time, and each failure read
+`fetch failed` or "The operation was aborted due to timeout" for the
+register, the work poll and the events alike. So a burst could be counted
+but never lined up with `docker logs -t` or put against a route. The time
+goes *after* the tag (`[host] 2026-11-03T19:54:18.123Z …`), because the file
+is append-only and still holds every untimed line. Anything anchored on
+`^\[host\]` reads both shapes; status.sh's desk-line pattern was widened for
+the indent that now follows the time. A failure reads `<METHOD> <board><path>
+<refused|timed out|failed (code)|→ status> after Nms`, with the limit beside
+a timeout. Read the wait against the limit: the timer runs on the host's own
+event loop, so a wait well past it is the host, not only the board.
+**diagnose-handoff** has the greps. Nothing else changed with it: the
+backoff, the re-register after a failure and the events requeue are as
+they were, and the suite says so beside the new assertions.
+
+**The board says when it could not answer** (issue #5 step 3, costmo's
+"Hold + slow request"; `src/server.js`, `test/board-log.mjs`). Staged with
+six 12 s holds of the board's event loop, the host logged six timeouts and
+the board wrote nothing. It now writes `event loop held <N>ms`, a 250 ms tick
+more than a second late, and `slow <METHOD> <path> <N>ms <status>` for a
+request over 2 s. Method and path only. The two event streams are left out,
+and so is the work poll up to its own wait. Read them together: the work
+poll is nearly always mid-wait, so it reads slow on *any* hold, and only
+another route reading slow names a culprit. Requests that arrive during a
+hold read fast. Those lines and Docker Desktop's logs are gone within hours
+(a deploy recreates the container; `monitor.log` keeps about 25 minutes),
+so **capture-a-burst** saves them while a burst is still happening. The
+two lines are the server half and reach the live board only with a rebuild.
+
 **The server is the other half, and it goes stale independently.** The
 **deploy-both-halves** skill is the procedure — its `status.sh` reads both
 halves against the tree, with symbol counts in what is served — and a deploy
@@ -838,6 +869,39 @@ overlay, and any other command with its `<command-name>` record. Neither
 has a composer the way the real window does for a *typed* message, so the
 typed delivery (`typeInto`) is proved on the composer pane and on a real
 probe, and the plain stand-in gets a paste.
+
+**The host suite's stand-in can be slow to die, and can start fresh under
+an id of its own, since 0.10.10** — two flag files, read the way the others
+are because a pane's environment is the tmux server's (above).
+`linger.flag` (ms) is read *at the hangup*, so it can be armed on a window
+already open: the killed stand-in stays alive, and so in the roster, for
+that long — the closing window a move's reopen used to meet (issue #24);
+the suite never met it before because the stand-in died on the instant.
+`fresh-id.flag` gives a window started with nothing to resume that id
+instead of the constant, so "a new conversation" is an id the desk can be
+seen to follow. Remove both when the case is done; the sections below
+expect the constant. And **`argv.log` is one line per window started, and
+a fresh one with no arguments is an empty line**: count launches with
+`.split('\n').slice(0, -1)`, never `.trim().split('\n')`, which reads "no
+window at all" as one launch with nothing to resume and passes a case that
+should be red.
+
+**A lingering stand-in is ended by a watchdog, and a run leaves none**
+(task 263, 2026-11-03). The linger used to end on the stand-in's own
+`setTimeout(process.exit)`, which never fired. After its pane's hangup, Node
+reopens the dead pty (`uv_tty_init → open()`, 775 of 775 `sample`s on the
+main thread), and on macOS that open never returns. So the two windows the
+move case closes under the flag lived on, two per run and 105 by one
+evening, parented to whichever tmux server held the suite's session: on
+this machine the live one, because the suite uses the default socket. They
+did not ignore signals: SIGHUP and SIGTERM each end one. A first reading
+here said otherwise, from a zsh `kill $PIDS` that delivered nothing. The
+linger's watchdog is a detached `sh` that SIGKILLs the pid once the linger
+is up, and only if the pid is still this stand-in. The suite then counts
+`node <its own FIX>/claude.cjs` after `killTmux` (scoped so a run beside it
+is not counted), sweeps whatever is left, and does the same on SIGINT or
+SIGTERM. Anything new that keeps a pane's process alive past its hangup
+needs the same: its own event loop is not there to end it.
 
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
