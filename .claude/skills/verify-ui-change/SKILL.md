@@ -648,8 +648,19 @@ was the check and not the page:
 
 ### check-popout.mjs — a desk's chat in a window of its own (issue #19)
 
-Seven desks from `seed-desk.mjs` (`--agent` each) on one scratch server, and
-the check drives the floor and its popouts as separate CDP targets:
+One command, with its whole fixture. [`run-check-popout.sh`](run-check-popout.sh)
+serves any directory (the repo, or a copy holding a mutant), seeds seven
+desks and the form desk on a scratch DB, launches its own Chrome with the
+throttling flag, runs the check and kills all of it:
+
+```bash
+PORT=8931 CDP=9271 .claude/skills/verify-ui-change/run-check-popout.sh "$PWD"
+# … PASS, 60 ✓, about five minutes
+```
+
+It refuses a PORT or CDP that anything answers on. For a page mutant,
+hand it to `run-page-mutant.sh` as the check, from the copy (the header
+has the line). By hand, the fixture is:
 
 ```bash
 PORT=8931 DB_PATH=/tmp/pop.db ORCH_AUTH_TOKEN=k node src/server.js &
@@ -660,7 +671,6 @@ node .claude/skills/verify-ui-change/seed-form.mjs http://localhost:8931 --host 
 pkill -f "remote-debugging-port=9271( |$)"     # the flags below reach only a Chrome the check launches
 ORCH_CDP_PORT=9271 ORCH_CHROME_ARGS=--enable-features=IntensiveWakeUpThrottling:grace_period_seconds/10 \
   node --experimental-websocket .claude/skills/verify-ui-change/check-popout.mjs http://localhost:8931 /tmp/shots
-# … 60 ✓ · PASS, about five minutes
 ```
 
 It covers detach with the floor's draft, the floor's panel while a desk is
@@ -745,6 +755,28 @@ cost rounds here — worth knowing even if you hand-roll something else:
   feature. Wait on the thing you expect to become true.
 - **`click()` dispatches a bubbling `MouseEvent`.** Floor pills are delegated and
   read the event target; a bare `.click()` on some of them does nothing.
+
+Beyond those four, a check has these (issues #13 and #19):
+
+- **`attach(match)` and `targets()`**, exported beside `open()`. A popup a
+  page opens is a CDP target of its own: `attach` waits for one whose URL
+  matches and drives it like any page, and `targets()` lists the pages open
+  now, which is how "it closed" and "no second window" are read. Only real
+  input opens a popup (`press()`); `window.open` from a dispatched click is
+  blocked and returns null.
+- **`page.console()`** returns every console warning and error and every
+  uncaught exception since the page connected (`{ clear: true }` empties
+  it). A requirement like "no console warnings or errors" can only be
+  answered from here, not from the DOM.
+- **`page.windowState('minimized' | 'normal')`** minimizes the page's own
+  window, which makes it `hidden`, and its timers subject to throttling.
+- **`ORCH_CHROME_ARGS`** adds flags to a Chrome that `browser()` launches.
+  A Chrome already on the port keeps the flags it was started with, so kill
+  it first.
+- **`press(from, to, { held })`, `key(name, { shift, text })` and
+  `type(text)`** are real input: a drag with a reading taken mid-gesture,
+  Shift+Enter that really types its newline, and text that arrives with
+  one `input` event (see check-chatbox below).
 
 Put injected browser code in its own file and pass its path to `probe()`. Nested
 backticks inside a heredoc inside a shell command will break it in ways that look
@@ -883,23 +915,37 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Teardown, because leftovers poison the next run
 
-Neither `lsof` nor `netstat` is installed on this machine, and env vars do not appear in `ps`, so a
-server started as `PORT=… DB_PATH=… node src/server.js` cannot be found by
-either. Match on the script:
+Neither `lsof` nor `netstat` is installed on this machine. Env vars are not
+in `ps -A`'s command column, but `ps eww -o command= -p <pid>` shows them for
+your own processes, so a scratch server is found by its `PORT=` without
+touching anyone else's. This was used throughout issue #19:
+
+```bash
+for pid in $(pgrep -f "node src/server.js"); do ps eww -o command= -p $pid | grep -q "PORT=8931" && kill $pid; done
+```
+
+Or match on the script:
 
 **And watch what your own command line says while you do it.** `ps | grep
 "[s]rc/server.js"` matches the shell running it if that same command *also*
 mentions `src/server.js` further along — the bracket trick hides the pattern
 from itself, not from the rest of your line. Killing your own shell mid-teardown
-looks like an unexplained exit code 144 and has happened twice here. Write the
+looks like an unexplained exit code 144 and has happened three times here,
+the third in issue #19 from an agent that had not read this section first:
+`ps | grep -E "localhost:8933|…"` in a command that itself named
+localhost:8933. Write the
 PID to a file when you start the server, or keep the kill in a command that
 mentions nothing else.
 
 ```bash
 for p in $(ps -Ao pid,command | grep "[s]rc/server.js" | awk '{print $1}'); do kill $p; done
 rm -f ./data/scratch.db ./data/scratch.db-wal ./data/scratch.db-shm
-pkill -f "orch-cdp"       # drive.mjs's browser (profiles live in tmpdir)
+pkill -f "remote-debugging-port=9271( |$)"   # YOUR drive.mjs Chrome, by its exact port
 ```
+
+Not `pkill -f orch-cdp`, which used to stand here. Every Chrome `drive.mjs`
+launches has `orch-cdp` in its profile path, QA's included (they keep one on
+9222 and others on announced ports), so it kills their runs as well as yours.
 
 Deleting the DB while the server holds it frees nothing — kill first, then
 delete, then confirm the port is actually dead. A test suite killed halfway
