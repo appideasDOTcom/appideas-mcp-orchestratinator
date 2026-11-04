@@ -882,7 +882,10 @@ its listing arrives (`agentTyped`, in `takeListing`). The listing comes a
 moment after the choice, and the first listing used to empty a name typed
 for the folder the dialog opened on. One loss is left and is not this:
 the `<dialog>` is centred, Take a desk grows 48 px with its first listing,
-and a release at the old spot lands 24 px off. `check-redraw.mjs` in
+and a release at the old spot lands 24 px off. costmo ruled it left as
+it is (2026-11-04, through QA): a top-anchored dialog would move every
+dialog on the board, and reserving the chosen-path line would not stop the
+note's wrap. Do not re-propose either. `check-redraw.mjs` in
 **verify-ui-change** is the page; it prints that move beside its row.
 
 **The chat box grows with its text, and a height the operator drags it to

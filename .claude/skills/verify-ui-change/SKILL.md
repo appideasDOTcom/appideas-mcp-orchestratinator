@@ -631,8 +631,9 @@ Four things it taught:
   on the next row, and no click fires whether or not the row survived.
   `press()` has `follow` for this: it measures a selector `to` again after
   `held`, so the row asks whether the element survived, and prints how far
-  it moved. That move is a loss the patch cannot prevent and was not fixed
-  here.
+  it moved. That move is a loss the patch cannot prevent, and costmo
+  ruled it left as it is (2026-11-04); the printed move is a record, not
+  a red.
 - **Swallow clicks only in the rows that press to observe.** The first cut
   swallowed every click in the dialog in the capture phase, so the rows
   that press a folder to move to it moved nowhere and went red for the
