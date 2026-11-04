@@ -1493,10 +1493,11 @@ async function tick({ background = false } = {}) {
 
 /**
  * /api/state as of now, for a dialog about to open on it (backlogDialog).
- * A poll already on its way is waited out first rather than joined: it was
- * asked before the thing the caller saw, its answer can be older, and
- * landing after the dialog opened it would redraw the dialog from that
- * older copy, where refreshDialog closes a backlog that reads empty. Each
+ * A poll already on its way is waited out first and then asked again: it
+ * may have been asked before the thing the caller saw, and tick() returns
+ * at once while one is in flight, so calling it then reads nothing new.
+ * (The poll never redraws an open dialog; refreshDialog runs only after an
+ * action inside one. An earlier version of this note said otherwise.) Each
  * poll is bounded by POLL_TIMEOUT_MS, so the wait is too.
  */
 async function freshState() {

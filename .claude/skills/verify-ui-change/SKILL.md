@@ -446,6 +446,19 @@ same task, which the late `close` must leave drawn. Under a red row the
 check prints the page's own log of every `showModal`, `close()` and
 `close` event with its time, which is how the gap was found.
 
+**The backlog dialog is in both tables** (QA, PR #38 Info 5: where #23
+meets #11). It is what a floor unread pill opens (Decided 5), so it has four
+gesture rows (no text field: it closes on all four) and a close-then-wait
+row. Its gesture rows bite: a page mutant giving it a text field turned
+exactly its backdrop, drag and padding rows red. The close-then-wait row is
+a control, like the task list. A mutant removing both `refreshDialog`'s
+open guard and `forgetDialog` left it green, and that taught the thing worth
+knowing: **the board's poll never redraws an open dialog.** `tick()` draws
+the board, and `refreshDialog` runs only after an action inside a dialog
+(reassign, advance). A note in `app.js` and in CLAUDE.md had said a late
+poll would close the backlog dialog through it. That was reasoned rather
+than read, and it was wrong.
+
 Six things it taught, each a red that was the check:
 
 - **A `close` event is a queued task**, and the page's handler for it

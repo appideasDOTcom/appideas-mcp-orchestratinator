@@ -729,9 +729,13 @@ Two more rulings went into the same diff:
   two opened nothing, and that was already so at 39d5e4b. Now the floor
   passes the newest message id it drew, and `backlogBehind` reads the copy
   as behind when it has no backlog or an older one. `freshState` then waits
-  out any poll already in flight before asking again. Joining it is not
-  enough: an older answer landing after the dialog opened would close it,
-  through `refreshDialog`.
+  out any poll already in flight and asks again. That poll may have been
+  asked before the pill's message existed, and `tick()` returns at once
+  while one is in flight, so calling it then reads nothing new. The board's
+  poll never redraws an open dialog: `refreshDialog` runs only after an
+  action inside one. An earlier note here said a late answer would close
+  the dialog through it, and that was a misreading; QA's PR #38 Info 5 and
+  a page mutant showed it.
 - **A host error that sends the operator to the window names Open in
   tmux** (Decided 6). The two errors used to hand them `tmux attach -t …`
   to type, which is a remedy given as a command. Now they name the control

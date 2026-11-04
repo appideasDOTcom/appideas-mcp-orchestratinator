@@ -247,10 +247,14 @@ for (const d of DIALOGS) {
 const WATCH_MS = 10_000;
 const WAITERS = [
   { name: 'tasks (control, no host)', open: `taskDialog('lab', null)`, host: false },
-  /* No host either, but the board's own poll redraws it while it is open
-     (refreshDialog), every 2.5 s, so ten seconds holds four chances to draw
-     it back after the close. */
-  { name: 'unread (board poll)', open: `backlogDialog('lab', 'bo')`, host: false },
+  /* A second control, not a host dialog. Nothing redraws the backlog
+     dialog after it closes: the board's poll (tick) never touches an open
+     dialog, and refreshDialog runs only after an action inside one. So this
+     holds that a closed backlog stays closed, and would catch a redraw on
+     the poll if one were added. Measured (PR #38): with refreshDialog's
+     open guard and forgetDialog both removed, it stayed green, because no
+     timer calls refreshDialog. The gesture rows above are the ones that bite. */
+  { name: 'unread (control, no host)', open: `backlogDialog('lab', 'bo')`, host: false },
   { name: 'history', open: `historyDialog()`, host: true },
   { name: 'sessions', open: `sessionDialog('lab', 'bo', 'Bo')`, host: true },
   { name: 'take a desk (a folder)', open: `deskDialog({ hostId: 'h1', path: '/repo/deep/nest' })`, host: true },
