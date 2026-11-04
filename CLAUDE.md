@@ -917,6 +917,15 @@ straight after was green (2026-11-03, task 247). Read the channel for
 their announcement before a full run, and if you overlapped, rerun the
 red suite alone before reading the pane.
 
+**One move-section red in `test:host` has now been seen twice with nothing
+else running.** "the new floor holds no session row for the conversation
+it left" listed two ids: the stand-in's constant `1111…5555` beside the
+fresh one. Seen on 2026-11-03 alone, and on 2026-11-04 with nine more reds
+after it in the same section (PR #38's full run, load 5.5–7, no QA run on
+the channel). `test:host` alone straight after was green both times. The
+cause is not found. A third sighting is the cue to read the session rows at
+the moment of the move, not to rerun again.
+
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
 on it hands you the *oldest* rows; and `admin.desk.*` matches
