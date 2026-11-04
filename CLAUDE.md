@@ -858,6 +858,33 @@ Escape included. Both are in `check-backdrop.mjs` in **verify-ui-change**,
 which is the only tier that sees them; the suite pins the decision and the
 handlers' text.
 
+**A host's answer is patched into its dialog, never drawn over it.**
+Issue #37. History, Sessions and Take a desk draw again when a host
+answers, on the host's clock, and drawn whole that took the text box's
+focus (the keys after it went to `body`), and a button held down across
+it fired no click: the pressed element was gone before the release. So
+`openDialog(html, { as: form })` patches the body in place (`patchBody`
+in `src/ui/app.js`) when the same form draws again while open, and every
+other draw still replaces it. Two rules in it look loosenable and are
+not. **An element is kept only as the same control** (its id, its
+`data-do`/`data-go`/`data-id`, or the id of the field inside it), never
+because it stands in the same place. Keyed by place, a press held on a
+conversation fired on the one drawn into its spot, and Take a desk's Host
+label, arriving above the Agent label with the host list, was patched
+into it. And a match further down is reached by removing what stands
+before it, never by moving it up: a moved element loses focus like a
+replaced one, which is how the first cut lost Take a desk's Agent box when
+its host list swapped the block above. **A field's value is written
+wherever it differs from the form**, because `.value` stops following its attribute once somebody has
+typed, and a bound folder's agent must still replace typed text. And Take
+a desk's name is now emptied when another folder is *chosen*, not when
+its listing arrives (`agentTyped`, in `takeListing`). The listing comes a
+moment after the choice, and the first listing used to empty a name typed
+for the folder the dialog opened on. One loss is left and is not this:
+the `<dialog>` is centred, Take a desk grows 48 px with its first listing,
+and a release at the old spot lands 24 px off. `check-redraw.mjs` in
+**verify-ui-change** is the page; it prints that move beside its row.
+
 **The chat box grows with its text, and a height the operator drags it to
 is theirs for that conversation.** Issue #13 (0.10.17). What the page
 decides is one lifted section of `src/ui/floor.js` ("chat box height: what

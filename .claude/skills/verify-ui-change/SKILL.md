@@ -551,10 +551,12 @@ Six things it taught, each a red that was the check:
   now waits for the close to be counted, and gives a row that should stay
   open 600 ms. And Take a desk redraws taller when its host list arrives,
   so its Cancel is pressed only once the button has held still.
-- **Sessions redraws whole when its host answers**, and the redraw takes
-  focus out of the filter; the value survives in the form's state. So the
-  marker is typed and focused until the same field element has held it
-  across two polls.
+- **Sessions redrew whole when its host answered**, and the redraw took
+  focus out of the filter; the value survived in the form's state. So the
+  marker was typed and focused until the same field element had held it
+  across two polls. Since issue #37 the answer is patched in, so the
+  marker is typed once and must hold across two polls with nothing typed
+  back; a field that does not is the finding, said as one.
 - **A non-empty `type="search"` field spends the first Escape clearing
   itself.** That is the browser's (History's query has no handler for it),
   so the row says `escape×2` rather than calling Escape broken.
@@ -574,6 +576,71 @@ Six things it taught, each a red that was the check:
   When a row stopped at the comeback, History's Close-button row opened
   inside its Escape row's window at the base, asked nobody, and could not
   come back. Every close-then-wait row now watches the full ten seconds.
+
+### check-redraw.mjs — a host's answer under the operator's hands (issue #37)
+
+History, Sessions and Take a desk draw again when their host answers.
+Drawn whole, that took the focus out of the box being typed in (the keys
+after it went to `body`), Take a desk's name with it, and a button held
+down across it fired no click. [`check-redraw.mjs`](check-redraw.mjs)
+lands each dialog's answer while real keys are going in or a real press is
+held, and reads what survived:
+
+```bash
+PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$PWD" after    # PASS · 14 of 14
+PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$CP" before    # HEAD's app.js in a copy
+```
+
+[`run-check-redraw.sh`](run-check-redraw.sh) is `run-check-backdrop.sh`'s
+shape with two differences: the server runs with
+`ORCH_SESSIONS_MIN_MS=0 ORCH_HISTORY_MIN_MS=0`, so every open asks its host
+and no row waits out the one before it, and `answering-host.mjs` reads an
+answers file the check rewrites before each row to time the answer
+(`browse.delay`, `recent.delay`, `sessions.answer` + `delay`, and
+`browse.bound` for a folder bound on this board). About a minute.
+
+Every row proves its own fixture: the three render functions are wrapped
+(they are the global's properties, so the page's own calls go through the
+wrappers), the time the answer drew is recorded, and a row whose answer
+did not land inside the typing or the press is red as *the fixture*. At
+e88a951 (`--expect before`) it read the issue's numbers again: Take a desk
+took 12 of 36 keys and held 0 letters, Sessions 16 of 36, focus on `BODY`
+for both; every held row lost; Sessions' and Take a desk's Cancel 0 of 5
+under their own redraw, History's 5 of 5 (its rows were already redrawn
+apart from its box and buttons). Two mutants of the patch in a copy: rows
+keyed by place without `data-id` turned "moved on" red (the held press
+fired on the conversation drawn into its spot, `session-resume
+bo-other`), leaving a field's value alone turned the three name rows
+red, and moving a keyed match up past what stood above it (the first cut)
+turned "its host list arriving above the box" red with focus on `BODY`.
+
+Four things it taught:
+
+- **A move is a removal, for focus.** The first cut moved a keyed element
+  up past siblings that had gone, and a moved element loses focus like a
+  replaced one. Take a desk opened on no folder lost its Agent box's focus
+  that way when the host list swapped the folder block above it, value and
+  element intact. This check passed; check-backdrop's simplified `fresh()`
+  went red on it (`same: true`, `active: BODY`). The patch now removes what
+  it passes, and the row replays that arrival, because the board answers
+  the host list faster than a person reaches the box.
+
+- **A click needs the same element, and it needs it to stay put.** Take a
+  desk's `<dialog>` is centred, and its first listing makes it 48 px
+  taller, so everything in it moves 24 px up. A release at the old spot is
+  on the next row, and no click fires whether or not the row survived.
+  `press()` has `follow` for this: it measures a selector `to` again after
+  `held`, so the row asks whether the element survived, and prints how far
+  it moved. That move is a loss the patch cannot prevent and was not fixed
+  here.
+- **Swallow clicks only in the rows that press to observe.** The first cut
+  swallowed every click in the dialog in the capture phase, so the rows
+  that press a folder to move to it moved nowhere and went red for the
+  fixture.
+- **A form value set from code must still be drawn into a typed box.**
+  `.value` stops following the `value` attribute once a person has typed,
+  so the patch writes the property wherever it differs from the form. A
+  bound folder's agent arriving under typed text is the case.
 
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
@@ -622,6 +689,10 @@ node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 --
   person" does between steps by rewriting one file: `{"pick":{"mode":"chosen",
   "path":"…","delay":1500}}`, then `cancelled` (with `why`), `failed` (with
   `error`), `silent` (says nothing — the page's 8-second path).
+  `browse`, `recent` and `search` take a `delay`; `browse.bound` maps a path
+  to a binding on this board. **Sessions is not answered** unless
+  `sessions.answer` is true: check-backdrop's rows need a Sessions that
+  waits out its 8 s.
 - A conversation whose id ends `-old` reads as thirty turns in two pages,
   with a tool call, a thought, a subagent label, and one turn containing
   `<b>all</b>` — which must arrive on the page as those characters.
