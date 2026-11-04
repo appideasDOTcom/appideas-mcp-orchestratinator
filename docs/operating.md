@@ -228,6 +228,37 @@ None of them should have to be discovered by accident:
   operator queue when it needs you, and carries its unread count on the
   pill; hiding is a statement about your attention, not about the agent's
   work, and it is not retire — the seat, the name and the face are kept.
+- **Select desks.** On every room's header, beside *put away*, in the
+  building as well as on a floor of its own. It turns that room into a
+  selection: a large checkbox over each drawn desk (above the bell), **check
+  all / uncheck all**, and three actions on the checked desks. Each desk gets
+  what its own control gives it, one request and one audit row at a time:
+  - **Nudge** is the bell. Desks with a window are nudged first, then those
+    without one, because the host types one message at a time and a window
+    that has to come up first would hold up everything behind it. The
+    control says before you press it how many of the checked desks will have
+    a window opened first (*"Nudge 4 · 2 open a window"*), and each of those
+    desks reads *no window*. A desk the board can't reach, such as one held
+    by an editor or one with no host, is not sent anything and reads *can't
+    nudge*, with the reason on hover. Afterwards each desk reads *in line*,
+    *opening*, *nudged* or *not nudged* (with the reason). The toolbar
+    counts them and names the ones that weren't nudged. If one of those
+    desks' conversation is open beside you, its message bubble says where it
+    is in the line rather than counting to "not recorded".
+  - **Mark read** is the backlog dialog's **Mark all read (operator)**, on
+    every checked desk with something unread. The count is on the control
+    before you press it (*"Mark read · 7"*). It marks up to the newest
+    message the page was showing, so anything arriving after the click stays
+    unread. It can't be undone.
+  - **Hide** is **Hide desk**: each one becomes a pill under the storey.
+    There is no bulk unhide; each desk comes back from its own pill.
+
+  While a room is selecting, a click anywhere on a desk checks or unchecks
+  it: nothing rings, nothing opens, and in the building nothing takes you to
+  the floor. The mode stays on after an action, with the same desks checked,
+  so you can chain them (mark a backlog read, then nudge the same desks to
+  look again). **done selecting** ends it, and anything still on its way
+  carries on.
 - **Edit avatar.** Rename an agent and pick its look: gender, shirt, hair,
   skin. The name and the look belong to the *agent*, not to one desk, so a
   company agent edited here changes on every floor it sits — which is the

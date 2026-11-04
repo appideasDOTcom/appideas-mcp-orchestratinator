@@ -1456,6 +1456,8 @@ try {
     eq(page.deliveryNote({ state: 'queued', held: true }), 'queued — the window took it once it was free', 'held: taken after a wait');
     eq(page.deliveryNote({ state: 'queued', held: 'compacting' }), 'held — the desk is compacting; it reads this when that ends', 'held by a compaction: said as that');
     eq(page.deliveryNote({ state: 'done', said: 'a new conversation started' }), 'a new conversation started', 'a command\'s receipt is its own sentence');
+    eq(page.deliveryNote({ state: 'line', note: 'in line — 2 desks ahead on openbox' }, true), 'in line — 2 desks ahead on openbox',
+      'a bulk nudge in its host\'s line says where it is, never "not recorded" (#23, bulkWait)');
     eq(page.modelSelectValue({ model: 'claude-haiku-5-5' }), 'haiku', 'the model select shows the confirmed model\'s family');
     eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'opus' }), 'opus', 'and the asked-for one while a change is pending, so one selection sticks (costmo, 2026-11-03)');
     eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'claude-sonnet-5-5' }), 'sonnet', 'an id asked for reads as its family');
@@ -2616,6 +2618,180 @@ try {
     eq([log.filter((r) => r.kind === 'admin.desk.hide').length, log.filter((r) => r.kind === 'admin.desk.show').length], [2, 2],
       'each hide and each restore is on the log, by the operator, naming the desk');
     assert(log.filter((r) => r.kind === 'admin.desk.hide').every((r) => r.actor === 'operator' && /waiter|boardonly/.test(JSON.stringify(r))), 'with the desk named on each row');
+  }
+
+  // Issue #23: bulk selection on a room. The page decides everything a bulk
+  // action does in one section of floor.js, lifted out here beside the
+  // desk-place section and run over desks the server built — one per nudge
+  // verdict, one hidden, one empty — and the plan is then sent to the real
+  // routes, the way the page sends it, so the words, rows and order are the
+  // board's. The drawing is verify-ui-change's check-select.mjs. If a slice
+  // fails, the section moved: fix the markers, do not route around the test.
+  console.log('\nbulk selection on a room');
+  {
+    const lift = async (from, to, names) => {
+      const src = readFileSync('src/ui/floor.js', 'utf8');
+      const a = src.indexOf(from);
+      const b = src.indexOf(to);
+      if (a < 0 || b < 0 || b < a) throw new Error(`a section was not found in src/ui/floor.js between ${JSON.stringify(from)} and ${JSON.stringify(to)}`);
+      const tmp = `./data/bulk-${names[0]}-${process.pid}.mjs`;
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { ${names.join(', ')} };\n`);
+      try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    };
+    const { deskRows } = await lift('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */',
+      '  /* ---------- a desk\'s place on the floor: the drawing ---------- */', ['deskRows']);
+    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary } = await lift(
+      '  /* ---------- bulk selection: what the page decides ---------- */',
+      '  /* ---------- bulk selection: the drawing ---------- */',
+      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary']);
+
+    const CHB = 'bulky';
+    const events = hostEvents;
+    const work = takeWorkFull;
+    const postJson = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const room = async () => (await floor()).channels.find((c) => c.channel === CHB);
+    const { default: Database } = await import('better-sqlite3');
+    const sql = new Database(DB_PATH);
+
+    // One desk per verdict, each made the way the floor makes them: `win`
+    // and `cold` bound by the host, `win` with a window the floor holds and
+    // `cold` with none; `ed` held by an editor; `hook` live by its hooks
+    // with no host and four unread; `away` hidden by hand; `gone` empty.
+    await registerWith({ roots: ['/repo'], folders: offered });
+    eq((await events(['win', 'cold', 'ed', 'away'].map((a) => ({ type: 'bound', channel: CHB, agent: a, cwd: `/repo/${a}`, scope: 'local' })))).applied, 4, 'four hosted desks on one floor');
+    eq((await events([
+      { type: 'holder', channel: CHB, agent: 'win', holder: 'floor', window: '@41', window_open: '@41' },
+      { type: 'holder', channel: CHB, agent: 'ed', holder: 'editor', pid: 4242 },
+      ...['win', 'cold', 'ed', 'away'].map((a) => ({ type: 'turn', channel: CHB, agent: a, session_id: `s-${a}`, role: 'assistant', text: `${a} ready` })),
+    ])).applied, 6, 'one with a window, one held by an editor, and a turn on each');
+    // `win` has a board row and nothing unread, so "only a desk with
+    // something unread is marked" has a desk to get wrong.
+    for (const a of ['hook', 'gone', 'win']) sql.prepare(`INSERT OR REPLACE INTO agents (channel, agent, last_seen) VALUES (?, ?, datetime('now'))`).run(CHB, a);
+    for (let i = 0; i < 4; i++) sql.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES (?, 'win', 'hook', ?)`).run(CHB, JSON.stringify(`for hook ${i}`));
+    for (const e of ['SessionStart', 'Stop']) await post({ ...ev('hook', 's-hook', e), channel: CHB });
+    eq(await postJson('/api/admin/desk/hide', { channel: CHB, agent: 'away' }).then((r) => r.status), 200, 'and one hidden by hand');
+    await work();
+
+    let c = await room();
+    const drawn = deskRows(c).drawn;
+    // Decided 1 and 2: a room's checkboxes are exactly the desks it draws.
+    eq(drawn.map((d) => d.agent).sort(), ['cold', 'ed', 'hook', 'win'], 'the selectable desks are the drawn ones: not the hidden desk, not the empty one (Decided 2)');
+    eq(checkedDesks(drawn, new Set(['win', 'away', 'gone', 'fay-on-another-floor'])).map((d) => d.agent), ['win'],
+      'a check reaches only a desk drawn in this room — a hidden, empty or other floor\'s desk named in the set is not acted on (Decided 1)');
+    eq(checkedDesks(deskRows({ ...c, archived: true }).drawn, new Set(drawn.map((d) => d.agent))), [], 'and a put-away floor has no room, so nothing on it is reachable');
+    const all = new Set(drawn.map((d) => d.agent));
+    const checked = checkedDesks(drawn, all);
+
+    // A selection survives a redraw: it is a Set held outside the payload, so
+    // a desk that stops being drawn drops out of what an action reaches and
+    // is back, still checked, when it is drawn again.
+    eq(await postJson('/api/admin/desk/hide', { channel: CHB, agent: 'cold' }).then((r) => r.status), 200, 'a checked desk is hidden meanwhile');
+    eq(checkedDesks(deskRows(await room()).drawn, all).map((d) => d.agent).includes('cold'), false, 'it is not acted on while it is not drawn');
+    eq(await postJson('/api/admin/desk/show', { channel: CHB, agent: 'cold' }).then((r) => r.status), 200, 'restored from its pill');
+    eq(checkedDesks(deskRows(await room()).drawn, all).map((d) => d.agent).includes('cold'), true, 'and it is checked again on the next payload — the selection outlived the redraw');
+
+    // Nudge: order, words before the click, refusals in the board's words.
+    const plan = nudgePlan(checked);
+    eq(plan.send.map((e) => `${e.agent}${e.opens ? ':opens' : ''}`), ['win', 'cold:opens'], 'a bulk nudge sends the windowed desks first and the windowless last (task 267 step 1)');
+    eq(plan.blocked.map((b) => b.agent).sort(), ['ed', 'hook'], 'and sends nothing to a desk the board cannot deliver to');
+    const chip = nudgeChip(plan);
+    eq(chip.text, 'Nudge 2 · 1 opens a window', 'the control says before the click that a window will be opened — a nudge never opens one by surprise');
+    assert(/Opens a window first on .*\(cold\)/.test(chip.title), 'and names the desk it opens it on');
+    eq(bulkTag(null, 'cold', checked.find((d) => d.agent === 'cold'))?.text, 'no window', 'and the checked desk itself says so');
+    eq(nudgeChip(plan, true).disabled, true, 'a second nudge while the first is still in line is not offered');
+    for (const b of plan.blocked) {
+      const r = await postJson('/api/floor/chat', { channel: CHB, agent: b.agent, text: 'nudge' });
+      eq([r.status, (await r.json()).error], [409, b.reason], `a refused desk (${b.agent}) is named with the words the chat route refuses it with`);
+    }
+    eq((await work()).length, 0, 'and a refused nudge queues nothing');
+    for (const e of plan.send) eq((await postJson('/api/floor/chat', { channel: CHB, agent: e.agent, text: 'nudge' })).status, 200, `${e.agent} is nudged`);
+    eq((await work()).map((w) => `${w.kind}:${w.agent}:${w.payload?.text}`), ['chat:win:nudge', 'chat:cold:nudge'], 'the host gets them in the plan\'s order, which is the order it types them in');
+
+    // What happened to each, read off its turns: the word as a user turn,
+    // or an error turn first.
+    eq(nudgeOutcome([{ id: 9, role: 'assistant', text: 'busy' }, { id: 10, role: 'user', text: 'nudge' }]), { state: 'sent' }, 'the word as a user turn is a nudge that landed');
+    eq(nudgeOutcome([{ id: 12, role: 'user', text: 'nudge' }, { id: 11, role: 'error', text: 'Claude Code is open in that window but has not finished starting' }]),
+      { state: 'failed', words: 'Claude Code is open in that window but has not finished starting' }, 'an error turn before it is a nudge that failed, in the host\'s words, whatever order the rows came in');
+    eq(nudgeOutcome([{ id: 5, role: 'assistant', text: 'nudge me later' }]), null, 'and nothing yet is nothing: no verdict on a clock');
+    eq((await events([{ type: 'turn', channel: CHB, agent: 'win', session_id: 's-win', role: 'user', text: 'nudge' }])).applied, 1, 'the host types win\'s');
+    const base = plan.send.find((e) => e.agent === 'win').base;
+    eq(nudgeOutcome((await turns('win', CHB)).rows.filter((r) => r.id > base)), { state: 'sent' }, 'and the turn after the base the plan took is read as delivered');
+
+    // The silence clock (QA, #2875): a nudge still in line must not read
+    // "not recorded — send again". Both cases QA named: a windowless desk
+    // behind one whose window never comes up, and ten windowed desks.
+    const line = (agents, extra = {}) => agents.map((a, i) => ({ agent: a, host: 'openbox', state: 'line', ...(extra[a] ?? {}) }));
+    let es = line(['x', 'y'], { x: { opens: true }, y: { opens: true } });
+    eq(bulkWait(es, 'y', true), { hold: true, note: 'in line — 1 desk ahead on openbox' }, 'a second windowless desk waits on the first without a clock');
+    es[0].state = 'failed';
+    eq(bulkWait(es, 'y', true), { hold: true, note: 'opening its window — the host waits up to 45 s for it' }, 'and once the first gives up, waits on its own window, still without one');
+    es[1].front = 1000; es[1].readyAt = 5000;
+    eq(bulkWait(es, 'y', false), { hold: false, since: 5000 }, 'its clock starts when its window is up, not when it was clicked');
+    es = line(Array.from({ length: 10 }, (_, i) => `w${i}`));
+    eq(bulkWait(es, 'w9', false)?.note, 'in line — 9 desks ahead on openbox', 'the tenth windowed desk waits on the nine in front of it');
+    eq(aheadOf([...es, { agent: 'z', host: 'otherbox', state: 'line' }], 'z'), 0, 'and a desk on another host is in a line of its own');
+    es.slice(0, 9).forEach((e) => { e.state = 'sent'; });
+    es[9].front = 777;
+    eq(bulkWait(es, 'w9', false), { hold: false, since: 777 }, 'it runs from when the line in front of it cleared');
+    eq(bulkWait(es, 'nobody', false), null, 'a desk this bulk did not nudge is not this bulk\'s to hold');
+
+    // Mark read: counted before, up to the id drawn and no further, one row
+    // per desk by the operator.
+    c = await room();
+    const rp = readPlan(checkedDesks(deskRows(c).drawn, all));
+    eq(rp.rows.map((r) => `${r.agent}:${r.count}`), ['hook:4'], 'only a checked desk with something unread is marked');
+    eq(readChip(rp).text, 'Mark read · 4', 'and the count is on the control before it runs');
+    assert(/cannot be undone/.test(readChip(rp).title), 'which says it cannot be undone');
+    eq(readChip(readPlan([])).disabled, true, 'with nothing unread there is nothing to press');
+    sql.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES (?, 'win', 'hook', '"arrived after the draw"')`).run(CHB);
+    const actBefore = new Set((await fetch(`${HOST}/api/activity?limit=500&channel=${CHB}`).then((r) => r.json())).rows.map((r) => JSON.stringify(r)));
+    for (const r of rp.rows) eq((await postJson('/api/admin/agent/advance', { channel: CHB, agent: r.agent, up_to_id: r.upTo })).status, 200, `${r.agent} marked read to ${r.upTo}`);
+    eq((await room()).desks.find((d) => d.agent === 'hook')?.board?.unread, 1, 'the message that arrived after the draw stays unread');
+
+    // Hide: #20's hide, one desk at a time, each with its row.
+    const hp = checkedDesks(deskRows(await room()).drawn, new Set(['win', 'cold']));
+    eq(hideChip(hp).text, 'Hide 2', 'Hide counts the checked desks');
+    const before = await room();
+    for (const d of hp) eq((await postJson('/api/admin/desk/hide', { channel: CHB, agent: d.agent })).status, 200, `${d.agent} hidden`);
+    c = await room();
+    eq(deskRows(c).pills.map((d) => d.agent).sort(), ['away', 'cold', 'win'], 'each is a pill under the storey');
+    eq([c.desks.length, c.live], [before.desks.length, before.live], 'and the storey still counts them: the payload keeps every desk');
+    const fresh = (await fetch(`${HOST}/api/activity?limit=500&channel=${CHB}`).then((r) => r.json())).rows.filter((r) => !actBefore.has(JSON.stringify(r)));
+    eq(fresh.filter((r) => ['admin.advance', 'admin.desk.hide'].includes(r.kind)).map((r) => `${r.kind}:${r.actor}:${r.target}`).sort(),
+      ['admin.advance:operator:hook', 'admin.desk.hide:operator:cold', 'admin.desk.hide:operator:win'], 'one audit row per desk, by operator, the rows the one-desk controls write');
+
+    // What the operator reads afterwards: every desk counted, the ones not reached named.
+    const rec = { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }, { agent: 'cold', state: 'line', host: 'openbox', opens: true }, { agent: 'ed', state: 'refused', words: 'held' }, { agent: 'hook', state: 'refused', words: 'no host' }] };
+    eq(bulkSummary(rec), 'nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', 'the summary counts every desk and names the ones not nudged');
+    eq(bulkTag(rec, 'ed', null), { text: 'not nudged', kind: 'bad', title: 'held' }, 'and a desk not nudged says why on its own checkbox');
+    eq(bulkTag(rec, 'cold', { nudge: { ok: true, opens: true } })?.text, 'opening', 'one at the front of the line with no window yet says it is being opened');
+    eq(bulkTag({ ...rec, entries: [{ agent: 'win', state: 'line', host: 'openbox' }, ...rec.entries.slice(1)] }, 'cold', { nudge: { ok: true, opens: true } })?.text, 'in line',
+      'and behind another, it says in line: its window has not been asked for yet');
+    eq(bulkTag({ kind: 'read', entries: [{ agent: 'hook', state: 'sending', count: 4 }] }, 'hook', null)?.text, 'marking', 'a mark-read still on its way is not called a failure before its answer');
+    eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'done' }] }, 'win', { nudge: { ok: true } }), null, 'a desk back from its pill has nothing left to say about the hide');
+    eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }] }, 'win', null), { text: 'not hidden', kind: 'bad', title: 'HTTP 500' }, 'and one the hide did not reach says so');
+
+    // Decided 5: a desk's unread pill opens its backlog dialog every time.
+    // The dialog reads app.js's /api/state copy, polled apart from the
+    // floor's, so it is read again first when that copy is older than the
+    // pill. The rule is lifted from app.js; check-select.mjs clicks a pill
+    // with the board half's poll switched off.
+    const { backlogBehind } = await (async () => {
+      const src = readFileSync('src/ui/app.js', 'utf8');
+      const a = src.indexOf('/* ---------- the backlog dialog: whether the board\'s copy is behind ---------- */');
+      const b = src.indexOf('/* ---------- the backlog dialog ---------- */');
+      if (a < 0 || b < 0 || b < a) throw new Error('the backlog-dialog section was not found in src/ui/app.js between its two section comments');
+      const tmp = `./data/backlog-behind-${process.pid}.mjs`;
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { backlogBehind };\n`);
+      try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    })();
+    const hookNow = (await room()).desks.find((d) => d.agent === 'hook').board;
+    eq(backlogBehind({ unread: 0, unread_max_id: null }, hookNow.unread_max_id), true, 'a board copy that has not seen the pill\'s message is behind, and is read again before the dialog opens');
+    eq(backlogBehind(null, hookNow.unread_max_id), true, 'so is one with no row for the agent yet');
+    eq(backlogBehind({ unread: 3, unread_max_id: hookNow.unread_max_id - 1 }, hookNow.unread_max_id), true, 'and one with an older backlog: its list would lack the newest, and Mark all read would stop short of it');
+    eq(backlogBehind({ unread: 1, unread_max_id: hookNow.unread_max_id }, hookNow.unread_max_id), false, 'a copy that has the pill\'s newest message opens at once, with no extra request');
+    eq(backlogBehind({ unread: 2, unread_max_id: 9 }), false, 'and the board\'s own button, which draws from that copy and passes nothing, is never behind on its own count');
+    sql.close();
   }
 
   console.log('\nwhat a backup carries');

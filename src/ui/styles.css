@@ -708,8 +708,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:hover:not(:has(.deskArrow:hover, .roomPut:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -1479,6 +1479,50 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    reads as pressable; it is the one thing on a storey that is not "ride here". */
 .roomPut { fill: var(--muted); font: 11px var(--mono); cursor: pointer; text-decoration: underline dotted; }
 .roomPut:hover, .roomPut:focus-visible { fill: var(--accent); outline: none; }
+
+/* Bulk selection (issue #23).
+   ---------------------------
+   The room's control is a word beside put away, drawn the same way. Lit
+   while the room is selecting, because that word is the way out. */
+.roomSel { fill: var(--muted); font: 11px var(--mono); cursor: pointer; text-decoration: underline dotted; }
+.roomSel:hover, .roomSel:focus-visible, .roomSel.on { fill: var(--accent); outline: none; }
+.roomSel.on { font-weight: 600; text-decoration: none; }
+
+/* The toolbar's band, a step off the carpet so it reads as a shelf of
+   controls under the header and not as more floor. */
+.selBand { fill: color-mix(in srgb, var(--accent) 7%, var(--surface-2)); }
+.selText { fill: var(--text); font: 11px var(--mono); }
+.selSum  { fill: var(--muted); font: 10.5px var(--mono); }
+.selAll, .selChip, .selBox { cursor: pointer; }
+.selAll:focus, .selChip:focus, .selBox:focus { outline: none; }
+.selAllBox { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; }
+.selAll.on .selAllBox, .selAll.some .selAllBox { fill: var(--accent); stroke: var(--accent); }
+.selAll:hover .selAllBox, .selAll:focus-visible .selAllBox { stroke: var(--accent); stroke-width: 2; }
+.selMark { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.selChipBox { fill: var(--surface); stroke: var(--border); }
+.selChipText { fill: var(--text); font: 600 11px var(--mono); }
+.selChip:not(.disabled):hover .selChipBox, .selChip:not(.disabled):focus-visible .selChipBox { stroke: var(--accent); stroke-width: 2; }
+.selChip:not(.disabled):hover .selChipText { fill: var(--accent); }
+.selChip.disabled { cursor: default; opacity: .45; }
+
+/* The checkbox over each desk, where the bell stands: large, and solid when
+   checked, because it is read from across the room. The desk's counter takes
+   the accent's edge too, so a checked desk reads as checked even where the
+   box is small on screen. */
+.selBoxRect { fill: var(--surface); stroke: var(--muted); stroke-width: 1.8; }
+.selBox.on .selBoxRect { fill: var(--accent); stroke: var(--accent); }
+.selBox:hover .selBoxRect, .selBox:focus-visible .selBoxRect { stroke: var(--accent); stroke-width: 2.6; }
+.desk.checked .deskTop { stroke: var(--accent); stroke-width: 2; }
+.selTag { font: 600 9.5px var(--mono); paint-order: stroke; stroke: var(--surface-2); stroke-width: 3px; }
+.selTag.wait { fill: var(--busy); }
+.selTag.ok   { fill: var(--idle); }
+.selTag.bad  { fill: var(--block); }
+.selTag.note { fill: var(--muted); }
+
+/* A selecting storey in the building is operated on, not ridden from: no
+   pointer over its carpet, no lift, and its desks show their checkboxes. */
+.rooms.building svg.room.selecting { cursor: default; }
+.rooms.building svg.room.selecting .desk { cursor: pointer; }
 
 /* A desk the board knows but no window has reported from. Dimmed like "away"
    (it inherits that) but the nameplate carries the reason, in the warning tone

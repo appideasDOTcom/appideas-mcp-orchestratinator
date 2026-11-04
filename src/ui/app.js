@@ -719,7 +719,35 @@ function nudgeHead(channel, agent, a) {
   };
 }
 
-function backlogDialog(channel, agent) {
+/* ---------- the backlog dialog: whether the board's copy is behind ---------- */
+
+/**
+ * Whether this page's /api/state copy of an agent is older than what the
+ * caller drew (issue #23 Decided 5).
+ *
+ * The floor draws a desk's unread pill from /api/floor, polled every 2 s;
+ * this dialog reads the board's own /api/state, polled every 2.5 s apart
+ * from it. A pill that arrived between the two was clicked and nothing
+ * opened: the board's copy still said nothing unread, and the dialog
+ * returned on that. Measured, the same at 39d5e4b. Behind means no agent,
+ * nothing unread, or a newest message older than the one the caller saw
+ * (`seen`, its `unread_max_id`). In that last case the dialog would open on
+ * a list without the newest message and mark read short of it. A caller
+ * that drew nothing of its own passes no `seen`, and is never behind on
+ * that count alone.
+ */
+function backlogBehind(a, seen = null) {
+  if (!a || !a.unread) return true;
+  return seen != null && (a.unread_max_id ?? 0) < seen;
+}
+
+/* ---------- the backlog dialog ---------- */
+
+async function backlogDialog(channel, agent, seen = null) {
+  // Read again before opening on a copy older than the pill that was
+  // pressed: the list is only in /api/state, so the floor's own count
+  // cannot draw it (Decided 5).
+  if (backlogBehind(findAgent(channel, agent), seen)) await freshState();
   const a = findAgent(channel, agent);
   if (!a || !a.unread) return;
   const upTo = a.unread_max_id ?? 0;
@@ -1379,6 +1407,19 @@ async function tick({ background = false } = {}) {
   } finally {
     inFlight = false;
   }
+}
+
+/**
+ * /api/state as of now, for a dialog about to open on it (backlogDialog).
+ * A poll already on its way is waited out first rather than joined: it was
+ * asked before the thing the caller saw, its answer can be older, and
+ * landing after the dialog opened it would redraw the dialog from that
+ * older copy, where refreshDialog closes a backlog that reads empty. Each
+ * poll is bounded by POLL_TIMEOUT_MS, so the wait is too.
+ */
+async function freshState() {
+  while (inFlight) await new Promise((r) => setTimeout(r, 50));
+  await tick();
 }
 
 /* ---------- events ---------- */

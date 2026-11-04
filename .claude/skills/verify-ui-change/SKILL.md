@@ -321,6 +321,54 @@ The check tells the two "the click did nothing" causes apart — the card's
 own click branch swallows a button it does not name, which is how the
 first cut of Hide desk failed here and not in the suite.
 
+### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
+
+Issue #23 (2026-11-04, 0.10.16): **select desks** on a room, check desks,
+and Nudge / Mark read / Hide them. [`seed-select.mjs`](seed-select.mjs) is
+the fixture *and* the host. `alpha` has a desk per nudge verdict: two with
+windows, two without (they open), one held by an editor, one live by hooks
+with no host. It also has two backlogs. `beta` has one desk, so the
+building has two storeys. As host it answers each chat **one at a time, in
+queue order**, as `run()` does: windowed desks after `delayMs`, windowless
+after their window comes up, and a desk named in `never` with waitReady's
+error after `neverMs`. The answers file is re-read per item.
+[`check-select.mjs`](check-select.mjs) drives both views with
+[`probe-select.js`](probe-select.js), about 2 minutes:
+
+```bash
+PORT=8905 DB_PATH=/tmp/select.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/seed-select.mjs http://localhost:8905 /tmp/select.db /tmp/select-host.json > /tmp/select-work.jsonl &
+node --experimental-websocket .claude/skills/verify-ui-change/check-select.mjs http://localhost:8905 /tmp/shots /tmp/select.db /tmp/select-host.json /tmp/select-work.jsonl
+# … 54 ✓ · PASS
+```
+
+What it proves beyond the suite: a click on a selecting storey in the
+building checks a desk instead of riding to it. The selection survives a
+rebuild and a change of view, and Space keeps focus on the checkbox. With
+the panel open on the desk last in line behind a window that never comes
+up, its bubble still reads `in line — 1 desk ahead on testbox` **past the
+30 s grace**. The host's work log reads windowed first, then windowless,
+and nothing for the two it can't reach. A message landing after the page
+drew stays unread. Outside selection, the bell, the card, its Hide desk and
+the backlog dialog still work. The dialog is opened from a pill **newer than
+the board half's /api/state copy** (Decided 5). The board half's poll is
+switched off with the `#autorefresh` box first, so the pill is newer for
+certain and not by luck: once with nothing in the copy, once with an older
+backlog of one against a pill reading two. Two red-then-green lessons came
+out of it:
+
+- **`textContent` includes an SVG `<title>`.** Every tag and label on the
+  room carries its tooltip as a `<title>` child, and the first probe read
+  `not nudgedNo host on this board…`. A wait on `<in line>` then never
+  matched, so the nudge loop ended after a second and reported a dozen
+  false reds. `own()` in the probe reads the element's own text nodes.
+- **A toggle that changes nothing in the signature draws nothing.** The
+  rooms are rebuilt only when their signature changes. The first cut wrote
+  "selecting, nothing checked" and "not selecting" alike once a result was
+  kept, so "done selecting" and selecting again both did nothing. The last
+  step of the check exists for that: leave and come back while a nudge is
+  still in line.
+
 ### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
 
 ```bash
@@ -461,7 +509,7 @@ whole question.
 |---|---|
 | board unread pill | `[data-act="unread"][data-agent="…"]` |
 | board task pills | `[data-act="tasks"][data-kind="assigned"\|"claimed"]` |
-| floor pills | `.desk[data-agent="…"] .pill[data-kind="unread"\|"assigned"\|"claimed"]` |
+| floor pills | `.desk[data-agent="…"] .pill[data-act="unread"]`, `.pill[data-act="tasks"][data-kind="assigned"\|"claimed"]` — the unread pill has no `data-kind` (a wait on one timed out, #23) |
 | floor — open the chat panel | `.desk[data-agent="…"] .deskHit` |
 | floor — whose panel is open | `#floor-panel` `dataset.channel`/`dataset.agent` — wait on this, not on visibility |
 | floor — the panel's link strip | `#floor-panel [data-act="openhere"\|"handback"\|"attach"\|"claude"]` |
