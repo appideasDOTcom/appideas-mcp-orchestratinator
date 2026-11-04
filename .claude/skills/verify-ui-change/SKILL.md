@@ -398,17 +398,30 @@ so is a click in the dialog's own padding, inside its visible box.
 
 ```bash
 PORT=8912 CDP=9254 .claude/skills/verify-ui-change/run-check-backdrop.sh "$PWD" after
-# rename  backdrop  open  kept   0 close  ✓ … close, then wait … PASS · 65 of 65
+# rename  backdrop  open  kept   0 close  ✓ … close, then wait … PASS · 71 of 71
 ```
 
 [`run-check-backdrop.sh`](run-check-backdrop.sh) starts the server from the
-directory it is given, seeds `seed-desk.mjs` and `answering-host.mjs` on the
-same scratch DB (with `--db`: seed-desk's default is `./data/scratch.db`, so
-a server on any other DB serves a board with no desk), runs the check, and
+directory it is given, seeds `seed-desk.mjs` (with `--unread 2`, so the
+backlog dialog has mail to open on) and `answering-host.mjs` on the same
+scratch DB (with `--db`: seed-desk's default is `./data/scratch.db`, so a
+server on any other DB serves a board with no desk), runs the check, and
 kills all of it. Because it serves whatever directory it is given, the same
 command reads the old page at a base SHA or a page mutant in a copy; the
 header has the recipe. It reports a check that died before its verdict
 line as not finished. A crash exits 1, like a FAIL.
+
+**It refuses a `PORT` or a `CDP` that anything answers on** (QA, PR #38
+finding 1). `browser()` in `drive.mjs` reuses whatever Chrome is already on
+its port and never closes one, so the runner's closing `pkill` is the only
+cleanup. Given another session's CDP port, the check ran inside that
+session's Chrome and then killed it, and the pattern also matched a longer
+port with the same prefix (`=9254` in `=92540`). Now a taken port is refused
+before anything starts, the `pkill` matches the port exactly, and the
+runner waits for its Chrome to let go of the port: Chrome takes a moment
+to exit on SIGTERM, and a run straight after (`run-page-mutant.sh` runs it
+back to back) would otherwise be refused as taken. Any new runner around
+`drive.mjs` needs the same three things.
 
 `--expect after` is #11's ruling: a dialog carrying a text field stays
 open with its text on backdrop, drag-out and padding and closes on Escape;

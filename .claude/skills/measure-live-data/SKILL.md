@@ -113,6 +113,11 @@ node $D/turn-lag.mjs "$PWD" /tmp/board.json                          # arrival v
 node $D/what-ran.mjs 2026-11-02T17:40:00Z 2026-11-02T18:15:00Z --grep 'e2e|playwright|docker'   # what any session ran then
 ```
 
+`what-ran.mjs` cuts a long command (180 characters) or result (200)
+around the first match, between `…` marks, so the reason a line was
+printed is on it. It used to print the first 180 characters, and in the
+window above 3 of 4 lines matched past the cut (QA, PR #38 Info 6).
+
 **The log's order is a clock once anchored.** Host lines that answer the
 operator (an answered form, a new conversation, a bind, a reopen by id, a
 move by path) pair with timed `admin_events` rows, and each failure run

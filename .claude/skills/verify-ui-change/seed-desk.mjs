@@ -61,6 +61,16 @@ db.prepare(
    VALUES (?, ?, ?, ?, ?, NULL, ?, 'working', datetime('now'))`
 ).run(CH, AG, HOST, `/repo/${AG}`, `${AG}-window`, SESSION);
 
+/* Unread mail for the desk, only when asked (`--unread N`). The backlog
+   dialog opens only on an agent with something unread, and check-backdrop.mjs
+   needs one (PR #38, QA Info 5). Other checks read this desk's pills, so the
+   default is none. The body is stored as tools.js stores it, JSON-encoded. */
+const UNREAD = Number(flag('unread', 0));
+if (UNREAD > 0 && !db.prepare(`SELECT 1 FROM messages WHERE channel = ? AND to_agent = ? LIMIT 1`).get(CH, AG)) {
+  const put = db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES (?, 'ann', ?, ?)`);
+  for (let i = 1; i <= UNREAD; i++) put.run(CH, AG, JSON.stringify(`seeded message ${i} of ${UNREAD}, for the backlog dialog`));
+}
+
 /* Older than 90s and the desk reports its host offline, which reads exactly
    like the feature under test having broken. */
 const HEARTBEAT = setInterval(
@@ -113,6 +123,7 @@ console.log(`bubble  : ${JSON.stringify(desk?.last_message?.text ?? null)}`);
    is not a column the page gets". Read a new field out of /api/floor before
    trusting anything, including this line. */
 console.log(`working : ${desk?.working}   host: ${desk?.hosted?.host ?? '(none)'}   live: ${desk?.hosted?.live}`);
+if (UNREAD > 0) console.log(`unread  : ${desk?.board?.unread ?? 0} (asked for ${UNREAD})`);
 console.log(`\nseeded ${CH}/${AG} on ${base} — heartbeat running, ^C to stop`);
 
 process.on('SIGINT', () => { clearInterval(HEARTBEAT); db.close(); process.exit(0); });

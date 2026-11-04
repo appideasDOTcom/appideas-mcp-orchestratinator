@@ -2751,6 +2751,7 @@ try {
     // What happened to each, read off its turns: the word as a user turn,
     // or an error turn first.
     eq(nudgeOutcome([{ id: 9, role: 'assistant', text: 'busy' }, { id: 10, role: 'user', text: 'nudge' }]), { state: 'sent' }, 'the word as a user turn is a nudge that landed');
+    eq(nudgeOutcome([{ id: 13, role: 'user', text: 'Nudge \n' }]), { state: 'sent' }, 'in any case: a turn that reads "Nudge " is the same nudge');
     eq(nudgeOutcome([{ id: 12, role: 'user', text: 'nudge' }, { id: 11, role: 'error', text: 'Claude Code is open in that window but has not finished starting' }]),
       { state: 'failed', words: 'Claude Code is open in that window but has not finished starting' }, 'an error turn before it is a nudge that failed, in the host\'s words, whatever order the rows came in');
     eq(nudgeOutcome([{ id: 5, role: 'assistant', text: 'nudge me later' }]), null, 'and nothing yet is nothing: no verdict on a clock');
@@ -2832,6 +2833,7 @@ try {
     eq(backlogBehind({ unread: 3, unread_max_id: hookNow.unread_max_id - 1 }, hookNow.unread_max_id), true, 'and one with an older backlog: its list would lack the newest, and Mark all read would stop short of it');
     eq(backlogBehind({ unread: 1, unread_max_id: hookNow.unread_max_id }, hookNow.unread_max_id), false, 'a copy that has the pill\'s newest message opens at once, with no extra request');
     eq(backlogBehind({ unread: 2, unread_max_id: 9 }), false, 'and the board\'s own button, which draws from that copy and passes nothing, is never behind on its own count');
+    eq(backlogBehind({ unread: 0, unread_max_id: null }), true, 'but a copy with nothing unread is read again even when the caller passes no id: the dialog cannot open on it as it stands');
     sql.close();
   }
 

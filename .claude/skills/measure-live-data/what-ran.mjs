@@ -32,6 +32,16 @@ const grep = opt('--grep') ? new RegExp(opt('--grep')) : null;
 const project = opt('--project');
 const results = args.includes('--results');
 const P = join(homedir(), '.claude/projects');
+/* The line cut to `width`, around the first match when the match is past
+   the cut, so the reason the line was printed is on it (PR #38, QA Info 6:
+   in the example window below, 3 of 4 lines matched past 180 characters). */
+function around(text, width) {
+  if (text.length <= width) return text;
+  const m = grep?.exec(text);
+  if (!m || m.index + m[0].length <= width) return `${text.slice(0, width)}…`;
+  const start = Math.max(0, Math.min(m.index - Math.floor((width - m[0].length) / 2), text.length - width));
+  return `…${text.slice(start, start + width)}${start + width < text.length ? '…' : ''}`;
+}
 const out = [];
 for (const dir of readdirSync(P)) {
   if (project && !dir.includes(project)) continue;
@@ -49,11 +59,11 @@ for (const dir of readdirSync(P)) {
       for (const b of Array.isArray(d.message?.content) ? d.message.content : []) {
         if (b.type === 'tool_use' && b.name === 'Bash') {
           const cmd = String(b.input?.command ?? '').replace(/\s+/g, ' ');
-          if (!grep || grep.test(cmd)) out.push(`${new Date(at).toISOString()} ${where}  $ ${cmd.slice(0, 180)}`);
+          if (!grep || grep.test(cmd)) out.push(`${new Date(at).toISOString()} ${where}  $ ${around(cmd, 180)}`);
         }
         if (results && b.type === 'tool_result') {
           const c = (Array.isArray(b.content) ? b.content.map((x) => x.text ?? '').join(' ') : String(b.content ?? '')).replace(/\s+/g, ' ');
-          if (grep && grep.test(c)) out.push(`${new Date(at).toISOString()} ${where}    → ${c.slice(0, 200)}`);
+          if (grep && grep.test(c)) out.push(`${new Date(at).toISOString()} ${where}    → ${around(c, 200)}`);
         }
       }
     }
