@@ -70,6 +70,23 @@ Do not raise a form, send a chat or open a window on anyone's desk to "test"
 the deploy. The hand check is costmo's and reaches him through appideas-qa;
 the symbol counts are yours.
 
+[`board-counts.sh`](board-counts.sh) is the board half of the readings,
+in one line: floors, the archived list, desks and hidden desks, plus the
+sha256 of the served `/app.js` beside the tree's. Run it before and after.
+When the delta is the page, QA names the hash to expect, and the served
+hash matching the tree's is the proof that the rebuild took (task 271:
+`37d043fc` before, `ece007e5` after). It answers the same question as the
+symbol counts, with nothing to choose. Use the symbols when the change is
+in `src/` outside the page.
+
+**A host file newer than the host's pid is not always a stale host.** A
+merge or a branch checkout rewrites files, and `status.sh` compares mtimes.
+On task 271, `host/window.js` read 14:40Z against a host started at 03:27Z,
+because costmo's merge had touched it, and its content was byte-identical
+to the deployed commit. So before restarting the host, read
+`git diff --quiet <deployed sha> HEAD -- host/ plugin/`. If nothing
+differs, the host and the plugin stay, and the note says why.
+
 ## The third half: the plugin
 
 Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).

@@ -1065,6 +1065,27 @@ operator's live floor.
   Work is assigned as a task, and a task is not a message: `poll_messages`
   returned nothing on the nudge that carried issue #4, and the assignment
   was sitting in `list_tasks`. Do both, every time.
+- **Your channel is the binding's, so leave it out of every call.** The
+  connection's headers already name your channel and agent (`whoami`
+  says which). A `channel` passed to a tool overrides them, and a wrong
+  one fails silently. On 2026-11-04, after a context reset, a summary
+  said "orchestratinator", and polls and posts named that instead of
+  `appideas-mcp-orchestratinator`. Each poll came back empty, two posts
+  went to a channel nobody reads, the first post created a new floor on
+  the live board, and a deploy task sat unread until costmo asked about
+  it. So call `whoami` first after a reset, and pass no `channel` or
+  `agent` unless you mean another one. List with `status: "open"`: with
+  `mine: true` the done tasks come back too, and on this channel that
+  ran past the tool's output limit.
+- **The board keeps each agent's cursor, and another machine's board
+  keeps its own.** `agents.poll_cursor` (one row per channel and agent)
+  is the last message delivered to that agent. That row, against
+  `MAX(id)` of `messages`, settles any doubt about whether an agent is up
+  to date. Read it read-only, inside the container. Message ids count up
+  on each board separately, so a cursor remembered from a board on
+  another computer is a number from a different sequence. A remembered
+  cursor above this board's newest id is one of those. Polling here from
+  it would skip everything below it.
 - **Post, poll, then build.** When a task says to post a result before
   building on it, the post is where the operator rules — so poll after
   posting and before the first line of the build, and again at each phase
