@@ -339,6 +339,42 @@ is a state no host could have produced. `probe-chat-panel.js` reads the
 meta line, both selects, the asked-for note, the slash rows and the last
 rows (with the compaction summary's open/closed) in one call.
 
+### check-backdrop.mjs — a click outside a dialog's contents (issue #11)
+
+Every dialog on the board, four gestures each, through `press()` and
+`key()` in `drive.mjs` — real input, because a dispatched click names its
+own target and the target is the whole question here. A click goes to the
+nearest common ancestor of where the button went down and where it came
+up, so a drag out of a field onto the backdrop is a click on the `<dialog>`;
+so is a click in the dialog's own padding, inside its visible box.
+
+```bash
+node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8905 &
+node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 &
+node --experimental-websocket .claude/skills/verify-ui-change/check-backdrop.mjs http://localhost:8905 --expect after
+# rename  backdrop  open  kept  ✓ … tasks (no field)  backdrop  closed  —  ✓ … PASS · 52 of 52
+```
+
+`--expect after` is #11's ruling: a dialog carrying a text field stays
+open with its text on backdrop, drag-out and padding and closes on Escape;
+one without closes on all four. `--expect before` is what the issue
+reported, and it read every dialog closing on every gesture (2026-11-03,
+0.10.12). Three things it taught, each a red that was the check:
+
+- **A `close` event is a queued task**, and the page's handler for it
+  empties `#dlg-body`. Closing one dialog and opening the next in the same
+  breath drew the second and then wiped it: an open dialog with nothing in
+  it, on some runs and not others. Let the event loop turn between them.
+  The page never does this (the one `closeDialog()` followed by an opener,
+  in `refreshDialog`, returns first).
+- **Sessions redraws whole when its host answers**, and the redraw takes
+  focus out of the filter; the value survives in the form's state. So the
+  marker is typed and focused until the same field element has held it
+  across two polls.
+- **A non-empty `type="search"` field spends the first Escape clearing
+  itself.** That is the browser's (History's query has no handler for it),
+  so the row says `escape×2` rather than calling Escape broken.
+
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
 Task 264 (2026-11-03). [`hold-proxy.mjs`](hold-proxy.mjs) stands in for a

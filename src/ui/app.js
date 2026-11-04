@@ -573,6 +573,45 @@ const findAgent = (channel, agent) => {
   return [...(c.agents ?? []), ...(c.retired_agents ?? [])].find((a) => a.agent === agent) ?? null;
 };
 
+/* ---------- dialogs: what a click on the dialog itself does ---------- */
+/**
+ * Whether a dialog holds a field a person types into, which decides whether a
+ * click on the `<dialog>` element closes it (issue #11).
+ *
+ * Closing wipes the dialog, and nothing keeps a draft: the saved-prompts form
+ * is redrawn from the saved rows on every change, so an unsaved edit lives
+ * only in the DOM the close empties. And the click that closed it was
+ * usually not meant as one. Measured with real input on every dialog with a
+ * field (`check-backdrop.mjs` in verify-ui-change): pressing in the field
+ * and letting go past the dialog's edge closes it, because a click goes to
+ * the nearest common ancestor of where the button went down and where it
+ * came up, and that is the `<dialog>`. The prompt form opens with its title
+ * selected, which invites exactly that drag. A click in the dialog's own
+ * padding closes it too, inside its visible box, for the same reason.
+ *
+ * So a dialog carrying a plain-text field closes from its own buttons and on
+ * Escape (unchanged), and from no click on the `<dialog>` at all: not the
+ * backdrop, not a drag-out, not the padding. Every other dialog keeps the
+ * backdrop dismiss exactly as it was, padding and drag-out included (costmo,
+ * #11: "Exactly as Decided", against a version that also narrowed those to a
+ * press and release both on the dimmed page). Nothing is lost there: such a
+ * dialog holds nothing typed, and reopening it draws it again from the board.
+ *
+ * "Carries" is presence, not "has something typed": rename and an edited
+ * prompt open prefilled, so a dirty check would need every dialog's starting
+ * value, and a field emptied on purpose is still a field being worked in. A
+ * disabled or read-only field counts. `act()` disables every field while a
+ * save is in flight, and a save that fails hands the boxes back with the text
+ * still in them. Asked at the click, not when the dialog opens, because a
+ * dialog's fields come and go: the prompt list grows its form on New prompt,
+ * the move dialog draws its name field only for a new floor, and settings
+ * draws type-RESTORE only once a file is chosen.
+ */
+const TYPED_INPUT = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+const holdsTyping = (fields) => [...(fields ?? [])].some((f) =>
+  f?.tagName === 'TEXTAREA' || (f?.tagName === 'INPUT' && TYPED_INPUT.has(String(f.type ?? 'text').toLowerCase())));
+/* ---------- dialogs: opening and closing ---------- */
+
 function openDialog(html) {
   el.dlgBody.innerHTML = html;
   // The error belongs with the thing that failed, above the buttons — appended at
@@ -1310,7 +1349,12 @@ async function restoreBackup() {
 el.openSettings.addEventListener('click', () => openSettings());
 
 el.setDlg.addEventListener('click', (e) => {
-  if (e.target === el.setDlg) { el.setDlg.close(); return; }
+  // The same rule as the operator dialog (holdsTyping): once a file is chosen
+  // the dialog carries type-RESTORE, and a click outside it does not close.
+  if (e.target === el.setDlg) {
+    if (!holdsTyping(el.setBody.querySelectorAll('input, textarea'))) el.setDlg.close();
+    return;
+  }
   const btn = e.target.closest('[data-set]');
   if (!btn) return;
 
@@ -1725,8 +1769,11 @@ el.dlgBody.addEventListener('change', (e) => {
   ).then((ok) => { if (ok) refreshDialog(); });
 });
 
-// Clicking the backdrop closes. <dialog> already handles Esc.
-el.dlg.addEventListener('click', (e) => { if (e.target === el.dlg) closeDialog(); });
+// Clicking the backdrop closes, unless the dialog holds a text field — see
+// holdsTyping. <dialog> already handles Esc, for every dialog.
+el.dlg.addEventListener('click', (e) => {
+  if (e.target === el.dlg && !holdsTyping(el.dlgBody.querySelectorAll('input, textarea'))) closeDialog();
+});
 el.dlg.addEventListener('close', () => { el.dlgBody.innerHTML = ''; });
 
 const poll = () => tick({ background: true });

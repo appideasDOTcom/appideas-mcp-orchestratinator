@@ -198,6 +198,46 @@ export async function open({
       el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       return true;
     })()`),
+    /**
+     * A real press, move and release, through the browser's own input
+     * pipeline rather than a dispatched event.
+     *
+     * `click()` above builds a MouseEvent and so names its own target. Where
+     * the browser decides the target — a click dispatched on the nearest
+     * common ancestor of where the button went down and where it came up, so
+     * a drag out of a text field onto a modal's backdrop is a click on the
+     * `<dialog>` (issue #11) — only real input says what a person gets.
+     * `from` and `to` are each a selector (its centre) or `{ x, y }` in CSS
+     * pixels; the same point for both is a plain click there.
+     */
+    press: async (from, to = from, { steps = 6 } = {}) => {
+      const at = async (p) => (typeof p === 'string'
+        ? JSON.parse(await evalJs(`(() => {
+            const el = document.querySelector(${JSON.stringify(p)});
+            if (!el) throw new Error('no element for ' + ${JSON.stringify(p)});
+            const r = el.getBoundingClientRect();
+            return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+          })()`))
+        : p);
+      const a = await at(from);
+      const b = await at(to);
+      const mouse = (type, { x, y }, buttons) => cmd('Input.dispatchMouseEvent',
+        { type, x, y, button: 'left', buttons, clickCount: 1 });
+      await mouse('mouseMoved', a, 0);
+      await mouse('mousePressed', a, 1);
+      for (let i = 1; i <= steps; i++) {
+        await mouse('mouseMoved', { x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, 1);
+      }
+      await mouse('mouseReleased', b, 0);
+      return { from: a, to: b };
+    },
+    /** A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter'). */
+    key: async (key) => {
+      const code = key.length === 1 ? `Key${key.toUpperCase()}` : key;
+      const vk = { Escape: 27, Enter: 13, Tab: 9 }[key] ?? key.toUpperCase().charCodeAt(0);
+      await cmd('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk });
+      await cmd('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk });
+    },
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
     shot: async (path, selector = null, { pad = 8, scale = 3, full = false } = {}) => {
       // `full` captures the whole document rather than the viewport, at the

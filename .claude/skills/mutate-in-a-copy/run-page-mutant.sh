@@ -16,6 +16,11 @@
 #     ORCH_CDP_PORT=9253 timeout 120 node --experimental-websocket .claude/skills/verify-ui-change/check-card-move.mjs http://localhost:8906 /tmp/pm-shots /tmp/pm.jsonl;
 #     kill $K $S'
 #
+# `timeout` is coreutils and not on every machine (it is not on the Mac
+# mini, 2026-11-03): there the line above is "command not found", which a
+# `2>/dev/null` hides and this reports as a check that did not finish. The
+# drivers carry their own deadline per command, so leave it out there.
+#
 # A page check that dies on a waitFor instead of printing ✗ has still
 # caught the mutant — "the card follows on the 200 again" killed step 3b by
 # timing out on a refusal the dialog never drew — and this says so.
