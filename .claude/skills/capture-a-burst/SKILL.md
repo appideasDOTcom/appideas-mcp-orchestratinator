@@ -111,6 +111,7 @@ discriminate:
 | a `slow` line with no hold beside it | that request waited on something other than the loop, such as its own client. Staged on the live board, read-only, by sending a small body in two halves 3 s apart (task 260): `slow POST /staged-slow-request-task-260 3001ms 404` and no hold |
 | outside probe slow, inside probe fast, docker-ping fast, no hold line | the forwarder |
 | docker-ping slow too, or `vm/init.log` gaps over 9 s (normal quiet is ≤ ~8.9 s) | the VM |
+| `OOM kills in the VM` above 0 (the kernel's `invoked oom-killer` / `Out of memory: Killed process`), with the board's hold ending the same second | the VM out of memory: Docker Desktop's memory limit. Issue #5's cause on 2026-11-03: the e2e matrix in a 4 GiB VM held the board's loop 59.5 s until the kernel killed a MySQL at 22:58:00.639Z. Docker Desktop at 8 GiB fixed it, and the same matrix then ran with no hold and no timeout |
 | `main.gvisor … stopped` / `started`, `exposer.Add` for 8787 | the forwarder was restarted (a container swap does exactly this) |
 | a pmset Sleep/Wake in the window | the machine slept |
 

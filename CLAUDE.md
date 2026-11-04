@@ -135,6 +135,11 @@ hold read fast. Those lines and Docker Desktop's logs are gone within hours
 (a deploy recreates the container; `monitor.log` keeps about 25 minutes),
 so **capture-a-burst** saves them while a burst is still happening. The
 two lines are the server half and reach the live board only with a rebuild.
+What issue #5 turned out to be, once caught: the board shares Docker
+Desktop's VM with everything else in Docker, and at 4 GiB a site e2e matrix
+ran it out of memory. The board's loop was held 59.5 s until the VM's kernel
+killed a MySQL, and Docker Desktop at 8 GiB fixed it (2026-11-03). A capture
+summary's `OOM kills in the VM` line is that reading.
 
 **The server is the other half, and it goes stale independently.** The
 **deploy-both-halves** skill is the procedure — its `status.sh` reads both
