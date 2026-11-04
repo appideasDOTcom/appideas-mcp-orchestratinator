@@ -3,6 +3,13 @@
 
 const REFRESH_MS = 2500;
 const PAGE = 200;
+/* A desk's popout (issue #19) is this page with ?popout=1. It loads this file
+   for its dialogs — a dialog opens in the window it was clicked in — and the
+   dialogs read /api/state, so that is polled there. The board is not on
+   screen in a popout, so the activity log is not fetched and nothing of the
+   board is drawn: each popout adds one /api/state a period, not the board's
+   whole poll. */
+const POPOUT = new URLSearchParams(location.search).get('popout') === '1';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -1469,6 +1476,11 @@ async function tick({ background = false } = {}) {
   if (background && document.hidden) return; // don't poll a tab nobody is looking at
   inFlight = true;
   try {
+    if (POPOUT) {
+      ui.state = await getJson('./api/state');
+      el.dot.className = 'dot';
+      return;
+    }
     const qs = new URLSearchParams({ limit: String(ui.limit) });
     if (ui.channel) qs.set('channel', ui.channel);
     const [state, activity] = await Promise.all([

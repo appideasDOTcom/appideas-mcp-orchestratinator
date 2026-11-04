@@ -4,7 +4,7 @@
  * fixture for any check of the question panel (tabs, the free-text row, the
  * lines under the form, Submit).
  *
- *   seed-form.mjs <base-url> [--channel page-check] [--agent typist] [--key k]
+ *   seed-form.mjs <base-url> [--channel page-check] [--agent typist] [--key k] [--host h1]
  *
  * Two things that cost a round when this was first done (2026-11-02):
  *
@@ -21,6 +21,10 @@
  * The questions: two single-selects (each gets a "Type something." row) and
  * one multi-select, so a check can tick the free-text row on a single-choice
  * question and on a multi and see the difference.
+ *
+ * `--host` beside seed-desk.mjs: both default to `h1`, and a host's register
+ * marks every desk it does not name offline, so the two on one host take each
+ * other's desks away. check-popout.mjs runs this as `--host h-form`.
  */
 const args = process.argv.slice(2);
 const BASE = args[0];
@@ -28,7 +32,7 @@ if (!BASE) { console.error('usage: seed-form.mjs <base-url> [--channel c] [--age
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const CH = opt('--channel', 'page-check'), AG = opt('--agent', 'typist'), KEY = opt('--key', 'k');
 const HK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
-const HOST = 'h1';
+const HOST = opt('--host', 'h1');
 
 const register = () => fetch(`${BASE}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: HOST, name: 'testbox', tmux: 'deskside', desks: [{ channel: CH, agent: AG, cwd: `/repo/${AG}`, window: '@9' }] }) });
 const ingest = (body) => fetch(`${BASE}/api/ingest`, { method: 'POST', headers: HK, body: JSON.stringify({ channel: CH, agent: AG, session_id: `s-${AG}`, cwd: `/repo/${AG}`, ...body }) });

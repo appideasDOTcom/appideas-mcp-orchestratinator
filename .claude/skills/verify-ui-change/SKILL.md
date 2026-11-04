@@ -646,6 +646,66 @@ was the check and not the page:
   `document.activeElement` — the History dialog redraws only its list for
   this reason, and the check for it is one line.
 
+### check-popout.mjs — a desk's chat in a window of its own (issue #19)
+
+Seven desks from `seed-desk.mjs` (`--agent` each) on one scratch server, and
+the check drives the floor and its popouts as separate CDP targets:
+
+```bash
+PORT=8931 DB_PATH=/tmp/pop.db ORCH_AUTH_TOKEN=k node src/server.js &
+for a in bo cy d1 d2 d3 d4 d5; do
+  node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8931 --db /tmp/pop.db --agent $a > /dev/null &
+done
+node .claude/skills/verify-ui-change/seed-form.mjs http://localhost:8931 --host h-form > /dev/null &
+pkill -f "remote-debugging-port=9271( |$)"     # the flags below reach only a Chrome the check launches
+ORCH_CDP_PORT=9271 ORCH_CHROME_ARGS=--enable-features=IntensiveWakeUpThrottling:grace_period_seconds/10 \
+  node --experimental-websocket .claude/skills/verify-ui-change/check-popout.mjs http://localhost:8931 /tmp/shots
+# … 60 ✓ · PASS, about five minutes
+```
+
+It covers detach with the floor's draft, the floor's panel while a desk is
+out, the stream reaching the popout, the bell, card, dialogs and Send in the
+popout, a floor nudge's bubble and a History row landing in the popout,
+every way back (each with its draft), a floor reload and then a closed
+floor, hide, move (followed, draft and address with it) and leave, and the
+floor plus six popouts all live at once. Four things it taught:
+
+- **A popup is a target of its own, and only real input opens one.**
+  `attach(match)` in `drive.mjs` finds a window the page opened, by URL,
+  and `targets()` lists the pages open now, which is how "closed" and "no
+  second window" are read. `window.open` from a dispatched click returns
+  null, because the browser wants a user gesture, so detach is pressed with
+  `press()`.
+- **One window per desk is two facts.** The window's name makes a second
+  `window.open` reuse the first window, so a count of windows cannot fail.
+  Without the "already out" guard the second detach reloads the popout
+  instead of bringing it forward, and a mutant doing exactly that survived
+  the count. The check now puts a mark on the popout's page and reads it
+  back.
+- **The seven-window step is the issue's own measurement.** With the
+  hub mutated out, each window opening its own stream, the step dies
+  waiting for a popout's composer. That is the six-connection cap holding
+  the page itself. A green run there means one connection for all seven.
+- **A step that depends on the page's payload waits for the page.** The
+  bulk-nudge step makes bo windowless so it queues last. The first cut
+  waited on its own fetch of `/api/floor`, pressed Nudge, and the plan,
+  made from the page's copy a poll behind, put bo first. It now waits for
+  the room to draw "no window" on bo.
+- **A hidden window's timers are the browser's.** QA's PR #41 finding:
+  presence on a 2 s beat failed once a minimized popout was throttled to a
+  wake-up a minute. The step minimizes the popout with `windowState()`
+  (CDP `Browser.setWindowBounds`) under `ORCH_CHROME_ARGS`' 10 s grace and
+  samples the floor for 150 s. It also measures the popout's own timer gaps
+  and fails if none reached 20 s, because a first cut sampling 100 s saw 14 s
+  at most and proved nothing. Throttling began about 65 s in.
+- **The console is read, not assumed.** `page.console()` in `drive.mjs`
+  returns every console warning and error and every uncaught exception
+  since the page connected. The check's last step asserts there were none
+  in the floor or the popouts.
+- **Headless ignores a popup's size.** The window comes up at 800×533
+  whatever the features asked, so the check sets 440×980 with `resize()`
+  before it takes a picture.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
