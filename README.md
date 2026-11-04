@@ -305,6 +305,16 @@ chat doesn't provide. **Open in VS Code** moves it to your editor with everythin
 you did from the floor already in it; **Open in Claude** lands a terminal on the
 desk's tmux window; or `tmux attach -t orch` and sit at any desk the host runs.
 
+**9. Keep it current.** The header shows **Update available** when the
+branch the board follows has a commit this build lacks; it checks GitHub once
+a day. **Update** says what it will interrupt, then the host on the board's
+machine fetches the commit, rebuilds the server, updates the plugin when its
+hooks changed, and restarts itself, and the page reloads onto the new build.
+An update is refused, in words, when the clone has local changes or is not on
+the followed branch. **Settings** (⚙) turns the daily check off, switches to
+the development version (`develop` instead of `main`), and has **Check now**.
+Restarting the host is macOS-only for now.
+
 ## Useful commands
 
 ```bash
@@ -313,7 +323,7 @@ docker compose down                        # stop; data kept in the volume
 docker compose logs -f orchestratinator    # tail
 curl -s localhost:8787/health              # is it up?
 open http://localhost:8787/                # the page (board/floor switch top right)
-npm test                                   # all eight suites
+npm test                                   # every suite
 ```
 
 And in any agent's chat window:

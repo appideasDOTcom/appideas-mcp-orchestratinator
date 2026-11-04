@@ -75,7 +75,7 @@ const SESSION_STALE_MINUTES = Math.max(1, Number(process.env.FLOOR_SESSION_TTL_M
  * moment a host is offline, because "Send" to a host that isn't there is the
  * one lie the floor is not allowed to tell.
  */
-const HOST_STALE_SECONDS = Math.max(30, Number(process.env.FLOOR_HOST_TTL_SECONDS ?? 90));
+export const HOST_STALE_SECONDS = Math.max(30, Number(process.env.FLOOR_HOST_TTL_SECONDS ?? 90));
 
 /**
  * How an avatar is drawn. The whole difference is hair, because a head, a pair
@@ -1483,6 +1483,8 @@ export function askRescan(store, live, { channel, agent, why, force = false }) {
  * `live`.
  */
 function applyHostEvent(store, live, hostId, ev) {
+  // A step of an update this host is carrying out: about the board, not a desk.
+  if (str(ev.type) === 'update') return live.updates?.applyEvent(hostId, ev) ?? false;
   // A folder listing is about the host, not a desk: kept per host for the
   // picker, before the desk checks below, which it has nothing to do with.
   if (str(ev.type) === 'browse') {
@@ -2577,9 +2579,11 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null }) {
   const router = express.Router();
   const live = createLive();
+  // An update's steps arrive as host events (src/updates.js).
+  live.updates = updates;
 
   /* ───────────────────── the plugin's door ───────────────────── */
 
@@ -2622,6 +2626,9 @@ export function createFloorRouter({ store, auth, sessions = null }) {
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const name = str(req.body?.name) ?? hostId;
     store.registerHost(hostId, name, str(req.body?.tmux));
+    // Its build, its clone and the board container it found beside it: which
+    // host can update this board, and whether it would be refused (issue #40).
+    live.updates?.noteHost(hostId, req.body);
 
     // The host's candidate folders, kept beside the rest of the live layer.
     // Validated field by field, and only paths under the roots the host itself
