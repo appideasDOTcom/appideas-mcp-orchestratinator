@@ -352,21 +352,49 @@ so is a click in the dialog's own padding, inside its visible box.
 node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8905 &
 node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 &
 node --experimental-websocket .claude/skills/verify-ui-change/check-backdrop.mjs http://localhost:8905 --expect after
-# rename  backdrop  open  kept  ✓ … tasks (no field)  backdrop  closed  —  ✓ … PASS · 52 of 52
+# rename  backdrop  open  kept   0 close  ✓ … close, then wait … PASS · 65 of 65
 ```
 
 `--expect after` is #11's ruling: a dialog carrying a text field stays
 open with its text on backdrop, drag-out and padding and closes on Escape;
 one without closes on all four. `--expect before` is what the issue
 reported, and it read every dialog closing on every gesture (2026-11-03,
-0.10.12). Three things it taught, each a red that was the check:
+0.10.12). Each row counts the `close` events its gesture fired, and `open`
+passes only with none: a dialog waiting on its host used to be drawn back
+open by the host's answer inside the row's 120 ms, so "closed and drawn
+back" read as "never closed" (PR #36, QA finding 2, mutant P4).
+
+Then **close, then wait** (PR #36, QA finding 1): History, Sessions and
+Take a desk (opened on a folder, so its host is asked a `browse`), each
+closed 150 ms after opening with Escape and with its own Close button,
+watched for ten seconds, against the task list as a control. Before the
+fix all three came back; History within a second. A close-then-wait row
+only catches a redraw that happens to land between `close()` and the late
+`close` event about one run in three, so three more rows put it there
+every time: each dialog closed and redrawn in the same task. One closes
+Sessions and opens Retire while Sessions' loop is still running, which must
+not draw over it. Last, one row closes History and opens it again in the
+same task, which the late `close` must leave drawn. Under a red row the
+check prints the page's own log of every `showModal`, `close()` and
+`close` event with its time, which is how the gap was found.
+
+Four things it taught, each a red that was the check:
 
 - **A `close` event is a queued task**, and the page's handler for it
   empties `#dlg-body`. Closing one dialog and opening the next in the same
   breath drew the second and then wiped it: an open dialog with nothing in
   it, on some runs and not others. Let the event loop turn between them.
-  The page never does this (the one `closeDialog()` followed by an opener,
-  in `refreshDialog`, returns first).
+  The handler now leaves a dialog that is open again alone, and the
+  same-breath row holds it to that; the check still turns the loop, so a
+  row measures its gesture and not the one before.
+- **A gesture is not done when `press()` returns, and its `close` event
+  is later still.** A drag is ten input events. Its `close()` landed
+  about 320 ms after the gesture started, and the event came about
+  100 ms after that. A fixed 120 ms read saw the dialog shut with no close
+  counted, and failed a working dialog, 1–2 rows in 2 control runs. A row
+  now waits for the close to be counted, and gives a row that should stay
+  open 600 ms. And Take a desk redraws taller when its host list arrives,
+  so its Cancel is pressed only once the button has held still.
 - **Sessions redraws whole when its host answers**, and the redraw takes
   focus out of the filter; the value survives in the form's state. So the
   marker is typed and focused until the same field element has held it

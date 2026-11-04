@@ -624,6 +624,44 @@ function openDialog(html) {
   else el.dlgBody.append(err);
   if (!el.dlg.open) el.dlg.showModal();
 }
+/**
+ * A closed dialog is finished, and whatever it was waiting on is let go.
+ *
+ * History, Sessions and Take a desk ask a host and keep reading for its
+ * answer behind `mine()`, which is `ui.dlgCtx` and the dialog's own form.
+ * Nothing cleared either on a close, and every redraw goes through
+ * openDialog(), whose showModal() opens a closed dialog. So a close before
+ * the host had answered was undone by the answer. Measured on PR #36 (QA,
+ * finding 1, and at the base): History back 0.35–0.6 s after an Escape or
+ * its Close button, Sessions about 8 s after (when its loop gives up and
+ * says so), Take a desk the same. With Escape and Close now the only ways
+ * out of a dialog holding a text field (#11), a dialog that bounced back
+ * could not be put away while its host was still answering.
+ *
+ * Two parts, because a dialog's close is seen twice and late the second
+ * time:
+ *
+ * - **On screen, at the moment of drawing** (`drawsNow`). `el.dlg.open` is
+ *   false the instant a dialog closes, however it closed. Each of those
+ *   three draws only while it is the current dialog and open, or when its
+ *   opener draws it the first time. That covers every late path into the
+ *   drawing, including a loop that draws after an `await` without asking
+ *   `mine()` again.
+ * - **The context, on the `close` event** (`forgetDialog`), so that a loop
+ *   still running cannot match the next dialog: one opened without a
+ *   context of its own (retire, stop, a channel) left History's or Sessions'
+ *   in place, and that loop would have drawn over it once it was open.
+ *
+ * The first cut had only the second, and the close event is not prompt: in
+ * the page check, History's poll redrew it 56 ms after its Close button and
+ * the event came 44 ms after that (1 run in 3). The form itself is kept:
+ * nothing reads it once its context has gone, and the next opener writes a
+ * new one.
+ */
+function forgetDialog() {
+  ui.dlgCtx = null;
+}
+const drawsNow = (kind, opening) => ui.dlgCtx?.kind === kind && (opening || el.dlg.open);
 function closeDialog() {
   if (el.dlg.open) el.dlg.close();
   el.dlgBody.innerHTML = '';
@@ -1774,7 +1812,15 @@ el.dlgBody.addEventListener('change', (e) => {
 el.dlg.addEventListener('click', (e) => {
   if (e.target === el.dlg && !holdsTyping(el.dlgBody.querySelectorAll('input, textarea'))) closeDialog();
 });
-el.dlg.addEventListener('close', () => { el.dlgBody.innerHTML = ''; });
+// Escape, a form's own close, closeDialog(): every way a dialog ends comes
+// through here. `close` is a queued task rather than part of close(), so a
+// dialog opened in the same breath is already open when it runs, and its
+// body and context are not this one's to clear.
+el.dlg.addEventListener('close', () => {
+  if (el.dlg.open) return;
+  el.dlgBody.innerHTML = '';
+  forgetDialog();
+});
 
 const poll = () => tick({ background: true });
 let timer = setInterval(poll, REFRESH_MS);
@@ -1986,7 +2032,7 @@ function deskDialog({ channel = null, hostId = null, path = null } = {}) {
     picking: null, listMode: false, pickError: null, pickNote: null,
     wantChannel: channel, channel, newChannel: '', agent: '', prefilled: null, error: null,
   };
-  renderDeskDialog();
+  renderDeskDialog({ opening: true });
   loadFolders();
 }
 
@@ -2215,9 +2261,11 @@ function crumbsOf(root, path) {
   return out;
 }
 
-function renderDeskDialog() {
+function renderDeskDialog({ opening = false } = {}) {
   const fm = ui.deskForm;
-  if (!fm) return;
+  // Only while this is the dialog on screen, or its opener's first draw —
+  // see forgetDialog.
+  if (!fm || !drawsNow('desk', opening)) return;
   const hosts = fm.hosts ?? [];
   const liveHosts = hosts.filter((h) => h.live);
   const host = hosts.find((h) => h.host_id === fm.hostId) ?? null;
@@ -2601,7 +2649,7 @@ function sessionDialog(channel, agent, persona) {
     rows: null, at: null, current: null, editorPid: null,
     filter: '', waiting: true, error: null, note: null,
   };
-  renderSessionDialog();
+  renderSessionDialog({ opening: true });
   askSessions();
 }
 
@@ -2711,9 +2759,11 @@ function sessionCountText(fm) {
   return `${q ? `${shown.length} of ${base}` : base} · newest first${fm.at ? ` · listed ${agoText(fm.at)}` : ''}`;
 }
 
-function renderSessionDialog() {
+function renderSessionDialog({ opening = false } = {}) {
   const fm = ui.sessForm;
-  if (!fm) return;
+  // Only while this is the dialog on screen, or its opener's first draw —
+  // see forgetDialog.
+  if (!fm || !drawsNow('sessions', opening)) return;
   const notes = [];
   if (fm.error) notes.push(`<b>${esc(fm.error)}</b>`);
   else if (fm.waiting) notes.push('Asking the host for a fresh list…');
@@ -2836,7 +2886,7 @@ function markHits(text, query, safe) {
 function historyDialog() {
   ui.dlgCtx = { kind: 'history' };
   ui.histForm = { hosts: null, rows: null, query: '', deep: false, search: null, waiting: true, error: null, note: null, seq: 0 };
-  renderHistoryDialog();
+  renderHistoryDialog({ opening: true });
   askRecent();
 }
 
@@ -2956,9 +3006,11 @@ function historyRowsHtml(fm) {
   }).join('');
 }
 
-function renderHistoryDialog() {
+function renderHistoryDialog({ opening = false } = {}) {
   const fm = ui.histForm;
-  if (!fm) return;
+  // Only while this is the dialog on screen, or its opener's first draw —
+  // see forgetDialog.
+  if (!fm || !drawsNow('history', opening)) return;
   const searching = !!fm.search;
   const rows = (searching ? fm.search.rows : fm.rows) ?? [];
   const hosts = searching ? fm.search.hosts : fm.hosts;
