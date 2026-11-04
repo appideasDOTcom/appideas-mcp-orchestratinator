@@ -112,10 +112,16 @@ export async function boardContainer() {
   return r.ok ? (r.stdout.split('\n').map((l) => l.trim()).find(Boolean) ?? null) : null;
 }
 
+/** What runUpdate understands beyond the first cut: `finish` (and its `from`). */
+export const CAPABILITIES = ['finish'];
+
 /** What the host says about itself, beside its desks, on every registration. */
 export async function selfReport() {
   const [clone, container] = await Promise.all([cloneState(), boardContainer()]);
-  return { build: { ...BUILD }, clone, board_container: container, supervised: supervised() };
+  // What this code can do for an update, so the board does not ask a host
+  // for something its code would get quietly wrong (PR #42 N1: a Finish
+  // carried out by a host from before Finish existed).
+  return { build: { ...BUILD }, clone, board_container: container, supervised: supervised(), capabilities: CAPABILITIES };
 }
 
 /**

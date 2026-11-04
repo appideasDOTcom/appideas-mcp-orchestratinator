@@ -70,7 +70,7 @@ const host = { commit: C1, dirty: false };
 const hostPost = (path, body) => fetch(`${BOARD}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY }, body: JSON.stringify(body) }).catch(() => null);
 const register = () => hostPost('/api/host/register', {
   host_id: 'h1', name: 'testbox', desks: [], folders: [], roots: [],
-  build: { version: '0.10.18', commit: host.commit }, board_container: CONTAINER, supervised: true,
+  build: { version: '0.10.18', commit: host.commit }, board_container: CONTAINER, supervised: true, capabilities: ['finish'],
   clone: { path: '/Users/op/orch', branch: 'main', head: host.commit, dirty: host.dirty, changes: host.dirty ? ['src/ui/app.js'] : [] },
 });
 const beat = setInterval(register, 1000);

@@ -106,6 +106,13 @@ export function refusalOf({ check, standing, branch, self, host, report, run, fi
   if (!finishing && !isNewer(standing)) return standing.state === 'latest' ? 'This board is already on the newest commit.' : `There is nothing newer on ${branch} to update to.`;
   if (!self.container) return 'This board is not running in a Docker container, so there is no build for a host to replace. It updates only when it runs from docker-compose.yml.';
   if (!host) return 'No host on this board\'s machine has reported in. The update is carried out by the host running beside the board\'s container, and none is live.';
+  // A host from before Finish existed (e578070 and older) ignores `from` and
+  // `finish`: it rebuilds again, compares plugin/ from a clone already at the
+  // commit, skips the plugin and closes the run as done with the plugin old
+  // (QA, PR #42 N1). After a plugin failure that host was never restarted, so
+  // it is exactly the one that would be asked. It says what it can do in its
+  // report; one that does not say "finish" is not asked to.
+  if (finishing && !(report.capabilities ?? []).includes('finish')) return `The host on ${host.name} runs a build from before Finish the update (${short(report.build?.commit) ?? 'an unknown commit'}). It would rebuild again and skip the plugin, so it is not asked. It runs the update's own code once it restarts, and then it can finish.`;
   if (!report.supervised) return `The host on ${host.name} is not running as its LaunchAgent, so nothing would start it again after the update. Restarting a host is macOS-only today (issues #26, #28).`;
   const c = report.clone ?? {};
   if (c.error) return `The host could not read its clone: ${c.error}`;
@@ -391,6 +398,9 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
       build: { version: text(body?.build?.version, 40), commit: text(body?.build?.commit, 40) },
       board_container: text(body?.board_container, 80),
       supervised: body?.supervised === true,
+      // What this host's update code can do. Only "finish" so far; a host
+      // that sends no list is one from before there was one.
+      capabilities: Array.isArray(body?.capabilities) ? body.capabilities.map((c) => text(String(c), 40)).filter(Boolean).slice(0, 20) : [],
       clone: clone ? {
         path: text(clone.path, 400),
         branch: text(clone.branch, 200),

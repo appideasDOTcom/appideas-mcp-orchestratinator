@@ -1075,7 +1075,14 @@ server half is [`src/updates.js`](src/updates.js), the host half
   `/health` already answers as the commit (a rebuild of an unchanged tree
   only says `Running`) and compares `plugin/` from that `from`, since the
   clone is already at the commit. Finishing is the remedy because the
-  alternative was telling the operator to type `claude plugin update`. A
+  alternative was telling the operator to type `claude plugin update`.
+  Finish is asked only of a host whose report says `capabilities:
+  ["finish"]` (`CAPABILITIES` in `host/update.js`). A host from before it
+  (`e578070` and older) ignores `from`, skips the plugin and closes the run
+  as done with the plugin old, and after a plugin failure that host was
+  never restarted, so it is exactly the one that would be asked (QA, PR #42
+  N1). It is refused in words instead. A new thing the board asks of a
+  host's update code goes in that list the same way. A
   run that gave up on a silent host is closed as done when that host does
   come back as the commit. Two things that close a run when an event is
   lost at a restart are pinned in `test:update` (QA's Info 3): the board

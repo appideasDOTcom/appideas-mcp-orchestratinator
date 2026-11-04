@@ -173,6 +173,12 @@ console.log('\nwhy an update would be refused, before anything is touched:');
   assert(/local changes \(a, b, c, \+1 more\)/.test(dirty), `a dirty clone, naming what is dirty ("${dirty}")`);
   const off = refusalOf({ ...base, report: { ...base.report, clone: { path: '/x', branch: 'issues/40', dirty: false } } });
   assert(/is on "issues\/40", not main/.test(off), `a clone on another branch ("${off}")`);
+  // Finish the update asks for nothing newer, and only of a host whose code
+  // can finish (PR #42 N1).
+  const fin = { ...base, standing: { state: 'latest' }, finishing: true };
+  const old = refusalOf({ ...fin, report: { ...base.report, build: { commit: 'e578070fb5a26172a25207d61d24e93bf2cded0b' } } });
+  assert(/runs a build from before Finish the update \(e578070\)/.test(old ?? ''), `finishing, a host whose report names no "finish" is not asked ("${old}")`);
+  eq(refusalOf({ ...fin, report: { ...base.report, capabilities: ['finish'] } }), null, 'one that names it is, with nothing newer on the branch');
 }
 
 /* ───────── 2. a real server against a stand-in GitHub ───────── */
@@ -436,8 +442,8 @@ try {
     writeFileSync(join(FIX, 'container'), CONTAINER + '\n');
     process.env.ORCH_HOST_SUPERVISED = '1';
     const me = await U.selfReport();
-    eq([me.clone.branch, me.clone.head, me.clone.dirty, me.board_container, me.supervised], ['main', C1, false, CONTAINER, true],
-      'the host reports its clone, the board container its compose project runs, and that launchd will restart it');
+    eq([me.clone.branch, me.clone.head, me.clone.dirty, me.board_container, me.supervised, me.capabilities], ['main', C1, false, CONTAINER, true, ['finish']],
+      'the host reports its clone, the board container its compose project runs, that launchd will restart it, and that it can finish an update');
     const asked = lines(join(FIX, 'docker.log')).find((l) => l.args[0] === 'ps');
     assert(asked?.args.includes(`label=com.docker.compose.project.working_dir=${CLONE}`), 'found by the compose project\'s working directory, which is this clone');
 
@@ -737,6 +743,8 @@ try {
     await reg(C1);
     const st = await admin('start', { commit: C2 });
     const id = st.body.run?.id;
+    const take = async () => (await (await fetch(`${BOARD}/api/host/work?host_id=played&wait=0`, { headers: { 'x-orchestratinator-key': KEY } })).json()).work;
+    eq((await take()).map((w) => w.kind), ['update'], 'the played host takes its update');
     for (const s of ['preflight', 'fetch', 'checkout']) await ev(id, s, 'done');
     await ev(id, 'server', 'running');
     // The board is replaced before the host's "server done" reaches it.
@@ -749,6 +757,14 @@ try {
     const gaveUp = await until(async () => ((await upd()).run?.state === 'failed' ? upd() : null), 8000);
     assert(gaveUp && /"host" \(running\)/.test(gaveUp.run.error ?? ''), `a host that never comes back: the run ends naming its last step ("${gaveUp?.run.error}")`);
     eq([gaveUp?.stopped?.id, page.updateButton(gaveUp)?.label], [id, 'Update stopped'], 'and stands stopped, with the header\'s button');
+    // This played host sends no capabilities, which is what a host from
+    // e578070 sends: it would carry a Finish out the old way (PR #42 N1).
+    await reg(C1);
+    const oldHost = await upd();
+    assert(/runs a build from before Finish the update \(/.test(oldHost.refusal ?? ''), `Finish is refused to a host that does not say it can finish ("${oldHost.refusal}")`);
+    const tried = await admin('start', { commit: C2 });
+    eq([tried.status, tried.body.error === oldHost.refusal], [409, true], 'by the route too, in the same words, with nothing queued');
+    eq((await take()).length, 0, 'the played host is handed no work');
     await reg(C2);
     const late = await upd();
     eq([late.run.state, late.stopped, page.updateButton(late), page.latestText(late)], ['done', null, null, 'You have the latest'], 'the host coming back as the commit, late, finishes it');
