@@ -1138,6 +1138,47 @@ try {
   eq(markHits('a <mark> in the text', '<mark>', safe), 'a <mark>&lt;mark&gt;</mark> in the text', 'even when the thing searched for is markup');
   eq([markHits('nothing to mark', '', safe), markHits('nothing to mark', 'zzz', safe), markHits(null, 'x', safe)], ['nothing to mark', 'nothing to mark', ''], 'no search, no match and no text are left as they are');
 
+  // Issue #11. What a person gets from each gesture — the drag out of a
+  // field, the padding click — is only in a real page with real input:
+  // check-backdrop.mjs in verify-ui-change. This is the decision under it.
+  console.log('\nwhat a click on a dialog itself does: nothing, while it holds a text field');
+  const dlgLift = await (async () => {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- dialogs: what a click on the dialog itself does ---------- */');
+    const b = src.indexOf('/* ---------- dialogs: opening and closing ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the dialog-dismiss section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/dialog-dismiss-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { holdsTyping, TYPED_INPUT };\n`);
+    try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+  })();
+  const { holdsTyping, TYPED_INPUT } = dlgLift;
+  const field = (tagName, type) => ({ tagName, type });
+  eq([holdsTyping([field('INPUT', 'text')]), holdsTyping([field('TEXTAREA', 'textarea')]), holdsTyping([field('INPUT', 'search')])], [true, true, true],
+    'a text box, a text area and a search box are each typing a backdrop click would throw away — rename, a prompt\'s body, the History query');
+  eq(holdsTyping([field('INPUT', undefined)]), true, 'an input with no type is a text box, as the browser draws it');
+  eq(['checkbox', 'radio', 'file', 'button', 'hidden', 'range', 'color'].map((t) => holdsTyping([field('INPUT', t)])), Array(7).fill(false),
+    'a checkbox, a radio, a file picker and the rest hold nothing typed — the History dialog\'s tick-box alone does not keep it open');
+  eq([holdsTyping([field('SELECT', 'select-one')]), holdsTyping([field('BUTTON', 'submit')])], [false, false], 'nor does a dropdown or a button');
+  eq(holdsTyping([field('INPUT', 'checkbox'), field('SELECT', 'select-one'), field('INPUT', 'text')]), true, 'one text field among other controls is enough');
+  eq([holdsTyping([]), holdsTyping(undefined), holdsTyping(null)], [false, false, false], 'a dialog with no fields at all keeps its backdrop dismiss');
+  {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    // Both dialogs ask, at the click. The settings dialog is a second
+    // <dialog> with its own handler — the issue's "own copy" — and fixing one
+    // of the two is the easy miss.
+    assert(/el\.dlg\.addEventListener\('click', \(e\) => \{\s*if \(e\.target === el\.dlg && !holdsTyping\(el\.dlgBody\.querySelectorAll\('input, textarea'\)\)\) closeDialog\(\);/.test(src),
+      'the operator dialog closes on a click on itself only when holdsTyping says it carries no text field');
+    assert(/if \(e\.target === el\.setDlg\) \{\s*if \(!holdsTyping\(el\.setBody\.querySelectorAll\('input, textarea'\)\)\) el\.setDlg\.close\(\);\s*return;/.test(src),
+      'and so does the settings dialog, which has its own <dialog> and its own handler');
+    // Every <input> type the page draws is one this decision has been made
+    // for. A new type turns this red, and the fix is to put it in TYPED_INPUT
+    // or in the list below — whichever it is — not to widen the match.
+    const NOT_TYPED = new Set(['checkbox', 'radio', 'file']);
+    const drawn = new Set([...readFileSync('src/ui/app.js', 'utf8').matchAll(/<input\b[^>]*\btype="([a-z-]+)"/g)].map((m) => m[1]));
+    const undecided = [...drawn].filter((t) => !TYPED_INPUT.has(t) && !NOT_TYPED.has(t));
+    eq(undecided, [], `every input type the board's dialogs draw is decided for a backdrop click (drawn: ${[...drawn].sort().join(', ')})`);
+  }
+
   console.log('\nwhere the folder dialog opens: the last place a choice was made');
   const browserStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, m }; };
   const st = browserStore();
