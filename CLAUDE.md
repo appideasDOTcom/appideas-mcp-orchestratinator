@@ -1037,7 +1037,12 @@ unquoted variable**: `kill $PIDS` hands kill one word and kills nothing
 (`illegal pid`, unseen behind `2>/dev/null`), and the same goes for a
 command kept in `$T`. Use `xargs kill`, or `${=PIDS}`. That is how "the
 stand-ins ignore SIGTERM" got told to QA as a measurement (task 263); they
-never got the signal.
+never got the signal. Two more from 2026-11-04. A glob that matches nothing is an error in
+zsh, not an empty list: `rm -f "$D"/x.db*` with no such file aborts the
+whole `&&` chain behind it, so the server it was meant to start never ran
+and the next step read a dead port. Name the files (`x.db x.db-wal
+x.db-shm`). And a word starting with `=` is a command lookup, so `echo
+===` prints `== not found`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is

@@ -12,8 +12,10 @@
 set -u
 cd "$(dirname "$0")/../../.." || exit 1
 echo "== tree"
-git fetch -q origin develop 2>/dev/null
-echo "HEAD $(git rev-parse --short HEAD)  origin/develop $(git rev-parse --short origin/develop 2>/dev/null)  dirty files: $(git status --short | wc -l | tr -d ' ')"
+git fetch -q origin 2>/dev/null
+# What deploys is HEAD. Its own upstream says whether it is pushed; develop is
+# beside it for information only (SKILL.md, "Before touching anything").
+echo "HEAD $(git rev-parse --short HEAD) on $(git rev-parse --abbrev-ref HEAD)  upstream $(git rev-parse --short '@{u}' 2>/dev/null || echo none)  origin/develop $(git rev-parse --short origin/develop 2>/dev/null)  dirty files: $(git status --short | wc -l | tr -d ' ')"
 echo "== server half"
 curl -s localhost:8787/health; echo
 docker inspect -f 'container created={{.Created}} started={{.State.StartedAt}}' appideas-orchestratinator 2>/dev/null
