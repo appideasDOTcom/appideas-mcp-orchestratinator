@@ -156,7 +156,12 @@ Two more facts about that rebuild, both measured 2026-09-01. It blanks
 presence for every desk — presence is an MCP session in the server's memory —
 while the relay rides out the restart on its own retries, so the board shows a
 conversation flowing between desks that look absent. Nothing is broken; one
-MCP tool call per desk brings each back. And the `/data` volume is *named*:
+MCP tool call per desk brings each back. A **Docker Desktop restart** is
+different for the session you are in (2026-11-03, the 8 GiB change). Its
+orchestratinator tools disappear outright, with ECONNREFUSED at the moment
+Docker went down, and no call brings them back; costmo reconnects them with
+`/mcp`. Until then, read the board with curl or board-query.sh and say so.
+And the `/data` volume is *named*:
 the repo's own `data/` directory is test leftovers, not the live database, so
 a row repair goes through `docker compose exec -T orchestratinator node` with
 better-sqlite3 at `$DB_PATH`, never through a file in the working tree.
@@ -795,7 +800,12 @@ pid: `node test/<suite>.mjs`, its `node src/server.js`, a tmux session
 processes and their servers, `tmux kill-session` each test session, remove
 the fixtures, then check `tmux ls` and `data/` again before the next run.
 `lsof` and `netstat` are not on this machine; match on the command line
-with `ps -Ao pid,command`.
+with `ps -Ao pid,command`. **The shell is zsh, which does not split an
+unquoted variable**: `kill $PIDS` hands kill one word and kills nothing
+(`illegal pid`, unseen behind `2>/dev/null`), and the same goes for a
+command kept in `$T`. Use `xargs kill`, or `${=PIDS}`. That is how "the
+stand-ins ignore SIGTERM" got told to QA as a measurement (task 263); they
+never got the signal.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is

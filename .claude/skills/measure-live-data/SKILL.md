@@ -1,6 +1,6 @@
 ---
 name: measure-live-data
-description: Put numbers behind a design choice before building it — read the live board's database read-only inside its container, read the transcripts on the host's disk with the host's own parser, and set the two against each other. Use when a task says "measure first", when two stores could answer the same question (the board's `turns` and `agent_sessions` versus the JSONL on a host), and before claiming how much of anything the board has.
+description: Put numbers behind a design choice before building it — read the live board's database read-only inside its container, read the transcripts on the host's disk with the host's own parser, and set the two against each other. Use when a task says "measure first", when two stores could answer the same question (the board's `turns` and `agent_sessions` versus the JSONL on a host), and before claiming how much of anything the board has. Also for dating something that happened before anything recorded its time (an untimed host-log stretch, a past burst): anchoring the log's order to admin_events, turn lag, what ran on this machine when, and the machine's other clocks.
 ---
 
 # Measuring what the board and the disk actually hold
@@ -98,6 +98,51 @@ machine with every timing; "2.7 s" means nothing without "104 conversations,
 
 `created_at` in SQLite is to the second. Anything derived from it — an age,
 a `waited_ms` — carries up to a second of phantom time.
+
+## Dating what happened before anything recorded the time
+
+Task 262 (issue #5, 2026-11-03): 7,066 host→board failure lines in a log
+with no times, to be dated and named the same day rather than waiting for a
+capture. It worked, and costmo closed the issue on it. The tools:
+
+```bash
+D=.claude/skills/measure-live-data
+$D/board-query.sh $D/dating-dump.js > /tmp/board.json              # turns, admin_events, messages; read-only
+node $D/align-host-log.mjs ~/.orchestratinator/log/host.log /tmp/board.json --min 40   # every failure run, bounded by timed anchors
+node $D/turn-lag.mjs "$PWD" /tmp/board.json                          # arrival vs written, by role; releases across desks
+node $D/what-ran.mjs 2026-11-02T17:40:00Z 2026-11-02T18:15:00Z --grep 'e2e|playwright|docker'   # what any session ran then
+```
+
+**The log's order is a clock once anchored.** Host lines that answer the
+operator (an answered form, a new conversation, a bind, a reopen by id, a
+move by path) pair with timed `admin_events` rows, and each failure run
+sits between two of them. Use the longest chain, never a greedy walk: greedy
+drifted by days and put 2,700 lines into 35 minutes. The chain reproduced
+QA's own placement of a run to the second.
+
+**Other clocks on this machine**, measured that day, with how far back each
+reaches:
+
+| clock | read with | reaches |
+|---|---|---|
+| sleep / wake | `pmset -g log \| grep -E '^[0-9-]+ [0-9:]+ [+-][0-9]{4} (Sleep\|Wake\|DarkWake) '` (the event column; Assertion lines also say "Wake Lock") | ~4 days (a ring) |
+| deploys | `docker images -a --format '{{.ID}} {{.CreatedAt}}'`: one build per `up --build` | as long as old images aren't pruned |
+| reboots | `last reboot` | since wtmp began |
+| VM under load | `/Library/Logs/DiagnosticReports/com.apple.Virtualization.VirtualMachine_*.cpu_resource.diag` | recent days |
+| Docker Desktop's logs | capture-a-burst's table | ~25 min (monitor.log) to ~10 h (backend) |
+| docker events | `docker events --since …` | **minutes only**, useless for history |
+| what ran | `what-ran.mjs` over every transcript | as long as transcripts are kept |
+
+**What it named, so the next reader starts there**, from the 7,066 lines:
+- **Deploy swaps:** one line each, which an image build time matches.
+- **The laptop asleep:** 2,506 lines. These are work-poll timeouts at the 1 s step, with no event failure and nobody working. They matched the DarkWake counts (136 vs 146), and stopped when the Mac stopped sleeping.
+- **The board unreachable for hours:** 3,997 lines, not named.
+- **Awake, with events failing too:** 237 lines, which began with QA's e2e matrix. A reproduction then caught it: the Docker VM out of memory at 4 GiB.
+
+**Three wrong turns:**
+- **Turn lag read across roles.** Only user turns are a clean clock (p50 0.27 s). Assistant and thinking turns carry generation time, so on their own they look like a lagging relay.
+- **Turn lag used to date a stall that never held events.** The sleep population left no trace in `turns` at all.
+- **A "Docker-heavy" pattern that also matched this repo's own deploys.** It took a window days wide as an overlap. Ask what ran in the minute a burst *started*.
 
 ## Reporting it
 
