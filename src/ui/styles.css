@@ -579,6 +579,30 @@ pre.raw {
 
 /* ---------- settings ---------- */
 
+/* The header's Update button (issue #40): the one place an update is offered. */
+.btn.update { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.btn.update.busy { border-color: var(--busy); color: var(--busy); }
+.btn.update[hidden] { display: none; }
+.set-updates .set-h { margin-bottom: 6px; }
+.set-check { display: flex; gap: 8px; align-items: baseline; margin-top: 6px; font-size: 12.5px; }
+.set-check input { accent-color: var(--accent); }
+.set-facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 10px 0 0; font-size: 12.5px; }
+.set-facts dt { color: var(--muted); }
+.set-facts dd { margin: 0; overflow-wrap: anywhere; }
+.upd-steps { list-style: none; margin: 12px 0 0; padding: 0; font-size: 12.5px; }
+.upd-step { display: grid; grid-template-columns: 16px 1fr; gap: 8px; padding: 4px 0; }
+.upd-step .upd-detail { display: block; overflow-wrap: anywhere; }
+.upd-mark { width: 10px; height: 10px; margin-top: 4px; border-radius: 50%; border: 2px solid var(--off); }
+.upd-step.running .upd-mark { border-color: var(--busy); background: var(--busy-bg); }
+.upd-step.done .upd-mark { border-color: var(--idle); background: var(--idle); }
+.upd-step.skipped .upd-mark { border-color: var(--off); background: var(--off-bg); }
+.upd-step.failed .upd-mark, .upd-step.refused .upd-mark { border-color: var(--block); background: var(--block); }
+.upd-step.pending { color: var(--muted); }
+.upd-int { margin: 4px 0 0; padding-left: 18px; font-size: 12.5px; }
+.upd-int li { margin: 3px 0; }
+.upd-actions { display: flex; gap: 8px; margin-top: 14px; }
+.upd-rule { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+
 .dlg-wide { width: min(740px, calc(100vw - 32px)); }
 
 .set-head { display: flex; align-items: center; gap: 14px; }

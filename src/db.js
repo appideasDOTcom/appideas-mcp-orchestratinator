@@ -258,6 +258,21 @@ export function openDb(path) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_prompts_title ON saved_prompts(title COLLATE NOCASE);
+
+    -- ─── Board settings ───────────────────────────────────────────────────────
+    -- What an operator chooses for the whole board rather than for one browser
+    -- (issue #40: "Settings are per board, not per browser", so the daily
+    -- update check runs once per board, not once per open tab). Key/value
+    -- with JSON values, because there are a handful and they are read whole.
+    -- Not in BACKUP_TABLES: a backup is the team's work, and a restore that
+    -- also turned update checking back on would be a setting changed by a
+    -- file nobody looked inside. The rows live in the /data volume beside
+    -- everything else, so a rebuild keeps them.
+    CREATE TABLE IF NOT EXISTS settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
@@ -737,6 +752,11 @@ export function makeStore(db) {
     // order that eventually disagrees with itself. NOCASE so the list reads
     // alphabetically to a person rather than to ASCII, which would file every
     // lower-case title after every upper-case one.
+    getSetting: db.prepare(`SELECT value, updated_at FROM settings WHERE key = ?`),
+    setSetting: db.prepare(
+      `INSERT INTO settings (key, value) VALUES (@key, @value)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+    ),
     listSavedPrompts: db.prepare(
       `SELECT id, title, content, created_at, updated_at
          FROM saved_prompts ORDER BY title COLLATE NOCASE`
@@ -1606,6 +1626,13 @@ export function makeStore(db) {
     // so nothing can slip between the two, and if anything ever does the write
     // fails rather than quietly making a second "Deploy".
     listSavedPrompts: () => q.listSavedPrompts.all(),
+    /** A board setting, parsed; `fallback` when it was never set or will not parse. */
+    getSetting: (key, fallback = null) => {
+      const row = q.getSetting.get(key);
+      if (!row) return fallback;
+      try { return JSON.parse(row.value); } catch { return fallback; }
+    },
+    setSetting: (key, value) => q.setSetting.run({ key, value: JSON.stringify(value) }).changes,
     getSavedPrompt: (id) => q.getSavedPrompt.get(id) ?? null,
     /** The prompt holding this title, if any — `exceptId` skips the row being edited. */
     savedPromptByTitle: (title, exceptId = null) => {

@@ -8,6 +8,9 @@ import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
 import { createAuth } from './auth.js';
+import { buildCommit } from './build-info.js';
+import { createUpdates } from './updates.js';
+import { HOST_STALE_SECONDS } from './floor.js';
 
 // Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
 // through compose's `environment:` block instead, so a missing file is normal.
@@ -19,6 +22,9 @@ const NAME = 'appideas-orchestratinator';
 // package.json the first time one of them is bumped alone, and the dashboard
 // header then confidently reports a build that doesn't exist.
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+// And the commit it was built from, which is what an update compares (issue
+// #40): written into the image at build, read from the clone run bare.
+const COMMIT = buildCommit();
 const PORT = Number(process.env.PORT ?? 8787);
 // Inside Docker the process must bind 0.0.0.0 to be reachable through the port
 // mapping; compose publishes it on 127.0.0.1 only. Set HOST=127.0.0.1 when
@@ -241,6 +247,8 @@ app.get('/health', (_req, res) => {
     ok: true,
     name: NAME,
     version: VERSION,
+    // What a page waiting out an update reads to know the new build is up.
+    commit: COMMIT,
     sessions: Object.keys(transports).length,
     session_stats: { ...sessionStats },
     ts: new Date().toISOString(),
@@ -378,6 +386,10 @@ async function handleSessionRequest(req, res) {
 app.get('/mcp', handleSessionRequest);
 app.delete('/mcp', handleSessionRequest);
 
+// Checking GitHub for a newer build, and the update the host carries out.
+const updates = createUpdates({ store, sessions, version: VERSION, commit: COMMIT, hostStaleSeconds: HOST_STALE_SECONDS });
+updates.startTimer();
+
 // Dashboard at `/` (+ its /api/* endpoints). Mounted last so it can never shadow
 // an MCP route. There is no guard in front of it: the board is open to anything
 // that can reach this port, which is the whole model on a single machine behind a
@@ -386,12 +398,14 @@ app.delete('/mcp', handleSessionRequest);
 app.use(createWebRouter({
   store,
   sessions,
+  updates,
   sessionStats,
   auth,
   closeSessionsFor,
   meta: {
     name: NAME,
     version: VERSION,
+    commit: COMMIT,
     port: PORT,
     dbPath: DB_PATH,
     claimTtlMinutes: Number(process.env.CLAIM_TTL_MINUTES ?? 15),

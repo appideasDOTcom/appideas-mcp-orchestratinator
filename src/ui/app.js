@@ -33,6 +33,9 @@ const el = {
   openSettings: $('open-settings'),
   setDlg: $('settings-dlg'),
   setBody: $('set-body'),
+  updBtn: $('update-btn'),
+  updDlg: $('update-dlg'),
+  updBody: $('upd-body'),
 };
 
 /* ---------- put away: what the pills read ---------- */
@@ -1288,6 +1291,7 @@ function toolsPanel() {
     : '';
 
   return `
+    ${updatesSection(ui.state?.update)}
     <div class="set-tool">
       <div>
         <h4 class="set-h">Export a backup</h4>
@@ -1447,6 +1451,316 @@ el.setBody.addEventListener('change', (e) => {
 
 el.setDlg.addEventListener('close', () => { set.backup = null; set.backupName = null; });
 
+/* ---------- updates: what the page decides ---------- */
+
+/*
+ * Issue #40. The board checks GitHub for a newer build (src/updates.js) and
+ * the host beside it carries the update out (host/update.js); everything the
+ * page decides about that is in this section, pure, so test/update.mjs lifts
+ * it and runs it over payloads the server built. The drawing is the next
+ * section.
+ *
+ * The button in the header is the one place an update is offered, and never
+ * while checking is off: `available` is false then, whatever a press of
+ * Check now found. While an update runs it reads "Updating…" instead, so the
+ * progress can be reopened from where it was started.
+ */
+
+/** Every step the host carries out, in order, with the words the page uses. */
+const UPDATE_STEPS = [
+  ['preflight', 'Check the clone'],
+  ['fetch', 'Fetch from GitHub'],
+  ['checkout', 'Move the clone to the commit'],
+  ['server', 'Rebuild and restart the server'],
+  ['plugin', 'Update the plugin'],
+  ['host', 'Restart the host'],
+];
+
+const sha7 = (sha) => (typeof sha === 'string' && sha ? sha.slice(0, 7) : null);
+const updRunning = (run) => !!run && (run.state === 'queued' || run.state === 'running');
+
+/**
+ * The header's button, or null for none. A run that stopped after the board
+ * was rebuilt keeps it, as "Update stopped": past the rebuild nothing is
+ * newer, so without it the failure had no way onto the page (PR #42
+ * finding 1).
+ */
+function updateButton(u) {
+  if (!u) return null;
+  if (updRunning(u.run)) return { label: 'Updating…', title: `Updating to ${u.run.version ?? sha7(u.run.commit)} — show progress` };
+  if (u.stopped) return { label: 'Update stopped', title: `The update to ${u.stopped.version ?? sha7(u.stopped.commit)} stopped at "${u.stopped.step}" — the board is on it, the rest may not be` };
+  if (u.available && u.latest) return { label: 'Update available', title: `${u.latest.version ?? ''} ${sha7(u.latest.sha)} on ${u.branch} — this board is ${sha7(u.current.commit) ?? 'on an unknown commit'}`.trim() };
+  return null;
+}
+
+/** "3 min ago", from an ISO time, for "when it last checked". */
+function updAgo(iso, nowMs = Date.now()) {
+  const t = Date.parse(iso ?? '');
+  if (!Number.isFinite(t)) return null;
+  const s = Math.max(0, Math.round((nowMs - t) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+
+/** What "Latest" says in Settings: the commit, or "You have the latest", or why it cannot say. */
+function latestText(u) {
+  const st = u?.standing?.state;
+  // Never "You have the latest" while an update stands stopped half-way.
+  if (u?.stopped) return `The update to ${u.stopped.version ? `v${u.stopped.version} · ` : ''}${sha7(u.stopped.commit)} stopped at "${u.stopped.step}". This board is on it; the host ${u.host?.build?.commit && u.host.build.commit !== u.current?.commit ? `runs ${sha7(u.host.build.commit)}` : 'and the plugin may not be'}.`;
+  if (!u || st === 'unchecked') return `Not checked on ${u?.branch ?? 'this branch'} yet`;
+  if (st === 'latest') return 'You have the latest';
+  const l = u.latest;
+  const what = l ? `${l.version ? `v${l.version} · ` : ''}${sha7(l.sha)}` : '?';
+  if (st === 'ahead') return `${what} — this build is ahead of ${u.branch}`;
+  if (st === 'behind') return `${what} — ${u.standing.behind_by ? `${u.standing.behind_by} commit${u.standing.behind_by === 1 ? '' : 's'} newer than this build` : 'newer than this build'}`;
+  if (st === 'diverged') return `${what} — this build was made from commits that are not on ${u.branch}`;
+  return `${what}${u.standing?.why ? ` — ${u.standing.why}` : ''}`;
+}
+
+/** What "Last checked" says, with the failure of the last attempt if it failed. */
+function checkedText(u, nowMs = Date.now()) {
+  if (!u?.checked_at && !u?.tried_at) return 'Never';
+  const ok = u.checked_at ? updAgo(u.checked_at, nowMs) : null;
+  const failed = u.error && u.tried_at && (!u.checked_at || Date.parse(u.tried_at) >= Date.parse(u.checked_at));
+  if (failed) return `${ok ? `${ok}; ` : ''}the last try (${updAgo(u.tried_at, nowMs)}) failed`;
+  return ok;
+}
+
+/** The steps as the dialog draws them: every one, reported or still to come. */
+function updateStepRows(run) {
+  const by = new Map((run?.steps ?? []).map((s) => [s.step, s]));
+  return UPDATE_STEPS.map(([step, label]) => {
+    const s = by.get(step);
+    return { step, label, state: s?.state ?? 'pending', detail: s?.detail ?? null };
+  });
+}
+
+/**
+ * What an update will interrupt, as sentences for the confirmation (Don't
+ * break: "Confirm before the update starts, and the confirmation names what
+ * will be interrupted"). The two restarts are the deploy skill's "Before
+ * touching anything".
+ */
+function interruptLines(u) {
+  const n = u?.interrupts?.sessions ?? 0;
+  const w = u?.interrupts?.windows ?? [];
+  const lines = [
+    `The server is rebuilt and restarted. The board goes away for a short while, and presence blanks for every desk (${n} connected now) until each one's next tool call.`,
+    `The host on ${u?.host?.name ?? 'this machine'} restarts. ${w.length
+      ? `The relay pauses for a few seconds on ${w.length} open window${w.length === 1 ? '' : 's'}: ${w.slice(0, 6).join(', ')}${w.length > 6 ? `, +${w.length - 6} more` : ''}. The windows themselves keep running.`
+      : 'No window is open on it now.'}`,
+    'The plugin is updated if plugin/ changed. Windows already open keep the hooks they started with until they restart.',
+  ];
+  return lines;
+}
+
+/**
+ * Reload once the server answers as the build an update asked for. Only for
+ * an update, and only when this page was loaded from another build, so the
+ * page that has already reloaded does not reload again, and a deploy done by
+ * hand reloads nobody's page under them.
+ */
+function reloadsFor(pageCommit, answeredCommit, run) {
+  return !!(run && pageCommit && answeredCommit && answeredCommit === run.commit && pageCommit !== answeredCommit);
+}
+
+/* ---------- updates: the dialog ---------- */
+
+const upd = {
+  pageCommit: null,   // the build this page was loaded from: the first state's
+  watching: null,     // the run whose server step this page is waiting out
+  away: false,        // the board did not answer the last health read
+  error: null,        // a refused Check now / Update, in words
+  note: null,
+  busy: false,
+};
+
+function updatesSection(u) {
+  if (!u) return '<div id="set-updates"></div>';
+  const cur = u.current ?? {};
+  return `
+    <div class="set-tool set-updates" id="set-updates">
+      <div>
+        <h4 class="set-h">Updates</h4>
+        <label class="set-check"><input type="checkbox" data-upd="check" ${u.check ? 'checked' : ''}>
+          <span><b>Check for updates</b> <span class="muted">— once a day, from GitHub. Off, the board contacts GitHub only when you press Check now.</span></span></label>
+        <label class="set-check"><input type="checkbox" data-upd="dev" ${u.dev ? 'checked' : ''}>
+          <span><b>Use the development version</b> <span class="muted">— follow <span class="mono">develop</span> instead of <span class="mono">main</span>.</span></span></label>
+        <dl class="set-facts">
+          <dt>Current</dt><dd class="mono">v${esc(cur.version ?? '?')} · ${esc(sha7(cur.commit) ?? 'commit unknown')}</dd>
+          <dt>Latest on ${esc(u.branch)}</dt><dd>${u.latest?.url && u.standing?.state !== 'latest'
+            ? `<a href="${esc(u.latest.url)}" target="_blank" rel="noopener">${esc(latestText(u))}</a>` : esc(latestText(u))}</dd>
+          <dt>Last checked</dt><dd>${esc(checkedText(u) ?? 'Never')}</dd>
+        </dl>
+        ${u.error ? `<div class="set-err">${esc(u.error)}</div>` : ''}
+        ${upd.note ? `<p class="muted tiny">${esc(upd.note)}</p>` : ''}
+      </div>
+      <button type="button" class="btn" data-upd="checknow" ${upd.busy ? 'disabled' : ''}>Check now</button>
+    </div>`;
+}
+
+function updatePanel(u) {
+  const run = u?.run ?? null;
+  const target = run && (updRunning(run) || run.state !== 'done' || run.commit === u.current?.commit) ? run : null;
+  const to = (r) => `${r.version ? `v${r.version} · ` : ''}${sha7(r.commit ?? r.sha)}`;
+  // A failed or refused step's words are the banner above the list, which
+  // names the step; they are not repeated under it.
+  const steps = target ? `<ol class="upd-steps">${updateStepRows(target).map((s) => `
+      <li class="upd-step ${esc(s.state)}"><span class="upd-mark" aria-hidden="true"></span>
+        <span><b>${esc(s.label)}</b> <span class="muted tiny">${esc(s.state === 'pending' ? '' : s.state)}</span>
+        ${s.detail && s.state !== 'failed' && s.state !== 'refused' ? `<span class="muted tiny upd-detail">${esc(s.detail)}</span>` : ''}</span></li>`).join('')}</ol>` : '';
+  let head;
+  let body = '';
+  if (target && updRunning(target)) {
+    head = `Updating to ${esc(to(target))}`;
+    body = `<p>${upd.away
+      ? `The board is away while its container is replaced. This page reloads itself when the board answers as ${esc(sha7(target.commit))}.`
+      : 'Every part on this machine is being moved to the new build. This page reloads itself once the server answers as it.'}</p>`;
+  } else if (target && target.state === 'done') {
+    head = `Updated to ${esc(to(target))}`;
+    body = '<p>The server, the host and the plugin are on this build.</p>';
+  } else if (target) {
+    head = target.state === 'refused' ? 'The update was refused' : 'The update stopped';
+    body = `<div class="set-err">${esc(target.error ?? target.state)}</div>`;
+    // Stopped past the rebuild: say what is on which build, and offer to
+    // finish it, which runs the steps again and skips what is done.
+    if (u?.stopped && u.stopped.id === target.id) {
+      const hostOn = u.host?.build?.commit;
+      body += `<p>The board is on ${esc(to(target))}. ${hostOn
+        ? `The host on ${esc(u.host.name)} runs ${esc(sha7(hostOn))}${hostOn === target.commit ? ', the same build' : ', the build the update started from'}.`
+        : 'No host beside the board has reported since.'}</p>
+        ${u.refusal
+          ? `<div class="set-err">${esc(u.refusal)}</div>`
+          : `<p>Finishing runs the steps again and skips what is done: the board is not rebuilt, the plugin is updated if it changed since ${esc(sha7(target.from))}, and the host on ${esc(u.host?.name ?? 'this machine')} restarts.</p>
+             <div class="upd-actions"><button type="button" class="btn primary" data-upd="start" data-commit="${esc(target.commit)}" ${upd.busy ? 'disabled' : ''}>Finish the update</button></div>`}`;
+    }
+  }
+  // The offer, under a finished or failed run as well, while there is one.
+  let offer = '';
+  if (!target || !updRunning(target)) {
+    if (u?.available && u.latest) {
+      const cmp = u.current?.commit ? `https://github.com/${u.repo}/compare/${u.current.commit}...${u.latest.sha}` : u.latest.url;
+      offer = `
+        ${target ? '<hr class="upd-rule">' : ''}
+        <p><b>${esc(to(u.latest))}</b> is the newest commit on <span class="mono">${esc(u.branch)}</span>${u.latest.message ? ` — ${esc(u.latest.message)}` : ''}.
+          This board is v${esc(u.current?.version ?? '?')} · ${esc(sha7(u.current?.commit) ?? 'commit unknown')}.
+          <a href="${esc(cmp)}" target="_blank" rel="noopener">What changed</a></p>
+        ${u.refusal
+          ? `<div class="set-err">${esc(u.refusal)}</div>`
+          : `<p>Updating will:</p><ul class="upd-int">${interruptLines(u).map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
+             <div class="upd-actions"><button type="button" class="btn primary" data-upd="start" data-commit="${esc(u.latest.sha)}" ${upd.busy ? 'disabled' : ''}>Update now</button>
+               <button type="button" class="btn" data-upd="close">Not now</button></div>`}`;
+      head ??= `Update to ${esc(to(u.latest))}`;
+    } else if (!target) {
+      head = 'No update';
+      offer = `<p>${esc(latestText(u))}.</p>`;
+    }
+  }
+  return `
+    <div class="set-head"><h3>${head}</h3><button type="button" class="btn" data-upd="close" title="Close">✕</button></div>
+    ${body}${steps}${offer}
+    ${upd.error ? `<div class="set-err">${esc(upd.error)}</div>` : ''}`;
+}
+
+function renderUpdate(state) {
+  const u = state?.update ?? null;
+  upd.pageCommit ??= state?.server?.commit ?? null;
+  const b = updateButton(u);
+  el.updBtn.hidden = !b;
+  if (b) { el.updBtn.textContent = b.label; el.updBtn.title = b.title; el.updBtn.classList.toggle('busy', updRunning(u.run)); }
+  if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel(u));
+  const sec = el.setDlg.open ? el.setBody.querySelector('#set-updates') : null;
+  if (sec) {
+    const html = updatesSection(u);
+    if (sec.outerHTML !== html) sec.outerHTML = html;
+  }
+  if (updRunning(u?.run)) watchUpdate(u.run);
+}
+
+/** Redraw only on a difference, so a poll does not knock focus off a button. */
+function drawIfChanged(box, html) {
+  if (box.dataset.sig === html) return;
+  box.dataset.sig = html;
+  box.innerHTML = html;
+}
+
+/**
+ * While an update runs, read /health every two seconds whatever auto-refresh
+ * says: the server goes away for the rebuild, and the page has to notice it
+ * coming back as the new build to reload onto it.
+ */
+function watchUpdate(run) {
+  if (upd.watching?.id === run.id) { upd.watching = run; return; }
+  upd.watching = run;
+  const loop = async () => {
+    const r = upd.watching;
+    if (!r) return;
+    let commit = null;
+    try {
+      const res = await fetch('./health', { signal: AbortSignal.timeout(3000), cache: 'no-store' });
+      commit = (await res.json())?.commit ?? null;
+      if (upd.away) { upd.away = false; tick(); }
+    } catch {
+      if (!upd.away) { upd.away = true; if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel({ ...(ui.state?.update ?? {}), run: r })); }
+    }
+    if (reloadsFor(upd.pageCommit, commit, r)) { location.reload(); return; }
+    // Done with: a finished run (seen by the poll) stops the watch.
+    if (!updRunning(ui.state?.update?.run) && !upd.away) { upd.watching = null; return; }
+    setTimeout(loop, 2000);
+  };
+  setTimeout(loop, 2000);
+}
+
+function openUpdate() {
+  upd.error = null;
+  el.updBody.dataset.sig = '';
+  drawIfChanged(el.updBody, updatePanel(ui.state?.update));
+  if (!el.updDlg.open) el.updDlg.showModal();
+}
+
+async function updateAction(act, btn) {
+  if (act === 'close') { el.updDlg.close(); return; }
+  upd.busy = true;
+  upd.error = null;
+  try {
+    if (act === 'start') {
+      const r = await admin('update/start', { commit: btn.dataset.commit });
+      if (ui.state) ui.state.update = r.update;
+    } else if (act === 'checknow') {
+      const r = await admin('update/check', {});
+      upd.note = r.throttled ? (r.note ?? r.error ?? null) : null;
+      if (ui.state) ui.state.update = r.update;
+    } else if (act === 'check' || act === 'dev') {
+      const r = await admin('update/settings', { [act]: btn.checked });
+      if (ui.state) ui.state.update = r.update;
+    }
+  } catch (err) {
+    upd.error = err.message;
+    if (act === 'checknow' || act === 'check' || act === 'dev') upd.note = err.message;
+  } finally {
+    upd.busy = false;
+    renderUpdate(ui.state);
+    if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel(ui.state?.update));
+  }
+}
+
+el.updBtn.addEventListener('click', () => openUpdate());
+el.updDlg.addEventListener('click', (e) => {
+  if (e.target === el.updDlg) { el.updDlg.close(); return; }
+  const btn = e.target.closest('[data-upd]');
+  if (btn) updateAction(btn.dataset.upd, btn);
+});
+el.setBody.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-upd]');
+  if (btn) updateAction(btn.dataset.upd, btn);
+});
+el.setBody.addEventListener('change', (e) => {
+  const box = e.target.closest('input[data-upd]');
+  if (box) updateAction(box.dataset.upd, box);
+});
+
 /* ---------- polling ---------- */
 
 let inFlight = false;
@@ -1478,6 +1792,11 @@ async function tick({ background = false } = {}) {
   try {
     if (POPOUT) {
       ui.state = await getJson('./api/state');
+      // A popout has no header, but it is a page on the old build too: it
+      // watches an update and reloads onto the new one like the floor does
+      // (issue #40). The reload keeps its ?popout= address, so it comes back
+      // as the same desk's popout.
+      renderUpdate(ui.state);
       el.dot.className = 'dot';
       return;
     }
@@ -1490,6 +1809,7 @@ async function tick({ background = false } = {}) {
     ui.hasMore = activity.count >= ui.limit;
     ui.state = state;
     renderServer(state);
+    renderUpdate(state);
     syncChannelFilter(state);
     renderChannels(state);
     renderLog(activity.rows);

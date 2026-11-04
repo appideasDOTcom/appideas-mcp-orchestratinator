@@ -13,6 +13,16 @@ RUN npm install --omit=dev
 
 COPY src ./src
 
+# The commit this image is built from, so the board can compare itself with
+# the newest commit on GitHub (issue #40; src/build-info.js has the why).
+# `gitmeta` is the clone's .git, handed over by docker-compose.yml as a build
+# context of its own: bind-mounted for this one step, never copied into a
+# layer, and not filtered by .dockerignore (which keeps .git out of the main
+# context). Last, because .git changes on every commit and this step is the
+# only one that should rerun for it. A plain `docker build .` has no such
+# context and fails here — build through compose.
+RUN --mount=type=bind,from=gitmeta,target=/gitmeta node src/build-info.js /gitmeta > BUILD_COMMIT
+
 ENV NODE_ENV=production
 ENV PORT=8787
 ENV DB_PATH=/data/orchestratinator.db
