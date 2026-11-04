@@ -354,6 +354,11 @@
     turns: [],
     sending: [],         // messages accepted but not yet seen in the conversation
     delivery: null,      // { state, text, held } — a message the window has but has not read
+    // The chat box's height (issue #13): what fitBox last drew it from, a
+    // press on it in progress, and heights for desks with no session.
+    boxSig: null,
+    boxPress: null,      // { el, before } between a pointerdown on the box and its release
+    boxLoose: new Map(), // `${channel}|${agent}` -> px, for a desk with no session to file it under
 
     sinceTurn: 0,
     lastActivityId: 0,
@@ -926,6 +931,225 @@
     renderPromptMenu();
   }
 
+  /* ---------- chat box height: what the page decides ---------- */
+  // Pure, and lifted into test/floor.mjs by the two markers around this
+  // section — see CLAUDE.md on page logic. Issue #13 (0.10.17).
+  //
+  // The box grows with its text and keeps a height the operator drags it to.
+  // Three numbers decide how tall it is drawn: what the text needs, the
+  // operator's height for this session (a floor, never a ceiling), and the
+  // room the panel has left. Everything in px.
+
+  /** The starting size, in lines: rows="3" in panelShell, today's box. */
+  const BOX_ROWS = 3;
+  /** How far the box grows on its own before it scrolls inside. 14 lines is
+   *  220px at the box's 15px line; the issue asked for 12–15. */
+  const BOX_CAP_ROWS = 14;
+  /** Transcript kept in view under a tall box, so the panel never becomes a
+   *  text field with a header: about three short turns. */
+  const BOX_TURNS_KEEP = 60;
+
+  /** One height per channel + agent + session. The draft is per desk; the
+   *  height is per conversation, because a new one starts at the default. */
+  const boxHeightKey = (channel, agent, session) => `orch.boxh:${channel}|${agent}|${session}`;
+  /** A hosted desk's turns are filed under `host:<host>:<channel>:<agent>`
+   *  until its SDK session announces itself (placeholderSession in
+   *  src/floor.js). The page sees that string as the desk's session. */
+  const isPlaceholderSession = (s) => typeof s === 'string' && s.startsWith('host:');
+
+  /**
+   * How tall to draw the box.
+   *
+   * The operator's height is a floor: never shorter, and the text still grows
+   * it past that, up to the larger of that height and the cap. The room is
+   * applied last, so the alert slot, the send row and the seat links stay on
+   * a panel that is `overflow: hidden` — but never below the starting size.
+   */
+  function boxHeight({ content, base, cap, set = null, room = Infinity }) {
+    const floorH = Math.max(base, set ?? 0);
+    const ceil = Math.max(cap, set ?? 0);
+    const want = Math.max(floorH, Math.min(content, ceil));
+    return Math.max(base, Math.min(want, room));
+  }
+
+  /**
+   * What a press and release on the box did to the operator's height.
+   *
+   * Only the operator's drag sets a height: the page's own growing happens on
+   * input, never between a press and its release, so a height that changed
+   * across one is the drag handle's. A click in the text changes nothing.
+   * Dragged back to the starting size (the box's min-height) clears it.
+   *
+   * `set` is the height already stored for this session, if any. A taller
+   * drag sets a height. A shorter one lowers the stored height when it ends
+   * below it, and otherwise stores nothing: a box its text holds up cannot
+   * be drawn shorter than the text, so a floor dragged under it is one the
+   * operator cannot see, and they met it only after the next send emptied
+   * the box (QA, PR #39 finding 1: 14 lines drawn at 220, dragged to 120,
+   * back to 220 on release, and 120 instead of 55 once emptied).
+   */
+  function dragOutcome({ before, after, base, set = null }) {
+    if (Math.abs(after - before) < 1) return { kind: 'none' };
+    if (after <= base + 1) return { kind: 'clear' };
+    if (after < before && !(set != null && after < set)) return { kind: 'none' };
+    return { kind: 'set', height: Math.round(after) };
+  }
+
+  /**
+   * A height set while the desk was on its placeholder is that session's, so
+   * it goes to the first real id the panel sees. `stored` is this desk's
+   * heights by session. The real id keeps its own if it has one; the
+   * placeholder's heights are dropped either way, because the next window
+   * that opens on this desk is filed under the same placeholder string and
+   * must start at the default.
+   */
+  function boxCarry(session, stored) {
+    if (!session || isPlaceholderSession(session)) return null;
+    const held = Object.keys(stored ?? {}).filter(isPlaceholderSession);
+    if (!held.length) return null;
+    const own = stored[session] != null;
+    return { to: session, height: own ? null : stored[held[held.length - 1]], drop: held };
+  }
+
+  /* ---------- chat box height: the drawing ---------- */
+
+  /** This desk's stored heights, by session. */
+  function loadBoxHeights(channel, agent) {
+    const prefix = boxHeightKey(channel, agent, '');
+    const out = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k?.startsWith(prefix)) continue;
+        const h = Number(localStorage.getItem(k));
+        if (h > 0) out[k.slice(prefix.length)] = h;
+      }
+    } catch { /* storage blocked: the box auto-grows and keeps nothing */ }
+    return out;
+  }
+  function saveBoxHeight(channel, agent, session, h) {
+    try {
+      if (h) localStorage.setItem(boxHeightKey(channel, agent, session), String(h));
+      else localStorage.removeItem(boxHeightKey(channel, agent, session));
+    } catch { /* as above */ }
+  }
+
+  /** The box's starting size and cap, read off its own computed style so a
+   *  change to the font or padding in styles.css moves both. */
+  function boxMetrics(ta) {
+    const cs = getComputedStyle(ta);
+    const line = parseFloat(cs.lineHeight) || 15;
+    const extra = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+      + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+    const border = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+    // scrollHeight counts padding and not border, so `border` is what turns
+    // a scrollHeight into the box's border-box height.
+    return { base: Math.ceil(line * BOX_ROWS + extra), cap: Math.ceil(line * BOX_CAP_ROWS + extra), border };
+  }
+
+  /**
+   * The tallest the box may be with everything else still on the panel:
+   * the panel's max-height, less every part of it that is not the box or the
+   * transcript, less a little transcript. Read each time, because the alert
+   * slot above the box grows with a question and shrinks when it is answered.
+   */
+  function boxRoom(ta, wrap) {
+    const turns = $('p-turns');
+    const last = wrap.lastElementChild;
+    const cs = getComputedStyle(wrap);
+    const max = parseFloat(cs.maxHeight);
+    if (!turns || !last || !(max > 0)) return Infinity;
+    // Measured from the parts, not from the panel's own height: once a box
+    // pushes the panel past its max-height, the panel's height is clamped
+    // there and the overflow is merely hidden, so "panel less box" would
+    // grow with the box (a red in check-chatbox's mutant without the drag's
+    // max-height: the room followed the drag off the panel).
+    const w = wrap.getBoundingClientRect();
+    const t = turns.getBoundingClientRect();
+    const above = t.top - w.top;
+    const below = last.getBoundingClientRect().bottom - t.bottom + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingBottom);
+    return Math.floor(max - above - below + ta.offsetHeight - BOX_TURNS_KEEP);
+  }
+
+  /**
+   * Draw the box at its height. Called wherever its text or its desk's
+   * session can have changed: every render of the panel (which is how a new
+   * session on an open desk is noticed — the shell is not rebuilt for one),
+   * and stashDraft, which every path that sets `.value` already calls.
+   * Cheap when nothing changed, because the inputs are compared first.
+   */
+  function fitBox() {
+    const ta = $('p-text');
+    const wrap = $('floor-panel');
+    if (!ta || !wrap?.dataset.agent || wrap.classList.contains('hidden') || !ta.offsetParent) return;
+    if (ui.boxPress) return;   // the operator has hold of the handle
+    const { channel, agent } = wrap.dataset;
+    const session = sessionFilter();
+    let set = null;
+    if (session) {
+      const stored = loadBoxHeights(channel, agent);
+      const carry = boxCarry(session, stored);
+      if (carry) {
+        if (carry.height) { saveBoxHeight(channel, agent, carry.to, carry.height); stored[carry.to] = carry.height; }
+        for (const s of carry.drop) { saveBoxHeight(channel, agent, s, null); delete stored[s]; }
+      }
+      set = stored[session] ?? null;
+    } else {
+      // No session to file it under (a desk that cannot chat): kept for as
+      // long as the page is, and no longer.
+      set = ui.boxLoose.get(`${channel}|${agent}`) ?? null;
+    }
+    const { base, cap, border } = boxMetrics(ta);
+    const room = boxRoom(ta, wrap);
+    const sig = `${channel}|${agent}|${session}|${set}|${room}|${ta.clientWidth}|${ta.value}`;
+    if (sig === ui.boxSig) return;
+    ui.boxSig = sig;
+    // Shrinking it to measure would scroll the transcript out from under a
+    // reader who was at the bottom, and the box's own scroll with it.
+    const turns = $('p-turns');
+    const stuck = turns && turns.scrollHeight - turns.scrollTop - turns.clientHeight < 4;
+    const top = ta.scrollTop;
+    ta.style.minHeight = `${base}px`;
+    ta.style.height = `${base}px`;
+    const content = ta.scrollHeight + border;
+    const h = boxHeight({ content, base, cap, set, room });
+    ta.style.height = `${h}px`;
+    // The drag handle obeys the same room, so a drag cannot push the foot off.
+    ta.style.maxHeight = Number.isFinite(room) ? `${Math.max(base, room)}px` : '';
+    ta.scrollTop = top;
+    if (stuck) turns.scrollTop = turns.scrollHeight;
+  }
+
+  /** The end of a press on the box: if its height moved, the operator dragged
+   *  it, and that height is theirs for this desk's session. */
+  function endBoxPress() {
+    const p = ui.boxPress;
+    if (!p) return;
+    ui.boxPress = null;
+    const ta = $('p-text');
+    const wrap = $('floor-panel');
+    if (!ta || ta !== p.el || !wrap?.dataset.agent) return;
+    const { channel, agent } = wrap.dataset;
+    const session = sessionFilter();
+    const set = session ? loadBoxHeights(channel, agent)[session] ?? null : ui.boxLoose.get(`${channel}|${agent}`) ?? null;
+    const out = dragOutcome({ before: p.before, after: ta.offsetHeight, base: boxMetrics(ta).base, set });
+    if (out.kind !== 'none') {
+      const h = out.kind === 'set' ? out.height : null;
+      if (session) saveBoxHeight(channel, agent, session, h);
+      else if (h) ui.boxLoose.set(`${channel}|${agent}`, h);
+      else ui.boxLoose.delete(`${channel}|${agent}`);
+    }
+    ui.boxSig = null;
+    fitBox();
+  }
+  document.addEventListener('pointerdown', (e) => {
+    if (e.target?.id === 'p-text' && e.button === 0) ui.boxPress = { el: e.target, before: e.target.offsetHeight };
+  }, true);
+  document.addEventListener('pointerup', endBoxPress, true);
+  document.addEventListener('pointercancel', endBoxPress, true);
+  // The panel's max-height is in vh, so the room changes with the window.
+  window.addEventListener('resize', () => fitBox());
+
   /* ---------- drafts ----------
      What is in the compose box belongs to the desk, not to the panel.
 
@@ -960,6 +1184,11 @@
     const wrap = $('floor-panel');
     if (!ta || !wrap?.dataset.agent) return;
     saveDraft(wrap.dataset.channel, wrap.dataset.agent, ta.value);
+    // Every path that puts text in the box or takes it out comes through
+    // here — typing, a draft put back, a prompt inserted, a lost message
+    // returned, the box emptied after a send, a command completed — and
+    // none of the others fire an `input` event. So the height follows here.
+    fitBox();
   }
 
   /**
@@ -3029,6 +3258,10 @@
     // The old shell's box goes with the old shell. File it first — under the
     // desk it was typed for, which is still what the dataset says.
     stashDraft();
+    // A new box, drawn at no height yet: whatever fitBox last compared is
+    // about the element going away.
+    ui.boxSig = null;
+    ui.boxPress = null;
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
     delete wrap.dataset.ended;
@@ -3822,6 +4055,9 @@
       partialNode.remove();
     }
     for (const w of wrap.querySelectorAll('.t-when[data-at]')) w.textContent = ago(w.dataset.at);
+    // The box last: its room depends on the alert slot drawn above, and a
+    // session that changed under an open desk is noticed here (issue #13).
+    fitBox();
     if (ui.stick) box.scrollTop = box.scrollHeight;
   }
 

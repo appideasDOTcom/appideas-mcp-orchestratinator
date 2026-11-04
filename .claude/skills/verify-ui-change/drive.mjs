@@ -249,8 +249,9 @@ async function connect(target) {
      * the held mouse. The release then landed on `#dlg-body` and no click
      * fired: 14 of 26 trials, against 0 of 20 with no moves (QA, PR #36 N1).
      * A drag keeps its moves, because the moves are the gesture.
+     * `held` is a function run before the release, with the button down.
      */
-    press: async (from, to = from, { steps } = {}) => {
+    press: async (from, to = from, { steps, held } = {}) => {
       const at = async (p) => (typeof p === 'string'
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(p)});
@@ -271,16 +272,32 @@ async function connect(target) {
       for (let i = 1; i <= steps; i++) {
         await mouse('mouseMoved', { x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, 1);
       }
+      // `held` runs with the button still down at the end point: what a
+      // drag looks like before the page hears it end (issue #13's handle,
+      // whose limit is only visible mid-drag).
+      const during = held ? await held() : undefined;
       await mouse('mouseReleased', b, 0);
-      return { from: a, to: b };
+      return { from: a, to: b, during };
     },
-    /** A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter'). */
-    key: async (key) => {
+    /**
+     * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').
+     *
+     * `shift` holds Shift for it. `text` is what the key types if nothing
+     * prevents it: a `rawKeyDown` alone types nothing, so Shift+Enter in a
+     * textarea adds its newline only as `key('Enter', { shift: true, text: '\r' })`.
+     */
+    key: async (key, { shift = false, text = undefined } = {}) => {
       const code = key.length === 1 ? `Key${key.toUpperCase()}` : key;
       const vk = { Escape: 27, Enter: 13, Tab: 9 }[key] ?? key.toUpperCase().charCodeAt(0);
-      await cmd('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk });
-      await cmd('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk });
+      const modifiers = shift ? 8 : 0;
+      await cmd('Input.dispatchKeyEvent', text === undefined
+        ? { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, modifiers }
+        : { type: 'keyDown', key, code, windowsVirtualKeyCode: vk, modifiers, text, unmodifiedText: text });
+      await cmd('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers });
     },
+    /** Text typed at the focus through the browser's own input, as a
+     *  keystroke or a paste arrives: one `input` event, `.value` changed. */
+    type: async (text) => cmd('Input.insertText', { text }),
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
     shot: async (path, selector = null, { pad = 8, scale = 3, full = false } = {}) => {
       // `full` captures the whole document rather than the viewport, at the

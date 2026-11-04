@@ -369,6 +369,81 @@ out of it:
   step of the check exists for that: leave and come back while a nudge is
   still in line.
 
+### check-chatbox.mjs — the chat box's height (issue #13, 0.10.17)
+
+The box grows with its text and keeps a height the operator drags it to,
+per channel + agent + session. [`run-check-chatbox.sh`](run-check-chatbox.sh)
+serves any directory (the repo, or a copy holding a mutant or an old SHA) on
+a scratch DB with two `seed-desk.mjs` desks, `bo` and `cy`, runs the check
+and kills all of it. It has the same port refusals as `run-check-backdrop.sh`:
+
+```bash
+PORT=8915 CDP=9265 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"
+# … PASS · 69 of 69        (about a minute)
+```
+
+What it drives, with real input: typing a line at a time with Shift+Enter
+(55px, then 15px a line from the fourth to the fourteenth, flat at 220px,
+scrolling inside past it), and shrinking as text goes. Every way text gets
+into the box without an `input` event: Enter's send, a lost message put
+back by an error turn, a saved prompt, a Tab-completed command, a draft
+loaded on open. Then the box's own resize handle, dragged through
+`press()`: a floor the text grows past, kept across a desk switch, a closed
+panel, a reload and a second tab, and cleared by a drag to the start. A
+real click in the text, which must not read as a drag. A shorter drag of a
+box its text grew, which stores nothing, and a shorter drag of a box at its
+stored height, which lowers it (QA, PR #39 findings 1 and 2). A
+session change on the open desk (host `session` events), a height set on
+the placeholder session carried to the real id, and the alert slot, send
+row and links still on the panel at three viewports with a permission
+prompt up and the handle dragged as far as it goes.
+
+Three things it taught:
+
+- **The native resize handle is visible to the page.** Measured on Chrome
+  through `press()` (2026-11-04): `pointerdown` and `mousedown` on the
+  textarea, `pointerup` and `mouseup` on the document (target `DIV`).
+  So the page tells a drag from its own growing by the height changing
+  between a press and its release (`dragOutcome`).
+- **A Chrome left with a crashed check's tabs stopped answering.** After a
+  few runs that threw mid-way, `Page.navigate` went 30 s without an answer,
+  and the saved-prompt menu was closed by two `scroll` events on `#p-turns`
+  that a fresh Chrome never fired. Kill the CDP Chrome (`pkill -f
+  "remote-debugging-port=<port>( |$)"`) before believing either. The
+  runner kills its own at the end.
+- **The panel's turns reload races turns landing in the same moment as a
+  session change.** Measured on HEAD's page as well as this one: a host
+  `session` event and 30 turns posted together drew 30 of 38 turns on the
+  base and 38 on the tree, and on one run of the check none at all. Not
+  issue #13's. The check lets the old session's turns in before posting
+  more.
+
+- **Some readings must be taken at once, and some mid-gesture.** The
+  panel renders every 2 s and refits the box, so a step that waited for a
+  height passed with `stashDraft`'s fit removed. The text-setting steps
+  read with no wait (`NOW`). And the page refits the box on release, so
+  the drag's own limit (its `max-height`) is visible only while the handle
+  is held. The panel step reads it through `press(…, { held })`.
+
+`drive.mjs` gained three things for it:
+- `type(text)`, one `Input.insertText`: an `input` event, like a keystroke
+  or a paste.
+- `key(name, { shift, text })`. A `rawKeyDown` types nothing, so Shift+Enter
+  adds its newline only as `key('Enter', { shift: true, text: '\r' })`.
+- `press(from, to, { held })`. `held` runs with the button still down,
+  and its result comes back as `during`.
+
+Page mutants (2026-11-04, `run-page-mutant.sh` with `CHECK='PORT=8916
+CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'`) went
+red on the assertion each was aimed at. Among them: no floor under the
+dragged height, the box's own growing recorded, `stashDraft` without its
+fit, `renderPanel` without its fit, the carry, the drag listener, the
+clear, the drag's `max-height`, and the room as a whole. Two survive, and
+each is held by the other half. The drawn height ignoring the room is held
+by the box's `max-height`, and the room read off the panel's clamped
+height is never wrong while that `max-height` keeps the box on the panel.
+`test/floor.mjs` holds `boxHeight`'s room rule on its own.
+
 ### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
 
 ```bash

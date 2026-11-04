@@ -2837,6 +2837,79 @@ try {
     sql.close();
   }
 
+  // Issue #13: the chat box grows with its text and keeps a height the
+  // operator drags it to, per channel + agent + session. What the page
+  // decides is one lifted section of floor.js. The drawing (line heights,
+  // the native drag handle, what still fits on the panel) is
+  // verify-ui-change's check-chatbox.mjs. If a slice fails, the section
+  // moved: fix the markers, do not route around the test.
+  console.log('\nthe chat box\'s height');
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const a = src.indexOf('  /* ---------- chat box height: what the page decides ---------- */');
+    const b = src.indexOf('  /* ---------- chat box height: the drawing ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the chat-box-height section was not found in src/ui/floor.js between its two section comments');
+    const tmp = `./data/chat-box-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { BOX_ROWS, BOX_CAP_ROWS, boxHeightKey, isPlaceholderSession, boxHeight, dragOutcome, boxCarry };\n`);
+    let box;
+    try { box = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    const { boxHeight, dragOutcome, boxCarry, boxHeightKey, isPlaceholderSession } = box;
+    // The page's numbers: a 15px line and 10px of padding and border, so
+    // three rows are 55px and the cap of fourteen is 220px.
+    const base = 55, cap = 220, lines = (n) => n * 15 + 10;
+    eq([box.BOX_ROWS, box.BOX_CAP_ROWS], [3, 14], 'it starts at three rows, today\'s box, and grows to fourteen (the issue asked 12–15)');
+
+    eq(boxHeight({ content: lines(1), base, cap }), base, 'one line is drawn at the starting size, not shorter');
+    eq([4, 8, 14].map((n) => boxHeight({ content: lines(n), base, cap })), [70, 130, 220], 'it grows a line at a time with the text');
+    eq(boxHeight({ content: lines(30), base, cap }), cap, 'and stops at the cap, past which it scrolls inside');
+    eq(boxHeight({ content: lines(2), base, cap, set: 150 }), 150, 'a dragged height is a floor: two lines in it are drawn at the dragged height');
+    eq(boxHeight({ content: lines(12), base, cap, set: 150 }), lines(12), 'and the text still grows it past that');
+    eq(boxHeight({ content: lines(30), base, cap, set: 150 }), cap, 'up to the cap when the dragged height is shorter than the cap');
+    eq(boxHeight({ content: lines(30), base, cap, set: 300 }), 300, 'or up to the dragged height when that is the larger');
+    eq(boxHeight({ content: lines(30), base, cap, set: 300, room: 180 }), 180, 'the room the panel has left wins over all of it, so the send row and links stay on the panel');
+    eq(boxHeight({ content: lines(30), base, cap, room: 20 }), base, 'but never below the starting size');
+
+    eq(dragOutcome({ before: 100, after: 100, base }), { kind: 'none' }, 'a press and release that moved nothing is a click in the text, not a drag');
+    eq(dragOutcome({ before: 100, after: 100.4, base }), { kind: 'none' }, 'nor is a sub-pixel difference');
+    eq(dragOutcome({ before: 55, after: 140.6, base }), { kind: 'set', height: 141 }, 'a height that moved across a press is the operator\'s');
+    eq(dragOutcome({ before: 180, after: 120, base, set: 180 }), { kind: 'set', height: 120 }, 'a shorter drag lowers a stored height, while it stays above the start');
+    // QA, PR #39 finding 1: a box its text holds up, dragged shorter, came
+    // back to its text's height on release and kept the shorter height as
+    // a floor nobody could see until a send emptied the box.
+    eq(dragOutcome({ before: 220, after: 120, base }), { kind: 'none' }, 'a shorter drag of a box its text grew, with nothing stored, stores nothing');
+    eq(dragOutcome({ before: 220, after: 200, base, set: 150 }), { kind: 'none' }, 'nor does one that ends above the stored height: it would raise the floor by dragging down');
+    eq(dragOutcome({ before: 220, after: 120, base, set: 150 }), { kind: 'set', height: 120 }, 'one that ends below the stored height lowers it');
+    eq(dragOutcome({ before: 150, after: 260, base, set: 150 }), { kind: 'set', height: 260 }, 'and a taller drag sets a height whatever is stored');
+    eq(dragOutcome({ before: 180, after: base, base }), { kind: 'clear' }, 'dragged back to the starting size, it clears');
+    eq(dragOutcome({ before: 180, after: base + 1, base }), { kind: 'clear' }, 'within a pixel of it too');
+
+    eq(boxHeightKey('ch', 'ag', 'sess-1'), 'orch.boxh:ch|ag|sess-1', 'one key per channel, agent and session, beside the draft\'s orch.draft:<channel>|<agent>');
+    const PH = 'host:h1:ch:ag';
+    eq(boxCarry(PH, { [PH]: 140 }), null, 'nothing moves while the desk is still on its placeholder');
+    eq(boxCarry('sess-real', { [PH]: 140 }), { to: 'sess-real', height: 140, drop: [PH] }, 'the real id takes a height set on the placeholder, which is the same session');
+    eq(boxCarry('sess-real', { [PH]: 140, 'sess-real': 90 }), { to: 'sess-real', height: null, drop: [PH] }, 'a real id with its own keeps it, and the placeholder\'s is dropped all the same');
+    eq(boxCarry('sess-real', { 'sess-old': 90 }), null, 'with no placeholder height there is nothing to do');
+    eq(boxCarry(null, { [PH]: 140 }), null, 'nor with no session');
+
+    // The page reads a placeholder by its shape. Hold that to the server's:
+    // a hosted desk whose window has not announced an id is filed under its
+    // placeholder, and one that has, under the id. A channel of its own, so
+    // nothing later in this file counts these desks.
+    const { default: Database } = await import('better-sqlite3');
+    const sql = new Database(DB_PATH);
+    sql.prepare(`INSERT OR REPLACE INTO hosts (host_id, name, last_seen) VALUES ('h-box', 'boxhost', datetime('now'))`).run();
+    for (const [agent, sid] of [['boxph', null], ['boxreal', 'sess-boxreal']]) {
+      sql.prepare(`INSERT OR REPLACE INTO agents (channel, agent, last_seen) VALUES ('boxy', ?, datetime('now'))`).run(agent);
+      sql.prepare(`INSERT OR REPLACE INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, sdk_session_id, state, updated_at)
+                   VALUES ('boxy', ?, 'h-box', ?, NULL, NULL, ?, 'idle', datetime('now'))`).run(agent, `/repo/${agent}`, sid);
+    }
+    sql.close();
+    const boxy = (await floor()).channels.find((c) => c.channel === 'boxy');
+    const sidOf = (agent) => boxy?.desks.find((d) => d.agent === agent)?.hosted?.session_id;
+    eq([sidOf('boxph'), isPlaceholderSession(sidOf('boxph'))], ['host:h-box:boxy:boxph', true], 'a desk with no session id yet is on its placeholder, and the page reads it as one');
+    eq([sidOf('boxreal'), isPlaceholderSession(sidOf('boxreal'))], ['sess-boxreal', false], 'and a desk with a real id is not');
+  }
+
   console.log('\nwhat a backup carries');
   const backup = await (await fetch(`${HOST}/api/admin/backup`)).json();
   const tables = Object.keys(backup.tables ?? {});
