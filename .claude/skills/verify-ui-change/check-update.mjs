@@ -193,8 +193,37 @@ try {
   ok(await ev(`document.getElementById('version').textContent`) === 'v' + JSON.parse(await (await fetch(`${BOARD}/health`)).text()).version, 'and the header names the build that answered');
   await sleep(3500);
   ok(await ev(`window.__afterReload`) === 1, 'it reloads once, not again and again (a marker set after the reload is still there 3.5 s on)');
-  await step(w2.payload.run_id, 'plugin', 'skipped', 'plugin/ is the same in both commits');
-  await step(w2.payload.run_id, 'host', 'running', 'restarting the host');
+
+  console.log('## a failure after the rebuild, and Finish the update (PR #42 finding 1)');
+  await step(w2.payload.run_id, 'plugin', 'failed', 'claude plugin update exited 2: boom. The board is on 2222222; the host was not restarted and runs the code it started with.');
+  ok(await page.waitFor(`document.getElementById('update-btn').textContent === 'Update stopped' && !document.getElementById('update-btn').hidden`, { timeout: 8000 }).then(() => true, () => false), 'the plugin failing past the rebuild leaves an "Update stopped" button in the header');
+  await page.click('#open-settings');
+  await page.waitFor(`!!document.querySelector('#set-updates')`);
+  const latestNow = await ev(`[...document.querySelectorAll('#set-updates dd')][1].textContent.trim()`);
+  ok(latestNow !== 'You have the latest' && /stopped at "plugin"/.test(latestNow) && /host runs 1111111/.test(latestNow), 'Settings does not say "You have the latest"', latestNow);
+  await page.click('[data-set="close"]');
+  await page.click('#update-btn');
+  await page.waitFor(`document.getElementById('update-dlg').open`);
+  const stoppedDlg = JSON.parse(await ev(`JSON.stringify({
+    h: document.querySelector('#upd-body h3').textContent,
+    err: document.querySelector('#upd-body .set-err')?.textContent,
+    text: document.querySelector('#upd-body').textContent,
+    steps: [...document.querySelectorAll('#upd-body .upd-step')].map((li) => li.className.replace('upd-step ', '')),
+    finish: !!document.querySelector('#upd-body [data-upd="start"][data-commit="${C2}"]:not([disabled])'),
+  })`));
+  ok(stoppedDlg.h === 'The update stopped' && /^plugin: claude plugin update exited 2/.test(stoppedDlg.err ?? ''), 'the dialog says which step stopped and why', stoppedDlg.h);
+  ok(/The board is on v0\.10\.19 · 2222222\. The host on testbox runs 1111111, the build the update started from\./.test(stoppedDlg.text), 'and what is on which build', stoppedDlg.text.slice(0, 300));
+  ok(JSON.stringify(stoppedDlg.steps) === JSON.stringify(['done', 'done', 'done', 'done', 'failed', 'pending']), 'with the steps as far as they got', stoppedDlg.steps);
+  ok(stoppedDlg.finish, 'and a Finish the update button');
+  await page.shot(join(SHOTS, 'stopped.png'), '#update-dlg');
+  await page.click('#upd-body [data-upd="start"]');
+  await page.waitFor(`/Updating to/.test(document.querySelector('#upd-body h3').textContent)`, { timeout: 6000 });
+  const [w3] = await work();
+  ok(w3?.kind === 'update' && w3.payload.commit === C2 && w3.payload.finish === true && w3.payload.from === C1, 'Finish queues the same commit, marked as a finish, from where the update started', w3?.payload);
+  for (const s of ['preflight', 'fetch', 'checkout']) await step(w3.payload.run_id, s, 'done');
+  await step(w3.payload.run_id, 'server', 'skipped', 'the board already answers as 0.10.19 at 2222222');
+  await step(w3.payload.run_id, 'plugin', 'done', 'updated');
+  await step(w3.payload.run_id, 'host', 'running', 'restarting the host');
   host.commit = C2; await register();
   ok(await page.waitFor(`document.getElementById('update-btn').hidden`, { timeout: 8000 }).then(() => true, () => false), 'the host back as the new build closes the run and the button goes');
   await page.click('#open-settings');

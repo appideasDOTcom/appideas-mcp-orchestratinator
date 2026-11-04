@@ -1060,8 +1060,28 @@ server half is [`src/updates.js`](src/updates.js), the host half
   `plugin/` differs → exit, and launchd starts the new code. A build that
   fails, or compose saying `Running` (nothing replaced), puts the clone
   back with `git reset --keep`, so the clone and the board stay on the
-  build that is running. Past the rebuild nothing is undone: the step
-  that stopped says what is on which build.
+  build that is running. Past the rebuild nothing is undone.
+- **A run that stops past the rebuild stays on the page until it is
+  finished** (QA, PR #42 finding 1). By then the board answers as the
+  commit, so nothing is newer, the offer is gone, and the page has
+  reloaded off the dialog. A failed plugin step or a host that never came
+  back from its restart then left one log row and Settings reading "You
+  have the latest" with the host on the old build. Now `stoppedOf` (a
+  failed run whose commit is the running build and whose `from` is not)
+  keeps an **Update stopped** button in the header and replaces "You have
+  the latest" in Settings, and the dialog says what is on which build and
+  offers **Finish the update**: the same steps for the same commit,
+  carrying the stopped run's `from`. The host skips the rebuild when
+  `/health` already answers as the commit (a rebuild of an unchanged tree
+  only says `Running`) and compares `plugin/` from that `from`, since the
+  clone is already at the commit. Finishing is the remedy because the
+  alternative was telling the operator to type `claude plugin update`. A
+  run that gave up on a silent host is closed as done when that host does
+  come back as the commit. Two things that close a run when an event is
+  lost at a restart are pinned in `test:update` (QA's Info 3): the board
+  marks the server step done itself when it starts as the run's commit,
+  and the host retries undelivered events for up to a minute before it
+  exits.
 - **The host is always restarted**, even when `host/` did not change, so
   every part reports the commit it was asked for. The run closes when the
   host registers again as that commit, not when it says it is going; a

@@ -1597,7 +1597,7 @@ class Host {
       await this.stop();
       process.exit(0);
     };
-    this.updating = U.runUpdate({ commit: p.commit, branch: p.branch, repo: p.repo }, { say, boardUrl: this.cfg.url, restart })
+    this.updating = U.runUpdate({ commit: p.commit, branch: p.branch, repo: p.repo, from: p.from, finish: p.finish === true }, { say, boardUrl: this.cfg.url, restart })
       .catch((err) => say('preflight', 'failed', `the update stopped on an error in the host: ${err.message}`))
       .finally(() => { this.updating = null; });
   }

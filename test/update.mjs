@@ -111,6 +111,7 @@ if (a[0] === 'plugin') {
   fs.appendFileSync(F + '/claude.log', JSON.stringify({ cwd: process.cwd(), args: a }) + '\\n');
   if (mode === 'missing') { process.stderr.write('Plugin "' + a[2] + '" is not installed\\n'); process.exit(1); }
   if (mode === 'fail') { process.stderr.write('boom\\n'); process.exit(2); }
+  if (mode === 'slow') { setTimeout(() => { process.stdout.write('✔ updated (slowly)\\n'); process.exit(0); }, 2000); return; }
   process.stdout.write('✔ Plugin "' + a[2] + '" updated from 1.0.0 to 1.0.1. Restart to apply changes.\\n'); process.exit(0);
 }
 process.exit(0);
@@ -267,7 +268,9 @@ try {
     assert(u1.available, 'so the header has an Update button');
     eq(apiCalls(), 1, 'one API request for the whole check (the version is raw.githubusercontent, not the API)');
     assert(gh.requests.every((r) => /^appideas-orchestratinator\//.test(r.ua)), 'every request names the board in its user agent, as GitHub requires');
-    await sleep(1500);
+    // Past the 3 s contact gap, so what holds the timer back is the day rule
+    // and not the gap (PR #42 finding 2: at 1.5 s the gap held it alone).
+    await sleep(3100);
     eq(apiCalls(), 1, 'and the timer, ticking every 400ms here, does not check again the same day');
     const rows = await activity();
     assert(rows.some((r) => r.kind === 'admin.update.check' && r.actor === 'system' && /main is at/.test(r.detail ?? '')), 'the daily check is in the activity log, as the system');
@@ -276,14 +279,16 @@ try {
   console.log('\nCheck now, and GitHub\'s hourly limit:');
   {
     const n = apiCalls();
+    const r0 = await admin('check');
+    eq([r0.body.ok, r0.body.throttled ?? false, apiCalls()], [true, false, n + 1], 'a press past the gap asks, with one request');
     const r1 = await admin('check');
     eq([r1.status, r1.body.throttled], [200, true], 'a press inside a minute of the last contact is answered from what is in hand');
     assert(/next is in \d+s/.test(r1.body.note ?? ''), `and says when it may ask again ("${r1.body.note}")`);
-    eq(apiCalls(), n, 'without a request to GitHub');
+    eq(apiCalls(), n + 1, 'without a request to GitHub');
     await sleep(3100);
     const r2 = await admin('check');
     assert(r2.body.ok && !r2.body.throttled, 'past the gap it asks');
-    eq(apiCalls(), n + 1, 'with one request');
+    eq(apiCalls(), n + 2, 'with one request');
     assert((await activity()).some((r) => r.kind === 'admin.update.check' && r.actor === 'operator'), 'and the press is logged as the operator\'s');
     gh.limited = true;
     await sleep(3100);
@@ -404,13 +409,19 @@ try {
     process.env.ORCH_UPDATE_FETCH_URL = ORIGIN;
     process.env.ORCH_UPDATE_HEALTH_TIMEOUT_MS = '1500';
     const U = await import('../host/update.js');
-    const health = { commit: C1 };
-    const stub = http.createServer((_q, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ version: '1.0.1', commit: health.commit })); });
+    // The board as the host reads it: `before` until the stand-in docker has
+    // been asked to build, `commit` after — a real board changes build only
+    // when its container is replaced.
+    const health = { before: C1, commit: C1 };
+    const stub = http.createServer((_q, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ version: '1.0.1', commit: existsSync(join(FIX, 'compose.flag')) ? health.commit : health.before }));
+    });
     await new Promise((r) => stub.listen(STUB_PORT, r));
-    const run = async (commit, branch = 'main') => {
+    const run = async (commit, branch = 'main', extra = {}) => {
       const said = [];
       let restarted = false;
-      const out = await U.runUpdate({ commit, branch, repo: REPO }, {
+      const out = await U.runUpdate({ commit, branch, repo: REPO, ...extra }, {
         say: async (step, st, detail) => { said.push([step, st, detail]); },
         boardUrl: `http://localhost:${STUB_PORT}`,
         restart: async () => { restarted = true; },
@@ -492,6 +503,7 @@ try {
     eq(r.last.slice(0, 2), ['host', 'running'], 'saying so before it goes');
 
     reset(); freshClone(C2);
+    health.before = C2;
     health.commit = C3;
     r = await run(C3);
     eq(r.said.find(([s]) => s === 'plugin')?.slice(0, 2), ['plugin', 'skipped'], 'plugin/ the same in both commits: the plugin step is skipped');
@@ -507,6 +519,22 @@ try {
     setMode('plugin', 'fail');
     r = await run(C2);
     assert(r.last[0] === 'plugin' && r.last[1] === 'failed' && /host was not restarted/.test(r.last[2]) && !r.restarted, 'a plugin update that fails stops there and says the host was not restarted');
+
+    // Finish the update (PR #42 finding 1): the clone and the board are at
+    // the commit already, the plugin and the host are not.
+    reset(); freshClone(C2);
+    health.before = C2;
+    health.commit = C2;
+    r = await run(C2, 'main', { from: C1, finish: true });
+    eq(r.said.map(([s, st]) => `${s}:${st}`).filter((x) => !x.endsWith(':running')),
+      ['preflight:done', 'fetch:done', 'checkout:done', 'server:skipped', 'plugin:done'], 'finishing: a board already on the commit is not rebuilt');
+    assert(/already answers as 1\.0\.1 at /.test(r.said.find(([s]) => s === 'server')[2]), 'and the step says why');
+    eq(lines(join(FIX, 'docker.log')).filter((l) => l.args[0] === 'compose').length, 0, 'docker compose is not run at all');
+    eq(lines(join(FIX, 'claude.log')).length, 1, 'plugin/ is compared from where the update started, so the plugin is updated');
+    assert(r.restarted, 'and the host restarts');
+    reset(); freshClone(C2);
+    r = await run(C2);
+    eq(r.said.find(([s]) => s === 'plugin')?.slice(0, 2), ['plugin', 'skipped'], 'the same run without its starting point compares the clone with itself and would skip the plugin (why finishing carries `from`)');
 
     stub.close();
   }
@@ -632,6 +660,99 @@ try {
     eq(s2.status, 200, 'an update queued for a host that has just died is accepted (it was live a moment ago)');
     const gave = await until(async () => ((await upd()).run?.state === 'failed' ? (await upd()).run : null), 8000);
     assert(gave && /No word from the host on Update Mac .* never picked the update up/.test(gave.error), `and ends as failed, saying the host never took it ("${gave?.error}")`);
+
+  console.log('\nan update that stops after the rebuild, and finishing it (PR #42 finding 1):');
+  {
+    await stopServer();
+    rmSync(DB, { force: true });
+    for (const f of ['docker.log', 'claude.log', 'compose.flag', 'docker.mode', 'plugin.mode']) rmSync(join(FIX, f), { force: true });
+    freshClone(C1);
+    setMode('plugin', 'fail');
+    await startServer(C1, { ORCH_UPDATE_TICK_MS: '300000' });
+    await admin('check');
+    let host = startHost();
+    await until(async () => (await upd()).host && (await upd()).refusal === null, 10000);
+    const rebuilt = (async () => {
+      await until(async () => existsSync(join(FIX, 'compose.flag')), 30000);
+      await sleep(300);
+      await stopServer();
+      await startServer(C2, { ORCH_UPDATE_TICK_MS: '300000' });
+    })();
+    eq((await admin('start', { commit: C2 })).status, 200, 'an update whose plugin step will fail is accepted');
+    await rebuilt;
+    // Failed, and the host heard from again: the board was replaced a moment
+    // ago, and what the host says of itself arrives with its next heartbeat.
+    const failed = await until(async () => { const u = await upd(); return u.run?.state === 'failed' && u.host ? u : null; }, 30000);
+    eq(failed?.run.steps.map((s) => `${s.step}:${s.state}`), ['preflight:done', 'fetch:done', 'checkout:done', 'server:done', 'plugin:failed'], 'it stops at the plugin, after the board was rebuilt');
+    eq([failed?.current.commit, failed?.host?.build?.commit], [C2, C1], 'the board is on the commit; the host, never restarted, is not');
+    eq([failed?.standing.state, failed?.available], ['latest', false], 'nothing is newer any more, so nothing is offered');
+    eq(failed?.stopped?.id, failed?.run.id, 'but the board names the run as stopped half-way');
+    eq(page.updateButton(failed)?.label, 'Update stopped', 'and the header keeps a button for it, the way back into the dialog');
+    const said = page.latestText(failed);
+    assert(said !== 'You have the latest' && /stopped at "plugin"/.test(said) && said.includes(C1.slice(0, 7)), `Settings does not say "You have the latest" ("${said}")`);
+    eq(failed?.refusal, null, 'and finishing it would not be refused');
+
+    // Finish the update, with the board away at the moment the host reports
+    // its last two steps (Info 3: the retry before the host exits). The
+    // stand-in plugin update takes 2 s; the board goes down as it starts and
+    // is back 2.5 s later.
+    setMode('plugin', 'slow');
+    const blip = (async () => {
+      await until(async () => lines(join(FIX, 'claude.log')).length >= 2, 30000);
+      await stopServer();
+      await sleep(2500);
+      await startServer(C2, { ORCH_UPDATE_TICK_MS: '300000' });
+    })();
+    const fin = await admin('start', { commit: C2 });
+    eq([fin.status, fin.body.run?.finishing, fin.body.run?.from], [200, true, C1], 'Finish the update is a run to the same commit, from where the update started');
+    const exited = await new Promise((r) => { host.once('exit', (code) => r(code)); setTimeout(() => r('timeout'), 60000); });
+    eq(exited, 0, 'the host exits once the board, back again, has its last steps');
+    await blip;
+    host = startHost(); // what launchd does
+    const done = await until(async () => ((await upd()).run?.state === 'done' ? upd() : null), 15000);
+    eq(done?.run.steps.map((s) => `${s.step}:${s.state}`), ['preflight:done', 'fetch:done', 'checkout:done', 'server:skipped', 'plugin:done', 'host:done'],
+      'finished: the board is not rebuilt again, the plugin is updated, the host restarts and comes back');
+    eq(lines(join(FIX, 'docker.log')).filter((l) => l.args[0] === 'compose').length, 1, 'docker compose ran once, for the first run only');
+    eq([done?.host?.build?.commit, done?.stopped, page.updateButton(done), page.latestText(done)], [C2, null, null, 'You have the latest'], 'every part on the commit: no button, and now "You have the latest"');
+    host.kill('SIGTERM');
+    await new Promise((r) => host.once('exit', r));
+  }
+
+  console.log('\nthe board\'s own proof of the server step, and a host that comes back late:');
+  {
+    await stopServer();
+    rmSync(DB, { force: true });
+    await startServer(C1, { ORCH_UPDATE_TICK_MS: '300000', ORCH_UPDATE_SILENT_MS: '2500' });
+    await admin('check');
+    // A host played through the board's own doors, so each event is chosen.
+    const reg = (commit) => fetch(`${BOARD}/api/host/register`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
+      body: JSON.stringify({ host_id: 'played', name: 'Played Mac', desks: [], build: { commit }, board_container: CONTAINER, supervised: true,
+        clone: { path: '/played', branch: 'main', head: commit, dirty: false, changes: [] } }),
+    });
+    const ev = (run_id, step, state, detail = null) => fetch(`${BOARD}/api/host/events`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
+      body: JSON.stringify({ host_id: 'played', events: [{ type: 'update', run_id, step, state, detail }] }),
+    });
+    await reg(C1);
+    const st = await admin('start', { commit: C2 });
+    const id = st.body.run?.id;
+    for (const s of ['preflight', 'fetch', 'checkout']) await ev(id, s, 'done');
+    await ev(id, 'server', 'running');
+    // The board is replaced before the host's "server done" reaches it.
+    await stopServer();
+    await startServer(C2, { ORCH_UPDATE_TICK_MS: '300000', ORCH_UPDATE_SILENT_MS: '2500' });
+    const proof = (await upd()).run?.steps.find((s) => s.step === 'server');
+    eq([proof?.state, /the board answers as 2/.test(proof?.detail ?? '') || proof?.detail?.includes(C2.slice(0, 7))], ['done', true], 'a board that starts as the run\'s commit marks the server step done itself, with no word from the host');
+    await ev(id, 'plugin', 'done');
+    await ev(id, 'host', 'running');
+    const gaveUp = await until(async () => ((await upd()).run?.state === 'failed' ? upd() : null), 8000);
+    assert(gaveUp && /"host" \(running\)/.test(gaveUp.run.error ?? ''), `a host that never comes back: the run ends naming its last step ("${gaveUp?.run.error}")`);
+    eq([gaveUp?.stopped?.id, page.updateButton(gaveUp)?.label], [id, 'Update stopped'], 'and stands stopped, with the header\'s button');
+    await reg(C2);
+    const late = await upd();
+    eq([late.run.state, late.stopped, page.updateButton(late), page.latestText(late)], ['done', null, null, 'You have the latest'], 'the host coming back as the commit, late, finishes it');
+  }
   }
 } catch (err) {
   failures++;

@@ -311,7 +311,9 @@ a day. **Update** says what it will interrupt, then the host on the board's
 machine fetches the commit, rebuilds the server, updates the plugin when its
 hooks changed, and restarts itself, and the page reloads onto the new build.
 An update is refused, in words, when the clone has local changes or is not on
-the followed branch. **Settings** (⚙) turns the daily check off, switches to
+the followed branch. One that stops after the server was rebuilt (the plugin
+update failed, say) leaves **Update stopped** in the header, and **Finish the
+update** runs what is left. **Settings** (⚙) turns the daily check off, switches to
 the development version (`develop` instead of `main`), and has **Check now**.
 Restarting the host is macOS-only for now.
 

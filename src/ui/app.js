@@ -1479,10 +1479,16 @@ const UPDATE_STEPS = [
 const sha7 = (sha) => (typeof sha === 'string' && sha ? sha.slice(0, 7) : null);
 const updRunning = (run) => !!run && (run.state === 'queued' || run.state === 'running');
 
-/** The header's button, or null for none. */
+/**
+ * The header's button, or null for none. A run that stopped after the board
+ * was rebuilt keeps it, as "Update stopped": past the rebuild nothing is
+ * newer, so without it the failure had no way onto the page (PR #42
+ * finding 1).
+ */
 function updateButton(u) {
   if (!u) return null;
   if (updRunning(u.run)) return { label: 'Updating…', title: `Updating to ${u.run.version ?? sha7(u.run.commit)} — show progress` };
+  if (u.stopped) return { label: 'Update stopped', title: `The update to ${u.stopped.version ?? sha7(u.stopped.commit)} stopped at "${u.stopped.step}" — the board is on it, the rest may not be` };
   if (u.available && u.latest) return { label: 'Update available', title: `${u.latest.version ?? ''} ${sha7(u.latest.sha)} on ${u.branch} — this board is ${sha7(u.current.commit) ?? 'on an unknown commit'}`.trim() };
   return null;
 }
@@ -1501,6 +1507,8 @@ function updAgo(iso, nowMs = Date.now()) {
 /** What "Latest" says in Settings: the commit, or "You have the latest", or why it cannot say. */
 function latestText(u) {
   const st = u?.standing?.state;
+  // Never "You have the latest" while an update stands stopped half-way.
+  if (u?.stopped) return `The update to ${u.stopped.version ? `v${u.stopped.version} · ` : ''}${sha7(u.stopped.commit)} stopped at "${u.stopped.step}". This board is on it; the host ${u.host?.build?.commit && u.host.build.commit !== u.current?.commit ? `runs ${sha7(u.host.build.commit)}` : 'and the plugin may not be'}.`;
   if (!u || st === 'unchecked') return `Not checked on ${u?.branch ?? 'this branch'} yet`;
   if (st === 'latest') return 'You have the latest';
   const l = u.latest;
@@ -1616,6 +1624,18 @@ function updatePanel(u) {
   } else if (target) {
     head = target.state === 'refused' ? 'The update was refused' : 'The update stopped';
     body = `<div class="set-err">${esc(target.error ?? target.state)}</div>`;
+    // Stopped past the rebuild: say what is on which build, and offer to
+    // finish it, which runs the steps again and skips what is done.
+    if (u?.stopped && u.stopped.id === target.id) {
+      const hostOn = u.host?.build?.commit;
+      body += `<p>The board is on ${esc(to(target))}. ${hostOn
+        ? `The host on ${esc(u.host.name)} runs ${esc(sha7(hostOn))}${hostOn === target.commit ? ', the same build' : ', the build the update started from'}.`
+        : 'No host beside the board has reported since.'}</p>
+        ${u.refusal
+          ? `<div class="set-err">${esc(u.refusal)}</div>`
+          : `<p>Finishing runs the steps again and skips what is done: the board is not rebuilt, the plugin is updated if it changed since ${esc(sha7(target.from))}, and the host on ${esc(u.host?.name ?? 'this machine')} restarts.</p>
+             <div class="upd-actions"><button type="button" class="btn primary" data-upd="start" data-commit="${esc(target.commit)}" ${upd.busy ? 'disabled' : ''}>Finish the update</button></div>`}`;
+    }
   }
   // The offer, under a finished or failed run as well, while there is one.
   let offer = '';

@@ -57,6 +57,17 @@ export function sh(cmd, args, { cwd = CLONE, timeout = 30_000 } = {}) {
   });
 }
 
+/** What the board's /health says it is, as a commit and a phrase for the page. */
+async function boardCommit(boardUrl) {
+  try {
+    const res = await fetch(`${boardUrl}/health`, { signal: AbortSignal.timeout(3000) });
+    const h = await res.json();
+    return { commit: h.commit ?? null, answer: `${h.version ?? '?'} at ${String(h.commit ?? '').slice(0, 7) || 'an unknown commit'}` };
+  } catch (err) {
+    return { commit: null, answer: `nothing (${err.cause?.code ?? err.name})` };
+  }
+}
+
 /** The last few non-empty lines of what a command said, for a sentence on the page. */
 export function tail(r, n = 3) {
   return `${r.stderr}\n${r.stdout}`.split('\n').map((l) => l.trim()).filter(Boolean).slice(-n).join(' · ') || `exit ${r.code}`;
@@ -112,7 +123,7 @@ export async function selfReport() {
  * `restart()` is called last, once every step before it is done.
  * Returns the outcome for the log.
  */
-export async function runUpdate({ commit, branch, repo }, { say, boardUrl, restart }) {
+export async function runUpdate({ commit, branch, repo, from: startedFrom = null, finish = false }, { say, boardUrl, restart }) {
   const fetchUrl = process.env.ORCH_UPDATE_FETCH_URL || `https://github.com/${repo}.git`;
   const s7 = (sha) => String(sha ?? '').slice(0, 7);
   const refuse = async (step, why) => { await say(step, 'refused', why); return { ok: false, step, why }; };
@@ -159,33 +170,40 @@ export async function runUpdate({ commit, branch, repo }, { say, boardUrl, resta
   };
 
   // server
-  await say('server', 'running', 'docker compose up -d --build — the board goes away while its container is replaced');
-  const d = await sh(DOCKER, ['compose', 'up', '-d', '--build'], { timeout: BUILD_TIMEOUT_MS });
-  if (!d.ok) return fail('server', `docker compose up -d --build ${d.code === 'timeout' ? `did not finish in ${BUILD_TIMEOUT_MS / 60_000} minutes` : `exited ${d.code}`}: ${tail(d)}. The board is still the build it was.${await putBack()}`);
-  // "Running" alone means compose found nothing to change: the old container
-  // is still the one serving (deploy-both-halves: it must say Recreated).
-  const said = `${d.stdout}\n${d.stderr}`;
-  if (!/\b(Recreated|Recreate|Started|Created)\b/.test(said)) {
-    return fail('server', `docker compose did not replace the container (it said: ${tail(d, 2)}). The board is still the build it was.${await putBack()}`);
-  }
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
-  let answer = 'nothing';
-  for (;;) {
-    try {
-      const res = await fetch(`${boardUrl}/health`, { signal: AbortSignal.timeout(3000) });
-      const h = await res.json();
-      answer = `${h.version ?? '?'} at ${s7(h.commit) || 'an unknown commit'}`;
-      if (h.commit === commit) break;
-    } catch (err) {
-      answer = `nothing (${err.cause?.code ?? err.name})`;
+  // A board that already answers as the commit is not rebuilt: that is
+  // Finish the update after a run stopped past the rebuild (PR #42 finding
+  // 1), and a rebuild of an unchanged tree would only say "Running" and fail.
+  const already = await boardCommit(boardUrl);
+  if (already.commit === commit) {
+    await say('server', 'skipped', `the board already answers as ${already.answer}`);
+  } else {
+    await say('server', 'running', 'docker compose up -d --build — the board goes away while its container is replaced');
+    const d = await sh(DOCKER, ['compose', 'up', '-d', '--build'], { timeout: BUILD_TIMEOUT_MS });
+    if (!d.ok) return fail('server', `docker compose up -d --build ${d.code === 'timeout' ? `did not finish in ${BUILD_TIMEOUT_MS / 60_000} minutes` : `exited ${d.code}`}: ${tail(d)}. The board is still the build it was.${await putBack()}`);
+    // "Running" alone means compose found nothing to change: the old container
+    // is still the one serving (deploy-both-halves: it must say Recreated).
+    const said = `${d.stdout}\n${d.stderr}`;
+    if (!/\b(Recreated|Recreate|Started|Created)\b/.test(said)) {
+      return fail('server', `docker compose did not replace the container (it said: ${tail(d, 2)}). The board is still the build it was.${await putBack()}`);
     }
-    if (Date.now() > deadline) return fail('server', `the container was replaced, but in ${HEALTH_TIMEOUT_MS / 1000}s the board never answered as ${s7(commit)} — it last answered ${answer}`);
-    await sleep(1000);
+    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+    let answer = 'nothing';
+    for (;;) {
+      const b = await boardCommit(boardUrl);
+      answer = b.answer;
+      if (b.commit === commit) break;
+      if (Date.now() > deadline) return fail('server', `the container was replaced, but in ${HEALTH_TIMEOUT_MS / 1000}s the board never answered as ${s7(commit)} — it last answered ${answer}`);
+      await sleep(1000);
+    }
+    await say('server', 'done', `the board answers as ${answer}`);
   }
-  await say('server', 'done', `the board answers as ${answer}`);
 
   // plugin
-  const same = await sh(GIT, ['diff', '--quiet', from, commit, '--', 'plugin/']);
+  // Compared from where the update started. That is the clone's HEAD before
+  // the checkout, except when finishing: the clone is at the commit by then,
+  // and the plugin is still whatever the stopped run left it.
+  const pluginFrom = finish && /^[0-9a-f]{40}$/.test(String(startedFrom)) ? startedFrom : from;
+  const same = await sh(GIT, ['diff', '--quiet', pluginFrom, commit, '--', 'plugin/']);
   if (same.ok) {
     await say('plugin', 'skipped', 'plugin/ is the same in both commits');
   } else {

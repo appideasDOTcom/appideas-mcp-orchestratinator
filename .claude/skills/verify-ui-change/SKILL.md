@@ -453,7 +453,7 @@ rebuild is), and the host played through `/api/host/register`, `/work` and
 
 ```bash
 node --experimental-websocket .claude/skills/verify-ui-change/check-update.mjs "$PWD" 8925 8926 9275 /tmp/shots
-# … PASS · 35 of 35        (about forty seconds)
+# … PASS · 42 of 42        (about forty seconds)
 pkill -f "remote-debugging-port=9275( |$)"
 ```
 
@@ -465,8 +465,11 @@ Update now with the refusal; a failed run (the banner names the step, the
 steps as far as they got, the update still offered); a good run with the
 board killed mid-update ("the board is away"), the page — and a desk's
 popout open beside it — reloading itself once when it answers as the new
-commit, and the run closing when the host
-registers as it. Shots of each dialog land in the shots directory.
+commit, a plugin step failing after that (the header keeping an
+**Update stopped** button, Settings not saying "You have the latest", the
+dialog saying what is on which build, and **Finish the update** queueing a
+finish from where the update started), and the run closing when the host
+registers as the commit. Shots of each dialog land in the shots directory.
 
 ### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
 

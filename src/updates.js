@@ -79,15 +79,31 @@ export const isNewer = (standing) => standing.state === 'behind' || standing.sta
 export const runActive = (run) => !!run && (run.state === 'queued' || run.state === 'running');
 
 /**
+ * A run that stopped after the board was rebuilt (PR #42 finding 1). The
+ * board already answers as its commit, so nothing is "newer" any more and the
+ * offer is gone, but the plugin and the host may still be on the old build:
+ * a plugin update that failed, or a host that never came back from its
+ * restart. Such a run is what the header shows ("Update stopped") until a run
+ * finishes it, and it is what Finish the update finishes. `from` is the build
+ * the update started from, kept by a finishing run too, so a finish that
+ * stops again is still this.
+ */
+export function stoppedOf(run, commit) {
+  if (!run || !commit || (run.state !== 'failed' && run.state !== 'refused')) return null;
+  return run.commit === commit && run.from !== commit ? run : null;
+}
+
+/**
  * Why an update would be refused before anything is touched, in words for the
- * page, or null. The host checks its clone again when it starts — this is
+ * page, or null. `finishing` is Finish the update on a stopped run: its commit
+ * is the running build, so nothing about the check applies to it. The host checks its clone again when it starts — this is
  * what the board can say from the host's last report, so the confirmation
  * shows the refusal instead of an Update button that would only be refused.
  */
-export function refusalOf({ check, standing, branch, self, host, report, run }) {
+export function refusalOf({ check, standing, branch, self, host, report, run, finishing = false }) {
   if (runActive(run)) return 'An update is already under way.';
-  if (!check?.head?.sha || check.branch !== branch) return `Nothing has been checked on ${branch} yet. Press Check now first.`;
-  if (!isNewer(standing)) return standing.state === 'latest' ? 'This board is already on the newest commit.' : `There is nothing newer on ${branch} to update to.`;
+  if (!finishing && (!check?.head?.sha || check.branch !== branch)) return `Nothing has been checked on ${branch} yet. Press Check now first.`;
+  if (!finishing && !isNewer(standing)) return standing.state === 'latest' ? 'This board is already on the newest commit.' : `There is nothing newer on ${branch} to update to.`;
   if (!self.container) return 'This board is not running in a Docker container, so there is no build for a host to replace. It updates only when it runs from docker-compose.yml.';
   if (!host) return 'No host on this board\'s machine has reported in. The update is carried out by the host running beside the board\'s container, and none is live.';
   if (!report.supervised) return `The host on ${host.name} is not running as its LaunchAgent, so nothing would start it again after the update. Restarting a host is macOS-only today (issues #26, #28).`;
@@ -288,7 +304,10 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
   // proof, whatever the host managed to say before the old one went away.
   {
     const run = getRun();
-    if (runActive(run) && commit && run.commit === commit && stepOf(run, 'server')?.state !== 'done') {
+    const was = stepOf(run ?? { steps: [] }, 'server')?.state;
+    // Only a step not yet said, or said to be running: a finish skips the
+    // server step, and that word must not be overwritten with "done".
+    if (runActive(run) && commit && run.commit === commit && (!was || was === 'running')) {
       addStep(run, 'server', 'done', `the board answers as ${short(commit)}`);
       run.state = 'running';
       putRun(run);
@@ -302,15 +321,22 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
     const standing = standingOf(commit, last, branch);
     const { host, report } = updater(nowMs);
     const run = settleRun(nowMs);
-    const refusal = refusalOf({ check: last, standing, branch, self, host, report: report ?? {}, run });
+    // Finish the update: the stopped run's own commit, which the board is
+    // already on. The steps are the same; the host skips the rebuild when the
+    // board already answers as the commit, and compares plugin/ from where
+    // the update started rather than from the clone, which is at the commit.
+    const stopped = stoppedOf(run, commit);
+    const finishing = !!stopped && wanted === stopped.commit;
+    const refusal = refusalOf({ check: last, standing, branch, self, host, report: report ?? {}, run, finishing });
     if (refusal) return { ok: false, error: refusal };
-    if (wanted !== last.head.sha) return { ok: false, error: `${short(wanted) ?? 'That commit'} is not the newest commit on ${branch} as last checked (${short(last.head.sha)}). Check again.` };
+    if (!finishing && wanted !== last.head.sha) return { ok: false, error: `${short(wanted) ?? 'That commit'} is not the newest commit on ${branch} as last checked (${short(last.head.sha)}). Check again.` };
     const next = {
       id: `${nowMs.toString(36)}-${short(wanted)}`,
       commit: wanted,
-      version: last.head.version,
+      version: finishing ? stopped.version : last.head.version,
       branch,
-      from: commit,
+      from: finishing ? stopped.from : commit,
+      finishing,
       from_version: version,
       host_id: host.host_id,
       host_name: host.name,
@@ -323,9 +349,11 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
     };
     putRun(next);
     store.enqueueHostWork(host.host_id, '*', '*', 'update', {
-      run_id: next.id, commit: wanted, branch, from: commit, repo: REPO,
+      run_id: next.id, commit: wanted, branch, from: next.from, repo: REPO, finish: finishing,
     });
-    log('update.start', short(wanted), `${short(commit) ?? '?'} → ${short(wanted)} on ${branch}${last.head.version ? ` (${last.head.version})` : ''}, by the host on ${host.name}`);
+    log('update.start', short(wanted), finishing
+      ? `finishing the update to ${short(wanted)} that stopped at "${stopped.step}", by the host on ${host.name}`
+      : `${short(commit) ?? '?'} → ${short(wanted)} on ${branch}${last.head.version ? ` (${last.head.version})` : ''}, by the host on ${host.name}`);
     return { ok: true, run: getRun() };
   }
 
@@ -377,6 +405,16 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
     if (runActive(run) && run.host_id === hostId && report.build.commit === run.commit && stepOf(run, 'host')) {
       addStep(run, 'host', 'done', `the host is back as ${short(run.commit)}`);
       finish(run, 'done');
+      return;
+    }
+    // A run that gave up waiting on its host after the restart (settleRun),
+    // whose host then does come back as the commit: every step before it was
+    // done, so the update is too, late. Not a run that stopped earlier — a
+    // failed plugin step leaves the host on its old build, which this never sees.
+    const late = stoppedOf(run, commit);
+    if (late && late.host_id === hostId && report.build.commit === late.commit && stepOf(late, 'host')?.state === 'running') {
+      addStep(late, 'host', 'done', `the host came back as ${short(late.commit)} after the run had given up on it`);
+      finish(late, 'done');
     }
   }
 
@@ -389,6 +427,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
     const standing = standingOf(commit, last, branch);
     const run = settleRun(nowMs);
     const { host, report } = updater(nowMs);
+    const stopped = stoppedOf(run, commit);
     const contact = get('contact', {});
     // What the update would interrupt, for the confirmation to name.
     const hosted = host ? store.listHostedDesks().filter((d) => d.host_id === host.host_id && d.state !== 'offline') : [];
@@ -408,7 +447,10 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
       // Only while checking is on (issue item 5): off, the header shows nothing,
       // even about a check pressed by hand.
       available: s.check && isNewer(standing),
-      refusal: refusalOf({ check: last, standing, branch, self, host, report: report ?? {}, run }),
+      // A run that stopped past the rebuild (stoppedOf): shown until a run
+      // finishes it, and its refusal is Finish the update's, not the offer's.
+      stopped,
+      refusal: refusalOf({ check: last, standing, branch, self, host, report: report ?? {}, run, finishing: !!stopped }),
       host: host ? {
         name: host.name,
         build: report.build,
