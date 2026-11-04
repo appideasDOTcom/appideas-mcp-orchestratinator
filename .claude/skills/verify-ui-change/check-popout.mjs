@@ -101,6 +101,34 @@ await pop.shot(`${shots}/popout-wide.png`, null, { scale: 1 });
 await pop.resize(440, 980);
 await pop.waitFor(`!document.querySelector('#floor-panel').classList.contains('pop-wide')`, { timeout: 3000 })
   .then(() => ok(true, 'and narrow again, back over the chat'), () => ok(false, 'and narrow again, back over the chat'));
+
+// The chat box (#13) in a popout: 18 lines, then its corner dragged far past
+// the window, at three sizes. The send row stays in the window. Before the
+// popout's panel gave boxRoom its height, the box reached 1,123px and the
+// row was drawn off the bottom of every size.
+{
+  const draft = await pop.evalJs(`document.querySelector('#p-text').value`);
+  const fits = [];
+  for (const [w, h] of [[440, 980], [1100, 760], [440, 700]]) {
+    await pop.resize(w, h);
+    await sleep(300);
+    await pop.evalJs(`document.querySelector('#p-text').focus(); 1`);
+    for (let i = 0; i < 18; i++) { await pop.type(`line ${i + 1}`); await pop.key('Enter', { shift: true, text: '\r' }); }
+    const b = await box(pop, '#p-text');
+    await pop.press({ x: b.right - 3, y: b.bottom - 3 }, { x: b.right - 3, y: b.bottom + 900 });
+    await sleep(300);
+    const foot = await box(pop, '#floor-panel .p-foot');
+    const panel = await box(pop, '#floor-panel');
+    fits.push(`${w}x${h}:${Math.round(foot.bottom)}/${Math.round(panel.bottom)}`);
+    await pop.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    const c = await box(pop, '#p-text');
+    await pop.press({ x: c.right - 3, y: c.bottom - 3 }, { x: c.right - 3, y: c.top + 10 });
+  }
+  ok(fits.every((f) => { const [a, b] = f.split(':')[1].split('/').map(Number); return a <= b; }),
+    `a long message and a tall drag keep the send row in the window: ${fits.join(' ')} (foot/panel bottom)`);
+  await pop.resize(440, 980);
+  await pop.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ${JSON.stringify('')} + ${JSON.stringify(draft)}; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+}
 await floor.shot(`${shots}/floor-out.png`, '#floor-panel', { scale: 1 });
 
 console.log('\nno second window');
@@ -360,6 +388,12 @@ const live = await Promise.all([...many, ['bo', floor]].map(([a, w]) =>
   w.waitFor(`[...document.querySelectorAll('#p-turns .t-pending')].some((n) => n.textContent.includes('held ${stamp} for ${a}'))`, { timeout: 4000 }).then(() => true, () => false)));
 ok(live.every(Boolean), `every window's stream delivers: ${live.map((x, i) => `${[...six, 'bo'][i]}=${x ? 'yes' : 'NO'}`).join(' ')}`);
 for (const [, w] of many) await closePop(w);
+
+console.log('\nthe console');
+{
+  const said = [...floor.console(), ...many.flatMap(([, w]) => w.console())];
+  ok(said.length === 0, `no warnings, errors or exceptions in the floor or the popouts${said.length ? `: ${said.slice(0, 3).join(' | ')}` : ''}`);
+}
 
 console.log(`\n${fails ? `${fails} ✗ · FAIL` : 'PASS'}`);
 await floor.close();

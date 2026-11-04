@@ -657,7 +657,7 @@ for a in bo cy d1 d2 d3 d4 d5; do
   node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8931 --db /tmp/pop.db --agent $a > /dev/null &
 done
 ORCH_CDP_PORT=9271 node --experimental-websocket .claude/skills/verify-ui-change/check-popout.mjs http://localhost:8931 /tmp/shots
-# … 55 ✓ · PASS, about two minutes
+# … 57 ✓ · PASS, about two and a half minutes
 ```
 
 It covers detach with the floor's draft, the floor's panel while a desk is

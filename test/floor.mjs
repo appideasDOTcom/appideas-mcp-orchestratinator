@@ -3146,7 +3146,7 @@ try {
     const b = src.indexOf('  /* ---------- popouts: the windows ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the popouts section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/popouts-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { POP_W, POP_TTL_MS, POP_CHAT_MIN, popoutName, popoutQuery, popoutOf, popoutPlace, popoutFeatures, outsNow, boundTo, deskFate, deskScaleOf, popWide };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { POP_W, POP_TTL_MS, POP_CHAT_MIN, popoutName, popoutQuery, popoutOf, popoutPlace, popoutFeatures, outsNow, boundTo, deskFate, deskScaleOf, popWide, popDeskScale };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
 
@@ -3192,6 +3192,8 @@ try {
       'and at the floor\'s widest when nothing usable is recorded');
     eq([page.popWide(230 + page.POP_CHAT_MIN, 230), page.popWide(230 + page.POP_CHAT_MIN - 1, 230)], [true, false],
       'the desk takes a column of its own exactly when the chat beside it keeps POP_CHAT_MIN');
+    eq([page.popDeskScale(1.25, 300, 500), page.popDeskScale(1.25, 300, 300), page.popDeskScale(1.25, 300, 10)], [1.25, 1, 0.625],
+      'in a window too short for it the desk gives way, to half the floor\'s size and no further; with room it is the floor\'s');
   }
 } catch (err) {
   failures++;

@@ -807,6 +807,15 @@ grows every popout's desk with it. With no floor to read, the floor's
 widest is used. A popout wide enough to keep `POP_CHAT_MIN` (420 px) of chat
 beside the desk puts the desk in a column of its own (`pop-wide`).
 
+Where #13's chat box meets a popout: `boxRoom` measures against the
+panel's `max-height`, and a popout's panel has none, because it is the
+window's height. So in a popout the room is the panel's own height, and
+the transcript keeps its popout `min-height` (140px) instead of 60. Before
+that, 18 lines or a drag took the box to 1,123px and the send row out of
+the window at every size (`check-popout.mjs`, red at 440x980, 1100x760 and
+440x700). In a window too short for the desk at the floor's size, the desk
+gives way down to half (`popDeskScale`), never the send row.
+
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a
 room's selection (#23: selection is the floor's, and the popout's desk is

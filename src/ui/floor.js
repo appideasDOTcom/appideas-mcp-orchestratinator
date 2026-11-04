@@ -1057,7 +1057,10 @@
     const turns = $('p-turns');
     const last = wrap.lastElementChild;
     const cs = getComputedStyle(wrap);
-    const max = parseFloat(cs.maxHeight);
+    // A popout's panel has no max-height: it is the window's height (issue
+    // #19), so that is its limit. Without this the room was unlimited
+    // there, and 18 lines or a drag pushed the send row out of the window.
+    const max = ui.popout ? wrap.getBoundingClientRect().height : parseFloat(cs.maxHeight);
     if (!turns || !last || !(max > 0)) return Infinity;
     // Measured from the parts, not from the panel's own height: once a box
     // pushes the panel past its max-height, the panel's height is clamped
@@ -1068,7 +1071,11 @@
     const t = turns.getBoundingClientRect();
     const above = t.top - w.top;
     const below = last.getBoundingClientRect().bottom - t.bottom + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingBottom);
-    return Math.floor(max - above - below + ta.offsetHeight - BOX_TURNS_KEEP);
+    // The transcript keeps BOX_TURNS_KEEP, or its own min-height where the
+    // stylesheet gives it more (a popout's): a box sized past that pushes
+    // the foot off, because the transcript will not shrink to make room.
+    const keep = Math.max(BOX_TURNS_KEEP, parseFloat(getComputedStyle(turns).minHeight) || 0);
+    return Math.floor(max - above - below + ta.offsetHeight - keep);
   }
 
   /**
@@ -4340,6 +4347,20 @@
   /** Whether a popout this wide puts its desk in a column of its own, given the desk column's width in px. */
   const popWide = (windowW, deskColW) => windowW >= deskColW + POP_CHAT_MIN;
 
+  /* The smallest a popout draws its desk, as a share of the floor's size. */
+  const POP_DESK_MIN = 0.5;
+  /**
+   * The scale a popout draws its desk at: the floor's, unless the window is
+   * too short for it, when the desk gives way, down to POP_DESK_MIN of the
+   * floor's. `avail` is the height left for the drawing once the header, the
+   * transcript's least and the composer at its smallest are on the panel; a
+   * desk drawn taller pushed the send row out of a 700px window.
+   */
+  function popDeskScale(scale, drawH, avail) {
+    if (!(drawH > 0) || !(avail >= 0)) return scale;
+    return Math.min(scale, Math.max(scale * POP_DESK_MIN, avail / drawH));
+  }
+
   /** A popup, not a tab: no tab strip, toolbar or navigation (Decided). */
   const popoutFeatures = (p) => `popup=yes,width=${p.width},height=${p.height},left=${p.left},top=${p.top}`;
 
@@ -4497,20 +4518,43 @@
     try { stored = localStorage.getItem(SCALE_KEY); } catch { /* the default */ }
     return deskScaleOf(stored, DESK_SCALE_DEFAULT);
   }
-  /** Size a popout's desk to the floor's, and put it beside the chat when the window is wide enough for both. */
+  /**
+   * Size a popout's desk to the floor's, and put it beside the chat when the
+   * window is wide enough for both. In a window too short for it the desk
+   * gives way (popDeskScale), never the send row.
+   */
   function popLayout() {
     if (!ui.popout) return;
     const wrap = $('floor-panel');
-    const svg = wrap?.querySelector('.p-deskslot svg.popdesk');
+    const slot = wrap?.querySelector('.p-deskslot');
+    const svg = slot?.querySelector('svg.popdesk');
+    const scale = deskScale();
     if (svg) {
       const vb = svg.viewBox.baseVal;
-      svg.style.width = `${Math.round(vb.width * deskScale())}px`;
+      // The column is the desk plus the slot's own padding in its wide form,
+      // and the panel shares the window less main's padding.
+      wrap.classList.toggle('pop-wide', popWide(window.innerWidth - 24, vb.width * scale + 2 * 18 + 1));
+      const wide = wrap.classList.contains('pop-wide');
+      const height = (el) => el?.getBoundingClientRect().height ?? 0;
+      const ta = $('p-text');
+      const compose = wrap.querySelector('.p-compose');
+      const turns = $('p-turns');
+      const slotPad = parseFloat(getComputedStyle(slot).paddingTop) + parseFloat(getComputedStyle(slot).paddingBottom) + 1;
+      const head = height(wrap.querySelector('.p-head')) + height(wrap.querySelector('.p-meta')) + 2;
+      // Beside the chat the desk has the panel's height under the header;
+      // over it, what the transcript's least and the composer at its
+      // smallest leave.
+      const avail = wide
+        ? height(wrap) - head - slotPad
+        : height(wrap) - head - slotPad - (parseFloat(getComputedStyle(turns ?? wrap).minHeight) || 0)
+          - (height(compose) - (ta?.offsetHeight ?? 0) + (ta ? boxMetrics(ta).base : 0));
+      svg.style.width = `${Math.round(vb.width * popDeskScale(scale, vb.height, avail))}px`;
+    } else {
+      wrap?.classList.remove('pop-wide');
     }
-    const slot = wrap?.querySelector('.p-deskslot');
-    // The column is the desk plus the slot's own padding in its wide form.
-    const col = svg ? svg.viewBox.baseVal.width * deskScale() + 2 * 18 + 1 : 0;
-    // The window less main's padding, which is what the panel has to share.
-    wrap?.classList.toggle('pop-wide', !!slot && popWide(window.innerWidth - 24, col));
+    // The chat box's room changes with the layout (the desk above the chat
+    // or beside it, and its size), and the box is fitted to its room (#13).
+    fitBox();
   }
   if (popoutOf(location.search)) {
     window.addEventListener('resize', popLayout);

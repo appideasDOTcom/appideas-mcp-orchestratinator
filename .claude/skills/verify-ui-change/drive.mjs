@@ -133,9 +133,21 @@ async function connect(target) {
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   let id = 0;
   const waiting = new Map();
+  // Every console warning and error the page writes, and every uncaught
+  // exception, from the moment this connects — read with `console()`. A
+  // check asked "no console warnings, no errors" (issue #19 with #13
+  // merged) cannot answer it from the DOM.
+  const said = [];
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); }
+    if (m.method === 'Runtime.consoleAPICalled' && (m.params.type === 'warning' || m.params.type === 'error')) {
+      said.push(`${m.params.type}: ${m.params.args.map((a) => a.value ?? a.description ?? '').join(' ')}`);
+    } else if (m.method === 'Runtime.exceptionThrown') {
+      said.push(`exception: ${m.params.exceptionDetails?.exception?.description ?? m.params.exceptionDetails?.text}`);
+    } else if (m.method === 'Log.entryAdded' && (m.params.entry.level === 'warning' || m.params.entry.level === 'error')) {
+      said.push(`${m.params.entry.level} (${m.params.entry.source}): ${m.params.entry.text}${m.params.entry.url ? ` ${m.params.entry.url}` : ''}`);
+    }
   };
   await new Promise((res) => { ws.onopen = res; });
   /* Every command carries a deadline, because the failure without one is silent
@@ -190,6 +202,8 @@ async function connect(target) {
   };
 
   await cmd('Page.enable');
+  await cmd('Runtime.enable');
+  await cmd('Log.enable');
   const goto = async (url) => {
     await cmd('Page.navigate', { url });
     await waitFor(`document.readyState === 'complete'`, { timeout: 15000 });
@@ -197,6 +211,8 @@ async function connect(target) {
 
   return {
     targetId: target.id,
+    /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
+    console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,
     waitFor,
     goto,
