@@ -74,7 +74,33 @@ await floor.waitFor(`!!document.querySelector('#floor-panel [data-act="bring-bac
 p = await panelOf(floor);
 ok(p.out && !p.composer, 'the floor panel is the header and "Bring chat back here", with no composer', JSON.stringify(p));
 ok(await floor.evalJs(`!!document.querySelector('#floor-rooms .desk[data-agent="bo"]')`), 'the desk stays drawn in its room');
+// The desk at the size the floor draws it (costmo, after the first cut drew
+// it smaller): the hit pad is the cell's full width, in both windows. At the
+// popout's own width first: headless opens a popup at 800 px whatever was
+// asked, which is wide enough for the desk's own column.
+await pop.resize(440, 980);
+await pop.waitFor(`!document.querySelector('#floor-panel').classList.contains('pop-wide')`, { timeout: 3000 });
+const hitW = (page, sel) => page.evalJs(`Math.round(document.querySelector('${sel} .deskHit').getBoundingClientRect().width)`);
+const onFloorW = await hitW(floor, '#floor-rooms .desk[data-agent="bo"]');
+ok(Math.abs(onFloorW - await hitW(pop, '.p-deskslot .desk')) <= 1, `the desk is drawn at the floor's size (${onFloorW}px)`);
+const box = (page, sel) => page.evalJs(`JSON.stringify(document.querySelector('${sel}').getBoundingClientRect())`).then(JSON.parse);
+let slot = await box(pop, '.p-deskslot');
+let turnsBox = await box(pop, '#p-turns');
+ok(slot.bottom <= turnsBox.top + 1 && !(await pop.evalJs(`document.querySelector('#floor-panel').classList.contains('pop-wide')`)),
+  'narrow: the desk above the chat');
+const panelBox = await box(pop, '#floor-panel');
+ok(panelBox.left >= 8 && panelBox.top >= 8, `inset from the window's edge (${Math.round(panelBox.left)}px, ${Math.round(panelBox.top)}px)`);
 await pop.shot(`${shots}/popout.png`, null, { scale: 1 });
+await pop.resize(1100, 900);
+await pop.waitFor(`document.querySelector('#floor-panel').classList.contains('pop-wide')`, { timeout: 3000 })
+  .then(() => ok(true, 'dragged wide: the desk takes a column of its own'), () => ok(false, 'dragged wide: the desk takes a column of its own'));
+slot = await box(pop, '.p-deskslot');
+turnsBox = await box(pop, '#p-turns');
+ok(slot.right <= turnsBox.left + 1 && slot.top <= turnsBox.top + 1, 'to the left of the chat');
+await pop.shot(`${shots}/popout-wide.png`, null, { scale: 1 });
+await pop.resize(440, 980);
+await pop.waitFor(`!document.querySelector('#floor-panel').classList.contains('pop-wide')`, { timeout: 3000 })
+  .then(() => ok(true, 'and narrow again, back over the chat'), () => ok(false, 'and narrow again, back over the chat'));
 await floor.shot(`${shots}/floor-out.png`, '#floor-panel', { scale: 1 });
 
 console.log('\nno second window');

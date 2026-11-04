@@ -3073,7 +3073,7 @@ try {
     const b = src.indexOf('  /* ---------- popouts: the windows ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the popouts section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/popouts-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { POP_W, POP_TTL_MS, popoutName, popoutQuery, popoutOf, popoutPlace, popoutFeatures, outsNow, boundTo, deskFate };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { POP_W, POP_TTL_MS, POP_CHAT_MIN, popoutName, popoutQuery, popoutOf, popoutPlace, popoutFeatures, outsNow, boundTo, deskFate, deskScaleOf, popWide };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
 
@@ -3113,6 +3113,12 @@ try {
     eq(page.deskFate(floorOf(['lab', []], ['lab2', [{ agent: 'bo', hosted: bound('otherbox', 'bo') }]]), here, mem).state, 'gone',
       'nor is the same folder name on another host — and a desk not on the board at all is gone');
     eq(page.deskFate(floorOf(['lab', []]), here, null).state, 'gone', 'a desk never bound and no longer drawn anywhere is gone');
+
+    eq(page.deskScaleOf('1.112', 1.25), 1.112, 'a popout draws its desk at the scale the floor recorded');
+    eq([null, '', 'NaN', '0', '-1', '99'].map((v) => page.deskScaleOf(v, 1.25)), [1.25, 1.25, 1.25, 1.25, 1.25, 1.25],
+      'and at the floor\'s widest when nothing usable is recorded');
+    eq([page.popWide(230 + page.POP_CHAT_MIN, 230), page.popWide(230 + page.POP_CHAT_MIN - 1, 230)], [true, false],
+      'the desk takes a column of its own exactly when the chat beside it keeps POP_CHAT_MIN');
   }
 } catch (err) {
   failures++;

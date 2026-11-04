@@ -3017,6 +3017,7 @@
     svg.appendChild(el('rect', { x: x0, y: y0, width: w, height: h, rx: 10, class: 'roomFloor' }));
     svg.appendChild(desk(d, 0, geo, channel));
     slot.replaceChildren(svg);
+    popLayout();
   }
 
   function panelShell(wrap, channel, agent) {
@@ -4088,6 +4089,21 @@
     return { width: POP_W, height: availH, left: Math.max(left0, left0 + availW - POP_W * (k + 1)), top: top0 };
   }
 
+  /* How large the floor draws a desk, in pixels per drawing unit: a room is
+     ROOM_W units wide, drawn at its container's width up to ROOM_MAX_W px.
+     The floor tab records what it is drawing (deskScale in localStorage) and
+     a popout draws its desk at that, so the person looks the same size in
+     both. With nothing stored, or nonsense, `fallback`: the floor's widest. */
+  function deskScaleOf(stored, fallback) {
+    const n = Number(stored);
+    return stored != null && stored !== '' && Number.isFinite(n) && n > 0.3 && n < 4 ? n : fallback;
+  }
+  /* The chat's narrowest, beside a desk column. Below it the desk goes back
+     over the chat: a transcript of 300px or so is a column of single words. */
+  const POP_CHAT_MIN = 420;
+  /** Whether a popout this wide puts its desk in a column of its own, given the desk column's width in px. */
+  const popWide = (windowW, deskColW) => windowW >= deskColW + POP_CHAT_MIN;
+
   /** A popup, not a tab: no tab strip, toolbar or navigation (Decided). */
   const popoutFeatures = (p) => `popup=yes,width=${p.width},height=${p.height},left=${p.left},top=${p.top}`;
 
@@ -4226,6 +4242,46 @@
       ring(msg.channel, msg.agent);
     }
   };
+
+  /* The size a desk is drawn on the floor, shared with the popouts through
+     localStorage: the floor writes it when it changes, and a popout reads it
+     when it draws and again on the `storage` event, so dragging the floor
+     window wider grows the desk in every popout with it. */
+  const SCALE_KEY = 'orch.deskScale';
+  const DESK_SCALE_DEFAULT = ROOM_MAX_W / ROOM_W;
+  function recordDeskScale() {
+    const r = document.querySelector('#floor-rooms svg.room');
+    const w = r?.getBoundingClientRect().width;
+    if (!w) return;
+    const s = (w / ROOM_W).toFixed(3);
+    try { if (localStorage.getItem(SCALE_KEY) !== s) localStorage.setItem(SCALE_KEY, s); } catch { /* a popout then draws at the default */ }
+  }
+  function deskScale() {
+    let stored = null;
+    try { stored = localStorage.getItem(SCALE_KEY); } catch { /* the default */ }
+    return deskScaleOf(stored, DESK_SCALE_DEFAULT);
+  }
+  /** Size a popout's desk to the floor's, and put it beside the chat when the window is wide enough for both. */
+  function popLayout() {
+    if (!ui.popout) return;
+    const wrap = $('floor-panel');
+    const svg = wrap?.querySelector('.p-deskslot svg.popdesk');
+    if (svg) {
+      const vb = svg.viewBox.baseVal;
+      svg.style.width = `${Math.round(vb.width * deskScale())}px`;
+    }
+    const slot = wrap?.querySelector('.p-deskslot');
+    // The column is the desk plus the slot's own padding in its wide form.
+    const col = svg ? svg.viewBox.baseVal.width * deskScale() + 2 * 18 + 1 : 0;
+    // The window less main's padding, which is what the panel has to share.
+    wrap?.classList.toggle('pop-wide', !!slot && popWide(window.innerWidth - 24, col));
+  }
+  if (popoutOf(location.search)) {
+    window.addEventListener('resize', popLayout);
+    window.addEventListener('storage', (e) => { if (e.key === SCALE_KEY) popLayout(); });
+  } else {
+    window.addEventListener('resize', recordDeskScale);
+  }
 
   /** A popout handing the floor that opened it its window, so the floor can bring it to the front — again after the floor reloads. */
   window.floorAdopt = (channel, agent, w) => { if (!ui.popout && w) ui.popWins.set(outKey(channel, agent), w); };
@@ -4527,6 +4583,8 @@
       ui.awaySig = awaySig;
       $('floor-away').innerHTML = ui.floorFilter ? '' : (window.pillBar?.(floor.channels) ?? '');
     }
+    // How large a desk is drawn here, for the popouts to match.
+    recordDeskScale();
     // Ages and counts in the open card tick with everything else.
     renderDetails();
     const t = floor.totals ?? {};

@@ -799,6 +799,14 @@ so the transcript's own follow-the-newest-turn closed a card in the popout
 the moment a turn arrived (red in the check once in five runs). The
 transcript moves no desk, on the floor or in a popout.
 
+The desk in a popout is drawn at the floor's own size (costmo, after a
+first cut drew it smaller). The floor tab writes how many pixels it draws
+per unit to `localStorage['orch.deskScale']`, and each popout sizes its
+desk from that, again on the `storage` event, so a floor dragged wider
+grows every popout's desk with it. With no floor to read, the floor's
+widest is used. A popout wide enough to keep `POP_CHAT_MIN` (420 px) of chat
+beside the desk puts the desk in a column of its own (`pop-wide`).
+
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a
 room's selection (#23: selection is the floor's, and the popout's desk is
