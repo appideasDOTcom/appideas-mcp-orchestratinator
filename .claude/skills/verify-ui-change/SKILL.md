@@ -415,10 +415,31 @@ Three things it taught:
   issue #13's. The check lets the old session's turns in before posting
   more.
 
-`drive.mjs` gained two things for it: `type(text)` (one `Input.insertText`,
-an `input` event like a keystroke or paste) and `key(name, { shift, text })`.
-A `rawKeyDown` types nothing, so Shift+Enter adds its newline only as
-`key('Enter', { shift: true, text: '\r' })`.
+- **Some readings must be taken at once, and some mid-gesture.** The
+  panel renders every 2 s and refits the box, so a step that waited for a
+  height passed with `stashDraft`'s fit removed. The text-setting steps
+  read with no wait (`NOW`). And the page refits the box on release, so
+  the drag's own limit (its `max-height`) is visible only while the handle
+  is held. The panel step reads it through `press(…, { held })`.
+
+`drive.mjs` gained three things for it:
+- `type(text)`, one `Input.insertText`: an `input` event, like a keystroke
+  or a paste.
+- `key(name, { shift, text })`. A `rawKeyDown` types nothing, so Shift+Enter
+  adds its newline only as `key('Enter', { shift: true, text: '\r' })`.
+- `press(from, to, { held })`. `held` runs with the button still down,
+  and its result comes back as `during`.
+
+Page mutants (2026-11-04, `run-page-mutant.sh` with `CHECK='PORT=8916
+CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'`) went
+red on the assertion each was aimed at. Among them: no floor under the
+dragged height, the box's own growing recorded, `stashDraft` without its
+fit, `renderPanel` without its fit, the carry, the drag listener, the
+clear, the drag's `max-height`, and the room as a whole. Two survive, and
+each is held by the other half. The drawn height ignoring the room is held
+by the box's `max-height`, and the room read off the panel's clamped
+height is never wrong while that `max-height` keeps the box on the panel.
+`test/floor.mjs` holds `boxHeight`'s room rule on its own.
 
 ### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
 

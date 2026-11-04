@@ -793,7 +793,12 @@ Four things behind it look simpler than they are:
   box or the transcript, less 60px of transcript. `.deskpanel` is
   `overflow: hidden`, so a box that pushed the send row off it could not
   be scrolled back. With a permission prompt up at 800x700, that leaves a
-  box of 81px.
+  box of 81px. The room is measured from the parts (above the transcript,
+  and from its bottom to the last child's), not from the panel's own
+  height: the panel's height is clamped at its max-height, so "panel less
+  box" grows with a box that overflows it. The first cut read it that way,
+  and a page mutant without the drag's `max-height` showed the room
+  following the drag off the panel.
 - **A placeholder's height goes to the first real id the panel sees.**
   The page cannot see the server's rekey, and the next window on the desk
   opens under the same `host:<host>:<channel>:<agent>` string. So a real

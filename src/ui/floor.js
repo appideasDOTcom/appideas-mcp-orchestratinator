@@ -1029,10 +1029,20 @@
    */
   function boxRoom(ta, wrap) {
     const turns = $('p-turns');
-    const max = parseFloat(getComputedStyle(wrap).maxHeight);
-    if (!turns || !(max > 0)) return Infinity;
-    const others = wrap.offsetHeight - turns.offsetHeight - ta.offsetHeight;
-    return Math.floor(max - others - BOX_TURNS_KEEP);
+    const last = wrap.lastElementChild;
+    const cs = getComputedStyle(wrap);
+    const max = parseFloat(cs.maxHeight);
+    if (!turns || !last || !(max > 0)) return Infinity;
+    // Measured from the parts, not from the panel's own height: once a box
+    // pushes the panel past its max-height, the panel's height is clamped
+    // there and the overflow is merely hidden, so "panel less box" would
+    // grow with the box (a red in check-chatbox's mutant without the drag's
+    // max-height: the room followed the drag off the panel).
+    const w = wrap.getBoundingClientRect();
+    const t = turns.getBoundingClientRect();
+    const above = t.top - w.top;
+    const below = last.getBoundingClientRect().bottom - t.bottom + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingBottom);
+    return Math.floor(max - above - below + ta.offsetHeight - BOX_TURNS_KEEP);
   }
 
   /**

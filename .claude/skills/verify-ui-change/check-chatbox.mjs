@@ -76,6 +76,14 @@ const heightIs = async (h, label, { timeout = 3000 } = {}) => {
   ok(s.h === h, label, `height ${s.h}, expected ${h}`);
   return s;
 };
+/**
+ * Read at once, with no wait. Where the box's text is set without an
+ * \`input\` event, the page fits it in the same task (stashDraft), and the
+ * panel's 2 s render would fit it again inside any wait — so a check that
+ * waits cannot tell the two apart. Measured: with stashDraft's fit removed,
+ * these steps passed on the render and only typing went red.
+ */
+const NOW = { timeout: 0 };
 const openDesk = async (agent) => {
   await page.click(`.desk[data-agent="${agent}"] .deskHit`);
   await page.waitFor(`document.getElementById('floor-panel')?.dataset.agent === ${JSON.stringify(agent)} && document.getElementById('p-text') && !document.getElementById('floor-panel').classList.contains('hidden')`);
@@ -106,9 +114,10 @@ const empty = async () => {
  */
 const frames = () => page.evalJs(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r('ok'))))`);
 /** Drag the box's own resize handle by dy, through the browser's input. */
-const drag = async (dy) => {
+const drag = async (dy, held = undefined) => {
   const r = JSON.parse(await page.evalJs(`JSON.stringify(document.getElementById('p-text').getBoundingClientRect())`));
-  await page.press({ x: r.right - 4, y: r.bottom - 4 }, { x: r.right - 4, y: r.bottom - 4 + dy });
+  const p = await page.press({ x: r.right - 4, y: r.bottom - 4 }, { x: r.right - 4, y: r.bottom - 4 + dy }, { held });
+  if (held) { await sleep(150); return { ...(await state()), during: p.during }; }
   await sleep(150);
   return state();
 };
@@ -146,13 +155,13 @@ await typeLines(6, 'sent');
 await heightIs(linesH(6), 'six lines before the send');
 await page.key('Enter');
 await page.waitFor(`document.getElementById('p-text').value === ''`, { timeout: 5000 }).catch(() => {});
-s = await heightIs(BASE_H, 'after Enter the box is empty and at the starting size');
+s = await heightIs(BASE_H, 'after Enter the box is empty and at the starting size', NOW);
 ok(await page.evalJs(`!!document.querySelector('#p-turns .t-pending')`), 'and the message is on its way (a pending bubble)');
 
 step('4. a lost message put back into the box draws it at its height');
 await hostEvents([{ type: 'turn', channel: CH, agent: A, session_id: `sess-${A}`, role: 'error', text: 'the window lost it', at: new Date().toISOString(), uuid: `err-${Date.now()}` }]);
 await page.waitFor(`document.getElementById('p-text').value.includes('sent 6')`, { timeout: 8000 }).catch(() => {});
-s = await heightIs(linesH(6), 'the six lines are back, and so is their height');
+s = await heightIs(linesH(6), 'the six lines are back, and so is their height', NOW);
 ok(s.value.includes('sent 1'), 'with the words', JSON.stringify(s.value.slice(0, 30)));
 
 step('5. a saved prompt inserted draws the box at its height');
@@ -162,7 +171,7 @@ await frames();
 await page.click('#floor-panel [data-act="prompts"]');
 await page.waitFor(`!!document.querySelector('#prompt-menu .pm-item[data-pick]:not([data-pick="manage"])')`);
 await page.click('#prompt-menu .pm-item[data-pick]:not([data-pick="manage"])');
-s = await heightIs(linesH(6), 'a six-line prompt draws six lines');
+s = await heightIs(linesH(6), 'a six-line prompt draws six lines', NOW);
 ok(s.value.startsWith('prompt line 1'), 'and it is the prompt', JSON.stringify(s.value.slice(0, 20)));
 
 step('6. a slash command completed by Tab leaves the box at its height');
@@ -177,7 +186,7 @@ step('7. a draft loaded when a desk opens is drawn at its height');
 await empty();
 await page.evalJs(`localStorage.setItem('orch.draft:${CH}|${B}', ${JSON.stringify(Array.from({ length: 8 }, (_, i) => `draft ${i + 1}`).join('\n'))}); 'ok'`);
 await openDesk(B);
-s = await heightIs(linesH(8), 'the other desk opens on its eight-line draft at eight lines');
+s = await heightIs(linesH(8), 'the other desk opens on its eight-line draft at eight lines', NOW);
 
 step('8. a drag sets a height: a floor the text still grows past');
 await openDesk(A);
@@ -309,7 +318,13 @@ for (const [w, h] of [[1500, 1000], [1280, 720], [800, 700]]) {
   let f = await fits();
   const inside = (x) => x && x.top >= f.panel.top && x.bottom <= f.panel.bottom + 1;
   ok(inside(f.alert) && inside(f.send) && inside(f.foot) && f.turns >= 50, `${w}x${h}, sixteen lines: alert, send and links on the panel`, JSON.stringify(f));
-  await drag(800);
+  // Read with the handle still held, too: the drag's own limit is its
+  // max-height, and the page refits on release, so after it is too late to
+  // see a drag that ran the send row off the panel.
+  const dragged = await drag(800, fits);
+  const mid = dragged.during;
+  ok(inside(mid.alert) && inside(mid.send) && inside(mid.foot),
+    `${w}x${h}, mid-drag with the handle held past the panel: alert, send and links on it`, JSON.stringify(mid));
   f = await fits();
   ok(inside(f.alert) && inside(f.send) && inside(f.foot) && f.turns >= 50,
     `${w}x${h}, dragged as far as it goes: still on the panel, with transcript showing`, JSON.stringify(f));

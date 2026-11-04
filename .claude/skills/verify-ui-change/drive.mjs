@@ -217,8 +217,9 @@ export async function open({
      * the held mouse. The release then landed on `#dlg-body` and no click
      * fired: 14 of 26 trials, against 0 of 20 with no moves (QA, PR #36 N1).
      * A drag keeps its moves, because the moves are the gesture.
+     * `held` is a function run before the release, with the button down.
      */
-    press: async (from, to = from, { steps } = {}) => {
+    press: async (from, to = from, { steps, held } = {}) => {
       const at = async (p) => (typeof p === 'string'
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(p)});
@@ -239,8 +240,12 @@ export async function open({
       for (let i = 1; i <= steps; i++) {
         await mouse('mouseMoved', { x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, 1);
       }
+      // `held` runs with the button still down at the end point: what a
+      // drag looks like before the page hears it end (issue #13's handle,
+      // whose limit is only visible mid-drag).
+      const during = held ? await held() : undefined;
       await mouse('mouseReleased', b, 0);
-      return { from: a, to: b };
+      return { from: a, to: b, during };
     },
     /**
      * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').
