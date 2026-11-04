@@ -768,6 +768,57 @@ Escape included. Both are in `check-backdrop.mjs` in **verify-ui-change**,
 which is the only tier that sees them; the suite pins the decision and the
 handlers' text.
 
+**The chat box grows with its text, and a height the operator drags it to
+is theirs for that conversation.** Issue #13 (0.10.17). What the page
+decides is one lifted section of `src/ui/floor.js` ("chat box height: what
+the page decides"): `boxHeight`, `dragOutcome`, `boxCarry`. The drawing is
+`fitBox`, and **check-chatbox.mjs** in **verify-ui-change** is the page.
+Four things behind it look simpler than they are:
+- **Only a drag sets a height, and a drag is a height that changed between
+  a press and its release.** The page's own growing happens on `input`,
+  never inside a press, so nothing has to tell the two apart by size.
+  Measured: Chrome's native resize handle sends `pointerdown` to the
+  textarea and `pointerup` to the document. A `ResizeObserver` would see
+  the page's own growing as well, and so would CSS clamping a height the
+  page set: the first long message would pin the box tall, which is the
+  thing the issue forbids. A taller drag sets a height. A shorter one
+  lowers a stored height when it ends below it, and otherwise stores
+  nothing (`dragOutcome`'s `set`). A box its text holds up cannot be drawn
+  shorter than the text: it springs back on release, and a floor stored
+  under it surfaced only after the next send, as 8 lines instead of 3 (QA,
+  PR #39 finding 1).
+- **`stashDraft` is the funnel.** Every path that sets `.value` without an
+  `input` event (the draft on open, a saved prompt, a lost message put
+  back, the box emptied after a send, a completed command) already called
+  it, so it calls `fitBox`. A new path that writes the box should go
+  through it. `renderPanel` calls `fitBox` last, which is how a new session
+  on an open desk is noticed: the shell is keyed by desk and is not rebuilt.
+- **The room wins.** The drawn height, and the drag's `max-height`, are
+  capped at the panel's max-height less everything on it that is not the
+  box or the transcript, less 60px of transcript. `.deskpanel` is
+  `overflow: hidden`, so a box that pushed the send row off it could not
+  be scrolled back. With a permission prompt up at 800x700, that leaves a
+  box of 81px. The room is measured from the parts (above the transcript,
+  and from its bottom to the last child's), not from the panel's own
+  height: the panel's height is clamped at its max-height, so "panel less
+  box" grows with a box that overflows it. The first cut read it that way,
+  and a page mutant without the drag's `max-height` showed the room
+  following the drag off the panel.
+- **A placeholder's height goes to the first real id the panel sees.**
+  The page cannot see the server's rekey, and the next window on the desk
+  opens under the same `host:<host>:<channel>:<agent>` string. So a real
+  id with no height of its own takes it, and the placeholder's is dropped
+  either way (`boxCarry`). The carry runs only while the desk's panel is
+  open (`fitBox` draws nothing else), so a reload, a desk switch or a
+  closed panel during that window leaves the height on the placeholder,
+  and the first real id the panel sees after it inherits (QA, PR #39
+  finding 3). That is the conversation that was opening, unless the
+  session changed again before the panel came back.
+
+`line-height: 1.2` on the box is the 15px that `normal` measured on this
+font. It is stated so the page can count lines, and three rows are still
+the 55px box of before.
+
 **A user record is not all the operator, and the split is the relay's job.**
 Claude Code glues machine-injected context — IDE state, slash-command records —
 onto the person's message, and joining the blocks once put
@@ -1065,6 +1116,27 @@ operator's live floor.
   Work is assigned as a task, and a task is not a message: `poll_messages`
   returned nothing on the nudge that carried issue #4, and the assignment
   was sitting in `list_tasks`. Do both, every time.
+- **Your channel is the binding's, so leave it out of every call.** The
+  connection's headers already name your channel and agent (`whoami`
+  says which). A `channel` passed to a tool overrides them, and a wrong
+  one fails silently. On 2026-11-04, after a context reset, a summary
+  said "orchestratinator", and polls and posts named that instead of
+  `appideas-mcp-orchestratinator`. Each poll came back empty, two posts
+  went to a channel nobody reads, the first post created a new floor on
+  the live board, and a deploy task sat unread until costmo asked about
+  it. So call `whoami` first after a reset, and pass no `channel` or
+  `agent` unless you mean another one. List with `status: "open"`: with
+  `mine: true` the done tasks come back too, and on this channel that
+  ran past the tool's output limit.
+- **The board keeps each agent's cursor, and another machine's board
+  keeps its own.** `agents.poll_cursor` (one row per channel and agent)
+  is the last message delivered to that agent. That row, against
+  `MAX(id)` of `messages`, settles any doubt about whether an agent is up
+  to date. Read it read-only, inside the container. Message ids count up
+  on each board separately, so a cursor remembered from a board on
+  another computer is a number from a different sequence. A remembered
+  cursor above this board's newest id is one of those. Polling here from
+  it would skip everything below it.
 - **Post, poll, then build.** When a task says to post a result before
   building on it, the post is where the operator rules — so poll after
   posting and before the first line of the build, and again at each phase

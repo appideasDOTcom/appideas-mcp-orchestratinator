@@ -1150,7 +1150,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .t-thought .t-body { font-size: 12px; }
 .t-thought-meta { font-size: 10.5px; font-style: normal; margin-top: 3px; opacity: .8; }
 .p-compose { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-.p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); }
+/* line-height is stated rather than `normal` so the page can count lines:
+   1.2 at 12.5px is the 15px `normal` measured on this font, so three rows are
+   the same 55px box as before issue #13. Its height is drawn by fitBox. */
+.p-compose textarea { width: 100%; resize: vertical; font: 12.5px var(--sans); line-height: 1.2; }
 /* One height for every control in the row, said once. Send's height used to be
    whatever its text and padding came to (28px), and the two glyph buttons were
    given 24px by hand — so the marks sat two pixels inside the button they stood

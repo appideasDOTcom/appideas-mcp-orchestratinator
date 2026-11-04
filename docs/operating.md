@@ -164,6 +164,11 @@ session; the reply comes back into the panel as the session writes it; a
 permission prompt becomes **Approve / Deny** on the desk and in the *Needs you*
 list. The human is still the one deciding — from one screen instead of one per
 agent. Enter sends, Shift+Enter is a new line, **stop** interrupts the turn.
+The box grows with what you type, up to fourteen lines, and then scrolls.
+Drag its corner taller and it keeps that height for this desk's conversation
+(across desk switches and reloads) while still growing past it. Drag it back
+to its smallest and it goes back to growing on its own; a new conversation on
+the desk starts at the default.
 You can sit in that same window yourself: `tmux attach -t orch`.
 
 <img src="images/floor-panel.png" width="476" alt="The desk panel: the live conversation, a permission request with Approve and Deny, and the composer">
