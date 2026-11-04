@@ -662,7 +662,8 @@ function openDialog(html, { as = null } = {}) {
  * they were, and only what the answer changed is written.
  *
  * "The same control" is a key: an element's id, or what it does
- * (`data-do`, `data-go`, `data-id`), or the id of the field inside it — so
+ * (`data-do`, `data-go`, `data-id`; the update surfaces' `data-upd` and the
+ * build an Update now offers, `data-commit`), or the id of the field inside it — so
  * the label around a text box is the box's. A row whose folder or
  * conversation is another one now is a new element, so a press held on it
  * as the list changed fires nothing rather than opening what was drawn under
@@ -683,7 +684,7 @@ function openDialog(html, { as = null } = {}) {
 const keyOf = (n) => {
   if (n.nodeType !== Node.ELEMENT_NODE) return null;
   if (n.id) return `#${n.id}`;
-  const does = ['data-do', 'data-go', 'data-id'].map((k) => n.getAttribute(k)).filter((v) => v !== null);
+  const does = ['data-do', 'data-go', 'data-id', 'data-upd', 'data-commit'].map((k) => n.getAttribute(k)).filter((v) => v !== null);
   if (does.length) return `${n.nodeName} ${does.join(' ')}`;
   const inner = n.querySelector('[id]')?.id;
   return inner ? `in #${inner}` : null;
@@ -1771,17 +1772,41 @@ function renderUpdate(state) {
   if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel(u));
   const sec = el.setDlg.open ? el.setBody.querySelector('#set-updates') : null;
   if (sec) {
+    // Patched, for the same reason as the dialog (#37). It used to be
+    // `sec.outerHTML = html` when `sec.outerHTML !== html`, and the two
+    // never matched: the template starts with whitespace and the element
+    // does not. So every poll replaced the section, Check now with it, and
+    // a press across a poll fired nothing (QA's 4 of 5 with no redraw at
+    // bf49ba1; measured, the button was a new element 4 times in 10 s of a
+    // still board). What was drawn is kept on the element instead.
     const html = updatesSection(u);
-    if (sec.outerHTML !== html) sec.outerHTML = html;
+    if (sec.dataset.sig !== html) {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = html.trim();
+      patchNode(sec, tpl.content.firstElementChild);
+      sec.dataset.sig = html;
+    }
   }
   if (updRunning(u?.run)) watchUpdate(u.run);
 }
 
-/** Redraw only on a difference, so a poll does not knock focus off a button. */
+/**
+ * Redraw only on a difference, so a poll does not knock focus off a button,
+ * and draw a difference as a patch (#37), so a button held down across it
+ * is still the button on release. Replaced, the update dialog's ✕ fired 0
+ * of 5 presses with a redraw 50 ms into each (QA, at bf49ba1); a click goes
+ * to the common ancestor of press and release, and the pressed one was gone.
+ * An Update now that offers another build is another button
+ * (`data-commit` is in its key), so a press held across a newer commit
+ * arriving updates to neither. An empty box (the first draw) is drawn whole.
+ */
 function drawIfChanged(box, html) {
   if (box.dataset.sig === html) return;
   box.dataset.sig = html;
-  box.innerHTML = html;
+  if (!box.firstChild) { box.innerHTML = html; return; }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  patchBody(box, tpl.content);
 }
 
 /**

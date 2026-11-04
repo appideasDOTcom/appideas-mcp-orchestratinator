@@ -35,6 +35,11 @@
  *   moved on   a row held while the list is redrawn with another
  *              conversation in its place: no click on either. A kept
  *              element must be the same control, not the same spot
+ *   #40's      the update dialog's ✕ and Settings' Check now held while
+ *   surfaces   renderUpdate draws a real change (a newer commit; Check
+ *              now's note), five presses each; Update now held while a
+ *              newer commit takes its place clicks neither; and a quiet
+ *              poll leaves both buttons the elements they were
  *   Take a desk's name: kept through the first listing; a bound folder's
  *              agent wins over what was typed; a folder chosen afterwards
  *              empties it; a name typed while that folder is on its way is
@@ -42,7 +47,11 @@
  *
  * `--expect before` is what the base did (e88a951): History's own partial
  * redraw kept its box and its Close button, nothing else survived, and the
- * name typed while a folder was on its way was emptied.
+ * name typed while a folder was on its way was emptied. The #40 rows came
+ * later (costmo added the two surfaces to #37), and their `before` is
+ * bf49ba1, where the three dialogs are fixed: 0 of 5 on both, and Settings
+ * replaced on every poll (its quiet-poll row has no `before`, since how
+ * many polls land in 6 s is the poll's clock).
  */
 import { writeFileSync } from 'node:fs';
 import { open } from './drive.mjs';
@@ -82,10 +91,11 @@ await page.evalJs(`(() => {
   window.__clicks = [];
   window.__swallow = false;
   window.addEventListener('click', (e) => {
-    const c = e.target.closest?.('[data-do], [data-go]');
-    window.__clicks.push(c ? ((c.dataset.do ?? 'go') + ' ' + (c.dataset.id ?? c.dataset.go ?? '')).trim()
-      : '(none: ' + (e.target.id || e.target.className || e.target.tagName) + ')');
-    if (window.__swallow && e.target.closest?.('#dlg')) { e.stopImmediatePropagation(); e.preventDefault(); }
+    const c = e.target.closest?.('[data-do], [data-go], [data-upd]');
+    window.__clicks.push(!c ? '(none: ' + (e.target.id || e.target.className || e.target.tagName) + ')'
+      : c.dataset.upd ? ('upd ' + c.dataset.upd + ' ' + (c.dataset.commit ?? '').slice(0, 7)).trim()
+      : ((c.dataset.do ?? 'go') + ' ' + (c.dataset.id ?? c.dataset.go ?? '')).trim());
+    if (window.__swallow && e.target.closest?.('#dlg, #update-dlg, #settings-dlg')) { e.stopImmediatePropagation(); e.preventDefault(); }
   }, true);
   window.__keys = { field: null, box: 0, other: 0 };
   window.addEventListener('keydown', (e) => {
@@ -280,6 +290,88 @@ for (const d of OWN) {
   }
   await page.evalJs(`window.__swallow = false, 'ok'`);
   row(`own redraw · ${d.name}'s close, held`, `${n} of 5 clicked`, { after: '5 of 5 clicked', before: `${d.before} of 5 clicked` });
+}
+
+/* #40's two surfaces, added to #37 by costmo (2026-11-04): the update
+   dialog and Settings' updates section, each with its own redraw 50 ms into
+   a held press, five presses each, as QA's probe measured them at bf49ba1
+   (0 of 5 on both). The redraw is a real change, or drawIfChanged would
+   rightly draw nothing: the dialog's is a newer commit on the branch (its
+   head, its text and an offer of Update now arriving above and below the
+   held ✕); Settings' is Check now's own note. Both are the page's own
+   render, renderUpdate, from a state the poll would bring. */
+const NEWER = (i) => `(() => {
+  const u = ui.state.update;
+  ui.state.update = { ...u, available: true, refusal: null,
+    latest: { sha: ${J('0123456789abcdef')}.repeat(3).slice(${i}, ${i} + 40), version: '9.9.' + ${i}, message: 'newer ' + ${i}, url: '#' } };
+  renderUpdate(ui.state);
+  return 'ok';
+})()`;
+const SURFACES = [
+  { name: 'update dialog\'s ✕', open: `openUpdate()`, shown: `#update-dlg[open]`, target: '#update-dlg .set-head [data-upd="close"]', click: 'upd close',
+    redraw: (i) => NEWER(i) },
+  { name: 'settings\' check now', open: `openSettings()`, shown: `#settings-dlg[open] #set-updates [data-upd="checknow"]`, target: '#set-updates [data-upd="checknow"]', click: 'upd checknow',
+    redraw: (i) => `(upd.note = 'note ' + ${i}, renderUpdate(ui.state), 'ok')` },
+];
+for (const d of SURFACES) {
+  process.stderr.write(`own redraw: ${d.name}… `);
+  await page.evalJs(`(async () => { for (const x of document.querySelectorAll('dialog[open]')) x.close(); await new Promise((r) => setTimeout(r, 50)); return 'ok'; })()`);
+  await page.evalJs(`${d.open}, 'ok'`);
+  await page.waitFor(`!!document.querySelector(${J(d.shown)})`);
+  await sleep(300);
+  let n = 0;
+  const moves = [];
+  await page.evalJs(`window.__swallow = true, 'ok'`);
+  for (let i = 0; i < 5; i++) {
+    await page.evalJs(`window.__clicks = [], 'ok'`);
+    const { moved } = await page.press(d.target, d.target, { held: async () => { await sleep(50); await page.evalJs(d.redraw(i + 1)); await sleep(100); }, follow: true });
+    const hit = (JSON.parse(await page.evalJs(`JSON.stringify(window.__clicks)`))).includes(d.click);
+    if (hit) n++;
+    moves.push(`${hit ? '✓' : '✗'}${Math.round(moved?.y ?? 0)}`);
+  }
+  await page.evalJs(`window.__swallow = false, upd.note = null, 'ok'`);
+  row(`own redraw · ${d.name}, held`, `${n} of 5 clicked`, { after: '5 of 5 clicked', before: '0 of 5 clicked' }, null, `px moved per press: ${moves.join(' ')}`);
+}
+
+/* A poll that changes nothing draws nothing: the button is the same
+   element across 6 s of a still board (two polls and more). At bf49ba1 the
+   dialog kept it and Settings did not: its outerHTML never matched the
+   template, which starts with whitespace, so every poll replaced it. */
+for (const d of SURFACES) {
+  process.stderr.write(`quiet poll: ${d.name}… `);
+  await page.evalJs(`(async () => { for (const x of document.querySelectorAll('dialog[open]')) x.close(); await new Promise((r) => setTimeout(r, 50)); return 'ok'; })()`);
+  await page.evalJs(`${d.open}, 'ok'`);
+  await page.waitFor(`!!document.querySelector(${J(d.shown)})`);
+  await sleep(300);
+  const n = await page.evalJs(`(async () => {
+    let cur = document.querySelector(${J(d.target)}), n = 0;
+    const t0 = performance.now();
+    while (performance.now() - t0 < 6000) {
+      await new Promise((r) => setTimeout(r, 100));
+      const now = document.querySelector(${J(d.target)});
+      if (now !== cur) { n++; cur = now; }
+    }
+    return n;
+  })()`);
+  row(`quiet poll · ${d.name}`, n ? `replaced ${n}×` : 'kept', { after: 'kept', before: d.name.startsWith('settings') ? undefined : 'kept' });
+}
+
+/* Update now held while a newer commit arrives: the button is now an
+   offer of another build, so neither must fire. The update dialog's
+   "moved on". */
+{
+  process.stderr.write('moved on (update)… ');
+  await page.evalJs(`(async () => { for (const x of document.querySelectorAll('dialog[open]')) x.close(); await new Promise((r) => setTimeout(r, 50)); return 'ok'; })()`);
+  await page.evalJs(`${NEWER(1)}`);
+  await page.evalJs(`openUpdate(), 'ok'`);
+  await page.waitFor(`!!document.querySelector('#update-dlg[open] [data-upd="start"]')`);
+  await sleep(300);
+  await page.evalJs(`window.__swallow = true, window.__clicks = [], 'ok'`);
+  await page.press('#update-dlg [data-upd="start"]', undefined, { held: () => page.evalJs(NEWER(2)) });
+  await page.evalJs(`window.__swallow = false, 'ok'`);
+  const clicks = JSON.parse(await page.evalJs(`JSON.stringify(window.__clicks)`));
+  const hit = clicks.find((c) => c.startsWith('upd start'));
+  row('moved on · update now, a newer commit in its place', hit ? `clicked ${hit}` : 'no click on either', { after: 'no click on either', before: 'no click on either' });
 }
 
 /* Another conversation in the held row's place. */

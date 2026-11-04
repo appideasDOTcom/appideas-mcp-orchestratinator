@@ -614,7 +614,7 @@ lands each dialog's answer while real keys are going in or a real press is
 held, and reads what survived:
 
 ```bash
-PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$PWD" after    # PASS · 14 of 14
+PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$PWD" after    # PASS · 19 of 19
 PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$CP" before    # HEAD's app.js in a copy
 ```
 
@@ -641,6 +641,25 @@ bo-other`), leaving a field's value alone turned the three name rows
 red, and moving a keyed match up past what stood above it (the first cut)
 turned "its host list arriving above the box" red with focus on `BODY`.
 
+**#40's two surfaces, five rows more** (task 274; costmo added them to #37).
+The update dialog's ✕ and Settings' Check now are held while `renderUpdate`
+draws a real change 50 ms in: a newer commit on the branch for the dialog,
+Check now's own note for Settings. A redraw of the same HTML is not a
+test, because `drawIfChanged` rightly draws nothing. Then Update now is
+held while another commit takes its place, and both buttons are watched
+through 6 s of a still board. At bf49ba1 (its `before`, since the three
+dialogs are fixed there) both read 0 of 5, and Settings' Check now was a
+new element on every poll: `sec.outerHTML !== html` never matched,
+because the template starts with whitespace. That is QA's unexplained
+"4 of 5 with no redraw". Five mutants: replacing the dialog sends ✕ to 0
+of 5; replacing the section sends Check now to 0 of 5 and makes the
+quiet poll read `replaced 3×`. Dropping `data-commit` from the key makes
+the held Update now **start the update to the newer build** (`upd start
+2345678`). Two mutants survive, both equivalent: patching Settings on
+every poll writes nothing when nothing changed, and `data-upd` in the key
+is not pinned, because no update control ever stands where another one
+stood.
+
 Four things it taught:
 
 - **A move is a removal, for focus.** The first cut moved a keyed element
@@ -660,7 +679,10 @@ Four things it taught:
   `held`, so the row asks whether the element survived, and prints how far
   it moved. That move is a loss the patch cannot prevent, and costmo
   ruled it left as it is (2026-11-04); the printed move is a record, not
-  a red.
+  a red. The update dialog does the same, at 77 px: an offer of Update now
+  arriving while it is open grows the centred dialog, and without `follow`
+  the row read 4 of 5, the miss being the first press every time. Its rows
+  follow and print the move per press (`✓-77 ✓0 …`).
 - **Swallow clicks only in the rows that press to observe.** The first cut
   swallowed every click in the dialog in the capture phase, so the rows
   that press a folder to move to it moved nowhere and went red for the

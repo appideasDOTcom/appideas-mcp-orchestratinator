@@ -885,8 +885,17 @@ the `<dialog>` is centred, Take a desk grows 48 px with its first listing,
 and a release at the old spot lands 24 px off. costmo ruled it left as
 it is (2026-11-04, through QA): a top-anchored dialog would move every
 dialog on the board, and reserving the chosen-path line would not stop the
-note's wrap. Do not re-propose either. `check-redraw.mjs` in
-**verify-ui-change** is the page; it prints that move beside its row.
+note's wrap. Do not re-propose either. #40's update dialog and Settings'
+updates section are patched too (costmo added them to #37):
+`drawIfChanged` patches whatever it has drawn, and Settings keeps what it
+drew on the section. Settings' old test, `sec.outerHTML !== html`, never
+matched, because the template starts with whitespace, so every poll
+replaced Check now. `data-commit` is in the key, so an Update now held
+while a newer commit arrives starts neither update; without it the press
+started the newer one. The update dialog shifts too, 77 px when an offer
+arrives while it is open, which is the same centred-dialog move as Take a
+desk's. `check-redraw.mjs` in **verify-ui-change** is the page; it prints
+each move beside its row.
 
 **The chat box grows with its text, and a height the operator drags it to
 is theirs for that conversation.** Issue #13 (0.10.17). What the page
