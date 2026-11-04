@@ -1070,7 +1070,11 @@ server half is [`src/updates.js`](src/updates.js), the host half
   answers as a run's commit and the page was loaded from another build; a
   deploy by hand reloads nobody, and the reloaded page does not reload
   again. While a run is open it reads `/health` every 2 s whatever
-  auto-refresh says.
+  auto-refresh says. A desk's popout (#19) is the same page on the same
+  build and does the same: its `tick()` returns early and draws nothing of
+  the board, so it calls `renderUpdate` itself. Without that a popout kept
+  the old page code after an update (found merging #19 in; red in
+  check-update.mjs without the line).
 - **Settings are rows, not localStorage** (`settings` table, `updates.*`
   keys), so every browser sees one value and the daily check is once per
   board. Not in `BACKUP_TABLES`: a restore that turned checking back on

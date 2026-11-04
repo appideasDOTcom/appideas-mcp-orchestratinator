@@ -1772,6 +1772,11 @@ async function tick({ background = false } = {}) {
   try {
     if (POPOUT) {
       ui.state = await getJson('./api/state');
+      // A popout has no header, but it is a page on the old build too: it
+      // watches an update and reloads onto the new one like the floor does
+      // (issue #40). The reload keeps its ?popout= address, so it comes back
+      // as the same desk's popout.
+      renderUpdate(ui.state);
       el.dot.className = 'dot';
       return;
     }

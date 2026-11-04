@@ -78,6 +78,7 @@ const work = async () => (await (await fetch(`${BOARD}/api/host/work?host_id=h1&
 const step = (run_id, s, state, detail = null) => hostPost('/api/host/events', { host_id: 'h1', events: [{ type: 'update', run_id, step: s, state, detail }] });
 
 let page;
+let pop;
 try {
   await startServer(C1);
   await register();
@@ -171,12 +172,22 @@ try {
   await page.waitFor(`document.querySelectorAll('#upd-body .upd-step.running').length === 1`, { timeout: 6000 });
   await page.shot(join(SHOTS, 'running.png'), '#update-dlg');
   await ev(`window.__beforeReload = 1`);
+  // A desk's popout (#19) is this page too, on the old build: it must watch
+  // the update and reload onto the new one, at its own address.
+  const POP = `${BOARD}/?popout=1&channel=lab&agent=bo`;
+  pop = await open({ base: POP, ready: `document.readyState === 'complete'`, port: CDP });
+  ok(await pop.waitFor(`typeof upd !== 'undefined' && upd.watching?.commit === ${JSON.stringify(C2)}`, { timeout: 8000 }).then(() => true, () => false), 'a popout open during the update watches it too');
+  await pop.evalJs(`window.__beforeReload = 1`);
   await stopServer();
   ok(await page.waitFor(`/The board is away/.test(document.querySelector('#upd-body').textContent)`, { timeout: 8000 }).then(() => true, () => false), 'with the board gone, the dialog says so and that the page will reload');
   host.commit = C1;
   await startServer(C2);
   ok(await page.waitFor(`window.__beforeReload === undefined && document.readyState === 'complete'`, { timeout: 12000 }).then(() => true, () => false), 'the page reloads itself once the board answers as the new commit');
   await ev(`window.__afterReload = 1`);
+  ok(await pop.waitFor(`window.__beforeReload === undefined && document.readyState === 'complete' && new URLSearchParams(location.search).get('popout') === '1'`, { timeout: 12000 }).then(() => true, () => false), 'the popout reloads itself onto the new build, as the same popout');
+  // Closed here because, while its tab is the one in front, the floor's tab
+  // is document.hidden and its background poll stands still (app.js tick).
+  await pop.close(); pop = null;
   await page.waitFor(`!document.getElementById('update-btn').hidden`, { timeout: 6000 }).catch(() => {});
   ok(await ev(`document.getElementById('update-btn').textContent`) === 'Updating…', 'after the reload the run is still open (the host has not restarted yet)');
   ok(await ev(`document.getElementById('version').textContent`) === 'v' + JSON.parse(await (await fetch(`${BOARD}/health`)).text()).version, 'and the header names the build that answered');
@@ -200,6 +211,7 @@ try {
 } finally {
   clearInterval(beat);
   try { await page?.close(); } catch { /* */ }
+  try { await pop?.close(); } catch { /* */ }
   await stopServer();
   gh.close();
   rmSync(join(TMP, 'b.db'), { force: true });
