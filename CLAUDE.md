@@ -763,10 +763,19 @@ look like they could be done more simply:
   deploy while any window is open, so a change to its messages bumps
   `HUB_P`. A browser with no SharedWorker, or one whose worker fails to
   start, gets the old one stream per window.
-- **Which desks are out lives in the popouts, not in storage.** Each popout
-  says `here` on a BroadcastChannel every 2 s and when a floor asks `who`,
-  and says `gone` on pagehide. The floor keeps only what it hears
-  (`ui.outs`), with a 7 s expiry for a window that dies without a word. A
+- **Which desks are out lives in the popouts, not in storage, and no timer
+  keeps it.** Each popout holds a Web Lock named for its desk for as long
+  as it is open, then says `here` on a BroadcastChannel (and again when a
+  floor asks `who`), and says `gone` on pagehide. The floor keeps what it
+  hears (`ui.outs`) and asks for the same lock, which the browser grants it
+  only when the popout's window is gone, crashed included. It used to be a
+  2 s beat with a 7 s expiry. QA measured that failing (PR #41 finding 1):
+  Chrome gives a minimized window one timer wake-up a minute, so the floor
+  drew a desk's composer beside its popout's in 9 samples of 25. The hub
+  is the same rule one level down: each window holds a lock and says
+  `hello` with its name, and the worker drops the window when it is granted
+  it, not after 30 s of quiet. Web Locks need a secure context (localhost
+  is one), and without them it is the beat and the silence, as before. A
   stored list would go stale against the windows it describes. A reloaded
   floor knows within milliseconds, and popouts cannot be reopened after a
   reload anyway, because the browser blocks `window.open` without a click.
