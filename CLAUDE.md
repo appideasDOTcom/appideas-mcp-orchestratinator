@@ -156,7 +156,12 @@ Two more facts about that rebuild, both measured 2026-09-01. It blanks
 presence for every desk — presence is an MCP session in the server's memory —
 while the relay rides out the restart on its own retries, so the board shows a
 conversation flowing between desks that look absent. Nothing is broken; one
-MCP tool call per desk brings each back. And the `/data` volume is *named*:
+MCP tool call per desk brings each back. A **Docker Desktop restart** is
+different for the session you are in (2026-11-03, the 8 GiB change). Its
+orchestratinator tools disappear outright, with ECONNREFUSED at the moment
+Docker went down, and no call brings them back; costmo reconnects them with
+`/mcp`. Until then, read the board with curl or board-query.sh and say so.
+And the `/data` volume is *named*:
 the repo's own `data/` directory is test leftovers, not the live database, so
 a row repair goes through `docker compose exec -T orchestratinator node` with
 better-sqlite3 at `$DB_PATH`, never through a file in the working tree.
@@ -672,6 +677,71 @@ button on the card goes there and not in the generic `[data-act]` chain —
 the first cut put it in the chain and the button did nothing, which the
 page check caught and the suite could not.
 
+**Bulk selection is the one-desk controls, sent in a line** (issue #23,
+0.10.16). **select desks** on a room's header checks desks and sends each
+one what its own control sends: the bell's chat, the backlog dialog's
+advance, the card's hide. That means one request and, for mark read and
+hide, one audit row per desk. A nudge writes no row, from the bell or in
+bulk; its record is the turn. Everything the page decides is in one lifted
+section of `src/ui/floor.js` ("bulk selection: what the page decides"),
+which `test/floor.mjs` runs over server-built desks. Three things behind it
+were measured, and each looks like it could be done more simply:
+- **The order is the host's line, not a preference.** The host types
+  work one item at a time, and each delivery costs about 3 s even into an
+  idle window (`settled()`, three quiet reads at `SUBMIT_SETTLE_MS`, then
+  the receipt). A desk with no window holds every desk behind it for about
+  1.5 s while it comes up, and for `READY_TIMEOUT_MS` (45 s) when it does
+  not. Measured on a stand-in rig (task 267 step 1, #2874): behind a stuck
+  window the three desks landed at 48, 52 and 55 s; sent first, at 3, 7 and
+  10 s. So `nudgePlan` sends windowed desks first and windowless ones last.
+  QA ruled the ordering a page-side how. A parallel or per-desk host queue
+  was not built here; it would be a host change.
+- **A bulk nudge's pending bubble waits on facts, not the click.** Its
+  30 s silence clock (`SENDING_GRACE_MS`) said "not recorded — send again"
+  about nudges still in line, in both cases QA named (two windowless desks
+  where the first never comes up; ten windowed ones). `bulkWait` holds the
+  clock while a desk of the same bulk is ahead on its host, and while its
+  own window is still being opened, and starts it once both are clear. What
+  happened to each desk is read off its turns (`nudgeOutcome`: the word as
+  a user turn, or an error turn first) and the desk's `delivery` note,
+  never off a timer. An error turn carries no tag naming its message, so an
+  unrelated one reads as the nudge failing. That is the panel's own
+  `settle()` rule, and the less harmful of the two wrong readings.
+- **"Selecting with nothing checked" and "not selecting" are different
+  signatures.** The rooms are redrawn only when their signature changes,
+  and the first cut wrote both as `[]` beside a kept result. So after an
+  action, "done selecting" and selecting again drew only when a later poll
+  happened to change the payload, and on a still floor that was not within
+  8 s. Unit tests could not see it; `check-select.mjs` in
+  **verify-ui-change** did, intermittently at first. Not selecting is
+  `null`.
+
+The operator's calls on what the issue left open (Not established): a
+click anywhere on a desk in a selecting room checks it and does nothing
+else. The mode stays on after an action, with the checks kept, so the
+actions chain, and only a second Nudge while one is still in line is
+refused. Mark read shows its count on the control before it runs.
+
+Two more rulings went into the same diff:
+- **A floor unread pill opens its dialog every time** (Decided 5). The
+  backlog dialog reads `app.js`'s `/api/state` copy, which is polled every
+  2.5 s, apart from the floor's 2 s `/api/floor`. A pill drawn between the
+  two opened nothing, and that was already so at 39d5e4b. Now the floor
+  passes the newest message id it drew, and `backlogBehind` reads the copy
+  as behind when it has no backlog or an older one. `freshState` then waits
+  out any poll already in flight and asks again. That poll may have been
+  asked before the pill's message existed, and `tick()` returns at once
+  while one is in flight, so calling it then reads nothing new. The board's
+  poll never redraws an open dialog: `refreshDialog` runs only after an
+  action inside one. An earlier note here said a late answer would close
+  the dialog through it, and that was a misreading; QA's PR #38 Info 5 and
+  a page mutant showed it.
+- **A host error that sends the operator to the window names Open in
+  tmux** (Decided 6). The two errors used to hand them `tmux attach -t …`
+  to type, which is a remedy given as a command. Now they name the control
+  through `OPEN_IN_TMUX` in `host/window.js`, and `test:window` holds that
+  to the page's `LINK_LABEL.attach`.
+
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
 2026-11-04). A click on the `<dialog>` element closes it only when it
@@ -821,7 +891,12 @@ pid: `node test/<suite>.mjs`, its `node src/server.js`, a tmux session
 processes and their servers, `tmux kill-session` each test session, remove
 the fixtures, then check `tmux ls` and `data/` again before the next run.
 `lsof` and `netstat` are not on this machine; match on the command line
-with `ps -Ao pid,command`.
+with `ps -Ao pid,command`. **The shell is zsh, which does not split an
+unquoted variable**: `kill $PIDS` hands kill one word and kills nothing
+(`illegal pid`, unseen behind `2>/dev/null`), and the same goes for a
+command kept in `$T`. Use `xargs kill`, or `${=PIDS}`. That is how "the
+stand-ins ignore SIGTERM" got told to QA as a measurement (task 263); they
+never got the signal.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
@@ -841,6 +916,19 @@ conversation back", real panes — at load 5.5, and `test:host` alone
 straight after was green (2026-11-03, task 247). Read the channel for
 their announcement before a full run, and if you overlapped, rerun the
 red suite alone before reading the pane.
+
+**One move-section red in `test:host` has now been seen twice with no other
+suite on its ports.** "the new floor holds no session row for the
+conversation it left" listed two ids: the stand-in's constant `1111…5555`
+beside the fresh one. Seen on 2026-11-03, and on 2026-11-04 with nine more
+reds after it in the same section (PR #38's full run from 15:46:47Z, load
+5.5–7). That second run had company: QA's page checks, probes and
+inversions ran from 15:46:28Z to 16:03:29Z, each with a server and a
+headless Chrome on private ports. That was load, though not a collision,
+and those ports were not announced. QA announces page-run ports too since
+then. `test:host` alone straight after was green both times. The cause is
+not found. A third sighting is the cue to read the session rows at the
+moment of the move, not to rerun again.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`

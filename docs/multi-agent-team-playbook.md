@@ -521,7 +521,7 @@ The operator has human fingers that have to push physical keys, and he'd like fo
 
 | Word | Definition |
 |---|---|
-| "nudge" | The operator is seeing that you have an unread message, unseen task, etc. on your channel — it shows as an unread badge on your desk, and the nudge is usually the service bell on it. Please check. Follow the rules above for action/response. |
+| "nudge" | The operator is seeing that you have an unread message, unseen task, etc. on your channel — it shows as an unread badge on your desk, and the nudge is usually the service bell on it, or several desks at once from **select desks** on the room. Same word, same meaning, either way. Please check. Follow the rules above for action/response. |
 | "start loop" | Begin the loop below ("Default loop prompt") unless instructed otherwise. |
 | "stop loop" | Stop/kill your running poll loop. |
 

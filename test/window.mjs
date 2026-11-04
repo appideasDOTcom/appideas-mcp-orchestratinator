@@ -991,6 +991,53 @@ async function main() {
      *   {"type":"queue-operation","operation":"enqueue","content":"…"}
      *   {"type":"attachment","attachment":{"type":"queued_command","prompt":"…"}}
      */
+    // Issue #23 Decided 6: the two errors that used to hand the operator
+    // `tmux attach -t …` to type name the desk panel's Open in tmux instead,
+    // in the page's own label, and keep everything else they said.
+    console.log('\n  an error that sends the operator to the window names Open in tmux');
+    {
+      const pageLabel = /attach: '([^']+)'/.exec(readFileSync('src/ui/floor.js', 'utf8'))?.[1];
+      eq(W.OPEN_IN_TMUX, pageLabel, 'the host names the control by the label the desk panel draws');
+
+      // A window that never registers: a pane in a folder no session is in.
+      const coldDir = `${FIX}/never-ready`;
+      mkdirSync(coldDir, { recursive: true });
+      await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', coldDir, 'sh', '-c', "printf '%s\\n' '  Starting'; sleep 120"]).catch(() => {});
+      await drawn(coldDir);
+      const cold = await W.waitReady(coldDir, { timeoutMs: 1500, target: (await W.paneFor(coldDir))?.target });
+      eq(cold.code, 'not_ready', 'a window that never finishes starting is reported not ready');
+      assert((cold.error ?? '').includes(`waiting for an answer. ${pageLabel} on this desk reaches the window: answer it there`) && !/tmux attach/.test(cold.error ?? ''),
+        `and sends the operator to ${pageLabel}, not to a command to type — ${cold.error}`);
+      assert(/The window is showing: .*Starting \(waited for \S*never-ready for \d+s; the roster had /.test(cold.error ?? ''), 'still quoting the window, what it waited for and the roster');
+
+      // A composer that keeps the message through every Enter: a raw-mode
+      // pane drawing the box composerOf reads, which never submits.
+      const boxDir = `${FIX}/keeps-it`;
+      mkdirSync(boxDir, { recursive: true });
+      writeFileSync(`${FIX}/keeps-it.cjs`, [
+        `const RULE = '\\u2500'.repeat(50); let box = '';`,
+        `const draw = () => process.stdout.write('\\x1b[2J\\x1b[H' + RULE + '\\r\\n\\u276f ' + box + '\\r\\n' + RULE + '\\r\\n  ? for shortcuts');`,
+        `process.stdin.setRawMode(true); process.stdout.write('\\x1b[?2004h'); draw();`,
+        `process.stdin.on('data', (c) => { for (const ch of c.toString('utf8').replace(/\\x1b\\[20[01]~/g, '')) if (ch !== '\\r' && ch !== '\\n') box += ch; draw(); });`,
+      ].join('\n'));
+      await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', boxDir, process.execPath, `${FIX}/keeps-it.cjs`]).catch(() => {});
+      await drawn(boxDir);
+      const boxPane = await W.paneFor(boxDir);
+      const boxSession = 'keeps-it-session';
+      const boxJsonl = W.transcriptPath(W.canonical(boxDir), boxSession);
+      mkdirSync(dirname(boxJsonl), { recursive: true });
+      writeFileSync(boxJsonl, '');
+      mkdirSync(`${CLAUDE_HOME}/sessions`, { recursive: true });
+      writeFileSync(`${CLAUDE_HOME}/sessions/${boxPane.pid}.json`,
+        JSON.stringify({ pid: boxPane.pid, sessionId: boxSession, cwd: boxDir, kind: 'interactive', startedAt: Date.now() }));
+      const kept = await W.send(boxDir, 'this one stays in the box');
+      eq(kept.code, 'not_delivered', 'a message the window keeps in its composer is not delivered');
+      assert((kept.error ?? '').startsWith('the window took the message but never submitted it — it is still in the composer, not in the conversation.')
+        && (kept.error ?? '').includes(`${pageLabel} on this desk reaches the window: press Enter there to send it.`) && !/tmux attach/.test(kept.error ?? ''),
+        `and says to press Enter in it through ${pageLabel}, not a command to type — ${kept.error}`);
+      rmSync(`${CLAUDE_HOME}/sessions/${boxPane.pid}.json`, { force: true });
+    }
+
     console.log('\n  a message sent to a desk that is working');
     const queuedText = 'this one is queued behind a running turn';
     const queueingSend = W.send(FIX, queuedText);

@@ -80,6 +80,13 @@
      which is what actually pushes the desks down, is derived from this further
      down — it has to clear a speech bubble as well as the band. */
   const HEAD_BAND = 60;
+  /* The bulk-selection toolbar (issue #23): a band of its own under the
+     header while a room is selecting, rather than a takeover of the header's
+     second line. That line is the board's channel stats, and an operator
+     choosing which desks to act on is the one reading it most. The desks move
+     down to clear the band for as long as it is there; roomGeometry and
+     deskXY carry the offset, so an envelope lands where the desk is. */
+  const SEL_BAND = 52;
   const DESK_W = 168;
   const GAP = 30;
   /* One width for every floor: a full row of desks, whatever the room holds.
@@ -383,6 +390,15 @@
     // mid-peal about half the time. It is also what rejects a second click —
     // the timestamp outlives the node, so the guard does too.
     rings: new Map(),
+    // Bulk selection (issue #23), keyed by channel. A room is selecting while
+    // it has an entry in `select`, and the Set is the desks checked on it.
+    // Outside the DOM for the bell's reason: a working floor rebuilds every
+    // room most ticks, and a check that lived on the node would be gone at
+    // the next one. `bulk` is what the last action of each kind did, desk by
+    // desk — kept past the end of selecting, because a nudge still in line
+    // is what the chat panel's pending bubble reads (bulkWait).
+    select: new Map(),
+    bulk: new Map(),
     // A seat change in flight: { channel, agent, act, since }. Outside the DOM
     // for the usual reason and one more — the panel skeleton is rebuilt when
     // you switch desks, and a spinner has to outlive both the poll that redraws
@@ -1021,16 +1037,18 @@
    * `collapsed` is the building view: one row, and the rest of the floor scrolls
    * past it.
    */
-  function roomGeometry(n, collapsed, pillLines = 0) {
+  function roomGeometry(n, collapsed, pillLines = 0, selecting = false) {
     const cols = COLS;
     const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / cols));
+    // The selection toolbar's band, under the header, when the room has one.
+    const top = selecting ? SEL_BAND : 0;
     // The last row contributes only what it draws below the desk origin (the
     // nameplate), not a whole cell — a full DESK_H there leaves every room
     // ending in a band of empty carpet that reads as "somebody is missing".
     // A storey with nothing drawn on it (every desk empty or put away, #20)
     // ends at its header band for the same reason: the row's height is
     // mostly the bubble above it, and there is nobody to speak.
-    const bottom = n ? PAD + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW : HEAD_BAND;
+    const bottom = (n ? PAD + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW : HEAD_BAND) + top;
     // The hidden desks' pills, as a tray under the last desk; absent, no height.
     const pillY = bottom + PILL_ROW_GAP;
     return {
@@ -1038,6 +1056,7 @@
       rows,
       collapsed: !!collapsed,
       w: ROOM_W,
+      top,
       pillY,
       h: (pillLines ? pillY + pillLines * (PILL_H + PILL_ROW_GAP) - PILL_ROW_GAP : bottom) + PAD,
     };
@@ -1519,7 +1538,7 @@
   /** One scroll arrow, sitting in the floor's own left or right margin. */
   function scrollArrow(dir, geo) {
     const cx = dir === 'left' ? 15 : geo.w - 15;
-    const cy = PAD + HEAD_H + DESK_BELOW / 2;
+    const cy = PAD + HEAD_H + (geo.top ?? 0) + DESK_BELOW / 2;
     const g = el('g', { class: `deskArrow ${dir}`, 'data-scroll': dir, role: 'button', tabindex: '0' });
     g.appendChild(el('title')).textContent = dir === 'left' ? 'Earlier desks' : 'More desks';
     g.appendChild(el('circle', { cx, cy, r: 13, class: 'arrowChip' }));
@@ -1536,7 +1555,7 @@
     const row = geo.collapsed ? 0 : Math.floor(i / geo.cols);
     return {
       x: PAD + col * (DESK_W + GAP),
-      y: PAD + HEAD_H + row * (DESK_H + GAP),
+      y: PAD + HEAD_H + (geo.top ?? 0) + row * (DESK_H + GAP),
     };
   }
 
@@ -1853,6 +1872,14 @@
       g.appendChild(badge);
     }
 
+    // Bulk selection's checkbox, when the room is selecting (issue #23).
+    // Last, so it lies over the bubble's thought trail, which runs through
+    // the same corner.
+    if (ui.select.has(channel)) {
+      g.classList.toggle('checked', !!ui.select.get(channel)?.has(d.agent));
+      g.appendChild(selBox(d, channel));
+    }
+
     return g;
   }
 
@@ -2020,13 +2047,367 @@
     return g;
   }
 
+  /* ---------- bulk selection: what the page decides ---------- */
+
+  /*
+   * Bulk selection on a room (issue #23): the bell, Mark all read (operator)
+   * and Hide desk, applied to the desks checked on one storey. Every decision
+   * is in here as a plain function over the floor payload, so test/floor.mjs
+   * can lift the section and hold each rule to desks the server really
+   * built. The drawing and the requests are the callers.
+   */
+
+  const bulkSquash = (s) => String(s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+  /**
+   * The desks a room's actions reach: drawn and checked, in drawn order.
+   * Only a drawn desk has a checkbox (Decided 2). The Set may still name a
+   * desk that has stopped being drawn since it was checked — empty for a
+   * poll, or hidden — and such a desk is simply not acted on. It is not
+   * forgotten either, so a desk that blinks out and back is still checked.
+   */
+  const checkedDesks = (drawn, checked) => drawn.filter((d) => checked?.has(d.agent));
+
+  /**
+   * Who a bulk nudge types into, in what order, and who it cannot reach.
+   *
+   * The order was measured, not chosen (task 267 step 1). The host types
+   * its work one item at a time (host/index.js `run`), each delivery taking
+   * about 3 s for the screen to settle, and a desk with no window holds every
+   * desk queued behind it while its window comes up. That is about 1.5 s
+   * when the window starts, and READY_TIMEOUT_MS (45 s) when it does not:
+   * the three windowed desks behind such a desk landed at 48, 52 and 55 s.
+   * Sent last, the windowed desks land at 3, 7 and 10 s whatever the
+   * windowless one does, and a window that never comes up keeps only itself
+   * waiting. So: windowed desks first, then windowless, each in drawn order.
+   *
+   * A desk the server says cannot be nudged is not sent anything. The bell
+   * does not ring for it either, and the reason is the server's own words
+   * (`nudge.reason`, from the deliverable() the chat route refuses with).
+   * `base` is the desk's newest turn as drawn. The nudge's own turn, or the
+   * error that says it failed, is the first one after it (nudgeOutcome).
+   */
+  function nudgePlan(desks) {
+    const windowed = [];
+    const opens = [];
+    const blocked = [];
+    for (const d of desks) {
+      if (!d.nudge?.ok) {
+        blocked.push({ agent: d.agent, persona: d.persona, reason: d.nudge?.reason ?? 'Nothing is known about this desk yet.' });
+        continue;
+      }
+      const e = { agent: d.agent, persona: d.persona, host: d.nudge.host ?? null, opens: !!d.nudge.opens, base: d.last_turn?.id ?? 0 };
+      (e.opens ? opens : windowed).push(e);
+    }
+    return { send: [...windowed, ...opens], opens, blocked };
+  }
+
+  /**
+   * The Nudge control: how many it types into, and how many of those open a
+   * window first. Said on the control before it is pressed, because a nudge
+   * never opens a window by surprise (nudgeable(), src/floor.js). The bell
+   * says it on hover, half-lit. This says it in the label, and names the
+   * desks on hover.
+   */
+  function nudgeChip(plan, busy = false) {
+    const n = plan.send.length;
+    const o = plan.opens.length;
+    const names = (xs) => xs.map((x) => `${x.persona} (${x.agent})`).join(', ');
+    const title = [
+      n ? `Types “nudge” into ${plural(n, 'desk')}, the open windows first.` : 'Nothing checked can be nudged.',
+      o ? `Opens a window first on ${names(plan.opens)}, resuming each one's conversation.` : '',
+      ...plan.blocked.map((b) => `Can't nudge ${b.persona} (${b.agent}): ${b.reason}`),
+      busy ? 'The last nudge from this room is still in line.' : '',
+    ].filter(Boolean).join('\n');
+    return { text: `Nudge ${n}${o ? ` · ${o} open${o === 1 ? 's' : ''} a window` : ''}`, title, disabled: !n || busy };
+  }
+
+  /**
+   * What Mark read does: each checked desk with something unread, marked up
+   * to the newest message the page drew for it (`board.unread_max_id`) and
+   * no further. A message that arrives after the click stays unread, as it
+   * does from the backlog dialog, which sends the id it drew too. The cursor
+   * only moves forward, so this is the one action here with no undo, and
+   * its count is on the control before it is pressed.
+   */
+  function readPlan(desks) {
+    const rows = desks
+      .filter((d) => (d.board?.unread ?? 0) > 0 && Number.isInteger(d.board?.unread_max_id))
+      .map((d) => ({ agent: d.agent, persona: d.persona, upTo: d.board.unread_max_id, count: d.board.unread }));
+    return { rows, total: rows.reduce((s, r) => s + r.count, 0) };
+  }
+
+  function readChip(plan) {
+    const { rows, total } = plan;
+    return {
+      text: `Mark read${total ? ` · ${total}` : ''}`,
+      title: total
+        ? `Marks ${plural(total, 'message')} read on ${plural(rows.length, 'desk')}, as the operator: ${rows.map((r) => `${r.agent} ${r.count}`).join(', ')}. Read is a cursor and only moves forward, so this cannot be undone. Anything that arrives after this click stays unread.`
+        : 'Nothing checked has anything unread.',
+      disabled: !total,
+    };
+  }
+
+  /** Hide: each checked desk becomes a pill under the storey, as Hide desk does (#20). No bulk unhide (Decided 3). */
+  function hideChip(desks) {
+    return {
+      text: `Hide ${desks.length}`,
+      title: desks.length
+        ? `Puts ${plural(desks.length, 'desk')} away as pills under this storey. Each comes back from its own pill. The desks keep working and are still counted.`
+        : 'Nothing checked.',
+      disabled: !desks.length,
+    };
+  }
+
+  /**
+   * What a desk's turns since the bulk nudge say happened to it, or null
+   * while they say nothing yet.
+   *
+   * The receipt is the one the chat panel settles on (settle()): the word
+   * as a user turn means the window took it, and an error turn means the
+   * host could not deliver it. An error turn carries no tag saying which
+   * message it was about, so an unrelated error landing first reads as this
+   * nudge failing. The panel reads it the same way and hands the words back
+   * to the composer, and that is the closer of two wrong readings: "not
+   * nudged, here is why" sends the operator to look, while calling it
+   * delivered would be a claim with nothing behind it.
+   */
+  function nudgeOutcome(rows, word = 'nudge') {
+    for (const r of [...(rows ?? [])].sort((a, b) => a.id - b.id)) {
+      if (r.role === 'user' && bulkSquash(r.text).includes(word)) return { state: 'sent' };
+      if (r.role === 'error') return { state: 'failed', words: r.text || 'the host could not deliver it' };
+    }
+    return null;
+  }
+
+  /**
+   * How many of this bulk nudge's own desks are ahead of `agent` in its host's
+   * line, still unresolved. Same host only: each host has its own line.
+   */
+  function aheadOf(entries, agent) {
+    const at = entries.findIndex((e) => e.agent === agent);
+    if (at < 0) return 0;
+    const host = entries[at].host;
+    return entries.slice(0, at).filter((e) => e.host === host && e.state === 'line').length;
+  }
+
+  /**
+   * What the chat panel's pending bubble says about a nudge this room sent
+   * in bulk, and whether its silence clock may run.
+   *
+   * The clock is SENDING_GRACE_MS of silence before "not recorded — send
+   * again", and the step-1 measurement is why it cannot simply start at
+   * the click. A desk queued behind others on its host waits about 3 s for
+   * each of them, and 45 s behind a window that never comes up. Either can
+   * pass 30 s with nothing wrong: two windowless desks, or ten windowed ones.
+   * So the clock waits on facts. While a desk of this bulk is ahead of it on
+   * the host, it does not run and the bubble says so. While its own window
+   * is still being opened, it does not run either, because the host is the
+   * one waiting, and it gives up with an error turn of its own at 45 s. It
+   * starts once the line in front is clear and the window is up, and then
+   * it means what it always meant.
+   *
+   * `opening` is the desk's own payload saying it still has no window.
+   */
+  function bulkWait(entries, agent, opening = false) {
+    const e = entries?.find((x) => x.agent === agent);
+    if (!e || e.state !== 'line') return null;
+    const ahead = aheadOf(entries, agent);
+    if (ahead) return { hold: true, note: `in line — ${plural(ahead, 'desk')} ahead on ${e.host ?? 'its host'}` };
+    if (e.opens && opening) return { hold: true, note: 'opening its window — the host waits up to 45 s for it' };
+    // From whichever came last: the front of the line, or its window coming up.
+    return { hold: false, since: Math.max(e.front ?? 0, e.opens ? e.readyAt ?? 0 : 0) };
+  }
+
+  /** A checked desk's word under its checkbox: what the last action did to it, or what is true of it before one. */
+  function bulkTag(rec, agent, desk) {
+    const e = rec?.entries?.find((x) => x.agent === agent);
+    if (e) {
+      if (rec.kind === 'nudge') {
+        if (e.state === 'line') {
+          // "opening" only at the front: behind others, its window has not
+          // been asked for yet, and saying so would be a guess.
+          const ahead = aheadOf(rec.entries, agent);
+          if (ahead) return { text: 'in line', kind: 'wait', title: `Sent; ${plural(ahead, 'desk')} ahead of it on ${e.host ?? 'its host'}` };
+          return e.opens && desk?.nudge?.opens
+            ? { text: 'opening', kind: 'wait', title: 'Sent; the host is opening its window, and waits up to 45 s for it' }
+            : { text: 'in line', kind: 'wait', title: 'Sent; the host has not typed it in yet' };
+        }
+        if (e.state === 'sent') return { text: 'nudged', kind: 'ok', title: 'The window took the nudge' };
+        return { text: 'not nudged', kind: 'bad', title: e.words ?? '' };
+      }
+      // `sending` is a request still on its way: nothing to report yet, and
+      // "not marked" would be a verdict before the answer.
+      if (rec.kind === 'read') {
+        if (e.state === 'sending') return { text: 'marking', kind: 'wait', title: '' };
+        return e.state === 'done'
+          ? { text: `read ${e.cleared ?? e.count}`, kind: 'ok', title: `Marked read up to message ${e.upTo}` }
+          : { text: 'not marked', kind: 'bad', title: e.words ?? '' };
+      }
+      // A desk that was hidden is a pill; if it is drawn again, its pill
+      // brought it back, and there is nothing left to say about the hide.
+      if (rec.kind === 'hide') return e.state === 'failed' ? { text: 'not hidden', kind: 'bad', title: e.words ?? '' } : null;
+    }
+    if (desk && !desk.nudge?.ok) return { text: "can't nudge", kind: 'note', title: desk.nudge?.reason ?? '' };
+    if (desk?.nudge?.opens) return { text: 'no window', kind: 'note', title: 'Nudging this desk opens its window first, resuming its conversation' };
+    return null;
+  }
+
+  /** One action's result, for the toolbar's second line. Every desk is counted, and the ones it did not reach are named. */
+  function bulkSummary(rec) {
+    if (!rec?.entries?.length) return '';
+    const n = (s) => rec.entries.filter((e) => e.state === s).length;
+    const missed = rec.entries.filter((e) => e.state === 'refused' || e.state === 'failed');
+    const named = missed.length ? ` — ${missed.map((e) => e.agent).join(', ')}` : '';
+    if (rec.kind === 'nudge') {
+      const parts = [n('sent') && `${n('sent')} nudged`, n('line') && `${n('line')} in line`, missed.length && `${missed.length} not nudged${named}`];
+      return `nudge: ${parts.filter(Boolean).join(' · ')}`;
+    }
+    if (rec.kind === 'read') {
+      const done = rec.entries.filter((e) => e.state === 'done');
+      const cleared = done.reduce((s, e) => s + (e.cleared ?? e.count ?? 0), 0);
+      const parts = [done.length && `${plural(cleared, 'message')} read on ${plural(done.length, 'desk')}`, missed.length && `${missed.length} not marked${named}`];
+      return `mark read: ${parts.filter(Boolean).join(' · ')}`;
+    }
+    const parts = [n('done') && `${n('done')} hidden`, missed.length && `${missed.length} not hidden${named}`];
+    return `hide: ${parts.filter(Boolean).join(' · ')}`;
+  }
+
+  /* ---------- bulk selection: the drawing ---------- */
+
+  /* 11px mono advances about 6.6 units at the room's scale: what the header's
+     right-hand controls are laid out by, the way deskPillWidth estimates. */
+  const MONO_W = 6.6;
+
+  /** What every action of this room last did, newest first, as one line. */
+  function bulkLine(channel) {
+    const b = ui.bulk.get(channel);
+    if (!b) return '';
+    return ['nudge', 'read', 'hide'].map((k) => b[k]).filter(Boolean)
+      .sort((x, y) => y.at - x.at).map(bulkSummary).filter(Boolean).join('   ·   ');
+  }
+
+  /** The newest action of this room that touched `agent`: what its tag reports. */
+  function bulkRecFor(channel, agent) {
+    const b = ui.bulk.get(channel);
+    if (!b) return null;
+    // A nudge still in line outranks anything newer: it is the one thing
+    // still happening, and the tag is how the operator sees it finish.
+    const live = b.nudge?.entries.some((e) => e.agent === agent && e.state === 'line') ? b.nudge : null;
+    return live ?? ['nudge', 'read', 'hide'].map((k) => b[k])
+      .filter((r) => r?.entries.some((e) => e.agent === agent))
+      .sort((x, y) => y.at - x.at)[0] ?? null;
+  }
+
+  /** A control in the toolbar: a chip the size of a word, disabled with its reason. */
+  function selChip(x, act, chip, channel) {
+    const w = chip.text.length * MONO_W + 16;
+    const g = el('g', {
+      class: `selChip${chip.disabled ? ' disabled' : ''}`, transform: `translate(${x} 6)`,
+      'data-act': act, 'data-channel': channel, 'data-fk': `${channel}|${act}`,
+      role: 'button', tabindex: '0', 'aria-disabled': chip.disabled ? 'true' : 'false',
+    });
+    g.appendChild(el('rect', { x: 0, y: 0, width: w, height: 21, rx: 10.5, class: 'selChipBox' }));
+    g.appendChild(el('text', { x: 8, y: 14.5, class: 'selChipText' })).textContent = chip.text;
+    g.appendChild(el('title')).textContent = chip.title;
+    return { g, w };
+  }
+
+  /**
+   * The toolbar, in its own band under the header: check all, the count,
+   * the three actions, and on the line under them what the last of each
+   * did. On the room and not on the desk track, so a collapsed storey
+   * scrolling its desks does not scroll its controls away.
+   */
+  function selToolbar(c, drawn, geo) {
+    const ch = c.channel;
+    const checked = ui.select.get(ch) ?? new Set();
+    const desks = checkedDesks(drawn, checked);
+    const g = el('g', { class: 'selBar', transform: `translate(0 ${HEAD_BAND})` });
+    g.appendChild(el('rect', { x: 0, y: 0, width: geo.w, height: SEL_BAND, class: 'selBand' }));
+
+    // Check all / uncheck all, one control: all checked reads as checked,
+    // some as mixed, and pressing it from either state goes to the other end.
+    const all = desks.length > 0 && desks.length === drawn.length;
+    const some = desks.length > 0 && !all;
+    const box = el('g', {
+      class: `selAll${all ? ' on' : ''}${some ? ' some' : ''}`, transform: `translate(${PAD - 6} 9)`,
+      'data-act': 'sel-all', 'data-channel': ch, 'data-fk': `${ch}|sel-all`,
+      role: 'checkbox', tabindex: '0', 'aria-checked': all ? 'true' : some ? 'mixed' : 'false',
+      'aria-label': all ? 'Uncheck all desks on this floor' : 'Check all desks on this floor',
+    });
+    box.appendChild(el('rect', { x: 0, y: 0, width: 15, height: 15, rx: 3, class: 'selAllBox' }));
+    if (all) box.appendChild(el('path', { d: 'M 3.5 7.8 L 6.4 10.6 L 11.6 4.6', class: 'selMark' }));
+    else if (some) box.appendChild(el('path', { d: 'M 4 7.5 L 11 7.5', class: 'selMark' }));
+    box.appendChild(el('text', { x: 21, y: 11.5, class: 'selText' })).textContent = all ? 'uncheck all' : 'check all';
+    box.appendChild(el('title')).textContent = all ? 'Uncheck every desk on this floor' : `Check every desk drawn on this floor (${drawn.length})`;
+    g.appendChild(box);
+
+    let x = PAD - 6 + 21 + (all ? 11 : 9) * MONO_W + 14;
+    const count = el('text', { x, y: 20.5, class: 'selText' });
+    count.textContent = `${desks.length} of ${drawn.length}`;
+    g.appendChild(count);
+    x += `${desks.length} of ${drawn.length}`.length * MONO_W + 16;
+
+    const busy = !!ui.bulk.get(ch)?.nudge?.entries.some((e) => e.state === 'line');
+    for (const [act, chip] of [
+      ['sel-nudge', nudgeChip(nudgePlan(desks), busy)],
+      ['sel-read', readChip(readPlan(desks))],
+      ['sel-hide', hideChip(desks)],
+    ]) {
+      const { g: cg, w } = selChip(x, act, chip, ch);
+      g.appendChild(cg);
+      x += w + 8;
+    }
+
+    const said = bulkLine(ch);
+    const sum = el('text', { x: PAD - 6, y: 43, class: 'selSum' });
+    const room_ = Math.floor((geo.w - (PAD - 6) * 2) / 5.9);
+    sum.textContent = said.length > room_ ? `${said.slice(0, room_ - 1)}…` : said || 'Click a desk to check it.';
+    if (said) sum.appendChild(el('title')).textContent = said;
+    g.appendChild(sum);
+    return g;
+  }
+
+  /**
+   * A desk's checkbox, over the space above the desk where the bell stands
+   * (the issue's "roughly above the service bell"), large enough to hit at
+   * floor zoom. Under it, what the last action did to this desk, or what is
+   * true of it before one: no window, or can't be nudged.
+   */
+  function selBox(d, channel) {
+    const on = !!ui.select.get(channel)?.has(d.agent);
+    const g = el('g', {
+      class: `selBox${on ? ' on' : ''}`,
+      'data-act': 'sel-desk', 'data-channel': channel, 'data-agent': d.agent, 'data-fk': `${channel}|sel|${d.agent}`,
+      role: 'checkbox', tabindex: '0', 'aria-checked': on ? 'true' : 'false',
+      'aria-label': `${on ? 'Uncheck' : 'Check'} ${d.persona} (${d.agent})`,
+    });
+    g.appendChild(el('rect', { x: BELL_CX - 13, y: 2, width: 26, height: 26, rx: 5, class: 'selBoxRect' }));
+    if (on) g.appendChild(el('path', { d: `M ${BELL_CX - 7} 15 L ${BELL_CX - 2} 20.5 L ${BELL_CX + 7.5} 9`, class: 'selMark' }));
+    // A result stays on a desk that was acted on, checked or not. The
+    // notes that come before an action are about what a click would do, so
+    // they are for checked desks only.
+    const rec = bulkRecFor(channel, d.agent);
+    const tag = (rec ? bulkTag(rec, d.agent, d) : null) ?? (on ? bulkTag(null, d.agent, d) : null);
+    if (tag) {
+      const t = el('text', { x: BELL_CX, y: 40, 'text-anchor': 'middle', class: `selTag ${tag.kind}` });
+      t.textContent = tag.text;
+      if (tag.title) t.appendChild(el('title')).textContent = tag.title;
+      g.appendChild(t);
+    }
+    return g;
+  }
+
   function room(c) {
     const collapsed = inBuilding();
     const { drawn, pills } = deskRows(c);
     const tray = deskPillTray(pills);
-    const geo = roomGeometry(drawn.length, collapsed, tray.lines);
+    const selecting = ui.select.has(c.channel);
+    const geo = roomGeometry(drawn.length, collapsed, tray.lines, selecting);
     const svg = el('svg', {
-      class: `room${collapsed ? ' collapsed' : ''}`,
+      class: `room${collapsed ? ' collapsed' : ''}${selecting ? ' selecting' : ''}`,
       viewBox: `0 0 ${geo.w} ${geo.h}`,
       preserveAspectRatio: 'xMidYMin meet',
       'data-channel': c.channel,
@@ -2066,6 +2447,25 @@
       put.appendChild(el('title')).textContent = `Archive ${c.channel} — off the board and the floor, kept as a pill below; agents on it keep working`;
       svg.appendChild(put);
     }
+
+    // Bulk selection's own control (issue #23), on every room in both views
+    // (Decided 1), left of put away when that is drawn. A room with nothing
+    // drawn has nothing to check, so it has no control either. A room
+    // already selecting keeps its control, so the way out is always there.
+    if (drawn.length || selecting) {
+      const putW = ui.floorFilter ? 0 : 'put away'.length * MONO_W + 16;
+      const sel = el('text', {
+        x: geo.w - PAD + 6 - putW, y: 41, class: `roomSel${selecting ? ' on' : ''}`, 'text-anchor': 'end',
+        'data-act': 'select-room', 'data-channel': c.channel, 'data-fk': `${c.channel}|select-room`,
+        role: 'button', tabindex: '0', 'aria-pressed': selecting ? 'true' : 'false',
+      });
+      sel.textContent = selecting ? 'done selecting' : 'select desks';
+      sel.appendChild(el('title')).textContent = selecting
+        ? 'Leave bulk selection. The checks are forgotten, and anything still on its way carries on.'
+        : `Check desks on ${c.channel} to nudge, mark read or hide several at once`;
+      svg.appendChild(sel);
+    }
+    if (selecting) svg.appendChild(selToolbar(c, drawn, geo));
 
     // Envelopes are appended to this layer so they sit above the furniture and
     // can be removed without touching anything that was drawn from data.
@@ -2138,7 +2538,9 @@
     // list, and a desk that is empty or put away is nowhere an envelope can
     // land, so it is skipped.
     const { drawn } = deskRows(c);
-    const geo = roomGeometry(drawn.length, svg.classList.contains('collapsed'));
+    // Selecting moves the desks down by the toolbar's band; ask the same way
+    // room() did, or the envelope lands a band above the desk.
+    const geo = roomGeometry(drawn.length, svg.classList.contains('collapsed'), 0, ui.select.has(channel));
     const idx = (a) => drawn.findIndex((d) => d.agent === a);
     const from = idx(fromAgent);
     if (from < 0) return;
@@ -3220,8 +3622,12 @@
     for (const stale of box.querySelectorAll('.t-pending')) stale.remove();
     for (const p of ui.sending) {
       const queued = deliveredNow(p.text);
-      const stale = !queued && Date.now() - (p.at ?? 0) > SENDING_GRACE_MS;
-      box.insertBefore(pendingNode(p.text, queued, stale), partialNode);
+      // A nudge sent in bulk waits on the line in front of it before its
+      // clock may run, and says what it is waiting on (bulkWait).
+      const wait = !queued && p.bulk ? bulkWaitFor(ui.open.channel, ui.open.agent) : null;
+      const held = wait?.hold ? { state: 'line', note: wait.note } : null;
+      const stale = !queued && !held && Date.now() - Math.max(p.at ?? 0, wait?.since ?? 0) > SENDING_GRACE_MS;
+      box.insertBefore(pendingNode(p.text, queued ?? held, stale), partialNode);
     }
     // A queued message this browser did not send — the bell struck with the
     // panel shut, the board's Nudge button, another tab, a reload — is still
@@ -3384,6 +3790,9 @@
    */
   function deliveryNote(d, stale = false) {
     if (d?.state === 'done') return d.said || 'done';
+    // A nudge from a selecting room, waiting on its host's line: the page's
+    // own reading of facts it has (bulkWait), never stale while it holds.
+    if (d?.state === 'line') return d.note || 'in line';
     if (d) {
       if (d.held === 'compacting') return 'held — the desk is compacting; it reads this when that ends';
       if (d.held) return 'queued — the window took it once it was free';
@@ -3563,9 +3972,20 @@
     // that floor. The class carries the whole difference in the stylesheet.
     rooms.classList.toggle('building', inBuilding());
 
-    const sig = JSON.stringify([ui.floorFilter, shown]);
+    // Selection is drawn from `ui`, so it is part of what the rooms depict:
+    // a check, or a nudge moving from in line to nudged, rebuilds them like
+    // any other change, and the focused control comes back focused (below).
+    // Selecting with nothing checked is `[]`, not selecting is null. Both used
+    // to be `[]` beside a kept result, so the toggle drew nothing either way.
+    const sel = shown.filter((c) => ui.select.has(c.channel) || ui.bulk.has(c.channel))
+      .map((c) => [c.channel, ui.select.has(c.channel) ? [...ui.select.get(c.channel)] : null, ui.bulk.get(c.channel) ?? null]);
+    const sig = JSON.stringify([ui.floorFilter, shown, sel]);
     if (sig !== ui.roomsSig) {
       ui.roomsSig = sig;
+      // Keyboard focus on a bulk control survives the rebuild. Space on a
+      // checkbox changes what the room draws, so without this the next Space
+      // landed on nothing.
+      const fk = document.activeElement?.closest?.('#floor-rooms [data-fk]')?.dataset.fk ?? null;
       if (!shown.length) {
         // Two different empties. "Nothing here yet" is wrong when there are
         // rooms and every one of them has been put away — that sends someone
@@ -3576,6 +3996,7 @@
           : '<div class="q-empty">No desks yet. An agent gets a seat the moment it appears on the board or its window posts a hook event.</div>';
       } else {
         rooms.replaceChildren(...shown.map(room));
+        if (fk) [...rooms.querySelectorAll('[data-fk]')].find((n) => n.dataset.fk === fk)?.focus();
       }
     }
     // The floors put away, under "all floors" and only there: a pill each, the
@@ -3629,6 +4050,8 @@
       const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       if (r.ok) floor = await r.json();
     } catch { /* the board's own dot already reports the connection */ }
+    // What happened to bulk nudges still in line, against the payload just read.
+    if (ui.bulk.size) await followBulk();
 
     // Envelopes come from the activity feed, which is the same source the log
     // panel reads — one shared definition of "a message happened".
@@ -3830,6 +4253,34 @@
       return;
     }
 
+    // Bulk selection (issue #23): the room's own control, then everything
+    // inside a room that is selecting. Inside the storey, so ahead of the
+    // ride, for the reason the arrows are.
+    const selCtl = e.target.closest?.('svg.room [data-act="select-room"]');
+    if (selCtl && ui.on) {
+      toggleSelecting(selCtl.dataset.channel);
+      return;
+    }
+    // While a room is selecting, a click on a desk checks or unchecks it,
+    // wherever it lands: the bell, the nameplate, the sign, a pill. Nothing
+    // rings, no card or conversation opens, and in the building nothing
+    // rides to the floor. A selecting room is being operated on, and one
+    // click doing two things there is how a nudge goes out by accident.
+    // A click on the carpet or the header does nothing at all.
+    const selRoom = e.target.closest?.('svg.room.selecting');
+    if (selRoom && ui.on) {
+      const ch = selRoom.dataset.channel;
+      const ctl = e.target.closest('[data-act^="sel-"]');
+      if (ctl?.dataset.act === 'sel-all') { checkAll(ch); return; }
+      if (ctl && ['sel-nudge', 'sel-read', 'sel-hide'].includes(ctl.dataset.act)) {
+        if (ctl.getAttribute('aria-disabled') !== 'true') bulkAct(ch, ctl.dataset.act.slice(4));
+        return;
+      }
+      const cell = e.target.closest('.desk');
+      if (cell) toggleChecked(ch, cell.dataset.agent);
+      return;
+    }
+
     const storey = e.target.closest?.('svg.room.collapsed');
     if (storey && ui.on) {
       setFloor(storey.dataset.channel);
@@ -3887,9 +4338,13 @@
       // rather than swallowing the click silently.
       const dlg = which === 'unread' ? window.backlogDialog : window.taskDialog;
       // The third argument tells the task dialog which pill was pressed, so it
-      // shows claims or assignments rather than both under one heading.
-      if (typeof dlg === 'function') dlg(channel, agent, pill.dataset.kind ?? null);
-      else openDesk(channel, agent);
+      // shows claims or assignments rather than both under one heading. The
+      // backlog dialog is told the newest message this pill was drawn from,
+      // so a board copy older than the pill is read again before it opens
+      // (issue #23 Decided 5, backlogBehind in app.js).
+      if (typeof dlg !== 'function') openDesk(channel, agent);
+      else if (which === 'unread') dlg(channel, agent, roomOf(channel)?.desks.find((x) => x.agent === agent)?.board?.unread_max_id ?? null);
+      else dlg(channel, agent, pill.dataset.kind ?? null);
       return;
     }
 
@@ -4153,6 +4608,202 @@
     tick();
   }
 
+  /* ---------- bulk selection: the actions ---------- */
+
+  const roomOf = (channel) => floor.channels.find((x) => x.channel === channel) ?? null;
+  const checkedHere = (channel) => {
+    const c = roomOf(channel);
+    return c ? checkedDesks(deskRows(c).drawn, ui.select.get(channel)) : [];
+  };
+  const post = async (path, body) => {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const got = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(got.error ?? `HTTP ${r.status}`);
+    return got;
+  };
+
+  /** A room's results are kept while it selects, and while a nudge from it is still in line. */
+  function pruneBulk(channel) {
+    const b = ui.bulk.get(channel);
+    if (!b || ui.select.has(channel)) return;
+    if (!b.nudge?.entries.some((e) => e.state === 'line')) ui.bulk.delete(channel);
+  }
+
+  function toggleSelecting(channel) {
+    if (ui.select.has(channel)) ui.select.delete(channel);
+    else {
+      ui.select.set(channel, new Set());
+      // The card describes one desk, and the room is about to be about many.
+      ui.details = null;
+      renderDetails();
+    }
+    pruneBulk(channel);
+    render();
+  }
+
+  function toggleChecked(channel, agent) {
+    const set = ui.select.get(channel);
+    if (!set) return;
+    if (set.has(agent)) set.delete(agent); else set.add(agent);
+    render();
+  }
+
+  /** Check every desk drawn in the room, or, when they all are, uncheck them. */
+  function checkAll(channel) {
+    const set = ui.select.get(channel);
+    const c = roomOf(channel);
+    if (!set || !c) return;
+    const drawn = deskRows(c).drawn;
+    if (drawn.length && drawn.every((d) => set.has(d.agent))) set.clear();
+    else for (const d of drawn) set.add(d.agent);
+    render();
+  }
+
+  /** When each entry first stood at the front of its host's line: where its silence clock may start (bulkWait). */
+  function stampFronts(rec) {
+    const now = Date.now();
+    for (const e of rec.entries) if (e.state === 'line' && e.front == null && !aheadOf(rec.entries, e.agent)) e.front = now;
+  }
+
+  /**
+   * One of the three, on the checked desks. Each desk gets the request its
+   * one-desk control sends today: the chat route the bell posts to, the
+   * advance the backlog dialog's Mark all read (operator) posts, the hide
+   * the card's Hide desk posts. So each desk gets the same audit row,
+   * written by `operator` (src/web.js, src/floor.js). One desk's refusal is
+   * that desk's: it is recorded against it, shown on it, and the next desk
+   * is sent its own.
+   *
+   * The mode stays on afterwards, with the same desks checked (the issue's
+   * Not established line, the developer's call). The results are drawn on
+   * the checked desks, which would go with the mode. The actions also
+   * chain: mark a backlog read, then nudge the same desks to look again.
+   * The one guard is a second Nudge while the first is still in line, which
+   * would queue every desk twice.
+   */
+  async function bulkAct(channel, kind) {
+    if (!ui.select.has(channel)) return;
+    const desks = checkedHere(channel);
+    const b = ui.bulk.get(channel) ?? {};
+    ui.bulk.set(channel, b);
+
+    if (kind === 'nudge') {
+      const plan = nudgePlan(desks);
+      if (!plan.send.length || b.nudge?.entries.some((e) => e.state === 'line')) return;
+      const rec = {
+        kind: 'nudge', at: Date.now(),
+        entries: [
+          ...plan.send.map((e) => ({ ...e, state: 'line' })),
+          ...plan.blocked.map((e) => ({ agent: e.agent, persona: e.persona, host: null, state: 'refused', words: e.reason })),
+        ],
+      };
+      b.nudge = rec;
+      render();
+      // In plan order, one after another: the host's line is the order the
+      // board took them in, and the plan's order is the measured one.
+      for (const e of rec.entries.filter((x) => x.state === 'line')) {
+        try {
+          await post('./api/floor/chat', { channel, agent: e.agent, text: NUDGE_WORD });
+          nudged(channel, e.agent, NUDGE_WORD, true);
+        } catch (err) {
+          // Refused by the board, in its words (deliverable(), src/floor.js),
+          // or not answered at all. Either way this desk was not nudged and
+          // the rest still are.
+          e.state = 'refused';
+          e.words = String(err.message ?? err);
+        }
+      }
+      stampFronts(rec);
+      render();
+      tick();
+      return;
+    }
+
+    if (kind === 'read') {
+      const plan = readPlan(desks);
+      if (!plan.total) return;
+      const rec = { kind: 'read', at: Date.now(), entries: plan.rows.map((r) => ({ ...r, state: 'sending' })) };
+      b.read = rec;
+      render();
+      for (const e of rec.entries) {
+        try {
+          const got = await post('./api/admin/agent/advance', { channel, agent: e.agent, up_to_id: e.upTo });
+          e.state = 'done';
+          e.cleared = got.cleared ?? e.count;
+        } catch (err) {
+          e.state = 'failed';
+          e.words = String(err.message ?? err);
+        }
+      }
+      render();
+      tick();
+      return;
+    }
+
+    if (kind === 'hide') {
+      if (!desks.length) return;
+      const rec = { kind: 'hide', at: Date.now(), entries: desks.map((d) => ({ agent: d.agent, persona: d.persona, state: 'sending' })) };
+      b.hide = rec;
+      render();
+      const set = ui.select.get(channel);
+      for (const e of rec.entries) {
+        try {
+          await post('./api/admin/desk/hide', { channel, agent: e.agent });
+          e.state = 'done';
+          // A hidden desk is a pill, and its check goes with it. Restored
+          // from the pill later, it comes back unchecked, not still lined up
+          // for whatever this room does next.
+          set?.delete(e.agent);
+        } catch (err) {
+          e.state = 'failed';
+          e.words = String(err.message ?? err);
+        }
+      }
+      render();
+      tick();
+    }
+  }
+
+  /**
+   * Each poll, what happened to the nudges still in line: the word on the
+   * desk as a turn, an error turn instead, or the window's own note that it
+   * holds the word behind a running turn. These are facts, read where they
+   * are written, and nothing here goes on a clock (task 267 step 1: a desk
+   * can wait 45 s in a line with nothing wrong).
+   */
+  async function followBulk() {
+    for (const [ch, b] of ui.bulk) {
+      const rec = b.nudge;
+      const c = roomOf(ch);
+      const line = rec?.entries.filter((e) => e.state === 'line') ?? [];
+      await Promise.all(line.map(async (e) => {
+        const d = c?.desks.find((x) => x.agent === e.agent);
+        if (e.opens && e.readyAt == null && d?.nudge?.ok && !d.nudge.opens) e.readyAt = Date.now();
+        if (d?.delivery && d.delivery.state !== 'done' && bulkSquash(d.delivery.text).includes(NUDGE_WORD)) {
+          e.state = 'sent';
+          return;
+        }
+        try {
+          const r = await fetch(`./api/floor/turns?channel=${encodeURIComponent(ch)}&agent=${encodeURIComponent(e.agent)}&since=${e.base}&limit=500`,
+            { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+          if (!r.ok) return;
+          const got = nudgeOutcome((await r.json()).rows, NUDGE_WORD);
+          if (got) Object.assign(e, got);
+        } catch { /* the next poll asks again */ }
+      }));
+      if (rec) stampFronts(rec);
+      pruneBulk(ch);
+    }
+  }
+
+  /** The open desk's bulk nudge, if it has one in line: what its pending bubble says (bulkWait). */
+  function bulkWaitFor(channel, agent) {
+    const rec = ui.bulk.get(channel)?.nudge;
+    if (!rec) return null;
+    const d = roomOf(channel)?.desks.find((x) => x.agent === agent);
+    return bulkWait(rec.entries, agent, !!d?.nudge?.opens);
+  }
+
   function flash(btn, text, ms = 2600) {
     if (!btn) return;
     const was = btn.dataset.label ?? btn.textContent;
@@ -4225,19 +4876,23 @@
     renderPanel();
     readWhole(ui.reading);
   };
-  window.floorNudged = (channel, agent, text) => {
+  // `bulk` marks a nudge sent from a selecting room, whose pending bubble
+  // waits on the line in front of it rather than on the clock alone — see
+  // bulkWait.
+  function nudged(channel, agent, text, bulk = false) {
     // Whichever surface sent it, the desk rings. The board's dialog has already
     // had its "ok" from the same endpoint strike() posts to, so the evidence
     // the ring stands for is the same evidence either way.
     ring(channel, agent);
     if (ui.open && ui.open.channel === channel && ui.open.agent === agent) {
-      ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
+      ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(bulk ? { bulk: true } : {}) }]);
       ui.stick = true;
       renderPanel();
     }
     // Even with no panel open on that desk, its sign is about to change.
     tick();
-  };
+  }
+  window.floorNudged = (channel, agent, text) => nudged(channel, agent, text);
 
   /**
    * Send: a user turn in the hosted session. The server refuses, with the
@@ -4517,6 +5172,14 @@
 
     // Keyboard has to mean what the pointer means, or the two surfaces teach
     // different things about what a desk is.
+    // Bulk selection's controls, and a desk in a selecting room, which the
+    // pointer checks rather than opens.
+    const selEl = document.activeElement?.closest?.('svg.room [data-act="select-room"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
+    if (selEl) {
+      e.preventDefault();
+      selEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return;
+    }
     const arrowEl = document.activeElement?.closest?.('svg.room .deskArrow');
     if (arrowEl) {
       e.preventDefault();

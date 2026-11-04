@@ -76,6 +76,14 @@ const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
 // roster entry to go, which happened within the same second.
 const STOP_TIMEOUT_MS = Number(process.env.ORCH_STOP_TIMEOUT_MS ?? 30_000);
 const RELEASE_TIMEOUT_MS = Number(process.env.ORCH_RELEASE_TIMEOUT_MS ?? 10_000);
+/**
+ * What the floor calls the control that puts a terminal on a desk's window:
+ * the desk panel's link (LINK_LABEL.attach in src/ui/floor.js). Two errors
+ * the floor shows on a desk name it where they used to hand the operator a
+ * `tmux attach -t …` to type (issue #23 Decided 6; a remedy is never a
+ * command on the desk). The window suite holds this to the page's label.
+ */
+export const OPEN_IN_TMUX = 'Open in tmux';
 /** How long a freshly opened window gets to become a running session. */
 export const READY_TIMEOUT_MS = Number(process.env.ORCH_READY_TIMEOUT_MS ?? 45_000);
 /** Pause before each attempt to submit a pasted message — see send(). */
@@ -663,7 +671,7 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
       return {
         ok: false,
         code: 'not_ready',
-        error: `Claude Code is open in that window but has not finished starting — something on screen is waiting for an answer. Attach with \`tmux attach -t ${SESSION}\` and reply to it, and this will go through.${onScreen ? ` The window is showing: ${onScreen}` : ''} (waited for ${pid ? `pid ${pid}` : cwd} for ${Math.round(timeoutMs / 1000)}s; the roster had ${roll})`,
+        error: `Claude Code is open in that window but has not finished starting — something on screen is waiting for an answer. ${OPEN_IN_TMUX} on this desk reaches the window: answer it there, and this will go through.${onScreen ? ` The window is showing: ${onScreen}` : ''} (waited for ${pid ? `pid ${pid}` : cwd} for ${Math.round(timeoutMs / 1000)}s; the roster had ${roll})`,
       };
     }
     await sleep(400);
@@ -1936,7 +1944,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       target: pane.target,
       note: opened?.note ?? null,
       error: stuck
-        ? `the window took the message but never submitted it — it is still in the composer, not in the conversation. Attach with \`tmux attach -t ${SESSION}\` and press Enter to send it.`
+        ? `the window took the message but never submitted it — it is still in the composer, not in the conversation. ${OPEN_IN_TMUX} on this desk reaches the window: press Enter there to send it.`
         : cmd
           ? `/${cmd.name} went in, and the window gave no sign of running it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer. Check the window.`
           : `the message went in but the conversation did not confirm it within ${Math.round(LAND_TIMEOUT_MS / 1000)}s — it is no longer in the composer, so it may well have been sent. Check the window before retyping it.`,

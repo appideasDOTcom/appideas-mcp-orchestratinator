@@ -4,8 +4,10 @@
  *
  *   node --experimental-websocket check-backdrop.mjs <base-url> [--expect before|after]
  *
- * Against seed-desk.mjs's desk (`lab` / `bo` on host h1) with answering-host.mjs
- * answering for h1, so the Sessions and History dialogs have a host to ask.
+ * Against seed-desk.mjs's desk (`lab` / `bo` on host h1), seeded with
+ * `--unread 2` so the backlog dialog has a backlog to open on, and with
+ * answering-host.mjs answering for h1, so the Sessions and History dialogs
+ * have a host to ask. run-check-backdrop.sh starts all three.
  *
  * Every gesture is real input through `press()` — a synthetic click names its
  * own target, and the target is the whole question: a click goes to the
@@ -103,6 +105,10 @@ const DIALOGS = [
     open: `(async () => { openSettings(); await chooseBackupFile(new File([${JSON.stringify(BACKUP)}], 'b.json', { type: 'application/json' })); })()` },
   { name: 'tasks (no field)', open: `taskDialog('lab', null)`, field: null, from: '#dlg .dlg-sub' },
   { name: 'retire (no field)', open: `retireDialog('lab', 'bo')`, field: null, from: '#dlg .dlg-sub' },
+  /* Where #23 meets #11 (PR #38, QA Info 5): the backlog dialog a floor
+     unread pill opens (Decided 5). It holds no text field, so it keeps every
+     gesture. Needs mail on bo: seed-desk.mjs --unread, which the runner passes. */
+  { name: 'unread (no field)', open: `backlogDialog('lab', 'bo')`, field: null, from: '#dlg .dlg-sub' },
   { name: 'saved prompts (list)', open: `promptManager()`, field: null, from: '#dlg .dlg-sub' },
   { name: 'settings (no file)', dlg: '#settings-dlg', open: `openSettings()`, field: null, from: '#settings-dlg .set-h' },
 ];
@@ -241,6 +247,14 @@ for (const d of DIALOGS) {
 const WATCH_MS = 10_000;
 const WAITERS = [
   { name: 'tasks (control, no host)', open: `taskDialog('lab', null)`, host: false },
+  /* A second control, not a host dialog. Nothing redraws the backlog
+     dialog after it closes: the board's poll (tick) never touches an open
+     dialog, and refreshDialog runs only after an action inside one. So this
+     holds that a closed backlog stays closed, and would catch a redraw on
+     the poll if one were added. Measured (PR #38): with refreshDialog's
+     open guard and forgetDialog both removed, it stayed green, because no
+     timer calls refreshDialog. The gesture rows above are the ones that bite. */
+  { name: 'unread (control, no host)', open: `backlogDialog('lab', 'bo')`, host: false },
   { name: 'history', open: `historyDialog()`, host: true },
   { name: 'sessions', open: `sessionDialog('lab', 'bo', 'Bo')`, host: true },
   { name: 'take a desk (a folder)', open: `deskDialog({ hostId: 'h1', path: '/repo/deep/nest' })`, host: true },

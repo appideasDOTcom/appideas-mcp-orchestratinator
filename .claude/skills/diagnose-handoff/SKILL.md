@@ -365,6 +365,22 @@ grep -oE '/api/host/[a-z]+[^ ]* (refused|timed out|failed|→ [0-9]+)' $L | sed 
 grep -E 'timed out after' $L | awk '{print $2}' | cut -c1-16 | uniq -c                   # timeouts per minute, to line up with docker logs -t
 ```
 
+**What a run of failures usually is**, from dating all 7,066 lines issue #5
+had (task 262 and its reproduction, 2026-11-03). Read the shape before
+theorising; the cause of each was measured:
+
+| the run looks like | it was | check |
+|---|---|---|
+| one line, `UND_ERR_SOCKET` or `refused`, then nothing | a deploy's container swap | an image build or `Recreated` in the same minute (`docker images -a`) |
+| work-poll timeouts at the `1s` step, no `events not delivered`, nothing else logged, overnight or idle | **the Mac asleep**: a poll in flight when it sleeps fails on a DarkWake, and the next one gets through | `pmset -g log` Sleep / DarkWake in the minute; with times since 0.10.11, the wait reads far past its limit |
+| awake; event POSTs failing too; board `event loop held` lines | the board's loop starved, in issue #5's case **Docker's VM out of memory** under an e2e matrix | the capture's `OOM kills in the VM`; Docker Desktop's memory (8 GiB since 2026-11-03) |
+| `refused` at the `30s` cap for hours | the board not running at all | `docker ps`; Docker Desktop itself |
+
+The sleep row is the commonest by far: 2,506 lines, and none in the three
+days the Mac stayed awake. It is harmless, since nobody is at a floor when
+it happens, and the capture does not open on it: about one a DarkWake is
+below its 5-in-10-minutes threshold.
+
 **A timeout that waited well past its limit is not only the board.** The
 timer that ends the wait runs on the host's own event loop, so `timed out
 after 14210ms (limit 5000ms)` is a host that could not get to its own
