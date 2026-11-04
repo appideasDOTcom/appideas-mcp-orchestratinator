@@ -22,7 +22,8 @@ old hooks.
 .claude/skills/deploy-both-halves/status.sh askUnanswered promptOffer     # symbols your change adds
 ```
 
-It prints the tree against `origin/develop`, the container's created time and
+It prints the tree (HEAD against its own upstream, with `origin/develop`
+beside it), the container's created time and
 the symbol counts in what is *served* and what is *in the container*, the host
 pid's start time against the newest `host/*.js`, and the host's last
 registration line. Read it and post it: QA's deploy order asks for the state
@@ -31,9 +32,16 @@ rebuild took.
 
 Three things to check in it:
 
-- **Tree clean and HEAD = origin/develop.** Nothing uncommitted goes out with
-  a deploy. If the tree is dirty, that is a question for the channel, not a
-  stash.
+- **Tree clean and HEAD = its upstream.** What deploys is the checked-out
+  HEAD, the code you built and tested. On an issue branch that is
+  `origin/issues/<n>`, not `origin/develop`. A develop that has moved on
+  with someone else's work is information to mention in one line after the
+  deploy, not a question to put to costmo first. On 2026-11-04 he asked
+  for 0.10.17 to be deployed, and was offered "issues/13 or develop" because
+  this line said HEAD must equal origin/develop. His answer: "It's your
+  current code. Why are you wanting to deploy a branch I don't have you
+  on?" Nothing uncommitted goes out with a deploy. If the tree is dirty,
+  that is a question for the channel, not a stash.
 - **Nothing else live on the instance.** A rebuild blanks presence for every
   desk and a host restart drops the relay mid-conversation. The go-ahead
   comes from costmo through appideas-qa as a task; a standing one ("the only

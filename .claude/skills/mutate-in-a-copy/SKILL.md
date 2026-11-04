@@ -152,6 +152,30 @@ command for `check-card-move.mjs`. Use its own `--dest`-style copy
 directory (`copy-repo.sh "$TMPDIR/orch-page-copy"`) — a page mutant can run
 beside a suite mutant, since the ports differ, but never in the same copy.
 
+For more than one page mutant, [`run-page-mutants.mjs`](run-page-mutants.mjs)
+takes a JSON list and the check command, makes the copy once, runs each
+mutant through `run-page-mutant.sh`, and ends with the unmutated check as
+the control:
+
+```bash
+node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs /tmp/page.json \
+  'PORT=8916 CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'
+# [["the operator's height is not a floor", "src/ui/floor.js", "const floorH = Math.max(base, set ?? 0);", "const floorH = base;"], …]
+```
+
+Two things a new page check needs before it can be mutation-tested this
+way, both learned on issue #13:
+
+- **Its verdict line carries no ✗.** `run-page-mutant.sh` counts that
+  character, so a summary like `58 ✓ · 0 ✗ · PASS` is a red on a green run.
+  Print `PASS · N of N` or `FAIL · M of N red`.
+- **A step that waits can be satisfied by something other than the code
+  under test.** The floor panel re-renders every 2 s. With `stashDraft`'s
+  fit removed, the steps that set the box's text still passed inside a
+  3 s wait, because the render fitted the box for them. Read at once where
+  the code acts in the same task. And read mid-gesture where the page
+  corrects on release (`press(…, { held })` in drive.mjs).
+
 ## Running more than one at a time
 
 `copy-repo.sh` with no argument always makes the same directory, and
