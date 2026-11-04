@@ -397,11 +397,18 @@ up, so a drag out of a field onto the backdrop is a click on the `<dialog>`;
 so is a click in the dialog's own padding, inside its visible box.
 
 ```bash
-node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8905 &
-node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 &
-node --experimental-websocket .claude/skills/verify-ui-change/check-backdrop.mjs http://localhost:8905 --expect after
+PORT=8912 CDP=9254 .claude/skills/verify-ui-change/run-check-backdrop.sh "$PWD" after
 # rename  backdrop  open  kept   0 close  ✓ … close, then wait … PASS · 65 of 65
 ```
+
+[`run-check-backdrop.sh`](run-check-backdrop.sh) starts the server from the
+directory it is given, seeds `seed-desk.mjs` and `answering-host.mjs` on the
+same scratch DB (with `--db`: seed-desk's default is `./data/scratch.db`, so
+a server on any other DB serves a board with no desk), runs the check, and
+kills all of it. Because it serves whatever directory it is given, the same
+command reads the old page at a base SHA or a page mutant in a copy; the
+header has the recipe. It reports a check that died before its verdict
+line as not finished. A crash exits 1, like a FAIL.
 
 `--expect after` is #11's ruling: a dialog carrying a text field stays
 open with its text on backdrop, drag-out and padding and closes on Escape;
