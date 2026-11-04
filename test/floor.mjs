@@ -3167,8 +3167,9 @@ try {
     assert(/^popup=yes,/.test(page.popoutFeatures(p0)), 'a popup, not a tab (Decided)');
 
     const now = 1_000_000;
-    const outs = new Map([['lab|bo', { at: now - 1000 }], ['lab|cy', { at: now - page.POP_TTL_MS - 1 }]]);
-    eq([...page.outsNow(outs, now)], ['lab|bo'], 'a popout that has gone quiet past POP_TTL_MS is counted back in');
+    const outs = new Map([['lab|bo', { at: now - 1000 }], ['lab|cy', { at: now - page.POP_TTL_MS - 1 }], ['lab|d1', { at: now - 3_600_000, held: true }]]);
+    eq([...page.outsNow(outs, now)], ['lab|bo', 'lab|d1'],
+      'a popout with no lock that has gone quiet past POP_TTL_MS is counted back in; one holding its lock is out however long it is quiet (PR #41)');
 
     const bound = (host, window, state = 'idle') => ({ host, window, state, live: true });
     const floorOf = (...chs) => chs.map(([channel, desks]) => ({ channel, desks }));

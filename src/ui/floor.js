@@ -4289,9 +4289,11 @@
      460px), less the window's frame, so the chat reads at the size it has on
      the floor. As tall as the screen allows. */
   const POP_W = 440;
-  /* A popout says it is out every POP_BEAT_MS, and the floor counts it back
-     in after POP_TTL_MS of silence: a window that closed without its last
-     word (a crash, a killed renderer) is not out for ever. */
+  /* Where the browser gives the page no Web Locks, a popout says it is out
+     every POP_BEAT_MS and the floor counts it back in after POP_TTL_MS of
+     silence, so a window that closed without its last word is not out for
+     ever. With locks, the lock says it and these time only a window not yet
+     heard from (see "Presence that no timer keeps"). */
   const POP_BEAT_MS = 2000;
   const POP_TTL_MS = 7000;
   /* How long a desk has to read as left or gone before its popout says so. A
@@ -4364,10 +4366,20 @@
   /** A popup, not a tab: no tab strip, toolbar or navigation (Decided). */
   const popoutFeatures = (p) => `popup=yes,width=${p.width},height=${p.height},left=${p.left},top=${p.top}`;
 
-  /** The desks out now: those whose popout has spoken within POP_TTL_MS. */
+  /**
+   * The desks out now. A popout that holds its lock (`held`) is out until
+   * the lock is released, however long it is quiet: its timers are the
+   * browser's to throttle, and a minimized popout's were, to one wake-up a
+   * minute (QA, PR #41 finding 1). Without a lock (a page the browser
+   * gives no Web Locks, or a window not yet heard from), out means heard
+   * within POP_TTL_MS.
+   */
   function outsNow(outs, now) {
-    return new Set([...outs].filter(([, o]) => now - o.at < POP_TTL_MS).map(([k]) => k));
+    return new Set([...outs].filter(([, o]) => o.held || now - o.at < POP_TTL_MS).map(([k]) => k));
   }
+
+  /** The Web Lock a desk's popout holds for as long as it is open. */
+  const popLockName = (channel, agent) => `orch.popout:${channel}|${agent}`;
 
   /** The folder and host a desk is bound to, which is what a move keeps, or null when nothing binds it. */
   function boundTo(d) {
@@ -4408,7 +4420,7 @@
 
   /*
    * How the windows agree on which desks are out (issue #19). A popout says
-   * so on a BroadcastChannel — when it loads, every POP_BEAT_MS, and when a
+   * so on a BroadcastChannel — once it holds its lock, and when a
    * floor asks — and says when it goes. A floor keeps what it hears in
    * `ui.outs` and nowhere else, so nothing holds a list that can go stale
    * against the windows themselves, and a reloaded floor asks once and is
@@ -4437,6 +4449,32 @@
      later, and must not bounce the floor's panel in between. */
   const REJOIN_MS = 1500;
 
+  /*
+   * Presence that no timer keeps (QA, PR #41 finding 1). A popout holds a
+   * Web Lock named for its desk for as long as it is open, and the browser
+   * releases it when the window goes: closed, crashed or reloaded. The
+   * floor asks for the same lock once it hears the popout holds it, and is
+   * granted it exactly when the popout is gone, so "out" never expires on a
+   * clock. It used to be a 2 s beat heard within 7 s, and Chrome gives a
+   * minimized window one timer wake-up a minute: measured by QA, the floor
+   * drew bo's composer beside the popout's in 9 samples of 25. Web Locks
+   * need a secure context (localhost is one). Elsewhere it is the beat, as
+   * before, with the same throttling.
+   */
+  const LOCKS = (() => { try { return typeof navigator.locks?.request === 'function'; } catch { return false; } })();
+  const watching = new Set();
+  function watchOut(channel, agent, id) {
+    const k = outKey(channel, agent);
+    if (!LOCKS || watching.has(k)) return;
+    watching.add(k);
+    // Granted when the popout's lock is released, and given straight back.
+    navigator.locks.request(popLockName(channel, agent), () => {
+      watching.delete(k);
+      const o = ui.outs.get(k);
+      if (o?.held && o.id === id) takeGone({ channel, agent, id, open: true });
+    }).catch(() => watching.delete(k));
+  }
+
   if (bc) bc.onmessage = (m) => {
     const msg = m.data ?? {};
     if (ui.popout) {
@@ -4463,38 +4501,12 @@
       // The same window under a new key is a popout that followed its desk
       // to another floor: the old key is not out any more.
       for (const [ok, o] of ui.outs) if (o.id === msg.id && ok !== k) ui.outs.delete(ok);
-      ui.outs.set(k, { at: Date.now(), id: msg.id });
+      const held = LOCKS && msg.held === true;
+      ui.outs.set(k, { at: Date.now(), id: msg.id, held });
+      if (held) watchOut(msg.channel, msg.agent, msg.id);
       if (!was && ui.open && outKey(ui.open.channel, ui.open.agent) === k) renderPanel();
     } else if (msg.t === 'gone') {
-      const o = ui.outs.get(k);
-      if (o && o.id && o.id !== msg.id) return;    // another window's word, about one it does not hold
-      if (!o) return;                              // already back: "Bring chat back here" took it
-      ui.popWins.delete(k);
-      // Its own Re-attach is the operator asking for it here now, and so is
-      // a desk the popout let go of (it followed a move, or the desk left).
-      if (msg.now || !msg.open) {
-        ui.outs.delete(k);
-        if (msg.open) openDesk(msg.channel, msg.agent);
-        else renderPanel();
-        return;
-      }
-      // A window that just closed may be a reload, which says `here` again
-      // in a moment. Until REJOIN_MS has passed it is still out, so the
-      // floor's panel does not open the chat and then put it away again.
-      ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id });
-      // Then the chat opens here only if the floor's panel is shut, or is
-      // this desk's already (renderPanel takes it back there). A panel on
-      // another desk is left as it is: closing a window is not asking for
-      // this chat, and taking the panel would throw the operator out of
-      // whatever they were typing to someone else (costmo, task 273). The
-      // desk is simply no longer out, and opens normally when clicked.
-      // Re-attach and "Bring chat back here" are the explicit asks, above
-      // and in bringBack(), and always open it.
-      setTimeout(() => {
-        if (isOut(msg.channel, msg.agent)) return; // reloaded, and out again
-        if (!ui.open) openDesk(msg.channel, msg.agent);
-        else renderPanel();
-      }, REJOIN_MS);
+      takeGone(msg);
     } else if (msg.t === 'rang') {
       ring(msg.channel, msg.agent);
     }
@@ -4563,12 +4575,64 @@
     window.addEventListener('resize', recordDeskScale);
   }
 
+  /** A popout going, by its own word (`gone`) or by its lock coming free. */
+  function takeGone(msg) {
+    const k = outKey(msg.channel, msg.agent);
+    const o = ui.outs.get(k);
+    if (o && o.id && o.id !== msg.id) return;    // another window's word, about one it does not hold
+    if (!o) return;                              // already back: "Bring chat back here" took it
+    ui.popWins.delete(k);
+    // Its own Re-attach is the operator asking for it here now, and so is
+    // a desk the popout let go of (it followed a move, or the desk left).
+    if (msg.now || !msg.open) {
+      ui.outs.delete(k);
+      if (msg.open) openDesk(msg.channel, msg.agent);
+      else renderPanel();
+      return;
+    }
+    // A window that just closed may be a reload, which says `here` again
+    // in a moment. Until REJOIN_MS has passed it is still out, so the
+    // floor's panel does not open the chat and then put it away again.
+    ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false });
+    // Then the chat opens here only if the floor's panel is shut, or is
+    // this desk's already (renderPanel takes it back there). A panel on
+    // another desk is left as it is: closing a window is not asking for
+    // this chat, and taking the panel would throw the operator out of
+    // whatever they were typing to someone else (costmo, task 273). The
+    // desk is simply no longer out, and opens normally when clicked.
+    // Re-attach and "Bring chat back here" are the explicit asks, above
+    // and in bringBack(), and always open it.
+    setTimeout(() => {
+      if (isOut(msg.channel, msg.agent)) return; // reloaded, and out again
+      if (!ui.open) openDesk(msg.channel, msg.agent);
+      else renderPanel();
+    }, REJOIN_MS);
+  }
+
   /** A popout handing the floor that opened it its window, so the floor can bring it to the front — again after the floor reloads. */
   window.floorAdopt = (channel, agent, w) => { if (!ui.popout && w) ui.popWins.set(outKey(channel, agent), w); };
 
+  /* The popout's half of the lock: taken for its desk, and `here` said
+     only once it is held, so a floor that then asks for it waits for this
+     window to go rather than being granted it on the spot. */
+  let heldFor = null;            // the desk key whose lock this window holds
+  let letGo = null;              // releases it
+  function holdPresence() {
+    if (!ui.popout) return;
+    if (!LOCKS) { announce(); return; }
+    const { channel, agent } = ui.popout;
+    const k = outKey(channel, agent);
+    navigator.locks.request(popLockName(channel, agent), () => new Promise((release) => {
+      heldFor = k;
+      letGo = () => { if (heldFor === k) { heldFor = null; letGo = null; } release(); };
+      announce();
+    })).catch(() => announce());
+  }
+
   function announce() {
     if (!ui.popout || ui.ended) return;
-    say({ t: 'here', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID });
+    const held = heldFor === outKey(ui.popout.channel, ui.popout.agent);
+    say({ t: 'here', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, held });
     try { window.opener?.floorAdopt?.(ui.popout.channel, ui.popout.agent, window); } catch { /* another origin, or gone */ }
   }
 
@@ -4619,6 +4683,7 @@
     stashDraft();
     ui.ended = { open };
     say({ t: 'gone', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, open, now: true });
+    letGo?.();
     closeStream();
     window.close();
     renderPanel();
@@ -4635,13 +4700,14 @@
     const ta = $('p-text');
     if (ta?.value) saveDraft(channel, agent, ta.value);
     say({ t: 'gone', channel: ui.popout.channel, agent, id: POP_ID, open: false });
+    letGo?.();
     ui.popout = { channel, agent };
     try { history.replaceState(null, '', `${location.pathname}${popoutQuery(channel, agent)}`); } catch { /* the address is only for a reload */ }
     try { window.name = popoutName(channel, agent); } catch { /* not ours to name */ }
     ui.fate = null;
     ui.panelFor = null;
     openDesk(channel, agent);
-    announce();
+    holdPresence();
   }
 
   /** What became of this popout's desk, each poll: follow a move; hold a leave or a disappearance for FATE_GRACE_MS, then say it. */
@@ -4677,7 +4743,7 @@
    * A browser with no SharedWorker gets the stream it always had, one per
    * window. It is the same handler either way.
    */
-  const HUB_P = 1;
+  const HUB_P = 2;     // 2: `hello`, a window's lock (PR #41)
   /* A window's want doubles as its heartbeat; the worker drops one silent for
      30 s. */
   const WANT_EVERY_MS = 5000;
@@ -4698,6 +4764,15 @@
         if (ui.stream?.hub) openStream(ui.stream.channel, ui.stream.agent);
       };
       w.port.start();
+      // This window's lock, held for as long as it is open. The worker asks
+      // for it once told its name, and is granted it when this window goes:
+      // that, and not a silence, is how it learns a window has closed (QA,
+      // PR #41 finding 1 — a minimized window's want is throttled to once a
+      // minute, and the 30 s silence dropped it from the stream every time).
+      if (navigator.locks?.request) {
+        const name = `orch.win:${Math.random().toString(36).slice(2)}`;
+        navigator.locks.request(name, () => new Promise(() => { w.port.postMessage({ t: 'hello', lock: name }); })).catch(() => {});
+      }
       return w;
     } catch { return null; }
   })();
@@ -6138,8 +6213,11 @@
     ui.on = true;
     openDesk(ui.popout.channel, ui.popout.agent);
     start();
-    announce();
-    setInterval(announce, POP_BEAT_MS);
+    // The lock is what keeps this desk out on the floor. The beat is for a
+    // browser with no Web Locks only; with them, nothing here runs on a
+    // timer that a hidden window would have throttled.
+    holdPresence();
+    if (!LOCKS) setInterval(announce, POP_BEAT_MS);
     // Closed, or reloaded: either way the draft is filed under the desk and
     // the floor is told. A floor waits REJOIN_MS before taking the chat
     // back, so a reload that says `here` again is not a re-attach.

@@ -10,7 +10,13 @@
  *     node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8931 --db /tmp/pop.db --agent $a > /dev/null &
  *   done
  *   node .claude/skills/verify-ui-change/seed-form.mjs http://localhost:8931 --host h-form > /dev/null &
- *   ORCH_CDP_PORT=9271 node --experimental-websocket .claude/skills/verify-ui-change/check-popout.mjs http://localhost:8931 /tmp/shots
+ *   ORCH_CDP_PORT=9271 ORCH_CHROME_ARGS=--enable-features=IntensiveWakeUpThrottling:grace_period_seconds/10 \
+ *     node --experimental-websocket .claude/skills/verify-ui-change/check-popout.mjs http://localhost:8931 /tmp/shots
+ *
+ * ORCH_CHROME_ARGS shortens Chrome's throttling grace from five minutes to
+ * ten seconds, for the minimized-popout step. It reaches only a Chrome the
+ * check launches, so kill one already on the port first. The step measures
+ * the throttling itself and says so if it did not happen.
  *
  * Its own CDP port, because QA's checks keep a Chrome on 9222. A popup is
  * opened with press() — real input — because the browser blocks window.open
@@ -300,6 +306,35 @@ await pop.waitFor(`[...document.querySelectorAll('#p-turns .t')].some((n) => n.t
 
 floor = await open({ base, view: 'floor', floor: CH });
 await floor.resize(1500, 1000);
+
+console.log('\na minimized popout stays out (QA, PR #41 finding 1)');
+{
+  // Chrome gives a window hidden past its grace one timer wake-up a minute.
+  // Presence used to be a 2 s beat heard within 7 s, so the floor drew bo's
+  // composer beside the popout's. It is the popout's lock now, and the hub
+  // drops a window when its lock comes free, not when it goes quiet.
+  await openOnFloor(floor, 'bo');
+  await floor.waitFor(`!!document.querySelector('#floor-panel [data-act="bring-back"]')`, { timeout: 5000 });
+  await pop.evalJs(`window.__ticks = []; setInterval(() => window.__ticks.push(Date.now()), 1000); 1`);
+  await pop.windowState('minimized');
+  await pop.waitFor(`document.visibilityState === 'hidden'`, { timeout: 5000 });
+  const samples = [];
+  for (let i = 0; i < 20; i++) {
+    await sleep(5000);
+    samples.push(await floor.evalJs(`document.querySelector('#floor-panel')?.dataset.agent === 'bo' && !!document.querySelector('#floor-panel [data-act="bring-back"]') && !document.querySelector('#p-text')`));
+  }
+  const gap = await pop.evalJs(`(() => { const t = window.__ticks; let g = 0; for (let i = 1; i < t.length; i++) g = Math.max(g, t[i] - t[i - 1]); return g; })()`);
+  ok(gap >= 20_000, `the hidden popout's timers were throttled (longest gap ${gap} ms) — or this step proves nothing`);
+  ok(samples.every(Boolean), `the floor kept bo out, with no composer of its own, in ${samples.filter(Boolean).length} of ${samples.length} samples over 100 s`);
+  // The stream: a turn while it is still hidden reaches it at once. Its own
+  // poll is throttled to once a minute, so only the hub can have brought it.
+  const t0 = Date.now();
+  await host([{ type: 'turn', channel: CH, agent: 'bo', session_id: 'sess-bo-2', role: 'assistant', text: 'said to a minimized popout', at: new Date().toISOString(), uuid: `h-${Date.now()}` }]);
+  await pop.waitFor(`[...document.querySelectorAll('#p-turns .t')].some((n) => n.textContent.includes('said to a minimized popout'))`, { timeout: 5000, every: 100 })
+    .then(() => ok(true, `and its stream still delivers while it is hidden (${Date.now() - t0} ms)`), (e) => ok(false, 'and its stream still delivers while it is hidden', e.message));
+  await pop.windowState('normal');
+  await pop.waitFor(`document.visibilityState === 'visible'`, { timeout: 5000 });
+}
 
 console.log('\nits desk changes under it');
 const hidden = await floor.evalJs(`fetch('./api/admin/desk/hide', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: 'lab', agent: 'bo' }) }).then((r) => r.status)`);

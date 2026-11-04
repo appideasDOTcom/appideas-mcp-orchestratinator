@@ -54,7 +54,12 @@ export async function browser({ port = DEBUG_PORT } = {}) {
   const profile = mkdtempSync(join(tmpdir(), 'orch-cdp-'));
   const proc = spawn(CHROME, [
     '--headless=new', `--remote-debugging-port=${port}`, '--disable-gpu',
-    '--no-first-run', `--user-data-dir=${profile}`, '--window-size=1500,1000', 'about:blank',
+    '--no-first-run', `--user-data-dir=${profile}`, '--window-size=1500,1000',
+    // Extra flags for a check that needs them, e.g. check-popout.mjs's
+    // shortened throttling grace. Only a browser this launches takes them:
+    // a Chrome already on the port is reused as it was started.
+    ...(process.env.ORCH_CHROME_ARGS ?? '').split(' ').filter(Boolean),
+    'about:blank',
   ], { stdio: 'ignore', detached: true });
   proc.unref();
   for (let i = 0; i < 60; i++) {
@@ -211,6 +216,13 @@ async function connect(target) {
 
   return {
     targetId: target.id,
+    /** Minimize this page's window, or bring it back ('normal'): a minimized window is `hidden`, and its timers are throttled. */
+    windowState: async (state) => {
+      const got = await cmd('Browser.getWindowForTarget', { targetId: target.id });
+      const windowId = got.result?.windowId;
+      if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
+      await cmd('Browser.setWindowBounds', { windowId, bounds: { windowState: state } });
+    },
     /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
     console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,

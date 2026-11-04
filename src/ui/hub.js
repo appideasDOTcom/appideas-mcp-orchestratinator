@@ -18,13 +18,18 @@
  *   { t: 'want', desks: [[channel, agent], …] }   what this window shows, all of
  *       it; sent on every change and again every WANT_EVERY_MS as its heartbeat
  *   { t: 'bye' }                                  this window is going
+ *   { t: 'hello', lock }                          the Web Lock this window holds
+ *       while it is open; the worker asks for it and is granted it when the
+ *       window goes, so a window that says hello is never dropped for
+ *       being quiet (PR #41: a minimized window's timers are throttled to a
+ *       wake-up a minute, and the silence rule dropped it every time)
  * worker → window:
  *   { t: 'ev', channel, agent, ev }               one event for one of its desks
  *
  * A window that closes without saying bye (a crash, a killed renderer) is
- * dropped once it has been silent for PORT_TTL_MS. A window whose timers are
- * throttled (a hidden tab) can be dropped too, and is back on its next want —
- * its poll covers the gap, as it covers any gap in a stream.
+ * dropped when its lock comes free. Where the browser has no Web Locks, it
+ * is dropped once silent for PORT_TTL_MS instead, and a window whose timers
+ * are throttled can be dropped that way too, and is back on its next want.
  */
 
 const PORT_TTL_MS = 30_000;
@@ -33,7 +38,7 @@ const SWEEP_MS = 5_000;
    (a floor reloading, its popouts answering) is one reopen, not several. */
 const SETTLE_MS = 60;
 
-const ports = new Map();      // port → { desks: Map<key, [channel, agent]>, at }
+const ports = new Map();      // port → { desks: Map<key, [channel, agent]>, at, locked }
 // The streams open now, oldest first. The last is the current one; any before
 // it are on their way out, closed the moment a newer one is answering.
 const streams = [];
@@ -91,12 +96,21 @@ onconnect = (e) => {
   port.onmessage = (m) => {
     const msg = m.data ?? {};
     if (msg.t === 'bye') { ports.delete(port); soon(); return; }
+    if (msg.t === 'hello' && typeof msg.lock === 'string' && self.navigator?.locks?.request) {
+      const p = ports.get(port);
+      if (!p || p.locked) return;
+      p.locked = true;
+      self.navigator.locks.request(msg.lock, () => {
+        if (ports.delete(port)) soon();
+      }).catch(() => { if (ports.has(port)) ports.get(port).locked = false; });
+      return;
+    }
     if (msg.t !== 'want') return;
     const desks = new Map();
     for (const pair of Array.isArray(msg.desks) ? msg.desks : []) {
       if (Array.isArray(pair) && pair[0] && pair[1]) desks.set(keyOf(pair[0], pair[1]), [String(pair[0]), String(pair[1])]);
     }
-    ports.set(port, { desks, at: Date.now() });
+    ports.set(port, { desks, at: Date.now(), locked: ports.get(port)?.locked ?? false });
     soon();
   };
   port.start();
@@ -105,6 +119,6 @@ onconnect = (e) => {
 setInterval(() => {
   const now = Date.now();
   let dropped = false;
-  for (const [port, p] of ports) if (now - p.at > PORT_TTL_MS) { ports.delete(port); dropped = true; }
+  for (const [port, p] of ports) if (!p.locked && now - p.at > PORT_TTL_MS) { ports.delete(port); dropped = true; }
   if (dropped) soon();
 }, SWEEP_MS);
