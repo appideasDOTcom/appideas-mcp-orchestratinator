@@ -325,10 +325,26 @@ export function summarise(c, end, sleeps) {
     lines.push(`${f}: ${rows.length} lines, ${marked.length} loop-hold or slow-request lines`);
     for (const l of marked.slice(0, 15)) lines.push(`  ${l}`);
   }
+  // The VM's kernel killing a process for memory, said first and in full: it
+  // was issue #5's cause (2026-11-03 22:58:00.639Z, the e2e matrix in a
+  // 4 GiB VM, the board's 59.5 s hold ending the same second; 8 GiB fixed
+  // it). A capture that saved three such lines once summarised none of them
+  // (PR #34 review, finding 1).
+  const OOM = /invoked oom-killer|oom-kill:|Out of memory: Killed process/;
+  const ooms = ['vm/init.log', 'vm/console.log'].flatMap((src) => read(`docker-${src.replace('/', '-')}`).filter((l) => OOM.test(l)));
+  lines.push(`OOM kills in the VM in the window: ${ooms.filter((l) => /Killed process/.test(l)).length} (${ooms.length} kernel lines)`);
+  for (const l of ooms.slice(0, 9)) {
+    const m = /"msg":"([^"]*)".*"time":"([^"]*)"/.exec(l);
+    lines.push(`  ${m ? `${m[2]} ${m[1]}` : l}`.slice(0, 260));
+  }
   for (const src of DOCKER_SOURCES) {
     const rows = read(`docker-${src.replace('/', '-')}`);
-    // :8787, the port — a bare 8787 also turns up inside Docker's hex ids.
-    const marked = rows.filter((l) => /:8787\b|gvisor\b.*(stopped|started|accept)|healthcheck failed|exposer\.(Add|Remove)/.test(l));
+    // :8787, the port — a bare 8787 also turns up inside Docker's hex ids —
+    // and the exposer only for the board's own container: every container's
+    // port changes match exposer.Add, and an e2e matrix's 143 of them once
+    // stood in front of everything else in the alert.
+    const ours = C.container ? new RegExp(`exposer\\.Add\\([^,]*, /${C.container}\\b`) : /$^/;
+    const marked = rows.filter((l) => /:8787\b|gvisor\b.*(stopped|started|accept)|healthcheck failed/.test(l) || ours.test(l));
     lines.push(`docker ${src}: ${rows.length} lines in the window, ${marked.length} about 8787, the forwarder or a failed healthcheck`);
     for (const l of marked.slice(0, 12)) lines.push(`  ${l.slice(0, 240)}`);
     if (src === 'vm/init.log') {

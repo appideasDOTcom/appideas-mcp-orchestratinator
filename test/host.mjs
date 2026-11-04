@@ -1601,7 +1601,7 @@ try {
     'a socket the board closed is named by its own code — not called a refusal');
 
   const garbled = await against({ register: 'not-json' }, /retrying in 1s/);
-  assert(new RegExp(`POST ${BOARD_RE}\\/api\\/host\\/register → 200, body failed \\(SyntaxError: `).test(garbled.out),
+  assert(new RegExp(`POST ${BOARD_RE}\\/api\\/host\\/register → 200, body failed \\(SyntaxError: [^)]*\\) after \\d+ms`).test(garbled.out),
     'and a 200 whose body is not JSON says so, rather than a parse error naming nothing');
 
   // The two that need the host kept running past its first failure: started
