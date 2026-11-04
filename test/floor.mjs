@@ -2872,7 +2872,14 @@ try {
     eq(dragOutcome({ before: 100, after: 100, base }), { kind: 'none' }, 'a press and release that moved nothing is a click in the text, not a drag');
     eq(dragOutcome({ before: 100, after: 100.4, base }), { kind: 'none' }, 'nor is a sub-pixel difference');
     eq(dragOutcome({ before: 55, after: 140.6, base }), { kind: 'set', height: 141 }, 'a height that moved across a press is the operator\'s');
-    eq(dragOutcome({ before: 180, after: 120, base }), { kind: 'set', height: 120 }, 'shorter as well as taller, while it stays above the start');
+    eq(dragOutcome({ before: 180, after: 120, base, set: 180 }), { kind: 'set', height: 120 }, 'a shorter drag lowers a stored height, while it stays above the start');
+    // QA, PR #39 finding 1: a box its text holds up, dragged shorter, came
+    // back to its text's height on release and kept the shorter height as
+    // a floor nobody could see until a send emptied the box.
+    eq(dragOutcome({ before: 220, after: 120, base }), { kind: 'none' }, 'a shorter drag of a box its text grew, with nothing stored, stores nothing');
+    eq(dragOutcome({ before: 220, after: 200, base, set: 150 }), { kind: 'none' }, 'nor does one that ends above the stored height: it would raise the floor by dragging down');
+    eq(dragOutcome({ before: 220, after: 120, base, set: 150 }), { kind: 'set', height: 120 }, 'one that ends below the stored height lowers it');
+    eq(dragOutcome({ before: 150, after: 260, base, set: 150 }), { kind: 'set', height: 260 }, 'and a taller drag sets a height whatever is stored');
     eq(dragOutcome({ before: 180, after: base, base }), { kind: 'clear' }, 'dragged back to the starting size, it clears');
     eq(dragOutcome({ before: 180, after: base + 1, base }), { kind: 'clear' }, 'within a pixel of it too');
 

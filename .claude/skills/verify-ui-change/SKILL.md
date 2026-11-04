@@ -379,7 +379,7 @@ and kills all of it. It has the same port refusals as `run-check-backdrop.sh`:
 
 ```bash
 PORT=8915 CDP=9265 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"
-# … PASS · 58 of 58        (about a minute)
+# … PASS · 69 of 69        (about a minute)
 ```
 
 What it drives, with real input: typing a line at a time with Shift+Enter
@@ -390,6 +390,9 @@ back by an error turn, a saved prompt, a Tab-completed command, a draft
 loaded on open. Then the box's own resize handle, dragged through
 `press()`: a floor the text grows past, kept across a desk switch, a closed
 panel, a reload and a second tab, and cleared by a drag to the start. A
+real click in the text, which must not read as a drag. A shorter drag of a
+box its text grew, which stores nothing, and a shorter drag of a box at its
+stored height, which lowers it (QA, PR #39 findings 1 and 2). A
 session change on the open desk (host `session` events), a height set on
 the placeholder session carried to the real id, and the alert slot, send
 row and links still on the panel at three viewports with a permission

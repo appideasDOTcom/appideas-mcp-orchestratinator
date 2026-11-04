@@ -207,6 +207,14 @@ await empty();
 await heightIs(SET, 'emptied: back to the dragged height, not to the start');
 s = await state();
 ok(s.keys[keyFor(`sess-${A}`)] === String(SET), 'and growing and emptying did not move the stored height', JSON.stringify(s.keys));
+// A plain click in the text is a press too, and must not read as a drag
+// (QA, PR #39 finding 2: with every press taken for one, a click cleared
+// the height and this check never pressed anywhere but the corner).
+await typeLines(2, 'click');
+await page.press('#p-text');
+s = await state();
+ok(s.h === SET && s.keys[keyFor(`sess-${A}`)] === String(SET), 'a real click in the text keeps the height and what is stored', `height ${s.h}, ${JSON.stringify(s.keys)}`);
+await empty();
 
 step('9. kept across a desk switch, a closed panel, a reload');
 await page.evalJs(`document.getElementById('p-text').__mark = 'before'; 'ok'`);
@@ -254,6 +262,27 @@ await typeLines(8);
 await heightIs(linesH(8), 'eight lines: it grows with the text again');
 await empty();
 await heightIs(BASE_H, 'and shrinks to the start');
+
+step('11b. a shorter drag of a box its text grew stores nothing');
+// QA, PR #39 finding 1: dragged from 220 to 120, the box came back to 220
+// on release and stored 120, so the next send left it at 120, not 55.
+await typeLines(14);
+await heightIs(CAP_H, 'fourteen lines, nothing stored: the cap');
+s = await drag(-100, () => page.evalJs(`document.getElementById('p-text').offsetHeight`));
+ok(s.during < CAP_H - 50, 'the handle does draw it shorter while held', `held at ${s.during}`);
+ok(s.h === CAP_H, 'released, it is back to what its text needs', `height ${s.h}`);
+ok(Object.keys(s.keys).length === 0, 'and nothing is stored', JSON.stringify(s.keys));
+await empty();
+await heightIs(BASE_H, 'so emptied, as a send empties it, it is the starting size');
+// The other side of the same rule: a shorter drag does lower a height the
+// operator stored, so the page has to hand the rule what is stored.
+s = await drag(100);
+const HIGH = s.h;
+s = await drag(-40);
+ok(s.h < HIGH - 30 && s.h > BASE_H && s.keys[keyFor(`sess-${A}`)] === String(s.h), 'a shorter drag of a box at its stored height lowers what is stored',
+  `${HIGH} → ${s.h}, ${JSON.stringify(s.keys)}`);
+s = await drag(-600);
+ok(!(keyFor(`sess-${A}`) in s.keys) && s.h === BASE_H, 'and back to the start clears it', `height ${s.h}, ${JSON.stringify(s.keys)}`);
 
 step('12. a new session on the open desk switches the box without a desk switch');
 s = await drag(60);

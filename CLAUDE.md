@@ -781,7 +781,12 @@ Four things behind it look simpler than they are:
   textarea and `pointerup` to the document. A `ResizeObserver` would see
   the page's own growing as well, and so would CSS clamping a height the
   page set: the first long message would pin the box tall, which is the
-  thing the issue forbids.
+  thing the issue forbids. A taller drag sets a height. A shorter one
+  lowers a stored height when it ends below it, and otherwise stores
+  nothing (`dragOutcome`'s `set`). A box its text holds up cannot be drawn
+  shorter than the text: it springs back on release, and a floor stored
+  under it surfaced only after the next send, as 8 lines instead of 3 (QA,
+  PR #39 finding 1).
 - **`stashDraft` is the funnel.** Every path that sets `.value` without an
   `input` event (the draft on open, a saved prompt, a lost message put
   back, the box emptied after a send, a completed command) already called
@@ -803,9 +808,12 @@ Four things behind it look simpler than they are:
   The page cannot see the server's rekey, and the next window on the desk
   opens under the same `host:<host>:<channel>:<agent>` string. So a real
   id with no height of its own takes it, and the placeholder's is dropped
-  either way (`boxCarry`). A reload in that window is the one gap: the
-  first real id seen after it inherits. That is the conversation that was
-  opening, unless the operator went back to an older one meanwhile.
+  either way (`boxCarry`). The carry runs only while the desk's panel is
+  open (`fitBox` draws nothing else), so a reload, a desk switch or a
+  closed panel during that window leaves the height on the placeholder,
+  and the first real id the panel sees after it inherits (QA, PR #39
+  finding 3). That is the conversation that was opening, unless the
+  session changed again before the panel came back.
 
 `line-height: 1.2` on the box is the 15px that `normal` measured on this
 font. It is stated so the page can count lines, and three rows are still

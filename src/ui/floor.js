@@ -962,10 +962,19 @@
    * input, never between a press and its release, so a height that changed
    * across one is the drag handle's. A click in the text changes nothing.
    * Dragged back to the starting size (the box's min-height) clears it.
+   *
+   * `set` is the height already stored for this session, if any. A taller
+   * drag sets a height. A shorter one lowers the stored height when it ends
+   * below it, and otherwise stores nothing: a box its text holds up cannot
+   * be drawn shorter than the text, so a floor dragged under it is one the
+   * operator cannot see, and they met it only after the next send emptied
+   * the box (QA, PR #39 finding 1: 14 lines drawn at 220, dragged to 120,
+   * back to 220 on release, and 120 instead of 55 once emptied).
    */
-  function dragOutcome({ before, after, base }) {
+  function dragOutcome({ before, after, base, set = null }) {
     if (Math.abs(after - before) < 1) return { kind: 'none' };
     if (after <= base + 1) return { kind: 'clear' };
+    if (after < before && !(set != null && after < set)) return { kind: 'none' };
     return { kind: 'set', height: Math.round(after) };
   }
 
@@ -1103,11 +1112,12 @@
     const ta = $('p-text');
     const wrap = $('floor-panel');
     if (!ta || ta !== p.el || !wrap?.dataset.agent) return;
-    const out = dragOutcome({ before: p.before, after: ta.offsetHeight, base: boxMetrics(ta).base });
+    const { channel, agent } = wrap.dataset;
+    const session = sessionFilter();
+    const set = session ? loadBoxHeights(channel, agent)[session] ?? null : ui.boxLoose.get(`${channel}|${agent}`) ?? null;
+    const out = dragOutcome({ before: p.before, after: ta.offsetHeight, base: boxMetrics(ta).base, set });
     if (out.kind !== 'none') {
-      const { channel, agent } = wrap.dataset;
       const h = out.kind === 'set' ? out.height : null;
-      const session = sessionFilter();
       if (session) saveBoxHeight(channel, agent, session, h);
       else if (h) ui.boxLoose.set(`${channel}|${agent}`, h);
       else ui.boxLoose.delete(`${channel}|${agent}`);
