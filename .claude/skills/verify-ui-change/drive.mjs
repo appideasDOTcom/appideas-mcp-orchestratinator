@@ -209,8 +209,16 @@ export async function open({
      * `<dialog>` (issue #11) — only real input says what a person gets.
      * `from` and `to` are each a selector (its centre) or `{ x, y }` in CSS
      * pixels; the same point for both is a plain click there.
+     *
+     * A plain click sends no moves unless `steps` asks for them. With the
+     * drag's six it took 300–600 ms from press to release, because each move
+     * is a CDP round trip. A dialog that redraws its body in that time, like
+     * Take a desk when its folder listing arrives, replaced the button under
+     * the held mouse. The release then landed on `#dlg-body` and no click
+     * fired: 14 of 26 trials, against 0 of 20 with no moves (QA, PR #36 N1).
+     * A drag keeps its moves, because the moves are the gesture.
      */
-    press: async (from, to = from, { steps = 6 } = {}) => {
+    press: async (from, to = from, { steps } = {}) => {
       const at = async (p) => (typeof p === 'string'
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(p)});
@@ -220,7 +228,10 @@ export async function open({
           })()`))
         : p);
       const a = await at(from);
-      const b = await at(to);
+      // One read for a click: a second could land after a layout shift and
+      // turn the click into a short drag.
+      const b = to === from ? a : await at(to);
+      steps ??= a.x === b.x && a.y === b.y ? 0 : 6;
       const mouse = (type, { x, y }, buttons) => cmd('Input.dispatchMouseEvent',
         { type, x, y, button: 'left', buttons, clickCount: 1 });
       await mouse('mouseMoved', a, 0);

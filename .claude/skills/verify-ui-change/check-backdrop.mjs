@@ -260,10 +260,16 @@ for (const w of WAITERS) {
     const shutFirst = await landed('#dlg', 2000);
     const t0 = Date.now();
     let back = null;
+    /* The whole WATCH_MS even after a comeback, so the next row starts past
+       History's and Sessions' 5 s host throttles and asks its host whatever
+       this row did. Stopping at the comeback made the rows depend on their
+       order. At the base, History came back about 0.7 s after its Escape,
+       its Close-button row opened inside the throttle and asked nobody, and
+       so it could not come back (QA, PR #36 N2). */
     if (shutFirst) {
       while (Date.now() - t0 < WATCH_MS) {
         await new Promise((r) => setTimeout(r, 250));
-        if (await isOpen('#dlg')) { back = Date.now() - t0; break; }
+        if (back === null && await isOpen('#dlg')) back = Date.now() - t0;
       }
     }
     const shut = await closes('#dlg');

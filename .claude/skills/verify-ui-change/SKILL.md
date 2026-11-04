@@ -378,7 +378,7 @@ same task, which the late `close` must leave drawn. Under a red row the
 check prints the page's own log of every `showModal`, `close()` and
 `close` event with its time, which is how the gap was found.
 
-Four things it taught, each a red that was the check:
+Six things it taught, each a red that was the check:
 
 - **A `close` event is a queued task**, and the page's handler for it
   empties `#dlg-body`. Closing one dialog and opening the next in the same
@@ -402,6 +402,22 @@ Four things it taught, each a red that was the check:
 - **A non-empty `type="search"` field spends the first Escape clearing
   itself.** That is the browser's (History's query has no handler for it),
   so the row says `escape×2` rather than calling Escape broken.
+- **A click held across a redraw is no click** (QA, PR #36 N1). `press()`
+  used to send a click's six moves too, which made press to release take
+  300–600 ms under load. Take a desk, opened on a folder, redraws
+  `#dlg-body` when its listing arrives, 525–590 ms after opening. When
+  that fell inside the press, the button went down on one Cancel and up on
+  another element, so no click fired and the Close-button row read "the
+  close never landed" on a correct build, in 3 of QA's 11 runs. A press
+  at one point is now a plain click with no moves, 1–2 ms from press to
+  release. A drag keeps its moves. Measured with the dialog's own render
+  pinned 50 ms after the press: no moves lost 0 of 10, the six moves lost
+  10 of 10.
+- **A row that stops watching early hands the next row a throttle** (QA,
+  PR #36 N2). History and Sessions ask their host at most once per 5 s.
+  When a row stopped at the comeback, History's Close-button row opened
+  inside its Escape row's window at the base, asked nobody, and could not
+  come back. Every close-then-wait row now watches the full ten seconds.
 
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
