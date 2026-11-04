@@ -4209,9 +4209,18 @@
       // in a moment. Until REJOIN_MS has passed it is still out, so the
       // floor's panel does not open the chat and then put it away again.
       ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id });
+      // Then the chat opens here only if the floor's panel is shut, or is
+      // this desk's already (renderPanel takes it back there). A panel on
+      // another desk is left as it is: closing a window is not asking for
+      // this chat, and taking the panel would throw the operator out of
+      // whatever they were typing to someone else (costmo, task 273). The
+      // desk is simply no longer out, and opens normally when clicked.
+      // Re-attach and "Bring chat back here" are the explicit asks, above
+      // and in bringBack(), and always open it.
       setTimeout(() => {
         if (isOut(msg.channel, msg.agent)) return; // reloaded, and out again
-        openDesk(msg.channel, msg.agent);
+        if (!ui.open) openDesk(msg.channel, msg.agent);
+        else renderPanel();
       }, REJOIN_MS);
     } else if (msg.t === 'rang') {
       ring(msg.channel, msg.agent);

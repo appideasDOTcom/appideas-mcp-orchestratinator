@@ -198,6 +198,26 @@ await closePop(pop);
 await floor.waitFor(`document.querySelector('#floor-panel')?.dataset.agent === 'bo' && !!document.querySelector('#p-text')`, { timeout: 5000 })
   .then(() => ok(true, 'closing the window puts the chat back in the floor panel'), (e) => ok(false, 'closing the window puts the chat back in the floor panel', e.message));
 
+// With the floor's panel on another desk, closing the window changes
+// nothing there (costmo, task 273): the panel stays on cy, with what was
+// being typed to cy and the focus in its box. bo is simply no longer out.
+await floor.press('#floor-panel [data-act="detach"]');
+pop = await attach(isPop('bo'));
+await pop.waitFor(`!!document.querySelector('#p-text')`);
+await openOnFloor(floor, 'cy');
+await floor.waitFor(`!!document.querySelector('#p-text')`);
+await type(floor, 'half a message to cy');
+await floor.evalJs(`document.querySelector('#p-text').focus(); 1`);
+await closePop(pop);
+await sleep(3500);
+p = await panelOf(floor);
+ok(p.agent === 'cy' && p.draft === 'half a message to cy' && await floor.evalJs(`document.activeElement?.id === 'p-text'`),
+  'closing it with the floor on another desk leaves that desk\'s panel, its text and its focus alone', JSON.stringify({ ...p, focus: await floor.evalJs(`document.activeElement?.id || document.activeElement?.tagName`) }));
+await type(floor, '');
+await openOnFloor(floor, 'bo');
+await floor.waitFor(`!!document.querySelector('#p-text')`, { timeout: 3000 })
+  .then(() => ok(true, 'and bo, no longer out, opens its chat on the floor when clicked'), (e) => ok(false, 'and bo, no longer out, opens its chat on the floor when clicked', e.message));
+
 console.log('\na floor reloaded, then closed');
 await floor.press('#floor-panel [data-act="detach"]');
 pop = await attach(isPop('bo'));

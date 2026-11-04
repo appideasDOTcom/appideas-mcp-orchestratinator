@@ -194,9 +194,11 @@ Sessions, Leave desk. A dialog opens in the window you clicked it in. While a
 desk is out, opening it on the floor shows its header and **Bring chat back
 here**, because only one place types into a desk. **⧉** on a desk that is
 already out brings its window to the front rather than opening a second. To
-end it, press **Re-attach** in the popout, **Bring chat back here** on the
-floor, or just close the window: the chat comes back to the floor's panel,
-with whatever you had typed. A popout keeps working if the floor tab is
+end it, press **Re-attach** in the popout or **Bring chat back here** on the
+floor, and the chat comes back to the floor's panel, with whatever you had
+typed. Just closing the window ends it too; the chat opens on the floor if
+its panel is shut or already on that desk, and otherwise the panel stays
+where you are and the desk opens normally when you click it. A popout keeps working if the floor tab is
 reloaded or closed. It follows its desk to another floor, stays put if the
 desk is hidden, and says so if the desk is left. The browser shows a read-only
 address strip on the popup; fully chromeless windows are the desktop app's

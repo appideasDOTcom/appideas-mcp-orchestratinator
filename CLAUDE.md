@@ -775,7 +775,11 @@ look like they could be done more simply:
   back** (`REJOIN_MS`). A popout being reloaded says `gone` and then `here`,
   and without the hold the floor's panel would open the chat and put it
   away again. Re-attach and Bring chat back here are not held: those are
-  the operator asking for it now.
+  the operator asking for it now. And a closed window takes the panel only
+  when the panel is shut or already on that desk (costmo, task 273). On
+  another desk it is left alone, text and focus with it, because closing a
+  window is not asking for that chat. QA measured the first cut taking the
+  panel from a half-typed message and leaving focus on BODY.
 - **"Left" is said after 4 s, not at once** (`FATE_GRACE_MS`). Read in
   `bind()` in `host/index.js`: a move re-registers the host without the old
   binding just before it reports the new one, so for a moment the desk
