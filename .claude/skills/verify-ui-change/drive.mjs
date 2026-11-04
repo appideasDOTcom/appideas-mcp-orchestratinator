@@ -90,6 +90,46 @@ export async function open({
   }
   await browser({ port });
   const target = await (await fetch(`http://localhost:${port}/json/new?about:blank`, { method: 'PUT' })).json();
+  const page = await connect(target);
+  await page.goto(base);
+  const sets = [];
+  if (view) sets.push(`localStorage.setItem('orch.view', ${JSON.stringify(view)})`);
+  if (floor !== undefined) sets.push(`localStorage.setItem('orch.floor', ${JSON.stringify(floor)})`);
+  // There is no `minimized` any more: putting a floor away is the server's
+  // archive flag (issue #21), so a check seeds it with POST /api/admin/channel/archive.
+  if (sets.length) { await page.evalJs(`${sets.join(';')};'ok'`); await page.goto(base); }
+  await page.waitFor(ready ?? READY[view] ?? `document.readyState === 'complete'`, { timeout: 15000 });
+  return page;
+}
+
+/**
+ * A window the page opened itself — a desk's popout (issue #19) — as its own
+ * target, driven like any page. `match` is a test on the target's URL; the
+ * wait is for the window to exist, since window.open returns before it does.
+ * A popup is only opened on real input (`press()`), never a dispatched click:
+ * the browser blocks window.open without a user gesture, and returns null.
+ */
+export async function attach(match, { port = DEBUG_PORT, timeout = 8000 } = {}) {
+  const until = Date.now() + timeout;
+  for (;;) {
+    const list = await (await fetch(`http://localhost:${port}/json/list`)).json();
+    const t = list.find((x) => x.type === 'page' && match(x.url));
+    if (t) {
+      const page = await connect(t);
+      await page.waitFor(`document.readyState === 'complete'`, { timeout: 15000 });
+      return page;
+    }
+    if (Date.now() > until) throw new Error(`no window matching ${match} within ${timeout}ms — open: ${list.map((x) => x.url).join(', ')}`);
+    await sleep(100);
+  }
+}
+
+/** The pages open now, by URL — for asserting a window closed, or that a second was never opened. */
+export async function targets({ port = DEBUG_PORT } = {}) {
+  return (await (await fetch(`http://localhost:${port}/json/list`)).json()).filter((x) => x.type === 'page').map((x) => x.url);
+}
+
+async function connect(target) {
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   let id = 0;
   const waiting = new Map();
@@ -155,16 +195,8 @@ export async function open({
     await waitFor(`document.readyState === 'complete'`, { timeout: 15000 });
   };
 
-  await goto(base);
-  const sets = [];
-  if (view) sets.push(`localStorage.setItem('orch.view', ${JSON.stringify(view)})`);
-  if (floor !== undefined) sets.push(`localStorage.setItem('orch.floor', ${JSON.stringify(floor)})`);
-  // There is no `minimized` any more: putting a floor away is the server's
-  // archive flag (issue #21), so a check seeds it with POST /api/admin/channel/archive.
-  if (sets.length) { await evalJs(`${sets.join(';')};'ok'`); await goto(base); }
-  await waitFor(ready ?? READY[view] ?? `document.readyState === 'complete'`, { timeout: 15000 });
-
   return {
+    targetId: target.id,
     evalJs,
     waitFor,
     goto,

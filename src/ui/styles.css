@@ -1728,3 +1728,30 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .p-persona-read { font: 600 13.5px var(--sans); }
 /* The turn a search was for, in the conversation it was found in. */
 .t.t-found { outline: 2px solid color-mix(in srgb, var(--wait) 55%, transparent); outline-offset: 2px; border-radius: 6px; }
+
+/* ─── a desk's chat in a window of its own (issue #19) ───────────────────────
+   The popout is this page with ?popout=1: the same scripts, so every control
+   in it is the floor's own. All of the page but the desk panel is put away,
+   and the panel fills the window — header, the desk as the floor draws it,
+   then the chat, top to bottom. */
+body.popout { height: 100vh; overflow: hidden; }
+body.popout .topbar,
+body.popout main > .panel:not(.panel-floor),
+body.popout #floor > :not(.floor-body),
+body.popout #floor-rooms { display: none; }
+body.popout main { height: 100vh; max-width: none; padding: 0; gap: 0; box-sizing: border-box; }
+body.popout #floor { height: 100%; border: 0; border-radius: 0; }
+body.popout .panel-floor > .floor-body { display: block; height: 100%; padding: 0; }
+body.popout .deskpanel { flex: none; width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; box-sizing: border-box; }
+/* The desk, a little larger than on the floor and no larger: a person at a
+   desk, not a billboard of one. */
+.p-deskslot { padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.p-deskslot svg.popdesk { display: block; height: min(26vh, 210px); width: auto; max-width: 100%; margin-inline: auto; }
+/* The transcript keeps a reading height however short the window is made;
+   the desk above it is what gives way, by its own min(). */
+body.popout .p-turns { min-height: 140px; }
+/* The floor's panel for a desk whose chat is out, and a popout whose chat
+   has gone: the header, a sentence, and the one thing to press. */
+.p-out { padding: 18px 14px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.p-out-why { margin: 0; font-size: 12.5px; }
+.p-detach { font-size: 13px; line-height: 1; }

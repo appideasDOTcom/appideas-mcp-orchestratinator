@@ -278,6 +278,10 @@ const secondsSince = (isoStr, nowMs) => {
 const SCREEN_COMMANDS = 6;
 
 const deskKey = (channel, agent) => `${channel}|${agent}`;
+/* The most desks one event stream carries. The page's windows ask for the
+   union of what they show — the floor's open panel plus one desk per popout —
+   so this is far past any real use and only bounds a malformed request. */
+const STREAM_DESKS_MAX = 50;
 
 /**
  * Can anything be typed into this desk's window right now, and if not, why not?
@@ -2844,11 +2848,32 @@ export function createFloorRouter({ store, auth, sessions = null }) {
    * proxy in the way doesn't like long responses.
    */
   router.get('/api/floor/stream', (req, res) => {
-    const channel = str(req.query.channel);
-    const agent = str(req.query.agent);
-    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    const key = deskKey(channel, agent);
+    // Several desks on one connection (issue #19): `desks` is a JSON list of
+    // [channel, agent] pairs, and every event says whose it is. A browser
+    // holds at most six connections to a host over HTTP/1.1, shared by every
+    // window, and the sixth stream hangs every poll in all of them (measured
+    // in the issue). So the page's windows share one stream through a
+    // SharedWorker (src/ui/hub.js) and ask it for the union of their desks,
+    // rather than one connection each. The single-desk form is kept for a
+    // page older than this, and its events stay untagged.
+    let desks;
+    if (req.query.desks !== undefined) {
+      try { desks = JSON.parse(String(req.query.desks)); } catch { desks = null; }
+      const ok = Array.isArray(desks) && desks.length >= 1 && desks.length <= STREAM_DESKS_MAX
+        && desks.every((p) => Array.isArray(p) && p.length === 2 && str(p[0]) && str(p[1]));
+      if (!ok) return res.status(400).json({ error: `desks must be a JSON list of 1 to ${STREAM_DESKS_MAX} [channel, agent] pairs` });
+      desks = [...new Map(desks.map(([c, a]) => [deskKey(str(c), str(a)), [str(c), str(a)]])).values()];
+    } else {
+      const channel = str(req.query.channel);
+      const agent = str(req.query.agent);
+      if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+      return streamDesks(req, res, [[channel, agent]], false);
+    }
+    return streamDesks(req, res, desks, true);
+  });
 
+  /** One event stream for `desks`; `tagged` puts each event's desk on it. */
+  function streamDesks(req, res, desks, tagged) {
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache, no-transform',
@@ -2856,18 +2881,21 @@ export function createFloorRouter({ store, auth, sessions = null }) {
       'x-accel-buffering': 'no',
     });
     res.write('retry: 2000\n\n');
-    const send = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch { /* closed */ } };
-
-    // What's true right now, so a panel that just opened doesn't wait for the
-    // next event to learn there is a reply mid-stream or a prompt open.
-    if (live.partial.get(key)) send({ type: 'partial', text: live.partial.get(key) });
-    if (live.pending.get(key)) send({ type: 'permission', request: live.pending.get(key) });
-    if (live.delivery.get(key)) send({ type: 'delivery', delivery: live.delivery.get(key) });
-
-    const unsubscribe = live.subscribe(key, send);
+    const unsubs = desks.map(([channel, agent]) => {
+      const key = deskKey(channel, agent);
+      const send = (ev) => {
+        try { res.write(`data: ${JSON.stringify(tagged ? { ...ev, channel, agent } : ev)}\n\n`); } catch { /* closed */ }
+      };
+      // What's true right now, so a panel that just opened doesn't wait for the
+      // next event to learn there is a reply mid-stream or a prompt open.
+      if (live.partial.get(key)) send({ type: 'partial', text: live.partial.get(key) });
+      if (live.pending.get(key)) send({ type: 'permission', request: live.pending.get(key) });
+      if (live.delivery.get(key)) send({ type: 'delivery', delivery: live.delivery.get(key) });
+      return live.subscribe(key, send);
+    });
     const heartbeat = setInterval(() => { try { res.write(': hb\n\n'); } catch { /* closed */ } }, 15_000);
-    req.on('close', () => { clearInterval(heartbeat); unsubscribe(); });
-  });
+    req.on('close', () => { clearInterval(heartbeat); for (const u of unsubs) u(); });
+  }
 
   /**
    * Rename whoever sits at a desk. An operator action, so it takes the same CSRF
