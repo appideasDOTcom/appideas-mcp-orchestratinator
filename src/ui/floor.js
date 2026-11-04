@@ -426,6 +426,21 @@
     // rather than after a round trip. Re-read every time it is opened, because
     // the manager may have changed it since.
     promptList: [],
+    // Popouts (issue #19). In a popout, `popout` is the desk it shows, and
+    // follows that desk to another floor; on the floor it is null. `outs` is
+    // the floor's record of which desks are out, by desk key, from what the
+    // popouts themselves say (see "popouts: the windows"); `popWins` the
+    // windows this page opened or was handed, for bringing one to the front.
+    // `fate` is what a popout last read of its desk (deskFate), and `mem`
+    // which folder on which host it last saw the desk bound to — what a move
+    // is followed by.
+    popout: null,
+    outs: new Map(),
+    popWins: new Map(),
+    fate: null,
+    mem: null,
+    lastDesk: null,      // the popout's desk as last read, for a header after it is gone
+    ended: null,         // a popout re-attached: { open }, and saying where the chat went
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -611,7 +626,9 @@
     // empty desk is still in the payload, so "still in the payload" is not
     // "still drawn"). Close rather than leave a card describing something that
     // is no longer on the floor.
-    if (!d || !c || !deskRows(c).drawn.includes(d)) { ui.details = null; pop?.remove(); return; }
+    // A popout draws its desk whatever the floor does with it — hidden (#20)
+    // changes what the floor draws, not the popout (issue #19).
+    if (!d || !c || (!ui.popout && !deskRows(c).drawn.includes(d))) { ui.details = null; pop?.remove(); return; }
 
     if (!pop) {
       pop = document.createElement('div');
@@ -1040,7 +1057,10 @@
     const turns = $('p-turns');
     const last = wrap.lastElementChild;
     const cs = getComputedStyle(wrap);
-    const max = parseFloat(cs.maxHeight);
+    // A popout's panel has no max-height: it is the window's height (issue
+    // #19), so that is its limit. Without this the room was unlimited
+    // there, and 18 lines or a drag pushed the send row out of the window.
+    const max = ui.popout ? wrap.getBoundingClientRect().height : parseFloat(cs.maxHeight);
     if (!turns || !last || !(max > 0)) return Infinity;
     // Measured from the parts, not from the panel's own height: once a box
     // pushes the panel past its max-height, the panel's height is clamped
@@ -1051,7 +1071,11 @@
     const t = turns.getBoundingClientRect();
     const above = t.top - w.top;
     const below = last.getBoundingClientRect().bottom - t.bottom + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingBottom);
-    return Math.floor(max - above - below + ta.offsetHeight - BOX_TURNS_KEEP);
+    // The transcript keeps BOX_TURNS_KEEP, or its own min-height where the
+    // stylesheet gives it more (a popout's): a box sized past that pushes
+    // the foot off, because the transcript will not shrink to make room.
+    const keep = Math.max(BOX_TURNS_KEEP, parseFloat(getComputedStyle(turns).minHeight) || 0);
+    return Math.floor(max - above - below + ta.offsetHeight - keep);
   }
 
   /**
@@ -1612,7 +1636,7 @@
       }
     }
     if (!moved) return;
-    for (const el_ of document.querySelectorAll('#floor-rooms svg.room .desk')) {
+    for (const el_ of document.querySelectorAll('svg.room .desk')) {
       paintScreen(el_, ui.screens.get(screenKey(el_.dataset.channel, el_.dataset.agent)));
     }
   }
@@ -3138,6 +3162,100 @@
    * and a scroll box rebuilt every two seconds forgets where you had scrolled.
    * Neither node is ever created twice for the same desk.
    */
+  /**
+   * The buttons at the right of the panel's header. On the floor: detach,
+   * then close. In a popout: Re-attach in place of close (issue #19) — the
+   * popout's own window close does the same, and a ✕ there would read as
+   * closing the conversation rather than sending it back.
+   */
+  function panelEnds(channel, agent) {
+    if (ui.popout) return '<button class="btn" data-act="reattach" title="Close this window and put the chat back in the floor\u2019s panel">Re-attach</button>';
+    return `<button class="btn p-detach" data-act="detach" data-channel="${esc(channel)}" data-agent="${esc(agent)}" title="Open this chat in a window of its own, beside the floor" aria-label="Detach into its own window">\u29c9</button>
+        <button class="btn" data-act="close-panel" title="Close">\u2715</button>`;
+  }
+
+  /**
+   * The floor's panel for a desk whose chat is in a popout: the header as it
+   * always is, and in place of the chat one way to bring it back. No
+   * composer and no stream — one place types into a desk, and it is the
+   * popout (issue #19). The detach button in the header brings the popout to
+   * the front.
+   */
+  function outShell(wrap, channel, agent) {
+    stashDraft();
+    wrap.dataset.channel = channel;
+    wrap.dataset.agent = agent;
+    wrap.innerHTML = `
+      <div class="p-head">
+        <div class="p-id">
+          <button class="p-persona" data-act="rename" data-channel="${esc(channel)}" data-agent="${esc(agent)}"
+                  title="Rename — everyone sees the same name"></button>
+          <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
+        </div>
+        ${panelEnds(channel, agent)}
+      </div>
+      <div class="p-meta mono muted"></div>
+      <div class="p-out">
+        <p class="muted p-out-why"></p>
+        <button class="btn primary" data-act="bring-back" data-channel="${esc(channel)}" data-agent="${esc(agent)}">Bring chat back here</button>
+      </div>`;
+  }
+
+  /**
+   * A popout whose chat has gone: re-attached to the floor (and the browser
+   * would not let the page close its own window), or its desk left or gone
+   * from the board. The header stays, so it is plain whose this was; the
+   * window never goes blank and never shows another desk.
+   */
+  function endShell(wrap, channel, agent, why) {
+    stashDraft();
+    closePromptMenu();
+    closeStream();
+    wrap.dataset.channel = channel;
+    wrap.dataset.agent = agent;
+    wrap.dataset.ended = why;
+    wrap.innerHTML = `
+      <div class="p-head">
+        <div class="p-id">
+          <span class="p-persona-read"></span>
+          <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
+        </div>
+      </div>
+      <div class="p-meta mono muted"></div>
+      <div class="p-out">
+        <p class="p-out-why"></p>
+        <button class="btn primary" data-act="close-window">Close this window</button>
+      </div>`;
+  }
+
+  /**
+   * The desk itself, in a popout (issue #19): the floor's own desk(), from
+   * the thought bubble down to the pill tray, in an SVG of its own. `room`
+   * on it is what lets the one click handler reach its bell, pills, sign
+   * and nameplate, so each does here exactly what it does on the floor. It
+   * is not in a room, so no room's selection reaches it (#23: selection is
+   * the floor's). Redrawn only when the desk changes, for the reason the
+   * rooms are.
+   */
+  function drawPopDesk(wrap, d, channel) {
+    const slot = wrap.querySelector('.p-deskslot');
+    if (!slot) return;
+    const sig = JSON.stringify([channel, d]);
+    if (slot.dataset.sig === sig) return;
+    slot.dataset.sig = sig;
+    // deskXY puts desk 0 at (PAD, PAD + HEAD_H + top); this `top` makes that (PAD, 0).
+    const geo = { cols: 1, rows: 1, collapsed: false, w: DESK_W, top: -(PAD + HEAD_H) };
+    const x0 = PAD - 8;
+    const y0 = -BUBBLE_ABOVE - 6;
+    const w = DESK_W + 16;
+    const h = DESK_BELOW + BUBBLE_ABOVE + 12;
+    const svg = el('svg', { class: 'room popdesk', viewBox: `${x0} ${y0} ${w} ${h}`, 'data-channel': channel, preserveAspectRatio: 'xMidYMin meet' });
+    svg.appendChild(el('rect', { x: x0, y: y0, width: w, height: h, rx: 10, class: 'roomFloor' }));
+    svg.appendChild(desk(d, 0, geo, channel));
+    slot.replaceChildren(svg);
+    popLayout();
+  }
+
   function panelShell(wrap, channel, agent) {
     // Whose panel this is, as a DOM fact. The shell is rebuilt in the same
     // synchronous pass that gates the links beneath it, so anything reading
@@ -3153,6 +3271,7 @@
     ui.boxPress = null;
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
+    delete wrap.dataset.ended;
     wrap.innerHTML = `
       <div class="p-head">
         <div class="p-id">
@@ -3160,9 +3279,10 @@
                   title="Rename — everyone sees the same name"></button>
           <span class="mono muted">${esc(channel)}/${esc(agent)}</span>
         </div>
-        <button class="btn" data-act="close-panel" title="Close">✕</button>
+        ${panelEnds(channel, agent)}
       </div>
       <div class="p-meta mono muted"></div>
+      ${ui.popout ? '<div class="p-deskslot"></div>' : ''}
       <div class="p-turns" id="p-turns"></div>
       <div class="p-compose">
         <!-- Where the question is, not where the panel begins. It used to sit up
@@ -3364,6 +3484,19 @@
     delete wrap.dataset.reading;
   }
 
+  /** The panel's meta line: the window, the branch, the model, where it is, how many turns. One line for every shell that shows it. */
+  function panelMeta(d) {
+    const s = d.session ?? {};
+    const h = d.hosted;
+    const compacting = compactingLine(s.compacting);
+    const presence = h
+      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
+      : d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
+    const models = modelLine(s);
+    return `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${models ? ` · ${models}` : ''}` +
+      ` · ${presence} · ${d.turns} turn${d.turns === 1 ? '' : 's'}`;
+  }
+
   function renderPanel() {
     const wrap = $('floor-panel');
     if (!ui.open) {
@@ -3389,8 +3522,54 @@
     const { channel, agent } = ui.open;
     const c = floor.channels.find((x) => x.channel === channel);
     const d = c?.desks.find((x) => x.agent === agent);
+    // A popout that has ended, or whose desk left or went (issue #19), says
+    // so where the chat was, under the header it had.
+    const ended = ui.popout ? (ui.ended ? 'reattached' : fateShown()) : null;
+    if (ended) {
+      const last = d ?? ui.lastDesk;
+      const forEnd = `${channel}|${agent}|end|${ended}`;
+      if (ui.panelFor !== forEnd) {
+        endShell(wrap, channel, agent, ended);
+        ui.panelFor = forEnd;
+      }
+      wrap.classList.remove('hidden');
+      wrap.querySelector('.p-persona-read').textContent = last?.persona ?? agent;
+      wrap.querySelector('.p-meta').textContent = last ? panelMeta(last) : '';
+      const who = last?.persona ?? agent;
+      wrap.querySelector('.p-out-why').textContent = ended === 'reattached'
+        ? `${who}\u2019s chat is back on the floor. This window has nothing more to show.`
+        : ended === 'left'
+          ? `${who} left this desk: its binding is gone, and its window with it. Nothing more will arrive here.`
+          : `${channel}/${agent} is no longer on the board. Nothing more will arrive here.`;
+      return;
+    }
     if (!d) {
       wrap.classList.add('hidden');
+      return;
+    }
+    // The desk's chat is in a popout: the header, and the way back. The
+    // floor holds no stream for it and draws no composer (issue #19).
+    if (isOut(channel, agent)) {
+      const forOut = `${channel}|${agent}|out`;
+      if (ui.panelFor !== forOut) {
+        stopReading();
+        closeStream();
+        closePromptMenu();
+        outShell(wrap, channel, agent);
+        ui.panelFor = forOut;
+      }
+      wrap.classList.remove('hidden');
+      wrap.querySelector('.p-persona').textContent = d.persona;
+      wrap.querySelector('.p-meta').textContent = panelMeta(d);
+      wrap.querySelector('.p-out-why').textContent =
+        `${d.persona}\u2019s chat is in a window of its own. Everything in the chat works there; the desk on the floor works as it always does.`;
+      return;
+    }
+    // Back from a popout with this desk open: started the way any desk is
+    // opened, its turns read and its stream asked for.
+    if (ui.panelFor === `${channel}|${agent}|out`) {
+      ui.panelFor = null;
+      openDesk(channel, agent);
       return;
     }
     // A past conversation is open to read on this desk: its own shell, and
@@ -3418,6 +3597,7 @@
     }
     wrap.classList.remove('hidden');
 
+    if (ui.popout) drawPopDesk(wrap, d, channel);
     const s = d.session ?? {};
     const h = d.hosted;
     // Whether this desk can be typed into at all. There is no longer a case
@@ -3431,15 +3611,8 @@
     // Deliberately looser than the bell: a message may open a window, so a desk
     // with none is still worth typing into. See nudgeable() on the server.
     const canChat = !!h?.live && !held;
-    const compacting = compactingLine(s.compacting);
-    const presence = h
-      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
-      : d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
     wrap.querySelector('.p-persona').textContent = d.persona;
-    const models = modelLine(s);
-    wrap.querySelector('.p-meta').textContent =
-      `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${models ? ` · ${models}` : ''}` +
-      ` · ${presence} · ${d.turns} turn${d.turns === 1 ? '' : 's'}`;
+    wrap.querySelector('.p-meta').textContent = panelMeta(d);
     // The model and effort controls: the window's confirmed value selected,
     // what was asked for beside it until the picker confirms. Both change
     // this session only (costmo, #10 Decided 4) — the host drives the
@@ -3896,7 +4069,7 @@
   }
 
   async function loadTurns(reset) {
-    if (!ui.open) return;
+    if (!ui.open || isOut(ui.open.channel, ui.open.agent)) return;
     if (reset) {
       ui.turns = [];
     ui.sending = [];
@@ -4108,7 +4281,509 @@
     return d?.hosted?.session_id ?? null;
   }
 
+  /* ---------- popouts: what the page decides ---------- */
+  // Issue #19. Pure, and lifted into test/floor.mjs by the two markers around
+  // this section — see CLAUDE.md on page logic.
+
+  /* A popout's width: the floor panel's own widest (`.deskpanel` clamps it to
+     460px), less the window's frame, so the chat reads at the size it has on
+     the floor. As tall as the screen allows. */
+  const POP_W = 440;
+  /* Where the browser gives the page no Web Locks, a popout says it is out
+     every POP_BEAT_MS and the floor counts it back in after POP_TTL_MS of
+     silence, so a window that closed without its last word is not out for
+     ever. With locks, the lock says it and these time only a window not yet
+     heard from (see "Presence that no timer keeps"). */
+  const POP_BEAT_MS = 2000;
+  const POP_TTL_MS = 7000;
+  /* How long a desk has to read as left or gone before its popout says so. A
+     move reads as "left" for a moment on the way — the host re-registers
+     without the old binding just before it reports the new one — and a
+     popout that announced a leave the operator never asked for, then
+     followed the desk a second later, would be saying something false. */
+  const FATE_GRACE_MS = 4000;
+
+  /** The window name a desk's popout is opened under: one per desk, so a second detach can never open a second window. */
+  const popoutName = (channel, agent) => `orch-desk:${channel}|${agent}`;
+
+  /** The page's own query string for a desk's popout. */
+  const popoutQuery = (channel, agent) =>
+    `?popout=1&channel=${encodeURIComponent(channel)}&agent=${encodeURIComponent(agent)}`;
+
+  /** The desk a page is the popout of, from its query string, or null for the floor. */
+  function popoutOf(search) {
+    const q = new URLSearchParams(search ?? '');
+    const channel = q.get('channel');
+    const agent = q.get('agent');
+    return q.get('popout') === '1' && channel && agent ? { channel, agent } : null;
+  }
+
+  /**
+   * Where the nth popout opens: full height, against the right edge of the
+   * screen, each further one to the left of the last, wrapping when the
+   * screen is full. The browser keeps a popup on the screen whatever is
+   * asked; this only keeps a fresh one from landing on top of the last.
+   */
+  function popoutPlace(scr, n = 0) {
+    const availW = scr?.availWidth ?? scr?.width ?? 1280;
+    const availH = scr?.availHeight ?? scr?.height ?? 800;
+    const left0 = scr?.availLeft ?? 0;
+    const top0 = scr?.availTop ?? 0;
+    const fit = Math.max(1, Math.floor(availW / POP_W));
+    const k = Math.max(0, n) % fit;
+    return { width: POP_W, height: availH, left: Math.max(left0, left0 + availW - POP_W * (k + 1)), top: top0 };
+  }
+
+  /* How large the floor draws a desk, in pixels per drawing unit: a room is
+     ROOM_W units wide, drawn at its container's width up to ROOM_MAX_W px.
+     The floor tab records what it is drawing (deskScale in localStorage) and
+     a popout draws its desk at that, so the person looks the same size in
+     both. With nothing stored, or nonsense, `fallback`: the floor's widest. */
+  function deskScaleOf(stored, fallback) {
+    const n = Number(stored);
+    return stored != null && stored !== '' && Number.isFinite(n) && n > 0.3 && n < 4 ? n : fallback;
+  }
+  /* The chat's narrowest, beside a desk column. Below it the desk goes back
+     over the chat: a transcript of 300px or so is a column of single words. */
+  const POP_CHAT_MIN = 420;
+  /** Whether a popout this wide puts its desk in a column of its own, given the desk column's width in px. */
+  const popWide = (windowW, deskColW) => windowW >= deskColW + POP_CHAT_MIN;
+
+  /* The smallest a popout draws its desk, as a share of the floor's size. */
+  const POP_DESK_MIN = 0.5;
+  /**
+   * The scale a popout draws its desk at: the floor's, unless the window is
+   * too short for it, when the desk gives way, down to POP_DESK_MIN of the
+   * floor's. `avail` is the height left for the drawing once the header, the
+   * transcript's least and the composer at its smallest are on the panel; a
+   * desk drawn taller pushed the send row out of a 700px window.
+   */
+  function popDeskScale(scale, drawH, avail) {
+    if (!(drawH > 0) || !(avail >= 0)) return scale;
+    return Math.min(scale, Math.max(scale * POP_DESK_MIN, avail / drawH));
+  }
+
+  /** A popup, not a tab: no tab strip, toolbar or navigation (Decided). */
+  const popoutFeatures = (p) => `popup=yes,width=${p.width},height=${p.height},left=${p.left},top=${p.top}`;
+
+  /**
+   * The desks out now. A popout that holds its lock (`held`) is out until
+   * the lock is released, however long it is quiet: its timers are the
+   * browser's to throttle, and a minimized popout's were, to one wake-up a
+   * minute (QA, PR #41 finding 1). Without a lock (a page the browser
+   * gives no Web Locks, or a window not yet heard from), out means heard
+   * within POP_TTL_MS.
+   */
+  function outsNow(outs, now) {
+    return new Set([...outs].filter(([, o]) => o.held || now - o.at < POP_TTL_MS).map(([k]) => k));
+  }
+
+  /** The Web Lock a desk's popout holds for as long as it is open. */
+  const popLockName = (channel, agent) => `orch.popout:${channel}|${agent}`;
+
+  /** The folder and host a desk is bound to, which is what a move keeps, or null when nothing binds it. */
+  function boundTo(d) {
+    const h = d?.hosted;
+    return h && h.state !== 'offline' && h.host && h.window ? { host: h.host, window: h.window } : null;
+  }
+
+  /**
+   * What became of a popout's desk, read off one /api/floor payload.
+   *
+   *   here   — on its floor, as it was
+   *   moved  — its folder is bound on another floor now, under the same
+   *            agent (#18); the popout follows it there
+   *   left   — still a seat on its floor, but the binding it had is gone
+   *            (Leave desk); the popout says so and offers to close
+   *   gone   — not on the board at all any more
+   *
+   * `mem` is the binding the popout last saw (`boundTo`), or null if it
+   * never saw one — a desk that is live by its hooks alone has no binding to
+   * lose, so it is never "left", and a move is only recognised by the
+   * folder and host it was bound to.
+   */
+  function deskFate(channels, here, mem) {
+    const all = channels ?? [];
+    const d = all.find((c) => c.channel === here.channel)?.desks?.find((x) => x.agent === here.agent) ?? null;
+    if (d && (boundTo(d) || !mem)) return { state: 'here', desk: d };
+    if (mem) {
+      for (const c of all) {
+        if (c.channel === here.channel) continue;
+        const t = c.desks?.find((x) => x.agent === here.agent && boundTo(x)?.host === mem.host && boundTo(x)?.window === mem.window);
+        if (t) return { state: 'moved', channel: c.channel, desk: t };
+      }
+    }
+    return d ? { state: 'left', desk: d } : { state: 'gone', desk: null };
+  }
+
+  /* ---------- popouts: the windows ---------- */
+
+  /*
+   * How the windows agree on which desks are out (issue #19). A popout says
+   * so on a BroadcastChannel — once it holds its lock, and when a
+   * floor asks — and says when it goes. A floor keeps what it hears in
+   * `ui.outs` and nowhere else, so nothing holds a list that can go stale
+   * against the windows themselves, and a reloaded floor asks once and is
+   * answered within milliseconds. Same origin only, which is the board.
+   *
+   *   popout → all : here   { channel, agent, id }       it is out
+   *                  gone   { channel, agent, id, open }  it is going; `open`
+   *                         when the chat should come back to the floor
+   *                  rang   { channel, agent }            its bell rang
+   *   floor → all  : who                                  say if you are out
+   *                  back   { channel, agent }            close; the floor has it
+   *                  read   { channel, agent, sessionId, title, find }  History
+   *                  nudged { channel, agent, text, bulk, rec }  a nudge sent here
+   *                  focus  { channel, agent }            come to the front
+   */
+  const POP_ID = Math.random().toString(36).slice(2);
+  const outKey = (channel, agent) => `${channel}|${agent}`;
+  const bc = (() => { try { return new BroadcastChannel('orch.popouts'); } catch { return null; } })();
+  const say = (msg) => { try { bc?.postMessage(msg); } catch { /* the channel is gone with the page */ } };
+  /** Is this desk's chat in a popout? Only ever asked on the floor: a popout is never "out" to itself. */
+  const isOut = (channel, agent) => !ui.popout && outsNow(ui.outs, Date.now()).has(outKey(channel, agent));
+  const mine = (msg) => !!ui.popout && msg.channel === ui.popout.channel && msg.agent === ui.popout.agent;
+
+  /* After a popout goes, how long the floor waits before taking the chat
+     back: a popout being reloaded says `gone` and then `here` again a moment
+     later, and must not bounce the floor's panel in between. */
+  const REJOIN_MS = 1500;
+
+  /*
+   * Presence that no timer keeps (QA, PR #41 finding 1). A popout holds a
+   * Web Lock named for its desk for as long as it is open, and the browser
+   * releases it when the window goes: closed, crashed or reloaded. The
+   * floor asks for the same lock once it hears the popout holds it, and is
+   * granted it exactly when the popout is gone, so "out" never expires on a
+   * clock. It used to be a 2 s beat heard within 7 s, and Chrome gives a
+   * minimized window one timer wake-up a minute: measured by QA, the floor
+   * drew bo's composer beside the popout's in 9 samples of 25. Web Locks
+   * need a secure context (localhost is one). Elsewhere it is the beat, as
+   * before, with the same throttling.
+   */
+  const LOCKS = (() => { try { return typeof navigator.locks?.request === 'function'; } catch { return false; } })();
+  const watching = new Set();
+  function watchOut(channel, agent, id) {
+    const k = outKey(channel, agent);
+    if (!LOCKS || watching.has(k)) return;
+    watching.add(k);
+    // Granted when the popout's lock is released, and given straight back.
+    navigator.locks.request(popLockName(channel, agent), () => {
+      watching.delete(k);
+      const o = ui.outs.get(k);
+      if (o?.held && o.id === id) takeGone({ channel, agent, id, open: true });
+    }).catch(() => watching.delete(k));
+  }
+
+  if (bc) bc.onmessage = (m) => {
+    const msg = m.data ?? {};
+    if (ui.popout) {
+      if (ui.ended) return;
+      if (msg.t === 'who') announce();
+      else if (msg.t === 'back' && mine(msg)) endPopout(false);
+      else if (msg.t === 'focus' && mine(msg)) window.focus();
+      else if (msg.t === 'read' && mine(msg)) {
+        window.floorRead(msg.channel, msg.agent, msg.sessionId, msg.title, { find: msg.find ?? null });
+        window.focus();
+      } else if (msg.t === 'nudged' && mine(msg)) {
+        // A nudge struck on the floor for this desk: its pending bubble is
+        // here, where the chat is. A bulk one brings the floor's record of
+        // its line with it, which this page then follows the way the floor
+        // does (followBulk), so the bubble waits on the same facts.
+        if (msg.rec) ui.bulk.set(msg.channel, { ...(ui.bulk.get(msg.channel) ?? {}), nudge: msg.rec });
+        nudged(msg.channel, msg.agent, msg.text, !!msg.bulk, false);
+      }
+      return;
+    }
+    const k = outKey(msg.channel, msg.agent);
+    if (msg.t === 'here') {
+      const was = isOut(msg.channel, msg.agent);
+      // The same window under a new key is a popout that followed its desk
+      // to another floor: the old key is not out any more.
+      for (const [ok, o] of ui.outs) if (o.id === msg.id && ok !== k) ui.outs.delete(ok);
+      const held = LOCKS && msg.held === true;
+      ui.outs.set(k, { at: Date.now(), id: msg.id, held });
+      if (held) watchOut(msg.channel, msg.agent, msg.id);
+      if (!was && ui.open && outKey(ui.open.channel, ui.open.agent) === k) renderPanel();
+    } else if (msg.t === 'gone') {
+      takeGone(msg);
+    } else if (msg.t === 'rang') {
+      ring(msg.channel, msg.agent);
+    }
+  };
+
+  /* The size a desk is drawn on the floor, shared with the popouts through
+     localStorage: the floor writes it when it changes, and a popout reads it
+     when it draws and again on the `storage` event, so dragging the floor
+     window wider grows the desk in every popout with it. */
+  const SCALE_KEY = 'orch.deskScale';
+  const DESK_SCALE_DEFAULT = ROOM_MAX_W / ROOM_W;
+  function recordDeskScale() {
+    const r = document.querySelector('#floor-rooms svg.room');
+    const w = r?.getBoundingClientRect().width;
+    if (!w) return;
+    const s = (w / ROOM_W).toFixed(3);
+    try { if (localStorage.getItem(SCALE_KEY) !== s) localStorage.setItem(SCALE_KEY, s); } catch { /* a popout then draws at the default */ }
+  }
+  function deskScale() {
+    let stored = null;
+    try { stored = localStorage.getItem(SCALE_KEY); } catch { /* the default */ }
+    return deskScaleOf(stored, DESK_SCALE_DEFAULT);
+  }
+  /**
+   * Size a popout's desk to the floor's, and put it beside the chat when the
+   * window is wide enough for both. In a window too short for it the desk
+   * gives way (popDeskScale), never the send row.
+   */
+  function popLayout() {
+    if (!ui.popout) return;
+    const wrap = $('floor-panel');
+    const slot = wrap?.querySelector('.p-deskslot');
+    const svg = slot?.querySelector('svg.popdesk');
+    const scale = deskScale();
+    if (svg) {
+      const vb = svg.viewBox.baseVal;
+      // The column is the desk plus the slot's own padding in its wide form,
+      // and the panel shares the window less main's padding.
+      wrap.classList.toggle('pop-wide', popWide(window.innerWidth - 24, vb.width * scale + 2 * 18 + 1));
+      const wide = wrap.classList.contains('pop-wide');
+      const height = (el) => el?.getBoundingClientRect().height ?? 0;
+      const ta = $('p-text');
+      const compose = wrap.querySelector('.p-compose');
+      const turns = $('p-turns');
+      const slotPad = parseFloat(getComputedStyle(slot).paddingTop) + parseFloat(getComputedStyle(slot).paddingBottom) + 1;
+      const head = height(wrap.querySelector('.p-head')) + height(wrap.querySelector('.p-meta')) + 2;
+      // Beside the chat the desk has the panel's height under the header;
+      // over it, what the transcript's least and the composer at its
+      // smallest leave.
+      const avail = wide
+        ? height(wrap) - head - slotPad
+        : height(wrap) - head - slotPad - (parseFloat(getComputedStyle(turns ?? wrap).minHeight) || 0)
+          - (height(compose) - (ta?.offsetHeight ?? 0) + (ta ? boxMetrics(ta).base : 0));
+      svg.style.width = `${Math.round(vb.width * popDeskScale(scale, vb.height, avail))}px`;
+    } else {
+      wrap?.classList.remove('pop-wide');
+    }
+    // The chat box's room changes with the layout (the desk above the chat
+    // or beside it, and its size), and the box is fitted to its room (#13).
+    fitBox();
+  }
+  if (popoutOf(location.search)) {
+    window.addEventListener('resize', popLayout);
+    window.addEventListener('storage', (e) => { if (e.key === SCALE_KEY) popLayout(); });
+  } else {
+    window.addEventListener('resize', recordDeskScale);
+  }
+
+  /** A popout going, by its own word (`gone`) or by its lock coming free. */
+  function takeGone(msg) {
+    const k = outKey(msg.channel, msg.agent);
+    const o = ui.outs.get(k);
+    if (o && o.id && o.id !== msg.id) return;    // another window's word, about one it does not hold
+    if (!o) return;                              // already back: "Bring chat back here" took it
+    ui.popWins.delete(k);
+    // Its own Re-attach is the operator asking for it here now, and so is
+    // a desk the popout let go of (it followed a move, or the desk left).
+    if (msg.now || !msg.open) {
+      ui.outs.delete(k);
+      if (msg.open) openDesk(msg.channel, msg.agent);
+      else renderPanel();
+      return;
+    }
+    // A window that just closed may be a reload, which says `here` again
+    // in a moment. Until REJOIN_MS has passed it is still out, so the
+    // floor's panel does not open the chat and then put it away again.
+    ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false });
+    // Then the chat opens here only if the floor's panel is shut, or is
+    // this desk's already (renderPanel takes it back there). A panel on
+    // another desk is left as it is: closing a window is not asking for
+    // this chat, and taking the panel would throw the operator out of
+    // whatever they were typing to someone else (costmo, task 273). The
+    // desk is simply no longer out, and opens normally when clicked.
+    // Re-attach and "Bring chat back here" are the explicit asks, above
+    // and in bringBack(), and always open it.
+    setTimeout(() => {
+      if (isOut(msg.channel, msg.agent)) return; // reloaded, and out again
+      if (!ui.open) openDesk(msg.channel, msg.agent);
+      else renderPanel();
+    }, REJOIN_MS);
+  }
+
+  /** A popout handing the floor that opened it its window, so the floor can bring it to the front — again after the floor reloads. */
+  window.floorAdopt = (channel, agent, w) => { if (!ui.popout && w) ui.popWins.set(outKey(channel, agent), w); };
+
+  /* The popout's half of the lock: taken for its desk, and `here` said
+     only once it is held, so a floor that then asks for it waits for this
+     window to go rather than being granted it on the spot. */
+  let heldFor = null;            // the desk key whose lock this window holds
+  let letGo = null;              // releases it
+  function holdPresence() {
+    if (!ui.popout) return;
+    if (!LOCKS) { announce(); return; }
+    const { channel, agent } = ui.popout;
+    const k = outKey(channel, agent);
+    navigator.locks.request(popLockName(channel, agent), () => new Promise((release) => {
+      heldFor = k;
+      letGo = () => { if (heldFor === k) { heldFor = null; letGo = null; } release(); };
+      announce();
+    })).catch(() => announce());
+  }
+
+  function announce() {
+    if (!ui.popout || ui.ended) return;
+    const held = heldFor === outKey(ui.popout.channel, ui.popout.agent);
+    say({ t: 'here', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, held });
+    try { window.opener?.floorAdopt?.(ui.popout.channel, ui.popout.agent, window); } catch { /* another origin, or gone */ }
+  }
+
+  /**
+   * Detach: the desk's chat into a popup window of its own. A desk already
+   * out is brought to the front instead — there is never a second window for
+   * one desk. The draft is filed first, so the popout opens on it.
+   */
+  function detach(channel, agent, btn = null) {
+    if (isOut(channel, agent)) { focusPopout(channel, agent); return; }
+    if (ui.open?.channel === channel && ui.open?.agent === agent) stashDraft();
+    const at = popoutPlace(window.screen, outsNow(ui.outs, Date.now()).size);
+    let w = null;
+    try { w = window.open(`${location.pathname}${popoutQuery(channel, agent)}`, popoutName(channel, agent), popoutFeatures(at)); } catch { w = null; }
+    if (!w) { flash(btn, 'the browser blocked the window'); return; }
+    ui.popWins.set(outKey(channel, agent), w);
+    // Out from this click, not from the popout's first word: the floor's
+    // composer for this desk goes now, so nothing can be typed in two places.
+    // If the window never speaks, the desk is counted back in at POP_TTL_MS.
+    ui.outs.set(outKey(channel, agent), { at: Date.now(), id: null });
+    renderPanel();
+  }
+
+  function focusPopout(channel, agent) {
+    const w = ui.popWins.get(outKey(channel, agent));
+    if (w && !w.closed) { try { w.focus(); return; } catch { /* fall through */ } }
+    say({ t: 'focus', channel, agent });
+  }
+
+  /** "Bring chat back here", on the floor: the popout closes and the floor's panel is the chat again. */
+  function bringBack(channel, agent) {
+    const k = outKey(channel, agent);
+    say({ t: 'back', channel, agent });
+    ui.outs.delete(k);
+    ui.popWins.delete(k);
+    openDesk(channel, agent);
+  }
+
+  /**
+   * A popout ending: by its own Re-attach (`open` — the floor takes the chat
+   * back), or because the floor asked (it has already). The draft is filed
+   * under the desk, which is how it comes back on the floor. A window the
+   * browser will not let the page close says where the chat went instead,
+   * and stops saying it is out.
+   */
+  function endPopout(open) {
+    if (!ui.popout || ui.ended) return;
+    stashDraft();
+    ui.ended = { open };
+    say({ t: 'gone', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, open, now: true });
+    letGo?.();
+    closeStream();
+    window.close();
+    renderPanel();
+  }
+
+  /**
+   * A popout's desk went to another floor: follow it. Its draft goes with
+   * it, under the new key; the window's name and address follow too, so a
+   * detach of the desk from its new floor finds this window and a reload
+   * reopens it here.
+   */
+  function followTo(channel) {
+    const { agent } = ui.popout;
+    const ta = $('p-text');
+    if (ta?.value) saveDraft(channel, agent, ta.value);
+    say({ t: 'gone', channel: ui.popout.channel, agent, id: POP_ID, open: false });
+    letGo?.();
+    ui.popout = { channel, agent };
+    try { history.replaceState(null, '', `${location.pathname}${popoutQuery(channel, agent)}`); } catch { /* the address is only for a reload */ }
+    try { window.name = popoutName(channel, agent); } catch { /* not ours to name */ }
+    ui.fate = null;
+    ui.panelFor = null;
+    openDesk(channel, agent);
+    holdPresence();
+  }
+
+  /** What became of this popout's desk, each poll: follow a move; hold a leave or a disappearance for FATE_GRACE_MS, then say it. */
+  function readFate() {
+    const now = Date.now();
+    const f = deskFate(floor.channels, ui.popout, ui.mem);
+    if (f.state === 'moved') { followTo(f.channel); return; }
+    if (f.state === 'here') {
+      ui.fate = null;
+      ui.mem = boundTo(f.desk) ?? ui.mem;
+      ui.lastDesk = f.desk;
+      document.title = `${f.desk.persona} · ${ui.popout.channel}`;
+      return;
+    }
+    if (ui.fate?.state !== f.state) ui.fate = { state: f.state, since: now };
+    if (f.desk) ui.lastDesk = f.desk;
+  }
+  /** A desk left or gone for long enough to say so. */
+  const fateShown = () => (ui.fate && Date.now() - ui.fate.since >= FATE_GRACE_MS ? ui.fate.state : null);
+
   /* ---------- live updates for the open desk ---------- */
+
+  /*
+   * One stream for every window of this board (issue #19). A browser holds at
+   * most six connections to the board, shared by all its windows, and an event
+   * stream keeps one for as long as it is open — so the floor plus five
+   * popouts, each streaming its own desk, would leave no connection for any
+   * poll in any of them. Each window tells the SharedWorker in hub.js which
+   * desk it shows, and the worker holds one stream for all of them. `HUB_P`
+   * names the protocol: a worker outlives a deploy while any window is open,
+   * and a page must not talk to one that speaks an older one.
+   *
+   * A browser with no SharedWorker gets the stream it always had, one per
+   * window. It is the same handler either way.
+   */
+  const HUB_P = 2;     // 2: `hello`, a window's lock (PR #41)
+  /* A window's want doubles as its heartbeat; the worker drops one silent for
+     30 s. */
+  const WANT_EVERY_MS = 5000;
+  let hubFailed = false;
+  const hub = (() => {
+    try {
+      if (typeof SharedWorker !== 'function') return null;
+      const w = new SharedWorker(`./hub.js?p=${HUB_P}`, { name: `orch-hub-${HUB_P}` });
+      w.port.onmessage = (m) => {
+        const msg = m.data ?? {};
+        if (msg.t === 'ev' && ui.stream?.hub) ui.stream.onEvent(msg.channel, msg.agent, msg.ev);
+      };
+      // A worker that could not start would leave the panel holding a
+      // stream that never speaks — and a panel with a stream does not take
+      // the delivery note from the poll. So it falls back to its own.
+      w.onerror = () => {
+        hubFailed = true;
+        if (ui.stream?.hub) openStream(ui.stream.channel, ui.stream.agent);
+      };
+      w.port.start();
+      // This window's lock, held for as long as it is open. The worker asks
+      // for it once told its name, and is granted it when this window goes:
+      // that, and not a silence, is how it learns a window has closed (QA,
+      // PR #41 finding 1 — a minimized window's want is throttled to once a
+      // minute, and the 30 s silence dropped it from the stream every time).
+      if (navigator.locks?.request) {
+        const name = `orch.win:${Math.random().toString(36).slice(2)}`;
+        navigator.locks.request(name, () => new Promise(() => { w.port.postMessage({ t: 'hello', lock: name }); })).catch(() => {});
+      }
+      return w;
+    } catch { return null; }
+  })();
+  function wantHub() {
+    const s = ui.stream;
+    try { hub?.port.postMessage({ t: 'want', desks: s?.hub ? [[s.channel, s.agent]] : [] }); } catch { /* the worker is gone; the poll carries on */ }
+  }
+  if (hub) {
+    setInterval(wantHub, WANT_EVERY_MS);
+    window.addEventListener('pagehide', () => { try { hub.port.postMessage({ t: 'bye' }); } catch { /* gone */ } });
+  }
 
   /**
    * Server-sent events for the desk whose panel is open: turns as they land,
@@ -4118,52 +4793,66 @@
    */
   function openStream(channel, agent) {
     closeStream();
-    if (typeof EventSource === 'undefined') return;
-    const es = new EventSource(`./api/floor/stream?channel=${encodeURIComponent(channel)}&agent=${encodeURIComponent(agent)}`);
-    es.onmessage = (m) => {
+    const onEvent = (c, a, ev) => {
+      if (c !== channel || a !== agent) return;
       if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) return;
+      streamEvent(channel, agent, ev);
+    };
+    if (hub && !hubFailed) {
+      ui.stream = { hub: true, channel, agent, onEvent, close() { ui.stream = null; wantHub(); } };
+      wantHub();
+      return;
+    }
+    if (typeof EventSource === 'undefined') return;
+    const desks = encodeURIComponent(JSON.stringify([[channel, agent]]));
+    const es = new EventSource(`./api/floor/stream?desks=${desks}`);
+    es.onmessage = (m) => {
       let ev;
       try { ev = JSON.parse(m.data); } catch { return; }
-      if (ev.type === 'turn' && ev.turn && ev.turn.id > ui.sinceTurn) {
-        const sess = sessionFilter();
-        // Another session on this desk is not this conversation. A hosted
-        // session's id is only known once it has announced itself, so a turn
-        // with no session on either side is let through rather than lost.
-        // Settle first. A turn filtered out of this panel still proves the
-        // message was recorded, and a "sending" bubble that never clears is a
-        // worse lie than one shown a moment early.
-        settle([ev.turn]);
-        if (sess && ev.turn.session_id && ev.turn.session_id !== sess) { renderPanel(); return; }
-        ui.turns = ui.turns.concat([ev.turn]).slice(-300);
-        ui.sinceTurn = ev.turn.id;
-        if (ev.turn.role === 'assistant') ui.partial = '';
-        renderPanel();
-      } else if (ev.type === 'partial') {
-        ui.partial = ev.text ?? '';
-        renderPanel();
-      } else if (ev.type === 'delivery') {
-        // The window has the message, or has just stopped having it. Straight
-        // to the panel rather than through tick(): this is what the pending
-        // bubble is waiting to hear, and two seconds of "sending…" over a
-        // message already delivered is the whole complaint this answers.
-        ui.delivery = ev.delivery ?? null;
-        // A command's receipt ends its send outright: there is no user turn
-        // coming to retire the bubble, and the bubble is not kept — the
-        // host's line in the conversation says what was typed and what
-        // happened — so the grace clock never runs on it.
-        if (ui.delivery?.state === 'done') ui.sending = ui.sending.filter((p) => !squash(ui.delivery.text).includes(squash(p.text)));
-        renderPanel();
-      } else if (ev.type === 'sessions') {
-        // A host listed this desk's conversations: the picker, if open, reads
-        // them now rather than at its next second.
-        window.sessionsArrived?.();
-      } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session' || ev.type === 'compacting') {
-        // All change what the desk and the queue say; the cheapest correct
-        // thing is to fetch the floor again rather than mirror the logic here.
-        tick();
-      }
+      onEvent(ev.channel, ev.agent, ev);
     };
     ui.stream = es;
+  }
+
+  function streamEvent(channel, agent, ev) {
+    if (ev.type === 'turn' && ev.turn && ev.turn.id > ui.sinceTurn) {
+      const sess = sessionFilter();
+      // Another session on this desk is not this conversation. A hosted
+      // session's id is only known once it has announced itself, so a turn
+      // with no session on either side is let through rather than lost.
+      // Settle first. A turn filtered out of this panel still proves the
+      // message was recorded, and a "sending" bubble that never clears is a
+      // worse lie than one shown a moment early.
+      settle([ev.turn]);
+      if (sess && ev.turn.session_id && ev.turn.session_id !== sess) { renderPanel(); return; }
+      ui.turns = ui.turns.concat([ev.turn]).slice(-300);
+      ui.sinceTurn = ev.turn.id;
+      if (ev.turn.role === 'assistant') ui.partial = '';
+      renderPanel();
+    } else if (ev.type === 'partial') {
+      ui.partial = ev.text ?? '';
+      renderPanel();
+    } else if (ev.type === 'delivery') {
+      // The window has the message, or has just stopped having it. Straight
+      // to the panel rather than through tick(): this is what the pending
+      // bubble is waiting to hear, and two seconds of "sending…" over a
+      // message already delivered is the whole complaint this answers.
+      ui.delivery = ev.delivery ?? null;
+      // A command's receipt ends its send outright: there is no user turn
+      // coming to retire the bubble, and the bubble is not kept — the
+      // host's line in the conversation says what was typed and what
+      // happened — so the grace clock never runs on it.
+      if (ui.delivery?.state === 'done') ui.sending = ui.sending.filter((p) => !squash(ui.delivery.text).includes(squash(p.text)));
+      renderPanel();
+    } else if (ev.type === 'sessions') {
+      // A host listed this desk's conversations: the picker, if open, reads
+      // them now rather than at its next second.
+      window.sessionsArrived?.();
+    } else if (ev.type === 'permission' || ev.type === 'state' || ev.type === 'session' || ev.type === 'compacting') {
+      // All change what the desk and the queue say; the cheapest correct
+      // thing is to fetch the floor again rather than mirror the logic here.
+      tick();
+    }
   }
 
   function closeStream() {
@@ -4175,6 +4864,12 @@
   /* ---------- render ---------- */
 
   function render() {
+    // A popout is one desk and its chat: no rooms, no picker, no totals.
+    if (ui.popout) {
+      renderDetails();
+      renderPanel();
+      return;
+    }
     const rooms = $('floor-rooms');
     // Rooms are rebuilt only when something they depict actually changed. The
     // board does the same thing for the same reason, and here it matters more:
@@ -4243,6 +4938,8 @@
       ui.awaySig = awaySig;
       $('floor-away').innerHTML = ui.floorFilter ? '' : (window.pillBar?.(floor.channels) ?? '');
     }
+    // How large a desk is drawn here, for the popouts to match.
+    recordDeskScale();
     // Ages and counts in the open card tick with everything else.
     renderDetails();
     const t = floor.totals ?? {};
@@ -4289,9 +4986,14 @@
     // What happened to bulk nudges still in line, against the payload just read.
     if (ui.bulk.size) await followBulk();
 
+    // What became of a popout's desk: followed to another floor, or held
+    // and then said to have left or gone (issue #19).
+    if (ui.popout && !ui.ended) readFate();
+
     // Envelopes come from the activity feed, which is the same source the log
-    // panel reads — one shared definition of "a message happened".
-    try {
+    // panel reads — one shared definition of "a message happened". A popout
+    // draws no rooms for one to fly across, so it does not ask.
+    if (!ui.popout) try {
       const r = await fetch('./api/activity?limit=40', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       if (r.ok) {
         const rows = (await r.json()).rows.filter((x) => x.kind === 'message');
@@ -4366,7 +5068,13 @@
     ui.sinceTurn = 0;
     ui.partial = '';
     ui.filterWas = sessionFilter();
-    loadTurns(true).then(() => { render(); openStream(channel, agent); });
+    // A desk whose chat is in a popout opens on the floor as its header and
+    // a way back: nothing to read and nothing to stream (issue #19).
+    if (isOut(channel, agent)) { closeStream(); render(); return; }
+    loadTurns(true).then(() => {
+      render();
+      if (ui.open?.channel === channel && ui.open?.agent === agent && !isOut(channel, agent)) openStream(channel, agent);
+    });
   }
 
   document.addEventListener('keydown', (e) => {
@@ -4375,7 +5083,14 @@
 
   // The card is positioned against a rectangle captured at click time, so any
   // scroll leaves it pointing at nothing. Closing beats chasing.
-  window.addEventListener('scroll', () => {
+  //
+  // Not a scroll inside the chat panel: its transcript follows each new turn
+  // down, and that moves no desk. In a popout the card sits over that very
+  // transcript, and the first turn to arrive closed it under the reader's
+  // pointer (issue #19, seen in check-popout.mjs). On the floor the same
+  // scroll closed a card on a desk across the room.
+  window.addEventListener('scroll', (e) => {
+    if (e.target instanceof Element && e.target.closest('#floor-panel')) return;
     if (ui.details) { ui.details = null; renderDetails(); }
     // Same reason: it is placed against a rectangle captured at click time.
     closePromptMenu();
@@ -4414,7 +5129,8 @@
       if (openBtn && ui.on) {
         ui.details = null;
         renderDetails();
-        openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
+        // In a popout the conversation is the one already open under the card.
+        if (!ui.popout) openDesk(openBtn.dataset.channel, openBtn.dataset.agent);
         return;
       }
       // "Move to another floor" (#18). The card closes first, as Hide desk's
@@ -4586,7 +5302,8 @@
 
     const deskEl = e.target.closest?.('svg.room .desk');
     if (deskEl && ui.on) {
-      openDesk(deskEl.dataset.channel, deskEl.dataset.agent);
+      // A popout's desk is the chat beneath it, already open.
+      if (!ui.popout) openDesk(deskEl.dataset.channel, deskEl.dataset.agent);
       return;
     }
 
@@ -4608,6 +5325,14 @@
     } else if (act.dataset.act === 'close-panel') {
       ui.open = null;
       render();
+    } else if (act.dataset.act === 'detach') {
+      detach(act.dataset.channel, act.dataset.agent, act);
+    } else if (act.dataset.act === 'bring-back') {
+      bringBack(act.dataset.channel, act.dataset.agent);
+    } else if (act.dataset.act === 'reattach') {
+      endPopout(true);
+    } else if (act.dataset.act === 'close-window') {
+      window.close();
     } else if (act.dataset.act === 'read-back') {
       stopReading();
       ui.stick = true;
@@ -5087,6 +5812,12 @@
   // dropped back to all floors by render(). Take a desk's call is as it was:
   // from all floors it opens the panel and leaves the view where it is.
   window.floorOpenDesk = async (channel, agent, { follow = false } = {}) => {
+    // A popout has one desk. A move made from its own card lands here once
+    // the desk is seated on the new floor; the popout goes with it (#19).
+    if (ui.popout) {
+      if (agent === ui.popout.agent && channel !== ui.popout.channel) followTo(channel);
+      return;
+    }
     if (follow) {
       await tick();
       if (ui.floorFilter !== channel) setFloor(channel);
@@ -5101,6 +5832,12 @@
    * are marked, and the view opens on the first of them.
    */
   window.floorRead = (channel, agent, sessionId, title, { find = null } = {}) => {
+    // A desk that is out reads in its popout, which is its panel now (#19).
+    if (isOut(channel, agent)) {
+      say({ t: 'read', channel, agent, sessionId, title: title ?? null, find });
+      focusPopout(channel, agent);
+      return;
+    }
     if (ui.floorFilter && ui.floorFilter !== channel) setFloor(channel);
     if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) openDesk(channel, agent);
     else stopReading();
@@ -5115,12 +5852,19 @@
   // `bulk` marks a nudge sent from a selecting room, whose pending bubble
   // waits on the line in front of it rather than on the clock alone — see
   // bulkWait.
-  function nudged(channel, agent, text, bulk = false) {
+  function nudged(channel, agent, text, bulk = false, tell = true) {
     // Whichever surface sent it, the desk rings. The board's dialog has already
     // had its "ok" from the same endpoint strike() posts to, so the evidence
     // the ring stands for is the same evidence either way.
     ring(channel, agent);
-    if (ui.open && ui.open.channel === channel && ui.open.agent === agent) {
+    // Issue #19. A desk that is out has its chat in its popout, so the
+    // pending bubble is drawn there — with this room's record of a bulk
+    // nudge's line, which the bubble waits on. A popout's own nudge rings
+    // the desk on the floor too: one desk, one ring, wherever it was struck.
+    const out = isOut(channel, agent);
+    if (out) say({ t: 'nudged', channel, agent, text, bulk, rec: bulk ? ui.bulk.get(channel)?.nudge ?? null : null });
+    else if (ui.popout && tell) say({ t: 'rang', channel, agent });
+    if (!out && ui.open && ui.open.channel === channel && ui.open.agent === agent) {
       ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(bulk ? { bulk: true } : {}) }]);
       ui.stick = true;
       renderPanel();
@@ -5400,7 +6144,8 @@
       document.querySelector('[data-act="prompts"]')?.focus();
       return;
     }
-    if (e.key === 'Escape' && ui.open) {
+    // A popout is its desk's chat; there is no panel in it to close.
+    if (e.key === 'Escape' && ui.open && !ui.popout) {
       ui.open = null;
       render();
     }
@@ -5438,7 +6183,7 @@
     if (!deskEl) return;
     e.preventDefault();
     if (deskEl.closest('svg.room.collapsed')) setFloor(deskEl.closest('svg.room').dataset.channel);
-    else openDesk(deskEl.dataset.channel, deskEl.dataset.agent);
+    else if (!ui.popout) openDesk(deskEl.dataset.channel, deskEl.dataset.agent);
   });
 
   /* ---------- view switch ---------- */
@@ -5458,11 +6203,39 @@
     if (b) setView(b.dataset.view);
   });
 
-  try { ui.floorFilter = localStorage.getItem('orch.floor') || null; } catch { /* default: all floors */ }
-  /* First visit lands on the floor, all floors — the less technical face of the
-     board. A stored choice (either one) always wins; only the absence of a
-     choice defaults here. */
-  let initial = 'floor';
-  try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
-  setView(initial);
+  ui.popout = popoutOf(location.search);
+  if (ui.popout) {
+    // A desk's popout (issue #19): the floor's view, always, and none of the
+    // floor's remembered choices — a popout writes neither the view nor the
+    // floor this browser stands on, which belong to the floor tab.
+    document.body.classList.add('popout', 'view-floor');
+    document.title = `${ui.popout.agent} · ${ui.popout.channel}`;
+    ui.on = true;
+    openDesk(ui.popout.channel, ui.popout.agent);
+    start();
+    // The lock is what keeps this desk out on the floor. The beat is for a
+    // browser with no Web Locks only; with them, nothing here runs on a
+    // timer that a hidden window would have throttled.
+    holdPresence();
+    if (!LOCKS) setInterval(announce, POP_BEAT_MS);
+    // Closed, or reloaded: either way the draft is filed under the desk and
+    // the floor is told. A floor waits REJOIN_MS before taking the chat
+    // back, so a reload that says `here` again is not a re-attach.
+    window.addEventListener('pagehide', () => {
+      if (ui.ended || !ui.popout) return;
+      stashDraft();
+      say({ t: 'gone', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, open: !fateShown() });
+    });
+  } else {
+    try { ui.floorFilter = localStorage.getItem('orch.floor') || null; } catch { /* default: all floors */ }
+    /* First visit lands on the floor, all floors — the less technical face of the
+       board. A stored choice (either one) always wins; only the absence of a
+       choice defaults here. */
+    let initial = 'floor';
+    try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
+    setView(initial);
+    // Which desks are out, from the popouts themselves: a reloaded floor
+    // knows within a moment, without any of them having to be reopened.
+    say({ t: 'who' });
+  }
 })();

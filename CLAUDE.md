@@ -742,6 +742,96 @@ Two more rulings went into the same diff:
   through `OPEN_IN_TMUX` in `host/window.js`, and `test:window` holds that
   to the page's `LINK_LABEL.attach`.
 
+**A desk's chat can be detached into a popup of its own, and every window
+shares one stream** (issue #19, 0.10.18). The popout is this page with
+`?popout=1&channel=&agent=`. It loads both scripts and draws only the panel,
+with the desk drawn into it by the floor's own `desk()`, so every control in
+it is the floor's code and every dialog is app.js's, opened in the window it
+was clicked in. Rebuilding the panel as a separate page would be the second
+implementation the pills' comment warns about. Five things behind it each
+look like they could be done more simply:
+- **No window opens a stream of its own.** A browser holds six
+  connections to one host over HTTP/1.1, shared by all its windows, and the
+  issue measured every fetch hanging once six streams were open. So
+  `src/ui/hub.js` is a SharedWorker. Each window tells it which desk it
+  shows, the worker holds one `/api/floor/stream?desks=[…]` for all of them,
+  and every event names its desk. Measured on a mutant with the hub removed,
+  so each window opened its own stream (`check-popout.mjs`): with the floor
+  and popouts opening one by one, the check died waiting 10 s for a popout
+  to draw its chat. With the hub, a fetch from the floor and six popouts
+  answered in 2–13 ms, and every window's stream delivered. A worker outlives a
+  deploy while any window is open, so a change to its messages bumps
+  `HUB_P`. A browser with no SharedWorker, or one whose worker fails to
+  start, gets the old one stream per window.
+- **Which desks are out lives in the popouts, not in storage, and no timer
+  keeps it.** Each popout holds a Web Lock named for its desk for as long
+  as it is open, then says `here` on a BroadcastChannel (and again when a
+  floor asks `who`), and says `gone` on pagehide. The floor keeps what it
+  hears (`ui.outs`) and asks for the same lock, which the browser grants it
+  only when the popout's window is gone, crashed included. It used to be a
+  2 s beat with a 7 s expiry. QA measured that failing (PR #41 finding 1):
+  Chrome gives a minimized window one timer wake-up a minute, so the floor
+  drew a desk's composer beside its popout's in 9 samples of 25. The hub
+  is the same rule one level down: each window holds a lock and says
+  `hello` with its name, and the worker drops the window when it is granted
+  it, not after 30 s of quiet. Web Locks need a secure context (localhost
+  is one), and without them it is the beat and the silence, as before. A
+  stored list would go stale against the windows it describes. A reloaded
+  floor knows within milliseconds, and popouts cannot be reopened after a
+  reload anyway, because the browser blocks `window.open` without a click.
+  So they survive the reload instead.
+- **A closed window is held out for 1.5 s before the floor takes the chat
+  back** (`REJOIN_MS`). A popout being reloaded says `gone` and then `here`,
+  and without the hold the floor's panel would open the chat and put it
+  away again. Re-attach and Bring chat back here are not held: those are
+  the operator asking for it now. And a closed window takes the panel only
+  when the panel is shut or already on that desk (costmo, task 273). On
+  another desk it is left alone, text and focus with it, because closing a
+  window is not asking for that chat. QA measured the first cut taking the
+  panel from a half-typed message and leaving focus on BODY.
+- **"Left" is said after 4 s, not at once** (`FATE_GRACE_MS`). Read in
+  `bind()` in `host/index.js`: a move re-registers the host without the old
+  binding just before it reports the new one, so for a moment the desk
+  reads as left. A move is recognised by the same agent bound to the same
+  folder on the same host on another floor (`deskFate`). The payload carries
+  no cwd, so it is the host's name and the folder's basename.
+- **A popout polls less than a floor.** It skips `/api/activity` (envelopes
+  need rooms), and app.js polls only `/api/state` there, for its dialogs.
+  So a popout costs one `/api/floor`, one `/api/state` and its turns per
+  period. The issue measured the live `/api/floor` at 250 KB in 20 ms. That
+  is per window, and sharing it through the worker was not done; it is the
+  next step if many popouts ever show up in the board's slow-request lines.
+
+One change rode along: a scroll inside the chat panel no longer closes the
+nameplate card. The card closed on any scroll, captured from every element,
+so the transcript's own follow-the-newest-turn closed a card in the popout
+the moment a turn arrived (red in the check once in five runs). The
+transcript moves no desk, on the floor or in a popout.
+
+The desk in a popout is drawn at the floor's own size (costmo, after a
+first cut drew it smaller). The floor tab writes how many pixels it draws
+per unit to `localStorage['orch.deskScale']`, and each popout sizes its
+desk from that, again on the `storage` event, so a floor dragged wider
+grows every popout's desk with it. With no floor to read, the floor's
+widest is used. A popout wide enough to keep `POP_CHAT_MIN` (420 px) of chat
+beside the desk puts the desk in a column of its own (`pop-wide`).
+
+Where #13's chat box meets a popout: `boxRoom` measures against the
+panel's `max-height`, and a popout's panel has none, because it is the
+window's height. So in a popout the room is the panel's own height, and
+the transcript keeps its popout `min-height` (140px) instead of 60. Before
+that, 18 lines or a drag took the box to 1,123px and the send row out of
+the window at every size (`check-popout.mjs`, red at 440x980, 1100x760 and
+440x700). In a window too short for the desk at the floor's size, the desk
+gives way down to half (`popDeskScale`), never the send row.
+
+What a popout is not: a third seat (the conversation's process is
+unchanged; only the page holding its composer moves), and part of a
+room's selection (#23: selection is the floor's, and the popout's desk is
+in no room). `check-popout.mjs` in **verify-ui-change** drives all of it,
+including a floor reload and close. A popup opens only on real input
+(`press()`), never on a dispatched click.
+
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
 2026-11-04). A click on the `<dialog>` element closes it only when it

@@ -3076,6 +3076,126 @@ try {
   assert(String(moverTurns.at(-1)?.text ?? '').includes('not being offered again'),
     'and says so, rather than leaving the operator wondering where the dialog went');
   await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
+
+  console.log('\none stream for several desks (issue #19)');
+  {
+    // A browser holds six connections to the board, shared by all its
+    // windows, so the floor and its popouts share one stream through a
+    // SharedWorker (src/ui/hub.js), which asks for the union of their desks.
+    // This is the server half: one connection, several desks, each event
+    // saying whose it is.
+    await register({ channel: CH, agent: 'pop-a', cwd: '/repo/pop-a' });
+    await register({ channel: CH, agent: 'pop-b', cwd: '/repo/pop-b' });
+    await register({ channel: CH, agent: 'pop-c', cwd: '/repo/pop-c' });
+    const stream = (qs) => fetch(`${HOST}/api/floor/stream?${qs}`);
+    const listen = async (qs) => {
+      const ac = new AbortController();
+      const r = await fetch(`${HOST}/api/floor/stream?${qs}`, { signal: ac.signal });
+      const got = [];
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      (async () => {
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              const block = buf.slice(0, i);
+              buf = buf.slice(i + 2);
+              const data = block.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('\n');
+              if (data) got.push(JSON.parse(data));
+            }
+          }
+        } catch { /* aborted */ }
+      })();
+      return { got, stop: () => ac.abort() };
+    };
+    const pairs = (list) => `desks=${encodeURIComponent(JSON.stringify(list))}`;
+
+    eq((await stream('desks=not-json')).status, 400, 'desks that are not JSON are refused');
+    eq((await stream(pairs([]))).status, 400, 'so is an empty list');
+    eq((await stream(pairs([[CH]]))).status, 400, 'and a pair with a part missing');
+    eq((await stream(pairs(Array.from({ length: 51 }, (_, i) => [CH, `a${i}`])))).status, 400, 'and more desks than one stream carries');
+
+    // Held before the stream opens: the snapshot on connect says it, tagged.
+    eq((await hostEvents([{ type: 'delivery', channel: CH, agent: 'pop-b', state: 'queued', text: 'held before' }])).applied, 1, 'a delivery note is held for pop-b');
+    const both = await listen(pairs([[CH, 'pop-a'], [CH, 'pop-b'], [CH, 'pop-a']]));
+    const one = await listen(`channel=${CH}&agent=pop-a`);
+    await sleep(200);
+    await hostEvents([
+      { type: 'delivery', channel: CH, agent: 'pop-a', state: 'queued', text: 'for a' },
+      { type: 'delivery', channel: CH, agent: 'pop-c', state: 'queued', text: 'for c' },
+    ]);
+    await sleep(300);
+    both.stop();
+    one.stop();
+    const said = both.got.filter((e) => e.type === 'delivery').map((e) => [e.agent, e.channel, e.delivery?.text]);
+    eq(said, [['pop-b', CH, 'held before'], ['pop-a', CH, 'for a']],
+      'one connection carries both desks — the held note on connect and the new one — each naming its desk, and nothing for a desk it did not ask for');
+    eq(one.got.filter((e) => e.type === 'delivery').map((e) => [e.delivery?.text, 'agent' in e]), [['for a', false]],
+      'the single-desk stream is as it was: its own desk, untagged, for a page older than the hub');
+  }
+
+  console.log('\na desk\'s popout: what the page decides (issue #19)');
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const a = src.indexOf('  /* ---------- popouts: what the page decides ---------- */');
+    const b = src.indexOf('  /* ---------- popouts: the windows ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the popouts section was not found in src/ui/floor.js between its two section comments');
+    const tmp = `./data/popouts-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { POP_W, POP_TTL_MS, POP_CHAT_MIN, popoutName, popoutQuery, popoutOf, popoutPlace, popoutFeatures, outsNow, boundTo, deskFate, deskScaleOf, popWide, popDeskScale };\n`);
+    let page;
+    try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    const odd = { channel: 'a b&c', agent: 'x/y?z' };
+    eq(page.popoutOf(page.popoutQuery(odd.channel, odd.agent)), odd, 'a popout reads its desk back out of its own address, whatever the names hold');
+    eq(page.popoutOf(''), null, 'the floor\'s own address names no desk');
+    eq(page.popoutOf('?channel=lab&agent=bo'), null, 'nor does one without popout=1');
+    eq(page.popoutName('lab', 'bo'), page.popoutName('lab', 'bo'), 'one window name per desk, so a second detach finds the first window');
+    assert(page.popoutName('lab', 'bo') !== page.popoutName('lab2', 'bo'), 'and a desk on another floor is another window');
+
+    const scr = { availWidth: 1440, availHeight: 870, availLeft: 0, availTop: 25 };
+    const p0 = page.popoutPlace(scr, 0);
+    const p1 = page.popoutPlace(scr, 1);
+    eq([p0.width, p0.height, p0.left, p0.top], [page.POP_W, 870, 1440 - page.POP_W, 25], 'the first popout: the panel\'s width, full height, against the right edge');
+    eq(p1.left, 1440 - 2 * page.POP_W, 'the next one opens beside it, not on top of it');
+    eq(page.popoutPlace(scr, 3).left, p0.left, 'and once the screen is full they start again from the right');
+    eq(page.popoutPlace({ availWidth: 300, availHeight: 600 }, 2).left, 0, 'a screen narrower than one never puts it off the left edge');
+    assert(/^popup=yes,/.test(page.popoutFeatures(p0)), 'a popup, not a tab (Decided)');
+
+    const now = 1_000_000;
+    const outs = new Map([['lab|bo', { at: now - 1000 }], ['lab|cy', { at: now - page.POP_TTL_MS - 1 }], ['lab|d1', { at: now - 3_600_000, held: true }]]);
+    eq([...page.outsNow(outs, now)], ['lab|bo', 'lab|d1'],
+      'a popout with no lock that has gone quiet past POP_TTL_MS is counted back in; one holding its lock is out however long it is quiet (PR #41)');
+
+    const bound = (host, window, state = 'idle') => ({ host, window, state, live: true });
+    const floorOf = (...chs) => chs.map(([channel, desks]) => ({ channel, desks }));
+    const here = { channel: 'lab', agent: 'bo' };
+    const mem = { host: 'testbox', window: 'bo' };
+    eq(page.deskFate(floorOf(['lab', [{ agent: 'bo', hosted: bound('testbox', 'bo') }]]), here, mem).state, 'here', 'on its floor and bound: here');
+    eq(page.deskFate(floorOf(['lab', [{ agent: 'bo', hosted: null, live: true }]]), here, null).state, 'here',
+      'a desk live by its hooks alone has no binding to lose: here');
+    const moved = page.deskFate(floorOf(['lab', []], ['lab2', [{ agent: 'bo', hosted: bound('testbox', 'bo') }]]), here, mem);
+    eq([moved.state, moved.channel], ['moved', 'lab2'], 'its folder on its host, bound on another floor: moved, and where to');
+    eq(page.deskFate(floorOf(['lab', [{ agent: 'bo', hosted: bound('testbox', 'bo', 'offline') }]], ['lab2', [{ agent: 'bo', hosted: bound('testbox', 'bo', 'offline') }]]), here, mem).state, 'left',
+      'its binding gone, and nothing bound elsewhere: left');
+    eq(page.deskFate(floorOf(['lab', [{ agent: 'bo', hosted: bound('testbox', 'bo', 'offline') }]], ['lab2', [{ agent: 'bo', hosted: bound('testbox', 'other') }]]), here, mem).state, 'left',
+      'the same agent bound to a different folder is not this desk moving');
+    eq(page.deskFate(floorOf(['lab', []], ['lab2', [{ agent: 'bo', hosted: bound('otherbox', 'bo') }]]), here, mem).state, 'gone',
+      'nor is the same folder name on another host — and a desk not on the board at all is gone');
+    eq(page.deskFate(floorOf(['lab', []]), here, null).state, 'gone', 'a desk never bound and no longer drawn anywhere is gone');
+
+    eq(page.deskScaleOf('1.112', 1.25), 1.112, 'a popout draws its desk at the scale the floor recorded');
+    eq([null, '', 'NaN', '0', '-1', '99'].map((v) => page.deskScaleOf(v, 1.25)), [1.25, 1.25, 1.25, 1.25, 1.25, 1.25],
+      'and at the floor\'s widest when nothing usable is recorded');
+    eq([page.popWide(230 + page.POP_CHAT_MIN, 230), page.popWide(230 + page.POP_CHAT_MIN - 1, 230)], [true, false],
+      'the desk takes a column of its own exactly when the chat beside it keeps POP_CHAT_MIN');
+    eq([page.popDeskScale(1.25, 300, 500), page.popDeskScale(1.25, 300, 300), page.popDeskScale(1.25, 300, 10)], [1.25, 1, 0.625],
+      'in a window too short for it the desk gives way, to half the floor\'s size and no further; with room it is the floor\'s');
+  }
 } catch (err) {
   failures++;
   console.error(`\n  ✗ ${err.stack ?? err}`);

@@ -54,7 +54,12 @@ export async function browser({ port = DEBUG_PORT } = {}) {
   const profile = mkdtempSync(join(tmpdir(), 'orch-cdp-'));
   const proc = spawn(CHROME, [
     '--headless=new', `--remote-debugging-port=${port}`, '--disable-gpu',
-    '--no-first-run', `--user-data-dir=${profile}`, '--window-size=1500,1000', 'about:blank',
+    '--no-first-run', `--user-data-dir=${profile}`, '--window-size=1500,1000',
+    // Extra flags for a check that needs them, e.g. check-popout.mjs's
+    // shortened throttling grace. Only a browser this launches takes them:
+    // a Chrome already on the port is reused as it was started.
+    ...(process.env.ORCH_CHROME_ARGS ?? '').split(' ').filter(Boolean),
+    'about:blank',
   ], { stdio: 'ignore', detached: true });
   proc.unref();
   for (let i = 0; i < 60; i++) {
@@ -90,12 +95,64 @@ export async function open({
   }
   await browser({ port });
   const target = await (await fetch(`http://localhost:${port}/json/new?about:blank`, { method: 'PUT' })).json();
+  const page = await connect(target);
+  await page.goto(base);
+  const sets = [];
+  if (view) sets.push(`localStorage.setItem('orch.view', ${JSON.stringify(view)})`);
+  if (floor !== undefined) sets.push(`localStorage.setItem('orch.floor', ${JSON.stringify(floor)})`);
+  // There is no `minimized` any more: putting a floor away is the server's
+  // archive flag (issue #21), so a check seeds it with POST /api/admin/channel/archive.
+  if (sets.length) { await page.evalJs(`${sets.join(';')};'ok'`); await page.goto(base); }
+  await page.waitFor(ready ?? READY[view] ?? `document.readyState === 'complete'`, { timeout: 15000 });
+  return page;
+}
+
+/**
+ * A window the page opened itself — a desk's popout (issue #19) — as its own
+ * target, driven like any page. `match` is a test on the target's URL; the
+ * wait is for the window to exist, since window.open returns before it does.
+ * A popup is only opened on real input (`press()`), never a dispatched click:
+ * the browser blocks window.open without a user gesture, and returns null.
+ */
+export async function attach(match, { port = DEBUG_PORT, timeout = 8000 } = {}) {
+  const until = Date.now() + timeout;
+  for (;;) {
+    const list = await (await fetch(`http://localhost:${port}/json/list`)).json();
+    const t = list.find((x) => x.type === 'page' && match(x.url));
+    if (t) {
+      const page = await connect(t);
+      await page.waitFor(`document.readyState === 'complete'`, { timeout: 15000 });
+      return page;
+    }
+    if (Date.now() > until) throw new Error(`no window matching ${match} within ${timeout}ms — open: ${list.map((x) => x.url).join(', ')}`);
+    await sleep(100);
+  }
+}
+
+/** The pages open now, by URL — for asserting a window closed, or that a second was never opened. */
+export async function targets({ port = DEBUG_PORT } = {}) {
+  return (await (await fetch(`http://localhost:${port}/json/list`)).json()).filter((x) => x.type === 'page').map((x) => x.url);
+}
+
+async function connect(target) {
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   let id = 0;
   const waiting = new Map();
+  // Every console warning and error the page writes, and every uncaught
+  // exception, from the moment this connects — read with `console()`. A
+  // check asked "no console warnings, no errors" (issue #19 with #13
+  // merged) cannot answer it from the DOM.
+  const said = [];
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); }
+    if (m.method === 'Runtime.consoleAPICalled' && (m.params.type === 'warning' || m.params.type === 'error')) {
+      said.push(`${m.params.type}: ${m.params.args.map((a) => a.value ?? a.description ?? '').join(' ')}`);
+    } else if (m.method === 'Runtime.exceptionThrown') {
+      said.push(`exception: ${m.params.exceptionDetails?.exception?.description ?? m.params.exceptionDetails?.text}`);
+    } else if (m.method === 'Log.entryAdded' && (m.params.entry.level === 'warning' || m.params.entry.level === 'error')) {
+      said.push(`${m.params.entry.level} (${m.params.entry.source}): ${m.params.entry.text}${m.params.entry.url ? ` ${m.params.entry.url}` : ''}`);
+    }
   };
   await new Promise((res) => { ws.onopen = res; });
   /* Every command carries a deadline, because the failure without one is silent
@@ -150,21 +207,24 @@ export async function open({
   };
 
   await cmd('Page.enable');
+  await cmd('Runtime.enable');
+  await cmd('Log.enable');
   const goto = async (url) => {
     await cmd('Page.navigate', { url });
     await waitFor(`document.readyState === 'complete'`, { timeout: 15000 });
   };
 
-  await goto(base);
-  const sets = [];
-  if (view) sets.push(`localStorage.setItem('orch.view', ${JSON.stringify(view)})`);
-  if (floor !== undefined) sets.push(`localStorage.setItem('orch.floor', ${JSON.stringify(floor)})`);
-  // There is no `minimized` any more: putting a floor away is the server's
-  // archive flag (issue #21), so a check seeds it with POST /api/admin/channel/archive.
-  if (sets.length) { await evalJs(`${sets.join(';')};'ok'`); await goto(base); }
-  await waitFor(ready ?? READY[view] ?? `document.readyState === 'complete'`, { timeout: 15000 });
-
   return {
+    targetId: target.id,
+    /** Minimize this page's window, or bring it back ('normal'): a minimized window is `hidden`, and its timers are throttled. */
+    windowState: async (state) => {
+      const got = await cmd('Browser.getWindowForTarget', { targetId: target.id });
+      const windowId = got.result?.windowId;
+      if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
+      await cmd('Browser.setWindowBounds', { windowId, bounds: { windowState: state } });
+    },
+    /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
+    console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,
     waitFor,
     goto,
