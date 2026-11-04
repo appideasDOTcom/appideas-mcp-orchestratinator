@@ -411,9 +411,42 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
 
 const killTmux = () => { try { execFileSync('tmux', ['kill-session', '-t', TMUX_SESSION], { stdio: 'ignore' }); } catch { /* none */ } };
 
+/* This run's stand-in claudes, by this run's fixture path, so a run beside
+ * it (QA's clone, a mutant copy) is neither counted nor killed by it. Only
+ * `node <FIX>/claude.cjs` itself: the linger watchdog's sh names the script
+ * too, and is not a stand-in. A run leaves none (task 263) — the pane ones
+ * live on the tmux server, not under this process, so nothing else would
+ * reach them once their window is gone. */
+const STAND_IN = `${FIX}/claude.cjs`;
+const standIns = () => {
+  let out = '';
+  try { out = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }); } catch { return []; }
+  return out.split('\n').map((l) => l.trim().split(/\s+/)).filter(([, exe, script]) => /(^|\/)node$/.test(exe ?? '') && script === STAND_IN).map(([pid]) => Number(pid));
+};
+const sweep = () => { for (const p of standIns()) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } };
+const childrenOf = (ppid) => {
+  try { return execFileSync('ps', ['-Ao', 'pid=,ppid='], { encoding: 'utf8' }).split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter(([, pp]) => pp === ppid).map(([p]) => p); } catch { return []; }
+};
+
 let server = null;
 let host = null;
 let hostLog = '';
+
+// An interrupted run cleans up after itself too: Ctrl-C, or a kill of the
+// suite, lands here instead of leaving its server, its hosts, its tmux
+// session and its stand-ins running (task 263). The finally below does not
+// run on a signal.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    for (const p of childrenOf(process.pid)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+    killTmux();
+    sweep();
+    rmDb(DB_PATH);
+    rmSync(FIX, { recursive: true, force: true });
+    console.log(`\nhost: interrupted by ${sig}; its server, hosts, tmux session and stand-ins are gone`);
+    process.exit(130);
+  });
+}
 
 try {
   try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); } catch {
@@ -1636,6 +1669,14 @@ try {
   try { host?.kill('SIGKILL'); } catch { /* gone */ }
   try { server?.kill('SIGKILL'); } catch { /* gone */ }
   killTmux();
+  // Counted before the sweep, or the sweep would hide a leak: a window the
+  // move case closed under the linger flag is gone by now (its watchdog
+  // fires 4 s after), and every other one goes on the kill-session above.
+  console.log('\n  what the run leaves behind');
+  await until(() => (standIns().length === 0 ? true : null), 8000);
+  const left = standIns();
+  eq(left.length, 0, `a run leaves no stand-in claude running${left.length ? ` (pids ${left.join(', ')})` : ''}`);
+  sweep();
   rmDb(DB_PATH);
   rmSync(FIX, { recursive: true, force: true });
 }

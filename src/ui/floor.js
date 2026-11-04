@@ -23,6 +23,15 @@
   const SVG = 'http://www.w3.org/2000/svg';
 
   const POLL_MS = 2000;
+  /* A poll the board has not answered in this long is given up on, and the
+     next one runs (task 264). Without a limit one request held open stayed
+     pending for as long as the connection did — measured behind a forwarder
+     that kept the browser's connection across a board's restart, and the
+     live board's own `slow GET /api/state 46764ms` under memory pressure.
+     About three periods of app.js's 2.5 s poll, against 7–35 ms normally.
+     The same number as app.js's POLL_TIMEOUT_MS: the two scripts share no
+     module, and the board's dot is app.js's. */
+  const POLL_TIMEOUT_MS = 8000;
   /* How long a question may be "being read" before the panel stops waiting for
      the host and offers the ordinary buttons instead. Reading walks the window's
      tabs, which is a second or two; this is generous against that. */
@@ -3257,7 +3266,7 @@
     const sess = sessionFilter();
     const url = `./api/floor/turns?channel=${encodeURIComponent(channel)}&agent=${encodeURIComponent(agent)}&since=${ui.sinceTurn}` +
       (sess ? `&session=${encodeURIComponent(sess)}` : '');
-    const r = await fetch(url, { headers: { accept: 'application/json' } });
+    const r = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
     if (!r.ok) return;
     const d = await r.json();
     if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) return;
@@ -3596,17 +3605,35 @@
 
   /* ---------- polling ---------- */
 
-  async function tick() {
-    if (!ui.on) return;
+  /* One poll at a time (task 264). The interval used to start a new one every
+     2 s whatever the last was doing, so a board that answered late collected
+     a stack of them, each waiting behind the first — measured: with one
+     /api/floor held, the next went out 22 s later (Chrome's lock on a second
+     identical GET fits that; the gap is what was measured, not the lock). A
+     tick asked for while one runs is not dropped: it runs once more straight
+     after, and a caller that awaits it gets that later poll — two do. */
+  let pollRun = null;
+  function tick() {
+    if (!ui.on) return Promise.resolve();
+    if (pollRun) { ui.pollAgain = true; return pollRun; }
+    pollRun = (async () => {
+      try {
+        do { ui.pollAgain = false; await pollOnce(); } while (ui.pollAgain && ui.on);
+      } finally { pollRun = null; }
+    })();
+    return pollRun;
+  }
+
+  async function pollOnce() {
     try {
-      const r = await fetch('./api/floor', { headers: { accept: 'application/json' } });
+      const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       if (r.ok) floor = await r.json();
     } catch { /* the board's own dot already reports the connection */ }
 
     // Envelopes come from the activity feed, which is the same source the log
     // panel reads — one shared definition of "a message happened".
     try {
-      const r = await fetch('./api/activity?limit=40', { headers: { accept: 'application/json' } });
+      const r = await fetch('./api/activity?limit=40', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       if (r.ok) {
         const rows = (await r.json()).rows.filter((x) => x.kind === 'message');
         const highest = rows.reduce((m, x) => Math.max(m, x.ref_id), 0);

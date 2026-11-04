@@ -1334,10 +1334,24 @@ el.setDlg.addEventListener('close', () => { set.backup = null; set.backupName = 
 
 let inFlight = false;
 
+/* A poll the board has not answered in this long fails, the dot says so, and
+   the next tick runs (task 264). Without a limit one request held open kept
+   `inFlight` set for as long as it hung: measured behind a forwarder that kept
+   the browser's connection across a board's restart — no poll at all for the
+   34 s measured, the dot green and "connected", though a fresh board was
+   answering — and the live board's `slow GET /api/state 46764ms` under memory
+   pressure is the same freeze with no restart in it. About three periods of
+   REFRESH_MS, against 7–35 ms normally. The signal covers the body too. */
+const POLL_TIMEOUT_MS = 8000;
+
 async function getJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    throw err?.name === 'TimeoutError' ? new Error(`no answer in ${POLL_TIMEOUT_MS / 1000} s`) : err;
+  }
 }
 
 async function tick({ background = false } = {}) {
@@ -1361,7 +1375,7 @@ async function tick({ background = false } = {}) {
     el.dot.title = `connected · updated ${new Date().toLocaleTimeString()}`;
   } catch (err) {
     el.dot.className = 'dot down';
-    el.dot.title = `cannot reach the server: ${err}`;
+    el.dot.title = `cannot reach the server: ${err?.message ?? err}`;
   } finally {
     inFlight = false;
   }

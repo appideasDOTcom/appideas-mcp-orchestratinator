@@ -886,6 +886,23 @@ a fresh one with no arguments is an empty line**: count launches with
 window at all" as one launch with nothing to resume and passes a case that
 should be red.
 
+**A lingering stand-in is ended by a watchdog, and a run leaves none**
+(task 263, 2026-11-03). The linger used to end on the stand-in's own
+`setTimeout(process.exit)`, which never fired. After its pane's hangup, Node
+reopens the dead pty (`uv_tty_init → open()`, 775 of 775 `sample`s on the
+main thread), and on macOS that open never returns. So the two windows the
+move case closes under the flag lived on, two per run and 105 by one
+evening, parented to whichever tmux server held the suite's session: on
+this machine the live one, because the suite uses the default socket. They
+did not ignore signals: SIGHUP and SIGTERM each end one. A first reading
+here said otherwise, from a zsh `kill $PIDS` that delivered nothing. The
+linger's watchdog is a detached `sh` that SIGKILLs the pid once the linger
+is up, and only if the pid is still this stand-in. The suite then counts
+`node <its own FIX>/claude.cjs` after `killTmux` (scoped so a run beside it
+is not counted), sweeps whatever is left, and does the same on SIGINT or
+SIGTERM. Anything new that keeps a pane's process alive past its hangup
+needs the same: its own event loop is not there to end it.
+
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the

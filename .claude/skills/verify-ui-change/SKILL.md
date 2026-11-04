@@ -339,6 +339,28 @@ is a state no host could have produced. `probe-chat-panel.js` reads the
 meta line, both selects, the asked-for note, the slash rows and the last
 rows (with the compaction summary's open/closed) in one call.
 
+### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
+
+Task 264 (2026-11-03). [`hold-proxy.mjs`](hold-proxy.mjs) stands in for a
+forwarder that keeps the browser's connection open when the board behind it
+dies. [`check-poll-timeout.mjs`](check-poll-timeout.mjs) serves any copy of
+the repo on 8951 behind it on 8953, kills the board with the page's requests
+held, starts a fresh one, and samples both views once a second:
+
+```bash
+node --experimental-websocket .claude/skills/verify-ui-change/check-poll-timeout.mjs "$PWD" /tmp/out   # the tree
+# red at a commit: a copy holding that commit's src/ui (copy-repo.sh, then git show <sha>:src/ui/… into it)
+```
+
+Measured before the fix, and kept here because it looked like nothing was
+wrong: **the dot stayed green and "connected" with no poll at all** for as
+long as the page stayed open. `inFlight` was set by a fetch nothing would
+ever end, though a fresh board had been answering for the last 30 s. The
+floor's own poll, with no guard, sent its next `/api/floor` 22 s after one
+was held. After the fix the dot reads `cannot reach the server: no answer
+in 8 s`, the header's server time moves again once the board is back, and
+the floor's worst gap is the 8 s limit.
+
 ### answering-host.mjs — a host that answers the page's questions
 
 `seed-desk.mjs` and `seed-folders.mjs` put state on the board; neither takes
