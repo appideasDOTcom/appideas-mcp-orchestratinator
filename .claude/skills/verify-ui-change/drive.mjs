@@ -242,13 +242,25 @@ export async function open({
       await mouse('mouseReleased', b, 0);
       return { from: a, to: b };
     },
-    /** A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter'). */
-    key: async (key) => {
+    /**
+     * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').
+     *
+     * `shift` holds Shift for it. `text` is what the key types if nothing
+     * prevents it: a `rawKeyDown` alone types nothing, so Shift+Enter in a
+     * textarea adds its newline only as `key('Enter', { shift: true, text: '\r' })`.
+     */
+    key: async (key, { shift = false, text = undefined } = {}) => {
       const code = key.length === 1 ? `Key${key.toUpperCase()}` : key;
       const vk = { Escape: 27, Enter: 13, Tab: 9 }[key] ?? key.toUpperCase().charCodeAt(0);
-      await cmd('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk });
-      await cmd('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk });
+      const modifiers = shift ? 8 : 0;
+      await cmd('Input.dispatchKeyEvent', text === undefined
+        ? { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, modifiers }
+        : { type: 'keyDown', key, code, windowsVirtualKeyCode: vk, modifiers, text, unmodifiedText: text });
+      await cmd('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers });
     },
+    /** Text typed at the focus through the browser's own input, as a
+     *  keystroke or a paste arrives: one `input` event, `.value` changed. */
+    type: async (text) => cmd('Input.insertText', { text }),
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
     shot: async (path, selector = null, { pad = 8, scale = 3, full = false } = {}) => {
       // `full` captures the whole document rather than the viewport, at the
