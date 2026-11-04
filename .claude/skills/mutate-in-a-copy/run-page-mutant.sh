@@ -16,6 +16,11 @@
 #     ORCH_CDP_PORT=9253 timeout 120 node --experimental-websocket .claude/skills/verify-ui-change/check-card-move.mjs http://localhost:8906 /tmp/pm-shots /tmp/pm.jsonl;
 #     kill $K $S'
 #
+# For check-backdrop.mjs (issue #11, PR #36) the whole fixture is one command,
+# run from the copy so the mutant is what is served:
+#
+#   CHECK='PORT=8912 CDP=9254 .claude/skills/verify-ui-change/run-check-backdrop.sh "$PWD" after'
+#
 # `timeout` is coreutils and not on every machine (it is not on the Mac
 # mini, 2026-11-03): there the line above is "command not found", which a
 # `2>/dev/null` hides and this reports as a check that did not finish. The
