@@ -1,8 +1,8 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `4d742bb`
-(branch `develop`, 2026-11-03; first written at `0ce4f1e`, 2026-10-17;
+code. Every fact names the file and line that holds it, at commit `3a57e39`
+(branch `develop`, 2026-11-04; first written at `0ce4f1e`, 2026-10-17;
 re-anchored at `c6f9474` on 2026-11-02 — sixteen references had moved, none
 had changed — at `8f4a703` on 2026-11-03 — six moved and one was placed by
 hand, the hook door's host check, which now sits under the Decided 6 wake;
@@ -26,12 +26,15 @@ nothing else — and at `08a0641` for issue #5 step 3, 0.10.12: one moved,
 the `POST /mcp` route, below the board's new hold and slow-request lines;
 none placed by hand; the version changed, nothing else — and at `4d742bb`
 for the poll time limit (task 264): five moved in src/ui/floor.js, below
-its new POLL_TIMEOUT_MS; none placed by hand, none changed). Cite
+its new POLL_TIMEOUT_MS; none placed by hand, none changed — and at
+`3a57e39` for issue #23, bulk selection, 0.10.16: fifteen moved, none placed
+by hand; the version changed and one per-desk row was added, acting on
+several desks at once). Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `4d742bb`. A later commit may move them; the file names
+Line numbers are for `3a57e39`. A later commit may move them; the file names
 will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
 reference whose line is found once at the new commit and lists the rest.
 
@@ -83,9 +86,9 @@ the workstation listens.
 - Requirements enforced by the installer: `tmux` (`host/install.sh:26-35`),
   `node` and a `claude` on PATH (`host/install.sh:63-65`).
 - **OS: macOS.** The installer writes a LaunchAgent (`host/install.sh:6,19`).
-  "Open in VS Code" uses macOS `open -a` (`host/window.js:3019`); "Open in
+  "Open in VS Code" uses macOS `open -a` (`host/window.js:3027`); "Open in
   Claude" and "Open in tmux" drive Terminal.app or iTerm through `osascript`
-  (`host/window.js:3040-3064, 3131`); the folder dialog has a macOS backend
+  (`host/window.js:3048-3072, 3139`); the folder dialog has a macOS backend
   and no other, by ruling (`host/dialog.js:1-50, 99-101`). The host's core
   loop is portable Node, but no other platform is installed, measured or
   claimed. Say "macOS" for the host.
@@ -104,19 +107,20 @@ conversation open in an editor means nothing can be typed in.
 | Tray: unread, assigned, claimed counts; derived state when no status is set | nothing beyond the MCP tools | `src/agent-state.js:102-139, 221` |
 | Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:1175-1222`, `src/floor.js:2318-2343`, `src/db.js:134-139` |
 | Permission prompt text, the tool asking | plugin | `src/floor.js:1175-1187` |
-| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2336-2341`, `src/ui/floor.js:2951-2952`, `host/index.js:1291-1435` |
+| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2336-2341`, `src/ui/floor.js:3353-3354`, `host/index.js:1291-1435` |
 | Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:1012-1023, 1144-1165` |
-| Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:3580, 3532-3718` |
-| The window compacting, from its start to its end, and a message sent meanwhile held rather than timed out; a compaction the hooks never finish ends on the window's next prompt, turn or tool, and a `/compact` from the floor is watched to its end and said in the window's closing words ("Compacted…", or "no compaction ran") | plugin (`PreCompact` / `PostCompact`) for the state; host for the held message, the summary (drawn as a system record) and the watched end | `src/floor.js:1111-1120`, `host/window.js:1259` |
-| The model and effort level, what was asked for beside what the window confirmed; a change from the floor is this session only, through the window's own picker | plugin (`PreModelSwitch` / `PostModelSwitch`, `effort_level`); host (the picker, the transcript's next reply) | `src/floor.js:1130-1142, 1907`, `host/window.js:2066` |
-| A slash command from the composer, confirmed on the command's own receipt and said in its terms as one line labelled `host` ("/model opus — Set model to Opus 5.5 for this session only"); a `/clear` shows the new session at once with the model and effort the window keeps; a long message typed in so the window never wraps it | host | `src/floor.js:189, 1862`, `host/window.js:1405, 1216, 1490, 3502` |
-| Thinking, drawn as a thought bubble | host | `host/window.js:3702-3703` |
-| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:336`, `src/ui/floor.js:1204-1217` |
+| Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:3588, 3540-3726` |
+| The window compacting, from its start to its end, and a message sent meanwhile held rather than timed out; a compaction the hooks never finish ends on the window's next prompt, turn or tool, and a `/compact` from the floor is watched to its end and said in the window's closing words ("Compacted…", or "no compaction ran") | plugin (`PreCompact` / `PostCompact`) for the state; host for the held message, the summary (drawn as a system record) and the watched end | `src/floor.js:1111-1120`, `host/window.js:1267` |
+| The model and effort level, what was asked for beside what the window confirmed; a change from the floor is this session only, through the window's own picker | plugin (`PreModelSwitch` / `PostModelSwitch`, `effort_level`); host (the picker, the transcript's next reply) | `src/floor.js:1130-1142, 1907`, `host/window.js:2074` |
+| A slash command from the composer, confirmed on the command's own receipt and said in its terms as one line labelled `host` ("/model opus — Set model to Opus 5.5 for this session only"); a `/clear` shows the new session at once with the model and effort the window keeps; a long message typed in so the window never wraps it | host | `src/floor.js:189, 1862`, `host/window.js:1413, 1224, 1498, 3510` |
+| Thinking, drawn as a thought bubble | host | `host/window.js:3710-3711` |
+| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:336`, `src/ui/floor.js:1223-1236` |
 | Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:295`, `host/index.js:1288, 1454` |
-| Open in VS Code | host (macOS) | `host/index.js:1457`, `host/window.js:3007-3023` |
-| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1512-1523`, `host/window.js:3103` |
+| Open in VS Code | host (macOS) | `host/index.js:1457`, `host/window.js:3015-3031` |
+| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1512-1523`, `host/window.js:3111` |
 | Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:3054`, `host/dialog.js` |
-| Move an agent to another floor from its nameplate card — only the floor is picked, the desk's own folder and host do the rest; a move that closes its window opens a new conversation there, one with no window open resumes its last; it lands on the new floor drawn, even a floor it left before | host | `src/floor.js:3116, 1606`, `src/ui/floor.js:569`, `host/index.js:892` |
+| Move an agent to another floor from its nameplate card — only the floor is picked, the desk's own folder and host do the rest; a move that closes its window opens a new conversation there, one with no window open resumes its last; it lands on the new floor drawn, even a floor it left before | host | `src/floor.js:3116, 1606`, `src/ui/floor.js:585`, `host/index.js:892` |
+| Several desks at once: select desks on a room, check them, and nudge, mark read or hide them together — desks with a window are nudged before those that must open one, a desk that cannot be nudged is named with the reason, and each desk shows what happened to it | host for the nudge; mark read and hide need nothing beyond the board | `src/ui/floor.js:2462, 2091, 2134, 4684` |
 | Recent conversations, search, read a conversation whole | host | `host/history.js:1-37`, `host/index.js:1494-1506` |
 | Tool calls on the plugin path carry only one descriptive field (command, path, pattern, description, prompt, url), clipped to 300 characters | plugin | `plugin/hooks/report.mjs:42, 267-290` |
 
@@ -128,7 +132,7 @@ Two honest limits worth not contradicting on the page:
   `src/agent-state.js:102-139`). Since 0.10.8 a desk with nothing live
   behind it — no session reporting, no host, or the host offline — is not
   drawn at all, and comes back on its own when something is; the storey
-  still counts it in `N/M here` (`src/ui/floor.js:1918, 1930-1937`, issue #20).
+  still counts it in `N/M here` (`src/ui/floor.js:1945, 1957-1964`, issue #20).
   Do not say "a desk for every agent": say every agent with something
   running has one.
 - The floor is a live tail, not an archive: the newest 400 turns per desk
@@ -184,7 +188,7 @@ file on the wire (`report.mjs:15-17`).
 
 **What the host sends.** The conversation itself, read from Claude Code's
 transcript: user, assistant, tool, thinking, context and subagent turns
-(`host/window.js:3532-3718`), plus who holds each desk and what its pane
+(`host/window.js:3540-3726`), plus who holds each desk and what its pane
 shows when a prompt is open. The server clips each turn to 20,000 characters
 (`src/floor.js:50, 211`).
 
@@ -231,8 +235,7 @@ Do not mention it.
 
 **VS Code alone, without the `claude` CLI.** Nothing in the *plugin* path
 needs the CLI: the hook runs inside whichever Claude Code raised it, and the
-host's roster recognises VS Code sessions as editor-held (`host/window.js:240,
-351, 382`). The *host* refuses to install without `claude` on PATH
+host's roster recognises VS Code sessions as editor-held (`host/window.js:248, 359, 390`). The *host* refuses to install without `claude` on PATH
 (`host/install.sh:65`), because it opens desks with it; without a host the
 floor shows what section 2 lists under "plugin". Whether the VS Code
 extension itself runs with no CLI installed is Claude Code's fact, not this
@@ -245,7 +248,7 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.10.12** at `4d742bb`, in all three places that carry it:
+- **Version: 0.10.16** at `3a57e39`, in all three places that carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
   They are kept equal by `npm run set-version` (`scripts/set-version.mjs`)
   and `npm run smoke` asserts it. The dashboard header reports the server's.
