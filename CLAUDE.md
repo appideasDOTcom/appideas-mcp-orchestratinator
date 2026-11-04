@@ -145,7 +145,7 @@ summary's `OOM kills in the VM` line is that reading.
 **deploy-both-halves** skill is the procedure — its `status.sh` reads both
 halves against the tree, with symbol counts in what is served — and a deploy
 task is closed with those readings, not with "rebuilt". `src/` is
-baked into the image (`build: .`; only `/data` is a volume), so a change there
+baked into the image (`build.context: .`; only `/data` is a volume), so a change there
 needs `docker compose up -d --build` — and that printing `Container … Running`
 instead of `Recreated` means it did *not* take your change. Restart each in its
 own command and then check both against the file mtimes. Chaining them behind
@@ -1023,9 +1023,130 @@ different things by "the desk". Before claiming any UI change works, use the
 **verify-ui-change** skill; the page is the only honest test, and it lists the
 ways a green result has lied here.
 
+## Updating from the page
+
+Issue #40, 0.10.19. The board checks GitHub for a newer build and says so
+in the header; **Update** has the host beside it bring the server, the host
+and the plugin to that commit, and the page reloads itself onto it. The
+server half is [`src/updates.js`](src/updates.js), the host half
+[`host/update.js`](host/update.js), the page a lifted section of
+`src/ui/app.js` ("updates: what the page decides"); the suite is
+`test/update.mjs` and the page is **check-update.mjs** in
+**verify-ui-change**. Each of these looks simpler than it is:
+
+- **A build knows its commit because the image build reads `.git`.** The
+  image has no `.git` and no git, and `.dockerignore` keeps `.git` out of
+  the context. `docker-compose.yml` hands the clone's `.git` over as a
+  second build context (`additional_contexts: gitmeta`), and the
+  Dockerfile's last `RUN` bind-mounts it for one step and writes
+  `BUILD_COMMIT` with `src/build-info.js` (plain fs: HEAD, the loose ref,
+  packed-refs). Nothing of `.git` reaches a layer. Measured 2026-11-04: the
+  image read `0c0a5e3` and `/gitmeta` did not exist in it. A plain
+  `docker build .` has no such context and fails at that step; build
+  through compose, or pass `--build-context gitmeta=./.git`. A dirty tree's
+  build records HEAD and not the edits. `/health` and `/api/state` carry
+  `commit`.
+- **Commit decides; the version is only shown** (the issue's Decided). A
+  check is one API request, the branch's last 100 commits: the newest, and
+  this build's place in the list is how far behind it is. A build not in
+  the list costs one compare (`diverged`, `ahead`, or `missing`, which reads
+  as unknown and offers nothing). The version comes from
+  raw.githubusercontent.com, which is not the API and not counted. The list
+  is kept, so after an update the board reads "You have the latest" with
+  nothing fetched.
+- **Sixty requests an hour is shared by Check now.** Contacts are at least
+  `ORCH_UPDATE_MIN_GAP_MS` (60 s) apart however often it is pressed; a press
+  inside the gap answers from what is in hand and says when it may ask
+  again, and a 403 with the limit spent stops all contact until the reset,
+  said as a time. The automatic check is a 10-minute tick that does
+  anything only while checking is on and nothing succeeded on the followed
+  branch in 24 h (a failed try waits an hour), and only on a board in a
+  container: every suite starts bare servers, and each would otherwise
+  spend the operator's sixty an hour from his address and make the suites
+  depend on GitHub (`test/update.mjs` holds that). Checking off means the tick
+  does nothing and a change of branch asks nothing; only Check now
+  contacts GitHub.
+- **Which host updates: the one whose clone runs this board's container.**
+  Inside Docker the hostname is the container's short id; the host asks
+  Docker for the container labelled with its clone's compose working
+  directory and service (`docker ps --filter label=…`, not `docker compose
+  ps`, which needs `.env`) and reports it on every registration, beside its
+  build, its clone (branch, HEAD, every uncommitted path, untracked
+  included) and whether launchd supervises it (`XPC_SERVICE_NAME`). No
+  other join says "the machine the board is on" without guessing. The
+  board computes the refusal from that report (`refusalOf`) so the
+  confirmation shows it instead of a button that would only be refused,
+  and the host checks again before it touches anything.
+- **Refusals are refusals.** A dirty clone, a clone off the followed
+  branch, a clone with commits the branch lacks (not fast-forwardable), a
+  host not under launchd (nothing would start it again; #26/#28), a board
+  run bare (no container to replace). Never a stash, a reset or a checkout
+  of another branch: on this machine the clone is a working tree, and
+  `issues/40` is refused here by design.
+- **The steps, and what a failure leaves.** preflight → fetch (over HTTPS
+  from the public repo: a LaunchAgent has no ssh agent, and `origin` here
+  is an ssh alias) → `git merge --ff-only` → `docker compose up -d --build`
+  then `/health` answering as the commit → `claude plugin update` only when
+  `plugin/` differs → exit, and launchd starts the new code. A build that
+  fails, or compose saying `Running` (nothing replaced), puts the clone
+  back with `git reset --keep`, so the clone and the board stay on the
+  build that is running. Past the rebuild nothing is undone.
+- **A run that stops past the rebuild stays on the page until it is
+  finished** (QA, PR #42 finding 1). By then the board answers as the
+  commit, so nothing is newer, the offer is gone, and the page has
+  reloaded off the dialog. A failed plugin step or a host that never came
+  back from its restart then left one log row and Settings reading "You
+  have the latest" with the host on the old build. Now `stoppedOf` (a
+  failed run whose commit is the running build and whose `from` is not)
+  keeps an **Update stopped** button in the header and replaces "You have
+  the latest" in Settings, and the dialog says what is on which build and
+  offers **Finish the update**: the same steps for the same commit,
+  carrying the stopped run's `from`. The host skips the rebuild when
+  `/health` already answers as the commit (a rebuild of an unchanged tree
+  only says `Running`) and compares `plugin/` from that `from`, since the
+  clone is already at the commit. Finishing is the remedy because the
+  alternative was telling the operator to type `claude plugin update`.
+  Finish is asked only of a host whose report says `capabilities:
+  ["finish"]` (`CAPABILITIES` in `host/update.js`). A host from before it
+  (`e578070` and older) ignores `from`, skips the plugin and closes the run
+  as done with the plugin old, and after a plugin failure that host was
+  never restarted, so it is exactly the one that would be asked (QA, PR #42
+  N1). It is refused in words instead. A new thing the board asks of a
+  host's update code goes in that list the same way. A
+  run that gave up on a silent host is closed as done when that host does
+  come back as the commit. Two things that close a run when an event is
+  lost at a restart are pinned in `test:update` (QA's Info 3): the board
+  marks the server step done itself when it starts as the run's commit,
+  and the host retries undelivered events for up to a minute before it
+  exits.
+- **The host is always restarted**, even when `host/` did not change, so
+  every part reports the commit it was asked for. The run closes when the
+  host registers again as that commit, not when it says it is going; a
+  run with no word for 20 minutes ends as failed, naming its last step.
+- **The page reloads only for an update, once.** It reloads when `/health`
+  answers as a run's commit and the page was loaded from another build; a
+  deploy by hand reloads nobody, and the reloaded page does not reload
+  again. While a run is open it reads `/health` every 2 s whatever
+  auto-refresh says. A desk's popout (#19) is the same page on the same
+  build and does the same: its `tick()` returns early and draws nothing of
+  the board, so it calls `renderUpdate` itself. Without that a popout kept
+  the old page code after an update (found merging #19 in; red in
+  check-update.mjs without the line).
+- **Settings are rows, not localStorage** (`settings` table, `updates.*`
+  keys), so every browser sees one value and the daily check is once per
+  board. Not in `BACKUP_TABLES`: a restore that turned checking back on
+  would be a setting changed by a file nobody looked inside.
+
+Not measured: a real update end to end on the live board. It replaces the
+board's container and restarts the live host, which is costmo's to call;
+every step was run against real git and real processes with stand-ins for
+`docker` and `claude`, and the two Docker halves (the image recording its
+commit, and the host finding the live container from launchd's
+environment) were each run for real.
+
 ## Tests
 
-`npm test` runs eight suites. `test:host` and `test:window` are not unit tests:
+`npm test` runs eleven suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
 `claude` (a `.cjs`, because this package is `"type": "module"`). They use their
 own tmux session names and ports, so they are safe to run beside a live host —

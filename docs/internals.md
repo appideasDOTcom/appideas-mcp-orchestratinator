@@ -24,15 +24,21 @@ docker compose down                          # stop (data is kept in the volume)
 `src/` is baked into the image, so a change there needs
 `docker compose up -d --build` to show up on the running board.
 
+The image records the commit it was built from (`/health` → `commit`), which
+is what the board compares with GitHub to offer an update. Compose passes
+the clone's `.git` as a second build context for that one step; it is never
+copied into the image. A plain `docker build .` fails at that step — build
+through compose, or add `--build-context gitmeta=./.git`.
+
 ## Run locally without Docker (for hacking on it)
 
 ```bash
 npm install
 npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
-npm test             # all eight suites — coordination (smoke), operator actions,
-                     #   the doors, the floor, the host, the window, the plugin,
-                     #   and markdown
+npm test             # every suite — coordination (smoke), operator actions,
+                     #   the doors, the board's log, the capture, the floor,
+                     #   markdown, the plugin, updates, the host, the window
 ```
 
 The host can also run by hand instead of as a LaunchAgent:
@@ -73,6 +79,26 @@ See `.env.example`:
   auto-reopens.
 - `SESSION_TTL_MINUTES` — default `15`; how long an untouched MCP session is
   kept.
+
+Updates (issue #40) — the defaults are what a real board wants; the rest
+exist for the suites:
+
+- `ORCH_UPDATE_REPO` — default `appideasDOTcom/appideas-mcp-orchestratinator`;
+  the public repo checked and fetched.
+- `ORCH_UPDATE_MIN_GAP_MS` — default `60000`; the least time between two
+  contacts with GitHub, however often Check now is pressed.
+- `ORCH_UPDATE_TICK_MS` — default `600000`; how often the board asks itself
+  whether the daily check is due. Only a board in a container checks by
+  itself; one run bare checks only on Check now.
+- `ORCH_UPDATE_SILENT_MS` — default `1200000`; an update with no word from
+  its host for this long ends as failed.
+- `ORCH_GITHUB_API`, `ORCH_GITHUB_RAW`, `ORCH_BUILD_COMMIT`,
+  `ORCH_BOARD_CONTAINER` — stand-ins: where GitHub is, which commit this
+  build is, and which container it runs in.
+- On the host: `ORCH_HOST_CLONE` (default the directory above `host/`),
+  `ORCH_HOST_DOCKER`, `ORCH_UPDATE_FETCH_URL`, `ORCH_UPDATE_BUILD_TIMEOUT_MS`
+  (15 min), `ORCH_UPDATE_HEALTH_TIMEOUT_MS` (3 min), and
+  `ORCH_HOST_SUPERVISED=1`, which stands in for launchd.
 
 `curl -s localhost:8787/health` reports the live session count and lifetime
 connection churn (`opened` / `superseded` / `expired`) — a large `superseded`

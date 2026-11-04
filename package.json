@@ -1,6 +1,6 @@
 {
   "name": "appideas-mcp-orchestratinator",
-  "version": "0.10.18",
+  "version": "0.10.19",
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
@@ -18,7 +18,8 @@
     "test:auth": "node test/auth.mjs",
     "test:boardlog": "node test/board-log.mjs",
     "test:capture": "node test/capture.mjs",
-    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:boardlog && npm run test:capture && npm run test:floor && npm run test:markdown && npm run test:plugin && npm run test:host && npm run test:window",
+    "test:update": "node test/update.mjs",
+    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:boardlog && npm run test:capture && npm run test:floor && npm run test:markdown && npm run test:plugin && npm run test:update && npm run test:host && npm run test:window",
     "test:floor": "node test/floor.mjs",
     "test:markdown": "node test/markdown.mjs",
     "test:host": "node test/host.mjs",

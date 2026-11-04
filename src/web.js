@@ -201,6 +201,7 @@ function buildState(store, sessions, sessionStats, meta) {
     server: {
       name: meta.name,
       version: meta.version,
+      commit: meta.commit ?? null,
       port: meta.port,
       db_path: meta.dbPath,
       claim_ttl_minutes: meta.claimTtlMinutes,
@@ -555,16 +556,22 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
   return router;
 }
 
-export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor }) {
+export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null }) {
   const router = express.Router();
 
+  // Update settings, Check now and Update (issue #40; src/updates.js). Ahead
+  // of the admin router, which answers 404 for a path it does not have.
+  if (updates) router.use('/api/admin/update', updates.router(auth));
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth, sessions }));
+  router.use(createFloorRouter({ store, auth, sessions, updates }));
 
   router.get('/api/state', (_req, res) => {
-    res.json(buildState(store, sessions, sessionStats, meta));
+    const state = buildState(store, sessions, sessionStats, meta);
+    // The header's Update button and the settings' Updates section read this.
+    if (updates) state.update = updates.view();
+    res.json(state);
   });
 
   // Read here rather than on /api/state: prompts change when an operator edits

@@ -45,6 +45,7 @@ import * as W from './window.js';
 import * as M from './mcp.js';
 import * as D from './dialog.js';
 import * as H from './history.js';
+import * as U from './update.js';
 import { log, warn, error, failureOf, requestFailed } from './log.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
@@ -588,6 +589,8 @@ class Host {
     this.stopping = false;
     // The folder dialog on this machine's screen, while one is open. See pick().
     this.picking = null;
+    // The update being carried out, if one is. See update().
+    this.updating = null;
     // The search of this machine's transcripts that is running, if one is. See search().
     this.searching = null;
   }
@@ -671,8 +674,13 @@ class Host {
     // And whether this machine can show its own folder dialog, so the page
     // knows which picker to draw before anybody clicks: the native one, or its
     // own list for a host with no backend. See host/dialog.js.
+    // And itself: the build it runs, the clone it runs from, and the board
+    // container that clone's compose project runs here, if any. That is how
+    // the board knows which host can update it, and what an update would be
+    // refused for before anyone presses it (issue #40, host/update.js).
+    const me = await U.selfReport().catch((err) => ({ clone: { path: U.CLONE, error: err.message } }));
     const reply = await this.request('/api/host/register', {
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog() },
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), ...me },
     });
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
@@ -1271,6 +1279,13 @@ class Host {
       this.search(item);
       return;
     }
+    // Bringing this machine to a new build: minutes of git and docker, so
+    // started and not awaited — the relay and every desk's messages go on
+    // until the board itself goes away for the rebuild.
+    if (item.kind === 'update') {
+      this.update(item);
+      return;
+    }
     if (item.kind === 'rescan') {
       // Asked for rather than scheduled: the board saw a session start on a
       // desk no host runs, or somebody pressed the button, and this host may
@@ -1558,6 +1573,36 @@ class Host {
   }
 
   /**
+   * Carry out an update the board asked for (issue #40; host/update.js has
+   * the steps). Each step goes to the board as an `update` event the moment it
+   * starts and ends; the events survive the board's own restart in the
+   * outbox, which retries. Last, this process exits and launchd starts the
+   * new code — after every event has been delivered, because the board
+   * closes the run only on hearing the restart and then this host again.
+   */
+  update(item) {
+    const p = item.payload ?? {};
+    const say = (step, state, detail) => {
+      (state === 'failed' || state === 'refused' ? warn : log)(`update ${String(p.commit).slice(0, 7)}: ${step} ${state}${detail ? ` — ${detail}` : ''}`);
+      return this.emit({ type: 'update', run_id: p.run_id, step, state, detail, at: new Date().toISOString() }, true);
+    };
+    if (this.updating) {
+      say('preflight', 'refused', 'this host is already carrying out an update');
+      return;
+    }
+    const restart = async () => {
+      const until = Date.now() + 60_000;
+      while (this.outbox.length && Date.now() < until) { await this.flush(); if (this.outbox.length) await sleep(1000); }
+      log('update: exiting so launchd starts the new build');
+      await this.stop();
+      process.exit(0);
+    };
+    this.updating = U.runUpdate({ commit: p.commit, branch: p.branch, repo: p.repo, from: p.from, finish: p.finish === true }, { say, boardUrl: this.cfg.url, restart })
+      .catch((err) => say('preflight', 'failed', `the update stopped on an error in the host: ${err.message}`))
+      .finally(() => { this.updating = null; });
+  }
+
+  /**
    * Read the roster and the transcripts, forever, on its own clock.
    *
    * This is deliberately not part of run(). The two used to share one loop, and
@@ -1709,6 +1754,9 @@ async function main() {
   if (found.length && !mine.length) {
     warn(`every desk found points at another board — this host serves ${origin} and has nothing to do`);
   }
+
+  await U.readBuild();
+  log(`build ${U.BUILD.version} at ${U.BUILD.commit?.slice(0, 7) ?? 'an unknown commit'} · clone ${U.CLONE}${U.supervised() ? '' : ' · not under launchd, so the board cannot update this host'}`);
 
   const host = new Host(cfg);
   host.folders = folders;

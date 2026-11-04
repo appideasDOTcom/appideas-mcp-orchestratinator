@@ -1,6 +1,11 @@
 services:
   orchestratinator:
-    build: .
+    build:
+      context: .
+      # The clone's .git, read once at build for the commit the image records
+      # (see the Dockerfile's BUILD_COMMIT step). Not part of the image.
+      additional_contexts:
+        gitmeta: ./.git
     container_name: appideas-orchestratinator
     restart: unless-stopped
     ports:

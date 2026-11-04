@@ -32,7 +32,11 @@
         <span>auto-refresh</span>
       </label>
       <button id="refresh-now" class="btn" title="Refresh now">↻</button>
-      <button id="open-settings" class="btn" title="Settings — export and restore">⚙</button>
+      <!-- Shown only while checking for updates is on and the followed branch
+           has a commit this build lacks, or while an update runs (issue #40).
+           The one place an update is offered. -->
+      <button id="update-btn" class="btn update" type="button" hidden>Update available</button>
+      <button id="open-settings" class="btn" title="Settings — updates, export and restore">⚙</button>
     </div>
   </header>
 
@@ -129,10 +133,17 @@
   -->
   <dialog id="settings-dlg" class="dlg dlg-wide">
     <div class="set-head">
-      <h3>Export &amp; restore</h3>
+      <h3>Settings</h3>
       <button type="button" class="btn" data-set="close" title="Close">✕</button>
     </div>
     <div id="set-body"></div>
+  </dialog>
+
+  <!-- The update: what it will interrupt, then its steps as the host reports
+       them. A dialog of its own because it outlives the board's restart and
+       redraws on every poll, which the operator dialog's helpers do not. -->
+  <dialog id="update-dlg" class="dlg dlg-wide">
+    <div id="upd-body"></div>
   </dialog>
 
   <script src="./app.js"></script>
