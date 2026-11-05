@@ -218,7 +218,10 @@ goes to everyone in the room unless you narrow it with the chips over the box;
 the next one goes to everyone again. Each desk's delivery shows under your
 message on its own: sending, queued, delivered, or not sent with the board's
 reason (an editor holding it, a host offline). The desks never hear each other
-through the room. Under each desk's name are its badges: unread messages
+through the room, and what they say to each other on the board stays in
+it: while a room is open, a broadcast from one of its desks reaches the
+room's other desks and nobody else on the floor (a message addressed to one
+agent still goes to that agent). Under each desk's name are its badges: unread messages
 waiting for it on the board, its tasks (each opens the same dialog as on the
 floor, with Mark all read and Nudge agent), a bell to nudge that desk, and
 its stop sign. **Nudge** beside Send nudges whoever the chips choose,

@@ -3668,6 +3668,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   });
 
   /**
+   * The room's window, still open (every MEETING_TOUCH_MS from the page).
+   * This is what keeps a room containing its participants' broadcasts
+   * (MEETING_LIVE_SECONDS, src/db.js). `live: false` says the board has the
+   * room ended — a reload's end that landed after its open — and the window
+   * opens it again.
+   */
+  router.post('/api/floor/meeting/touch', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    res.json({ ok: true, live: store.touchMeeting(room.id) });
+  });
+
+  /**
    * The room's window closing, by End meeting or by being closed. Each
    * participant's conversation is read off its desk now, so Resume reopens
    * what it was on as the room ended. Sent with keepalive from pagehide, so

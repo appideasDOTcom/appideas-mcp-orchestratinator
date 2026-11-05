@@ -957,6 +957,25 @@ transcript, having no drawn bell to put it on. Then its stop sign.
 choose, with the unread count in its label (`meetingNudgeChip`), as one
 room message with each desk's delivery under it.
 
+**A room's conversation is contained, and that is the board's job, not
+the page's** (costmo, on the second preview: agents on the floor outside a
+room received its participants' broadcasts). A broadcast from an agent in
+an open, live room is stamped with the room's participants
+(`messages.audience`, `,bo,cy,`), and the three readers of "messages for
+this agent" — `pollMessages`, `unreadCounts`, `unreadMessages` — skip it
+for anyone outside, so the ✉ pill and the backlog agree with the poll. The
+agent's `send_message` reply names who it reached. A direct message goes
+where it is addressed, in or out of a room: an agent naming a recipient is
+not the room's conversation, and refusing it would strand a real
+escalation. costmo ruled it (2026-11-05), over refusing it and over
+delivering it marked; do not re-propose either. "Live" is the window's 30 s `touch` within
+`MEETING_LIVE_SECONDS` (150 s), not "not ended", because a crashed window
+never sends its end and must not keep a floor's agents apart. Chrome
+throttles a hidden window's timers to a minute, which the 150 s rides out.
+A touch that finds the room ended (a reload's end landing after its open)
+opens it again. The floor's envelopes for such a broadcast fly to the
+roommates only (`outMeeting` in flyEnvelope).
+
 Left out on purpose. **Model and effort controls**: a desk's select drives
 its window's picker, so a room would need one per desk; `/model sonnet`
 narrowed to one desk takes the same route. **A reading view**: History

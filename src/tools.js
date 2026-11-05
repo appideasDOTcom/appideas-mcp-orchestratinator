@@ -76,7 +76,7 @@ export function registerTools(server, { store, context }) {
 
   server.tool(
     'send_message',
-    'Post a message to the channel. Omit "to" to broadcast to everyone; set "to" (e.g. "pro") to direct-message one agent. The recipient receives it on their next poll_messages.',
+    'Post a message to the channel. Omit "to" to broadcast to everyone; set "to" (e.g. "pro") to direct-message one agent. The recipient receives it on their next poll_messages. While the operator has you in a meeting room, a broadcast reaches only the room\'s other participants, and the reply names them (meeting_room.reached).',
     {
       body: z.any().describe('Message content: a string or a structured object.'),
       to: z.string().optional().describe('Recipient agent name. Omit to broadcast.'),
@@ -86,8 +86,18 @@ export function registerTools(server, { store, context }) {
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent, 'send_message');
-      const id = store.insertMessage(channel, agent, args.to ?? null, JSON.stringify(args.body ?? null));
-      return ok({ sent: true, id, channel, from: agent, to: args.to ?? null });
+      // A broadcast from an agent in an open meeting room reaches that room
+      // and nobody else on the floor (issue #44: a room's conversation is
+      // contained). A direct message goes where it is addressed. The reply
+      // says who a contained broadcast reached, so the agent is not left
+      // believing the whole channel heard it.
+      const room = args.to ? null : store.liveMeetingOf(channel, agent);
+      const audience = room ? room.participants.map((p) => p.agent) : null;
+      const id = store.insertMessage(channel, agent, args.to ?? null, JSON.stringify(args.body ?? null), audience);
+      return ok({
+        sent: true, id, channel, from: agent, to: args.to ?? null,
+        ...(audience ? { meeting_room: { id: room.id, reached: audience.filter((a) => a !== agent) } } : {}),
+      });
     }
   );
 

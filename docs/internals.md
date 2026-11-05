@@ -263,7 +263,12 @@ just means a client opens a session per turn, which is normal and handled.
   at `MEETINGS_KEEP` (20), pruned as each room is created; swept by
   `purgeChannel`; not in `BACKUP_TABLES`. Resume reopens each desk through
   `POST /api/floor/reopen`, after asking its host's conversation list, and
-  says why for each desk it does not (`meetingResumePlan`).
+  says why for each desk it does not (`meetingResumePlan`). A room's
+  conversation is contained: `send_message` with no `to` from an agent in a
+  room that is open and live (its window's `POST /meeting/touch` within
+  `MEETING_LIVE_SECONDS`, 150 s) stores the room's participants in
+  `messages.audience`, which `pollMessages`, `unreadCounts` and
+  `unreadMessages` honour. Direct messages are unaffected.
 
 ```
 src/

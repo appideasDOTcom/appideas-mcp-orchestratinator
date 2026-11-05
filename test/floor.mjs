@@ -3276,8 +3276,50 @@ try {
     r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia', 'oli'] });
     eq(r.body.room.participants.map((p) => p.agent), ['mia', 'oli'], 'Remove: and the desk is out of the record');
 
+    // A room's conversation is contained (costmo, on the preview): a
+    // broadcast from a participant reaches the room and nobody else on the
+    // floor, through the agents' own MCP tools.
+    const mcpCall = async (agent, tool, args = {}) => {
+      const h = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': MCH, 'X-Agent': agent, 'x-orchestratinator-key': KEY };
+      const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: h, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'floor-test', version: '0' } } }) });
+      await init.text();
+      const sid = init.headers.get('mcp-session-id');
+      await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }).then((r) => r.text());
+      const r = await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } }) });
+      const text = await r.text();
+      const data = text.includes('data:') ? text.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5)).join('') : text;
+      return JSON.parse(JSON.parse(data).result.content[0].text);
+    };
+    const heard = async (agent, since) => (await mcpCall(agent, 'poll_messages', { since })).messages.map((x) => `${x.from}:${x.body}`);
+    const mark = (await mcpCall('mia', 'send_message', { body: 'before the mark', to: 'oli' })).id;
+    let said = await mcpCall('mia', 'send_message', { body: 'room only' });
+    eq(said.meeting_room?.reached, ['oli'], 'a broadcast from a participant says who in the room it reached');
+    eq([await heard('oli', mark), await heard('noa', mark)], [['mia:room only'], []],
+      'and reaches the room only: Oli in the room hears it, Noa on the floor outside does not');
+    const unread = async (agent) => (await floor()).channels.find((c) => c.channel === MCH)?.desks.find((d) => d.agent === agent)?.board?.unread ?? 0;
+    said = await mcpCall('mia', 'send_message', { body: 'room only, unread' });
+    eq([await unread('oli'), await unread('noa')], [1, 0], 'nor is it counted unread for a desk outside the room (the ✉ pill and its backlog read the same rule)');
+    said = await mcpCall('noa', 'send_message', { body: 'from outside' });
+    eq(said.meeting_room, undefined, 'a desk outside the room broadcasts to the whole floor as before');
+    assert((await heard('mia', said.id - 1)).includes('noa:from outside'), 'room participants included');
+    said = await mcpCall('mia', 'send_message', { body: 'direct, out of the room', to: 'noa' });
+    assert((await heard('noa', said.id - 1)).includes('mia:direct, out of the room'), 'a direct message goes where it is addressed, in or out of a room');
+    const { default: Database } = await import('better-sqlite3');
+    const sql = new Database(DB_PATH);
+    sql.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-10 minutes') WHERE id = ?`).run(room.id);
+    said = await mcpCall('mia', 'send_message', { body: 'after the window went quiet' });
+    assert(!said.meeting_room && (await heard('noa', said.id - 1)).includes('mia:after the window went quiet'),
+      'a room whose window has not said it is open for minutes contains nothing: a crashed window cannot keep a floor apart');
+    eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, true, 'its window saying so again');
+    said = await mcpCall('mia', 'send_message', { body: 'contained again' });
+    eq(said.meeting_room?.reached, ['oli'], 'contains it again');
+    sql.close();
+
     await regMeet(desksM.map((d) => (d.agent === 'mia' ? { ...d, session_id: 'sdk-mia-2' } : d)));
     eq((await op('/api/floor/meeting/end', { id: room.id })).status, 200, 'End');
+    said = await mcpCall('mia', 'send_message', { body: 'after the meeting' });
+    assert(!said.meeting_room && (await heard('noa', said.id - 1)).includes('mia:after the meeting'), 'an ended room contains nothing');
+    eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, false, 'and a touch says it is ended, so a reloaded window opens it again');
     let list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
     const ended = list.find((x) => x.id === room.id);
     eq(ended.participants.map((p) => [p.agent, p.session_id, p.persona]), [['mia', 'sdk-mia-2', 'Mia'], ['oli', 'sdk-oli', 'Oli']],

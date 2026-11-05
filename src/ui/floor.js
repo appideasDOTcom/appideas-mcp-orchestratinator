@@ -2841,9 +2841,12 @@
     const from = idx(fromAgent);
     if (from < 0) return;
 
+    // A broadcast from a desk in a meeting room reached that room only
+    // (issue #44; the board's `audience`), so it flies to its roommates.
+    const room = outMeeting(channel, fromAgent);
     const targets = toAgent
       ? [idx(toAgent)].filter((i) => i >= 0)
-      : drawn.map((_, i) => i).filter((i) => i !== from);
+      : drawn.map((_, i) => i).filter((i) => i !== from && (!room || outMeeting(channel, drawn[i].agent) === room));
     if (!targets.length) return;
 
     const layer = svg.querySelector('.mailLayer');
@@ -5185,6 +5188,21 @@
     m.notes.push({ seq: ++m.seq, after, text, kind });
   }
 
+  /* How often the room's window tells the board it is open. The board
+     contains a room's broadcasts only while it has heard this within
+     MEETING_LIVE_SECONDS (150 s, src/db.js), so a window that crashed stops
+     containing anything within minutes; a minimized one is throttled to a
+     wake-up a minute and still says it in time. */
+  const MEETING_TOUCH_MS = 30_000;
+  /** Still open. If the board has the room ended (a reload's end landed after its open), open it again. */
+  function meetingTouch() {
+    const m = ui.meeting;
+    if (!m?.id || m.phase !== 'live') return;
+    post('./api/floor/meeting/touch', { id: m.id })
+      .then((got) => { if (got.live === false && ui.meeting?.phase === 'live') return post('./api/floor/meeting/open', { id: m.id }); return null; })
+      .catch(() => {});
+  }
+
   /** The record Resume reads: who is in the room now. Best effort — the window holds the truth while it is open. */
   function meetingSave() {
     const m = ui.meeting;
@@ -7489,6 +7507,7 @@
     start();
     startMeeting(meetingSpec);
     if (!LOCKS) setInterval(() => meetingAnnounce(), POP_BEAT_MS);
+    setInterval(meetingTouch, MEETING_TOUCH_MS);
     // Closing the window ends the meeting (the issue's 7), and so does a
     // reload, which then opens the room again from its address.
     window.addEventListener('pagehide', () => endMeeting({ closing: true }));
