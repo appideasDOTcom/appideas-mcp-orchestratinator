@@ -74,7 +74,10 @@ Two routes considered and set aside:
   channel from the environment. But the file still has to be in the repo, a
   VS Code session has no such environment, and the host and the hook read the
   file literally and would see the unexpanded text. It moves the edit; it does
-  not remove it.
+  not remove it. (The key is the exception, since 2026-11-05: repos that keep
+  it out of the tree write `${ORCH_AUTH_TOKEN}`, and reading that literally
+  made the host sign in with the placeholder. Both now expand it — `expandEnv`
+  in `host/identity.js` and the hook — and channel and agent still are not.)
 - **`--mcp-config` as the primary.** Zero writes to disk, which is attractive,
   but the binding then exists only in the process the host launched. "Open in
   VS Code" would hand the conversation to a window with no board on it, and

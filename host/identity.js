@@ -45,6 +45,37 @@ export function header(headers, name) {
   return null;
 }
 
+/**
+ * A header value as Claude Code would send it: `${VAR}` and `${VAR:-default}`
+ * expanded against `env`. Null when a variable is unset and has no default —
+ * the value is unknown here, and a guess is worse than nothing.
+ *
+ * Used for the key only, and that is why it exists: a repo that keeps its key
+ * out of the tree writes `"X-Orchestratinator-Key": "${ORCH_AUTH_TOKEN}"`, its
+ * windows connect because Claude Code expands it, and the host used to read
+ * the placeholder literally. A desk's key outranks the environment and
+ * host.json (main()), so the host then signed in with the text
+ * `${ORCH_AUTH_TOKEN}` on every request, and bound every floor-opened window
+ * with it too — reported from a partner's machine with 33 such desks,
+ * 2026-11-05. Unresolved, the desk carries no key and the host's own
+ * (environment, host.json) is used. Channel and agent are not expanded: they
+ * are the window's environment, not the host's, and the two need not agree.
+ * The plugin hook has the same function (`expandEnv` in report.mjs); it runs
+ * in the window's own environment, so there it resolves what Claude Code did.
+ */
+export function expandEnv(value, env = process.env) {
+  if (typeof value !== 'string') return null;
+  let missing = false;
+  const out = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) => {
+    const v = env[name];
+    if (v !== undefined && v !== '') return v;
+    if (fallback !== undefined) return fallback;
+    missing = true;
+    return '';
+  });
+  return missing || !out.trim() ? null : out.trim();
+}
+
 /** The orchestratinator entry in a set of MCP servers, as a desk, or null. The
  *  signature is the pair of headers, never the entry's name. */
 function deskIn(servers, dir, extra) {
@@ -52,7 +83,7 @@ function deskIn(servers, dir, extra) {
     const channel = header(s?.headers, 'X-Channel');
     const agent = header(s?.headers, 'X-Agent');
     if (channel && agent && typeof s?.url === 'string') {
-      return { channel, agent, cwd: dir, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key'), ...extra };
+      return { channel, agent, cwd: dir, url: s.url, key: expandEnv(header(s.headers, 'X-Orchestratinator-Key')), ...extra };
     }
   }
   return null;

@@ -1587,6 +1587,30 @@ try {
   assert(/no shared secret/.test(none.out) && /install\.sh --token/.test(none.out),
     'and with nothing at all the host says so, and how to give it one');
 
+  // A key written as a placeholder, which Claude Code expands for the window
+  // (2026-11-05, a partner's 33 desks). Read literally, the placeholder beat
+  // the environment and the host signed in with the text `${…}`. The value is
+  // never logged, so which one won is read off "which overrides": it is said
+  // only when the desk's key differs from the environment's.
+  const placeholderAt = (dir, key) => {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(`${dir}/desk`, { recursive: true });
+    writeFileSync(`${dir}/desk/.mcp.json`, JSON.stringify({
+      mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9911/mcp', headers: { 'X-Channel': CH, 'X-Agent': 'ph-agent', 'X-Orchestratinator-Key': key } } },
+    }, null, 2));
+    return dir;
+  };
+  const line = /shared secret[^\n]*\n/;
+  const unset = await runHost(placeholderAt(`${FIX}/ph-unset`, '${ORCH_TEST_UNSET_DESK_KEY}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(no desk here carries one\)/.test(unset.out),
+    "a desk whose key is ${VAR} with VAR unset carries no key, and the host's own is used");
+  const expanded = await runHost(placeholderAt(`${FIX}/ph-set`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from host-test\/ph-agent's \.mcp\.json\n/.test(expanded.out.replace(/\r/g, '')),
+    "a desk whose key is ${ORCH_AUTH_TOKEN} is read as that variable's value, not as the text");
+  const fallback = await runHost(placeholderAt(`${FIX}/ph-default`, '${ORCH_TEST_UNSET_DESK_KEY:-env-key-value}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from host-test\/ph-agent's \.mcp\.json\n/.test(fallback.out.replace(/\r/g, '')),
+    'and ${VAR:-default} takes the default, as Claude Code does');
+
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
    * it held 7,379 failure lines without a time among them, each reading

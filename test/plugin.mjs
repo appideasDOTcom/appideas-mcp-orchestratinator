@@ -150,6 +150,12 @@ function writeFixture() {
     mcpServers: { board: { url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'x-channel': CH, 'x-agent': 'casey' } } },
   }));
 
+  // A key kept out of the tree as a placeholder, which Claude Code expands.
+  mkdirSync(`${FIX}/placeholder`, { recursive: true });
+  writeFileSync(`${FIX}/placeholder/.mcp.json`, JSON.stringify({
+    mcpServers: { board: { url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'pat', 'X-Orchestratinator-Key': '${ORCH_TEST_HOOK_KEY}' } } },
+  }));
+
   // MCP servers that are not the orchestratinator: one with no headers, one
   // with only half the signature, one with the pair but no url. None qualify.
   mkdirSync(`${FIX}/notours`, { recursive: true });
@@ -498,6 +504,18 @@ async function main() {
     eq(received.length, 1, 'lowercase x-channel / x-agent still identify a repo');
     eq(received[0].body?.agent, 'casey', 'with the right agent');
     eq(received[0].headers['x-orchestratinator-key'], undefined, 'and a repo with no key sends no key header');
+
+    // `${VAR}` in the key is expanded from the window's environment, as Claude
+    // Code's own connection does; read literally it was sent as the text.
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder` }, { env: { ORCH_TEST_HOOK_KEY: KEY } });
+    await settle();
+    eq(received[0]?.headers['x-orchestratinator-key'], KEY, 'a ${VAR} key is sent as the variable\'s value');
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session-2', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder` }, { env: { ORCH_TEST_HOOK_KEY: '' } });
+    await settle();
+    eq(received.length, 1, 'a ${VAR} key with VAR unset still identifies the repo');
+    eq(received[0]?.headers['x-orchestratinator-key'], undefined, 'and sends no key rather than the placeholder');
 
     // The signature is the X-Channel + X-Agent pair on an entry with a url.
     // Anything less is some other MCP server and must not put a repo on the
