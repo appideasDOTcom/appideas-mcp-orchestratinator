@@ -861,6 +861,27 @@ stay on the panel, and an emptied box, which gives the room back. Do not
 add a cap on the drag, or a floor under the transcript, in the name of
 protecting the operator from their own choice.
 
+**A panel's turns are fetched under a session, and an answer is used only
+under the session it was requested for** (issue #46, 0.10.22). A popout opens
+its desk before its first `/api/floor`, so `sessionFilter()` had nothing to
+scope by, and the first turns request went out unscoped. On a desk whose
+new session had no turns yet, the answer was entirely the session before
+it. When it landed after the first poll had reset the panel to the new
+session, it stayed, because nothing clears a list whose filter does not
+change again. That is why it showed only on a new session. So `loadTurns`
+asks nothing until `/api/floor` has answered once, and drops an answer whose
+filter is no longer the panel's. QA found either guard enough on its own
+to turn the check green. Both stay, for reasons that come from reading the
+code, not from a measurement. Without the first, an unscoped answer that
+beats the first poll draws the old session for a moment before the reset
+wipes it, and the check does not look in that window. Without the second,
+the floor's own panel is exposed to the same late answer whenever a
+session changes under it mid-request.
+A new caller of `/api/floor/turns`, or anything else scoped by
+`sessionFilter()`, needs the same check after its `await`. The race read
+red in 1 of 8 runs to 2 of 3, and never on the first run, so
+`run-check-popout-session.sh` in **verify-ui-change** runs it 12 times.
+
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a
 room's selection (#23: selection is the floor's, and the popout's desk is

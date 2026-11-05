@@ -1,7 +1,7 @@
 // check-popout-session.mjs — issue #46: a new session, then detach, must not
 // show the session before it. Against seed-desk.mjs's lab/bo desk:
 //   node --experimental-websocket check-popout-session.mjs http://localhost:8941 [runs]
-// Red before the fix 2 of 3 runs (the popout's first, unscoped turns fetch
+// Red before the fix in 2 of 3 runs once and 1 of 8 since (the popout's first, unscoped turns fetch
 // landing after the first poll's scoped reset); green 8 of 8 after.
 import { open, attach, targets } from './drive.mjs';
 const [base, runs = '3'] = process.argv.slice(2);

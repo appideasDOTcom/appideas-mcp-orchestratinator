@@ -416,7 +416,11 @@ Three things it taught:
   `session` event and 30 turns posted together drew 30 of 38 turns on the
   base and 38 on the tree, and on one run of the check none at all. Not
   issue #13's. The check lets the old session's turns in before posting
-  more.
+  more. Probably the mechanism found in #46 (0.10.22), though not
+  re-measured: a turns answer that lands after a session change has
+  reset the panel. Since #46, `loadTurns` drops an answer requested under
+  another session filter. If this race is ever seen again on 0.10.22 or
+  later, the cause is something else.
 
 - **Some readings must be taken at once, and some mid-gesture.** The
   panel renders every 2 s and refits the box, so a step that waited for a
@@ -854,10 +858,24 @@ floor plus six popouts all live at once. Four things it taught:
 ### check-popout-session.mjs — a new session, then detach (issue #46)
 
 ```bash
-PORT=8941 DB_PATH=/tmp/i46.db ORCH_AUTH_TOKEN=k node src/server.js &
-node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8941 --db /tmp/i46.db &
-ORCH_CDP_PORT=9281 node --experimental-websocket .claude/skills/verify-ui-change/check-popout-session.mjs http://localhost:8941 8
+PORT=8935 CDP=9275 .claude/skills/verify-ui-change/run-check-popout-session.sh "$PWD"
+# … PASS · 12 of 12        (about two minutes; RUNS=<n> to change the count)
 ```
+
+[`run-check-popout-session.sh`](run-check-popout-session.sh) serves any
+directory, the repo or a copy, with its own scratch DB, desk and Chrome. It
+refuses taken ports like the other runners and kills everything after.
+The red is proved on the copy: `copy-repo.sh` from **mutate-in-a-copy**,
+then `git show c20a893:src/ui/floor.js` into the copy's `src/ui/`
+(2026-11-05: `FAIL · 1 of 8`, on run 7).
+
+**Loading the popout's URL directly is not the bug's path.** The first
+repro used `goto(base + '?popout=1&…')` on a desk already on its new
+session, and it passed 4 of 4 on the broken page. The check now does what
+the operator does: the floor's panel is open on the old session, the
+session changes under it, and detach is pressed with `press()`. That
+version read red on the same page. A repro that passes before the fix has
+not reproduced anything yet.
 
 The floor's panel is open on bo, a host `session` event moves the desk
 onto a new id with no turns, and detach is pressed. Each run reads the
