@@ -815,6 +815,17 @@ desk from that, again on the `storage` event, so a floor dragged wider
 grows every popout's desk with it. With no floor to read, the floor's
 widest is used. A popout wide enough to keep `POP_CHAT_MIN` (420 px) of chat
 beside the desk puts the desk in a column of its own (`pop-wide`).
+In that column the panel's foot stands under the desk (issue #43): the four controls, then the seat links, and the composer
+beside it is the box and the Send row alone. `popLayout` moves the
+`.p-foot` element there and back, so it stays one element. The other
+ways to do this break things that already work. A second copy of the
+foot gives every reader of the panel two of each control. CSS cannot
+take the foot out of `.p-compose` without `display: contents`, and a
+`display: contents` composer has no box, so `boxRoom`, which measures
+from the panel's last child, reads a room of nothing. `drawPopDesk`
+replaces only the desk's SVG, never the slot's children, because the
+foot lives in the slot. The floor's own panel and a narrow popout are
+untouched. `check-pop-foot.mjs` in **verify-ui-change** is the page.
 
 Where #13's chat box meets a popout: `boxRoom` measures against the
 panel's `max-height`, and a popout's panel has none, because it is the

@@ -851,6 +851,32 @@ floor plus six popouts all live at once. Four things it taught:
   whatever the features asked, so the check sets 440×980 with `resize()`
   before it takes a picture.
 
+### check-pop-foot.mjs — a wide popout's foot under the desk (issue #43)
+
+```bash
+PORT=8933 CDP=9273 .claude/skills/verify-ui-change/run-check-pop-foot.sh "$PWD"
+# … PASS, 27 ✓, about half a minute
+```
+
+Two seeded desks: bo is popped out, and cy is the floor's own panel. The
+check covers narrow (the foot is the composer's last part), wide (the foot
+in the desk's column, controls under the desk and links under them, every
+control inside the column, two rows of two, the desk still the floor's
+size, nothing under the Send row but padding), a desk redraw (one desk and
+one foot, still in the column), Sessions and Leave desk opening their
+dialogs from the column, wide and short at 1100×640 and 1100×520 (the desk
+gives way and the foot still fits), narrow again, and the floor's panel.
+Pictures: `pop-foot-wide.png`, `pop-foot-short.png`, `pop-foot-narrow.png`.
+Its reds were run, one per behavior. HEAD before #43 fails "the foot is in
+the desk's column". A mutant with `drawPopDesk` back on
+`slot.replaceChildren(svg)` fails "one desk, one foot", because the first
+redraw deletes the foot. When the foot is missing, the check stops at that
+assertion and does not crash on it.
+
+check-popout's "send row in the window" step now measures `.p-compose`,
+not `.p-foot`. When wide, the foot is in the left column and no longer
+stands for the send row.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no

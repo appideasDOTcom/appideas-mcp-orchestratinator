@@ -1792,6 +1792,15 @@ body.popout .deskpanel.pop-wide:has(> .p-deskslot) {
 .pop-wide > .p-deskslot { grid-column: 1; grid-row: 3 / span 2; border-bottom: 0; border-right: 1px solid var(--border); padding: 22px 18px; }
 .pop-wide > .p-turns { grid-column: 2; grid-row: 3; }
 .pop-wide > .p-compose { grid-column: 2; grid-row: 4; }
+/* And the panel's foot stands in that column, under the desk (costmo, #43):
+   the four controls first, the seat links beneath them, both at the
+   column's width. popLayout moves the element here and back; the composer
+   it left is then the box and the Send row, and the transcript gets the
+   rows the foot took. */
+.pop-wide > .p-deskslot { display: flex; flex-direction: column; gap: 16px; }
+.p-deskslot > .p-foot { flex-direction: column; align-items: stretch; gap: 12px; padding-top: 0; }
+.p-deskslot .p-desk { order: -1; margin-left: 0; }
+.p-deskslot .p-desk .p-asked { text-align: left; }
 /* The floor's panel for a desk whose chat is out, and a popout whose chat
    has gone: the header, a sentence, and the one thing to press. */
 .p-out { padding: 18px 14px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }

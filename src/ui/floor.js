@@ -3252,7 +3252,10 @@
     const svg = el('svg', { class: 'room popdesk', viewBox: `${x0} ${y0} ${w} ${h}`, 'data-channel': channel, preserveAspectRatio: 'xMidYMin meet' });
     svg.appendChild(el('rect', { x: x0, y: y0, width: w, height: h, rx: 10, class: 'roomFloor' }));
     svg.appendChild(desk(d, 0, geo, channel));
-    slot.replaceChildren(svg);
+    // The desk only: in a wide popout the panel's foot lives in this slot
+    // too (popLayout, #43), and replacing the slot's children would take it.
+    const old = slot.querySelector('svg.popdesk');
+    if (old) old.replaceWith(svg); else slot.prepend(svg);
     popLayout();
   }
 
@@ -4551,13 +4554,22 @@
       const ta = $('p-text');
       const compose = wrap.querySelector('.p-compose');
       const turns = $('p-turns');
+      // Beside the chat, the desk's controls and the seat links stand under
+      // the desk, and the composer is the box and the Send row alone, so the
+      // transcript gets the rows they took (costmo, #43). The same element
+      // moves, not a copy: every reader finds it through the panel, and the
+      // change handlers are the document's. Over the chat it goes back to
+      // the composer's foot.
+      const foot = wrap.querySelector('.p-foot');
+      const home = wide ? slot : compose;
+      if (foot && home && foot.parentElement !== home) home.appendChild(foot);
       const slotPad = parseFloat(getComputedStyle(slot).paddingTop) + parseFloat(getComputedStyle(slot).paddingBottom) + 1;
       const head = height(wrap.querySelector('.p-head')) + height(wrap.querySelector('.p-meta')) + 2;
-      // Beside the chat the desk has the panel's height under the header;
-      // over it, what the transcript's least and the composer at its
-      // smallest leave.
+      // Beside the chat the desk has the panel's height under the header,
+      // less the foot that now stands under it; over it, what the
+      // transcript's least and the composer at its smallest leave.
       const avail = wide
-        ? height(wrap) - head - slotPad
+        ? height(wrap) - head - slotPad - (foot ? height(foot) + (parseFloat(getComputedStyle(slot).rowGap) || 0) : 0)
         : height(wrap) - head - slotPad - (parseFloat(getComputedStyle(turns ?? wrap).minHeight) || 0)
           - (height(compose) - (ta?.offsetHeight ?? 0) + (ta ? boxMetrics(ta).base : 0));
       svg.style.width = `${Math.round(vb.width * popDeskScale(scale, vb.height, avail))}px`;

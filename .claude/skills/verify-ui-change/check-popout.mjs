@@ -123,7 +123,9 @@ await pop.waitFor(`!document.querySelector('#floor-panel').classList.contains('p
     const b = await box(pop, '#p-text');
     await pop.press({ x: b.right - 3, y: b.bottom - 3 }, { x: b.right - 3, y: b.bottom + 900 });
     await sleep(300);
-    const foot = await box(pop, '#floor-panel .p-foot');
+    // The composer's bottom, not the foot's: in a wide popout the foot
+    // stands under the desk (#43) and the composer ends at the Send row.
+    const foot = await box(pop, '#floor-panel .p-compose');
     const panel = await box(pop, '#floor-panel');
     fits.push(`${w}x${h}:${Math.round(foot.bottom)}/${Math.round(panel.bottom)}`);
     await pop.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
@@ -131,7 +133,7 @@ await pop.waitFor(`!document.querySelector('#floor-panel').classList.contains('p
     await pop.press({ x: c.right - 3, y: c.bottom - 3 }, { x: c.right - 3, y: c.top + 10 });
   }
   ok(fits.every((f) => { const [a, b] = f.split(':')[1].split('/').map(Number); return a <= b; }),
-    `a long message and a tall drag keep the send row in the window: ${fits.join(' ')} (foot/panel bottom)`);
+    `a long message and a tall drag keep the send row in the window: ${fits.join(' ')} (composer/panel bottom)`);
   await pop.resize(440, 980);
   await pop.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ${JSON.stringify('')} + ${JSON.stringify(draft)}; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
 }
