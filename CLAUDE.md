@@ -852,7 +852,14 @@ meta line filled in after the desk was sized, and the send row stood 6px
 off the panel (`check-pop-foot.mjs`, red on that mutant). popLayout
 depends only on the parts that are not the desk, so its call back into
 fitBox finds both as it left them, and the two settle (the check counts
-redraws over 2 s of quiet).
+redraws over 2 s of quiet). Nothing stops the operator from making it
+cramped. A long message or a deliberate drag can take the transcript to
+60px and the desk to half its size. costmo's ruling on that (2026-11-05):
+"trusting that our users are adults … we've struck a decent balance".
+The bounds that do hold are the send row and the controls, which always
+stay on the panel, and an emptied box, which gives the room back. Do not
+add a cap on the drag, or a floor under the transcript, in the name of
+protecting the operator from their own choice.
 
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a

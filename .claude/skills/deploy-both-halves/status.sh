@@ -4,9 +4,11 @@
 #
 #   .claude/skills/deploy-both-halves/status.sh [symbol ...]
 #
-# Each symbol given is grepped in the served /floor.js, the served /app.js and
-# the container's /app/src/floor.js, so "did my change reach the server half"
-# is a count and not a feeling. The host half is the pid's start time against
+# Each symbol given is grepped in the served /floor.js and /app.js, in the
+# container's page (/app/src/ui/floor.js) and in its server module
+# (/app/src/floor.js), so "did my change reach the server half" is a count
+# and not a feeling. The page and the module share a name: a page symbol
+# reads 0 in the module however well the rebuild took (2026-11-05, #43). The host half is the pid's start time against
 # host/*.js mtimes — a running process older than the file is the most common
 # reason a fix "didn't work" (CLAUDE.md, The host).
 set -u
@@ -20,14 +22,25 @@ echo "== server half"
 curl -s localhost:8787/health; echo
 docker inspect -f 'container created={{.Created}} started={{.State.StartedAt}}' appideas-orchestratinator 2>/dev/null
 for sym in "$@"; do
-  printf '  %-28s served floor.js=%s app.js=%s container src/floor.js=%s\n' "$sym" \
+  printf '  %-28s served floor.js=%s app.js=%s · container src/ui/floor.js=%s src/floor.js=%s\n' "$sym" \
     "$(curl -s localhost:8787/floor.js | grep -c -- "$sym")" \
     "$(curl -s localhost:8787/app.js | grep -c -- "$sym")" \
+    "$(docker compose exec -T orchestratinator grep -c -- "$sym" /app/src/ui/floor.js 2>/dev/null | tr -d '\r')" \
     "$(docker compose exec -T orchestratinator grep -c -- "$sym" /app/src/floor.js 2>/dev/null | tr -d '\r')"
 done
 echo "== host half"
+# The host is launchd's job's pid. A match on the command line alone is not:
+# on 2026-11-05 another session's watch loop, waiting for this very deploy,
+# had host/index.js in its zsh -c line and read as a second host. Any other
+# node running host/index.js is listed as what it is, because two hosts would
+# be a real fault.
+job=$(launchctl print "gui/$(id -u)/com.appideas.orchestratinator-host" 2>/dev/null | awk '/^\tpid = /{print $3; exit}')
+if [ -n "$job" ]; then echo "pid $job started $(ps -o lstart= -p "$job")  (launchd's)"; else echo "pid none — the launchd job is not running"; fi
 for p in $(pgrep -f 'host/index.js'); do
-  echo "pid $p started $(ps -o lstart= -p "$p")"
+  [ "$p" = "$job" ] && continue
+  case "$(ps -o comm= -p "$p")" in
+    *node) echo "ANOTHER HOST: pid $p started $(ps -o lstart= -p "$p") — not launchd's";;
+  esac
 done
 echo "newest host/*.js: $(ls -t host/*.js | head -1) modified $(stat -f '%Sm' "$(ls -t host/*.js | head -1)")"
 line=$(grep -n '\[host\] costmo4\|\[host\] .* → http' ~/.orchestratinator/log/host.log | tail -1)

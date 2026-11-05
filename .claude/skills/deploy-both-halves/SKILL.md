@@ -26,7 +26,17 @@ It prints the tree (HEAD against its own upstream, with `origin/develop`
 beside it), the container's created time and
 the symbol counts in what is *served* and what is *in the container*, the host
 pid's start time against the newest `host/*.js`, and the host's last
-registration line. Read it and post it: QA's deploy order asks for the state
+registration line. Two readings changed on 2026-11-05, both after a
+misreading. A container count is given twice. `src/ui/floor.js` is the
+page, and `src/floor.js` is the server module of the same name, where a
+page symbol always reads 0. Only the module was read before, so a page
+change looked as if the rebuild had not taken. The host is launchd's
+job's pid, marked `(launchd's)`. Matching on the command line alone
+listed another session's watch loop as a second host, because its
+`zsh -c` line named `host/index.js`. Any other *node* running it is still
+printed, as `ANOTHER HOST`, because that would be a real fault. Both
+cases were run with a decoy: a shell and a node, each naming
+`host/index.js`. Read it and post it: QA's deploy order asks for the state
 before as well as after, and "0 hits before, N hits after" is what proves the
 rebuild took.
 
@@ -41,7 +51,16 @@ Three things to check in it:
   this line said HEAD must equal origin/develop. His answer: "It's your
   current code. Why are you wanting to deploy a branch I don't have you
   on?" Nothing uncommitted goes out with a deploy. If the tree is dirty,
-  that is a question for the channel, not a stash.
+  that is a question for the channel, not a stash. **The exception is a
+  preview, and only costmo can ask for one.** He types in the window to see
+  the change before committing it, as in "rebuild and restart so I can
+  see the difference now" (twice for #43, 2026-11-05). Deploy the dirty
+  tree, but only the halves it touches: for a page change that is the
+  container alone, and the host stays up. Say UNCOMMITTED on the channel
+  before and after, and say that `/health`'s `commit` is HEAD, not what
+  is served. Prove what is served with the sha256 of each changed page
+  file against the tree's. He committed both previews afterwards, and the
+  release deploy came from QA as a task, as usual.
 - **Nothing else live on the instance.** A rebuild blanks presence for every
   desk and a host restart drops the relay mid-conversation. The go-ahead
   comes from costmo through appideas-qa as a task; a standing one ("the only
