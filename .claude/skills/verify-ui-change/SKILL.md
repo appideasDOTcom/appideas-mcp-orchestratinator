@@ -1187,7 +1187,11 @@ meeting room in a narrow window for the page's 514 px slot. Its width is the
 narrowest from 560 at which the room's "Nudge everyone · 1 unread" stays on
 one line (700 at 0.12.2: below that it wraps and spills under the room's
 edge, a page fault). Its height is the shortest with no transcript scrolling.
-The script prints both.
+The script prints both. The same capture is also copied to
+`docs/images/meeting-room-700.png` on every run, because `docs/operating.md`
+draws the meeting room at width 700, 1:1. The README's `meeting-room.png` is
+2200 px and would put text near 6 px at that width (appideas-designer, msg
+3032). Two files, two widths, on purpose.
 
 Re-run it after any version bump: the header's version is in every image.
 Then **read the five images**. Its red case was run: without
