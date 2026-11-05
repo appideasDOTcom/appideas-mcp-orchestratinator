@@ -1180,6 +1180,13 @@ it and tears down after itself (about 45 s):
 .claude/skills/verify-ui-change/shoot-readme.sh "$PWD" --landing   # and docs/review/landing
 ```
 
+`--landing` writes six: the five above and `06-meeting-room.png`, the README's
+meeting room in a narrow window for the page's 514 px slot. Its width is the
+narrowest from 560 at which the room's "Nudge everyone · 1 unread" stays on
+one line (700 at 0.12.1: below that it wraps and spills under the room's
+edge, a page fault). Its height is the shortest with no transcript scrolling.
+The script prints both.
+
 Re-run it after any version bump: the header's version is in every image.
 Then **read the five images**. Its red case was run: without
 `landing-host.mjs` it fails on the meeting room's replies and leaves

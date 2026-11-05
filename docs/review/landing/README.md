@@ -2,17 +2,20 @@
 
 Five captures of the floor and board for the orchestratinator page on
 appideas.com (appideas-designer, task #204, spec in that practice's
-`projects/orchestratinator-landing/CAPTURE-SPEC.md`). Made 2026-10-17 at
-`0ce4f1e` (header reads v0.10.5), from the README's fictional company —
-TrailTracker, Bookinator, Ledgerino — never a real channel.
+`projects/orchestratinator-landing/CAPTURE-SPEC.md`). First made 2026-10-17 at
+`0ce4f1e` (v0.10.5); re-shot 2026-11-05 at v0.12.1 (header reads v0.12.1),
+from the README's fictional company — TrailTracker, Bookinator, Ledgerino —
+never a real channel. Since that re-shoot the QA Engineer wears cyan, not
+green, so it stays distinct from the API Developer in a meeting room.
 
 ## How they were made, so a re-capture matches
 
 ```bash
-PORT=8906 DB_PATH=./data/landing.db ORCH_AUTH_TOKEN=k node src/server.js &
-node .claude/skills/verify-ui-change/landing-seed.mjs &          # keeps a heartbeat; leave it up
-node --experimental-websocket .claude/skills/verify-ui-change/landing-shot.mjs
+.claude/skills/verify-ui-change/shoot-readme.sh "$PWD" --landing   # these five and the README's, ~45 s
 ```
+
+The steps it runs, and why each is the way it is, are in the
+verify-ui-change skill ("Shooting the README images").
 
 `landing-seed.mjs` rebuilds the README fixture through the real doors (MCP
 sessions, host registration and events, hook ingest); `landing-shot.mjs`
@@ -25,7 +28,7 @@ is cached and every later poll is answered from the cache. The page keeps
 polling and auto-refresh stays on, but the header's clock and `up` counter,
 every age, every bubble and sign stop at that moment; POSTs and the panel's
 own reads pass through, so desks can still be clicked and a bell struck.
-Captures 1–4 are one page session at **2026-10-17 20:38:34Z**; 5 is a
+Captures 1–4 are one page session (2026-11-05, each run's own moment); 5 is a
 second load ten seconds later.
 
 ## The five
@@ -33,7 +36,7 @@ second load ten seconds later.
 | File | Pixels | What |
 |---|---|---|
 | `01-room-prompt.png` | 3200×2000 | TrailTracker room; App Developer's panel with the permission prompt and Approve / Deny / Cancel, a line typed in the composer; red badge on that desk; trays on App Developer, API Developer and QA Engineer; QA Engineer's bell mid-ring (struck on the real page, shot 350 ms into its 1.33 s peal). |
-| `02-building.png` | 3200×3020 | All three floors with header counts (3 floors · 11 desks · 9 here · 1 need you; 6/6 · 3/3 · 0/2). **Full page**: the building is 1510 CSS px tall at this width, so this is the whole document rather than a 1000-px window with the third floor cut. |
+| `02-building.png` | 3200×2436 | All three floors with header counts (3 floors · 11 desks · 9 here · 1 need you; 6/6 · 3/3 · 0/2). **Full page**: the building is 1218 CSS px tall at this width, so this is the whole document rather than a 1000-px window with the third floor cut. |
 | `03-desk.png` | 1776×2376 | The App Developer desk cropped from the room at **4× the CSS size** (the floor has no zoom; the SVG scales crisply). Bubble, sign, tray with both pills, badge, bell. |
 | `04-panel-conversation.png` | 3200×2000 | API Developer's panel: four turns (you, agent, a tool line, agent), composer with placeholder, OPEN IN VS CODE / CLAUDE / TMUX. No prompt. |
 | `05-board-activity.png` | 3200×2638 | Board view, same fixture; activity log's newest rows are a contract set, a message and a task claimed. **Full page** (1319 CSS px tall). |

@@ -72,6 +72,30 @@ await room.waitFor(`![...document.querySelectorAll('#p-turns .m-deliv')].some(n 
 await pause(room, 1200);
 await room.shot(join(OUT, 'meeting-room.png'), null, { scale: 1 });
 console.log('meeting-room', await room.evalJs(`JSON.stringify([...document.querySelectorAll('#p-turns .m-msg .m-deliv')].map(n => n.textContent))`));
+// The landing page's sixth capture is the same moment in a narrow window:
+// the page shows it in a 514 CSS px slot, and the README's 1100-wide room
+// shrunk to that puts its text near 6 px (appideas-designer, msg 3022). So
+// about 560 wide: the narrowest from 560 at which "Nudge everyone · 1 unread"
+// stays on one line. Below that it wraps and spills under the room's edge,
+// which is a page fault, not something to photograph. Then the shortest
+// height at which the transcript needs no scrolling.
+const oneLine = `(() => { const n = document.querySelector('[data-act="m-nudge-all"]'), s = document.querySelector('#p-send, [data-act="send"]') ?? n;
+  return n.getBoundingClientRect().height <= s.getBoundingClientRect().height + 1 && n.scrollHeight <= n.clientHeight + 1; })()`;
+let roomW = 560;
+for (; roomW <= 760; roomW += 10) {
+  await room.resize(roomW, 1000, { dpr: 2 });
+  await pause(room, 200);
+  if (await room.evalJs(oneLine)) break;
+}
+let roomH = 600;
+for (; roomH <= 2400; roomH += 10) {
+  await room.resize(roomW, roomH, { dpr: 2 });
+  await pause(room, 150);
+  if (await room.evalJs(`(() => { const t = document.querySelector('#p-turns'); return t.scrollHeight <= t.clientHeight + 1; })()`)) break;
+}
+await pause(room, 600);
+await room.shot(join(OUT, '06-meeting-room.png'), null, { scale: 1 });
+console.log(`06-meeting-room at ${roomW}x${roomH}`);
 
 // End the room so its desks come back to the floor for the next shot.
 await room.click('[data-act="meeting-end"]').catch(() => {});

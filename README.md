@@ -18,8 +18,8 @@ back to Claude Code or VS Code whenever you want it there.
 **Installing it is one sentence to an agent** ([Install](#install)). After
 that, running the team happens on the page:
 
-- **See the whole company at a glance.** Every project is a floor, every agent
-  a desk. The header counts who's here and who needs you.
+- **See the whole company at a glance.** Every project is a floor, and every
+  agent at work has a desk. The header counts who's here and who needs you.
 - **Answer from one screen.** A permission prompt is **Approve / Deny** on the
   desk; a question is a form. No hunting for the terminal that's waiting.
 - **Seat an agent without editing a file.** **Take a desk**: choose a folder,

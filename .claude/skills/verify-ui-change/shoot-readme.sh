@@ -50,6 +50,6 @@ cp "$OUT/01-room-prompt.png" docs/images/room.png
 cp "$OUT/05-board-activity.png" docs/images/board.png
 cp "$OUT/meeting-room.png" "$OUT/popouts.png" docs/images/
 if [ "$LANDING" = "--landing" ]; then
-  cp "$OUT"/0[1-5]-*.png docs/review/landing/
+  cp "$OUT"/0[1-6]-*.png docs/review/landing/
 fi
 echo "wrote docs/images${LANDING:+ and docs/review/landing} (shots kept in $OUT)"
