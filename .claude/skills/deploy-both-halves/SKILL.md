@@ -95,6 +95,15 @@ to the deployed commit. So before restarting the host, read
 `git diff --quiet <deployed sha> HEAD -- host/ plugin/`. If nothing
 differs, the host and the plugin stay, and the note says why.
 
+**Diff against what is running, not only against the last SHA.** When
+the last deploy went out with an uncommitted version bump (costmo asked
+for 0.10.20's bump, rebuild and reload in one go, 2026-11-04, and
+committed it afterwards as bf49ba1), the next deploy's
+`git diff 623f91a HEAD -- host/ plugin/` is not empty: it is that bump.
+The host started after the bump and the plugin cache already reads
+0.10.20 (`installed_plugins.json`), so both stay. Task 275 went out as
+the server half only on that reading, and the note said so.
+
 ## The third half: the plugin
 
 Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).

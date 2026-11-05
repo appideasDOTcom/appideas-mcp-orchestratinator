@@ -660,6 +660,20 @@ every poll writes nothing when nothing changed, and `data-upd` in the key
 is not pinned, because no update control ever stands where another one
 stood.
 
+**Known flake in the update dialog's row, not fixed** (QA's Low in msg
+2942 at 2ba600a, waiting on costmo's call). The row writes a fake newer
+commit into `ui.state.update`, and the page's own 2.5 s poll (`timer`
+in app.js) can land mid-press. The poll redraws from the real state,
+which wipes the fake commit, and the ✕ jumps 77 px after `follow` has
+measured it. Two of QA's equivalent mutants read 4 of 5 by chance (3 of 4
+runs and 1 of 4). QA's measured fix is `clearInterval(timer)` around the
+#40 rows, after which the head and both mutants passed 3 of 3. So a 4 of 5
+on that row whose per-press list shows a ✗ after the first press is this
+race, not the patch; rerun it before reading it as red. The rule
+generalizes: **a row that writes state into the page races the page's
+own poll**, so stop the poll for the row or redraw from state the poll
+also brings.
+
 Four things it taught:
 
 - **A move is a removal, for focus.** The first cut moved a keyed element
