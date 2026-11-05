@@ -1726,10 +1726,16 @@ export function makeStore(db) {
     recentMeetings: (limit) => q.recentMeetings.all(limit).map(meetingRow),
     /** The window says the room is still open; false when the board has it ended (a reload's end landed after its open). */
     touchMeeting: (id) => q.touchMeeting.run(id).changes > 0,
-    /** The open, live meeting room `agent` is in on `channel`, or null: whose participants its broadcasts reach. */
+    /**
+     * The open, live meeting room `agent` is in on `channel`, or null: whose
+     * participants its broadcasts reach. In it, not absent: a desk Resume
+     * could not bring back is kept in the record for the next Resume, but it
+     * is on the floor, and talks and hears as the floor does (QA, PR #49
+     * finding 1).
+     */
     liveMeetingOf: (channel, agent, liveSeconds = MEETING_LIVE_SECONDS) =>
       q.liveMeetings.all(channel, `-${liveSeconds} seconds`).map(meetingRow)
-        .find((r) => r.participants.some((p) => p.agent === agent)) ?? null,
+        .find((r) => r.participants.some((p) => p.agent === agent && !p.absent)) ?? null,
     getSavedPrompt: (id) => q.getSavedPrompt.get(id) ?? null,
     /** The prompt holding this title, if any — `exceptId` skips the row being edited. */
     savedPromptByTitle: (title, exceptId = null) => {

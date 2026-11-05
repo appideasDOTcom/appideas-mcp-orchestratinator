@@ -189,6 +189,13 @@ async function main() {
     eq(W.askedStill(askForm, { headers: ['Routing'], options: ['Fast path'] }), false, 'a different question in its place is not answered with keys meant for another');
     eq(W.askedStill(box('\u276f '), asksScope), false, 'nor is a window that is no longer asking anything');
     eq(W.askedStill(askForm, undefined), false, 'and an answer that names no question (a board from before this) is dropped as it always was');
+    // A permission answer names its command too: every permission menu offers
+    // the same choices (QA, PR #49 finding 2).
+    const bashPrompt = [RULE, ' Bash command', '', '   rm -rf build-cache', '   Clear the build cache', '', ' Do you want to proceed?', ' \u276f 1. Yes',
+      "   2. Yes, and don't ask again for rm commands in this folder", '   3. No, and tell Claude what to do differently (esc)', '', ' Esc to cancel \u00b7 Tab to amend'].join('\n');
+    const bashChoices = ['Yes', "Yes, and don't ask again for rm commands in this folder", 'No, and tell Claude what to do differently (esc)'];
+    eq(W.askedStill(bashPrompt, { options: bashChoices, subject: 'rm -rf build-cache' }), true, 'an old permission answer is pressed while its own command is the one asked about');
+    eq(W.askedStill(bashPrompt, { options: bashChoices, subject: 'npm publish' }), false, 'and not when the same menu now asks about another command');
 
     /* The composer once a message is queued behind a running turn.
      *

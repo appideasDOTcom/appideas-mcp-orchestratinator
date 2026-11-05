@@ -377,13 +377,20 @@ answered in the window. Three fixes, each costmo's pick:
   host presses it past the TTL when the screen still shows them. A
   different question in its place matches neither and is not answered.
   The TTL was right for an answer queued while no host was there, and
-  wrong when the age was the host's own line.
+  wrong when the age was the host's own line. A permission decision goes
+  the same way (QA, PR #49 finding 2), and it carries what it was for
+  (`asks.subject`, the command or file from the prompt's summary), because
+  every permission menu offers the same choices, and the choices alone
+  could approve a different command.
 A stale `live.pending` would refuse messages wrongly. It is cleared by the
 window's next hook, by an answer from the floor, and at session end, and
 the panel shows the prompt with Cancel, so the refusal does not outlive the
-question for long. No host-suite case drives an old answer end to end
-(its stand-in draws no form). `askedStill` is tested on a captured form in
-`test:window`, and the board half (`asks` on the answer) in `test:floor`.
+question for long. `test:host` drives both call sites end to end ("an
+answer that waited in the host's line"). Its host runs with the TTL at -1,
+so every answer is old, and its stand-in draws a permission menu or a form
+from `prompt.flag`, in raw mode, because a tty in canonical mode holds a
+bare key until a newline. `askedStill` is tested on captured screens in
+`test:window`, and the board half (`asks`) in `test:floor`.
 
 ## A slash command, the model, and a compaction
 
@@ -1022,7 +1029,10 @@ in the room sends nothing and leaves the box as it was. Mentions outrank
 the chips for that message.
 
 **A desk Resume could not bring back for a reason that may pass stays in
-the room's record, `absent`.** Busy window, host offline, an editor, out in
+the room's record, `absent`, and absent is on the floor**: it is not in
+the room for containment either way, so its broadcasts reach the floor
+and the room's do not reach it (QA, PR #49 finding 1: `liveMeetingOf`
+and the audience matched the whole record). Busy window, host offline, an editor, out in
 another window, the host refusing the reopen, or a 90 s timeout. The first
 cut dropped any desk it skipped, so one busy window took a desk out of the
 room for good. An absent entry is kept exactly as it was (`absentKept` in

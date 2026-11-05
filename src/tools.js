@@ -92,7 +92,9 @@ export function registerTools(server, { store, context }) {
       // says who a contained broadcast reached, so the agent is not left
       // believing the whole channel heard it.
       const room = args.to ? null : store.liveMeetingOf(channel, agent);
-      const audience = room ? room.participants.map((p) => p.agent) : null;
+      // The room's desks, not its absent ones: those are on the floor and
+      // hear the floor's broadcasts, not the room's (QA, PR #49 finding 1).
+      const audience = room ? room.participants.filter((p) => !p.absent).map((p) => p.agent) : null;
       const id = store.insertMessage(channel, agent, args.to ?? null, JSON.stringify(args.body ?? null), audience);
       return ok({
         sent: true, id, channel, from: agent, to: args.to ?? null,

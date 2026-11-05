@@ -2597,6 +2597,12 @@ async function reacted(target, before) {
 export function askedStill(screen, asks) {
   if (!askingOf(screen)) return false;
   const s = String(screen ?? '');
+  // A permission answer names what it was for (the command, the file):
+  // every permission menu offers the same choices, so without this an old
+  // approve could land on a newer prompt for something else (QA, PR #49
+  // finding 2). Required when given; a prompt that no longer shows it is
+  // not the one that was answered.
+  if (asks?.subject && !s.includes(asks.subject)) return false;
   if ((asks?.headers ?? []).some((h) => typeof h === 'string' && h && s.includes(h))) return true;
   const options = (asks?.options ?? []).filter((o) => typeof o === 'string' && o);
   return options.length > 0 && options.every((o) => s.includes(o));

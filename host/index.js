@@ -1314,10 +1314,18 @@ class Host {
         // cursor starts somewhere dangerous, so it has its own presser.
         const isStartup = String(item.payload?.request_id ?? '').startsWith('startup:');
         // See W.answerIsStale for why a startup answer is exempt.
+        // Old is not the same as gone, as for a form below (QA, PR #49
+        // finding 2): a meeting room's message to several desks on one host
+        // can hold a decision in this line past the TTL. It is pressed when
+        // the window still shows the prompt it was for — its choices and its
+        // command (askedStill) — and dropped when it does not.
         if (W.answerIsStale(item.payload, ANSWER_TTL_MS)) {
           const age = Date.now() - (Number(item.payload?.queued_at) || 0);
-          warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — the prompt is long gone`);
-          break;
+          if (!(await W.stillAsking(desk.cwd, item.payload?.asks))) {
+            warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — its prompt is no longer on screen`);
+            break;
+          }
+          log(`${desk.label}: a ${Math.round(age / 1000)}s-old permission answer, and its prompt is still on screen — answering it`);
         }
         const r = isStartup
           ? await desk.answerStartup(item.payload?.decision)

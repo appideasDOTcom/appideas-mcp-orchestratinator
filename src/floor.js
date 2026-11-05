@@ -3914,6 +3914,15 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
       request_id: requestId, decision: send, message: str(req.body?.message), reason, queued_at: Date.now(),
+      // How the host knows, if this waits in its line, that the prompt is
+      // still the one on screen (askedStill, host/window.js): every choice
+      // it was answered from, and what it asks permission for. Every
+      // permission menu offers the same choices, so the choices alone could
+      // approve a different command (QA, PR #49 finding 2).
+      asks: {
+        options: (pendingReq.options ?? []).map((o) => o.text).filter(Boolean),
+        subject: String(pendingReq.summary ?? '').replace(/^[^:]+:\s*/, '').split('\n')[0].slice(0, 40).trim() || null,
+      },
     });
     live.wake(check.hosted.host_id);
     // A row reading "permission.3" tells nobody anything a year later, so a

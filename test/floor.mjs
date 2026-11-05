@@ -3322,7 +3322,14 @@ try {
       'and reaches the room only: Oli in the room hears it, Noa on the floor outside does not');
     const unread = async (agent) => (await floor()).channels.find((c) => c.channel === MCH)?.desks.find((d) => d.agent === agent)?.board?.unread ?? 0;
     said = await mcpCall('mia', 'send_message', { body: 'room only, unread' });
-    eq([await unread('oli'), await unread('noa')], [1, 0], 'nor is it counted unread for a desk outside the room (the ✉ pill and its backlog read the same rule)');
+    eq([await unread('oli'), await unread('noa')], [1, 0], 'nor is it counted unread for a desk outside the room');
+    // The ✉ pill's backlog dialog lists the messages from /api/state's
+    // unread_list (unreadMessages), a third reader of the same rule (QA, PR
+    // #49 Info 3: only the count was asserted).
+    const backlog = async (agent) => ((await fetch(`${HOST}/api/state`).then((r) => r.json())).channels.find((c) => c.channel === MCH)
+      ?.agents.find((a) => a.agent === agent)?.unread_list ?? []).map((m) => { try { return JSON.parse(m.body); } catch { return m.body; } });
+    eq([(await backlog('oli')).includes('room only, unread'), (await backlog('noa')).includes('room only, unread')], [true, false],
+      'and its backlog lists it for Oli in the room, and not for Noa outside it');
     said = await mcpCall('noa', 'send_message', { body: 'from outside' });
     eq(said.meeting_room, undefined, 'a desk outside the room broadcasts to the whole floor as before');
     assert((await heard('mia', said.id - 1)).includes('noa:from outside'), 'room participants included');
@@ -3342,6 +3349,14 @@ try {
     // Oli goes absent (a Resume could not bring it back) and its desk moves
     // on; End must keep the conversation Oli had in the room.
     await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia'], absent: ['oli'] });
+    // Absent is on the floor, not in the room (QA, PR #49 finding 1): Oli's
+    // broadcasts reach the floor, and the room's do not reach Oli.
+    said = await mcpCall('oli', 'send_message', { body: 'from Oli, absent' });
+    assert(said.meeting_room === undefined && (await heard('noa', said.id - 1)).includes('oli:from Oli, absent'),
+      'a desk the record keeps as absent broadcasts to the floor: Noa hears it, and the reply names no room');
+    said = await mcpCall('mia', 'send_message', { body: 'the room, without Oli' });
+    eq(said.meeting_room?.reached, [], 'and the room\'s broadcasts reach its desks only — Oli, absent, is not one of them');
+    assert(!(await heard('oli', said.id - 1)).includes('mia:the room, without Oli'), 'so Oli does not hear them');
     await regMeet(desksM.map((d) => (d.agent === 'mia' ? { ...d, session_id: 'sdk-mia-2' } : d.agent === 'oli' ? { ...d, session_id: 'sdk-oli-2' } : d)));
     eq((await op('/api/floor/meeting/end', { id: room.id })).status, 200, 'End');
     said = await mcpCall('mia', 'send_message', { body: 'after the meeting' });
