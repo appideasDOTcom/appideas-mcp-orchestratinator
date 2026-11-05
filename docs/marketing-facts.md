@@ -1,7 +1,7 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `56d04eb`
+code. Every fact names the file and line that holds it, at commit `5dae536`
 (branch `develop`, 2026-11-05; first written at `0ce4f1e`, 2026-10-17;
 re-anchored at `c6f9474` on 2026-11-02 — sixteen references had moved, none
 had changed — at `8f4a703` on 2026-11-03 — six moved and one was placed by
@@ -40,12 +40,13 @@ leaves the machine** — the update check (#40) contacts GitHub, so "the
 server makes no outbound connections" no longer holds and section 4 says
 what does. Rows added for popouts, meeting rooms and updating from the
 page — and at `56d04eb`, the 0.12.2 bump: none moved, the version
-changed, nothing else). Cite
+changed, nothing else — and at `5dae536` for the 0.12.3 bump that follows it:
+none moved, the version changed, nothing else). Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `56d04eb`. A later commit may move them; the file names
+Line numbers are for `5dae536`. A later commit may move them; the file names
 will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
 reference whose line is found once at the new commit and lists the rest.
 
@@ -280,8 +281,8 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.12.2** at `56d04eb` (0.12.1 and 0.12.2 are docs releases on
-  top of 0.12.0), in all three places that carry it:
+- **Version: 0.12.3**, the bump after `5dae536` (0.12.1 to 0.12.3 are docs
+  releases on top of 0.12.0), in all three places that carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
   They are kept equal by `npm run set-version` (`scripts/set-version.mjs`)
   and `npm run smoke` asserts it. The dashboard header reports the server's.

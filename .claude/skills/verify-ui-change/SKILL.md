@@ -1171,7 +1171,7 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Shooting the README images
 
-Every image in `docs/images/` (2026-11-05 at 0.12.2) comes from one fresh
+Every image in `docs/images/` (2026-11-05 at 0.12.3) comes from one fresh
 seed. The README's five are the landing captures plus two of their own, and
 `docs/operating.md`'s five are element crops at DPR 2 (`operating-shot.mjs`:
 two board cards, the activity log, a desk, a panel). One command does all of
@@ -1185,7 +1185,7 @@ it and tears down after itself (about 55 s):
 `--landing` writes six: the five above and `06-meeting-room.png`, the README's
 meeting room in a narrow window for the page's 514 px slot. Its width is the
 narrowest from 560 at which the room's "Nudge everyone · 1 unread" stays on
-one line (700 at 0.12.2: below that it wraps and spills under the room's
+one line (700 at 0.12.3: below that it wraps and spills under the room's
 edge, a page fault). Its height is the shortest with no transcript scrolling.
 The script prints both. The same capture is also copied to
 `docs/images/meeting-room-700.png` on every run, because `docs/operating.md`
