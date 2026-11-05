@@ -450,6 +450,7 @@
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
+  let floorRead = false;   // an /api/floor has answered at least once (loadTurns)
 
   /* ---------- small helpers ---------- */
 
@@ -4107,6 +4108,12 @@
     ui.sending = [];
       ui.sinceTurn = 0;
     }
+    // Not before the page has read /api/floor once: until then there is no
+    // desk to scope to, and an unscoped fetch is the desk's whole tail. A
+    // popout opens its desk before its first poll, and on a desk whose new
+    // session has no turns yet that tail is entirely the session before it
+    // (issue #46). The first poll loads the panel, scoped (tick).
+    if (!floorRead) return;
     const { channel, agent } = ui.open;
     // A hosted desk shows the hosted session — the one you can talk to — even
     // if a window in the same repo is reporting turns of its own to this desk.
@@ -4117,6 +4124,11 @@
     if (!r.ok) return;
     const d = await r.json();
     if (!ui.open || ui.open.channel !== channel || ui.open.agent !== agent) return;
+    // Asked for another session than the panel's now: tick has started the
+    // panel over since, and these rows would be appended to the new one's
+    // list for good, because nothing clears a list whose filter has not
+    // changed again (#46: an answer landing after that reset).
+    if (sessionFilter() !== sess) return;
     if (d.rows.length) {
       const known = new Set(ui.turns.map((x) => x.id));
       ui.turns = ui.turns.concat(d.rows.filter((x) => !known.has(x.id))).slice(-300);
@@ -5032,7 +5044,7 @@
   async function pollOnce() {
     try {
       const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
-      if (r.ok) floor = await r.json();
+      if (r.ok) { floor = await r.json(); floorRead = true; }
     } catch { /* the board's own dot already reports the connection */ }
     // What happened to bulk nudges still in line, against the payload just read.
     if (ui.bulk.size) await followBulk();

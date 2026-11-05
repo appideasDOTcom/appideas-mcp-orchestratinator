@@ -851,6 +851,25 @@ floor plus six popouts all live at once. Four things it taught:
   whatever the features asked, so the check sets 440×980 with `resize()`
   before it takes a picture.
 
+### check-popout-session.mjs — a new session, then detach (issue #46)
+
+```bash
+PORT=8941 DB_PATH=/tmp/i46.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8941 --db /tmp/i46.db &
+ORCH_CDP_PORT=9281 node --experimental-websocket .claude/skills/verify-ui-change/check-popout-session.mjs http://localhost:8941 8
+```
+
+The floor's panel is open on bo, a host `session` event moves the desk
+onto a new id with no turns, and detach is pressed. Each run reads the
+popout as it first draws and again 5 s later. Before the fix, 2 of 3 runs
+showed the old session's eight turns, and they were still there 5 s later.
+After it, 8 of 8 runs drew none. A popout opens its desk before its first
+`/api/floor`, so its first turns fetch had no session to scope to. When
+that fetch answered after the first poll had reset the panel, its rows
+stayed, because the filter did not change again. The red is a race, so
+**run several times**. One clean run proves nothing, and the first run
+was clean on the base too.
+
 ### check-pop-foot.mjs — a wide popout's foot under the desk (issue #43)
 
 ```bash
