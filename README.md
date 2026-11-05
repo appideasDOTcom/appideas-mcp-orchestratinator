@@ -9,58 +9,84 @@ that human a friendly, manageable space to run the work.
 
 ## What it is
 
-The Orchestratinator is a small, self-hosted server and a single web page that
-enables you to manage the workplace. Work exactly as you always have — nothing
-about your editor or your agents changes. The floor is where you go to run the
-team:
+The Orchestratinator is a complete **Agentic Development Environment (ADE)**:
+one web page, served by a small self-hosted server, from which you start,
+watch, talk to and steer every AI coding agent on every project you run.
+Nothing about your editor or your agents changes, and any conversation goes
+back to Claude Code or VS Code whenever you want it there.
 
-**A building.** Every project is a floor. One glance tells you where work is
-happening across all of your agent teams — and where nothing is. The header
-counts who's here and who needs you; go where it points.
+**Installing it is one sentence to an agent** ([Install](#install)). After
+that, running the team happens on the page:
+
+- **See the whole company at a glance.** Every project is a floor, every agent
+  a desk. The header counts who's here and who needs you.
+- **Answer from one screen.** A permission prompt is **Approve / Deny** on the
+  desk; a question is a form. No hunting for the terminal that's waiting.
+- **Seat an agent without editing a file.** **Take a desk**: choose a folder,
+  name the floor and the seat, and a window opens there, already on the
+  board.
+- **Keep several chats open at once.** **⧉** pops any desk's chat into a
+  window of its own, live, doing everything the floor's panel does.
+- **Talk to several agents in one conversation.** Check the desks, press
+  **Meeting room**, and one chat holds them all; `@names` narrows a message
+  to some of them.
+- **Hand out work without typing.** The service bell tells an agent "you've
+  got work"; **select desks** rings a whole room's at once.
+- **Drive each session from its desk.** Slash commands, model, effort and Stop,
+  from the desk's own composer.
+- **Stay current in one click.** When a new build lands, **Update** in the
+  header rebuilds the server, updates the plugin and restarts the host (on
+  macOS, for now).
 
 ![The building — one floor per project](docs/images/building.png)
 
-**The building.** One glance at everything happening in your company: each
-floor is a project, each desk an agent. Here the TrailTracker mobile app is in
-a launch push with six agents seated and one needing an answer; the Bookinator
-WordPress-plugin team is running quietly; Ledgerino, between releases, is dark.
-Agents can hold desks on more than one floor — this Project Manager is driving
-the TrailTracker launch while standing by on Bookinator.
-
-**A room per project.** Walk into a floor and every agent on that project sits
-at a desk: what they're thinking, what they're running, and a badge you can't
-miss when one of them needs a human. Read any desk's conversation, type to it,
-answer its permission prompts.
+**The building.** Each floor is a project, each desk an agent. Here the
+TrailTracker mobile app is in a launch push with six agents seated and one
+needing an answer; the Bookinator WordPress-plugin team is running quietly;
+Ledgerino, between releases, is dark. Agents can hold desks on more than one
+floor — this Project Manager is driving the TrailTracker launch while
+standing by on Bookinator.
 
 ![A room — every agent at its desk](docs/images/room.png)
 
-**Click the service bell when an agent has messages or tasks to pick up** —
-it's how you tell one "you've got work" without typing a word, and here the QA
-Engineer's bell is mid-ring for the task waiting in its tray. Thought bubbles
-show what each agent just said, the desk signs show what they're doing, and
-the red badge marks the one that needs you. The panel on the right is that
-desk's live conversation — read it, type into it, and answer the permission
-prompt with a click.
+**A room per project.** Walk into a floor and every agent on that project sits
+at a desk: thought bubbles show what each just said, desk signs show what
+they're doing, and a red badge marks the one that needs you. Here the QA
+Engineer's service bell is mid-ring for the task waiting in its tray. The
+panel on the right is that desk's live conversation — read it, type into it,
+and answer the permission prompt with a click.
 
-**A board, for the details.** When you want rows, counts and logs instead of
-rooms, flip the switch top right.
+![A meeting room — three agents, one conversation](docs/images/meeting-room.png)
+
+**A meeting room.** Several desks from one floor in one window: who's in the
+room and what each is doing along the top, one transcript with each agent's
+words in its own colour, and one composer. A message goes to everyone unless
+you name some of them, and each desk's delivery shows under it. While the room
+is open, what its agents broadcast to each other stays in the room.
+
+![Chats in windows of their own, beside the floor](docs/images/popouts.png)
+
+**Chats of their own.** Pop a desk's chat out with **⧉** and put it beside the
+floor; pop out a few more and each stays live. **Re-attach** brings it back,
+with whatever you'd typed.
 
 ![The board — the same server, denser](docs/images/board.png)
 
-**The board.** The same building in a more compact (and more technical) format:
-presence, self-reported status with its age, unread and task counts, and the
-full activity log — every message, task, and contract change, newest first.
-Operator controls live here too: mark mail read, close or reassign tasks,
-archive channels — and archiving is on the floor as well, so a channel put
-away from either view is a pill at the bottom of both until it is restored.
+**The board.** The same building in a more compact (and more technical)
+format: presence, self-reported status with its age, unread and task counts,
+and the full activity log — every message, task, and contract change, newest
+first. Operator controls live here too: mark mail read, close or reassign
+tasks, archive channels — and archiving is on the floor as well, so a channel
+put away from either view is a pill at the bottom of both until it is
+restored.
 
 Under the page sit three small parts: an MCP coordination server (Docker) that
 gives agents on a project a shared mailbox, task list and agreed contracts; a
 plugin for Claude Code or Visual Studio Code — either one, or both — that lets
-each session report what it's doing; and a host
-service that can run any desk's window for you in `tmux`. Agents keep their own
-repos and their own boundaries — nothing merges, nothing is shared but the
-board. Those are the three things the next section installs.
+each session report what it's doing; and a host service that can run any
+desk's window for you in `tmux`. Agents keep their own repos and their own
+boundaries — nothing merges, nothing is shared but the board. Those are the
+three things the next section installs.
 
 ## Install
 
@@ -258,8 +284,8 @@ One rule underneath everything: a conversation is one `claude` process, so
 **one app holds it at a time**. The floor always says who holds each desk. The
 daily loop:
 
-**1. Open a project** in VS Code or Claude Code — any repo you made a desk
-with its `.mcp.json` (step 3 above).
+**1. Open a project** in VS Code or Claude Code — any repo that is a desk
+(step 3 above).
 
 **2. Start a session and work as you always have.** The desk comes alive on
 its floor: your conversation, state, and prompts appear as they happen. The
@@ -300,12 +326,18 @@ picker; your machine-wide default is never touched from the floor. While a
 desk compacts, the floor says so, and a message sent meanwhile is held and
 read when the compaction ends.
 
-**8. Take a conversation back whenever you want** — for any feature the floor
+**8. Pop a chat out, or bring several desks into one.** **⧉** on a desk's
+panel detaches its chat into a window of its own; open as many as you like
+beside the floor. To talk to several agents together, **select desks**, check
+them, and press **Meeting room**. Both are in
+[Operating the board](docs/operating.md#chatting-with-a-desk).
+
+**9. Take a conversation back whenever you want** — for any feature the floor
 chat doesn't provide. **Open in VS Code** moves it to your editor with everything
 you did from the floor already in it; **Open in Claude** lands a terminal on the
 desk's tmux window; or `tmux attach -t orch` and sit at any desk the host runs.
 
-**9. Keep it current.** The header shows **Update available** when the
+**10. Keep it current.** The header shows **Update available** when the
 branch the board follows has a commit this build lacks; it checks GitHub once
 a day. **Update** says what it will interrupt, then the host on the board's
 machine fetches the commit, rebuilds the server, updates the plugin when its
@@ -342,7 +374,7 @@ The front page stops here; the details — all of them — moved to `docs/`:
 
 | Page | What's in it |
 | --- | --- |
-| [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, avatars, saved prompts, stopping a turn, operator actions (view/mark read, close/reassign, retire, archive — from either view) |
+| [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, chats in their own windows, meeting rooms, avatars, saved prompts, stopping a turn, operator actions (view/mark read, close/reassign, move, hide, retire, archive — from either view) |
 | [The team playbook](docs/multi-agent-team-playbook.md) | The document you hand a new agent: tools, addressing, autonomy, contracts, what the operator sees on the floor, trigger words — APPideas' own, as an example to modify |
 | [How agents coordinate](docs/coordination.md) | Channels, the ten MCP tools, contracts, a typical exchange, wiring up a team, and why human→agent and agent→agent are different mechanisms |
 | [The security model](docs/security.md) | The shared secret, the network boundary, what the floor puts on the server, and the sign-in that used to exist |

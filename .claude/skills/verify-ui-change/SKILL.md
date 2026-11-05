@@ -1169,6 +1169,41 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
   in the activity log — the query treats `updated_at > created_at` on an
   open task as a stale claim reopening. Move both.
 
+## Shooting the README images
+
+The README's five (`docs/images/`, 2026-11-05 at 0.12.0) are the landing
+captures plus two of their own, from one fresh seed:
+
+```bash
+PORT=8906 DB_PATH=./data/landing.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/landing-seed.mjs &
+node .claude/skills/verify-ui-change/landing-host.mjs &      # the desks answer what they are sent
+node --experimental-websocket .claude/skills/verify-ui-change/landing-shot.mjs <dir>
+node --experimental-websocket .claude/skills/verify-ui-change/readme-shot.mjs <dir>
+```
+
+`building.png`, `room.png` and `board.png` are landing-shot's 02, 01 and 05
+under the README's names; `meeting-room.png` and `popouts.png` are
+readme-shot's. Four things worth knowing first:
+
+- **`DB_PATH` is printed in the page's header.** A scratchpad path puts the
+  operator's home directory in a published image. Keep it `./data/landing.db`
+  (`data/` is ignored).
+- **The seed's database is `ORCH_SHOT_DB`, not `DB_PATH`.** Given neither,
+  it opens `data/landing.db` itself, so a server started on another path
+  leaves the seed writing a file nobody reads: `no such table: agent_profile`.
+- **A meeting room needs a host that takes work.** landing-seed registers the
+  host and never polls `/api/host/work`, so every room message sits at
+  "sending". `landing-host.mjs` answers each chat with the desk's user turn
+  and a scripted reply in the fixture's story. The App Developer is left out
+  of the room because it is asking a permission question, and a desk that is
+  asking takes no message (`askingWhy`).
+- **`popouts.png` is a composite.** A popout is its own window, so each
+  window is captured alone and the three are laid side by side on a backdrop
+  drawn in the same headless browser. Nothing inside a window is retouched.
+  Seed fresh for every run: a second run finds the first room's messages in
+  the desks' turns.
+
 ## Teardown, because leftovers poison the next run
 
 Neither `lsof` nor `netstat` is installed on this machine. Env vars are not
