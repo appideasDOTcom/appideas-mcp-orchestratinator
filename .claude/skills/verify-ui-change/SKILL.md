@@ -1171,16 +1171,34 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Shooting the README images
 
-The README's five (`docs/images/`, 2026-11-05 at 0.12.0) are the landing
-captures plus two of their own, from one fresh seed:
+The README's five (`docs/images/`, 2026-11-05 at 0.12.1) are the landing
+captures plus two of their own, from one fresh seed. One command does all of
+it and tears down after itself (about 45 s):
+
+```bash
+.claude/skills/verify-ui-change/shoot-readme.sh "$PWD"             # docs/images
+.claude/skills/verify-ui-change/shoot-readme.sh "$PWD" --landing   # and docs/review/landing
+```
+
+Re-run it after any version bump: the header's version is in every image.
+Then **read the five images**. Its red case was run: without
+`landing-host.mjs` it fails on the meeting room's replies and leaves
+`docs/images` untouched. By hand, the steps are:
 
 ```bash
 PORT=8906 DB_PATH=./data/landing.db ORCH_AUTH_TOKEN=k node src/server.js &
 node .claude/skills/verify-ui-change/landing-seed.mjs &
 node .claude/skills/verify-ui-change/landing-host.mjs &      # the desks answer what they are sent
-node --experimental-websocket .claude/skills/verify-ui-change/landing-shot.mjs <dir>
-node --experimental-websocket .claude/skills/verify-ui-change/readme-shot.mjs <dir>
+ORCH_CDP_PORT=9273 node --experimental-websocket .claude/skills/verify-ui-change/landing-shot.mjs <dir>
+ORCH_CDP_PORT=9273 node --experimental-websocket .claude/skills/verify-ui-change/readme-shot.mjs <dir>
 ```
+
+**Set `ORCH_CDP_PORT` for any run of your own.** drive.mjs defaults to 9222,
+which is where QA keeps a Chrome. `browser()` reuses whatever is on its port,
+so a run on the default shoots through QA's browser, and a teardown by port
+then kills it. The 2026-11-05 shoot ran on the default and once tore down
+with `pkill -f orch-cdp`, the broad match the teardown section warns
+against. No QA check was running at the time, so that was luck, not care.
 
 `building.png`, `room.png` and `board.png` are landing-shot's 02, 01 and 05
 under the README's names; `meeting-room.png` and `popouts.png` are

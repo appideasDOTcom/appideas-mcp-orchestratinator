@@ -1432,7 +1432,12 @@ zsh, not an empty list: `rm -f "$D"/x.db*` with no such file aborts the
 whole `&&` chain behind it, so the server it was meant to start never ran
 and the next step read a dead port. Name the files (`x.db x.db-wal
 x.db-shm`). And a word starting with `=` is a command lookup, so `echo
-===` prints `== not found`.
+===` prints `== not found`. Two more from 2026-11-05. In an agent's shell,
+`grep` is a function that runs ugrep, which reads `-i'pat'` as a cluster of
+flags (`invalid argument -m=eeting`). Use `command grep -i -e "pat"`. Shell
+scripts are not affected, because `sh` does not load the function. And
+`md5` is not installed: a comparison of two `$(md5 -q …)` is two empty
+strings and always equal. Use `shasum`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
