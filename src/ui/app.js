@@ -622,17 +622,115 @@ const holdsTyping = (fields) => [...(fields ?? [])].some((f) =>
   f?.tagName === 'TEXTAREA' || (f?.tagName === 'INPUT' && TYPED_INPUT.has(String(f.type ?? 'text').toLowerCase())));
 /* ---------- dialogs: opening and closing ---------- */
 
-function openDialog(html) {
-  el.dlgBody.innerHTML = html;
+/**
+ * Draw a dialog. `as` is the form a dialog draws from, for the three that
+ * draw again when a host answers (History, Sessions, Take a desk): drawn
+ * again from the same form while open, the body is patched in place
+ * (`patchBody`) rather than replaced. Every other draw replaces it.
+ */
+let drawnAs = null;
+function openDialog(html, { as = null } = {}) {
+  const again = as !== null && drawnAs === as && el.dlg.open;
+  drawnAs = as;
+  const tpl = again ? document.createElement('template') : null;
+  if (tpl) tpl.innerHTML = html;
+  else el.dlgBody.innerHTML = html;
+  const into = tpl ? tpl.content : el.dlgBody;
   // The error belongs with the thing that failed, above the buttons — appended at
   // the end it lands under "Cancel", where it reads as unrelated.
   const err = document.createElement('div');
   err.className = 'dlg-err';
   err.hidden = true;
-  const foot = el.dlgBody.querySelector('.dlg-foot');
-  if (foot) el.dlgBody.insertBefore(err, foot);
-  else el.dlgBody.append(err);
+  const foot = into.querySelector('.dlg-foot');
+  if (foot) foot.before(err);
+  else into.append(err);
+  if (again) patchBody(el.dlgBody, into);
   if (!el.dlg.open) el.dlg.showModal();
+}
+
+/**
+ * Make `into`'s children what `from`'s are, keeping every element that is
+ * still the same control — issue #37.
+ *
+ * Those three dialogs redraw on a host's answer, which lands on the host's
+ * clock, not the operator's. Replaced whole, the body took three things with
+ * it, measured with real input (#37): the focus (keys after the answer went
+ * to `body`), the caret, and a button held down across the answer, which
+ * fired no click, because a click goes to the common ancestor of press and
+ * release and the pressed button was no longer in the page (10 of 10 on
+ * Cancel). Patched, the text box, the buttons and the rows are the elements
+ * they were, and only what the answer changed is written.
+ *
+ * "The same control" is a key: an element's id, or what it does
+ * (`data-do`, `data-go`, `data-id`; the update surfaces' `data-upd` and the
+ * build an Update now offers, `data-commit`), or the id of the field inside it — so
+ * the label around a text box is the box's. A row whose folder or
+ * conversation is another one now is a new element, so a press held on it
+ * as the list changed fires nothing rather than opening what was drawn under
+ * the pointer. A keyed element is found further down among its siblings,
+ * and whatever it passed is removed rather than the element moved up, since
+ * a move drops its focus (so a control that changed order is drawn anew);
+ * one with no key matches only the element at its own place with the same
+ * tag and class. That is what keeps Take a desk's three
+ * `label.field`s apart: the Host label arrives above the Agent label when
+ * the host list does, and matched by place it would have been patched into
+ * the Agent label, box and focus with it.
+ *
+ * The value of a field is written only where it differs from what the form
+ * holds: each of these dialogs records its fields as they are typed, so a
+ * typed box is left alone and a value the form changed (a bound folder's
+ * agent) is drawn.
+ */
+const keyOf = (n) => {
+  if (n.nodeType !== Node.ELEMENT_NODE) return null;
+  if (n.id) return `#${n.id}`;
+  const does = ['data-do', 'data-go', 'data-id', 'data-upd', 'data-commit'].map((k) => n.getAttribute(k)).filter((v) => v !== null);
+  if (does.length) return `${n.nodeName} ${does.join(' ')}`;
+  const inner = n.querySelector('[id]')?.id;
+  return inner ? `in #${inner}` : null;
+};
+function patchBody(into, from) {
+  let at = into.firstChild;
+  for (const want of [...from.childNodes]) {
+    const key = keyOf(want);
+    let match = null;
+    if (key !== null) {
+      for (let n = at; n && !match; n = n.nextSibling) if (n.nodeName === want.nodeName && keyOf(n) === key) match = n;
+    } else if (at && at.nodeName === want.nodeName && keyOf(at) === null
+      && (want.nodeType !== Node.ELEMENT_NODE || at.getAttribute('class') === want.getAttribute('class'))) {
+      match = at;
+    }
+    if (!match) { into.insertBefore(want, at); continue; }
+    // What stands between is gone, and goes. Moving the match up past it
+    // instead takes it out of the page and back, which drops its focus:
+    // Take a desk's Agent box did, when its host list replaced the block
+    // above it.
+    while (at !== match) { const next = at.nextSibling; at.remove(); at = next; }
+    patchNode(match, want);
+    at = match.nextSibling;
+  }
+  while (at) { const next = at.nextSibling; at.remove(); at = next; }
+}
+function patchNode(old, want) {
+  if (old.nodeType !== Node.ELEMENT_NODE) {
+    if (old.nodeValue !== want.nodeValue) old.nodeValue = want.nodeValue;
+    return;
+  }
+  for (const { name } of [...old.attributes]) if (!want.hasAttribute(name)) old.removeAttribute(name);
+  for (const { name, value } of [...want.attributes]) if (old.getAttribute(name) !== value) old.setAttribute(name, value);
+  if (old.tagName === 'INPUT') {
+    if (old.type === 'checkbox' || old.type === 'radio') {
+      if (old.checked !== want.hasAttribute('checked')) old.checked = want.hasAttribute('checked');
+    } else if (old.value !== (want.getAttribute('value') ?? '')) old.value = want.getAttribute('value') ?? '';
+    return;
+  }
+  if (old.tagName === 'TEXTAREA') {
+    if (old.value !== want.textContent) old.value = want.textContent;
+    return;
+  }
+  const chosen = old.tagName === 'SELECT' ? (want.querySelector('option[selected]') ?? want.querySelector('option'))?.value : undefined;
+  patchBody(old, want);
+  if (chosen !== undefined && old.value !== chosen) old.value = chosen;
 }
 /**
  * A closed dialog is finished, and whatever it was waiting on is let go.
@@ -675,6 +773,7 @@ const drawsNow = (kind, opening) => ui.dlgCtx?.kind === kind && (opening || el.d
 function closeDialog() {
   if (el.dlg.open) el.dlg.close();
   el.dlgBody.innerHTML = '';
+  drawnAs = null;
 }
 
 /**
@@ -1673,17 +1772,41 @@ function renderUpdate(state) {
   if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel(u));
   const sec = el.setDlg.open ? el.setBody.querySelector('#set-updates') : null;
   if (sec) {
+    // Patched, for the same reason as the dialog (#37). It used to be
+    // `sec.outerHTML = html` when `sec.outerHTML !== html`, and the two
+    // never matched: the template starts with whitespace and the element
+    // does not. So every poll replaced the section, Check now with it, and
+    // a press across a poll fired nothing (QA's 4 of 5 with no redraw at
+    // bf49ba1; measured, the button was a new element 4 times in 10 s of a
+    // still board). What was drawn is kept on the element instead.
     const html = updatesSection(u);
-    if (sec.outerHTML !== html) sec.outerHTML = html;
+    if (sec.dataset.sig !== html) {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = html.trim();
+      patchNode(sec, tpl.content.firstElementChild);
+      sec.dataset.sig = html;
+    }
   }
   if (updRunning(u?.run)) watchUpdate(u.run);
 }
 
-/** Redraw only on a difference, so a poll does not knock focus off a button. */
+/**
+ * Redraw only on a difference, so a poll does not knock focus off a button,
+ * and draw a difference as a patch (#37), so a button held down across it
+ * is still the button on release. Replaced, the update dialog's ✕ fired 0
+ * of 5 presses with a redraw 50 ms into each (QA, at bf49ba1); a click goes
+ * to the common ancestor of press and release, and the pressed one was gone.
+ * An Update now that offers another build is another button
+ * (`data-commit` is in its key), so a press held across a newer commit
+ * arriving updates to neither. An empty box (the first draw) is drawn whole.
+ */
 function drawIfChanged(box, html) {
   if (box.dataset.sig === html) return;
   box.dataset.sig = html;
-  box.innerHTML = html;
+  if (!box.firstChild) { box.innerHTML = html; return; }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  patchBody(box, tpl.content);
 }
 
 /**
@@ -2349,6 +2472,36 @@ function moveOutcome(floor, { channel, agent, to }, beforeId) {
   return null;
 }
 
+/**
+ * What the host listed, and the form filled from the folder it stands in.
+ *
+ * Filled once per folder: the folder's own binding fixes the agent and
+ * proposes the floor; an unbound folder asks for a name, on the floor the
+ * dialog was opened from. Typed values survive a redraw, not a new folder.
+ *
+ * "Not a new folder" is decided when the folder is chosen, not when its
+ * listing arrives (issue #37). The listing comes a moment after the choice,
+ * and the name used to be emptied on its arrival whatever had been typed
+ * meanwhile, the first folder included: opened on a folder, the dialog took
+ * the 3 letters typed before its listing and the rest went to `body`. So
+ * the form says whether the box was typed into since the folder was chosen
+ * (`agentTyped`: set by typing, cleared by browseTo on another folder, by a
+ * pick and by a change of host), and only an untyped name is emptied. A
+ * bound folder's agent still wins over anything typed.
+ */
+function takeListing(fm, got) {
+  fm.listing = got;
+  if (got.path) fm.path = got.path;
+  if (fm.prefilled !== fm.path) {
+    const b = got.self?.bound ?? null;
+    if (b) fm.agent = b.agent;
+    else if (!fm.agentTyped) fm.agent = '';
+    if (b) fm.channel = b.channel;
+    else if (fm.wantChannel) fm.channel = fm.wantChannel;
+    fm.prefilled = fm.path;
+  }
+}
+
 /* ---------- take a desk: the dialog ---------- */
 
 /**
@@ -2404,7 +2557,7 @@ function deskDialog({ channel = null, hostId = null, path = null } = {}) {
     // to. listMode: the page's list is drawn although the host has a dialog,
     // because that dialog failed, and pickError is what it said.
     picking: null, listMode: false, pickError: null, pickNote: null,
-    wantChannel: channel, channel, newChannel: '', agent: '', prefilled: null, error: null,
+    wantChannel: channel, channel, newChannel: '', agent: '', agentTyped: false, prefilled: null, error: null,
   };
   renderDeskDialog({ opening: true });
   loadFolders();
@@ -2475,6 +2628,7 @@ async function pickFolder() {
   fm.picking = 'asking';
   fm.listMode = false;
   fm.waiting = false;
+  fm.agentTyped = false;
   fm.error = null;
   fm.pickError = null;
   fm.pickNote = null;
@@ -2543,6 +2697,9 @@ async function browseTo(path, { keep = false } = {}) {
   fm.picking = null;
   fm.waiting = true;
   fm.error = null;
+  // Another folder is a new name; the same one (Look again, the first
+  // listing) keeps what was typed — see takeListing.
+  if (path !== fm.path) fm.agentTyped = false;
   fm.path = path;
   renderDeskDialog();
   const mine = () => ui.dlgCtx?.kind === 'desk' && ui.deskForm === fm && fm.seq === seq;
@@ -2584,22 +2741,6 @@ async function browseTo(path, { keep = false } = {}) {
   // form is still the old folder's, and a take must not carry the new path.
   if (keep) { fm.path = stood.path; fm.listing = stood.listing; }
   renderDeskDialog();
-}
-
-/** What the host listed, and the form filled from the folder it stands in. */
-function takeListing(fm, got) {
-  fm.listing = got;
-  if (got.path) fm.path = got.path;
-  // Filled once per folder: the folder's own binding fixes the agent and
-  // proposes the floor; an unbound folder asks for a name, on the floor the
-  // dialog was opened from. Typed values survive a redraw, not a new folder.
-  if (fm.prefilled !== fm.path) {
-    const b = got.self?.bound ?? null;
-    fm.agent = b ? b.agent : '';
-    if (b) fm.channel = b.channel;
-    else if (fm.wantChannel) fm.channel = fm.wantChannel;
-    fm.prefilled = fm.path;
-  }
 }
 
 /** Copy what is in the boxes into ui.deskForm, so a redraw keeps it. */
@@ -2772,7 +2913,7 @@ function renderDeskDialog({ opening = false } = {}) {
       <button type="button" class="btn" data-do="cancel">Cancel</button>
       <button type="button" class="btn primary" data-do="desk-take"${canGo ? '' : ' disabled'}>${primary}</button>
     </div>
-  `);
+  `, { as: fm });
 }
 
 /** Leave a desk: a confirmation that says exactly what goes and what stays. */
@@ -2921,6 +3062,7 @@ el.dlgBody.addEventListener('change', (e) => {
     const fm = ui.deskForm;
     fm.listing = null;
     fm.prefilled = null;
+    fm.agentTyped = false;
     fm.path = null;
     fm.picking = null;
     fm.listMode = false;
@@ -2943,6 +3085,7 @@ el.dlgBody.addEventListener('input', (e) => {
   if (!e.target.matches('#desk-agent, #desk-new-channel')) return;
   readDeskForm();
   const fm = ui.deskForm;
+  if (e.target.matches('#desk-agent')) fm.agentTyped = true;
   // The name follows the id as it is typed, without a redraw: an unbound
   // folder's agent is whatever is in the box, and so is whose name this is.
   const shown = el.dlgBody.querySelector('#desk-name');
@@ -3160,7 +3303,7 @@ function renderSessionDialog({ opening = false } = {}) {
       <button type="button" class="btn" data-do="cancel">Close</button>
       <button type="button" class="btn primary" data-do="session-new" title="Close the desk's window and open a fresh conversation in this folder">Start new</button>
     </div>
-  `);
+  `, { as: fm });
 }
 
 // Typing in the filter redraws the rows and the count, never the box.
@@ -3397,20 +3540,9 @@ function renderHistoryDialog({ opening = false } = {}) {
   else if (fm.note) notes.push(esc(fm.note));
   notes.push('A row opens that conversation to read, in its desk\'s panel on the floor. It is not resumed — to put a desk on one, use that desk\'s Sessions.');
   const cover = coverageText(hosts, searching ? 'search' : 'recent').join(' · ');
-  // An answer arriving redraws the list and the lines under it, never the
-  // box: the hosts answer on their own clocks, and a redraw of the whole
-  // dialog every poll would take the caret out of a search being typed.
-  const mode = searching ? 'search' : 'recent';
-  const list = ui.dlgCtx?.kind === 'history' ? el.dlgBody.querySelector('.hist-rows') : null;
-  if (list && fm.drawn === mode) {
-    list.innerHTML = historyRowsHtml(fm);
-    el.dlgBody.querySelector('.hist-count').textContent = count;
-    el.dlgBody.querySelector('.hist-cover').textContent = cover;
-    el.dlgBody.querySelector('.dlg-note').innerHTML = notes.join(' ');
-    return;
-  }
-  fm.drawn = mode;
-  const hadFocus = document.activeElement?.id === 'hist-query';
+  // The hosts answer on their own clocks, so an answer is patched in, not
+  // drawn whole (openDialog's `as`): the box keeps its caret mid-search and
+  // a row held down as the list grows still opens.
   openDialog(`
     <div class="dlg-head"><h3>History</h3></div>
     <p class="dlg-sub">every desk's conversations, read off the hosts' own transcripts</p>
@@ -3431,12 +3563,7 @@ function renderHistoryDialog({ opening = false } = {}) {
     <div class="dlg-foot">
       <button type="button" class="btn" data-do="cancel">Close</button>
     </div>
-  `);
-  if (hadFocus) {
-    const box = el.dlgBody.querySelector('#hist-query');
-    box?.focus();
-    box?.setSelectionRange(box.value.length, box.value.length);
-  }
+  `, { as: fm });
 }
 
 // What is typed, and the switch, live in ui.histForm so a redraw keeps them.

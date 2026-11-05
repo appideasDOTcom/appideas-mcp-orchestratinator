@@ -1017,10 +1017,10 @@ try {
     const b = src.indexOf('/* ---------- take a desk: the dialog ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the take-a-desk section was not found in src/ui/app.js between its two section comments');
     const tmp = `./data/desk-dialog-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing };\n`);
     try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
   })();
-  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome } = lifted;
+  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing } = lifted;
 
   // A move the board accepted is not yet made: the page follows the agent
   // only once its host has seated it on the target, and says the host's
@@ -1058,6 +1058,36 @@ try {
   eq(takeBody({ hostId: 'h-open', path: '/repo/zeta-newest', channel: CH, newChannel: '', agent: ' fresh ', persona: 'Typed Name' }),
     { host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', open: true },
     'what the dialog sends on a take names the host, the folder, the floor and the agent — and no name, even if a form somehow held one');
+
+  // Issue #37: the name is the operator's from the moment a folder is
+  // chosen, so a listing arriving after it does not empty what was typed
+  // meanwhile. How the dialog keeps the box, focus and caret through that
+  // listing is only in the page: check-redraw.mjs in verify-ui-change.
+  {
+    const listingOf = (path, bound = null) => ({ path, self: { path, bound } });
+    const form = (over = {}) => ({ path: '/repo/a', prefilled: null, agent: '', agentTyped: false, channel: CH, wantChannel: CH, ...over });
+    let fm = form({ agent: 'dev', agentTyped: true });
+    takeListing(fm, listingOf('/repo/a'));
+    eq([fm.agent, fm.prefilled], ['dev', '/repo/a'], 'a name typed before the first listing of the folder the dialog opened on is kept when the listing arrives (#37)');
+    fm = form({ path: null, agent: 'dev', agentTyped: true });
+    takeListing(fm, listingOf('/home/me'));
+    eq(fm.agent, 'dev', 'and so is one typed before the home folder is listed, on a dialog opened with no folder');
+    fm = form({ agent: 'dev', agentTyped: true });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq([fm.agent, fm.channel], ['cy', 'elsewhere'], 'a bound folder\'s agent wins over anything typed, and proposes its floor');
+    fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'dev', agentTyped: false });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.agent, '', 'a new folder the operator moved to starts with no name: typed values survive a redraw, not a new folder');
+    fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'cy', agentTyped: false });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.agent, '', 'nor does a bound folder\'s agent follow the operator into an unbound one');
+    fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'qa', agentTyped: true });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.agent, 'qa', 'but a name typed after the folder was chosen, while its listing was on its way, is that folder\'s and is kept');
+    fm = form({ prefilled: '/repo/a', agent: 'dev', agentTyped: false });
+    takeListing(fm, listingOf('/repo/a'));
+    eq(fm.agent, 'dev', 'and the same folder listed again (Look again) changes nothing in the form');
+  }
   eq(takeBody({ hostId: 'h-open', path: '/repo/x', channel: '__new__', newChannel: ' brand-new ', agent: 'x' }).channel, 'brand-new', 'a new floor is sent by the name typed for it');
 
   console.log('\nrecently opened');

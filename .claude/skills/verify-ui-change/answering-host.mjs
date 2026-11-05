@@ -31,6 +31,15 @@
  *               `rows` replaces that; `error` makes the host's search fail
  *   read        any conversation whose id ends `-old` is thirty turns in two
  *               pages; any other is "no conversation … in <folder>"
+ *   browse      `delay` before the listing; `bound` maps a path to the
+ *               binding its listing reports, for a folder bound on this
+ *               board ({ "/repo/x": { "channel", "agent", "scope" } })
+ *   recent      `delay` before History's recent list; `rows` replaces it
+ *   sessions    not answered unless `answer: true` (then after `delay`):
+ *               check-backdrop.mjs needs a Sessions that waits out its 8 s
+ *
+ * The delays are how a check lands a host's answer while somebody is
+ * typing or holding a button (check-redraw.mjs, issue #37).
  *
  * Every value here is one a default could not produce: titles that sort
  * wrong if the order is lost, a turn with markup in it (`<b>all</b>` — it
@@ -89,9 +98,10 @@ const FOLDERS = [
 ];
 const register = () => post('/api/host/register', { host_id: HOST, name: NAME, tmux: 'orch', desks: desksOf(), roots: ['/repo'], folders: FOLDERS, dialog: DIALOG });
 
-const listing = (path, at) => {
-  const self = FOLDERS.find((f) => f.path === path)
-    ?? { path, name: path.split('/').pop() || '/', depth: 1, bound: null, trusted: true, git: false, last_active: null, sessions: 0 };
+const listing = (path, at, bound = {}) => {
+  const self = { ...(FOLDERS.find((f) => f.path === path)
+    ?? { path, name: path.split('/').pop() || '/', depth: 1, bound: null, trusted: true, git: false, last_active: null, sessions: 0 }),
+  ...(bound[path] ? { bound: bound[path] } : {}) };
   return { type: 'browse', requested: path, path, root: '/', parent: path.split('/').slice(0, -1).join('/') || '/', at, self, entries: [{ path: `${path}/src`, name: 'src', depth: 4, bound: null }] };
 };
 
@@ -114,8 +124,9 @@ async function answer(w) {
   const a = answers();
   if (w.kind === 'browse') {
     const path = w.payload?.path ?? '/home/me';
+    await sleep(a.browse?.delay ?? 0);
     if (/\/gone[^/]*$/.test(path)) return events([{ type: 'browse', path, requested: path, at: now(), error: `${path} could not be opened: no such folder` }]);
-    return events([listing(path, now())]);
+    return events([listing(path, now(), a.browse?.bound ?? {})]);
   }
   if (w.kind === 'pick') {
     const p = a.pick ?? { mode: 'cancelled' };
@@ -129,6 +140,7 @@ async function answer(w) {
     return events([{ type: 'pick', state: 'cancelled', at, start, why: p.why ?? null }]);
   }
   if (w.kind === 'recent') {
+    await sleep(a.recent?.delay ?? 0);
     return events([{ type: 'history', kind: 'recent', request_id: w.payload.request_id, at: now(), rows: a.recent?.rows ?? conversations() }]);
   }
   if (w.kind === 'search') {
@@ -146,6 +158,13 @@ async function answer(w) {
       ],
     }));
     return events([{ ...head, rows, files: 104, ms: 2700 }]);
+  }
+  if (w.kind === 'sessions') {
+    const s = a.sessions ?? {};
+    if (!s.answer) return null;
+    await sleep(s.delay ?? 0);
+    const rows = s.rows ?? conversations().filter((c) => c.channel === w.channel && c.agent === w.agent);
+    return events([{ type: 'sessions', channel: w.channel, agent: w.agent, at: now(), rows }]);
   }
   if (w.kind === 'read') {
     const { session_id: sid, request_id: rid } = w.payload;

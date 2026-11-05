@@ -131,25 +131,29 @@ async function fresh(d) {
   await page.evalJs(d.open);
   await page.waitFor(`document.querySelector(${JSON.stringify(dlg)}).open`);
   if (d.field) {
-    /* A dialog that asks its host something redraws whole when the answer
-       lands — Sessions does, on its host's list, and the redraw takes focus
-       out of the filter (the value survives, in the form's state). So the
-       marker is typed and focused again until the same field element has
-       held it across two polls half a second apart: nothing redrew it in
-       between. Otherwise a lost marker or a lost focus is the fixture's.
-       The first cut retyped only a missing value, and a back-to-back run
-       whose host answered late waited on a focus nobody restored. */
+    /* The marker is typed and focused once, and must then hold in the same
+       element across two polls half a second apart. Until issue #37 a
+       dialog that asks its host redrew whole on the answer, which took the
+       focus out of the field, so this retyped and refocused until nothing
+       redrew it in between. The host's answer is patched in now, so a
+       field that does not hold is the finding, and this says so rather
+       than typing it back. */
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(d.field)})`);
+    await page.evalJs(`(() => {
+      const f = document.querySelector(${JSON.stringify(d.field)});
+      f.value = ${JSON.stringify(MARK)};
+      f.dispatchEvent(new Event('input', { bubbles: true }));
+      f.focus();
+      window.__issue11Field = f;
+      window.__issue11Polls = 0;
+      return 'ok';
+    })()`);
     await page.waitFor(`(() => {
       const f = document.querySelector(${JSON.stringify(d.field)});
-      if (!f) return false;
-      const same = window.__issue11Field === f;
-      window.__issue11Field = f;
-      if (f.value !== ${JSON.stringify(MARK)}) {
-        f.value = ${JSON.stringify(MARK)};
-        f.dispatchEvent(new Event('input', { bubbles: true }));
+      if (!f || window.__issue11Field !== f || f.value !== ${JSON.stringify(MARK)} || document.activeElement !== f) {
+        throw new Error('the field did not hold the marker — redrawn, emptied or unfocused (issue #37)');
       }
-      if (document.activeElement !== f) f.focus();
-      return same && f.value === ${JSON.stringify(MARK)} && document.activeElement === f;
+      return ++window.__issue11Polls >= 2;
     })()`, { every: 500, timeout: 15000 }).catch(async (e) => {
       const seen = await page.evalJs(`(() => {
         const f = document.querySelector(${JSON.stringify(d.field)});

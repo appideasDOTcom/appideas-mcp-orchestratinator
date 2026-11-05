@@ -278,8 +278,12 @@ async function connect(target) {
      * fired: 14 of 26 trials, against 0 of 20 with no moves (QA, PR #36 N1).
      * A drag keeps its moves, because the moves are the gesture.
      * `held` is a function run before the release, with the button down.
+     * `follow` measures a selector `to` again after `held`, so the release
+     * lands on that element wherever it now is: a pointer that tracked it
+     * through a layout shift. It is for asking whether an element survived
+     * (issue #37's patch), apart from whether it moved; say the move too.
      */
-    press: async (from, to = from, { steps, held } = {}) => {
+    press: async (from, to = from, { steps, held, follow = false } = {}) => {
       const at = async (p) => (typeof p === 'string'
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(p)});
@@ -304,8 +308,10 @@ async function connect(target) {
       // drag looks like before the page hears it end (issue #13's handle,
       // whose limit is only visible mid-drag).
       const during = held ? await held() : undefined;
-      await mouse('mouseReleased', b, 0);
-      return { from: a, to: b, during };
+      const end = follow && typeof to === 'string' ? await at(to) : b;
+      if (end !== b) await mouse('mouseMoved', end, 1);
+      await mouse('mouseReleased', end, 0);
+      return { from: a, to: end, during, moved: { x: end.x - b.x, y: end.y - b.y } };
     },
     /**
      * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').

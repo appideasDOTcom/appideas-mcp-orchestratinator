@@ -578,10 +578,12 @@ Six things it taught, each a red that was the check:
   now waits for the close to be counted, and gives a row that should stay
   open 600 ms. And Take a desk redraws taller when its host list arrives,
   so its Cancel is pressed only once the button has held still.
-- **Sessions redraws whole when its host answers**, and the redraw takes
-  focus out of the filter; the value survives in the form's state. So the
-  marker is typed and focused until the same field element has held it
-  across two polls.
+- **Sessions redrew whole when its host answered**, and the redraw took
+  focus out of the filter; the value survived in the form's state. So the
+  marker was typed and focused until the same field element had held it
+  across two polls. Since issue #37 the answer is patched in, so the
+  marker is typed once and must hold across two polls with nothing typed
+  back; a field that does not is the finding, said as one.
 - **A non-empty `type="search"` field spends the first Escape clearing
   itself.** That is the browser's (History's query has no handler for it),
   so the row says `escape×2` rather than calling Escape broken.
@@ -601,6 +603,94 @@ Six things it taught, each a red that was the check:
   When a row stopped at the comeback, History's Close-button row opened
   inside its Escape row's window at the base, asked nobody, and could not
   come back. Every close-then-wait row now watches the full ten seconds.
+
+### check-redraw.mjs — a host's answer under the operator's hands (issue #37)
+
+History, Sessions and Take a desk draw again when their host answers.
+Drawn whole, that took the focus out of the box being typed in (the keys
+after it went to `body`), Take a desk's name with it, and a button held
+down across it fired no click. [`check-redraw.mjs`](check-redraw.mjs)
+lands each dialog's answer while real keys are going in or a real press is
+held, and reads what survived:
+
+```bash
+PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$PWD" after    # PASS · 19 of 19
+PORT=8913 CDP=9255 .claude/skills/verify-ui-change/run-check-redraw.sh "$CP" before    # HEAD's app.js in a copy
+```
+
+[`run-check-redraw.sh`](run-check-redraw.sh) is `run-check-backdrop.sh`'s
+shape with two differences: the server runs with
+`ORCH_SESSIONS_MIN_MS=0 ORCH_HISTORY_MIN_MS=0`, so every open asks its host
+and no row waits out the one before it, and `answering-host.mjs` reads an
+answers file the check rewrites before each row to time the answer
+(`browse.delay`, `recent.delay`, `sessions.answer` + `delay`, and
+`browse.bound` for a folder bound on this board). About a minute.
+
+Every row proves its own fixture: the three render functions are wrapped
+(they are the global's properties, so the page's own calls go through the
+wrappers), the time the answer drew is recorded, and a row whose answer
+did not land inside the typing or the press is red as *the fixture*. At
+e88a951 (`--expect before`) it read the issue's numbers again: Take a desk
+took 12 of 36 keys and held 0 letters, Sessions 16 of 36, focus on `BODY`
+for both; every held row lost; Sessions' and Take a desk's Cancel 0 of 5
+under their own redraw, History's 5 of 5 (its rows were already redrawn
+apart from its box and buttons). Two mutants of the patch in a copy: rows
+keyed by place without `data-id` turned "moved on" red (the held press
+fired on the conversation drawn into its spot, `session-resume
+bo-other`), leaving a field's value alone turned the three name rows
+red, and moving a keyed match up past what stood above it (the first cut)
+turned "its host list arriving above the box" red with focus on `BODY`.
+
+**#40's two surfaces, five rows more** (task 274; costmo added them to #37).
+The update dialog's ✕ and Settings' Check now are held while `renderUpdate`
+draws a real change 50 ms in: a newer commit on the branch for the dialog,
+Check now's own note for Settings. A redraw of the same HTML is not a
+test, because `drawIfChanged` rightly draws nothing. Then Update now is
+held while another commit takes its place, and both buttons are watched
+through 6 s of a still board. At bf49ba1 (its `before`, since the three
+dialogs are fixed there) both read 0 of 5, and Settings' Check now was a
+new element on every poll: `sec.outerHTML !== html` never matched,
+because the template starts with whitespace. That is QA's unexplained
+"4 of 5 with no redraw". Five mutants: replacing the dialog sends ✕ to 0
+of 5; replacing the section sends Check now to 0 of 5 and makes the
+quiet poll read `replaced 3×`. Dropping `data-commit` from the key makes
+the held Update now **start the update to the newer build** (`upd start
+2345678`). Two mutants survive, both equivalent: patching Settings on
+every poll writes nothing when nothing changed, and `data-upd` in the key
+is not pinned, because no update control ever stands where another one
+stood.
+
+Four things it taught:
+
+- **A move is a removal, for focus.** The first cut moved a keyed element
+  up past siblings that had gone, and a moved element loses focus like a
+  replaced one. Take a desk opened on no folder lost its Agent box's focus
+  that way when the host list swapped the folder block above it, value and
+  element intact. This check passed; check-backdrop's simplified `fresh()`
+  went red on it (`same: true`, `active: BODY`). The patch now removes what
+  it passes, and the row replays that arrival, because the board answers
+  the host list faster than a person reaches the box.
+
+- **A click needs the same element, and it needs it to stay put.** Take a
+  desk's `<dialog>` is centred, and its first listing makes it 48 px
+  taller, so everything in it moves 24 px up. A release at the old spot is
+  on the next row, and no click fires whether or not the row survived.
+  `press()` has `follow` for this: it measures a selector `to` again after
+  `held`, so the row asks whether the element survived, and prints how far
+  it moved. That move is a loss the patch cannot prevent, and costmo
+  ruled it left as it is (2026-11-04); the printed move is a record, not
+  a red. The update dialog does the same, at 77 px: an offer of Update now
+  arriving while it is open grows the centred dialog, and without `follow`
+  the row read 4 of 5, the miss being the first press every time. Its rows
+  follow and print the move per press (`✓-77 ✓0 …`).
+- **Swallow clicks only in the rows that press to observe.** The first cut
+  swallowed every click in the dialog in the capture phase, so the rows
+  that press a folder to move to it moved nowhere and went red for the
+  fixture.
+- **A form value set from code must still be drawn into a typed box.**
+  `.value` stops following the `value` attribute once a person has typed,
+  so the patch writes the property wherever it differs from the form. A
+  bound folder's agent arriving under typed text is the case.
 
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
@@ -649,6 +739,10 @@ node .claude/skills/verify-ui-change/answering-host.mjs http://localhost:8905 --
   person" does between steps by rewriting one file: `{"pick":{"mode":"chosen",
   "path":"…","delay":1500}}`, then `cancelled` (with `why`), `failed` (with
   `error`), `silent` (says nothing — the page's 8-second path).
+  `browse`, `recent` and `search` take a `delay`; `browse.bound` maps a path
+  to a binding on this board. **Sessions is not answered** unless
+  `sessions.answer` is true: check-backdrop's rows need a Sessions that
+  waits out its 8 s.
 - A conversation whose id ends `-old` reads as thirty turns in two pages,
   with a tool call, a thought, a subagent label, and one turn containing
   `<b>all</b>` — which must arrive on the page as those characters.
@@ -675,8 +769,19 @@ was the check and not the page:
 
 ### check-popout.mjs — a desk's chat in a window of its own (issue #19)
 
-Seven desks from `seed-desk.mjs` (`--agent` each) on one scratch server, and
-the check drives the floor and its popouts as separate CDP targets:
+One command, with its whole fixture. [`run-check-popout.sh`](run-check-popout.sh)
+serves any directory (the repo, or a copy holding a mutant), seeds seven
+desks and the form desk on a scratch DB, launches its own Chrome with the
+throttling flag, runs the check and kills all of it:
+
+```bash
+PORT=8931 CDP=9271 .claude/skills/verify-ui-change/run-check-popout.sh "$PWD"
+# … PASS, 60 ✓, about five minutes
+```
+
+It refuses a PORT or CDP that anything answers on. For a page mutant,
+hand it to `run-page-mutant.sh` as the check, from the copy (the header
+has the line). By hand, the fixture is:
 
 ```bash
 PORT=8931 DB_PATH=/tmp/pop.db ORCH_AUTH_TOKEN=k node src/server.js &
@@ -687,7 +792,6 @@ node .claude/skills/verify-ui-change/seed-form.mjs http://localhost:8931 --host 
 pkill -f "remote-debugging-port=9271( |$)"     # the flags below reach only a Chrome the check launches
 ORCH_CDP_PORT=9271 ORCH_CHROME_ARGS=--enable-features=IntensiveWakeUpThrottling:grace_period_seconds/10 \
   node --experimental-websocket .claude/skills/verify-ui-change/check-popout.mjs http://localhost:8931 /tmp/shots
-# … 60 ✓ · PASS, about five minutes
 ```
 
 It covers detach with the floor's draft, the floor's panel while a desk is
@@ -772,6 +876,28 @@ cost rounds here — worth knowing even if you hand-roll something else:
   feature. Wait on the thing you expect to become true.
 - **`click()` dispatches a bubbling `MouseEvent`.** Floor pills are delegated and
   read the event target; a bare `.click()` on some of them does nothing.
+
+Beyond those four, a check has these (issues #13 and #19):
+
+- **`attach(match)` and `targets()`**, exported beside `open()`. A popup a
+  page opens is a CDP target of its own: `attach` waits for one whose URL
+  matches and drives it like any page, and `targets()` lists the pages open
+  now, which is how "it closed" and "no second window" are read. Only real
+  input opens a popup (`press()`); `window.open` from a dispatched click is
+  blocked and returns null.
+- **`page.console()`** returns every console warning and error and every
+  uncaught exception since the page connected (`{ clear: true }` empties
+  it). A requirement like "no console warnings or errors" can only be
+  answered from here, not from the DOM.
+- **`page.windowState('minimized' | 'normal')`** minimizes the page's own
+  window, which makes it `hidden`, and its timers subject to throttling.
+- **`ORCH_CHROME_ARGS`** adds flags to a Chrome that `browser()` launches.
+  A Chrome already on the port keeps the flags it was started with, so kill
+  it first.
+- **`press(from, to, { held })`, `key(name, { shift, text })` and
+  `type(text)`** are real input: a drag with a reading taken mid-gesture,
+  Shift+Enter that really types its newline, and text that arrives with
+  one `input` event (see check-chatbox below).
 
 Put injected browser code in its own file and pass its path to `probe()`. Nested
 backticks inside a heredoc inside a shell command will break it in ways that look
@@ -910,23 +1036,37 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Teardown, because leftovers poison the next run
 
-Neither `lsof` nor `netstat` is installed on this machine, and env vars do not appear in `ps`, so a
-server started as `PORT=… DB_PATH=… node src/server.js` cannot be found by
-either. Match on the script:
+Neither `lsof` nor `netstat` is installed on this machine. Env vars are not
+in `ps -A`'s command column, but `ps eww -o command= -p <pid>` shows them for
+your own processes, so a scratch server is found by its `PORT=` without
+touching anyone else's. This was used throughout issue #19:
+
+```bash
+for pid in $(pgrep -f "node src/server.js"); do ps eww -o command= -p $pid | grep -q "PORT=8931" && kill $pid; done
+```
+
+Or match on the script:
 
 **And watch what your own command line says while you do it.** `ps | grep
 "[s]rc/server.js"` matches the shell running it if that same command *also*
 mentions `src/server.js` further along — the bracket trick hides the pattern
 from itself, not from the rest of your line. Killing your own shell mid-teardown
-looks like an unexplained exit code 144 and has happened twice here. Write the
+looks like an unexplained exit code 144 and has happened three times here,
+the third in issue #19 from an agent that had not read this section first:
+`ps | grep -E "localhost:8933|…"` in a command that itself named
+localhost:8933. Write the
 PID to a file when you start the server, or keep the kill in a command that
 mentions nothing else.
 
 ```bash
 for p in $(ps -Ao pid,command | grep "[s]rc/server.js" | awk '{print $1}'); do kill $p; done
 rm -f ./data/scratch.db ./data/scratch.db-wal ./data/scratch.db-shm
-pkill -f "orch-cdp"       # drive.mjs's browser (profiles live in tmpdir)
+pkill -f "remote-debugging-port=9271( |$)"   # YOUR drive.mjs Chrome, by its exact port
 ```
+
+Not `pkill -f orch-cdp`, which used to stand here. Every Chrome `drive.mjs`
+launches has `orch-cdp` in its profile path, QA's included (they keep one on
+9222 and others on announced ports), so it kills their runs as well as yours.
 
 Deleting the DB while the server holds it frees nothing — kill first, then
 delete, then confirm the port is actually dead. A test suite killed halfway

@@ -21,6 +21,12 @@
 #
 #   CHECK='PORT=8912 CDP=9254 .claude/skills/verify-ui-change/run-check-backdrop.sh "$PWD" after'
 #
+# check-popout.mjs (issue #19, PR #41) and check-chatbox.mjs (issue #13) have
+# runners of the same shape (about five minutes and one minute):
+#
+#   CHECK='PORT=8932 CDP=9272 .claude/skills/verify-ui-change/run-check-popout.sh "$PWD"'
+#   CHECK='PORT=8916 CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'
+#
 # `timeout` is coreutils and not on every machine (it is not on the Mac
 # mini, 2026-11-03): there the line above is "command not found", which a
 # `2>/dev/null` hides and this reports as a check that did not finish. The
