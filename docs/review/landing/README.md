@@ -3,7 +3,7 @@
 Five captures of the floor and board for the orchestratinator page on
 appideas.com (appideas-designer, task #204, spec in that practice's
 `projects/orchestratinator-landing/CAPTURE-SPEC.md`). First made 2026-10-17 at
-`0ce4f1e` (v0.10.5); re-shot 2026-11-05 at v0.12.2 (header reads v0.12.2),
+`0ce4f1e` (v0.10.5); re-shot 2026-11-05 at v0.12.3 (header reads v0.12.3),
 from the README's fictional company — TrailTracker, Bookinator, Ledgerino —
 never a real channel. Since that re-shoot the QA Engineer wears cyan, not
 green, so it stays distinct from the API Developer in a meeting room.

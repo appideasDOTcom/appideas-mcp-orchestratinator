@@ -1171,9 +1171,11 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Shooting the README images
 
-The README's five (`docs/images/`, 2026-11-05 at 0.12.2) are the landing
-captures plus two of their own, from one fresh seed. One command does all of
-it and tears down after itself (about 45 s):
+Every image in `docs/images/` (2026-11-05 at 0.12.3) comes from one fresh
+seed. The README's five are the landing captures plus two of their own, and
+`docs/operating.md`'s five are element crops at DPR 2 (`operating-shot.mjs`:
+two board cards, the activity log, a desk, a panel). One command does all of
+it and tears down after itself (about 55 s):
 
 ```bash
 .claude/skills/verify-ui-change/shoot-readme.sh "$PWD"             # docs/images
@@ -1183,9 +1185,13 @@ it and tears down after itself (about 45 s):
 `--landing` writes six: the five above and `06-meeting-room.png`, the README's
 meeting room in a narrow window for the page's 514 px slot. Its width is the
 narrowest from 560 at which the room's "Nudge everyone · 1 unread" stays on
-one line (700 at 0.12.2: below that it wraps and spills under the room's
+one line (700 at 0.12.3: below that it wraps and spills under the room's
 edge, a page fault). Its height is the shortest with no transcript scrolling.
-The script prints both.
+The script prints both. The same capture is also copied to
+`docs/images/meeting-room-700.png` on every run, because `docs/operating.md`
+draws the meeting room at width 700, 1:1. The README's `meeting-room.png` is
+2200 px and would put text near 6 px at that width (appideas-designer, msg
+3032). Two files, two widths, on purpose.
 
 Re-run it after any version bump: the header's version is in every image.
 Then **read the five images**. Its red case was run: without
@@ -1223,6 +1229,15 @@ readme-shot's. Four things worth knowing first:
   and a scripted reply in the fixture's story. The App Developer is left out
   of the room because it is asking a permission question, and a desk that is
   asking takes no message (`askingWhy`).
+- **An element crop paints only inside the window.** drive.mjs's `shot()`
+  with a selector takes the element's window rect, and the capture paints
+  nothing past the window: the activity log, which starts near the bottom
+  of a 1000-px board, came out as four rows of twelve over dark ground.
+  Pass `{ beyond: true }` for an element that may run past the window. Three
+  wrong fixes were tried first: lifting the scroll box's cap, resizing the
+  window, and scrolling the element into view. The last moves the window
+  rect but not the page coordinates the clip is read in. Count the rows in
+  the DOM before guessing.
 - **`popouts.png` is a composite.** A popout is its own window, so each
   window is captured alone and the three are laid side by side on a backdrop
   drawn in the same headless browser. Nothing inside a window is retouched.
