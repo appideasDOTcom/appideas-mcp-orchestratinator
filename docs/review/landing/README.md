@@ -3,7 +3,7 @@
 Five captures of the floor and board for the orchestratinator page on
 appideas.com (appideas-designer, task #204, spec in that practice's
 `projects/orchestratinator-landing/CAPTURE-SPEC.md`). First made 2026-10-17 at
-`0ce4f1e` (v0.10.5); re-shot 2026-11-05 at v0.12.1 (header reads v0.12.1),
+`0ce4f1e` (v0.10.5); re-shot 2026-11-05 at v0.12.2 (header reads v0.12.2),
 from the README's fictional company — TrailTracker, Bookinator, Ledgerino —
 never a real channel. Since that re-shoot the QA Engineer wears cyan, not
 green, so it stays distinct from the API Developer in a meeting room.
@@ -31,7 +31,7 @@ own reads pass through, so desks can still be clicked and a bell struck.
 Captures 1–4 are one page session (2026-11-05, each run's own moment); 5 is a
 second load ten seconds later.
 
-## The five
+## The six
 
 | File | Pixels | What |
 |---|---|---|
@@ -40,6 +40,7 @@ second load ten seconds later.
 | `03-desk.png` | 1776×2376 | The App Developer desk cropped from the room at **4× the CSS size** (the floor has no zoom; the SVG scales crisply). Bubble, sign, tray with both pills, badge, bell. |
 | `04-panel-conversation.png` | 3200×2000 | API Developer's panel: four turns (you, agent, a tool line, agent), composer with placeholder, OPEN IN VS CODE / CLAUDE / TMUX. No prompt. |
 | `05-board-activity.png` | 3200×2638 | Board view, same fixture; activity log's newest rows are a contract set, a message and a task claimed. **Full page** (1319 CSS px tall). |
+| `06-meeting-room.png` | 1400×1380 | Meeting room (issue #44), 700×690 CSS at DPR 2, for the page's 514 px half-width slot (appideas-designer, msg 3022). TrailTracker's Project Manager, API Developer and QA Engineer; one message to everyone with three "delivered" lines and three replies, then `@qa-engineer` narrowed to QA with its reply. 700 wide, not 560: narrower, "Nudge everyone · 1 unread" wraps and spills under the room's edge (costmo: keep 700, fix later). Shot by `readme-shot.mjs`; replies scripted by `landing-host.mjs`. |
 
 ## Deviations from the spec, stated rather than hidden
 

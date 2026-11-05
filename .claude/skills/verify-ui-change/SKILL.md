@@ -1171,7 +1171,7 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Shooting the README images
 
-The README's five (`docs/images/`, 2026-11-05 at 0.12.1) are the landing
+The README's five (`docs/images/`, 2026-11-05 at 0.12.2) are the landing
 captures plus two of their own, from one fresh seed. One command does all of
 it and tears down after itself (about 45 s):
 
@@ -1183,7 +1183,7 @@ it and tears down after itself (about 45 s):
 `--landing` writes six: the five above and `06-meeting-room.png`, the README's
 meeting room in a narrow window for the page's 514 px slot. Its width is the
 narrowest from 560 at which the room's "Nudge everyone · 1 unread" stays on
-one line (700 at 0.12.1: below that it wraps and spills under the room's
+one line (700 at 0.12.2: below that it wraps and spills under the room's
 edge, a page fault). Its height is the shortest with no transcript scrolling.
 The script prints both.
 
