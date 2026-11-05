@@ -137,12 +137,12 @@ await page.click('svg.room[data-channel="alpha"] .selAll');
 await sleep(150);
 r = await read(page);
 eq(roomOf(r, 'alpha').bar?.count, '0 of 6', 'uncheck all unchecks them');
-eq(roomOf(r, 'alpha').bar?.chips, ['sel-nudge:Nudge 0:off', 'sel-read:Mark read:off', 'sel-hide:Hide 0:off'], 'with nothing checked every action is off');
+eq(roomOf(r, 'alpha').bar?.chips, ['sel-nudge:Nudge 0:off', 'sel-read:Mark read:off', 'sel-hide:Hide 0:off', 'sel-meeting:Meeting room:off'], 'with nothing checked every action is off — Meeting room (#44) too');
 await page.click('svg.room[data-channel="alpha"] .selAll');
 await sleep(150);
 r = await read(page);
 show('check all again: the controls before anything runs', r);
-eq(roomOf(r, 'alpha').bar?.chips, ['sel-nudge:Nudge 4 · 2 open a window:on', 'sel-read:Mark read · 7:on', 'sel-hide:Hide 6:on'],
+eq(roomOf(r, 'alpha').bar?.chips, ['sel-nudge:Nudge 4 · 2 open a window:on', 'sel-read:Mark read · 7:on', 'sel-hide:Hide 6:on', 'sel-meeting:Meeting room · 6:on'],
   'Nudge says how many and that two open a window first; Mark read says its count before it runs');
 eq(roomOf(r, 'alpha').desks, ['ed[x]<can\'t nudge>', 'ann[x]', 'bo[x]', 'cy[x]<no window>', 'di[x]<can\'t nudge>', 'gil[x]<no window>'], 'and each checked desk a nudge cannot reach, or would open, says so before the click');
 console.log(`    nudge title: ${roomOf(r, 'alpha').bar.titles['sel-nudge'].replace(/\n/g, ' / ')}`);

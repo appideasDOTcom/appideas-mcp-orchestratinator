@@ -202,6 +202,12 @@ Three things about the readings, all measured this way:
   for (const r of db.prepare(`SELECT id, channel, action, actor, created_at FROM admin_events WHERE action LIKE 'channel.%' ORDER BY id DESC LIMIT 8`).all()) console.log(JSON.stringify(r));
   EOF
   ```
+- **A symbol to count must be absent from what is served before the
+  rebuild.** #46's new variable, `floorRead`, read 3 in the old page,
+  because `window.floorRead` already existed (a different thing with
+  the same name). Its count could not have proved anything. Grep the
+  served file for a symbol before choosing it, or use the page hash
+  from `board-counts.sh`.
 - **`grep -c` prints `0` and exits 1**, so a symbol you expect to be absent
   before the rebuild ends an `&&` chain at that grep. `status.sh` tolerates
   it; a hand-rolled chain should use `;` between readings.

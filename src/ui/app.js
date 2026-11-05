@@ -9,7 +9,10 @@ const PAGE = 200;
    screen in a popout, so the activity log is not fetched and nothing of the
    board is drawn: each popout adds one /api/state a period, not the board's
    whole poll. */
-const POPOUT = new URLSearchParams(location.search).get('popout') === '1';
+const POPOUT = new URLSearchParams(location.search).get('popout') === '1'
+  // A meeting room's window (issue #44) is a popout of several desks, and
+  // the same here: its dialogs, and nothing of the board.
+  || new URLSearchParams(location.search).has('meeting');
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -2175,6 +2178,18 @@ el.dlgBody.addEventListener('click', (e) => {
     case 'history-look':
       askRecent();
       break;
+    case 'meeting-resume': {
+      // A window, so opened inside this click: the browser blocks a popup the
+      // page opens on its own, and nothing here ever reopens one by itself.
+      const opened = window.floorResumeMeeting?.(Number(d.id));
+      if (opened === false) {
+        const err = el.dlgBody.querySelector('.dlg-err');
+        if (err) { err.textContent = 'The browser blocked the window. Allow popups for this board, then press Resume again.'; err.hidden = false; }
+        break;
+      }
+      closeDialog();
+      break;
+    }
     case 'history-read': {
       // Opened to read in its own desk's panel — the floor script's, which
       // owns the panel. The dialog closes: the conversation is the answer.
@@ -3400,6 +3415,59 @@ function markHits(text, query, safe) {
  * floor (window.floorRead). It does not resume it: nothing here moves a desk
  * onto a conversation — that stays the Sessions dialog's, on the desk.
  */
+/**
+ * Recent meeting rooms (issue #44): the one list an ended meeting room is
+ * shown in. Newest first, the participants of each and the conversation
+ * each was on as the room ended, and Resume, which opens a new window for
+ * the room and reopens each desk on that conversation (floor.js,
+ * startMeeting). A room open in a window now is not in the list — it is on
+ * the screen already, and the floor's panel says so on each of its desks.
+ *
+ * The board keeps MEETINGS_KEEP rooms and drops the oldest as each new one
+ * starts, so nothing here asks the operator to tidy anything: no delete, no
+ * count anywhere else, no pill. An ended room is drawn nowhere but here.
+ */
+function meetingsDialog() {
+  ui.dlgCtx = { kind: 'meetings' };
+  ui.meetForm = { rows: null, keep: null, error: null };
+  renderMeetingsDialog({ opening: true });
+  getJson('./api/floor/meetings')
+    .then((got) => { if (ui.meetForm) { ui.meetForm.rows = got.rows ?? []; ui.meetForm.keep = got.keep ?? null; } })
+    .catch((e) => { if (ui.meetForm) ui.meetForm.error = String(e.message ?? e); })
+    .then(() => renderMeetingsDialog());
+}
+
+function renderMeetingsDialog({ opening = false } = {}) {
+  const fm = ui.meetForm;
+  if (!fm || !drawsNow('meetings', opening)) return;
+  const open = window.floorOpenMeetings?.() ?? new Map();
+  const rows = (fm.rows ?? []).filter((r) => !open.has(String(r.id)));
+  const shortId = (id) => (id ? String(id).slice(0, 8) : 'no conversation recorded');
+  const body = fm.error
+    ? `<p class="muted sess-empty"><b>${esc(fm.error)}</b></p>`
+    : fm.rows === null
+      ? '<p class="muted sess-empty">Reading the list…</p>'
+      : !rows.length
+        ? `<p class="muted sess-empty">${open.size ? 'Every recent meeting room is open in a window now.' : 'No meeting rooms yet. Start one on a floor: select desks, then Meeting room.'}</p>`
+        : rows.map((r) => {
+          const who = r.participants.map((p) => p.persona ?? p.agent);
+          const when = r.ended_at ? `ended ${agoText(r.ended_at)}` : `closed ${agoText(r.updated_at)}`;
+          return `<div class="sess-row meet-row" role="listitem">
+            <span class="sess-title">${esc(who.length ? who.join(', ') : 'nobody')}</span>
+            <span class="sess-meta">${esc([r.channel, when].join(' · '))}</span>
+            <span class="sess-detail mono">${r.participants.map((p) => esc(`${p.persona ?? p.agent} · ${shortId(p.session_id)}${p.absent ? ' · not back last time' : ''}`)).join('<br>')}</span>
+            <button type="button" class="btn primary meet-resume" data-do="meeting-resume" data-id="${esc(r.id)}"${who.length ? '' : ' disabled'}
+              title="Open this meeting room again, each desk back on the conversation it had">Resume</button>
+          </div>`;
+        }).join('');
+  openDialog(`
+    <div class="dlg-head"><h3>Recent meeting rooms</h3></div>
+    <p class="dlg-sub">newest first${fm.keep ? ` · the last ${fm.keep} are kept, and older ones drop off by themselves` : ''}</p>
+    <div class="dlg-sessions meet-rows" role="list" aria-label="Recent meeting rooms">${body}</div>
+    <div class="dlg-foot"><button type="button" class="btn" data-do="cancel">Close</button></div>
+  `, { as: 'meetings' });
+}
+
 function historyDialog() {
   ui.dlgCtx = { kind: 'history' };
   ui.histForm = { hosts: null, rows: null, query: '', deep: false, search: null, waiting: true, error: null, note: null, seq: 0 };

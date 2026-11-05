@@ -314,6 +314,29 @@ export function deliverable(h, nowMs = Date.now()) {
 }
 
 /**
+ * A desk whose window is asking something takes no message, and says so
+ * before anything is queued: the open prompt (`live.pending`) — a question
+ * form, a permission menu, a question before the window can start. Its keys
+ * go to the prompt, so a message typed then never reaches the composer. The
+ * host used to try for 60 s and fail, holding every item behind it; on
+ * 2026-11-05 one of those was the answer to the question on screen, which
+ * aged out and was dropped, and the desk took nothing for three minutes
+ * (#44 follow-up, costmo's report). The prompt is cleared by the window's
+ * next hook, by an answer from the floor, and at session end, and the panel
+ * shows it with Cancel, so a refusal here never outlives the question for
+ * long. The host refuses the same thing (`asking` in host/window.js send())
+ * for a prompt that opens after the message was queued.
+ */
+export function askingWhy(pending) {
+  if (!pending) return null;
+  const what = pending.questions?.length || pending.reading ? 'a question' : pending.startup ? 'a question before it can start' : 'for permission';
+  return {
+    error: `The window is asking ${what}. A message typed now would go into that, not the conversation: answer it, or cancel it, then send this.`,
+    code: 'asking',
+  };
+}
+
+/**
  * Whether this desk can be *nudged* — the same question as whether it can be
  * sent a message, with one more fact attached: whether ringing will have to
  * open a window first.
@@ -490,6 +513,36 @@ export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false }
    are not: "send a message instead" is no help at all to someone trying to
    stop one. Same verdict, re-worded by its code. `no_window` is stop's own: a
    nudge opens a window when there is none, a stop cannot. */
+/* Meeting rooms (issue #44): how many the Recent list keeps, newest first —
+   the oldest drop off as each new room starts — and the most desks one room
+   is asked to hold, which only bounds a malformed request: the live board's
+   floors draw one to three desks each (measured in the issue). */
+export const MEETINGS_KEEP = 20;
+const MEETING_DESKS_MAX = 24;
+
+/**
+ * One meeting-room participant as Resume will need it, from the desk's
+ * hosted row now and what the room's record knew before (`prev`).
+ *
+ *   session_id — the conversation the desk is on: the window's real id, or
+ *                the last one known when the window has none (a placeholder
+ *                is not a conversation anyone can reopen)
+ *   host, window — the host's name and the folder's basename, the binding a
+ *                move keeps (the page's boundTo/deskFate read these)
+ *   since      — the turn its part of the transcript starts after: the
+ *                desk's newest turn when it first joined, kept from then on
+ */
+export function meetingSeat(agent, h, prev, lastTurnId) {
+  const sid = h?.sdk_session_id && !String(h.sdk_session_id).startsWith('host:') ? h.sdk_session_id : null;
+  return {
+    agent,
+    session_id: sid ?? prev?.session_id ?? null,
+    host: h?.host_name ?? prev?.host ?? null,
+    window: (h?.cwd ? h.cwd.split('/').filter(Boolean).pop() : null) ?? prev?.window ?? null,
+    since: Number.isInteger(prev?.since) ? prev.since : (Number(lastTurnId) || 0),
+  };
+}
+
 /** One row of a host's session list, with only the fields the picker draws. */
 const SESSIONS_MAX = 60;
 function sessionRow(r) {
@@ -2428,9 +2481,15 @@ export function buildFloor(store, live = null, sessions = null) {
           // first that it will open the window — see nudgeable().
           nudge: (() => {
             const v = nudgeable(h, nowMs);
+            // A window asking something takes nothing typed: the chat route
+            // refuses it in these words, so the bell, Nudge and a meeting
+            // room read the same verdict before anything is sent.
+            const ask = v.error ? null : askingWhy(live?.pending.get(k));
             return v.error
               ? { ok: false, code: v.code, reason: v.error }
-              : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id, opens: !!v.opens };
+              : ask
+                ? { ok: false, code: ask.code, reason: ask.error }
+                : { ok: true, host: v.hosted.host_name ?? v.hosted.host_id, opens: !!v.opens };
           })(),
           // Whether a turn is running, said once. The desk is drawn from this
           // and the chat panel's stop sign is lit from it, so they cannot
@@ -3000,6 +3059,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
     const check = hostedOrWhyNot(channel, agent);
     if (check.error) return res.status(409).json(check);
+    const asking = askingWhy(live.pending.get(deskKey(channel, agent)));
+    if (asking) return res.status(409).json(asking);
 
     const h = check.hosted;
     // What the floor asked for, shown apart from what the window confirms —
@@ -3560,6 +3621,131 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     res.json({ ok: true, session_id: sessionId, known });
   });
 
+  /* ───────────────────── meeting rooms (issue #44) ───────────────────── */
+
+  /*
+   * Which desks are in a meeting room right now is the room's window's to
+   * say, the way a popout says it, on the page's BroadcastChannel and a Web
+   * Lock per desk (src/ui/floor.js, "meeting rooms: the window"). Nothing
+   * here holds a desk or refuses a message because of a room: a room's
+   * message is N calls to /api/floor/chat, each with every check that route
+   * makes. What the board keeps is the record Resume reads after the window
+   * has gone — the floor, and each participant as the room ended — and it
+   * keeps MEETINGS_KEEP of them, dropping the oldest as each new room
+   * starts, so thirty rooms in a month ask nothing of anybody.
+   */
+  // Every room the routes hand out names its participants the board's way,
+  // so a note about a desk that has gone from the floor still says "Bo".
+  const roomOut = (r, personas = personasNow()) => r && ({
+    ...r,
+    participants: r.participants.map((p) => ({ ...p, persona: personas.get(deskKey(r.channel, p.agent)) ?? p.agent })),
+    started_at: iso(r.started_at),
+    updated_at: iso(r.updated_at),
+    ended_at: r.ended_at ? iso(r.ended_at) : null,
+  });
+  /** The agents named, if every one sits on `channel`; else why not. */
+  const seatedOn = (channel, agents) => {
+    if (!Array.isArray(agents) || !agents.length || agents.length > MEETING_DESKS_MAX) {
+      return { error: `agents must be a list of 1 to ${MEETING_DESKS_MAX} desks on the floor`, code: 'bad_agents' };
+    }
+    const names = [...new Set(agents.map(str))];
+    if (names.some((a) => !a)) return { error: 'every agent must be named', code: 'bad_agents' };
+    const here = new Set(store.listPersonas().filter((p) => p.channel === channel).map((p) => p.agent));
+    const away = names.filter((a) => !here.has(a));
+    if (away.length) return { error: `${away.join(', ')} ${away.length === 1 ? 'has' : 'have'} no desk on ${channel}. A meeting room is one floor's desks.`, code: 'not_on_floor' };
+    return { names };
+  };
+  /**
+   * A participant Resume could not bring back for a reason that may pass —
+   * its window busy, its host offline, an editor holding it, a reopen the
+   * host refused — is kept in the record as `absent`, exactly as it was, so
+   * the next Resume tries it again on the conversation it had. Without this
+   * a resume that met one busy window dropped the desk from the room for
+   * good. One gone for good (moved floors, left, its conversation deleted)
+   * is not kept.
+   */
+  const absentKept = (prev, names, absent) => prev
+    .filter((p) => Array.isArray(absent) && absent.includes(p.agent) && !names.includes(p.agent))
+    .map((p) => ({ ...p, absent: true }));
+  /** Each participant as it stands now, keeping what an earlier record knew. */
+  const seatsNow = (channel, names, prev = []) => {
+    const last = new Map(store.lastTurns().filter((t) => t.channel === channel).map((t) => [t.agent, t.id]));
+    return names.map((a) => meetingSeat(a, store.hostedDesk(channel, a), prev.find((p) => p.agent === a) ?? null, last.get(a) ?? 0));
+  };
+  const roomOr404 = (req, res) => {
+    const id = Number(req.body?.id ?? req.query?.id);
+    const room = Number.isInteger(id) && id > 0 ? store.meeting(id) : null;
+    if (!room) res.status(404).json({ error: 'There is no such meeting room. Older rooms drop off the Recent list by themselves.', code: 'no_room' });
+    return room;
+  };
+
+  /** A new room: its floor and its first participants. */
+  router.post('/api/floor/meeting', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    if (!channel) return res.status(400).json({ error: 'channel is required' });
+    const ok = seatedOn(channel, req.body?.agents);
+    if (ok.error) return res.status(400).json(ok);
+    const id = store.createMeeting(channel, seatsNow(channel, ok.names), MEETINGS_KEEP);
+    res.json({ ok: true, room: roomOut(store.meeting(id)) });
+  });
+
+  /** Who is in the room now: after an Add, a Remove, or a participant's conversation changing under it. */
+  router.post('/api/floor/meeting/participants', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    const agents = req.body?.agents;
+    // An empty room is allowed here: the last desk removed leaves the window
+    // open and the record saying nobody, until it is ended.
+    const ok = Array.isArray(agents) && !agents.length ? { names: [] } : seatedOn(room.channel, agents);
+    if (ok.error) return res.status(400).json(ok);
+    store.setMeetingParticipants(room.id, [...seatsNow(room.channel, ok.names, room.participants), ...absentKept(room.participants, ok.names, req.body?.absent)]);
+    res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
+  });
+
+  /** A window opening on a room it names: a reload, or a Resume. */
+  router.post('/api/floor/meeting/open', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    store.openMeeting(room.id);
+    res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
+  });
+
+  /**
+   * The room's window, still open (every MEETING_TOUCH_MS from the page).
+   * This is what keeps a room containing its participants' broadcasts
+   * (MEETING_LIVE_SECONDS, src/db.js). `live: false` says the board has the
+   * room ended — a reload's end that landed after its open — and the window
+   * opens it again.
+   */
+  router.post('/api/floor/meeting/touch', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    res.json({ ok: true, live: store.touchMeeting(room.id) });
+  });
+
+  /**
+   * The room's window closing, by End meeting or by being closed. Each
+   * participant's conversation is read off its desk now, so Resume reopens
+   * what it was on as the room ended. Sent with keepalive from pagehide, so
+   * a reload ends a room too — and the reloaded window opens it again
+   * (`/open`), which is why ended is not final.
+   */
+  router.post('/api/floor/meeting/end', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    // An absent participant is kept as the record had it: what its desk is
+    // on now is not the conversation it had in this room.
+    const here = room.participants.filter((p) => !p.absent);
+    store.endMeeting(room.id, [...seatsNow(room.channel, here.map((p) => p.agent), here), ...room.participants.filter((p) => p.absent)]);
+    res.json({ ok: true });
+  });
+
+  /** Recent meeting rooms, newest first: the Resume list. Personas are the board's, so every viewer reads one name. */
+  router.get('/api/floor/meetings', (_req, res) => {
+    const personas = personasNow();
+    res.json({ keep: MEETINGS_KEEP, rows: store.recentMeetings(MEETINGS_KEEP).map((r) => roomOut(r, personas)) });
+  });
+
   /**
    * Make every host here look at its roots again, now.
    *
@@ -3728,6 +3914,15 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
       request_id: requestId, decision: send, message: str(req.body?.message), reason, queued_at: Date.now(),
+      // How the host knows, if this waits in its line, that the prompt is
+      // still the one on screen (askedStill, host/window.js): every choice
+      // it was answered from, and what it asks permission for. Every
+      // permission menu offers the same choices, so the choices alone could
+      // approve a different command (QA, PR #49 finding 2).
+      asks: {
+        options: (pendingReq.options ?? []).map((o) => o.text).filter(Boolean),
+        subject: String(pendingReq.summary ?? '').replace(/^[^:]+:\s*/, '').split('\n')[0].slice(0, 40).trim() || null,
+      },
     });
     live.wake(check.hosted.host_id);
     // A row reading "permission.3" tells nobody anything a year later, so a
@@ -3789,6 +3984,13 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     live.publish(key, { type: 'permission', request_id: requestId, decision: 'answered', resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'answer', {
       request_id: requestId, steps, queued_at: Date.now(),
+      // How the host knows, if this waits, that the question is still the
+      // one on screen (askedStill, host/window.js): its headers, and the
+      // first question's choices for a form whose header row is cut.
+      asks: {
+        headers: pendingReq.questions.map((q) => q.tab_title).filter(Boolean),
+        options: (pendingReq.questions[0]?.options ?? []).filter((o) => !o.other).map((o) => o.text).filter(Boolean),
+      },
     });
     live.wake(check.hosted.host_id);
     // What was chosen, in the window's own words, so the log is readable later.

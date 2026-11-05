@@ -306,6 +306,19 @@ function fixture() {
     // off the pane's bottom line. A reopen must refuse such a window.
     `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
     String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
+    // And a flag file that leaves the window asking something: a permission
+    // menu (`bash`) or a one-question form (`form`), drawn once at the bottom
+    // of the pane and never redrawn — for an answer that waited in the host's
+    // line past ANSWER_TTL_MS (QA, PR #49 finding 2 and Info 4).
+    `const PROMPT_FLAG = ${JSON.stringify(`${FIX}/prompt.flag`)};`,
+    `let promptKind = ''; try { promptKind = fs.readFileSync(PROMPT_FLAG, 'utf8').trim(); } catch {}`,
+    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"] })};`,
+    `for (const l of PROMPTS[promptKind] ?? []) process.stdout.write(l + '\\n');`,
+    // A prompt takes a bare key with no Enter, as a person pressing one
+    // would, and a tty in canonical mode holds it until a newline that never
+    // comes — so the key the host pressed never reached SINK. Raw while
+    // asking, as the window suite's prompt panes are (`stty raw`).
+    `if (PROMPTS[promptKind] && process.stdin.isTTY) process.stdin.setRawMode(true);`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
     `let acc = '', composer = '', n = 0;`,
     `process.stdin.on('data', (chunk) => {`,
@@ -397,6 +410,11 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
       // A conversation read whole goes up three turns to a page, so a short
       // fixture still crosses a page boundary.
       ORCH_READ_PAGE_TURNS: '3',
+      // Every answer and decision counts as old, so each one takes the
+      // still-on-screen path (askedStill) the section "an answer that
+      // waited in the host's line" measures. Nothing else here answers a
+      // prompt, and a startup answer is exempt (answerIsStale).
+      ORCH_ANSWER_TTL_MS: '-1',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1066,6 +1084,68 @@ try {
    * window closes, opens or moves, and the desk stays on its own
    * conversation. The fixture has one of every kind of turn, a subagent,
    * and more turns than a page holds. */
+  /* ── an answer that waited in the host's line (QA, PR #49) ─────────────
+   * The host takes its work one item at a time, so an answer can wait past
+   * ANSWER_TTL_MS behind other items — a meeting room's message to several
+   * desks on one host makes that likelier. Past it, an answer is pressed
+   * only while the window still shows what it was for (askedStill): a form
+   * by its header or choices, a permission menu by its choices and its
+   * command. This host runs with the TTL at -1, so every answer here is old.
+   * The window is the stand-in with prompt.flag: drawn once, never redrawn. */
+  console.log('\nan answer that waited in the host\'s line');
+  {
+    const sinkAt = () => (existsSync(SINK) ? readFileSync(SINK, 'utf8').length : 0);
+    const reopenAsking = async (kind) => {
+      assert(await closeByHand(), `the window is closed by hand (${kind})`);
+      writeFileSync(`${FIX}/prompt.flag`, kind);
+      eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, `and one is opened that is asking (${kind})`);
+      assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000), 'held by the floor, on its conversation');
+      await sleep(WATCH_SETTLE_MS);
+    };
+    const askBash = async (command) => {
+      await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'Bash', tool_input: { command } });
+      return until(async () => { const p = deskOf(await floor(), 'free')?.permission; return p && (p.summary ?? '').includes(command) && (p.options?.length ?? 0) >= 3 ? p : null; }, 25000);
+    };
+    await reopenAsking('bash');
+    let p = await askBash('rm -rf build-cache');
+    assert(!!p, 'the host reads the menu\'s choices off the window');
+    let sink0 = sinkAt();
+    let log0 = hostLog.length;
+    eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'allow' })).status, 200, 'Approve is queued');
+    assert(await until(async () => (hostLog.slice(log0).includes('permission answer, and its prompt is still on screen — answering it') ? true : null), 15000),
+      'an old decision whose prompt — its choices and its command — is still on screen is pressed, and the log says why (finding 2)');
+    assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its key reached the window');
+    p = await askBash('npm publish --tag next');
+    assert(!!p, 'a second prompt arrives, for another command');
+    await sleep(1000);
+    sink0 = sinkAt();
+    log0 = hostLog.length;
+    await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'allow' });
+    assert(await until(async () => (hostLog.slice(log0).includes('permission answer — its prompt is no longer on screen') ? true : null), 15000),
+      'an old approve for a command the window is not asking about is dropped: the same menu, another command');
+    await sleep(800);
+    eq(sinkAt(), sink0, 'and not one key was pressed');
+
+    await reopenAsking('form');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which scope should step one audit?', header: 'Scope', multiSelect: false,
+        options: [{ label: 'Baseline only', description: 'Audit just the baseline.' }, { label: 'Everything in the tree', description: 'Audit everything in the tree.' }] }] } });
+    const f = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.length ? q : null; }, 25000);
+    assert(!!f, 'the form is on the desk');
+    sink0 = sinkAt();
+    log0 = hostLog.length;
+    eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: f?.request_id, answers: [{ choose: [1] }] })).status, 200, 'its answer is queued');
+    assert(await until(async () => (hostLog.slice(log0).includes('-old answer, and its question is still on screen — answering it') ? true : null), 15000),
+      'an old answer whose form is still on screen is pressed — this call site, not only askedStill (Info 4)');
+    assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its keys reached the window');
+
+    rmSync(`${FIX}/prompt.flag`, { force: true });
+    assert(await closeByHand(), 'the asking window is closed by hand');
+    eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'and a quiet one opened');
+    assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000), 'home again, on its conversation');
+    await sleep(WATCH_SETTLE_MS);
+  }
+
   console.log('\nreading a conversation whole');
   const SESSION_C = 'cccccccc-2222-3333-4444-555555555555';
   const cPath = `${HOME}/.claude/projects/${slug()}/${SESSION_C}.jsonl`;

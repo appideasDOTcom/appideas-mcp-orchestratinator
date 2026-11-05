@@ -273,6 +273,33 @@ export function openDb(path) {
       value      TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- ─── Meeting rooms (issue #44) ────────────────────────────────────────────
+    -- A meeting room is a window on the operator's screen holding several
+    -- desks of one floor, and the window is what holds them: which desks are
+    -- in one right now is said by the window itself, the way a popout says
+    -- it (src/ui/floor.js, "meeting rooms: the window"). This row is only
+    -- what Resume needs once the window is gone: the floor, and each
+    -- participant as the room ended — its agent, the conversation it was
+    -- on, the folder and host it was bound to (how a move is recognised),
+    -- and the turn it joined after (where its part of the transcript
+    -- starts). The participants column is that list as JSON, read and written whole,
+    -- because it is two or three entries and never queried into.
+    --
+    -- Bounded, newest first, and pruned on every new room (MEETINGS_KEEP in
+    -- src/floor.js): most rooms are used once, and nobody is asked to tidy
+    -- them. Not in BACKUP_TABLES: a list of windows that were open is not
+    -- the team's work, and a restored one would name sessions on disks that
+    -- may not be this machine's.
+    CREATE TABLE IF NOT EXISTS meeting_rooms (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel      TEXT NOT NULL,
+      participants TEXT NOT NULL,
+      started_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_meeting_rooms_updated ON meeting_rooms(updated_at);
   `);
 
   // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
@@ -310,6 +337,18 @@ export function openDb(path) {
   // conversation itself. A column rather than a prefix baked into the text, so
   // the chat panel can label it and the bubble can still quote it plainly.
   addColumn(db, 'turns', 'via', 'TEXT');
+
+  // Who a broadcast reaches, when not the whole channel: `,bo,cy,dee,`, the
+  // participants of the meeting room its sender was in (issue #44, costmo:
+  // "Conversations within a room need to be contained"). NULL is the whole
+  // channel, as every broadcast was before. Delimited rather than JSON so the
+  // three readers below test it with one instr().
+  addColumn(db, 'messages', 'audience', 'TEXT');
+  // When a meeting room's window last said it is open (issue #44). A room
+  // contains its participants' broadcasts only while this is recent
+  // (MEETING_LIVE_SECONDS): a window that crashed or was killed never sends
+  // its end, and must not keep a floor's agents talking past each other.
+  addColumn(db, 'meeting_rooms', 'live_at', 'TEXT');
 
   // Retired = the operator has taken this agent off the board. Deliberately a
   // flag and not a DELETE: the row is recreated by `touchAgent` the moment the
@@ -535,6 +574,21 @@ function dropColumns(db, table, columns, why) {
 
 const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
 
+/* How long a meeting room contains its participants' broadcasts after its
+   window last said it is open. The window says so every MEETING_TOUCH_MS (30 s,
+   src/ui/floor.js), and Chrome throttles a hidden window's timers to one
+   wake-up a minute, so 150 s rides out a minimized room and still lets go of
+   a crashed one within three minutes. */
+export const MEETING_LIVE_SECONDS = 150;
+
+/** A meeting_rooms row with its participants parsed; a list that will not parse is an empty one. */
+function meetingRow(r) {
+  if (!r) return null;
+  let participants = [];
+  try { participants = JSON.parse(r.participants); } catch { /* an empty room */ }
+  return { ...r, participants: Array.isArray(participants) ? participants : [] };
+}
+
 /**
  * How long a self-reported status stays believable when the caller doesn't say.
  * Deliberately short: an expired status is treated as absent and the dashboard
@@ -632,14 +686,14 @@ export function makeStore(db) {
 
   const q = {
     insertMessage: db.prepare(
-      `INSERT INTO messages (channel, from_agent, to_agent, body)
-       VALUES (@channel, @from, @to, @body)`
+      `INSERT INTO messages (channel, from_agent, to_agent, body, audience)
+       VALUES (@channel, @from, @to, @body, @audience)`
     ),
     pollMessages: db.prepare(
       `SELECT id, from_agent AS "from", to_agent AS "to", body, created_at
        FROM messages
        WHERE channel = @channel AND id > @since
-         AND ( to_agent = @me OR (to_agent IS NULL AND from_agent != @me) )
+         AND ( to_agent = @me OR (to_agent IS NULL AND from_agent != @me AND (audience IS NULL OR instr(audience, ',' || @me || ',') > 0)) )
        ORDER BY id ASC
        LIMIT @limit`
     ),
@@ -752,6 +806,29 @@ export function makeStore(db) {
     // order that eventually disagrees with itself. NOCASE so the list reads
     // alphabetically to a person rather than to ASCII, which would file every
     // lower-case title after every upper-case one.
+    // Meeting rooms (issue #44). `ended_at` is cleared again when a room's
+    // window opens on it — a reload, or a Resume — so "ended" always means
+    // "no window has it now, as far as the board was told".
+    insertMeeting: db.prepare(`INSERT INTO meeting_rooms (channel, participants, live_at) VALUES (?, ?, datetime('now'))`),
+    getMeeting: db.prepare(`SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms WHERE id = ?`),
+    setMeetingParticipants: db.prepare(
+      `UPDATE meeting_rooms SET participants = ?, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`
+    ),
+    openMeeting: db.prepare(`UPDATE meeting_rooms SET ended_at = NULL, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`),
+    touchMeeting: db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now') WHERE id = ? AND ended_at IS NULL`),
+    liveMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms
+        WHERE channel = ? AND ended_at IS NULL AND live_at > datetime('now', ?) ORDER BY live_at DESC, id DESC`
+    ),
+    endMeeting: db.prepare(
+      `UPDATE meeting_rooms SET participants = ?, ended_at = datetime('now'), updated_at = datetime('now'), live_at = NULL WHERE id = ?`
+    ),
+    recentMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?`
+    ),
+    pruneMeetings: db.prepare(
+      `DELETE FROM meeting_rooms WHERE id NOT IN (SELECT id FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?)`
+    ),
     getSetting: db.prepare(`SELECT value, updated_at FROM settings WHERE key = ?`),
     setSetting: db.prepare(
       `INSERT INTO settings (key, value) VALUES (@key, @value)
@@ -838,7 +915,7 @@ export function makeStore(db) {
          FROM agents a
          LEFT JOIN messages m
            ON m.channel = a.channel AND m.id > a.poll_cursor
-          AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent))
+          AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent AND (m.audience IS NULL OR instr(m.audience, ',' || a.agent || ',') > 0)))
         GROUP BY a.channel, a.agent`
     ),
     // The unread messages themselves, not just the count. Bounded like
@@ -851,7 +928,7 @@ export function makeStore(db) {
          FROM agents a
          JOIN messages m
            ON m.channel = a.channel AND m.id > a.poll_cursor
-          AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent))
+          AND (m.to_agent = a.agent OR (m.to_agent IS NULL AND m.from_agent != a.agent AND (m.audience IS NULL OR instr(m.audience, ',' || a.agent || ',') > 0)))
         WHERE a.retired_at IS NULL
         ORDER BY a.channel, a.agent, m.id DESC
         LIMIT 2000`
@@ -1363,7 +1440,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1520,8 +1597,10 @@ export function makeStore(db) {
   }
 
   return {
-    insertMessage: (channel, from, to, body) =>
-      n(q.insertMessage.run({ channel, from, to, body }).lastInsertRowid),
+    // `audience` (issue #44): the agents a broadcast reaches, or null for the
+    // whole channel — see the column.
+    insertMessage: (channel, from, to, body, audience = null) =>
+      n(q.insertMessage.run({ channel, from, to, body, audience: audience?.length ? `,${audience.join(',')},` : null }).lastInsertRowid),
     pollMessages: (channel, me, since, limit) =>
       q.pollMessages.all({ channel, me, since, limit }),
 
@@ -1633,6 +1712,30 @@ export function makeStore(db) {
       try { return JSON.parse(row.value); } catch { return fallback; }
     },
     setSetting: (key, value) => q.setSetting.run({ key, value: JSON.stringify(value) }).changes,
+    // --- meeting rooms (issue #44) ---------------------------------------------
+    /** A new room, then the oldest beyond `keep` dropped: the list bounds itself. */
+    createMeeting: (channel, participants, keep) => {
+      const id = n(q.insertMeeting.run(channel, JSON.stringify(participants)).lastInsertRowid);
+      q.pruneMeetings.run(keep);
+      return id;
+    },
+    meeting: (id) => meetingRow(q.getMeeting.get(id)),
+    setMeetingParticipants: (id, participants) => q.setMeetingParticipants.run(JSON.stringify(participants), id).changes,
+    openMeeting: (id) => q.openMeeting.run(id).changes,
+    endMeeting: (id, participants) => q.endMeeting.run(JSON.stringify(participants), id).changes,
+    recentMeetings: (limit) => q.recentMeetings.all(limit).map(meetingRow),
+    /** The window says the room is still open; false when the board has it ended (a reload's end landed after its open). */
+    touchMeeting: (id) => q.touchMeeting.run(id).changes > 0,
+    /**
+     * The open, live meeting room `agent` is in on `channel`, or null: whose
+     * participants its broadcasts reach. In it, not absent: a desk Resume
+     * could not bring back is kept in the record for the next Resume, but it
+     * is on the floor, and talks and hears as the floor does (QA, PR #49
+     * finding 1).
+     */
+    liveMeetingOf: (channel, agent, liveSeconds = MEETING_LIVE_SECONDS) =>
+      q.liveMeetings.all(channel, `-${liveSeconds} seconds`).map(meetingRow)
+        .find((r) => r.participants.some((p) => p.agent === agent && !p.absent)) ?? null,
     getSavedPrompt: (id) => q.getSavedPrompt.get(id) ?? null,
     /** The prompt holding this title, if any — `exceptId` skips the row being edited. */
     savedPromptByTitle: (title, exceptId = null) => {

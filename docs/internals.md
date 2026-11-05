@@ -124,8 +124,8 @@ just means a client opens a session per turn, which is normal and handled.
   hand), `admin_events` (operator audit) — all
   keyed by `channel` — plus the floor's tables: `agent_sessions` and `turns`
   (what each window reported), `agent_profile` and `personas` (who each agent
-  is and where it sits), `hosts`, `hosted_desks`, `host_outbox` and
-  `saved_prompts`. See [`src/db.js`](../src/db.js). A channel is never a row of
+  is and where it sits), `hosts`, `hosted_desks`, `host_outbox`,
+  `saved_prompts` and `meeting_rooms`. See [`src/db.js`](../src/db.js). A channel is never a row of
   its own; it's a key shared across those tables, which is why archiving needs
   a flag table and deleting has to sweep all of them in one transaction.
 - **The floor's chat controls (0.10.9):** `agent_sessions` carries `effort`,
@@ -244,6 +244,31 @@ just means a client opens a session per turn, which is normal and handled.
   the third in the desk's own chat panel (`readingShell` in
   `src/ui/floor.js`): a different shell with a banner and a way back, the
   same `turnNode`, and no composer or actions at all.
+- **Meeting rooms (issue #44, 0.12.0):** several desks of one floor in one
+  window, which is the page with `?meeting=<id>` — a popout's sibling, out
+  the popout's way (a Web Lock per desk under `popLockName`, taken
+  `ifAvailable`, and `here` on the `orch.popouts` BroadcastChannel carrying
+  `meeting`), so the floor's panel, the detach button and a floor nudge all
+  step aside for it exactly as they do for a popout. Its stream is the
+  SharedWorker's, asked for every participant. The board adds no route that
+  types into a window: a room's message is one `POST /api/floor/chat` per
+  recipient, in `nudgePlan`'s order, and each desk's delivery is read off
+  that desk's own turns and delivery note (`meetingEntry`). What the board
+  keeps is `meeting_rooms`, for Resume: the floor and each participant's
+  agent, conversation, host, folder and starting turn, written by `POST
+  /api/floor/meeting` (create), `/meeting/participants` (Add, Remove, a
+  conversation changing), `/meeting/open` (a reload or a Resume clears
+  `ended_at`) and `/meeting/end` (End, or the window's pagehide, with
+  keepalive), and listed newest first by `GET /api/floor/meetings`. Bounded
+  at `MEETINGS_KEEP` (20), pruned as each room is created; swept by
+  `purgeChannel`; not in `BACKUP_TABLES`. Resume reopens each desk through
+  `POST /api/floor/reopen`, after asking its host's conversation list, and
+  says why for each desk it does not (`meetingResumePlan`). A room's
+  conversation is contained: `send_message` with no `to` from an agent in a
+  room that is open and live (its window's `POST /meeting/touch` within
+  `MEETING_LIVE_SECONDS`, 150 s) stores the room's participants in
+  `messages.audience`, which `pollMessages`, `unreadCounts` and
+  `unreadMessages` honour. Direct messages are unaffected.
 
 ```
 src/

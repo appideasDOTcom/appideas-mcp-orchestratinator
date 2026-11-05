@@ -1811,3 +1811,72 @@ body.popout .deskpanel.pop-wide:has(> .p-deskslot) {
 .p-out { padding: 18px 14px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .p-out-why { margin: 0; font-size: 12.5px; }
 .p-detach { font-size: 13px; line-height: 1; }
+
+/* ─── a meeting room (issue #44) ─────────────────────────────────────────────
+   The popout's window (body.popout) with several desks in it: who is in it
+   in a row under the header, one transcript, one composer. Each desk is
+   told apart by its shirt colour (--m-c), the one thing that tells two
+   desks apart on the floor. */
+body.meeting .deskpanel { display: flex; flex-direction: column; }
+.m-head .m-addslot { margin-left: auto; }
+.m-add { font-size: 12px; max-width: 220px; }
+.m-parts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.m-empty { font-size: 12px; }
+.m-part {
+  display: inline-flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 4px 5px 5px 8px;
+  border: 1px solid var(--border); border-left: 4px solid var(--m-c); border-radius: 8px;
+  font-size: 12px; background: var(--surface);
+}
+.m-part .m-state { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.m-part.s-working .m-state { color: var(--busy); }
+.m-part.s-needs-you { border-color: color-mix(in srgb, var(--wait) 55%, var(--border)); border-left-color: var(--m-c); background: var(--wait-bg); }
+.m-part.s-needs-you .m-state { color: var(--wait); font-weight: 600; }
+.m-part.s-away .m-state { color: var(--off); }
+.m-part .btn { height: 22px; padding: 0 6px; font-size: 11px; line-height: 1; }
+.m-part .m-stop .stopGlyph { width: 11px; height: 11px; }
+.m-swatch { display: none; }
+/* A desk's turns carry its colour down their left edge; the operator's own
+   messages are the panel's. */
+.t.m-said { border-left: 3px solid var(--m-c); padding-left: 7px; }
+.t.m-said.t-tool, .t.m-said.t-thinking { border-left-width: 2px; }
+.m-delivs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: 11px; }
+.m-deliv { color: var(--muted); border-left: 3px solid var(--m-c); padding-left: 5px; }
+.m-deliv b { font-weight: 600; color: var(--text); }
+.m-deliv.ok { color: var(--idle); }
+.m-deliv.wait { color: var(--busy); }
+.m-deliv.bad { color: var(--block); }
+.m-msg.t-pending { opacity: .85; }
+.m-note .t-text { font-family: var(--sans); font-style: italic; }
+.m-note-bad .t-text { color: var(--block); }
+/* Each participant's prompt, labelled with its desk, against the box. */
+.m-alerts { display: flex; flex-direction: column; gap: 6px; }
+.m-alerts:empty { display: none; }
+.m-alert:has(> .p-alert-slot:empty) { display: none; }
+.m-alert { border-left: 4px solid var(--m-c); padding-left: 6px; }
+.m-alert-who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 3px; }
+.m-to { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.m-to:empty { display: none; }
+.m-to-label { font-size: 11px; margin-right: 2px; }
+.m-to .m-to-one { border-left: 3px solid var(--m-c); }
+.m-to .m-to-one:not(.on) { text-decoration: line-through; opacity: .7; }
+/* Recent meeting rooms: each row a room, and its Resume. */
+.meet-row { position: relative; padding-right: 96px; cursor: default; }
+.meet-row .meet-resume { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
+/* A participant's waiting messages and its bell (issue #44, follow-up): the
+   desk's own pills and the floor's bell, on the room's row. Unread is what a
+   nudge is for, so it is the one that stands out. */
+.m-pill { font: 11px var(--mono); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); cursor: pointer; }
+.m-pill:hover { border-color: var(--accent); color: var(--accent); }
+.m-pill-unread { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-weight: 600; }
+.m-part.has-unread { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); border-left-color: var(--m-c); }
+.m-bell .m-bellGlyph { width: 12px; height: 12px; fill: currentColor; display: block; }
+.m-nudge-all.waiting { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* A participant is two rows: its name, state and ✕, then its badges. */
+.m-row { display: flex; align-items: center; gap: 6px; }
+.m-row-name .m-remove { margin-left: auto; }
+.m-row-badges { gap: 5px; min-height: 22px; }
+/* Hair along the top of a participant's box and its To chip (costmo):
+   shirt down the side, hair across the top, as the desk wears them. */
+.m-part, .m-to .m-to-one { border-top: 3px solid var(--m-h, var(--border)); }
+/* The unread and needs-you outlines colour every side; the hair stays on top. */
+.m-part.has-unread, .m-part.s-needs-you { border-top-color: var(--m-h, var(--border)); }

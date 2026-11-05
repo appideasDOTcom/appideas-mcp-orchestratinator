@@ -178,6 +178,25 @@ async function main() {
     eq(W.promptQuestion(menu('Do you want to proceed?', '  \u276f 1. Yes', '    2. No')), { header: null, question: 'Do you want to proceed?' }, 'a permission prompt\'s own sentence reads the same way');
     eq(W.promptOptions(askForm).map((o) => o.n), [1, 2, 3, 4, 5], 'and the choices are still the numbered rows, the extra two included');
 
+    // An answer that waited in the host's line is still pressed if its own
+    // question is on screen (askedStill; #44 follow-up, 2026-11-05: an
+    // answer dropped as "long gone" with its question there the whole time).
+    const asksScope = { headers: ['Scope'], options: ['Baseline only', 'Everything in the tree', 'Shelve new features'] };
+    eq(W.askedStill(askForm, asksScope), true, 'an old answer whose form is on screen is still answered: its header is there');
+    eq(W.askedStill(askForm.split('\n').slice(2).join('\n'), asksScope), true, 'and a form cut below its header is known by every one of its choices');
+    eq(W.askedStill(askForm.split('\n').slice(2).join('\n'), { headers: ['Scope'], options: ['Baseline only', 'Something else'] }), false,
+      'but not by some of them: a different question with one choice in common is not this one');
+    eq(W.askedStill(askForm, { headers: ['Routing'], options: ['Fast path'] }), false, 'a different question in its place is not answered with keys meant for another');
+    eq(W.askedStill(box('\u276f '), asksScope), false, 'nor is a window that is no longer asking anything');
+    eq(W.askedStill(askForm, undefined), false, 'and an answer that names no question (a board from before this) is dropped as it always was');
+    // A permission answer names its command too: every permission menu offers
+    // the same choices (QA, PR #49 finding 2).
+    const bashPrompt = [RULE, ' Bash command', '', '   rm -rf build-cache', '   Clear the build cache', '', ' Do you want to proceed?', ' \u276f 1. Yes',
+      "   2. Yes, and don't ask again for rm commands in this folder", '   3. No, and tell Claude what to do differently (esc)', '', ' Esc to cancel \u00b7 Tab to amend'].join('\n');
+    const bashChoices = ['Yes', "Yes, and don't ask again for rm commands in this folder", 'No, and tell Claude what to do differently (esc)'];
+    eq(W.askedStill(bashPrompt, { options: bashChoices, subject: 'rm -rf build-cache' }), true, 'an old permission answer is pressed while its own command is the one asked about');
+    eq(W.askedStill(bashPrompt, { options: bashChoices, subject: 'npm publish' }), false, 'and not when the same menu now asks about another command');
+
     /* The composer once a message is queued behind a running turn.
      *
      * Claude Code puts its own prompt where the caret would be, and read as
@@ -1575,6 +1594,19 @@ async function main() {
     eq(notTaken.code, 'not_taken', 'it says the answer was not taken');
     assert(/still showing the same prompt/.test(notTaken.error ?? ''),
            `and quotes what is on screen rather than guessing why — ${notTaken.error}`);
+
+    // A message to a window that is asking something: refused at once, and
+    // nothing typed. It used to paste for 60 s and fail, holding every item
+    // behind it in the host's line, the answer to that very question
+    // included (#44 follow-up, costmo's report, 2026-11-05).
+    const askT0 = Date.now();
+    const intoPrompt = await W.send(deaf, 'a message while it asks');
+    eq(intoPrompt.code, 'asking', 'a message to a window holding a prompt is refused as `asking`');
+    assert(Date.now() - askT0 < 8000, `in seconds, not after a minute of pasting — ${Date.now() - askT0}ms`);
+    assert(/^the window is asking something, so nothing was typed\./.test(intoPrompt.error ?? '') && /The window is showing: .*Esc to cancel/.test(intoPrompt.error ?? ''),
+      `and says so, quoting the pane — ${intoPrompt.error}`);
+    const deafNow = await run('tmux', ['capture-pane', '-p', '-t', (await W.paneFor(deaf)).target]).then((r) => r.stdout, () => '');
+    assert(!deafNow.includes('a message while it asks'), 'not one character of it reached the window');
 
     // Takes the key and moves on.
     //

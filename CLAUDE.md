@@ -355,6 +355,43 @@ Two things follow, and both were bugs before they were rules:
   order, because the host's two loops do not wait for each other and the relay
   genuinely does publish the turn first sometimes. It did, on the real board.
 
+**A desk whose window is asking something takes no message, and that is
+said at once** (#44 follow-up, from costmo's report, 2026-11-05). The
+rule above is for a window that is *working*. A window holding a question
+form, a permission menu or a startup question sends every key to the
+prompt, so a pasted message never reaches the composer. `send()` used to
+try 14 times over `PASTE_TIMEOUT_MS` (60 s), then fail. Measured on the
+live board: three chats typed while a form was open each held the host's
+line for a minute, and the operator's answer to that very form queued
+behind the first, aged past `ANSWER_TTL_MS` (30 s) and was dropped as
+"long gone" with its question on screen. The desk took nothing until he
+answered in the window. Three fixes, each costmo's pick:
+- The board refuses the message before it is queued (`askingWhy` in
+  src/floor.js, on `/api/floor/chat` and in the desk's `nudge` verdict, so
+  the bell, Nudge and a meeting room send nothing). The panel's Send dims,
+  with the reason in the box.
+- `send()` reads the pane first and returns `asking` in a second, quoting
+  it, for a prompt that opened after the message was queued.
+- An old answer is dropped only when its question is gone (`askedStill`):
+  the board sends the form's headers and first choices with it, and the
+  host presses it past the TTL when the screen still shows them. A
+  different question in its place matches neither and is not answered.
+  The TTL was right for an answer queued while no host was there, and
+  wrong when the age was the host's own line. A permission decision goes
+  the same way (QA, PR #49 finding 2), and it carries what it was for
+  (`asks.subject`, the command or file from the prompt's summary), because
+  every permission menu offers the same choices, and the choices alone
+  could approve a different command.
+A stale `live.pending` would refuse messages wrongly. It is cleared by the
+window's next hook, by an answer from the floor, and at session end, and
+the panel shows the prompt with Cancel, so the refusal does not outlive the
+question for long. `test:host` drives both call sites end to end ("an
+answer that waited in the host's line"). Its host runs with the TTL at -1,
+so every answer is old, and its stand-in draws a permission menu or a form
+from `prompt.flag`, in raw mode, because a tty in canonical mode holds a
+bare key until a newline. `askedStill` is tested on captured screens in
+`test:window`, and the board half (`asks`) in `test:floor`.
+
 ## A slash command, the model, and a compaction
 
 Issues #9, #10 and #15, shipped as 0.10.9 (2026-11-03, measured on 2.1.300
@@ -861,12 +898,169 @@ stay on the panel, and an emptied box, which gives the room back. Do not
 add a cap on the drag, or a floor under the transcript, in the name of
 protecting the operator from their own choice.
 
+**A panel's turns are fetched under a session, and an answer is used only
+under the session it was requested for** (issue #46, 0.10.22). A popout opens
+its desk before its first `/api/floor`, so `sessionFilter()` had nothing to
+scope by, and the first turns request went out unscoped. On a desk whose
+new session had no turns yet, the answer was entirely the session before
+it. When it landed after the first poll had reset the panel to the new
+session, it stayed, because nothing clears a list whose filter does not
+change again. That is why it showed only on a new session. So `loadTurns`
+asks nothing until `/api/floor` has answered once, and drops an answer whose
+filter is no longer the panel's. QA found either guard enough on its own
+to turn the check green. Both stay, for reasons that come from reading the
+code, not from a measurement. Without the first, an unscoped answer that
+beats the first poll draws the old session for a moment before the reset
+wipes it, and the check does not look in that window. Without the second,
+the floor's own panel is exposed to the same late answer whenever a
+session changes under it mid-request.
+A new caller of `/api/floor/turns`, or anything else scoped by
+`sessionFilter()`, needs the same check after its `await`. The race read
+red in 1 of 8 runs to 2 of 3, and never on the first run, so
+`run-check-popout-session.sh` in **verify-ui-change** runs it 12 times.
+
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a
 room's selection (#23: selection is the floor's, and the popout's desk is
 in no room). `check-popout.mjs` in **verify-ui-change** drives all of it,
 including a floor reload and close. A popup opens only on real input
 (`press()`), never on a dispatched click.
+
+**A meeting room is a popout of several desks, out the popout's way**
+(issue #44, 0.12.0). It is this page with `?meeting=<id>`, opened from a
+room's selection toolbar or from Resume. Its code names are `meeting…`,
+never `room…`, because `room(c)` is a channel's drawing (Decided 1). Seven
+things behind it each look like they could be done more simply:
+- **Presence is the popout's, under the same lock names.** The window takes
+  `popLockName` for each participant with `ifAvailable` and says `here`
+  with `meeting` on `orch.popouts`. So the floor's panel, the detach
+  button, a floor nudge and the hub all step aside for it with no new
+  machinery, and Decided 3's "one place at a time" is the lock: a desk
+  whose popout or another room holds it is not taken, and the room says
+  so. The floor's `here` handler used to drop every other key a window id
+  held (a popout following a move). A meeting's `here` skips that, or each
+  participant's `here` would undo the last one's.
+- **No route types for a room.** A message is one `/api/floor/chat` per
+  recipient, in `nudgePlan`'s order (windowed desks first), with every
+  check that route makes. Each desk's delivery is read off that desk's
+  turns and note (`meetingEntry`). The room's own send is only the
+  addressing, never the record (CLAUDE.md's "a delivery is what the window
+  recorded"). A user turn the room did not send, or whose send a reload
+  lost, is folded by the same words within two minutes
+  (`MEET_GROUP_MS`). Two identical messages typed into two windows inside
+  that time read as one; that is the limit, and it was chosen over N
+  copies of every message.
+- **The prompt box is the panel's, lifted, not copied.** `drawAlert`
+  draws a desk's box into any slot, and the handlers read the desk off
+  the box (`targetOf`: `data-for-agent`, else `ui.open`). A new control in
+  a prompt box goes through `targetOf` too, or it answers the open desk
+  from a meeting room, which has none.
+- **A desk leaves the room on moved, binding gone, or gone, never on a host
+  offline.** deskFate reads a host gone offline as "left", and a host
+  restart is that for a few seconds. A room losing its desks to a restart
+  was the failure; such a desk stays, reads "away", and its messages are
+  refused in the board's words.
+- **A reload is End then Open.** pagehide ends the record with keepalive,
+  because closing the window ends the meeting and the page cannot tell a
+  close from a reload. The reloaded window's `/meeting/open` clears
+  `ended_at`, and the floor holds its desks out for `REJOIN_MS`
+  (`rejoin`), so its panel does not flash a composer. So "ended" is not
+  final, and the Recent list leaves out rooms open in a window
+  (`floorOpenMeetings`) rather than trusting the column.
+- **Resume reuses the room's row, and asks before it reopens.** A new row
+  per resume filled the list with copies of one room. The host's
+  conversation list is asked first: `reopen` of an id gone from disk makes
+  the host open the folder's newest instead (`resumable()`), which would
+  move a desk off whatever it was on for nothing. A desk whose reopen
+  fails (refused, the host's error turn, another conversation opened, 90 s)
+  leaves the resumed room with the reason, so "in the room" always means
+  "on the conversation it had". Add puts it back on whatever it is on now.
+- **A resumed room shows what was said before, from each desk's own
+  turns.** Each participant's part starts after the turn it first joined
+  after (`since`, kept in the record), under its current conversation. The
+  original addressing was the old window's and is gone, so an old message
+  reads `you → Bo` there.
+
+**A nudge is needed when a participant has unread mail on the board, and
+the room says so** (costmo, on the first preview: "no indication that a
+nudge is needed, nor is there any way to nudge"). Each participant is two
+rows: its name, state and ✕, then its badges. The badges are the desk's
+own `signPills` (✉ unread, ☰ assigned, ☑ claimed), each opening the floor's
+dialog through `openPill`, so Mark all read, read to here, reassign and
+Nudge agent are the backlog dialog's. Then its bell, the floor's `strike()`,
+which now returns the board's refusal so the room can say it in the
+transcript, having no drawn bell to put it on. Then its stop sign.
+**Nudge** beside Send is "nudge all": it nudges whoever the To chips
+choose, with the unread count in its label (`meetingNudgeChip`), as one
+room message with each desk's delivery under it.
+
+**A room's conversation is contained, and that is the board's job, not
+the page's** (costmo, on the second preview: agents on the floor outside a
+room received its participants' broadcasts). A broadcast from an agent in
+an open, live room is stamped with the room's participants
+(`messages.audience`, `,bo,cy,`), and the three readers of "messages for
+this agent" — `pollMessages`, `unreadCounts`, `unreadMessages` — skip it
+for anyone outside, so the ✉ pill and the backlog agree with the poll. The
+agent's `send_message` reply names who it reached. A direct message goes
+where it is addressed, in or out of a room: an agent naming a recipient is
+not the room's conversation, and refusing it would strand a real
+escalation. costmo ruled it (2026-11-05), over refusing it and over
+delivering it marked; do not re-propose either. "Live" is the window's 30 s `touch` within
+`MEETING_LIVE_SECONDS` (150 s), not "not ended", because a crashed window
+never sends its end and must not keep a floor's agents apart. Chrome
+throttles a hidden window's timers to a minute, which the 150 s rides out.
+A touch that finds the room ended (a reload's end landing after its open)
+opens it again. The floor's envelopes for such a broadcast fly to the
+roommates only (`outMeeting` in flyEnvelope).
+
+A participant wears its desk's colours: its shirt down the left edge of
+its box, its turns and its To chip, and its hair across the top of the box
+and the chip (not the turns). The hair is costmo's call for recognition, "if
+slightly", and may be undone. The payload's hair already falls back to
+`DEFAULT_HAIR`. The unread and needs-you outlines colour every side, so the
+stylesheet puts the hair back on top after them.
+
+**Narrowing is chips plus `@name`, the names stripped** (costmo,
+2026-11-05, both by AskUserQuestion). Names at the start of the box
+(`meetingMentions`: id or persona, any case, `@everyone`/`@all`) choose
+who hears that one message, and the agents receive the words after them.
+An `@` later in a sentence is the operator's words. A name that is nobody
+in the room sends nothing and leaves the box as it was. Mentions outrank
+the chips for that message.
+
+**A desk Resume could not bring back for a reason that may pass stays in
+the room's record, `absent`, and absent is on the floor**: it is not in
+the room for containment either way, so its broadcasts reach the floor
+and the room's do not reach it (QA, PR #49 finding 1: `liveMeetingOf`
+and the audience matched the whole record). Busy window, host offline, an editor, out in
+another window, the host refusing the reopen, or a 90 s timeout. The first
+cut dropped any desk it skipped, so one busy window took a desk out of the
+room for good. An absent entry is kept exactly as it was (`absentKept` in
+src/floor.js). End does not re-read its conversation, because what its
+desk is on now is not what it had in the room. A desk still being reopened
+is saved the same way until the reopen lands. Saved as present, its record
+took the conversation it was leaving, which the page check caught as
+`sess-bo-x3`. A desk gone for good is not kept: moved, left, or its
+conversation deleted. A reload leaves absent desks absent, and Resume
+tries them again.
+
+**Two forms on one page share radio groups unless their names differ.** A
+radio group is by name across the document, not per form. With `q0` on
+every form, ticking a choice in one participant's form unticked the other's
+(check-meeting.mjs: "1 of 3 answered" on a form ticked in full). `askHtml`
+names each input by its prompt's request id. The panel only ever drew one
+form, which is why the name was never scoped before. A prompt box's
+answering spinner is per desk for the same reason (`ui.answering` is a Map).
+
+Left out on purpose. **Model and effort controls**: a desk's select drives
+its window's picker, so a room would need one per desk; `/model sonnet`
+narrowed to one desk takes the same route. **A reading view**: History
+reads a meeting desk in the floor's panel, because reading types into
+nothing (renderPanel's `outMeeting` branch). **Audit rows**: a room is a
+window arrangement, like a popout, and popouts write none; the reopens a
+Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it names
+sessions on disks that may not be this machine's. `check-meeting.mjs` in
+**verify-ui-change** drives all of it.
 
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
@@ -1270,7 +1464,12 @@ headless Chrome on private ports. That was load, though not a collision,
 and those ports were not announced. QA announces page-run ports too since
 then. `test:host` alone straight after was green both times. The cause is
 not found. A third sighting is the cue to read the session rows at the
-moment of the move, not to rerun again.
+moment of the move, not to rerun again. **Third sighting, 2026-11-05**, the
+0.12.0 (#44) full run, load average 7.6 with nothing else on its ports or
+running beside it: the same assertion, the same two ids, one red only.
+`test:host` alone straight after was green. The session rows were not read
+— the meeting room work it was run for touches no host or session code —
+so the cue stands for the next one.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
