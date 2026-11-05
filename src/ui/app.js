@@ -3455,7 +3455,7 @@ function renderMeetingsDialog({ opening = false } = {}) {
           return `<div class="sess-row meet-row" role="listitem">
             <span class="sess-title">${esc(who.length ? who.join(', ') : 'nobody')}</span>
             <span class="sess-meta">${esc([r.channel, when].join(' · '))}</span>
-            <span class="sess-detail mono">${r.participants.map((p) => esc(`${p.persona ?? p.agent} · ${shortId(p.session_id)}`)).join('<br>')}</span>
+            <span class="sess-detail mono">${r.participants.map((p) => esc(`${p.persona ?? p.agent} · ${shortId(p.session_id)}${p.absent ? ' · not back last time' : ''}`)).join('<br>')}</span>
             <button type="button" class="btn primary meet-resume" data-do="meeting-resume" data-id="${esc(r.id)}"${who.length ? '' : ' disabled'}
               title="Open this meeting room again, each desk back on the conversation it had">Resume</button>
           </div>`;

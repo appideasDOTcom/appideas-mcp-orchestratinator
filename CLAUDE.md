@@ -355,6 +355,36 @@ Two things follow, and both were bugs before they were rules:
   order, because the host's two loops do not wait for each other and the relay
   genuinely does publish the turn first sometimes. It did, on the real board.
 
+**A desk whose window is asking something takes no message, and that is
+said at once** (#44 follow-up, from costmo's report, 2026-11-05). The
+rule above is for a window that is *working*. A window holding a question
+form, a permission menu or a startup question sends every key to the
+prompt, so a pasted message never reaches the composer. `send()` used to
+try 14 times over `PASTE_TIMEOUT_MS` (60 s), then fail. Measured on the
+live board: three chats typed while a form was open each held the host's
+line for a minute, and the operator's answer to that very form queued
+behind the first, aged past `ANSWER_TTL_MS` (30 s) and was dropped as
+"long gone" with its question on screen. The desk took nothing until he
+answered in the window. Three fixes, each costmo's pick:
+- The board refuses the message before it is queued (`askingWhy` in
+  src/floor.js, on `/api/floor/chat` and in the desk's `nudge` verdict, so
+  the bell, Nudge and a meeting room send nothing). The panel's Send dims,
+  with the reason in the box.
+- `send()` reads the pane first and returns `asking` in a second, quoting
+  it, for a prompt that opened after the message was queued.
+- An old answer is dropped only when its question is gone (`askedStill`):
+  the board sends the form's headers and first choices with it, and the
+  host presses it past the TTL when the screen still shows them. A
+  different question in its place matches neither and is not answered.
+  The TTL was right for an answer queued while no host was there, and
+  wrong when the age was the host's own line.
+A stale `live.pending` would refuse messages wrongly. It is cleared by the
+window's next hook, by an answer from the floor, and at session end, and
+the panel shows the prompt with Cancel, so the refusal does not outlive the
+question for long. No host-suite case drives an old answer end to end
+(its stand-in draws no form). `askedStill` is tested on a captured form in
+`test:window`, and the board half (`asks` on the answer) in `test:floor`.
+
 ## A slash command, the model, and a compaction
 
 Issues #9, #10 and #15, shipped as 0.10.9 (2026-11-03, measured on 2.1.300
@@ -983,15 +1013,42 @@ slightly", and may be undone. The payload's hair already falls back to
 `DEFAULT_HAIR`. The unread and needs-you outlines colour every side, so the
 stylesheet puts the hair back on top after them.
 
+**Narrowing is chips plus `@name`, the names stripped** (costmo,
+2026-11-05, both by AskUserQuestion). Names at the start of the box
+(`meetingMentions`: id or persona, any case, `@everyone`/`@all`) choose
+who hears that one message, and the agents receive the words after them.
+An `@` later in a sentence is the operator's words. A name that is nobody
+in the room sends nothing and leaves the box as it was. Mentions outrank
+the chips for that message.
+
+**A desk Resume could not bring back for a reason that may pass stays in
+the room's record, `absent`.** Busy window, host offline, an editor, out in
+another window, the host refusing the reopen, or a 90 s timeout. The first
+cut dropped any desk it skipped, so one busy window took a desk out of the
+room for good. An absent entry is kept exactly as it was (`absentKept` in
+src/floor.js). End does not re-read its conversation, because what its
+desk is on now is not what it had in the room. A desk still being reopened
+is saved the same way until the reopen lands. Saved as present, its record
+took the conversation it was leaving, which the page check caught as
+`sess-bo-x3`. A desk gone for good is not kept: moved, left, or its
+conversation deleted. A reload leaves absent desks absent, and Resume
+tries them again.
+
+**Two forms on one page share radio groups unless their names differ.** A
+radio group is by name across the document, not per form. With `q0` on
+every form, ticking a choice in one participant's form unticked the other's
+(check-meeting.mjs: "1 of 3 answered" on a form ticked in full). `askHtml`
+names each input by its prompt's request id. The panel only ever drew one
+form, which is why the name was never scoped before. A prompt box's
+answering spinner is per desk for the same reason (`ui.answering` is a Map).
+
 Left out on purpose. **Model and effort controls**: a desk's select drives
 its window's picker, so a room would need one per desk; `/model sonnet`
 narrowed to one desk takes the same route. **A reading view**: History
 reads a meeting desk in the floor's panel, because reading types into
 nothing (renderPanel's `outMeeting` branch). **Audit rows**: a room is a
 window arrangement, like a popout, and popouts write none; the reopens a
-Resume makes write their own `desk.reopen`. **`@name` narrowing**: the
-chips narrow, and the words go as typed, because stripping a mention
-changes what the agent receives. **`meeting_rooms` in backups**: it names
+Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it names
 sessions on disks that may not be this machine's. `check-meeting.mjs` in
 **verify-ui-change** drives all of it.
 
@@ -1397,7 +1454,12 @@ headless Chrome on private ports. That was load, though not a collision,
 and those ports were not announced. QA announces page-run ports too since
 then. `test:host` alone straight after was green both times. The cause is
 not found. A third sighting is the cue to read the session rows at the
-moment of the move, not to rerun again.
+moment of the move, not to rerun again. **Third sighting, 2026-11-05**, the
+0.12.0 (#44) full run, load average 7.6 with nothing else on its ports or
+running beside it: the same assertion, the same two ids, one red only.
+`test:host` alone straight after was green. The session rows were not read
+— the meeting room work it was run for touches no host or session code —
+so the cue stands for the next one.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`

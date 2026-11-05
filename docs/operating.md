@@ -214,8 +214,9 @@ more, and press **Meeting room**. One window opens with those desks in it:
 who is in the room and what each is doing (working, idle, needs you) in a
 row along the top, one transcript of everything said from then on with each
 desk's words labelled and coloured as its shirt, and one composer. A message
-goes to everyone in the room unless you narrow it with the chips over the box;
-the next one goes to everyone again. Each desk's delivery shows under your
+goes to everyone in the room unless you narrow it: with the chips over the
+box, or by starting it with names (`@bo @cy look at this` goes to Bo and Cy,
+and they receive "look at this"). The next one goes to everyone again. Each desk's delivery shows under your
 message on its own: sending, queued, delivered, or not sent with the board's
 reason (an editor holding it, a host offline). The desks never hear each other
 through the room, and what they say to each other on the board stays in
@@ -234,7 +235,9 @@ closing the window, ends it. Ended rooms are drawn nowhere and counted
 nowhere: **Meeting rooms** in the floor's header lists the last twenty,
 newest first, and **Resume** opens one again with each desk back on the
 conversation it had — or says, desk by desk, why not (it left, it moved
-floors, its window is busy, its conversation is gone).
+floors, its window is busy, its conversation is gone). A desk that missed a
+Resume for a reason that may pass, like a busy window, stays in the room
+and is tried again at the next Resume.
 
 The host only ever reaches *out*. It registers with the server, then holds a
 request open asking for work; the server never connects to a workstation and

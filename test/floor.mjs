@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -2228,6 +2228,9 @@ try {
     const tallWork = (await takeWorkFull()).find((w) => w.kind === 'answer');
     eq((tallWork?.payload?.steps ?? []).map((st) => st.key), ['Left', 'Left', 'Left', '2', '1', '3', 'Tab'],
       'with the keys that answered the same form on a real 80x24 window: Left Left Left 2 1 3 Tab');
+    const tallAsks = tallWork?.payload?.asks;
+    eq([tallAsks?.headers, tallAsks?.options], [['Colour', 'Toppings'], ['Red', 'Green', 'Blue']],
+      'and the question it answers rides along — its headers, its first question\'s choices — so a host whose line held it can tell the form is still the one on screen (askedStill)');
 
     // No form from the host and none from the hook: said, not guessed at.
     await post(ev('tall', 's-tall', 'PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: {} }));
@@ -3256,6 +3259,22 @@ try {
     ] }) });
     const miaLast = (await turns('mia', MCH)).rows.at(-1).id;
 
+    // A window that is asking something takes no message, and the board says
+    // so before anything is queued (#44 follow-up, costmo's report: a chat
+    // sent while a question form was open pasted for 60 s, held the host's
+    // line, and the answer behind it aged out).
+    await post({ channel: MCH, agent: 'noa', session_id: 'sdk-noa', hook_event_name: 'PermissionRequest', cwd: '/repo/noa', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } });
+    let asked = await op('/api/floor/chat', { channel: MCH, agent: 'noa', text: 'are you there?' });
+    eq([asked.status, asked.body.code], [409, 'asking'], 'a message to a desk whose window is asking is refused at once, nothing queued');
+    assert(/asking for permission\. A message typed now would go into that/.test(asked.body.error ?? ''), `in words that say why and what to do — ${asked.body.error}`);
+    const noaDesk = (await floor()).channels.find((c) => c.channel === MCH)?.desks.find((d) => d.agent === 'noa');
+    eq([noaDesk?.nudge?.ok, noaDesk?.nudge?.code], [false, 'asking'], 'and its nudge verdict says the same, so the bell, Nudge and a meeting room send nothing');
+    await post({ channel: MCH, agent: 'noa', session_id: 'sdk-noa', hook_event_name: 'PreToolUse', cwd: '/repo/noa', tool_name: 'Bash', tool_input: { command: 'ls' } });
+    asked = await op('/api/floor/chat', { channel: MCH, agent: 'noa', text: 'are you there?' });
+    eq(asked.status, 200, 'once the window works again, the prompt is gone and a message goes');
+    eq([askingWhy(null), askingWhy({ questions: [{}] })?.code, /asking a question\./.test(askingWhy({ questions: [{}] })?.error), /before it can start/.test(askingWhy({ startup: true })?.error)],
+      [null, 'asking', true, true], 'askingWhy names what the window is asking: a question, permission, or a question before it can start');
+
     let r = await op('/api/floor/meeting', { channel: MCH, agents: ['mia', 'noa'] });
     eq(r.status, 200, 'a room is created from desks on one floor');
     const room = r.body.room;
@@ -3273,8 +3292,13 @@ try {
     r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia', 'noa', 'oli'] });
     eq(r.body.room.participants.map((p) => p.agent), ['mia', 'noa', 'oli'], 'Add: the record follows who is in the room');
     eq(r.body.room.participants[0].since, miaLast, 'and a participant already there keeps where its part started');
+    r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia'], absent: ['oli'] });
+    eq(r.body.room.participants.map((p) => [p.agent, !!p.absent, p.session_id]), [['mia', false, 'sdk-mia'], ['oli', true, 'sdk-oli']],
+      'a desk Resume could not bring back for a reason that may pass is kept, absent, as it was');
     r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia', 'oli'] });
-    eq(r.body.room.participants.map((p) => p.agent), ['mia', 'oli'], 'Remove: and the desk is out of the record');
+    eq(r.body.room.participants.map((p) => [p.agent, !!p.absent]), [['mia', false], ['oli', false]], 'and is back in the room when it joins again');
+    r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia', 'oli'], absent: ['noa'] });
+    eq(r.body.room.participants.map((p) => p.agent), ['mia', 'oli'], 'absent keeps only a desk the record had: Noa, removed earlier, is not brought back by it');
 
     // A room's conversation is contained (costmo, on the preview): a
     // broadcast from a participant reaches the room and nobody else on the
@@ -3315,7 +3339,10 @@ try {
     eq(said.meeting_room?.reached, ['oli'], 'contains it again');
     sql.close();
 
-    await regMeet(desksM.map((d) => (d.agent === 'mia' ? { ...d, session_id: 'sdk-mia-2' } : d)));
+    // Oli goes absent (a Resume could not bring it back) and its desk moves
+    // on; End must keep the conversation Oli had in the room.
+    await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia'], absent: ['oli'] });
+    await regMeet(desksM.map((d) => (d.agent === 'mia' ? { ...d, session_id: 'sdk-mia-2' } : d.agent === 'oli' ? { ...d, session_id: 'sdk-oli-2' } : d)));
     eq((await op('/api/floor/meeting/end', { id: room.id })).status, 200, 'End');
     said = await mcpCall('mia', 'send_message', { body: 'after the meeting' });
     assert(!said.meeting_room && (await heard('noa', said.id - 1)).includes('mia:after the meeting'), 'an ended room contains nothing');
@@ -3323,7 +3350,7 @@ try {
     let list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
     const ended = list.find((x) => x.id === room.id);
     eq(ended.participants.map((p) => [p.agent, p.session_id, p.persona]), [['mia', 'sdk-mia-2', 'Mia'], ['oli', 'sdk-oli', 'Oli']],
-      'an ended room keeps each participant\'s conversation as the room ended — read off the desk at the end — and its name');
+      'an ended room keeps each participant\'s conversation as the room ended — read off the desk at the end, except an absent one, kept as it was — and its name');
     assert(!!ended.ended_at, 'and says when it ended');
     r = await op('/api/floor/meeting/open', { id: room.id });
     eq(r.body.room.ended_at, null, 'a window opening on it (a reload, a Resume) makes it open again — ended is not final');
@@ -3360,7 +3387,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, meetingNudgeChip, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -3436,6 +3463,22 @@ try {
     nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' })], false);
     eq(nc.disabled, true, 'a desk the board will not nudge is not offered');
     assert(/Can't nudge Ed: held by your editor/.test(nc.title), 'and says why');
+
+    const who = [{ agent: 'bo', persona: 'Bo' }, { agent: 'cy', persona: 'Cy' }, { agent: 'dee', persona: 'Dee' }];
+    eq(pg.meetingMentions('@bo @CY, take a look', who), { to: ['bo', 'cy'], text: 'take a look', unknown: [] },
+      'names at the start narrow the message, by id or name in any case, and are taken off it');
+    eq(pg.meetingMentions('@Dee', who), { to: ['dee'], text: '', unknown: [] }, 'a box of names alone has nothing to send (the page refuses it)');
+    eq(pg.meetingMentions('ask @bo about it', who), { to: null, text: 'ask @bo about it', unknown: [] }, 'an @ later in a sentence is the operator\'s words, not an address');
+    eq(pg.meetingMentions('@everyone hello', who).to, ['bo', 'cy', 'dee'], '@everyone (or @all) is the whole room');
+    eq(pg.meetingMentions('@zed @bo hi', who), { to: ['bo'], text: 'hi', unknown: ['zed'] }, 'a name that is nobody here is reported, not guessed at');
+    const keeps = pg.meetingResumePlan(roomOf([P('bo'), P('cy'), P('dee'), P('ed'), P('fay')]), chans([
+      { agent: 'bo', persona: 'Bo', hosted: H({ live: false }) },
+      { agent: 'cy', persona: 'Cy', hosted: H({ held: 'editor' }) },
+      { agent: 'dee', persona: 'Dee', hosted: H() },
+      { agent: 'ed', persona: 'Ed', hosted: null },
+    ]), new Set(['lab|dee'])).map((x) => [x.agent, x.act, x.keep]);
+    eq(keeps, [['bo', 'skip', true], ['cy', 'skip', true], ['dee', 'skip', true], ['ed', 'skip', false], ['fay', 'skip', false]],
+      'a reason that may pass (host offline, an editor, out in a window) keeps the desk for the next Resume; one that will not (left, gone) does not');
 
     eq([pg.meetingTo(['a', 'b'], null), pg.meetingTo(['a', 'b'], new Set(['b', 'z']))], [['a', 'b'], ['b']], 'everyone by default; narrowed, only desks still in the room');
     eq([pg.meetingToLine(['a', 'b'], true, (x) => x.toUpperCase()), pg.meetingToLine(['a'], true, (x) => x)], ['everyone (A, B)', 'a'], 'the line over a message names who heard it');

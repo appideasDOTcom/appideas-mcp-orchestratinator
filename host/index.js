@@ -1398,9 +1398,17 @@ class Host {
       case 'answer': {
         const steps = Array.isArray(item.payload?.steps) ? item.payload.steps : [];
         const age = Date.now() - (Number(item.payload?.queued_at) || 0);
+        // Old is not the same as gone. An item ahead of this one in run()
+        // can take a minute (it did, 2026-11-05: an answer dropped as "long
+        // gone" with its question on screen the whole time). So an old answer
+        // is still pressed when the window shows the question it was written
+        // for (askedStill), and dropped only when it does not.
         if (item.payload?.queued_at && age > ANSWER_TTL_MS) {
-          warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old answer — the question is long gone`);
-          break;
+          if (!(await W.stillAsking(desk.cwd, item.payload?.asks))) {
+            warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old answer — its question is no longer on screen`);
+            break;
+          }
+          log(`${desk.label}: a ${Math.round(age / 1000)}s-old answer, and its question is still on screen — answering it`);
         }
         const r = await W.answerQuestion(desk.cwd, steps);
         if (!r.ok) {

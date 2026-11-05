@@ -451,6 +451,9 @@
     // messages and notes — see "meeting rooms: the window". Null everywhere
     // else, the floor and a popout included.
     meeting: null,
+    // Answers on their way to a window, by desk (`channel|agent`): what the
+    // prompt box shows a spinner for until the desk gains a turn.
+    answering: new Map(),
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -786,11 +789,17 @@
     const qs = req.questions ?? [];
     const tabs = qs.map((q, i) =>
       `<button type="button" class="p-tab${i === 0 ? ' on' : ''}" data-act="ask-tab" data-q="${i}">${esc(clip(q.tab_title || q.question || `Question ${i + 1}`, 28))}</button>`).join('');
+    // Radio groups are by name across the whole page, not per form. A
+    // meeting room draws a form per participant (issue #44), and with the
+    // name `q0` on both, ticking a choice in one desk's form unticked the
+    // same question in the other's (seen in check-meeting.mjs: "1 of 3
+    // answered" on a form ticked in full). So the name carries the prompt.
+    const group = `ask-${String(req.request_id ?? '').replace(/[^A-Za-z0-9_-]/g, '_')}`;
     const body = qs.map((q, i) => {
       const multi = q.kind === 'multi';
       const opts = (q.options ?? []).map((o) => `
         <label class="p-opt">
-          <input type="${multi ? 'checkbox' : 'radio'}" name="q${i}" value="${esc(String(o.n))}"${o.other ? ' data-other="1"' : ''}>
+          <input type="${multi ? 'checkbox' : 'radio'}" name="${group}-q${i}" value="${esc(String(o.n))}"${o.other ? ' data-other="1"' : ''}>
           <span class="p-opt-text">${esc(o.text)}${o.detail ? `<span class="p-opt-detail">${esc(clip(o.detail, 160))}</span>` : ''}</span>
         </label>`).join('');
       // The free-text field belongs to the choice that opens it, and is no use
@@ -3718,12 +3727,18 @@
 
     drawAlert(wrap.querySelector('.p-alert-slot'), d, channel, agent, canChat);
 
-    $('p-text').placeholder = canChat
+    // The window is asking something: anything typed would go into the
+    // prompt, so the board refuses it (askingWhy, src/floor.js), and the box
+    // says so before Send is pressed. The answer is the box above.
+    const asking = canChat && d.nudge?.code === 'asking';
+    $('p-text').placeholder = asking
+      ? `${d.persona} is asking something — answer it above, then type here…`
+      : canChat
       ? `Message ${d.persona}…`
       : held
       ? `${d.persona}’s conversation is open in your editor…`
       : `${d.persona}’s machine isn’t reachable right now…`;
-    wrap.querySelector('[data-act="send"]').disabled = !canChat;
+    wrap.querySelector('[data-act="send"]').disabled = !canChat || asking;
     // Gated with Send, not with the stop sign: a prompt is something to send, so
     // offering the library for a box that cannot deliver is the same drift the
     // composer's own gating exists to prevent.
@@ -4058,11 +4073,14 @@
     // A new turn is the honest signal: the window took the answers and the
     // conversation moved on. The deadline is the other way out, for a host that
     // never gets there.
-    const answering = ui.answering?.channel === channel && ui.answering?.agent === agent ? ui.answering : null;
+    // One per desk: a meeting room draws a box for each participant, and two
+    // forms answered back to back each keep their own spinner (issue #44).
+    const answerKey = `${channel}|${agent}`;
+    const answering = ui.answering.get(answerKey) ?? null;
     if (answering && ((d.turns ?? 0) > answering.turns || Date.now() - answering.since > ANSWER_SEND_MS)) {
-      ui.answering = null;
+      ui.answering.delete(answerKey);
     }
-    const sendingAnswers = !!answering && ui.answering === answering;
+    const sendingAnswers = !!answering && ui.answering.get(answerKey) === answering;
     // Which of the box's bodies is drawn — a form, the reading spinner, a
     // startup question's rows, the menu, or one of the two ways of saying the
     // board could not read what the window is asking. Decided in one place:
@@ -4718,7 +4736,8 @@
    * and whose conversation is gone (the host's list of them, asked first).
    * Two more fall out of the floor as it is: a desk out in another window,
    * and a desk nothing can reach — no host, a host offline, an editor
-   * holding it.
+   * holding it. A skip whose reason may pass carries `keep`, and the desk
+   * stays in the room's record, absent, for the next Resume.
    */
   function meetingResumePlan(room, channels, outKeys) {
     const all = channels ?? [];
@@ -4726,7 +4745,9 @@
       const c = all.find((x) => x.channel === room.channel);
       const d = c?.desks?.find((x) => x.agent === p.agent) ?? null;
       const who = d?.persona ?? p.persona ?? p.agent;
-      const skip = (why) => ({ agent: p.agent, persona: who, act: 'skip', why });
+      // `keep`: a reason that may pass, so the desk stays in the room's
+      // record for the next Resume (see absentKept in src/floor.js).
+      const skip = (why, keep = false) => ({ agent: p.agent, persona: who, act: 'skip', why, keep });
       if (!d || !d.hosted) {
         const mem = p.host && p.window ? p : null;
         for (const o of mem ? all : []) {
@@ -4737,9 +4758,9 @@
         if (!d) return skip(`${who} is no longer on ${room.channel}.`);
         return skip(mem ? `${who} has left its desk: nothing binds it to a folder now.` : `No host on this board runs ${who}'s folder, so its conversation cannot be reopened.`);
       }
-      if (outKeys?.has(`${room.channel}|${p.agent}`)) return skip(`${who} is in a window already — its own, or another meeting room.`);
-      if (!d.hosted.live) return skip(`${who}'s host (${d.hosted.host}) is offline.`);
-      if (d.hosted.held === 'editor') return skip(`${who}'s conversation is open in your editor. One app holds a conversation at a time.`);
+      if (outKeys?.has(`${room.channel}|${p.agent}`)) return skip(`${who} is in a window already — its own, or another meeting room.`, true);
+      if (!d.hosted.live) return skip(`${who}'s host (${d.hosted.host}) is offline.`, true);
+      if (d.hosted.held === 'editor') return skip(`${who}'s conversation is open in your editor. One app holds a conversation at a time.`, true);
       const now = d.hosted.session_id ?? null;
       if (!p.session_id || now === p.session_id) return { agent: p.agent, persona: who, act: 'join', session_id: now };
       return { agent: p.agent, persona: who, act: 'reopen', session_id: p.session_id, from: now };
@@ -4771,6 +4792,32 @@
       disabled: !plan.send.length,
       waiting: n > 0,
     };
+  }
+
+  /**
+   * Narrowing by name (costmo: chips plus @name, the mentions stripped). A
+   * message that starts with `@bo @cy` (spaces or commas between) goes to
+   * those desks, and they receive the words after the names. A name is the
+   * agent id or the persona, any case; `@everyone` and `@all` are the whole
+   * room. Only the names at the start count, so an `@` later in a sentence
+   * is the operator's words. `to` is null when the message names nobody (the
+   * chips decide), and `unknown` lists names that are nobody in the room —
+   * the page refuses those rather than guess.
+   */
+  function meetingMentions(text, parts) {
+    const all = String(text ?? '');
+    const names = [];
+    let rest = all;
+    for (let m = /^\s*@([^\s,@]+)[\s,]*/.exec(rest); m; m = /^\s*@([^\s,@]+)[\s,]*/.exec(rest)) {
+      names.push(m[1]);
+      rest = rest.slice(m[0].length);
+    }
+    if (!names.length) return { to: null, text: all, unknown: [] };
+    const whole = names.some((n) => /^(everyone|all)$/i.test(n));
+    const find = (n) => parts.find((p) => p.agent.toLowerCase() === n.toLowerCase() || String(p.persona ?? '').toLowerCase() === n.toLowerCase())?.agent ?? null;
+    const unknown = names.filter((n) => !/^(everyone|all)$/i.test(n) && !find(n));
+    const to = whole ? parts.map((p) => p.agent) : [...new Set(names.map(find).filter(Boolean))];
+    return { to, text: rest, unknown };
   }
 
   /** Who a room message goes to: everyone in the room, or the ones chosen for this one message (Decided 2). */
@@ -5203,20 +5250,34 @@
       .catch(() => {});
   }
 
+  /** A desk Resume could not bring back: said, and kept for the next Resume when the reason may pass. */
+  function meetingMissed(agent, words, keep) {
+    const m = ui.meeting;
+    if (keep) m.absent.add(agent);
+    meetingNote(`${words}${keep ? ' It stays in this room for the next Resume.' : ''}`, 'bad');
+  }
+
   /** The record Resume reads: who is in the room now. Best effort — the window holds the truth while it is open. */
   function meetingSave() {
     const m = ui.meeting;
     if (!m?.id || m.phase === 'ended') return;
-    post('./api/floor/meeting/participants', { id: m.id, agents: m.parts.map((p) => p.agent) }).catch(() => {});
+    // A desk still being reopened is saved as the record had it (absent):
+    // what its desk is on until the reopen lands is not this room's
+    // conversation, and if the reopen fails the record would keep that.
+    const agents = m.parts.filter((p) => !p.reopen).map((p) => p.agent);
+    const absent = [...m.absent, ...m.parts.filter((p) => p.reopen).map((p) => p.agent)];
+    post('./api/floor/meeting/participants', { id: m.id, agents, absent: absent.filter((a) => !agents.includes(a)) }).catch(() => {});
   }
 
   /** Put a desk in the room. `since` is where its part of the transcript starts; a new participant starts from now. */
-  async function meetingJoin(agent, { since = null, reopen = null, quiet = false } = {}) {
+  // `keep`: a desk from the room's record (a reload, a Resume) that is out
+  // in another window stays in the record for the next Resume.
+  async function meetingJoin(agent, { since = null, reopen = null, quiet = false, keep = false } = {}) {
     const m = ui.meeting;
     if (!m || m.parts.some((p) => p.agent === agent)) return true;
     const release = await takeDeskLock(m.channel, agent);
     if (!release) {
-      meetingNote(`${meetPersona(agent)} is in a window already — its own, or another meeting room — so it is not in this one.`, 'bad');
+      meetingMissed(agent, `${meetPersona(agent)} is in a window already — its own, or another meeting room — so it is not in this one.`, keep);
       return false;
     }
     const d = deskIn(m.channel, agent);
@@ -5231,6 +5292,7 @@
     };
     part.cursor = part.since;
     m.left = m.left.filter((p) => p.agent !== agent);
+    m.absent.delete(agent);
     m.parts.push(part);
     meetingAnnounce(part);
     if (!quiet) meetingNote(`${meetPersona(agent)} joined the meeting room.`);
@@ -5273,7 +5335,7 @@
         const got = await fetch(`./api/floor/sessions?${q}`).then((r) => r.json());
         if (got.rows?.length && (got.at !== before || !asked.asked)) {
           if (!got.rows.some((r) => r.id === step.session_id)) {
-            meetingNote(`${step.persona} was not reopened: its conversation is gone from its folder.`, 'bad');
+            meetingMissed(step.agent, `${step.persona} was not reopened: its conversation is gone from its folder.`, false);
             return;
           }
           break;
@@ -5285,11 +5347,13 @@
     try {
       await post('./api/floor/reopen', { channel: m.channel, agent: step.agent, session_id: step.session_id });
     } catch (err) {
-      meetingNote(`${step.persona} was not reopened: ${err.message ?? err}`, 'bad');
+      // The reopen route's own refusal: busy, an editor, a host offline —
+      // each may pass, so the desk is kept for the next Resume.
+      meetingMissed(step.agent, `${step.persona} was not reopened: ${err.message ?? err}`, true);
       return;
     }
     await meetingJoin(step.agent, {
-      since, quiet: true,
+      since, quiet: true, keep: true,
       reopen: { sessionId: step.session_id, from: step.from ?? null, since: Date.now(), base: d?.last_turn?.id ?? 0 },
     });
   }
@@ -5309,14 +5373,19 @@
     try {
       const got = await fetch(`./api/floor/turns?channel=${encodeURIComponent(ui.meeting.channel)}&agent=${encodeURIComponent(p.agent)}&since=${r.base}&limit=100`).then((x) => x.json());
       const err = (got.rows ?? []).find((t) => t.role === 'error');
-      if (err) { meetingRemove(p.agent, `${who} was not reopened: ${err.text}`); return; }
+      // Marked absent before it is removed: the remove saves the record,
+      // and the board keeps an absent desk only from the record it had.
+      if (err) { meetingMissed(p.agent, `${who} was not reopened: ${err.text}`, true); meetingRemove(p.agent, null); return; }
     } catch { /* asked again next poll */ }
     const real = !!sid && !String(sid).startsWith('host:');
     if (real && sid !== r.from) {
       meetingRemove(p.agent, `${who}'s conversation could not be opened, and its host opened another one instead, so it is not in this meeting room.`);
       return;
     }
-    if (Date.now() - r.since > MOVE_MS) meetingRemove(p.agent, `${who} was not back on its conversation after ${MOVE_MS / 1000}s, so it is not in this meeting room.`);
+    if (Date.now() - r.since > MOVE_MS) {
+      meetingMissed(p.agent, `${who} was not back on its conversation after ${MOVE_MS / 1000}s, so it is not in this meeting room.`, true);
+      meetingRemove(p.agent, null);
+    }
   }
 
   /** One participant's turns since the room last asked, under the conversation its desk is on. */
@@ -5354,7 +5423,7 @@
         s.returned = true;
         const box = $('p-text');
         if (box && s.fromBox) {
-          box.value = box.value.trim() ? `${s.text}\n\n${box.value}` : s.text;
+          box.value = box.value.trim() ? `${s.typed ?? s.text}\n\n${box.value}` : (s.typed ?? s.text);
           stashDraft();
         }
       }
@@ -5413,6 +5482,7 @@
     const m = ui.meeting = {
       id: spec.id, channel: spec.channel, phase: 'starting', error: null,
       parts: [], left: [], sends: [], notes: [], seq: 0, to: null, nodes: new Map(), room: null, sig: null,
+      absent: new Set(),   // kept in the record for the next Resume, though not in the room now
     };
     render();
     try {
@@ -5429,6 +5499,11 @@
       return;
     }
     try { history.replaceState(null, '', `${location.pathname}${meetingQuery({ id: m.id })}`); } catch { /* only for a reload */ }
+    // A reload sends its end with keepalive as the page goes, and that can
+    // land after this window's open. The touch finds the room ended and opens
+    // it again — soon, rather than at the first 30 s touch, so containment
+    // is off for two seconds at most.
+    setTimeout(meetingTouch, 2000);
     try { window.name = meetingName(m.id); } catch { /* not ours to name */ }
     document.title = `Meeting room · ${m.channel}`;
     // What is out in other windows, before any desk is taken: the popouts
@@ -5439,14 +5514,20 @@
     m.phase = 'joining';
     render();
     const outs = outsNow(ui.outs, Date.now());
+    // A reload brings back who was in the room, and leaves a desk the
+    // record holds as absent where it was: absent, for the next Resume.
+    // Resume tries every one.
+    if (!spec.resume) for (const p of m.room.participants) if (p.absent) m.absent.add(p.agent);
     const steps = spec.resume
       ? meetingResumePlan(m.room, floor.channels, outs)
-      : m.room.participants.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent), act: 'join' }));
+      : m.room.participants.filter((p) => !p.absent).map((p) => ({ agent: p.agent, persona: meetPersona(p.agent), act: 'join' }));
     const since = new Map(m.room.participants.map((p) => [p.agent, Number.isInteger(p.since) ? p.since : null]));
     for (const step of steps) {
-      if (step.act === 'skip') meetingNote(`${step.persona} was not reopened: ${step.why}`, 'bad');
+      if (step.act === 'skip') meetingMissed(step.agent, `${step.persona} was not reopened: ${step.why}`, !!step.keep);
       else if (step.act === 'reopen') await meetingReopen(step, since.get(step.agent));
-      else await meetingJoin(step.agent, { since: since.get(step.agent), quiet: true });
+      // Kept absent when out elsewhere only for a room that existed before
+      // this window (a reload); a new room has no record to keep it in.
+      else await meetingJoin(step.agent, { since: since.get(step.agent), quiet: true, keep: !!spec.id });
     }
     if (spec.resume) meetingNote(`Resumed. ${m.parts.length ? `${m.parts.map((p) => meetPersona(p.agent)).join(', ')} ${m.parts.length === 1 ? 'is' : 'are'} here.` : 'Nobody could be reopened.'}`);
     m.phase = 'live';
@@ -5498,12 +5579,18 @@
     const text = typeof given === 'string' ? given : (box?.value ?? '');
     if (m?.phase !== 'live' || !text.trim() || !btn || btn.disabled) return;
     const inRoom = m.parts.map((p) => p.agent);
-    const to = meetingTo(inRoom, m.to);
+    // Names at the start of the box narrow this one message, and are not
+    // part of it (meetingMentions); the chips decide otherwise.
+    const named = typeof given === 'string' ? { to: null, text, unknown: [] }
+      : meetingMentions(text, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
+    if (named.unknown.length) { flash(btn, `nobody here is @${named.unknown[0]}`); return; }
+    if (named.to && !named.text.trim()) { flash(btn, 'nothing to send after the names'); return; }
+    const to = named.to ?? meetingTo(inRoom, m.to);
     if (!to.length) { flash(btn, 'nobody is chosen to hear it'); return; }
     const desks = to.map((a) => deskIn(m.channel, a)).filter(Boolean);
     const plan = nudgePlan(desks);
     const s = {
-      seq: ++m.seq, text, at: Date.now(), to, everyone: to.length === inRoom.length, fromBox: typeof given !== 'string',
+      seq: ++m.seq, text: named.text, typed: text, at: Date.now(), to, everyone: to.length === inRoom.length, fromBox: typeof given !== 'string',
       entries: [
         ...plan.send.map((e) => ({ ...e, state: 'line' })),
         ...plan.blocked.map((e) => ({ agent: e.agent, persona: e.persona, host: null, state: 'refused', words: e.reason })),
@@ -5516,7 +5603,7 @@
     let taken = 0;
     for (const e of s.entries.filter((x) => x.state === 'line')) {
       try {
-        await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text });
+        await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text: s.text });
         taken++;
         // A nudge rings the desk, here and on the floor, as the bell does.
         if (nudge) { ring(m.channel, e.agent); say({ t: 'rang', channel: m.channel, agent: e.agent }); }
@@ -5827,8 +5914,9 @@
         ${m.parts.map((p) => `<button type="button" class="chip m-to-one${to.includes(p.agent) ? ' on' : ''}" data-act="m-to" data-agent="${esc(p.agent)}" aria-pressed="${to.includes(p.agent)}" style="--m-c:${esc(meetColour(p.agent))};--m-h:${esc(meetHair(p.agent))}">${esc(meetPersona(p.agent))}</button>`).join('')}` : '';
     }
     const ta = $('p-text');
-    ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room…' : `Message ${to.map(meetPersona).join(', ')}…`;
-    wrap.querySelector('[data-act="send"]').disabled = !to.length || m.phase !== 'live';
+    ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room… (start with @name for some)' : `Message ${to.map(meetPersona).join(', ')}…`;
+    const named = meetingMentions(ta.value, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
+    wrap.querySelector('[data-act="send"]').disabled = !(named.to?.length || to.length) || m.phase !== 'live';
     const nudgeBtn = wrap.querySelector('[data-act="m-nudge-all"]');
     const nudgeChip = meetingNudgeChip(to.map((a) => deskIn(m.channel, a)).filter(Boolean), everyone);
     nudgeBtn.textContent = nudgeChip.text;
@@ -5836,6 +5924,8 @@
     nudgeBtn.disabled = nudgeChip.disabled || m.phase !== 'live';
     nudgeBtn.classList.toggle('waiting', nudgeChip.waiting);
     wrap.querySelector('.p-hint').textContent = !m.parts.length ? ''
+      : named.unknown.length ? `Nobody in this room is called @${named.unknown.join(', @')}.`
+      : named.to ? `Only ${named.to.map(meetPersona).join(', ')} ${named.to.length === 1 ? 'hears' : 'hear'} this one; the @names are not sent.`
       : !to.length ? 'Nobody is chosen to hear the next message.'
         : everyone ? `Everyone in the room hears this. Enter sends, Shift+Enter for a new line.`
           : `Only ${to.map(meetPersona).join(', ')} ${to.length === 1 ? 'hears' : 'hear'} this one; the next goes to everyone again.`;
@@ -6633,7 +6723,7 @@
           // between the click and the first draw cannot settle it early.
           const now = floor?.channels?.find((c) => c.channel === to.channel)
             ?.desks?.find((x) => x.agent === to.agent);
-          ui.answering = { channel: to.channel, agent: to.agent, request_id: form.dataset.request, since: Date.now(), turns: now?.turns ?? 0 };
+          ui.answering.set(`${to.channel}|${to.agent}`, { channel: to.channel, agent: to.agent, request_id: form.dataset.request, since: Date.now(), turns: now?.turns ?? 0 });
           render();
         } else {
           const body = await r.json().catch(() => ({}));
@@ -6864,6 +6954,8 @@
   }
 
   function toggleSelecting(channel) {
+    // What the last Meeting room click came to is about this selection.
+    meetSelNote.delete(channel);
     if (ui.select.has(channel)) ui.select.delete(channel);
     else {
       ui.select.set(channel, new Set());
@@ -6878,6 +6970,7 @@
   function toggleChecked(channel, agent) {
     const set = ui.select.get(channel);
     if (!set) return;
+    meetSelNote.delete(channel);
     if (set.has(agent)) set.delete(agent); else set.add(agent);
     render();
   }
@@ -7414,7 +7507,7 @@
   });
 
   document.addEventListener('input', (e) => {
-    if (e.target?.id === 'p-text') { stashDraft(); drawSlash(); }
+    if (e.target?.id === 'p-text') { stashDraft(); drawSlash(); if (ui.meeting?.phase === 'live') render(); }
     // Typing into a free-text choice is what turns it into an answer, so the
     // count under the form follows the words.
     const form = e.target?.classList?.contains('p-other') ? e.target.closest('.p-ask') : null;

@@ -1753,6 +1753,27 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   const { here, pane, path } = w;
   const opened = { note: w.note };
 
+  // A window that is asking something takes no message: a question form, a
+  // permission menu, a startup question. Its keys go to the prompt, not the
+  // composer, so the paste below never lands — and it used to try for 60 s
+  // (PASTE_TIMEOUT_MS) before saying so, holding every item behind it in
+  // run(). On 2026-11-05 that held an answer to the very question on screen
+  // until it aged out and was dropped, and the desk took no message for
+  // three minutes (#44 follow-up, costmo's report). Read first, refuse in a
+  // second, and type nothing. The board refuses the same message before it
+  // is queued (`asking` in src/floor.js); this is for a prompt that opened
+  // after it was.
+  {
+    const screen = await screenOf(pane.target, 40);
+    if (askingOf(screen) || startupQuestionOf(screen)) {
+      const onScreen = screen.split('\n').map((l) => l.replace(/\s+$/, '')).filter(Boolean).slice(-8).join(' / ');
+      return {
+        ok: false, code: 'asking', target: pane.target,
+        error: `the window is asking something, so nothing was typed. Answer it on the floor, then send this again. The window is showing: ${onScreen}`,
+      };
+    }
+  }
+
   // A working window is typed into, not waited for.
   //
   // This used to wait for the turn to end, on the grounds that "a message
@@ -2559,6 +2580,35 @@ async function reacted(target, before) {
  * whatever is there — which is how this repo's own driver put "2113" into the
  * operator's message and granted a standing permission nobody asked for.
  */
+/**
+ * Is the question an answer was written for still the one on screen?
+ *
+ * The host drops an answer that waited longer than ANSWER_TTL_MS
+ * (host/index.js) — but its age can be the host's own doing: run() takes
+ * work one item at a time, and an item ahead of it can take a minute. So an
+ * old answer is still pressed when its question is visibly still there:
+ * the window is asking, and the screen shows one of the form's headers, or
+ * every choice of its first question (`asks`, sent by the board with the
+ * answer). The choices are the fallback because a form taller than its pane
+ * loses its header row first (CLAUDE.md, "A question on the floor"). A
+ * different question in its place matches neither, and is not answered
+ * with keys meant for another.
+ */
+export function askedStill(screen, asks) {
+  if (!askingOf(screen)) return false;
+  const s = String(screen ?? '');
+  if ((asks?.headers ?? []).some((h) => typeof h === 'string' && h && s.includes(h))) return true;
+  const options = (asks?.options ?? []).filter((o) => typeof o === 'string' && o);
+  return options.length > 0 && options.every((o) => s.includes(o));
+}
+
+/** askedStill, against the desk's own window now. */
+export async function stillAsking(cwd, asks) {
+  const pane = await paneFor(cwd);
+  if (!pane) return false;
+  return askedStill(await screenOf(pane.target, 60), asks);
+}
+
 export async function answerQuestion(cwd, steps = []) {
   const pane = await paneFor(cwd);
   if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo', done: [] };

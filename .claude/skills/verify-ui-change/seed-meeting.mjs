@@ -32,7 +32,11 @@
  * A control file (`--ctl`, JSON, re-read on each poll) lets a check change
  * the board between steps without SQL of its own: { "session": { "bo":
  * "sess-bo-new" } } puts bo on another conversation (a /clear), the way the
- * host would report it.
+ * host would report it. `gone: [ids]` leaves those conversations out of
+ * the sessions list (Resume sees them gone), `slow: { bo: 4000 }` holds a
+ * desk's recording that long (the room's "in line" note), and
+ * `reopenFail: ["bo"]` answers a reopen with the host's error, as a busy
+ * window does.
  */
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
@@ -137,7 +141,7 @@ async function handle(item) {
       await events([{ type: 'delivery', channel, agent, state: 'queued', text }]);
       await sleep(1500);
     } else {
-      await sleep(250);
+      await sleep(Number(ctl().slow?.[agent]) || 250);
     }
     await events([turn(channel, agent, 'user', text)]);
     await sleep(600);
@@ -151,6 +155,10 @@ async function handle(item) {
     await events([{ type: 'sessions', channel, agent, at: new Date().toISOString(), rows }]);
   } else if (kind === 'reopen') {
     await sleep(400);
+    if ((ctl().reopenFail ?? []).includes(agent)) {
+      await events([{ type: 'error', channel, agent, code: 'reopen_failed', message: 'not reopened — the window is still working: ✻ Working… (esc to interrupt)' }]);
+      return;
+    }
     await events([{ type: 'session', channel, agent, session_id: payload?.session_id ?? `sess-${agent}-fresh` }]);
   }
 }

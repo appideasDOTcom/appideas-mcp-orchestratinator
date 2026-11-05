@@ -27,6 +27,6 @@ ORCH_CDP_PORT=$CDP node --experimental-websocket .claude/skills/verify-ui-change
 kill $SEED $SRV 2>/dev/null; wait $SEED $SRV 2>/dev/null
 pkill -f "remote-debugging-port=$CDP( |\$)" 2>/dev/null
 for _ in $(seq 1 40); do taken "$CDP" json/version || break; sleep 0.25; done
-grep -qE '^(PASS|FAIL · [0-9]+ red)' "$S/out.txt" || { echo "-- THE CHECK DID NOT FINISH; its stderr:"; tail -5 "$S/check.err"; rc=3; }
+grep -qE '^(PASS|FAIL) · ' "$S/out.txt" || { echo "-- THE CHECK DID NOT FINISH; its stderr:"; tail -5 "$S/check.err"; rc=3; }
 echo "-- exit $rc · fixture logs and shots in $S"
 exit $rc

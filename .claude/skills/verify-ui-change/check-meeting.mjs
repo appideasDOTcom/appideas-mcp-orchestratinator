@@ -23,7 +23,9 @@ const KEY = 'k';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let fails = 0;
+let total = 0;
 const ok = (cond, msg, extra = '') => {
+  total++;
   console.log(`  ${cond ? '✓' : '✗'} ${msg}${cond || !extra ? '' : `  (${extra})`}`);
   if (!cond) fails++;
 };
@@ -80,7 +82,15 @@ ok(await m.evalJs(`getComputedStyle(document.querySelector('.topbar')).display =
 ok(!/old answer|old question/.test(await text(m, '#p-turns')), 'the transcript starts now: nothing a desk said before it joined');
 ok(workSince(w0).length === 0, 'opening the room typed into nobody');
 
+const selSum = () => floor.evalJs(`document.querySelector('svg.room.selecting .selSum')?.textContent ?? null`);
+ok(/meeting room: bo, cy, dee/.test(await selSum() ?? ''), 'the toolbar\'s line says what the click came to', await selSum());
+
 console.log('\nthe floor while the desks are in it');
+await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
+await sleep(300);
+await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
+await floor.waitFor(`!!document.querySelector('svg.room.selecting')`);
+ok(!/meeting room:/.test(await selSum() ?? ''), 'and forgets it when the selection is done with — it is not left on the line', await selSum());
 await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
 await sleep(300);
 await openOnFloor(floor, 'bo');
@@ -92,6 +102,9 @@ ok((await text(floor, '#floor-totals')) === totalsBefore, 'and the floor\'s coun
 console.log('\none message, everyone, delivered desk by desk');
 w0 = work().length;
 await say(m, 'hello room');
+const delivText = `[...document.querySelectorAll('#p-turns .m-msg .m-deliv')].map((n) => n.textContent).join('|')`;
+ok(await m.waitFor(`/Cy queued — the desk is working/.test(${delivText})`, { timeout: 3000, every: 50 }).then(() => true, () => false),
+  "while Cy's window holds it, Cy's line says so: queued — the desk is working");
 await m.waitFor(`[...document.querySelectorAll('#p-turns .t-assistant')].length >= 3`, { timeout: 10000 }).catch(() => {});
 let msg = await msgNode(m, 'hello room');
 ok(msg && /you → everyone \(Bo, Cy, Dee\)/i.test(msg.who), 'the message says who it went to', JSON.stringify(msg));
@@ -149,6 +162,29 @@ ok(msg && /you → Bo$/i.test(msg.who.trim()) && msg.delivs.join('|') === 'Bo de
 await sleep(1500);
 ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.agent)) === '["bo"]', 'and only Bo\'s host was handed it');
 ok(await m.evalJs(`document.querySelector('.m-to [data-act="m-to-all"]').classList.contains('on')`), 'the next message goes to everyone again');
+
+console.log('\nin line, and narrowed by name');
+writeFileSync(CTL, JSON.stringify({ slow: { bo: 4000 } }));
+await say(m, 'line up');
+ok(await m.waitFor(`/Dee in line — \\d+ desks? ahead on testbox/.test(${delivText})`, { timeout: 3000, every: 50 }).then(() => true, () => false),
+  'a desk behind another on its host says so: in line — N ahead, and no silence clock runs on it');
+await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === 'line up'); return n && n.querySelectorAll('.m-deliv.ok').length === 3; })()`, { timeout: 12000 }).catch(() => {});
+ok((await msgNode(m, 'line up'))?.delivs.every((d) => /delivered$/.test(d)), 'and each is delivered when its turn comes');
+writeFileSync(CTL, '{}');
+await m.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = '@bo hi'; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+ok(await text(m, '.p-hint') === 'Only Bo hears this one; the @names are not sent.', 'names at the start of the box narrow it, and the hint says so', await text(m, '.p-hint'));
+w0 = work().length;
+await say(m, '@cy, @Dee  just you two');
+await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === 'just you two'); return n && n.querySelectorAll('.m-deliv.ok').length === 2; })()`, { timeout: 8000 }).catch(() => {});
+msg = await msgNode(m, 'just you two');
+ok(msg && /you → Cy, Dee$/.test(msg.who.trim()), '"@cy, @Dee …" goes to Cy and Dee (an id or a name, any case)', JSON.stringify(msg));
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => [x.agent, x.payload.text]).sort()) === '[["cy","just you two"],["dee","just you two"]]',
+  'and they receive the words without the names');
+w0 = work().length;
+await say(m, '@zed hello');
+await sleep(800);
+ok(await m.evalJs(`document.querySelector('#p-text').value`) === '@zed hello' && !workSince(w0).length, 'a name that is nobody in the room sends nothing, and the words stay in the box');
+await m.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
 
 console.log('\na desk that cannot take it is said, never skipped');
 const addable = await m.evalJs(`JSON.stringify([...document.querySelectorAll('.m-add option')].map((o) => o.value).filter(Boolean))`).then(JSON.parse);
@@ -212,22 +248,32 @@ ok(msg?.delivs.join('|') === "Bo /compact — done in bo's window" && !msg.pendi
 console.log('\na question form, answered in the room');
 const { spawn } = await import('node:child_process');
 const formSeed = spawn('node', [new URL('./seed-form.mjs', import.meta.url).pathname, base, '--channel', 'lab', '--host', 'h-form'], { stdio: 'ignore' });
-await m.waitFor(`[...document.querySelectorAll('.m-add option')].some((o) => o.value === 'typist')`, { timeout: 12000 }).catch(() => {});
-await m.evalJs(`(() => { const s = document.querySelector('.m-add'); s.value = 'typist'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
-await m.waitFor(`!!document.querySelector('.m-alert[data-for-agent="typist"] .p-ask')`, { timeout: 10000 }).catch(() => {});
+const formSeed2 = spawn('node', [new URL('./seed-form.mjs', import.meta.url).pathname, base, '--channel', 'lab', '--host', 'h-form2', '--agent', 'typist2'], { stdio: 'ignore' });
+for (const a of ['typist', 'typist2']) {
+  await m.waitFor(`[...document.querySelectorAll('.m-add option')].some((o) => o.value === '${a}')`, { timeout: 12000 }).catch(() => {});
+  await m.evalJs(`(() => { const s = document.querySelector('.m-add'); s.value = '${a}'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+  await m.waitFor(`!!document.querySelector('.m-alert[data-for-agent="${a}"] .p-ask')`, { timeout: 10000 }).catch(() => {});
+}
 ok(await m.evalJs(`!!document.querySelector('.m-alert[data-for-agent="typist"] .p-ask .p-q')`), 'Typist\'s form is drawn in the room, in its own box');
-await m.evalJs(`(() => {
-  const f = document.querySelector('.m-alert[data-for-agent="typist"] .p-ask');
-  for (const q of f.querySelectorAll('.p-q')) { const i = q.querySelector('input:not([data-other="1"])'); i.checked = true; i.dispatchEvent(new Event('change', { bubbles: true })); }
-  return 1; })()`);
+for (const a of ['typist', 'typist2']) {
+  await m.evalJs(`(() => {
+    const f = document.querySelector('.m-alert[data-for-agent="${a}"] .p-ask');
+    for (const q of f.querySelectorAll('.p-q')) { const i = q.querySelector('input:not([data-other="1"])'); i.checked = true; i.dispatchEvent(new Event('change', { bubbles: true })); }
+    return 1; })()`);
+}
 await m.click('.m-alert[data-for-agent="typist"] [data-act="ask-submit"]');
-await m.waitFor(`/sending your answers/.test(document.querySelector('.m-alert[data-for-agent="typist"]')?.textContent ?? '')`, { timeout: 5000 }).catch(() => {});
+await m.click('.m-alert[data-for-agent="typist2"] [data-act="ask-submit"]');
+await m.waitFor(`['typist', 'typist2'].every((a) => /sending your answers/.test(document.querySelector('.m-alert[data-for-agent="' + a + '"]')?.textContent ?? ''))`, { timeout: 5000 }).catch(() => {});
+ok(await m.evalJs(`['typist', 'typist2'].every((a) => /sending your answers/.test(document.querySelector('.m-alert[data-for-agent="' + a + '"]')?.textContent ?? ''))`),
+  'two forms answered back to back each keep their own spinner');
 const answered = await fetch(`${base}/api/host/work?host_id=h-form&wait=0`, { headers: { 'x-orchestratinator-key': KEY } }).then((r) => r.json());
 const ans = (answered.work ?? []).find((x) => x.kind === 'answer');
 ok(ans?.agent === 'typist' && ans?.channel === 'lab', 'Submit sends Typist\'s answers to Typist\'s window', JSON.stringify((answered.work ?? []).map((x) => [x.kind, x.agent])));
 await m.shot(`${shots}/meeting-form.png`, null, { scale: 1 });
 await m.click('.m-part[data-for-agent="typist"] [data-act="m-remove"]');
+await m.click('.m-part[data-for-agent="typist2"] [data-act="m-remove"]');
 formSeed.kill();
+formSeed2.kill();
 
 console.log('\nRemove, and Bring back from the floor');
 await m.click('.m-part[data-for-agent="dee"] [data-act="m-remove"]');
@@ -239,6 +285,14 @@ await openOnFloor(floor, 'dee');
 await floor.waitFor(`!!document.querySelector('#floor-panel #p-text')`, { timeout: 5000 }).catch(() => {});
 fp = await floorPanel(floor);
 ok(fp.composer && !fp.back, 'Dee\'s own chat works on the floor again', JSON.stringify(fp));
+await floor.press('#floor-panel [data-act="detach"]');
+const deePop = await attach((u) => u.includes('popout=1') && u.includes('agent=dee'));
+const offered = (a) => m.evalJs(`[...document.querySelectorAll('.m-add option')].some((o) => o.value === '${a}')`);
+await m.waitFor(`![...document.querySelectorAll('.m-add option')].some((o) => o.value === 'dee')`, { timeout: 5000 }).catch(() => {});
+ok(!(await offered('dee')), 'a desk out in its own popout is not offered by Add: one place at a time (Decided 3)');
+await deePop.close();
+await m.waitFor(`[...document.querySelectorAll('.m-add option')].some((o) => o.value === 'dee')`, { timeout: 8000 }).catch(() => {});
+ok(await offered('dee'), 'and is offered again once its popout is closed');
 await openOnFloor(floor, 'cy');
 await floor.waitFor(`!!document.querySelector('#floor-panel [data-act="bring-back"]')`, { timeout: 5000 });
 await floor.click('#floor-panel [data-act="bring-back"]');
@@ -258,6 +312,16 @@ await openOnFloor(floor, 'bo');
 await floor.waitFor(`!!document.querySelector('#floor-panel [data-act="bring-back"]')`, { timeout: 5000 }).catch(() => {});
 ok(!(await floorPanel(floor)).composer, 'and Bo is still out of the floor\'s panel');
 
+console.log('\na second room cannot take a desk this one holds');
+const other = await open({ base: `${base}/?meeting=new&channel=lab&agents=bo,dee` });
+await other.waitFor(`/is in a window already/.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 15000 }).catch(() => {});
+ok(JSON.stringify(await parts(other)) === '["dee"]' && /Bo is in a window already/.test(await text(other, '#p-turns')),
+  'opened on Bo and Dee, it takes Dee and says why it has no Bo: the lock is held here', JSON.stringify(await parts(other)));
+ok(JSON.stringify(await parts(m)) === '["bo","ed"]', 'and this room still has Bo');
+await other.click('[data-act="m-end"]');
+await sleep(800);
+await other.close().catch(() => {});
+
 console.log('\nEnd meeting');
 const totalsMid = await text(floor, '#floor-totals');
 await m.click('[data-act="m-end"]');
@@ -275,12 +339,17 @@ await floor.waitFor(`(() => { return true; })()`);
 await sleep(3500);
 await floor.click('[data-act="meetings"]');
 await floor.waitFor(`!!document.querySelector('.meet-row')`, { timeout: 5000 });
-const row = await floor.evalJs(`JSON.stringify([...document.querySelectorAll('.meet-row')].map((r) => r.innerText))`).then(JSON.parse);
-ok(row.length === 1 && /Bo, Ed/.test(row[0]) && /lab/.test(row[0]) && /ended/.test(row[0]), 'one entry: its participants, its floor, when it ended', JSON.stringify(row));
+// Both rooms ended within a second, and the list's order is updated_at at
+// second resolution, then id: this room is found by its id, not its place.
+const rowOf = (id) => `[...document.querySelectorAll('.meet-row')].find((r) => r.querySelector('[data-id="${id}"]'))`;
+const allRows = await floor.evalJs(`document.querySelectorAll('.meet-row').length`);
+const row = [await floor.evalJs(`${rowOf(roomId)}?.innerText ?? ''`)];
+ok(allRows === 2 && /Bo, Ed/.test(row[0]) && /lab/.test(row[0]) && /ended/.test(row[0]),
+  'this room is listed with its participants, its floor and when it ended, beside the second room', JSON.stringify(row));
 ok(/Bo · sess-bo/.test(row[0]), 'with the conversation each was on as it ended', row[0]);
 await floor.shot(`${shots}/meeting-recent.png`, null, { scale: 1 });
 w0 = work().length;
-await floor.press('.meet-row [data-do="meeting-resume"]');
+await floor.press(`.meet-row [data-do="meeting-resume"][data-id="${roomId}"]`);
 m = await attach(isMeeting);
 await m.resize(760, 980);
 await m.waitFor(`/Resumed\\./.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 20000 }).catch(() => {});
@@ -300,8 +369,58 @@ await sleep(1500);
 await openOnFloor(floor, 'bo');
 await floor.waitFor(`!!document.querySelector('#floor-panel #p-text')`, { timeout: 6000 }).catch(() => {});
 ok((await floorPanel(floor)).composer, 'Bo is back on the floor when the window is closed');
-const rooms = await (await fetch(`${base}/api/floor/meetings`)).json();
-ok(rooms.rows.length === 1 && !!rooms.rows[0].ended_at, 'the board has the room as ended, still one entry after a resume', JSON.stringify(rooms.rows.map((r) => [r.id, r.ended_at])));
+const roomA = async () => (await (await fetch(`${base}/api/floor/meetings`)).json()).rows.filter((r) => r.id === roomId);
+let rec = await roomA();
+ok(rec.length === 1 && !!rec[0].ended_at, 'the board has the room as ended, one entry still after a resume', JSON.stringify(rec.map((r) => [r.id, r.ended_at])));
+ok(JSON.stringify(rec[0].participants.map((p) => [p.agent, !!p.absent])) === '[["bo",false],["ed",true]]',
+  'Ed, not reopened because an editor held it, is kept in the room for the next Resume, marked absent', JSON.stringify(rec[0].participants));
 
-console.log(fails ? `\nFAIL · ${fails} red` : '\nPASS');
+// Resume, again, against each way a desk can fail to come back. The fixture
+// moves Bo to a new conversation before each, so each Resume has to reopen it.
+const resumeAgain = async (ctlNow, before = async () => {}) => {
+  writeFileSync(CTL, JSON.stringify(ctlNow));
+  await before();
+  await sleep(3500);
+  await floor.click('[data-act="meetings"]');
+  await floor.waitFor(`!!document.querySelector('.meet-row')`, { timeout: 5000 });
+  const rowNow = await floor.evalJs(`${rowOf(roomId)}?.innerText ?? ''`);
+  w0 = work().length;
+  await floor.press(`.meet-row [data-do="meeting-resume"][data-id="${roomId}"]`);
+  const r = await attach(isMeeting);
+  await r.waitFor(`/Resumed\\./.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 25000 }).catch(() => {});
+  return { r, rowNow };
+};
+console.log('\nResume: a busy window');
+let rs = await resumeAgain({ session: { bo: 'sess-bo-x2' } },
+  () => hostEv([{ type: 'turn', channel: 'lab', agent: 'bo', session_id: 'sess-bo', role: 'tool', tool_name: 'Bash', tool_input: { command: 'make' }, at: new Date().toISOString(), uuid: 'busy-1' }]));
+ok(/Ed · sess-ed · not back last time/.test(rs.rowNow), 'the Recent list says which desk did not come back last time', rs.rowNow);
+let notes = await text(rs.r, '#p-turns');
+ok(/Bo was not reopened: bo is working[^.]*\..*It stays in this room for the next Resume\./s.test(notes), 'Bo, mid-turn, is not reopened, in the reopen route\'s words, and kept for next time', notes);
+ok(!workSince(w0).some((x) => x.kind === 'reopen'), 'and nothing was sent to its window');
+await rs.r.close();
+await sleep(1500);
+console.log('\nResume: the host refuses the reopen');
+rs = await resumeAgain({ session: { bo: 'sess-bo-x3' }, reopenFail: ['bo'] },
+  () => hostEv([{ type: 'turn', channel: 'lab', agent: 'bo', session_id: 'sess-bo', role: 'assistant', text: 'done with make', at: new Date().toISOString(), uuid: 'busy-2' }]));
+await rs.r.waitFor(`/Bo was not reopened: not reopened — the window is still working/.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 12000 }).catch(() => {});
+notes = await text(rs.r, '#p-turns');
+ok(/Bo was not reopened: not reopened — the window is still working/.test(notes), 'the host\'s refusal, read off its error turn, is said in its words', notes);
+ok(JSON.stringify(await parts(rs.r)) === '[]', 'and the desk is not left in the room on the wrong conversation');
+await rs.r.close();
+await sleep(1500);
+rec = await roomA();
+ok(JSON.stringify(rec[0].participants.map((p) => [p.agent, !!p.absent, p.session_id])) === '[["bo",true,"sess-bo"],["ed",true,"sess-ed"]]',
+  'both are kept, each with the conversation it had in the room — not the one its desk is on now', JSON.stringify(rec[0].participants));
+console.log('\nResume: a conversation gone from disk');
+rs = await resumeAgain({ session: { bo: 'sess-bo-x4' }, gone: ['sess-bo'] });
+notes = await text(rs.r, '#p-turns');
+ok(/Bo was not reopened: its conversation is gone from its folder\.(?! It stays)/.test(notes), 'Bo, whose conversation is gone, is said so — and not kept, since that will not pass', notes);
+ok(!workSince(w0).some((x) => x.kind === 'reopen'), 'its window was not touched: the host\'s list was asked first');
+await rs.r.close();
+await sleep(1500);
+rec = await roomA();
+ok(JSON.stringify(rec[0].participants.map((p) => p.agent)) === '["ed"]', 'the record keeps Ed only', JSON.stringify(rec[0].participants));
+
+// The verdict mutate-in-a-copy's runners read: `PASS · N of N` / `FAIL · M of N red`.
+console.log(fails ? `\nFAIL · ${fails} of ${total} red` : `\nPASS · ${total} of ${total}`);
 process.exit(fails ? 1 : 0);
