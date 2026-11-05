@@ -11,6 +11,8 @@
  *                             messages to it are refused, in the board's words
  *   lab2/zed                  another floor, so Add offers nothing from it
  *
+ * And mail on the board: two unread messages for bo, one for cy.
+ *
  * The host long-polls its work and answers it the way host/index.js does,
  * as events, printing every item it was handed as one JSON line on stdout
  * — which is how a check reads what the page actually sent, desk by desk:
@@ -71,6 +73,13 @@ DESKS.forEach((d, i) => {
   ).run(d.channel, d.agent, HOST, `/repo/${d.agent}`, d.editor ? null : `${d.agent}-window`, d.editor ?? null, `sess-${d.agent}`);
 });
 setInterval(() => db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`).run(HOST), 2000);
+
+// The agents talking among themselves on the board: two messages waiting for
+// bo, one for cy — what a nudge is for. Stored as tools.js stores a body.
+const put = db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES ('lab', ?, ?, ?)`);
+put.run('cy', 'bo', JSON.stringify('bo, the build went red after your merge'));
+put.run('dee', 'bo', JSON.stringify('bo, lint is failing too'));
+put.run('bo', 'cy', JSON.stringify('cy, the contract for /api/x changed'));
 
 const sessionOf = (channel, agent) => db.prepare(`SELECT sdk_session_id FROM hosted_desks WHERE channel = ? AND agent = ?`).get(channel, agent)?.sdk_session_id;
 let uuid = 0;

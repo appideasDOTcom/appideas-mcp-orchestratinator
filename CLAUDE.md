@@ -944,6 +944,19 @@ things behind it each look like they could be done more simply:
   original addressing was the old window's and is gone, so an old message
   reads `you → Bo` there.
 
+**A nudge is needed when a participant has unread mail on the board, and
+the room says so** (costmo, on the first preview: "no indication that a
+nudge is needed, nor is there any way to nudge"). Each participant is two
+rows: its name, state and ✕, then its badges. The badges are the desk's
+own `signPills` (✉ unread, ☰ assigned, ☑ claimed), each opening the floor's
+dialog through `openPill`, so Mark all read, read to here, reassign and
+Nudge agent are the backlog dialog's. Then its bell, the floor's `strike()`,
+which now returns the board's refusal so the room can say it in the
+transcript, having no drawn bell to put it on. Then its stop sign.
+**Nudge** beside Send is "nudge all": it nudges whoever the To chips
+choose, with the unread count in its label (`meetingNudgeChip`), as one
+room message with each desk's delivery under it.
+
 Left out on purpose. **Model and effort controls**: a desk's select drives
 its window's picker, so a room would need one per desk; `/model sonnet`
 narrowed to one desk takes the same route. **A reading view**: History

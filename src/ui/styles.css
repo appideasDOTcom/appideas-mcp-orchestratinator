@@ -1823,7 +1823,7 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .m-parts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
 .m-empty { font-size: 12px; }
 .m-part {
-  display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 8px;
+  display: inline-flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 4px 5px 5px 8px;
   border: 1px solid var(--border); border-left: 4px solid var(--m-c); border-radius: 8px;
   font-size: 12px; background: var(--surface);
 }
@@ -1862,3 +1862,16 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 /* Recent meeting rooms: each row a room, and its Resume. */
 .meet-row { position: relative; padding-right: 96px; cursor: default; }
 .meet-row .meet-resume { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
+/* A participant's waiting messages and its bell (issue #44, follow-up): the
+   desk's own pills and the floor's bell, on the room's row. Unread is what a
+   nudge is for, so it is the one that stands out. */
+.m-pill { font: 11px var(--mono); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); cursor: pointer; }
+.m-pill:hover { border-color: var(--accent); color: var(--accent); }
+.m-pill-unread { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-weight: 600; }
+.m-part.has-unread { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); border-left-color: var(--m-c); }
+.m-bell .m-bellGlyph { width: 12px; height: 12px; fill: currentColor; display: block; }
+.m-nudge-all.waiting { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* A participant is two rows: its name, state and ✕, then its badges. */
+.m-row { display: flex; align-items: center; gap: 6px; }
+.m-row-name .m-remove { margin-left: auto; }
+.m-row-badges { gap: 5px; min-height: 22px; }

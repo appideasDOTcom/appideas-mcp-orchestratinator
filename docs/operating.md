@@ -218,7 +218,11 @@ goes to everyone in the room unless you narrow it with the chips over the box;
 the next one goes to everyone again. Each desk's delivery shows under your
 message on its own: sending, queued, delivered, or not sent with the board's
 reason (an editor holding it, a host offline). The desks never hear each other
-through the room. A desk's question forms, permission prompts, Stop and
+through the room. Under each desk's name are its badges: unread messages
+waiting for it on the board, its tasks (each opens the same dialog as on the
+floor, with Mark all read and Nudge agent), a bell to nudge that desk, and
+its stop sign. **Nudge** beside Send nudges whoever the chips choose,
+everyone by default, and says how many unread messages are waiting for them. A desk's question forms, permission prompts, Stop and
 slash-command receipts are answered in the room, each in a box labelled with
 its desk. **Add a desk** offers the floor's other desks that are not in a
 window already; **✕** on a desk, or **Bring back from the meeting room** in

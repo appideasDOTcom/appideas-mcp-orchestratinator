@@ -1436,9 +1436,12 @@
    * the ring against a chat panel that showed nothing. The ring says "sent";
    * the amber bubble is what says "the desk has it".
    */
+  // Returns the board's words when it refused, so a caller with no drawn
+  // bell to put them on (a meeting room's participant, issue #44) can say
+  // them; null when the nudge went.
   async function strike(channel, agent) {
     const k = ringKey(channel, agent);
-    if (ringingSince(k)) return;              // already pealing; the click is rejected
+    if (ringingSince(k)) return null;         // already pealing; the click is rejected
     try {
       const r = await fetch('./api/floor/chat', {
         method: 'POST',
@@ -1462,9 +1465,10 @@
           if (tip && was != null) tip.textContent = was;
         }, REFUSED_MS);
       }
-      return;
+      return String(err.message ?? err);
     }
     window.floorNudged(channel, agent, NUDGE_WORD);
+    return null;
   }
 
   /** Start a peal on a desk, whoever asked for it. */
@@ -4739,6 +4743,33 @@
     });
   }
 
+  /**
+   * The room's Nudge button: the word typed into whoever the To chips
+   * choose, in nudgePlan's order, the way a selecting room's Nudge does it.
+   * Its label carries the unread count, which is the whole of "a nudge is
+   * needed": messages waiting on the board for a desk that has not read
+   * them (`board.unread`, the number the floor's ✉ pill shows). Desks that
+   * cannot be nudged are named on hover with the board's reason.
+   */
+  function meetingNudgeChip(desks, everyone) {
+    const plan = nudgePlan(desks);
+    const waiting = desks.filter((d) => (d.board?.unread ?? 0) > 0);
+    const n = waiting.reduce((sum, d) => sum + d.board.unread, 0);
+    const who = everyone && desks.length > 1 ? 'everyone' : desks.map((d) => d.persona).join(', ');
+    return {
+      text: `Nudge ${who || 'nobody'}${n ? ` · ${n} unread` : ''}`,
+      title: [
+        plan.send.length
+          ? `Types “nudge” into ${plural(plan.send.length, 'desk')}: each goes and reads what is waiting for it on the board.`
+          : 'Nobody chosen can be nudged.',
+        ...waiting.map((d) => `${d.persona}: ${plural(d.board.unread, 'unread message')}`),
+        ...plan.blocked.map((b) => `Can't nudge ${b.persona}: ${b.reason}`),
+      ].join('\n'),
+      disabled: !plan.send.length,
+      waiting: n > 0,
+    };
+  }
+
   /** Who a room message goes to: everyone in the room, or the ones chosen for this one message (Decided 2). */
   const meetingTo = (inRoom, chosen) => (chosen ? inRoom.filter((a) => chosen.has(a)) : [...inRoom]);
 
@@ -5442,7 +5473,7 @@
    * own words and the rest sent anyway. The words leave the box once any
    * desk has them; who hears goes back to everyone for the next message.
    */
-  async function sendMeeting(given = null) {
+  async function sendMeeting(given = null, { nudge = false } = {}) {
     const m = ui.meeting;
     const box = $('p-text');
     const btn = document.querySelector('#floor-panel [data-act="send"]');
@@ -5469,6 +5500,8 @@
       try {
         await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text });
         taken++;
+        // A nudge rings the desk, here and on the floor, as the bell does.
+        if (nudge) { ring(m.channel, e.agent); say({ t: 'rang', channel: m.channel, agent: e.agent }); }
       } catch (err) {
         e.state = 'refused';
         e.words = String(err.message ?? err);
@@ -5590,6 +5623,7 @@
         <div class="p-slash hidden" role="listbox"></div>
         <div class="p-actions">
           <span class="muted p-hint"></span>
+          <button class="btn m-nudge-all" data-act="m-nudge-all"></button>
           <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="${PROMPT_BOX}" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
@@ -5703,18 +5737,35 @@
     const parts = m.parts.map((p) => {
       const d = deskIn(m.channel, p.agent);
       const st = d ? deskState(d) : 'away';
-      return { p, d, st, word: p.reopen ? 'reopening…' : MEET_STATE_WORD[st] ?? st, stop: stopBlock(d) };
+      return {
+        p, d, st, word: p.reopen ? 'reopening…' : MEET_STATE_WORD[st] ?? st, stop: stopBlock(d),
+        pills: d ? signPills(d) : [], nudge: d?.nudge ?? null,
+      };
     });
-    const partsSig = JSON.stringify(parts.map((x) => [x.p.agent, x.d?.persona, x.d?.shirt, x.st, x.word, x.stop]));
+    const partsSig = JSON.stringify(parts.map((x) => [x.p.agent, x.d?.persona, x.d?.shirt, x.st, x.word, x.stop, x.pills, x.nudge]));
     if (partsEl.dataset.sig !== partsSig) {
       partsEl.dataset.sig = partsSig;
-      partsEl.innerHTML = parts.length ? parts.map(({ p, d, st, word, stop }) => `
-        <span class="m-part s-${esc(st)}" role="listitem" data-for-channel="${esc(m.channel)}" data-for-agent="${esc(p.agent)}" style="--m-c:${esc(d?.shirt ?? 'var(--muted)')}">
-          <span class="m-swatch" aria-hidden="true"></span>
+      // Two rows (costmo): the name, its state and the way out, then the
+      // desk's badges. The badges are the desk's own pills — unread,
+      // assigned, claimed — its bell and its stop sign:
+      // what the floor draws on the desk, so a participant's waiting
+      // messages and the way to nudge it are on the room's row too. A pill
+      // opens the floor's own dialog (openPill), the bell is the floor's
+      // own strike().
+      const bellTitle = (who, n) => (!n?.ok ? `Can't nudge ${who}: ${n?.reason ?? 'nothing is known about this desk yet'}`
+        : n.opens ? `Nudge ${who} — opens its window first, resuming its conversation` : `Nudge ${who}: type “nudge” into its window`);
+      partsEl.innerHTML = parts.length ? parts.map(({ p, d, st, word, stop, pills, nudge }) => `
+        <span class="m-part s-${esc(st)}${pills.some((x) => x.act === 'unread') ? ' has-unread' : ''}" role="listitem" data-for-channel="${esc(m.channel)}" data-for-agent="${esc(p.agent)}" style="--m-c:${esc(d?.shirt ?? 'var(--muted)')}">
+          <span class="m-row m-row-name">
           <b>${esc(d?.persona ?? p.agent)}</b>
           <span class="m-state">${esc(word)}</span>
-          <button class="btn stopbtn m-stop" data-act="stop" ${stop ? 'disabled' : ''} title="${esc(stop ?? `Stop ${d?.persona ?? p.agent}`)}" aria-label="${esc(stop ? `Cannot stop ${d?.persona ?? p.agent}` : `Stop ${d?.persona ?? p.agent}`)}"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
           <button class="btn m-remove" data-act="m-remove" title="Take ${esc(d?.persona ?? p.agent)} out of the meeting room: back on the floor, its own chat working there again" aria-label="Remove ${esc(d?.persona ?? p.agent)} from the meeting room">✕</button>
+          </span>
+          <span class="m-row m-row-badges">
+          ${pills.map((x) => `<button type="button" class="m-pill m-pill-${esc(x.cls)}" data-act="m-pill" data-which="${esc(x.act)}" data-kind="${esc(x.kind ?? '')}" title="${esc(x.title)}">${esc(x.mark)} ${x.n}</button>`).join('')}
+          <button class="btn m-bell" data-act="m-nudge" ${nudge?.ok ? '' : 'disabled'} title="${esc(bellTitle(d?.persona ?? p.agent, nudge))}" aria-label="${esc(bellTitle(d?.persona ?? p.agent, nudge))}"><svg class="m-bellGlyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2a.9.9 0 0 1 .9.9v.5a4.2 4.2 0 0 1 3.3 4.1v2.6l1.1 1.4v.8H2.7v-.8l1.1-1.4V7.7a4.2 4.2 0 0 1 3.3-4.1v-.5a.9.9 0 0 1 .9-.9zM6.6 13.3h2.8a1.4 1.4 0 0 1-2.8 0z"/></svg></button>
+          <button class="btn stopbtn m-stop" data-act="stop" ${stop ? 'disabled' : ''} title="${esc(stop ?? `Stop ${d?.persona ?? p.agent}`)}" aria-label="${esc(stop ? `Cannot stop ${d?.persona ?? p.agent}` : `Stop ${d?.persona ?? p.agent}`)}"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
+          </span>
         </span>`).join('') : '<span class="muted m-empty">Nobody is in this meeting room. Add a desk from the floor, or end it.</span>';
     }
 
@@ -5755,6 +5806,12 @@
     const ta = $('p-text');
     ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room…' : `Message ${to.map(meetPersona).join(', ')}…`;
     wrap.querySelector('[data-act="send"]').disabled = !to.length || m.phase !== 'live';
+    const nudgeBtn = wrap.querySelector('[data-act="m-nudge-all"]');
+    const nudgeChip = meetingNudgeChip(to.map((a) => deskIn(m.channel, a)).filter(Boolean), everyone);
+    nudgeBtn.textContent = nudgeChip.text;
+    nudgeBtn.title = nudgeChip.title;
+    nudgeBtn.disabled = nudgeChip.disabled || m.phase !== 'live';
+    nudgeBtn.classList.toggle('waiting', nudgeChip.waiting);
     wrap.querySelector('.p-hint').textContent = !m.parts.length ? ''
       : !to.length ? 'Nobody is chosen to hear the next message.'
         : everyone ? `Everyone in the room hears this. Enter sends, Shift+Enter for a new line.`
@@ -6432,15 +6489,7 @@
       // how one button comes to mean two things depending on where it was
       // clicked. If the board half is not there, fall back to opening the desk
       // rather than swallowing the click silently.
-      const dlg = which === 'unread' ? window.backlogDialog : window.taskDialog;
-      // The third argument tells the task dialog which pill was pressed, so it
-      // shows claims or assignments rather than both under one heading. The
-      // backlog dialog is told the newest message this pill was drawn from,
-      // so a board copy older than the pill is read again before it opens
-      // (issue #23 Decided 5, backlogBehind in app.js).
-      if (typeof dlg !== 'function') openDesk(channel, agent);
-      else if (which === 'unread') dlg(channel, agent, roomOf(channel)?.desks.find((x) => x.agent === agent)?.board?.unread_max_id ?? null);
-      else dlg(channel, agent, pill.dataset.kind ?? null);
+      if (!openPill(channel, agent, which, pill.dataset.kind ?? null)) openDesk(channel, agent);
       return;
     }
 
@@ -6479,6 +6528,20 @@
       window.close();
     } else if (act.dataset.act === 'm-end') {
       endMeeting();
+    } else if (act.dataset.act === 'm-pill') {
+      const to = targetOf(act);
+      if (to) openPill(to.channel, to.agent, act.dataset.which, act.dataset.kind || null);
+    } else if (act.dataset.act === 'm-nudge') {
+      // The floor's bell, for one participant. A refusal is said in the
+      // room: there is no drawn bell here to show it on.
+      const to = targetOf(act);
+      if (!to || act.disabled) return;
+      act.disabled = true;
+      const why = await strike(to.channel, to.agent);
+      if (why) meetingNote(`${meetPersona(to.agent)} was not nudged: ${why}`, 'bad');
+      render();
+    } else if (act.dataset.act === 'm-nudge-all') {
+      if (!act.disabled) await sendMeeting(NUDGE_WORD, { nudge: true });
     } else if (act.dataset.act === 'm-remove') {
       const to = targetOf(act);
       if (to) meetingRemove(to.agent, `${meetPersona(to.agent)} went back to the floor.`);
@@ -6707,6 +6770,25 @@
     }
   });
 
+
+  /**
+   * A desk's pill, pressed: its backlog (Mark all read, read to here,
+   * reassign, Nudge agent) or its tasks, in app.js's own dialogs. One
+   * function for the floor's pills and a meeting room's (issue #44), so a
+   * pill means one thing wherever it is clicked. The third argument tells
+   * the task dialog which pill was pressed, so it shows claims or
+   * assignments rather than both under one heading. The backlog dialog is
+   * told the newest message this pill was drawn from, so a board copy older
+   * than the pill is read again before it opens (issue #23 Decided 5,
+   * backlogBehind in app.js). False when the board half is not loaded.
+   */
+  function openPill(channel, agent, which, kind = null) {
+    const dlg = which === 'unread' ? window.backlogDialog : window.taskDialog;
+    if (typeof dlg !== 'function') return false;
+    if (which === 'unread') dlg(channel, agent, roomOf(channel)?.desks.find((x) => x.agent === agent)?.board?.unread_max_id ?? null);
+    else dlg(channel, agent, kind);
+    return true;
+  }
 
   /** A short note on the send button, then back to normal. */
   /**
@@ -7032,7 +7114,10 @@
     // the desk on the floor too: one desk, one ring, wherever it was struck.
     const out = isOut(channel, agent);
     if (out) say({ t: 'nudged', channel, agent, text, bulk, rec: bulk ? ui.bulk.get(channel)?.nudge ?? null : null });
-    else if (ui.popout && tell) say({ t: 'rang', channel, agent });
+    else if ((ui.popout || ui.meeting) && tell) say({ t: 'rang', channel, agent });
+    // In a meeting room, a participant's pending line is drawn in the
+    // room's transcript (its bell, or Nudge agent in its backlog dialog).
+    if (ui.meeting) meetingNudged(agent, text);
     if (!out && ui.open && ui.open.channel === channel && ui.open.agent === agent) {
       ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(bulk ? { bulk: true } : {}) }]);
       ui.stick = true;

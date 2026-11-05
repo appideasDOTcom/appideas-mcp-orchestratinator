@@ -104,6 +104,34 @@ ok(sent.length === 3 && new Set(sent.map((x) => x.agent)).size === 3 && sent.eve
 ok(await m.evalJs(`document.querySelector('#p-text').value === ''`), 'the box is empty after the send');
 await m.shot(`${shots}/meeting-sent.png`, null, { scale: 1 });
 
+console.log('\na nudge needed, and given');
+const pills = (agent) => m.evalJs(`JSON.stringify([...document.querySelectorAll('.m-part[data-for-agent="${agent}"] .m-pill')].map((n) => n.textContent.trim()))`).then(JSON.parse);
+ok(JSON.stringify(await pills('bo')) === '["✉ 2"]' && JSON.stringify(await pills('cy')) === '["✉ 1"]' && JSON.stringify(await pills('dee')) === '[]',
+  'each participant carries its unread count, as its desk does', JSON.stringify([await pills('bo'), await pills('cy'), await pills('dee')]));
+const nudgeLabel = () => m.evalJs(`document.querySelector('[data-act="m-nudge-all"]').textContent`);
+ok(await nudgeLabel() === 'Nudge everyone · 3 unread', 'the Nudge button says a nudge is needed', await nudgeLabel());
+w0 = work().length;
+await m.click('.m-part[data-for-agent="cy"] [data-act="m-nudge"]');
+await sleep(1500);
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => [x.agent, x.payload.text])) === '[["cy","nudge"]]', "Cy's bell nudges Cy alone");
+await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === 'nudge'); return n && /delivered/.test(n.textContent); })()`, { timeout: 8000 }).catch(() => {});
+msg = await msgNode(m, 'nudge');
+ok(msg && /you → Cy$/.test(msg.who.trim()) && msg.delivs.join('|') === 'Cy delivered', 'and the room shows it, delivered', JSON.stringify(msg));
+await m.click('.m-part[data-for-agent="bo"] [data-act="m-pill"]');
+await m.waitFor(`document.querySelector('#dlg')?.open && !!document.querySelector('#dlg [data-do="advance"]')`, { timeout: 6000 }).catch(() => {});
+ok(await m.evalJs(`!!document.querySelector('#dlg [data-do="nudge"]') && !!document.querySelector('#dlg [data-do="advance"]')`),
+  "Bo's ✉ opens the floor's own backlog dialog, here: Nudge agent, Mark all read");
+await m.click('#dlg [data-do="advance"]');
+await m.waitFor(`!document.querySelector('.m-part[data-for-agent="bo"] .m-pill')`, { timeout: 8000 }).catch(() => {});
+ok(JSON.stringify(await pills('bo')) === '[]', "Mark all read clears Bo's count in the room");
+ok(await nudgeLabel() === 'Nudge everyone · 1 unread', 'and the Nudge button follows', await nudgeLabel());
+w0 = work().length;
+await m.click('[data-act="m-nudge-all"]');
+await sleep(2000);
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.agent).sort()) === '["bo","cy","dee"]', 'Nudge everyone types the word into every desk in the room');
+const nudges = await m.evalJs(`[...document.querySelectorAll('#p-turns .m-msg')].filter((x) => x.querySelector('.t-body')?.textContent === 'nudge').length`);
+ok(nudges === 2, 'as one message in the transcript, not one per desk', String(nudges));
+
 console.log('\nnarrowed to one desk, for one message');
 await m.click('.m-to [data-act="m-to"][data-agent="cy"]');
 await m.click('.m-to [data-act="m-to"][data-agent="dee"]');

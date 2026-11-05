@@ -325,14 +325,16 @@ first cut of Hide desk failed here and not in the suite.
 
 Issue #44 (0.12.0): several desks of one floor in one window.
 [`seed-meeting.mjs`](seed-meeting.mjs) is the floor *and* its host: `lab`
-has bo, cy, dee (live), ed (held by an editor) and `lab2` has zed. As host
+has bo, cy, dee (live), ed (held by an editor) and `lab2` has zed, with
+two unread board messages for bo and one for cy. As host
 it records each chat as the desk's user turn and answers it, cy saying
 `queued` first. It answers a `/command` with a `receipt`, `sessions` with
 the desk's conversations, and `reopen` by moving the desk's session. It
 prints every work item as a JSON line, which is how the check reads who
 was sent what. A `--ctl` file moves a desk's session between steps.
 [`check-meeting.mjs`](check-meeting.mjs) drives create, the floor while
-desks are out, send to everyone, narrowing, a refusal, a permission
+desks are out, send to everyone, a nudge (the unread badges, one desk's
+bell, the backlog dialog's Mark all read, Nudge everyone), narrowing, a refusal, a permission
 prompt, Stop, a command receipt, a question form, Remove, Bring back, a
 reload, End, the Recent list, Resume and close, about a minute and a half:
 

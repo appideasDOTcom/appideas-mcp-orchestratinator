@@ -3318,7 +3318,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, meetingNudgeChip, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -3384,6 +3384,16 @@ try {
     eq(plan1({ agent: 'bo', persona: 'Bo', hosted: H({ held: 'editor' }) }, P('bo')).act, 'skip', 'held by an editor: not taken');
     eq(pg.meetingResumePlan(roomOf([P('bo'), P('cy')]), chans([{ agent: 'bo', persona: 'Bo', hosted: H() }]), new Set()).map((s) => s.act), ['join', 'skip'],
       'one desk that cannot be reopened does not stop the rest');
+
+    const U = (agent, unread, nudge = { ok: true, host: 'h' }) => ({ ...D(agent, { nudge }), board: { unread } });
+    let nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 1), U('dee', 0)], true);
+    eq([nc.text, nc.disabled, nc.waiting], ['Nudge everyone · 3 unread', false, true], 'the room\'s Nudge says a nudge is needed: the unread waiting for its recipients');
+    assert(/Bo: 2 unread messages/.test(nc.title) && /Cy: 1 unread message$/m.test(nc.title), 'and whose, on hover');
+    nc = pg.meetingNudgeChip([U('bo', 0)], false);
+    eq([nc.text, nc.waiting], ['Nudge Bo', false], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' })], false);
+    eq(nc.disabled, true, 'a desk the board will not nudge is not offered');
+    assert(/Can't nudge Ed: held by your editor/.test(nc.title), 'and says why');
 
     eq([pg.meetingTo(['a', 'b'], null), pg.meetingTo(['a', 'b'], new Set(['b', 'z']))], [['a', 'b'], ['b']], 'everyone by default; narrowed, only desks still in the room');
     eq([pg.meetingToLine(['a', 'b'], true, (x) => x.toUpperCase()), pg.meetingToLine(['a'], true, (x) => x)], ['everyone (A, B)', 'a'], 'the line over a message names who heard it');
