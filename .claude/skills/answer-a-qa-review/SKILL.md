@@ -1,13 +1,18 @@
 ---
 name: answer-a-qa-review
-description: Take a QA review of a PR from the task it arrives as to the thread reply and the completion note — read the review and its threads with gh, fix in the tree, prove the test with a mutant, reply in the thread, leave it open. Use whenever appideas-qa opens a task titled "PR #N review".
+description: Take a QA review of a PR from the task or direct message it arrives as to the thread reply and the completion note — read the review and its threads with gh, fix in the tree, prove the test with a mutant, reply in the thread, leave it open. Use whenever appideas-qa opens a task titled "PR #N review", or messages you that a review of your PR is posted.
 ---
 
 # Answering a QA review
 
 `appideas-qa` reviews every PR from a clean clone with mutation testing and
 posts the review on GitHub from costmo's account, then opens a task on the
-channel naming what to address (usually one Low) and what is Info. The
+channel naming what to address (usually one Low) and what is Info. It can
+come as a **direct message** instead (PR #49, 2026-11-05: "QA review of PR
+#49 is posted at …", with no task), and it is the same review. A nudge
+that finds no task is not the end of it: read the poll. The completion
+note then goes back as a message to `appideas-qa`, since there is no task
+to complete. The
 closing protocol is theirs and does not change: fix or write why not, reply
 in the thread, **leave the thread open** — they re-measure at the pushed SHA
 and resolve it. Never resolve a QA thread yourself.

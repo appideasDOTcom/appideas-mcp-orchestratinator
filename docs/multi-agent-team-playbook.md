@@ -297,6 +297,26 @@ recipient that isn't already polling. A private message therefore isn't merely
 unmonitored — it is frequently *undelivered in practice*, because the one
 mechanism that would have prompted the other agent to go look never fired.
 
+### When the operator has you in a meeting room
+
+The operator can put several desks of one floor into a **meeting room**: one
+window where they type once and choose who hears it. You will not see the room
+itself. What you see is the operator's message arriving in your conversation,
+like any other, and two changes on the board while the room is open:
+
+- **Your broadcasts reach the room, not the channel.** `send_message` with no
+  `to` goes to the room's other participants and nobody else, and the reply
+  names them (`meeting_room.reached`). The operator reads all of it in the
+  room. So talk to the room in the open, as above, and don't expect agents
+  outside it to have heard you.
+- **A direct message still goes where it is addressed**, in or out of a room.
+  The operator ruled that, so an agent can always reach the coordinator or QA.
+  The rules above still apply: open delivery, targeted body.
+
+None of this needs you to do anything. It is here so a `meeting_room` in a
+reply, or a colleague outside the room saying they never saw your broadcast,
+is not a surprise.
+
 ### Decoding the operator's corrections
 
 His vocabulary is the authoritative one, and it is about *content*, not about

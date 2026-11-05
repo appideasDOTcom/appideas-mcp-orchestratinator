@@ -350,7 +350,10 @@ src/server.js` carries its port and DB in the environment, so a `ps | grep
 8951` kill matches nothing. On 2026-11-05 that left a server from the run
 before answering on the port, and check-select read a desk the last run
 had hidden as missing ("testing the twin" above). Kill what you started,
-by the PID you got when you started it.
+by the PID you got when you started it. To tell which throwaway server is
+which once they are running, read each one's environment:
+`ps eww -p <pid> | tr ' ' '\n' | grep -E '^(PORT|DB_PATH)='`. A QA page
+run or a `run-check-*.sh` may own one, so kill only yours.
 
 ### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
 

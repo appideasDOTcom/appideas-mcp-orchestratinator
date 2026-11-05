@@ -307,6 +307,38 @@ form still there after 8 s is logged "the form was not submitted"
 (`still_asking`) rather than "answered"; a report against an older host is
 read against that host's own log.
 
+## A desk that took nothing for minutes — read the host's line
+
+The report: red error turns on a desk, every message failing, an answer that
+"didn't take", until the operator opened the window and did it by hand.
+Before reading the pane or forming a theory, read the host's line. The host
+takes its work **one item at a time** (`run()`), so one slow item holds
+everything behind it, and `host_outbox` records when each item was queued and
+when it was taken:
+
+```bash
+docker compose exec -T orchestratinator node - <<'EOF'
+const db = new (require('better-sqlite3'))(process.env.DB_PATH, { readonly: true });
+for (const r of db.prepare(`SELECT id, kind, substr(payload,1,80) AS payload, created_at, taken_at FROM host_outbox
+    WHERE channel = ? AND agent = ? AND created_at > ? ORDER BY id`).all('<channel>', '<agent>', '2026-11-05 16:05')) console.log(JSON.stringify(r));
+EOF
+```
+
+A gap between `created_at` and `taken_at` is time the item sat behind the
+one before it, and the item before it is the culprit. Measured on
+2026-11-05 (#44 follow-up): three `chat` items, each taken at once and each
+held for 60 s. They were pasting into a window showing an AskUserQuestion,
+which takes no composer input ("pasted in 14 times over 60s"). The `answer`
+to that very form was queued 4 s after the first chat and taken 60 s later.
+At that age the host dropped it as "long gone", so the form never closed.
+Two cheap readings first ruled out the expensive theory, the board's and
+the host's clocks disagreeing: `date -u` beside `docker compose exec -T
+orchestratinator node -e 'console.log(new Date().toISOString())'` agreed to
+the second. Since then the board refuses a message to an asking desk
+(`askingWhy`), `send()` refuses in a second (`asking`), and an old answer
+is pressed while its question is still on screen (`askedStill`). A gap
+like this is now a new fault, not that one.
+
 ## Who held a conversation that is gone — after the fact
 
 The question in issue #24 (task 253): a reopen was refused "outside tmux
