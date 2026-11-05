@@ -5655,6 +5655,11 @@
 
   /** A participant's colour: its shirt, the one thing that tells two desks apart on the floor. */
   const meetColour = (agent) => deskIn(ui.meeting.channel, agent)?.shirt ?? 'var(--muted)';
+  /* And its hair, along the top of its box and its To chip (costmo, on the
+     preview: "if slightly" more to recognise it by; may be undone). The
+     payload's hair already falls back to DEFAULT_HAIR (src/palette.js), so
+     only a desk gone from the floor has none. */
+  const meetHair = (agent) => deskIn(ui.meeting.channel, agent)?.hair ?? 'var(--muted)';
 
   function meetingItemNode(it) {
     const m = ui.meeting;
@@ -5760,7 +5765,7 @@
         pills: d ? signPills(d) : [], nudge: d?.nudge ?? null,
       };
     });
-    const partsSig = JSON.stringify(parts.map((x) => [x.p.agent, x.d?.persona, x.d?.shirt, x.st, x.word, x.stop, x.pills, x.nudge]));
+    const partsSig = JSON.stringify(parts.map((x) => [x.p.agent, x.d?.persona, x.d?.shirt, x.d?.hair, x.st, x.word, x.stop, x.pills, x.nudge]));
     if (partsEl.dataset.sig !== partsSig) {
       partsEl.dataset.sig = partsSig;
       // Two rows (costmo): the name, its state and the way out, then the
@@ -5773,7 +5778,7 @@
       const bellTitle = (who, n) => (!n?.ok ? `Can't nudge ${who}: ${n?.reason ?? 'nothing is known about this desk yet'}`
         : n.opens ? `Nudge ${who} — opens its window first, resuming its conversation` : `Nudge ${who}: type “nudge” into its window`);
       partsEl.innerHTML = parts.length ? parts.map(({ p, d, st, word, stop, pills, nudge }) => `
-        <span class="m-part s-${esc(st)}${pills.some((x) => x.act === 'unread') ? ' has-unread' : ''}" role="listitem" data-for-channel="${esc(m.channel)}" data-for-agent="${esc(p.agent)}" style="--m-c:${esc(d?.shirt ?? 'var(--muted)')}">
+        <span class="m-part s-${esc(st)}${pills.some((x) => x.act === 'unread') ? ' has-unread' : ''}" role="listitem" data-for-channel="${esc(m.channel)}" data-for-agent="${esc(p.agent)}" style="--m-c:${esc(d?.shirt ?? 'var(--muted)')};--m-h:${esc(d?.hair ?? 'var(--muted)')}">
           <span class="m-row m-row-name">
           <b>${esc(d?.persona ?? p.agent)}</b>
           <span class="m-state">${esc(word)}</span>
@@ -5814,12 +5819,12 @@
     const to = meetingTo(m.parts.map((p) => p.agent), m.to);
     const everyone = to.length === m.parts.length;
     const toEl = wrap.querySelector('.m-to');
-    const toSig = JSON.stringify([m.parts.map((p) => [p.agent, meetPersona(p.agent)]), to]);
+    const toSig = JSON.stringify([m.parts.map((p) => [p.agent, meetPersona(p.agent), meetColour(p.agent), meetHair(p.agent)]), to]);
     if (toEl.dataset.sig !== toSig) {
       toEl.dataset.sig = toSig;
       toEl.innerHTML = m.parts.length ? `<span class="muted m-to-label">To</span>
         <button type="button" class="chip${everyone ? ' on' : ''}" data-act="m-to-all" aria-pressed="${everyone}">everyone</button>
-        ${m.parts.map((p) => `<button type="button" class="chip m-to-one${to.includes(p.agent) ? ' on' : ''}" data-act="m-to" data-agent="${esc(p.agent)}" aria-pressed="${to.includes(p.agent)}" style="--m-c:${esc(meetColour(p.agent))}">${esc(meetPersona(p.agent))}</button>`).join('')}` : '';
+        ${m.parts.map((p) => `<button type="button" class="chip m-to-one${to.includes(p.agent) ? ' on' : ''}" data-act="m-to" data-agent="${esc(p.agent)}" aria-pressed="${to.includes(p.agent)}" style="--m-c:${esc(meetColour(p.agent))};--m-h:${esc(meetHair(p.agent))}">${esc(meetPersona(p.agent))}</button>`).join('')}` : '';
     }
     const ta = $('p-text');
     ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room…' : `Message ${to.map(meetPersona).join(', ')}…`;

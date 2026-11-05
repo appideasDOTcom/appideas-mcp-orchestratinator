@@ -976,6 +976,13 @@ A touch that finds the room ended (a reload's end landing after its open)
 opens it again. The floor's envelopes for such a broadcast fly to the
 roommates only (`outMeeting` in flyEnvelope).
 
+A participant wears its desk's colours: its shirt down the left edge of
+its box, its turns and its To chip, and its hair across the top of the box
+and the chip (not the turns). The hair is costmo's call for recognition, "if
+slightly", and may be undone. The payload's hair already falls back to
+`DEFAULT_HAIR`. The unread and needs-you outlines colour every side, so the
+stylesheet puts the hair back on top after them.
+
 Left out on purpose. **Model and effort controls**: a desk's select drives
 its window's picker, so a room would need one per desk; `/model sonnet`
 narrowed to one desk takes the same route. **A reading view**: History

@@ -1875,3 +1875,8 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .m-row { display: flex; align-items: center; gap: 6px; }
 .m-row-name .m-remove { margin-left: auto; }
 .m-row-badges { gap: 5px; min-height: 22px; }
+/* Hair along the top of a participant's box and its To chip (costmo):
+   shirt down the side, hair across the top, as the desk wears them. */
+.m-part, .m-to .m-to-one { border-top: 3px solid var(--m-h, var(--border)); }
+/* The unread and needs-you outlines colour every side; the hair stays on top. */
+.m-part.has-unread, .m-part.s-needs-you { border-top-color: var(--m-h, var(--border)); }

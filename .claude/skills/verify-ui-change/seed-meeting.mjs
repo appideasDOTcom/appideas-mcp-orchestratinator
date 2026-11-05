@@ -74,6 +74,10 @@ DESKS.forEach((d, i) => {
 });
 setInterval(() => db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`).run(HOST), 2000);
 
+// Hair on two of them, so a check of the room's hair borders sees two
+// colours set and the default (dark brown, DEFAULT_HAIR) on the rest.
+db.prepare(`INSERT OR REPLACE INTO agent_profile (agent, hair) VALUES ('bo', '#d9a441'), ('cy', '#b1583a')`).run();
+
 // The agents talking among themselves on the board: two messages waiting for
 // bo, one for cy — what a nudge is for. Stored as tools.js stores a body.
 const put = db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES ('lab', ?, ?, ?)`);

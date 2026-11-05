@@ -108,6 +108,11 @@ console.log('\na nudge needed, and given');
 const pills = (agent) => m.evalJs(`JSON.stringify([...document.querySelectorAll('.m-part[data-for-agent="${agent}"] .m-pill')].map((n) => n.textContent.trim()))`).then(JSON.parse);
 ok(JSON.stringify(await pills('bo')) === '["✉ 2"]' && JSON.stringify(await pills('cy')) === '["✉ 1"]' && JSON.stringify(await pills('dee')) === '[]',
   'each participant carries its unread count, as its desk does', JSON.stringify([await pills('bo'), await pills('cy'), await pills('dee')]));
+const tops = await m.evalJs(`JSON.stringify(['bo', 'cy', 'dee'].map((a) => [
+  getComputedStyle(document.querySelector('.m-part[data-for-agent="' + a + '"]')).borderTopColor,
+  getComputedStyle(document.querySelector('.m-to [data-agent="' + a + '"]')).borderTopColor]))`).then(JSON.parse);
+ok(JSON.stringify(tops) === JSON.stringify([['rgb(217, 164, 65)', 'rgb(217, 164, 65)'], ['rgb(177, 88, 58)', 'rgb(177, 88, 58)'], ['rgb(90, 65, 48)', 'rgb(90, 65, 48)']]),
+  "each participant's box and To chip carry its hair across the top; one with none set carries the default", JSON.stringify(tops));
 const nudgeLabel = () => m.evalJs(`document.querySelector('[data-act="m-nudge-all"]').textContent`);
 ok(await nudgeLabel() === 'Nudge everyone · 3 unread', 'the Nudge button says a nudge is needed', await nudgeLabel());
 w0 = work().length;
