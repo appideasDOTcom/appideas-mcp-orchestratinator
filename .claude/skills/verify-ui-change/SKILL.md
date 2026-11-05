@@ -660,6 +660,20 @@ every poll writes nothing when nothing changed, and `data-upd` in the key
 is not pinned, because no update control ever stands where another one
 stood.
 
+**Known flake in the update dialog's row, not fixed** (QA's Low in msg
+2942 at 2ba600a, waiting on costmo's call). The row writes a fake newer
+commit into `ui.state.update`, and the page's own 2.5 s poll (`timer`
+in app.js) can land mid-press. The poll redraws from the real state,
+which wipes the fake commit, and the ✕ jumps 77 px after `follow` has
+measured it. Two of QA's equivalent mutants read 4 of 5 by chance (3 of 4
+runs and 1 of 4). QA's measured fix is `clearInterval(timer)` around the
+#40 rows, after which the head and both mutants passed 3 of 3. So a 4 of 5
+on that row whose per-press list shows a ✗ after the first press is this
+race, not the patch; rerun it before reading it as red. The rule
+generalizes: **a row that writes state into the page races the page's
+own poll**, so stop the poll for the row or redraw from state the poll
+also brings.
+
 Four things it taught:
 
 - **A move is a removal, for focus.** The first cut moved a keyed element
@@ -836,6 +850,47 @@ floor plus six popouts all live at once. Four things it taught:
 - **Headless ignores a popup's size.** The window comes up at 800×533
   whatever the features asked, so the check sets 440×980 with `resize()`
   before it takes a picture.
+
+### check-pop-foot.mjs — a wide popout's foot under the desk (issue #43)
+
+```bash
+PORT=8933 CDP=9273 .claude/skills/verify-ui-change/run-check-pop-foot.sh "$PWD"
+# … PASS, 27 ✓, about half a minute
+```
+
+Two seeded desks: bo is popped out, and cy is the floor's own panel. The
+check covers narrow (the foot is the composer's last part), wide (the foot
+in the desk's column, controls under the desk and links under them, every
+control inside the column, two rows of two, the desk still the floor's
+size, nothing under the Send row but padding), a desk redraw (one desk and
+one foot, still in the column), Sessions and Leave desk opening their
+dialogs from the column, wide and short at 1100×640 and 1100×520 (the desk
+gives way and the foot still fits), narrow again, and the floor's panel.
+Pictures: `pop-foot-wide.png`, `pop-foot-short.png`, `pop-foot-narrow.png`.
+Its reds were run, one per behavior. HEAD before #43 fails "the foot is in
+the desk's column". A mutant with `drawPopDesk` back on
+`slot.replaceChildren(svg)` fails "one desk, one foot", because the first
+redraw deletes the foot. When the foot is missing, the check stops at that
+assertion and does not crash on it.
+
+Its last section is the narrow, short popout's box (the #43 follow-up),
+at 500×760 and 440×640:
+- six lines grow it;
+- 26 lines take the transcript to 60px and then the desk, no further than
+  half, with the send row on the panel;
+- emptied, the box and the desk go back to where they were;
+- a drag takes the box to its room;
+- the dragged height survives a reload;
+- nothing redraws over 2 s of quiet.
+
+Its reds: HEAD before the follow-up fails six (55 → 55px everywhere, as
+reported). A mutant whose fitBox re-lays the desk on the box's height
+alone fails only the reload, desk 158px against 151, send row 6px off.
+Moving the probes from scratch into the check is what found that one.
+
+check-popout's "send row in the window" step now measures `.p-compose`,
+not `.p-foot`. When wide, the foot is in the left column and no longer
+stands for the send row.
 
 ## Driving the page
 

@@ -815,6 +815,17 @@ desk from that, again on the `storage` event, so a floor dragged wider
 grows every popout's desk with it. With no floor to read, the floor's
 widest is used. A popout wide enough to keep `POP_CHAT_MIN` (420 px) of chat
 beside the desk puts the desk in a column of its own (`pop-wide`).
+In that column the panel's foot stands under the desk (issue #43): the four controls, then the seat links, and the composer
+beside it is the box and the Send row alone. `popLayout` moves the
+`.p-foot` element there and back, so it stays one element. The other
+ways to do this break things that already work. A second copy of the
+foot gives every reader of the panel two of each control. CSS cannot
+take the foot out of `.p-compose` without `display: contents`, and a
+`display: contents` composer has no box, so `boxRoom`, which measures
+from the panel's last child, reads a room of nothing. `drawPopDesk`
+replaces only the desk's SVG, never the slot's children, because the
+foot lives in the slot. The floor's own panel and a narrow popout are
+untouched. `check-pop-foot.mjs` in **verify-ui-change** is the page.
 
 Where #13's chat box meets a popout: `boxRoom` measures against the
 panel's `max-height`, and a popout's panel has none, because it is the
@@ -824,6 +835,24 @@ that, 18 lines or a drag took the box to 1,123px and the send row out of
 the window at every size (`check-popout.mjs`, red at 440x980, 1100x760 and
 440x700). In a window too short for the desk at the floor's size, the desk
 gives way down to half (`popDeskScale`), never the send row.
+
+Over the chat (a narrow popout), the desk gives way to the box too
+(costmo, #43 follow-up, "Transcript, then desk"). The 140px transcript
+and a desk sized for a box at its starting height left a popout under
+~800px tall no room for the box. It sat at 55px, neither growing nor
+taking a drag, and that was so before #43. Now the narrow transcript
+keeps 60px, the floor's `BOX_TURNS_KEEP`. The box's room is its free
+room plus `ui.popSlack`, which is how much shorter the desk can still
+be drawn. popLayout leaves room for the box at `ui.boxDrawn`, so the box
+grows into the transcript first and then into the desk, down to
+`POP_DESK_MIN`. A drag moves the desk as it goes, on `pointermove`.
+fitBox hands back to popLayout when the box's height *or its free room*
+changes. The box's height alone was not enough: after a reload the
+meta line filled in after the desk was sized, and the send row stood 6px
+off the panel (`check-pop-foot.mjs`, red on that mutant). popLayout
+depends only on the parts that are not the desk, so its call back into
+fitBox finds both as it left them, and the two settle (the check counts
+redraws over 2 s of quiet).
 
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a
