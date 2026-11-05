@@ -359,6 +359,12 @@
     boxSig: null,
     boxPress: null,      // { el, before } between a pointerdown on the box and its release
     boxLoose: new Map(), // `${channel}|${agent}` -> px, for a desk with no session to file it under
+    // A narrow popout's desk gives way to the box (#43 follow-up): the
+    // height the box was last drawn at, which popLayout leaves room for, and
+    // how much shorter the desk can still be drawn, which fitBox may take.
+    boxDrawn: null,
+    popFree: null,       // the box's room without that slack, as fitBox last read it
+    popSlack: 0,
 
     sinceTurn: 0,
     lastActivityId: 0,
@@ -1107,7 +1113,13 @@
       set = ui.boxLoose.get(`${channel}|${agent}`) ?? null;
     }
     const { base, cap, border } = boxMetrics(ta);
-    const room = boxRoom(ta, wrap);
+    // In a narrow popout the desk above the chat gives way too, once the
+    // transcript is down to its least: its slack is part of the box's room,
+    // and popLayout draws it shorter to match whatever the box is drawn at.
+    // Without it a popout under ~800px tall left the box no room at all, so
+    // it neither grew nor took a drag (costmo, #43 follow-up).
+    const free = boxRoom(ta, wrap);
+    const room = free + (ui.popout ? ui.popSlack : 0);
     const sig = `${channel}|${agent}|${session}|${set}|${room}|${ta.clientWidth}|${ta.value}`;
     if (sig === ui.boxSig) return;
     ui.boxSig = sig;
@@ -1125,6 +1137,11 @@
     ta.style.maxHeight = Number.isFinite(room) ? `${Math.max(base, room)}px` : '';
     ta.scrollTop = top;
     if (stuck) turns.scrollTop = turns.scrollHeight;
+    // The desk is drawn for the box at this height and the rest of the panel
+    // as popLayout last measured it. Either changing (the meta line filled
+    // in after a reload left the send row 6px off the panel) draws it again;
+    // popLayout's own call back here then finds both as it left them.
+    if (ui.popout && (h !== ui.boxDrawn || free !== ui.popFree)) { ui.boxDrawn = h; ui.popFree = free; popLayout(); }
   }
 
   /** The end of a press on the box: if its height moved, the operator dragged
@@ -1151,6 +1168,15 @@
   }
   document.addEventListener('pointerdown', (e) => {
     if (e.target?.id === 'p-text' && e.button === 0) ui.boxPress = { el: e.target, before: e.target.offsetHeight };
+  }, true);
+  // A drag in a narrow popout moves the desk as it goes, so the send row
+  // stays on the panel while the box takes the desk's slack. fitBox is
+  // still out of the way (boxPress); popLayout only redraws the desk.
+  document.addEventListener('pointermove', () => {
+    const p = ui.boxPress;
+    if (!ui.popout || !p || p.el.offsetHeight === ui.boxDrawn) return;
+    ui.boxDrawn = p.el.offsetHeight;
+    popLayout();
   }, true);
   document.addEventListener('pointerup', endBoxPress, true);
   document.addEventListener('pointercancel', endBoxPress, true);
@@ -3272,6 +3298,9 @@
     // about the element going away.
     ui.boxSig = null;
     ui.boxPress = null;
+    ui.boxDrawn = null;
+    ui.popFree = null;
+    ui.popSlack = 0;
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
     delete wrap.dataset.ended;
@@ -4567,14 +4596,24 @@
       const head = height(wrap.querySelector('.p-head')) + height(wrap.querySelector('.p-meta')) + 2;
       // Beside the chat the desk has the panel's height under the header,
       // less the foot that now stands under it; over it, what the
-      // transcript's least and the composer at its smallest leave.
+      // transcript's least and the composer leave, with the box at the
+      // height fitBox last drew it (its starting size before that). So the
+      // box grows into the transcript first, down to its least, and then
+      // into the desk, down to POP_DESK_MIN.
+      const boxH = ta ? Math.max(boxMetrics(ta).base, ui.boxDrawn ?? 0) : 0;
       const avail = wide
         ? height(wrap) - head - slotPad - (foot ? height(foot) + (parseFloat(getComputedStyle(slot).rowGap) || 0) : 0)
         : height(wrap) - head - slotPad - (parseFloat(getComputedStyle(turns ?? wrap).minHeight) || 0)
-          - (height(compose) - (ta?.offsetHeight ?? 0) + (ta ? boxMetrics(ta).base : 0));
+          - (height(compose) - (ta?.offsetHeight ?? 0) + boxH);
       svg.style.width = `${Math.round(vb.width * popDeskScale(scale, vb.height, avail))}px`;
+      // How much shorter the desk can still be drawn: fitBox's room for the
+      // box over the chat. Beside it the desk is in a column of its own and
+      // gives the box nothing.
+      const drawn = height(svg);
+      ui.popSlack = wide ? 0 : Math.max(0, Math.floor(drawn - Math.min(drawn, vb.height * scale * POP_DESK_MIN)));
     } else {
       wrap?.classList.remove('pop-wide');
+      ui.popSlack = 0;
     }
     // The chat box's room changes with the layout (the desk above the chat
     // or beside it, and its size), and the box is fitted to its room (#13).

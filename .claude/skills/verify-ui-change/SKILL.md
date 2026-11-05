@@ -873,6 +873,21 @@ the desk's column". A mutant with `drawPopDesk` back on
 redraw deletes the foot. When the foot is missing, the check stops at that
 assertion and does not crash on it.
 
+Its last section is the narrow, short popout's box (the #43 follow-up),
+at 500×760 and 440×640:
+- six lines grow it;
+- 26 lines take the transcript to 60px and then the desk, no further than
+  half, with the send row on the panel;
+- emptied, the box and the desk go back to where they were;
+- a drag takes the box to its room;
+- the dragged height survives a reload;
+- nothing redraws over 2 s of quiet.
+
+Its reds: HEAD before the follow-up fails six (55 → 55px everywhere, as
+reported). A mutant whose fitBox re-lays the desk on the box's height
+alone fails only the reload, desk 158px against 151, send row 6px off.
+Moving the probes from scratch into the check is what found that one.
+
 check-popout's "send row in the window" step now measures `.p-compose`,
 not `.p-foot`. When wide, the foot is in the left column and no longer
 stands for the send row.

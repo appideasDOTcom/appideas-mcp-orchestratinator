@@ -47,7 +47,7 @@ await floor.resize(1500, 1000);
 await floor.click(`#floor-rooms .desk[data-agent="bo"] .deskHit`);
 await floor.waitFor(`document.querySelector('#floor-panel')?.dataset.agent === 'bo'`);
 await floor.press('#floor-panel [data-act="detach"]');
-const pop = await attach((u) => u.includes('popout=1') && u.includes('agent=bo'));
+let pop = await attach((u) => u.includes('popout=1') && u.includes('agent=bo'));
 await pop.waitFor(`document.querySelector('#floor-panel')?.dataset.agent === 'bo' && document.querySelector('.p-deskslot svg.popdesk')`);
 
 console.log('\nnarrow first: the foot is the composer’s, as before');
@@ -146,6 +146,59 @@ const nCtl = await box(pop, '.p-compose .p-desk');
 ok(nLinks.right <= nCtl.left && Math.abs(nLinks.top - nCtl.top) <= 2, 'links left, controls right, side by side, as before');
 ok(Math.abs((await box(pop, '#floor-panel .p-compose')).height - narrowCompose.height) <= 1, 'the composer is the height it was');
 await pop.shot(`${shots}/pop-foot-narrow.png`, null, { scale: 1 });
+
+console.log('\nnarrow and short: the box grows, the transcript gives way first, then the desk');
+{
+  // Under ~800px tall the desk and a 140px transcript used to take all the
+  // height: the box sat at 55px, neither growing nor taking a drag.
+  const state = () => pop.evalJs(`(() => { const r = (s) => document.querySelector(s).getBoundingClientRect(), t = document.querySelector('#p-text');
+    return JSON.stringify({ ta: t.offsetHeight, max: parseFloat(t.style.maxHeight), turns: Math.round(r('#p-turns').height), desk: Math.round(r('.p-deskslot svg').height),
+      fits: r('.p-compose').bottom <= r('#floor-panel').bottom + 0.5 }); })()`).then(JSON.parse);
+  const fill = async (n) => {
+    await pop.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); return 1; })()`);
+    for (let i = 0; i < n; i++) { await pop.type(`line ${i + 1}`); if (i < n - 1) await pop.key('Enter', { shift: true, text: '\r' }); }
+    await sleep(200);
+    return state();
+  };
+  const draft = await pop.evalJs(`document.querySelector('#p-text').value`);
+  await pop.resize(440, 980); await sleep(300);
+  const fullDesk = (await state()).desk;
+  for (const [w, h] of [[500, 760], [440, 640]]) {
+    await pop.resize(w, h); await sleep(400);
+    const empty = await fill(0);
+    const six = await fill(6);
+    const many = await fill(26);
+    const back = await fill(0);
+    ok(empty.ta === back.ta && six.ta > empty.ta + 40, `${w}x${h}: six lines grow the box (${empty.ta} → ${six.ta}px)`);
+    ok(many.ta > six.ta && many.turns <= 61 && many.desk < six.desk && many.desk >= Math.floor(fullDesk / 2) - 1 && many.fits,
+      `${w}x${h}: 26 lines take the transcript to its least and then the desk, not past half, send row on the panel`,
+      JSON.stringify({ six, many, fullDesk }));
+    ok(back.desk === empty.desk, `${w}x${h}: emptied, the box and the desk are as they were (${back.ta}px, desk ${back.desk}px)`);
+  }
+  await pop.resize(500, 760); await sleep(400);
+  await fill(0);
+  const b = await box(pop, '#p-text');
+  await pop.press({ x: b.right - 3, y: b.bottom - 3 }, { x: b.right - 3, y: b.bottom + 900 }, { steps: 10 });
+  await sleep(300);
+  const dragged = await state();
+  ok(dragged.ta > b.height + 150 && dragged.ta >= dragged.max - 1 && dragged.fits && dragged.desk >= Math.floor(fullDesk / 2) - 1,
+    `500x760: a drag takes the box to its room (${Math.round(b.height)} → ${dragged.ta}px), desk ${dragged.desk}px, send row on the panel`, JSON.stringify(dragged));
+  await pop.evalJs(`location.reload(); 1`).catch(() => {});
+  await sleep(1500);
+  pop = await attach((u) => u.includes('popout=1') && u.includes('agent=bo'));
+  await pop.waitFor(`document.querySelector('.p-deskslot svg.popdesk') && document.querySelector('#p-turns .t')`);
+  await sleep(500);
+  const reloaded = await state();
+  ok(Math.abs(reloaded.ta - dragged.ta) <= 2 && reloaded.fits, `and the dragged height is theirs after a reload (${reloaded.ta}px)`, JSON.stringify(reloaded));
+  // The desk and the box size each other: settled means neither moves
+  // while nothing changes. A loop between fitBox and popLayout would.
+  const moves = await pop.evalJs(`new Promise((res) => { let n = 0; const o = new MutationObserver((m) => { n += m.length; });
+    o.observe(document.querySelector('.p-deskslot'), { attributes: true, subtree: true, attributeFilter: ['style'] });
+    o.observe(document.querySelector('#p-text'), { attributes: true, attributeFilter: ['style'] });
+    setTimeout(() => { o.disconnect(); res(n); }, 2000); })`);
+  ok(moves === 0, `and settled: no desk or box redraw in 2 s of nothing changing (${moves})`);
+  await pop.evalJs(`(() => { const t = document.querySelector('#p-text'); t.value = ${JSON.stringify(draft)}; t.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+}
 
 console.log('\nthe floor’s own panel is untouched');
 await floor.click(`#floor-rooms .desk[data-agent="cy"] .deskHit`);

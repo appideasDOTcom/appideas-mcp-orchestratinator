@@ -836,6 +836,24 @@ the window at every size (`check-popout.mjs`, red at 440x980, 1100x760 and
 440x700). In a window too short for the desk at the floor's size, the desk
 gives way down to half (`popDeskScale`), never the send row.
 
+Over the chat (a narrow popout), the desk gives way to the box too
+(costmo, #43 follow-up, "Transcript, then desk"). The 140px transcript
+and a desk sized for a box at its starting height left a popout under
+~800px tall no room for the box. It sat at 55px, neither growing nor
+taking a drag, and that was so before #43. Now the narrow transcript
+keeps 60px, the floor's `BOX_TURNS_KEEP`. The box's room is its free
+room plus `ui.popSlack`, which is how much shorter the desk can still
+be drawn. popLayout leaves room for the box at `ui.boxDrawn`, so the box
+grows into the transcript first and then into the desk, down to
+`POP_DESK_MIN`. A drag moves the desk as it goes, on `pointermove`.
+fitBox hands back to popLayout when the box's height *or its free room*
+changes. The box's height alone was not enough: after a reload the
+meta line filled in after the desk was sized, and the send row stood 6px
+off the panel (`check-pop-foot.mjs`, red on that mutant). popLayout
+depends only on the parts that are not the desk, so its call back into
+fitBox finds both as it left them, and the two settle (the check counts
+redraws over 2 s of quiet).
+
 What a popout is not: a third seat (the conversation's process is
 unchanged; only the page holding its composer moves), and part of a
 room's selection (#23: selection is the floor's, and the popout's desk is
