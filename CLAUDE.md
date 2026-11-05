@@ -1432,7 +1432,12 @@ zsh, not an empty list: `rm -f "$D"/x.db*` with no such file aborts the
 whole `&&` chain behind it, so the server it was meant to start never ran
 and the next step read a dead port. Name the files (`x.db x.db-wal
 x.db-shm`). And a word starting with `=` is a command lookup, so `echo
-===` prints `== not found`.
+===` prints `== not found`. Two more from 2026-11-05. In an agent's shell,
+`grep` is a function that runs ugrep, which reads `-i'pat'` as a cluster of
+flags (`invalid argument -m=eeting`). Use `command grep -i -e "pat"`. Shell
+scripts are not affected, because `sh` does not load the function. And
+`md5` is not installed: a comparison of two `$(md5 -q …)` is two empty
+strings and always equal. Use `shasum`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
@@ -1469,7 +1474,12 @@ moment of the move, not to rerun again. **Third sighting, 2026-11-05**, the
 running beside it: the same assertion, the same two ids, one red only.
 `test:host` alone straight after was green. The session rows were not read
 — the meeting room work it was run for touches no host or session code —
-so the cue stands for the next one.
+so the cue stands for the next one. **Fourth, the same day**, in QA's
+re-review of PR #49 (dc6de34): red once in one of ten single-suite host runs
+(inversion R8, whose mutant was elsewhere), green in the other nine and in
+both full suites. Four sightings, each alone or under load, each green on
+the next run: the session rows at the moment of the move are still unread,
+and that is now overdue rather than next.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`

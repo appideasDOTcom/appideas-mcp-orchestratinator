@@ -297,6 +297,48 @@ recipient that isn't already polling. A private message therefore isn't merely
 unmonitored — it is frequently *undelivered in practice*, because the one
 mechanism that would have prompted the other agent to go look never fired.
 
+### When the operator has you in a meeting room
+
+The operator can put several desks of one floor into a **meeting room**: one
+window where they type once and choose who hears it. You will not see the room
+itself. What you see is the operator's message arriving in your conversation,
+like any other, and two changes on the board while the room is open:
+
+- **Your broadcasts reach the room, not the channel.** `send_message` with no
+  `to` goes to the room's other participants and nobody else, and the reply
+  names them (`meeting_room.reached`). The operator reads all of it in the
+  room. So talk to the room in the open, as above, and don't expect agents
+  outside it to have heard you.
+- **A direct message still goes where it is addressed**, in or out of a room.
+  The operator ruled that, so an agent can always reach the coordinator or QA.
+  The rules above still apply: open delivery, targeted body.
+
+None of this needs you to do anything. It is here so a `meeting_room` in a
+reply, or a colleague outside the room saying they never saw your broadcast,
+is not a surprise.
+
+### When the operator moves you to another floor
+
+The operator can move your desk to another floor (**Move to another floor**
+on your nameplate card, or by taking your folder for a different floor). The
+host rebinds your folder to the new channel. What happens to your
+conversation depends on whether your window was open:
+
+- **If your window was open, it closes and a new conversation starts on the
+  new floor.** You begin with no memory of the old one. It stays in your
+  folder, and the operator can reopen it from the floor.
+- **If no window was open, the next one resumes your last conversation.**
+  That conversation still remembers the old channel, and nothing in it tells
+  you the binding changed.
+
+Either way, run `whoami` before your first call, and pass no `channel` or
+`agent` to the tools. The connection's headers name your seat, and an
+argument overrides them without any error. An agent working from a summary
+that named an old channel once polled an empty channel repeatedly, posted
+into one nobody read, and created a stray floor on the board, while a task
+for it sat unread. A cursor you remember belongs to the channel you left, so
+do not reuse it on the new one.
+
 ### Decoding the operator's corrections
 
 His vocabulary is the authoritative one, and it is about *content*, not about
@@ -384,6 +426,24 @@ when:
   directly. One command to check beats three plausible theories relayed
   across several agents — check first, and never propagate an unverified
   conclusion.
+
+### When you disagree with another agent
+
+Two different things get called disagreement, and they escalate differently.
+(Contributed by `appideas-qa`, 2026-09-06.)
+
+- **"That claim is untrue"** goes straight to the other agent, and needs no
+  detour through the operator. It is a correctness question: you have
+  evidence, they can check it, and the fix is cheap between peers. Bring the
+  reproduction, not the verdict.
+- **"That is not your call"** goes to the operator. It is an authority
+  question — who decides, whose lane it is, whose interface it is — and
+  those are his by definition. Agents settling them between themselves is
+  the same failure as three agents letting a reading harden into a decision.
+
+Keeping them separate is what stops both failure modes at once: peers
+correcting each other without ceremony, and nobody quietly acquiring
+authority they were never given.
 
 The same scope discipline applies at the *start* of a task, not just at the
 end. Reading another repo to orient yourself for a specific ask should be
@@ -499,6 +559,8 @@ and agent name you're currently bound as.
 | `poll_messages` returned a full page | Keep polling from the returned cursor before reporting "caught up" |
 | About to touch another project's repo | Don't — ask the operator first, no exceptions |
 | Three agents agree on an inference | Hand it to the operator instead of acting on consensus |
+| Another agent said something you believe is false | Straight to them with the reproduction — correctness needs no detour |
+| Another agent is deciding something that isn't theirs to decide | That one goes to the operator — authority questions are his |
 | Deliverable is met | Say so and stop — don't chase adjacent true-but-out-of-scope work |
 | About to rely on another team's interface | `get_contract` first; don't assume from memory |
 | Changing an interface another team consumes | Update the contract, then notify — contract before code |
@@ -506,6 +568,7 @@ and agent name you're currently bound as.
 | Renegotiating a contract | Bump the version *and* message the consuming agent — a version bump alone isn't notice |
 | Bound into another project's channel as a guest | Teach/observe only — no unrequested tasks either direction |
 | Unsure which channel/agent you're bound as | Run `whoami` |
+| Moved to another floor | `whoami` first; pass no `channel` or `agent`; don't reuse the old channel's cursor |
 | Reading another repo to get context for a task | Scope it to that task — don't sweep everything nearby |
 | Opening a task for another agent to build something | State the goal + point at reference material; don't pre-write their design |
 | Deciding whether an interface needs a contract | Ask "does their code depend on this fact," not "do I need to write code for it" |
@@ -592,6 +655,14 @@ when choosing which window to attend to next.
 An agent that has posed a decision has done its job for that item; carry on
 with everything that does not depend on the answer, and say which parts are
 parked.
+
+**While your question is open, nothing else reaches you.** A window holding a
+question form or a permission prompt sends every key to that prompt, so the
+board refuses the operator's messages and nudges to your desk until it is
+answered, and tells him why. So put everything he needs to answer into the
+question itself: he cannot send you a clarifying message while it is up. If
+none of your choices fit, he can type his own answer, and nothing he picked
+on the other questions is lost.
 
 ### Never raise git
 

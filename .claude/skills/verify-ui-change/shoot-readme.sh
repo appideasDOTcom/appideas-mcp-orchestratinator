@@ -1,0 +1,55 @@
+#!/bin/sh
+# The README's five images, end to end, from a fresh fixture:
+#
+#   .claude/skills/verify-ui-change/shoot-readme.sh [repo] [--landing]
+#
+# Starts a throwaway server on :8906 with ./data/landing.db (the path the
+# page header prints, so never a home-directory path), the fixture, and the
+# host that answers the meeting room; runs landing-shot.mjs and
+# readme-shot.mjs; copies the five into docs/images under the README's
+# names; and tears everything down, its own Chrome included. With
+# --landing it also refreshes docs/review/landing/ from the same run.
+#
+# Its Chrome is on CDP 9273, never drive.mjs's default 9222: QA keeps a
+# Chrome on 9222, drive.mjs reuses whatever is on its port, and the teardown
+# kills by port. Run on 9222, this would shoot through QA's browser and then
+# kill it.
+#
+# Read the images afterwards; a green run proves only that every wait was met.
+set -u
+REPO=${1:-$PWD}
+LANDING=${2:-}
+cd "$REPO" || exit 1
+SK=.claude/skills/verify-ui-change
+OUT=$(mktemp -d "${TMPDIR:-/tmp}/readme-shots.XXXXXX")
+CDP=9273
+PIDS=""
+
+down() {
+  for p in $PIDS; do kill "$p" 2>/dev/null; done
+  pkill -f "remote-debugging-port=$CDP( |$)" 2>/dev/null
+  sleep 1
+  rm -f data/landing.db data/landing.db-wal data/landing.db-shm
+}
+trap down EXIT INT TERM
+
+rm -f data/landing.db data/landing.db-wal data/landing.db-shm
+PORT=8906 DB_PATH=./data/landing.db ORCH_AUTH_TOKEN=k node src/server.js > "$OUT/server.log" 2>&1 & PIDS="$PIDS $!"
+sleep 1.5
+node $SK/landing-seed.mjs > "$OUT/seed.log" 2>&1 & PIDS="$PIDS $!"
+node $SK/landing-host.mjs > "$OUT/host.log" 2>&1 & PIDS="$PIDS $!"
+sleep 6
+grep -q "heartbeat running" "$OUT/seed.log" || { echo "seed did not come up:"; tail -5 "$OUT/seed.log"; exit 1; }
+
+export ORCH_CDP_PORT=$CDP
+node --experimental-websocket $SK/landing-shot.mjs "$OUT" || { echo "landing-shot failed"; exit 1; }
+node --experimental-websocket $SK/readme-shot.mjs "$OUT" || { echo "readme-shot failed"; exit 1; }
+
+cp "$OUT/02-building.png" docs/images/building.png
+cp "$OUT/01-room-prompt.png" docs/images/room.png
+cp "$OUT/05-board-activity.png" docs/images/board.png
+cp "$OUT/meeting-room.png" "$OUT/popouts.png" docs/images/
+if [ "$LANDING" = "--landing" ]; then
+  cp "$OUT"/0[1-5]-*.png docs/review/landing/
+fi
+echo "wrote docs/images${LANDING:+ and docs/review/landing} (shots kept in $OUT)"

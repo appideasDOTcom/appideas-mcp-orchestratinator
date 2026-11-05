@@ -50,6 +50,20 @@ Then by hand, each time:
    table, a new route, a changed behaviour — and either update the fact or
    add a line under the nearest "honest limit" (issue #20 added one under
    "nothing is inferred from silence": an empty desk is not drawn).
+   **Read section 4 against the code on every re-anchor, whatever the
+   commit was for.** It is the page's privacy claim, and a feature can
+   falsify it without touching anything the file cites. Issue #40's update
+   check made "the server makes no outbound connections" false, and three
+   re-anchors went by before 2026-11-05 caught it. List every network call
+   and compare it with what section 4 names:
+
+   ```bash
+   command grep -rn "fetch(\|fetchImpl(\|https://\|'fetch'" src host plugin | command grep -v "^src/ui/"
+   ```
+
+   A destination the section does not name is a fact to add before
+   anything else in the file. `src/ui/` is left out because the page only
+   ever fetches its own origin.
 4. **Self-check**:
 
    ```bash
@@ -67,6 +81,12 @@ own commit (`67a1104` was one), and that commit carries QA's measurement of
 the code by identity — say "docs only, no code touched" so they know.
 
 ## What has gone wrong
+
+- **A line that repeats is always UNSURE** (2026-11-05): the seven tool
+  references in `src/tools.js` cite `server.tool(`, which occurs ten times,
+  so the script cannot pick one. Place each one by the tool name on the
+  line after it (`git show $NEW:src/tools.js | grep -n -A1 "server.tool("`).
+  They all move together whenever a tool above them grows.
 
 - **Re-anchored by hand with a regex** (2026-11-02): six references in list
   form (`src/floor.js:2244, 2269, …`) were missed; QA found them by reading.

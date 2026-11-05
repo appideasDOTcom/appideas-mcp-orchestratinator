@@ -350,7 +350,10 @@ src/server.js` carries its port and DB in the environment, so a `ps | grep
 8951` kill matches nothing. On 2026-11-05 that left a server from the run
 before answering on the port, and check-select read a desk the last run
 had hidden as missing ("testing the twin" above). Kill what you started,
-by the PID you got when you started it.
+by the PID you got when you started it. To tell which throwaway server is
+which once they are running, read each one's environment:
+`ps eww -p <pid> | tr ' ' '\n' | grep -E '^(PORT|DB_PATH)='`. A QA page
+run or a `run-check-*.sh` may own one, so kill only yours.
 
 ### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
 
@@ -1165,6 +1168,59 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 - **An open task backdated by `created_at` alone reads as "task reopened"**
   in the activity log — the query treats `updated_at > created_at` on an
   open task as a stale claim reopening. Move both.
+
+## Shooting the README images
+
+The README's five (`docs/images/`, 2026-11-05 at 0.12.1) are the landing
+captures plus two of their own, from one fresh seed. One command does all of
+it and tears down after itself (about 45 s):
+
+```bash
+.claude/skills/verify-ui-change/shoot-readme.sh "$PWD"             # docs/images
+.claude/skills/verify-ui-change/shoot-readme.sh "$PWD" --landing   # and docs/review/landing
+```
+
+Re-run it after any version bump: the header's version is in every image.
+Then **read the five images**. Its red case was run: without
+`landing-host.mjs` it fails on the meeting room's replies and leaves
+`docs/images` untouched. By hand, the steps are:
+
+```bash
+PORT=8906 DB_PATH=./data/landing.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/landing-seed.mjs &
+node .claude/skills/verify-ui-change/landing-host.mjs &      # the desks answer what they are sent
+ORCH_CDP_PORT=9273 node --experimental-websocket .claude/skills/verify-ui-change/landing-shot.mjs <dir>
+ORCH_CDP_PORT=9273 node --experimental-websocket .claude/skills/verify-ui-change/readme-shot.mjs <dir>
+```
+
+**Set `ORCH_CDP_PORT` for any run of your own.** drive.mjs defaults to 9222,
+which is where QA keeps a Chrome. `browser()` reuses whatever is on its port,
+so a run on the default shoots through QA's browser, and a teardown by port
+then kills it. The 2026-11-05 shoot ran on the default and once tore down
+with `pkill -f orch-cdp`, the broad match the teardown section warns
+against. No QA check was running at the time, so that was luck, not care.
+
+`building.png`, `room.png` and `board.png` are landing-shot's 02, 01 and 05
+under the README's names; `meeting-room.png` and `popouts.png` are
+readme-shot's. Four things worth knowing first:
+
+- **`DB_PATH` is printed in the page's header.** A scratchpad path puts the
+  operator's home directory in a published image. Keep it `./data/landing.db`
+  (`data/` is ignored).
+- **The seed's database is `ORCH_SHOT_DB`, not `DB_PATH`.** Given neither,
+  it opens `data/landing.db` itself, so a server started on another path
+  leaves the seed writing a file nobody reads: `no such table: agent_profile`.
+- **A meeting room needs a host that takes work.** landing-seed registers the
+  host and never polls `/api/host/work`, so every room message sits at
+  "sending". `landing-host.mjs` answers each chat with the desk's user turn
+  and a scripted reply in the fixture's story. The App Developer is left out
+  of the room because it is asking a permission question, and a desk that is
+  asking takes no message (`askingWhy`).
+- **`popouts.png` is a composite.** A popout is its own window, so each
+  window is captured alone and the three are laid side by side on a backdrop
+  drawn in the same headless browser. Nothing inside a window is retouched.
+  Seed fresh for every run: a second run finds the first room's messages in
+  the desks' turns.
 
 ## Teardown, because leftovers poison the next run
 
