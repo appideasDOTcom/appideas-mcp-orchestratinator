@@ -1,5 +1,6 @@
 #!/bin/sh
-# The README's five images, end to end, from a fresh fixture:
+# Every image the docs use, end to end, from a fresh fixture: the README's
+# five and docs/operating.md's five, plus the landing set with --landing:
 #
 #   .claude/skills/verify-ui-change/shoot-readme.sh [repo] [--landing]
 #
@@ -43,12 +44,17 @@ grep -q "heartbeat running" "$OUT/seed.log" || { echo "seed did not come up:"; t
 
 export ORCH_CDP_PORT=$CDP
 node --experimental-websocket $SK/landing-shot.mjs "$OUT" || { echo "landing-shot failed"; exit 1; }
+# Before readme-shot: its meeting room adds turns, and operating.md's images are the seed as it stands.
+node --experimental-websocket $SK/operating-shot.mjs "$OUT" || { echo "operating-shot failed"; exit 1; }
 node --experimental-websocket $SK/readme-shot.mjs "$OUT" || { echo "readme-shot failed"; exit 1; }
 
 cp "$OUT/02-building.png" docs/images/building.png
 cp "$OUT/01-room-prompt.png" docs/images/room.png
 cp "$OUT/05-board-activity.png" docs/images/board.png
 cp "$OUT/meeting-room.png" "$OUT/popouts.png" docs/images/
+# operating.md draws the meeting room at 700 CSS, 1:1 with the landing capture.
+cp "$OUT/06-meeting-room.png" docs/images/meeting-room-700.png
+for f in board-offline board-card board-activity floor-desk floor-panel; do cp "$OUT/$f.png" docs/images/; done
 if [ "$LANDING" = "--landing" ]; then
   cp "$OUT"/0[1-6]-*.png docs/review/landing/
 fi

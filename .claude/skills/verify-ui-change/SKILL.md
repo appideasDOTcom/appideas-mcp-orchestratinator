@@ -1171,9 +1171,11 @@ why this one is here. Three things in `landing-shot.mjs` are worth keeping:
 
 ## Shooting the README images
 
-The README's five (`docs/images/`, 2026-11-05 at 0.12.2) are the landing
-captures plus two of their own, from one fresh seed. One command does all of
-it and tears down after itself (about 45 s):
+Every image in `docs/images/` (2026-11-05 at 0.12.2) comes from one fresh
+seed. The README's five are the landing captures plus two of their own, and
+`docs/operating.md`'s five are element crops at DPR 2 (`operating-shot.mjs`:
+two board cards, the activity log, a desk, a panel). One command does all of
+it and tears down after itself (about 55 s):
 
 ```bash
 .claude/skills/verify-ui-change/shoot-readme.sh "$PWD"             # docs/images
@@ -1223,6 +1225,15 @@ readme-shot's. Four things worth knowing first:
   and a scripted reply in the fixture's story. The App Developer is left out
   of the room because it is asking a permission question, and a desk that is
   asking takes no message (`askingWhy`).
+- **An element crop paints only inside the window.** drive.mjs's `shot()`
+  with a selector takes the element's window rect, and the capture paints
+  nothing past the window: the activity log, which starts near the bottom
+  of a 1000-px board, came out as four rows of twelve over dark ground.
+  Pass `{ beyond: true }` for an element that may run past the window. Three
+  wrong fixes were tried first: lifting the scroll box's cap, resizing the
+  window, and scrolling the element into view. The last moves the window
+  rect but not the page coordinates the clip is read in. Count the rows in
+  the DOM before guessing.
 - **`popouts.png` is a composite.** A popout is its own window, so each
   window is captured alone and the three are laid side by side on a backdrop
   drawn in the same headless browser. Nothing inside a window is retouched.

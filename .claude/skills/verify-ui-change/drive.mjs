@@ -333,7 +333,12 @@ async function connect(target) {
      *  keystroke or a paste arrives: one `input` event, `.value` changed. */
     type: async (text) => cmd('Input.insertText', { text }),
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
-    shot: async (path, selector = null, { pad = 8, scale = 3, full = false } = {}) => {
+    shot: async (path, selector = null, { pad = 8, scale = 3, full = false, beyond = false } = {}) => {
+      // `beyond` crops an element that runs past the window: the clip is
+      // taken in page coordinates (the rect plus the scroll) and painted with
+      // captureBeyondViewport. Without it, rows below the window come out as
+      // dark ground (operating-shot.mjs's activity log, 2026-11-05). Off by
+      // default so every existing check crops exactly as it did.
       // `full` captures the whole document rather than the viewport, at the
       // page's own DPR: for a view taller than the window (the building). The
       // clip is the document's size; `captureBeyondViewport` is what lets the
@@ -350,10 +355,11 @@ async function connect(target) {
             const el = document.querySelector(${JSON.stringify(selector)});
             if (!el) throw new Error('no element for ' + ${JSON.stringify(selector)});
             const r = el.getBoundingClientRect();
-            return JSON.stringify({ x: Math.max(0, r.x - ${pad}), y: Math.max(0, r.y - ${pad}), width: r.width + ${pad * 2}, height: r.height + ${pad * 2} });
+            const ox = ${beyond} ? window.scrollX : 0, oy = ${beyond} ? window.scrollY : 0;
+            return JSON.stringify({ x: Math.max(0, r.x + ox - ${pad}), y: Math.max(0, r.y + oy - ${pad}), width: r.width + ${pad * 2}, height: r.height + ${pad * 2} });
           })()`))
         : null;
-      const png = await cmd('Page.captureScreenshot', { format: 'png', ...(clip ? { clip: { ...clip, scale } } : {}) });
+      const png = await cmd('Page.captureScreenshot', { format: 'png', ...(clip ? { clip: { ...clip, scale } } : {}), ...(beyond ? { captureBeyondViewport: true } : {}) });
       writeFileSync(path, Buffer.from(png.result.data, 'base64'));
       return path;
     },

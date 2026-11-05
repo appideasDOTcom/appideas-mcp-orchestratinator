@@ -1,7 +1,7 @@
 # Operating the board
 
 One page draws two views of the same server: the **board** (a row per agent)
-and the **floor** (a room per project, a desk per agent). The switch is top
+and the **floor** (a room per project, a desk per agent at work). The switch is top
 right. This page is the operator's manual for both, and for the small set of
 actions only a human can take.
 
@@ -34,7 +34,7 @@ an unknown session id answers `404`, which is the spec's cue to re-initialize.
 The practical consequence: green means "we heard from this window recently",
 and a window you closed goes red within the TTL rather than instantly.
 
-<img src="images/board-offline.png" width="486" alt="An offline channel card: red presence dots, OFFLINE, seen 2d ago">
+<img src="images/board-offline.png" width="470" alt="An offline channel card: red presence dots, OFFLINE, seen 2d ago, idle chips">
 
 *A gone team reads as gone: red dots, `seen 2d ago`, and chips fallen back to
 derived `idle`.*
@@ -52,7 +52,7 @@ approximation by design — the server can't see inside the agent's turn, only
 what it last told the board (coordination is pull, not push; see
 [how agents coordinate](coordination.md)).
 
-<img src="images/board-card.png" width="486" alt="A live channel card: green presence dots, declared status chips with ages, detail lines, unread and assigned counts">
+<img src="images/board-card.png" width="470" alt="A live channel card: green presence dots, declared status chips with ages, detail lines, unread and assigned counts">
 
 *A live team: green dots, declared chips with their ages, the detail line
 beneath, and the derived counts (`1 unread · 1 assigned`).*
@@ -91,7 +91,7 @@ row to expand the full stored value (message body, task note, contract JSON).
 ## The floor
 
 The `board` / `floor` switch gives you the second view: **one room per channel,
-one desk per agent**. It exists for the people who operate this system without
+one desk per agent at work**. It exists for the people who operate this system without
 having built it. The board answers *what is the state*; the floor answers *who
 is stuck, and what do I do about it* — the question that was otherwise being
 answered by holding several chat windows and a dashboard in one head at once.
@@ -100,17 +100,18 @@ A floor is a channel. Nothing else would be honest: a channel is one project
 with one set of boundaries, and putting two of them in a room would draw a wall
 that isn't there.
 
-**What you get.** A ranked **Needs you** list at the top — who is blocked on a
-human, why, for how long, and which window to go to, longest wait first. Below
-it, a room per channel: each desk shows the person's state, the last thing they
-said or the tool they're running, and a red badge when they need you. Envelopes
+**What you get.** A room per channel: each desk shows the person's state, the
+last thing they said or the tool they're running, and a red badge when they
+need you. The floor's header counts the desks that need you (`1 need you`),
+and so does each room's, so you go where it points. Envelopes
 fly desk to desk on real `send_message` rows, never on a timer. Click any desk
 for that agent's conversation, live, with tool calls collapsed to one line.
 
-<img src="images/floor-desk.png" width="264" alt="One desk: thought bubble, red badge, running tool on the monitor, service bell, and tray pills">
+<img src="images/floor-desk.png" width="222" alt="One desk: thought bubble, red badge, the monitor tinted while it waits, service bell, and tray pills">
 
-*One desk says all of it: the thought bubble, the red badge, the tool on the
-monitor, the service bell, and the tray (2 unread, 1 task).*
+*One desk says all of it: the thought bubble, the red badge, the monitor
+tinted while it waits on you, the service bell, and the tray (2 unread,
+1 task). A working desk's monitor types the tool it is running instead.*
 
 **What the floor knows that the board cannot.** The board is pull-based and
 cannot see inside an agent's turn. The floor closes the gap from the other end:
@@ -125,8 +126,7 @@ moment real work happens. A quiet desk is drawn quiet, because quiet is
 indistinguishable from blocked, crashed, and finished — which is the same
 reason the board never guesses either.
 
-**An empty desk is not drawn.** Every agent the board knows has a desk, but a
-desk with nothing live behind it — its host gone quiet, a window that has
+**An empty desk is not drawn.** A desk with nothing live behind it — its host gone quiet, a window that has
 never checked in, a session that ended — is left off the storey rather than
 drawn as a nameplate nobody can type into. It comes back by itself the moment
 something is live behind it; nothing is clicked and nothing is recorded. The
@@ -161,8 +161,8 @@ who holds this one.
 same binary, login, tools, `.mcp.json`, hooks and `CLAUDE.md` as any window you
 open in that directory. Type on the floor and it is a user turn in that
 session; the reply comes back into the panel as the session writes it; a
-permission prompt becomes **Approve / Deny** on the desk and in the *Needs you*
-list. The human is still the one deciding — from one screen instead of one per
+permission prompt becomes **Approve / Deny** on the desk, and the header
+counts it under `need you`. The human is still the one deciding — from one screen instead of one per
 agent. Enter sends, Shift+Enter is a new line, **stop** interrupts the turn.
 The box grows with what you type, up to fourteen lines, and then scrolls.
 Drag its corner taller and it keeps that height for this desk's conversation
@@ -171,7 +171,7 @@ to its smallest and it goes back to growing on its own; a new conversation on
 the desk starts at the default.
 You can sit in that same window yourself: `tmux attach -t orch`.
 
-<img src="images/floor-panel.png" width="476" alt="The desk panel: the live conversation, a permission request with Approve and Deny, and the composer">
+<img src="images/floor-panel.png" width="460" alt="The desk panel: the live conversation, a permission request with Approve, Deny and Cancel, and the composer">
 
 *The desk panel: the conversation as it happens, the permission prompt with
 its real choices, the composer — and the doors back to VS Code, Claude, and
@@ -209,6 +209,11 @@ desk is hidden, and says so if the desk is left. The browser shows a read-only
 address strip on the popup; fully chromeless windows are the desktop app's
 job, not the page's.
 
+<img src="images/popouts.png" width="820" alt="The floor with the App Developer's panel open on a permission request, and two popped-out chats beside it: the API Developer's and the Project Manager's, each with its desk above its conversation and composer">
+
+*Three places a chat can be: the floor's own panel, and two desks popped out
+beside it, each live and each with Re-attach in its header.*
+
 **Several desks in one chat.** On a floor, **select desks**, check two or
 more, and press **Meeting room**. One window opens with those desks in it:
 who is in the room and what each is doing (working, idle, needs you) in a
@@ -238,6 +243,11 @@ conversation it had — or says, desk by desk, why not (it left, it moved
 floors, its window is busy, its conversation is gone). A desk that missed a
 Resume for a reason that may pass, like a busy window, stays in the room
 and is tried again at the next Resume.
+
+<img src="images/meeting-room-700.png" width="700" alt="A meeting room with the Project Manager, API Developer and QA Engineer along the top, one message to everyone with a delivered line per desk and three replies, then a message to the QA Engineer alone and its reply, and the composer with its To chips">
+
+*One message to the room, delivered desk by desk, and the replies coloured
+by desk; then `@qa-engineer` narrowing the next one to QA alone.*
 
 The host only ever reaches *out*. It registers with the server, then holds a
 request open asking for work; the server never connects to a workstation and
@@ -279,8 +289,8 @@ None of them should have to be discovered by accident:
   clears it, and so does taking the desk onto another floor: the flag
   belongs to the seat it leaves, the desk arrives on the new floor drawn,
   and the floor it left gets a restore row saying so. A hidden
-  desk still counts in the storey's `N/M here`, still pages you from the
-  operator queue when it needs you, and carries its unread count on the
+  desk still counts in the storey's `N/M here`, still counts in the header's
+  `need you` when it needs you, and carries its unread count on the
   pill; hiding is a statement about your attention, not about the agent's
   work, and it is not retire — the seat, the name and the face are kept.
 - **Select desks.** On every room's header, beside *put away*, in the
@@ -416,3 +426,32 @@ deleted it, and what it contained.
 
 What guards these routes — and, deliberately, what doesn't — is described in
 [the security model](security.md).
+
+## Keeping it current
+
+The header shows **Update available** when the branch the board follows has a
+commit this build lacks. The board checks once a day, and only when it runs
+from `docker-compose.yml`. The check asks GitHub's public API about this
+repository, and nothing about your work is sent.
+
+**Update** says what it will interrupt. Then the host on the board's machine
+fetches the commit, rebuilds the server, updates the plugin when its hooks
+changed, and restarts itself, and the page reloads onto the new build. It is
+refused, in words, when the clone has local changes, is on another branch
+than the one followed, or has commits that branch lacks; when the host is not
+running as its LaunchAgent; or when the board is not running in Docker.
+Nothing is stashed, reset or switched to make it fit. A build that fails puts
+the clone back where it was, so the clone and the running board agree. A run
+that stops after the server was rebuilt (the plugin update failed, say)
+leaves **Update stopped** in the header, and **Finish the update** runs what
+is left.
+
+**Settings** (⚙ in the header) turns the daily check off, after which only
+**Check now** contacts GitHub. It also switches to the development version
+(`develop` instead of `main`). The settings are the board's, so every browser
+sees the same ones. GitHub allows sixty unauthenticated checks an hour, so
+**Check now** asks at most once a minute and otherwise answers from the last
+check.
+
+Updating is macOS-only for now, because it relies on launchd to start the
+host again.
