@@ -53,13 +53,15 @@ const upSeat = db.prepare(`INSERT INTO personas (channel, agent, seat) VALUES (?
   ON CONFLICT(channel, agent) DO UPDATE SET seat=excluded.seat`);
 
 // agent, persona, gender, shirt, hair, skin — one look per agent, every floor.
+// QA is cyan, not the green it was at 0.10.5: beside the API Developer's green the
+// two read as one colour in a meeting room, whose turns wear the shirt.
 const cast = {
   'project-manager':    ['Project Manager',    'female', '#e8b84a', '#e8c99b', '#f7dece'],
   'designer':           ['Designer',           'female', '#e77edc', '#5a4130', '#d5ab88'],
   'app-developer':      ['App Developer',      'male',   '#7aa2ff', '#5a4130', '#af7e57'],
   'api-developer':      ['API Developer',      'male',   '#6fd08c', '#c0392b', '#f7dece'],
   'marketing-site-dev': ['Marketing Site Dev', 'female', '#b39bfa', '#e8c99b', '#f7dece'],
-  'qa-engineer':        ['QA Engineer',        'male',   '#8fd36a', '#3a2a1e', '#8d5524'],
+  'qa-engineer':        ['QA Engineer',        'male',   '#5ec8d8', '#3a2a1e', '#8d5524'],
   'wp-developer':       ['Plugin Developer',   'female', '#f28b82', '#5a4130', '#d5ab88'],
   'desktop-dev':        ['Desktop Developer',  'male',   '#7aa2ff', '#3a2a1e', '#af7e57'],
 };

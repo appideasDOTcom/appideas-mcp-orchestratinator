@@ -102,7 +102,12 @@ in — the host runs desks with it even if you only ever work from VS Code.
 Where you *work* is your choice: start sessions from Claude Code in a
 terminal, from VS Code, or both. The floor doesn't replace either — it hands
 any conversation back to them whenever you want a feature its chat doesn't
-provide.
+provide. The host — the part that opens and drives windows from the floor —
+runs on **macOS** for now; the server and the board run anywhere Docker does,
+and the plugin wherever Claude Code has a POSIX shell. A desk with no host
+behind it is still on the floor with its presence, status, prompts and the
+conversation as the plugin's hooks report it, but it is read there, not typed
+into.
 
 **1. Get the code and make a shared secret.**
 
