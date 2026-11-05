@@ -83,6 +83,14 @@ ok(controls.every((c) => c.r.left >= slot.left - 0.5 && c.r.right <= slot.right 
 ok(controls[0].r.top === controls[1].r.top && controls[2].r.top === controls[3].r.top && controls[0].r.bottom <= controls[2].r.top,
   'still two rows of two: model and effort, then Sessions and Leave desk');
 ok(slot.right <= turns.left + 1, 'the column stays left of the chat');
+// The column is the desk's width plus the slot's padding and border, and the
+// foot fits in it rather than widening it. QA's M8 (#43): with the foot's
+// height left out of the desk's room, flex still shrank the drawing to fit,
+// but the column was drawn for the larger desk, 45px wider, and nothing
+// here pinned it.
+const pad = JSON.parse(await pop.evalJs(`(() => { const c = getComputedStyle(document.querySelector('.p-deskslot'));
+  return JSON.stringify(parseFloat(c.paddingLeft) + parseFloat(c.paddingRight) + parseFloat(c.borderRightWidth)); })()`));
+ok(Math.abs(slot.width - (svg.width + pad)) <= 2, `the column is the desk\u2019s width and its padding (${Math.round(slot.width)}px for a ${Math.round(svg.width)}px desk)`);
 const hitW = (page, sel) => page.evalJs(`Math.round(document.querySelector('${sel} .deskHit').getBoundingClientRect().width)`);
 const onFloorW = await hitW(floor, '#floor-rooms .desk[data-agent="bo"]');
 ok(Math.abs(onFloorW - await hitW(pop, '.p-deskslot .desk')) <= 1, `the desk is still the floor’s size (${onFloorW}px)`);
@@ -132,6 +140,17 @@ for (const [w, h] of [[1100, 640], [1100, 520]]) {
     .filter((n) => n.offsetParent).every((n) => { const r = n.getBoundingClientRect(), c = document.querySelector('.p-deskslot').getBoundingClientRect(); return r.left >= c.left - 0.5 && r.right <= c.right + 0.5; }))`));
   ok(d.bottom <= f.top && f.bottom <= p.bottom && inside,
     `${w}x${h}: desk ${Math.round(d.width)}px wide, foot ${Math.round(f.top)}–${Math.round(f.bottom)} in a panel ending at ${Math.round(p.bottom)}, controls inside the ${Math.round(s.width)}px column`);
+  // Sized for the room the foot leaves, not squashed into it: the drawing
+  // keeps its own proportions, and the column is its width plus padding.
+  // QA's M8 (#43), with the foot left out of the desk's room, drew the desk
+  // for the whole column height; flex then shrank its height and not its
+  // width, and the column stood 45px wider. The 4px is the foot's own
+  // least width at 520 tall, where it is a hair wider than the desk.
+  const aspect = JSON.parse(await pop.evalJs(`(() => { const v = document.querySelector('.p-deskslot svg.popdesk').viewBox.baseVal; return JSON.stringify(v.width / v.height); })()`));
+  const pad = JSON.parse(await pop.evalJs(`(() => { const c = getComputedStyle(document.querySelector('.p-deskslot'));
+    return JSON.stringify(parseFloat(c.paddingLeft) + parseFloat(c.paddingRight) + parseFloat(c.borderRightWidth)); })()`));
+  ok(Math.abs(d.width - d.height * aspect) <= 2 && s.width <= d.width + pad + 4,
+    `${w}x${h}: the desk is drawn for its room, not squashed into it (${Math.round(d.width)}x${Math.round(d.height)}, column ${Math.round(s.width)}px)`);
   if (h === 520) await pop.shot(`${shots}/pop-foot-short.png`, null, { scale: 1 });
 }
 

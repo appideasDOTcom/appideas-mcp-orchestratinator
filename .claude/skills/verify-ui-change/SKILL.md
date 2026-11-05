@@ -851,11 +851,30 @@ floor plus six popouts all live at once. Four things it taught:
   whatever the features asked, so the check sets 440×980 with `resize()`
   before it takes a picture.
 
+### check-popout-session.mjs — a new session, then detach (issue #46)
+
+```bash
+PORT=8941 DB_PATH=/tmp/i46.db ORCH_AUTH_TOKEN=k node src/server.js &
+node .claude/skills/verify-ui-change/seed-desk.mjs http://localhost:8941 --db /tmp/i46.db &
+ORCH_CDP_PORT=9281 node --experimental-websocket .claude/skills/verify-ui-change/check-popout-session.mjs http://localhost:8941 8
+```
+
+The floor's panel is open on bo, a host `session` event moves the desk
+onto a new id with no turns, and detach is pressed. Each run reads the
+popout as it first draws and again 5 s later. Before the fix, 2 of 3 runs
+showed the old session's eight turns, and they were still there 5 s later.
+After it, 8 of 8 runs drew none. A popout opens its desk before its first
+`/api/floor`, so its first turns fetch had no session to scope to. When
+that fetch answered after the first poll had reset the panel, its rows
+stayed, because the filter did not change again. The red is a race, so
+**run several times**. One clean run proves nothing, and the first run
+was clean on the base too.
+
 ### check-pop-foot.mjs — a wide popout's foot under the desk (issue #43)
 
 ```bash
 PORT=8933 CDP=9273 .claude/skills/verify-ui-change/run-check-pop-foot.sh "$PWD"
-# … PASS, 27 ✓, about half a minute
+# … PASS, 39 ✓, about half a minute
 ```
 
 Two seeded desks: bo is popped out, and cy is the floor's own panel. The
@@ -887,6 +906,15 @@ Its reds: HEAD before the follow-up fails six (55 → 55px everywhere, as
 reported). A mutant whose fitBox re-lays the desk on the box's height
 alone fails only the reload, desk 158px against 151, send row 6px off.
 Moving the probes from scratch into the check is what found that one.
+
+QA's M8 (#43 review) survived at first: the wide desk sized without the
+foot's height. At 1100×900 there is room either way, so nothing shows.
+At 1100×520 flex shrinks the drawing's height but not its width, and the
+column stands 45px wider. Two pins were added for it. At 1100×900 the
+column must be the desk's width plus the slot's padding. In the short
+loop the desk must keep its viewBox's proportions, with the column
+within 4px of desk plus padding; at 520 tall the foot is 3px wider than
+the desk. M8 now fails the short loop, with the desk drawn 230×230.
 
 check-popout's "send row in the window" step now measures `.p-compose`,
 not `.p-foot`. When wide, the foot is in the left column and no longer
