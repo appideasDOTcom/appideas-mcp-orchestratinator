@@ -273,6 +273,33 @@ export function openDb(path) {
       value      TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- ─── Meeting rooms (issue #44) ────────────────────────────────────────────
+    -- A meeting room is a window on the operator's screen holding several
+    -- desks of one floor, and the window is what holds them: which desks are
+    -- in one right now is said by the window itself, the way a popout says
+    -- it (src/ui/floor.js, "meeting rooms: the window"). This row is only
+    -- what Resume needs once the window is gone: the floor, and each
+    -- participant as the room ended — its agent, the conversation it was
+    -- on, the folder and host it was bound to (how a move is recognised),
+    -- and the turn it joined after (where its part of the transcript
+    -- starts). The participants column is that list as JSON, read and written whole,
+    -- because it is two or three entries and never queried into.
+    --
+    -- Bounded, newest first, and pruned on every new room (MEETINGS_KEEP in
+    -- src/floor.js): most rooms are used once, and nobody is asked to tidy
+    -- them. Not in BACKUP_TABLES: a list of windows that were open is not
+    -- the team's work, and a restored one would name sessions on disks that
+    -- may not be this machine's.
+    CREATE TABLE IF NOT EXISTS meeting_rooms (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel      TEXT NOT NULL,
+      participants TEXT NOT NULL,
+      started_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_meeting_rooms_updated ON meeting_rooms(updated_at);
   `);
 
   // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
@@ -535,6 +562,14 @@ function dropColumns(db, table, columns, why) {
 
 const n = (v) => (typeof v === 'bigint' ? Number(v) : v);
 
+/** A meeting_rooms row with its participants parsed; a list that will not parse is an empty one. */
+function meetingRow(r) {
+  if (!r) return null;
+  let participants = [];
+  try { participants = JSON.parse(r.participants); } catch { /* an empty room */ }
+  return { ...r, participants: Array.isArray(participants) ? participants : [] };
+}
+
 /**
  * How long a self-reported status stays believable when the caller doesn't say.
  * Deliberately short: an expired status is treated as absent and the dashboard
@@ -752,6 +787,24 @@ export function makeStore(db) {
     // order that eventually disagrees with itself. NOCASE so the list reads
     // alphabetically to a person rather than to ASCII, which would file every
     // lower-case title after every upper-case one.
+    // Meeting rooms (issue #44). `ended_at` is cleared again when a room's
+    // window opens on it — a reload, or a Resume — so "ended" always means
+    // "no window has it now, as far as the board was told".
+    insertMeeting: db.prepare(`INSERT INTO meeting_rooms (channel, participants) VALUES (?, ?)`),
+    getMeeting: db.prepare(`SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms WHERE id = ?`),
+    setMeetingParticipants: db.prepare(
+      `UPDATE meeting_rooms SET participants = ?, updated_at = datetime('now') WHERE id = ?`
+    ),
+    openMeeting: db.prepare(`UPDATE meeting_rooms SET ended_at = NULL, updated_at = datetime('now') WHERE id = ?`),
+    endMeeting: db.prepare(
+      `UPDATE meeting_rooms SET participants = ?, ended_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+    ),
+    recentMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?`
+    ),
+    pruneMeetings: db.prepare(
+      `DELETE FROM meeting_rooms WHERE id NOT IN (SELECT id FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?)`
+    ),
     getSetting: db.prepare(`SELECT value, updated_at FROM settings WHERE key = ?`),
     setSetting: db.prepare(
       `INSERT INTO settings (key, value) VALUES (@key, @value)
@@ -1363,7 +1416,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1633,6 +1686,18 @@ export function makeStore(db) {
       try { return JSON.parse(row.value); } catch { return fallback; }
     },
     setSetting: (key, value) => q.setSetting.run({ key, value: JSON.stringify(value) }).changes,
+    // --- meeting rooms (issue #44) ---------------------------------------------
+    /** A new room, then the oldest beyond `keep` dropped: the list bounds itself. */
+    createMeeting: (channel, participants, keep) => {
+      const id = n(q.insertMeeting.run(channel, JSON.stringify(participants)).lastInsertRowid);
+      q.pruneMeetings.run(keep);
+      return id;
+    },
+    meeting: (id) => meetingRow(q.getMeeting.get(id)),
+    setMeetingParticipants: (id, participants) => q.setMeetingParticipants.run(JSON.stringify(participants), id).changes,
+    openMeeting: (id) => q.openMeeting.run(id).changes,
+    endMeeting: (id, participants) => q.endMeeting.run(JSON.stringify(participants), id).changes,
+    recentMeetings: (limit) => q.recentMeetings.all(limit).map(meetingRow),
     getSavedPrompt: (id) => q.getSavedPrompt.get(id) ?? null,
     /** The prompt holding this title, if any — `exceptId` skips the row being edited. */
     savedPromptByTitle: (title, exceptId = null) => {

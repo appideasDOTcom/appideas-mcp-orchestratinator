@@ -1811,3 +1811,54 @@ body.popout .deskpanel.pop-wide:has(> .p-deskslot) {
 .p-out { padding: 18px 14px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .p-out-why { margin: 0; font-size: 12.5px; }
 .p-detach { font-size: 13px; line-height: 1; }
+
+/* ─── a meeting room (issue #44) ─────────────────────────────────────────────
+   The popout's window (body.popout) with several desks in it: who is in it
+   in a row under the header, one transcript, one composer. Each desk is
+   told apart by its shirt colour (--m-c), the one thing that tells two
+   desks apart on the floor. */
+body.meeting .deskpanel { display: flex; flex-direction: column; }
+.m-head .m-addslot { margin-left: auto; }
+.m-add { font-size: 12px; max-width: 220px; }
+.m-parts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.m-empty { font-size: 12px; }
+.m-part {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 8px;
+  border: 1px solid var(--border); border-left: 4px solid var(--m-c); border-radius: 8px;
+  font-size: 12px; background: var(--surface);
+}
+.m-part .m-state { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.m-part.s-working .m-state { color: var(--busy); }
+.m-part.s-needs-you { border-color: color-mix(in srgb, var(--wait) 55%, var(--border)); border-left-color: var(--m-c); background: var(--wait-bg); }
+.m-part.s-needs-you .m-state { color: var(--wait); font-weight: 600; }
+.m-part.s-away .m-state { color: var(--off); }
+.m-part .btn { height: 22px; padding: 0 6px; font-size: 11px; line-height: 1; }
+.m-part .m-stop .stopGlyph { width: 11px; height: 11px; }
+.m-swatch { display: none; }
+/* A desk's turns carry its colour down their left edge; the operator's own
+   messages are the panel's. */
+.t.m-said { border-left: 3px solid var(--m-c); padding-left: 7px; }
+.t.m-said.t-tool, .t.m-said.t-thinking { border-left-width: 2px; }
+.m-delivs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: 11px; }
+.m-deliv { color: var(--muted); border-left: 3px solid var(--m-c); padding-left: 5px; }
+.m-deliv b { font-weight: 600; color: var(--text); }
+.m-deliv.ok { color: var(--idle); }
+.m-deliv.wait { color: var(--busy); }
+.m-deliv.bad { color: var(--block); }
+.m-msg.t-pending { opacity: .85; }
+.m-note .t-text { font-family: var(--sans); font-style: italic; }
+.m-note-bad .t-text { color: var(--block); }
+/* Each participant's prompt, labelled with its desk, against the box. */
+.m-alerts { display: flex; flex-direction: column; gap: 6px; }
+.m-alerts:empty { display: none; }
+.m-alert:has(> .p-alert-slot:empty) { display: none; }
+.m-alert { border-left: 4px solid var(--m-c); padding-left: 6px; }
+.m-alert-who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 3px; }
+.m-to { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.m-to:empty { display: none; }
+.m-to-label { font-size: 11px; margin-right: 2px; }
+.m-to .m-to-one { border-left: 3px solid var(--m-c); }
+.m-to .m-to-one:not(.on) { text-decoration: line-through; opacity: .7; }
+/* Recent meeting rooms: each row a room, and its Resume. */
+.meet-row { position: relative; padding-right: 96px; cursor: default; }
+.meet-row .meet-resume { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }

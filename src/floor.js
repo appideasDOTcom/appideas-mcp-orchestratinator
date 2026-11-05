@@ -490,6 +490,36 @@ export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false }
    are not: "send a message instead" is no help at all to someone trying to
    stop one. Same verdict, re-worded by its code. `no_window` is stop's own: a
    nudge opens a window when there is none, a stop cannot. */
+/* Meeting rooms (issue #44): how many the Recent list keeps, newest first —
+   the oldest drop off as each new room starts — and the most desks one room
+   is asked to hold, which only bounds a malformed request: the live board's
+   floors draw one to three desks each (measured in the issue). */
+export const MEETINGS_KEEP = 20;
+const MEETING_DESKS_MAX = 24;
+
+/**
+ * One meeting-room participant as Resume will need it, from the desk's
+ * hosted row now and what the room's record knew before (`prev`).
+ *
+ *   session_id — the conversation the desk is on: the window's real id, or
+ *                the last one known when the window has none (a placeholder
+ *                is not a conversation anyone can reopen)
+ *   host, window — the host's name and the folder's basename, the binding a
+ *                move keeps (the page's boundTo/deskFate read these)
+ *   since      — the turn its part of the transcript starts after: the
+ *                desk's newest turn when it first joined, kept from then on
+ */
+export function meetingSeat(agent, h, prev, lastTurnId) {
+  const sid = h?.sdk_session_id && !String(h.sdk_session_id).startsWith('host:') ? h.sdk_session_id : null;
+  return {
+    agent,
+    session_id: sid ?? prev?.session_id ?? null,
+    host: h?.host_name ?? prev?.host ?? null,
+    window: (h?.cwd ? h.cwd.split('/').filter(Boolean).pop() : null) ?? prev?.window ?? null,
+    since: Number.isInteger(prev?.since) ? prev.since : (Number(lastTurnId) || 0),
+  };
+}
+
 /** One row of a host's session list, with only the fields the picker draws. */
 const SESSIONS_MAX = 60;
 function sessionRow(r) {
@@ -3558,6 +3588,103 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     store.enqueueHostWork(h.host_id, channel, agent, 'reopen', { session_id: sessionId, known, queued_at: new Date().toISOString() });
     live.wake(h.host_id);
     res.json({ ok: true, session_id: sessionId, known });
+  });
+
+  /* ───────────────────── meeting rooms (issue #44) ───────────────────── */
+
+  /*
+   * Which desks are in a meeting room right now is the room's window's to
+   * say, the way a popout says it, on the page's BroadcastChannel and a Web
+   * Lock per desk (src/ui/floor.js, "meeting rooms: the window"). Nothing
+   * here holds a desk or refuses a message because of a room: a room's
+   * message is N calls to /api/floor/chat, each with every check that route
+   * makes. What the board keeps is the record Resume reads after the window
+   * has gone — the floor, and each participant as the room ended — and it
+   * keeps MEETINGS_KEEP of them, dropping the oldest as each new room
+   * starts, so thirty rooms in a month ask nothing of anybody.
+   */
+  // Every room the routes hand out names its participants the board's way,
+  // so a note about a desk that has gone from the floor still says "Bo".
+  const roomOut = (r, personas = personasNow()) => r && ({
+    ...r,
+    participants: r.participants.map((p) => ({ ...p, persona: personas.get(deskKey(r.channel, p.agent)) ?? p.agent })),
+    started_at: iso(r.started_at),
+    updated_at: iso(r.updated_at),
+    ended_at: r.ended_at ? iso(r.ended_at) : null,
+  });
+  /** The agents named, if every one sits on `channel`; else why not. */
+  const seatedOn = (channel, agents) => {
+    if (!Array.isArray(agents) || !agents.length || agents.length > MEETING_DESKS_MAX) {
+      return { error: `agents must be a list of 1 to ${MEETING_DESKS_MAX} desks on the floor`, code: 'bad_agents' };
+    }
+    const names = [...new Set(agents.map(str))];
+    if (names.some((a) => !a)) return { error: 'every agent must be named', code: 'bad_agents' };
+    const here = new Set(store.listPersonas().filter((p) => p.channel === channel).map((p) => p.agent));
+    const away = names.filter((a) => !here.has(a));
+    if (away.length) return { error: `${away.join(', ')} ${away.length === 1 ? 'has' : 'have'} no desk on ${channel}. A meeting room is one floor's desks.`, code: 'not_on_floor' };
+    return { names };
+  };
+  /** Each participant as it stands now, keeping what an earlier record knew. */
+  const seatsNow = (channel, names, prev = []) => {
+    const last = new Map(store.lastTurns().filter((t) => t.channel === channel).map((t) => [t.agent, t.id]));
+    return names.map((a) => meetingSeat(a, store.hostedDesk(channel, a), prev.find((p) => p.agent === a) ?? null, last.get(a) ?? 0));
+  };
+  const roomOr404 = (req, res) => {
+    const id = Number(req.body?.id ?? req.query?.id);
+    const room = Number.isInteger(id) && id > 0 ? store.meeting(id) : null;
+    if (!room) res.status(404).json({ error: 'There is no such meeting room. Older rooms drop off the Recent list by themselves.', code: 'no_room' });
+    return room;
+  };
+
+  /** A new room: its floor and its first participants. */
+  router.post('/api/floor/meeting', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    if (!channel) return res.status(400).json({ error: 'channel is required' });
+    const ok = seatedOn(channel, req.body?.agents);
+    if (ok.error) return res.status(400).json(ok);
+    const id = store.createMeeting(channel, seatsNow(channel, ok.names), MEETINGS_KEEP);
+    res.json({ ok: true, room: roomOut(store.meeting(id)) });
+  });
+
+  /** Who is in the room now: after an Add, a Remove, or a participant's conversation changing under it. */
+  router.post('/api/floor/meeting/participants', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    const agents = req.body?.agents;
+    // An empty room is allowed here: the last desk removed leaves the window
+    // open and the record saying nobody, until it is ended.
+    const ok = Array.isArray(agents) && !agents.length ? { names: [] } : seatedOn(room.channel, agents);
+    if (ok.error) return res.status(400).json(ok);
+    store.setMeetingParticipants(room.id, seatsNow(room.channel, ok.names, room.participants));
+    res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
+  });
+
+  /** A window opening on a room it names: a reload, or a Resume. */
+  router.post('/api/floor/meeting/open', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    store.openMeeting(room.id);
+    res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
+  });
+
+  /**
+   * The room's window closing, by End meeting or by being closed. Each
+   * participant's conversation is read off its desk now, so Resume reopens
+   * what it was on as the room ended. Sent with keepalive from pagehide, so
+   * a reload ends a room too — and the reloaded window opens it again
+   * (`/open`), which is why ended is not final.
+   */
+  router.post('/api/floor/meeting/end', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    store.endMeeting(room.id, seatsNow(room.channel, room.participants.map((p) => p.agent), room.participants));
+    res.json({ ok: true });
+  });
+
+  /** Recent meeting rooms, newest first: the Resume list. Personas are the board's, so every viewer reads one name. */
+  router.get('/api/floor/meetings', (_req, res) => {
+    const personas = personasNow();
+    res.json({ keep: MEETINGS_KEEP, rows: store.recentMeetings(MEETINGS_KEEP).map((r) => roomOut(r, personas)) });
   });
 
   /**

@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP } from '../src/floor.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -3173,7 +3173,7 @@ try {
   {
     const src = readFileSync('src/ui/floor.js', 'utf8');
     const a = src.indexOf('  /* ---------- popouts: what the page decides ---------- */');
-    const b = src.indexOf('  /* ---------- popouts: the windows ---------- */');
+    const b = src.indexOf('  /* ---------- meeting rooms: what the page decides ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the popouts section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/popouts-${process.pid}.mjs`;
     writeFileSync(tmp, `${src.slice(a, b)}\nexport { POP_W, POP_TTL_MS, POP_CHAT_MIN, popoutName, popoutQuery, popoutOf, popoutPlace, popoutFeatures, outsNow, boundTo, deskFate, deskScaleOf, popWide, popDeskScale };\n`);
@@ -3225,6 +3225,168 @@ try {
       'the desk takes a column of its own exactly when the chat beside it keeps POP_CHAT_MIN');
     eq([page.popDeskScale(1.25, 300, 500), page.popDeskScale(1.25, 300, 300), page.popDeskScale(1.25, 300, 10)], [1.25, 1, 0.625],
       'in a window too short for it the desk gives way, to half the floor\'s size and no further; with room it is the floor\'s');
+  }
+
+  // Issue #44: meeting rooms. The board half is a bounded record Resume
+  // reads — the routes are driven here against desks a host registered —
+  // and the page half is one lifted section of floor.js, run with the
+  // sections it reuses (popouts' deskFate, bulk selection's nudgePlan and
+  // bulkWait, the chat controls' deliveryNote) over desks shaped as the
+  // payload has them. The window itself is verify-ui-change's
+  // check-meeting.mjs. Last in this file: its ingest asks every host to
+  // look, and the sections above read h-open's queue.
+  console.log('\nmeeting rooms');
+  {
+    const MCH = 'meet-ch';
+    const mHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const regMeet = (desks) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', name: 'meetbox', tmux: 'orch', desks }),
+    }).then((r) => r.json());
+    const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const desksM = [
+      { channel: MCH, agent: 'mia', cwd: '/repo/mia', session_id: 'sdk-mia' },
+      { channel: MCH, agent: 'noa', cwd: '/repo/noa', session_id: 'sdk-noa' },
+      { channel: MCH, agent: 'oli', cwd: '/repo/oli', session_id: 'sdk-oli' },
+    ];
+    await regMeet(desksM);
+    for (const d of desksM) await post({ channel: MCH, agent: d.agent, session_id: d.session_id, hook_event_name: 'SessionStart', cwd: d.cwd });
+    await fetch(`${HOST}/api/host/events`, { method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', events: [
+      { type: 'turn', channel: MCH, agent: 'mia', session_id: 'sdk-mia', role: 'user', text: 'before any room', at: new Date().toISOString(), uuid: 'mt1' },
+    ] }) });
+    const miaLast = (await turns('mia', MCH)).rows.at(-1).id;
+
+    let r = await op('/api/floor/meeting', { channel: MCH, agents: ['mia', 'noa'] });
+    eq(r.status, 200, 'a room is created from desks on one floor');
+    const room = r.body.room;
+    eq(room.participants.map((p) => [p.agent, p.session_id, p.host, p.window]), [['mia', 'sdk-mia', 'meetbox', 'mia'], ['noa', 'sdk-noa', 'meetbox', 'noa']],
+      'each participant is recorded with its conversation and the binding a move keeps — host and folder');
+    eq(room.participants[0].since, miaLast, 'and the turn its part of the transcript starts after: its newest when it joined');
+    eq(room.ended_at, null, 'a new room is open');
+    r = await op('/api/floor/meeting', { channel: MCH, agents: ['mia', 'nobody-here'] });
+    eq([r.status, r.body.code], [400, 'not_on_floor'], 'a desk not on that floor is refused: a meeting room is one floor\'s desks (Decided 4)');
+    eq((await op('/api/floor/meeting', { channel: MCH, agents: [] })).status, 400, 'and so is a room of nobody');
+
+    await fetch(`${HOST}/api/host/events`, { method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', events: [
+      { type: 'turn', channel: MCH, agent: 'mia', session_id: 'sdk-mia', role: 'assistant', text: 'in the room', at: new Date().toISOString(), uuid: 'mt2' },
+    ] }) });
+    r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia', 'noa', 'oli'] });
+    eq(r.body.room.participants.map((p) => p.agent), ['mia', 'noa', 'oli'], 'Add: the record follows who is in the room');
+    eq(r.body.room.participants[0].since, miaLast, 'and a participant already there keeps where its part started');
+    r = await op('/api/floor/meeting/participants', { id: room.id, agents: ['mia', 'oli'] });
+    eq(r.body.room.participants.map((p) => p.agent), ['mia', 'oli'], 'Remove: and the desk is out of the record');
+
+    await regMeet(desksM.map((d) => (d.agent === 'mia' ? { ...d, session_id: 'sdk-mia-2' } : d)));
+    eq((await op('/api/floor/meeting/end', { id: room.id })).status, 200, 'End');
+    let list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
+    const ended = list.find((x) => x.id === room.id);
+    eq(ended.participants.map((p) => [p.agent, p.session_id, p.persona]), [['mia', 'sdk-mia-2', 'Mia'], ['oli', 'sdk-oli', 'Oli']],
+      'an ended room keeps each participant\'s conversation as the room ended — read off the desk at the end — and its name');
+    assert(!!ended.ended_at, 'and says when it ended');
+    r = await op('/api/floor/meeting/open', { id: room.id });
+    eq(r.body.room.ended_at, null, 'a window opening on it (a reload, a Resume) makes it open again — ended is not final');
+    eq((await op('/api/floor/meeting/open', { id: 999999 })).body.code, 'no_room', 'a room the board does not have is said, not guessed');
+
+    for (let i = 0; i < MEETINGS_KEEP + 2; i++) await op('/api/floor/meeting', { channel: MCH, agents: ['noa'] });
+    list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
+    eq(list.length, MEETINGS_KEEP, `the list is bounded at ${MEETINGS_KEEP}: thirty rooms in a month ask nothing of anybody`);
+    assert(!list.some((x) => x.id === room.id), 'and the oldest dropped off by itself as new ones started');
+    eq((await op('/api/floor/meeting/open', { id: room.id })).body.code, 'no_room', 'gone from the board, not only from the list: nothing grows behind it');
+    assert(list.every((x, i) => i === 0 || Date.parse(list[i - 1].updated_at) >= Date.parse(x.updated_at)), 'newest first');
+    eq((await op('/api/admin/channel/delete', { channel: MCH, confirm: MCH })).status, 200, 'deleting the floor');
+    list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
+    eq(list.filter((x) => x.channel === MCH).length, 0, 'takes its meeting rooms with it (purgeChannel sweeps them)');
+
+    eq(meetingSeat('a', { sdk_session_id: 'host:h:c:a', host_name: 'box', cwd: '/r/a' }, { session_id: 'real-1', since: 7 }, 99),
+      { agent: 'a', session_id: 'real-1', host: 'box', window: 'a', since: 7 },
+      'a placeholder is not a conversation anyone can reopen: the last real one is kept, and so is where the part started');
+    eq(meetingSeat('a', null, null, 12), { agent: 'a', session_id: null, host: null, window: null, since: 12 },
+      'a desk with no host is recorded with nothing to reopen');
+
+    // The page's half.
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const cut = (from, to) => {
+      const a = src.indexOf(from);
+      const b = src.indexOf(to);
+      if (a < 0 || b < 0 || b < a) throw new Error(`a section was not found in src/ui/floor.js between ${JSON.stringify(from)} and ${JSON.stringify(to)}`);
+      return src.slice(a, b);
+    };
+    const tmp = `./data/meeting-${process.pid}.mjs`;
+    writeFileSync(tmp, [
+      'const SENDING_GRACE_MS = 30000;',
+      cut('  /* ---------- chat controls: what the page decides ---------- */', '  /* ---------- chat controls: the drawing ---------- */'),
+      cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
+      cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
+      cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, MEET_STATE_WORD, MEET_W, nudgePlan };',
+    ].join('\n'));
+    let pg;
+    try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    const fresh = pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: ['bo', 'cy', 'bo'] }));
+    eq(fresh, { id: null, channel: 'lab', agents: ['bo', 'cy'], resume: false }, 'a new room\'s address names its floor and desks, each once');
+    eq(pg.meetingOf(pg.meetingQuery({ id: 7, resume: true })), { id: 7, channel: null, agents: [], resume: true }, 'a Resume names the room and asks for the reopen');
+    eq(pg.meetingOf(pg.meetingQuery({ id: 7 })).resume, false, 'and the address it settles on does not, so a reload reopens nothing');
+    eq([pg.meetingOf(''), pg.meetingOf('?popout=1&channel=a&agent=b'), pg.meetingOf('?meeting=new&channel=lab'), pg.meetingOf('?meeting=0')], [null, null, null, null],
+      'a popout, a new room naming no desk, and a nonsense id are not meeting rooms');
+    eq(pg.meetingPlace({ availWidth: 1000, availHeight: 900, availLeft: 0, availTop: 0 }), { width: pg.MEET_W, height: 900, left: 1000 - pg.MEET_W, top: 0 }, 'it opens full height against the right edge');
+
+    const D = (agent, extra = {}) => ({ agent, persona: agent[0].toUpperCase() + agent.slice(1), nudge: { ok: true, host: 'h' }, last_turn: { id: 10 }, ...extra });
+    let chip = pg.meetingChip([D('bo'), D('cy')], new Set(['lab|cy']), 'lab');
+    eq([chip.disabled, chip.text, chip.agents], [true, 'Meeting room · 1', ['bo']], 'a desk already out in a window is not taken, and one free desk is not a meeting');
+    assert(/Cy \(cy\) is in a window already/.test(chip.title), 'and the desk left out is named on hover');
+    chip = pg.meetingChip([D('bo'), D('cy'), D('ed', { nudge: { ok: false, reason: 'held' } })], new Set(), 'lab');
+    eq([chip.disabled, chip.agents], [false, ['bo', 'cy', 'ed']], 'a desk that cannot take messages can still be in the room: its refusals are said per message');
+    eq(pg.meetingAddable([D('bo'), D('cy'), D('dee')], new Set(['bo']), new Set(['lab|dee']), 'lab').map((d) => d.agent), ['cy'],
+      'Add offers the drawn desks not in this room and not out anywhere (Decided 3)');
+
+    const e0 = { agent: 'bo', host: 'h', base: 10, state: 'line' };
+    eq(pg.meetingEntry(e0, 'hi', [{ id: 9, role: 'user', text: 'hi' }], null).state, 'line', 'an older turn with the same words is not this message');
+    eq(pg.meetingEntry(e0, 'hi  there', [{ id: 11, role: 'user', text: 'hi there' }], null), { ...e0, state: 'recorded', turn: 11 }, 'recorded: the desk\'s own user turn after it was sent');
+    eq(pg.meetingEntry(e0, 'hi', [{ id: 11, role: 'error', text: 'no window' }, { id: 12, role: 'user', text: 'hi' }], null).state, 'failed', 'an error turn first is a failure (settle()\'s rule)');
+    eq(pg.meetingEntry(e0, 'hi', [], { state: 'queued', text: 'hi' }).state, 'queued', 'queued: the window\'s own note');
+    eq(pg.meetingEntry({ ...e0, state: 'queued' }, 'hi', [], null).state, 'queued', 'and that sticks until the turn comes');
+    eq(pg.meetingEntry(e0, '/compact', [], { state: 'done', text: '/compact', said: 'Compacted' }), { ...e0, state: 'done', words: 'Compacted' }, 'a command: its receipt, in the window\'s words');
+    eq(pg.meetingEntry({ ...e0, state: 'refused', words: 'x' }, 'hi', [{ id: 11, role: 'user', text: 'hi' }], null).state, 'refused', 'a refusal is settled');
+
+    const line = [{ agent: 'a', host: 'h', state: 'line' }, { agent: 'b', host: 'h', state: 'line' }];
+    eq(pg.meetingEntryWord(line[1], line, false, 0, 100_000, 30_000), { text: 'in line — 1 desk ahead on h', kind: 'wait' }, 'a desk behind another on its host waits on that, not on the clock');
+    eq(pg.meetingEntryWord({ ...line[0], front: 1000 }, line, false, 0, 40_000, 30_000), { text: 'not recorded — send again', kind: 'bad' }, 'the silence clock runs from the front of the line');
+    eq(pg.meetingEntryWord({ agent: 'a', state: 'refused', words: 'The host is offline.' }, [], false, 0, 0, 1).text, 'not sent — The host is offline.', 'a refusal is said in the board\'s words');
+
+    const sends = [{ seq: 1, text: 'hello', at: 0, to: ['bo', 'cy'], entries: [{ agent: 'bo', state: 'recorded', turn: 21 }, { agent: 'cy', state: 'recorded', turn: 24 }] },
+      { seq: 2, text: 'pending', at: 0, to: ['bo'], entries: [{ agent: 'bo', state: 'line' }] }];
+    const ps = [
+      { agent: 'bo', turns: [{ id: 21, role: 'user', text: 'hello' }, { id: 22, role: 'assistant', text: 'bo says hi' }, { id: 30, role: 'user', text: 'typed in the window', created_at: '2026-11-05T10:00:00Z' }] },
+      { agent: 'cy', turns: [{ id: 24, role: 'user', text: 'hello' }, { id: 25, role: 'assistant', text: 'cy says hi' }, { id: 31, role: 'user', text: 'typed in the window', created_at: '2026-11-05T10:00:30Z' }] },
+    ];
+    const items = pg.meetingItems(ps, sends, [{ seq: 3, after: 25, text: 'Dee joined' }]);
+    eq(items.map((it) => it.key), ['send:1', 't:22', 't:25', 'n:3', 'u:30', 'send:2'],
+      'one transcript in time order: a message once however many desks recorded it, each reply, the room\'s notes, pending messages last');
+    eq(items.find((it) => it.key === 'u:30').agents, ['bo', 'cy'], 'the same words on two desks within two minutes, not sent by this window, are one message to both');
+    eq(pg.meetingItems([{ agent: 'bo', turns: [{ id: 1, role: 'user', text: 'x', created_at: '2026-11-05T10:00:00Z' }] }, { agent: 'cy', turns: [{ id: 2, role: 'user', text: 'x', created_at: '2026-11-05T10:05:00Z' }] }], [], [])
+      .map((it) => it.key), ['u:1', 'u:2'], 'and five minutes apart they are two');
+
+    const H = (extra = {}) => ({ host: 'box', window: 'bo', live: true, held: 'floor', session_id: 'S1', ...extra });
+    const chans = (deskList, others = []) => [{ channel: 'lab', desks: deskList }, ...others];
+    const roomOf = (participants) => ({ channel: 'lab', participants });
+    const P = (agent, session_id = 'S1', extra = {}) => ({ agent, session_id, host: 'box', window: agent, ...extra });
+    const plan1 = (desk, p, outs = new Set(), others = []) => pg.meetingResumePlan(roomOf([p]), chans(desk ? [desk] : [], others), outs)[0];
+    eq(plan1({ agent: 'bo', persona: 'Bo', hosted: H() }, P('bo')).act, 'join', 'on its conversation already: joins');
+    eq(plan1({ agent: 'bo', persona: 'Bo', hosted: H({ session_id: 'S2' }) }, P('bo')), { agent: 'bo', persona: 'Bo', act: 'reopen', session_id: 'S1', from: 'S2' },
+      'on another one since: reopened on the one it had');
+    eq(plan1(null, P('bo'), new Set(), [{ channel: 'lab2', desks: [{ agent: 'bo', persona: 'Bo', hosted: H() }] }]).why, 'Bo has moved to lab2. A meeting room is one floor\'s desks.',
+      'moved floors: said, with where');
+    eq(plan1({ agent: 'bo', persona: 'Bo', hosted: null }, P('bo')).why, 'Bo has left its desk: nothing binds it to a folder now.', 'left its desk: said');
+    eq(plan1(null, P('bo')).why, 'bo is no longer on lab.', 'gone from the floor: said');
+    eq(plan1({ agent: 'bo', persona: 'Bo', hosted: H() }, P('bo'), new Set(['lab|bo'])).act, 'skip', 'out in another window: not taken');
+    eq(plan1({ agent: 'bo', persona: 'Bo', hosted: H({ live: false }) }, P('bo')).why, "Bo's host (box) is offline.", 'a host offline: said');
+    eq(plan1({ agent: 'bo', persona: 'Bo', hosted: H({ held: 'editor' }) }, P('bo')).act, 'skip', 'held by an editor: not taken');
+    eq(pg.meetingResumePlan(roomOf([P('bo'), P('cy')]), chans([{ agent: 'bo', persona: 'Bo', hosted: H() }]), new Set()).map((s) => s.act), ['join', 'skip'],
+      'one desk that cannot be reopened does not stop the rest');
+
+    eq([pg.meetingTo(['a', 'b'], null), pg.meetingTo(['a', 'b'], new Set(['b', 'z']))], [['a', 'b'], ['b']], 'everyone by default; narrowed, only desks still in the room');
+    eq([pg.meetingToLine(['a', 'b'], true, (x) => x.toUpperCase()), pg.meetingToLine(['a'], true, (x) => x)], ['everyone (A, B)', 'a'], 'the line over a message names who heard it');
   }
 } catch (err) {
   failures++;

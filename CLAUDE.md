@@ -889,6 +889,73 @@ in no room). `check-popout.mjs` in **verify-ui-change** drives all of it,
 including a floor reload and close. A popup opens only on real input
 (`press()`), never on a dispatched click.
 
+**A meeting room is a popout of several desks, out the popout's way**
+(issue #44, 0.12.0). It is this page with `?meeting=<id>`, opened from a
+room's selection toolbar or from Resume. Its code names are `meeting…`,
+never `room…`, because `room(c)` is a channel's drawing (Decided 1). Seven
+things behind it each look like they could be done more simply:
+- **Presence is the popout's, under the same lock names.** The window takes
+  `popLockName` for each participant with `ifAvailable` and says `here`
+  with `meeting` on `orch.popouts`. So the floor's panel, the detach
+  button, a floor nudge and the hub all step aside for it with no new
+  machinery, and Decided 3's "one place at a time" is the lock: a desk
+  whose popout or another room holds it is not taken, and the room says
+  so. The floor's `here` handler used to drop every other key a window id
+  held (a popout following a move). A meeting's `here` skips that, or each
+  participant's `here` would undo the last one's.
+- **No route types for a room.** A message is one `/api/floor/chat` per
+  recipient, in `nudgePlan`'s order (windowed desks first), with every
+  check that route makes. Each desk's delivery is read off that desk's
+  turns and note (`meetingEntry`). The room's own send is only the
+  addressing, never the record (CLAUDE.md's "a delivery is what the window
+  recorded"). A user turn the room did not send, or whose send a reload
+  lost, is folded by the same words within two minutes
+  (`MEET_GROUP_MS`). Two identical messages typed into two windows inside
+  that time read as one; that is the limit, and it was chosen over N
+  copies of every message.
+- **The prompt box is the panel's, lifted, not copied.** `drawAlert`
+  draws a desk's box into any slot, and the handlers read the desk off
+  the box (`targetOf`: `data-for-agent`, else `ui.open`). A new control in
+  a prompt box goes through `targetOf` too, or it answers the open desk
+  from a meeting room, which has none.
+- **A desk leaves the room on moved, binding gone, or gone, never on a host
+  offline.** deskFate reads a host gone offline as "left", and a host
+  restart is that for a few seconds. A room losing its desks to a restart
+  was the failure; such a desk stays, reads "away", and its messages are
+  refused in the board's words.
+- **A reload is End then Open.** pagehide ends the record with keepalive,
+  because closing the window ends the meeting and the page cannot tell a
+  close from a reload. The reloaded window's `/meeting/open` clears
+  `ended_at`, and the floor holds its desks out for `REJOIN_MS`
+  (`rejoin`), so its panel does not flash a composer. So "ended" is not
+  final, and the Recent list leaves out rooms open in a window
+  (`floorOpenMeetings`) rather than trusting the column.
+- **Resume reuses the room's row, and asks before it reopens.** A new row
+  per resume filled the list with copies of one room. The host's
+  conversation list is asked first: `reopen` of an id gone from disk makes
+  the host open the folder's newest instead (`resumable()`), which would
+  move a desk off whatever it was on for nothing. A desk whose reopen
+  fails (refused, the host's error turn, another conversation opened, 90 s)
+  leaves the resumed room with the reason, so "in the room" always means
+  "on the conversation it had". Add puts it back on whatever it is on now.
+- **A resumed room shows what was said before, from each desk's own
+  turns.** Each participant's part starts after the turn it first joined
+  after (`since`, kept in the record), under its current conversation. The
+  original addressing was the old window's and is gone, so an old message
+  reads `you → Bo` there.
+
+Left out on purpose. **Model and effort controls**: a desk's select drives
+its window's picker, so a room would need one per desk; `/model sonnet`
+narrowed to one desk takes the same route. **A reading view**: History
+reads a meeting desk in the floor's panel, because reading types into
+nothing (renderPanel's `outMeeting` branch). **Audit rows**: a room is a
+window arrangement, like a popout, and popouts write none; the reopens a
+Resume makes write their own `desk.reopen`. **`@name` narrowing**: the
+chips narrow, and the words go as typed, because stripping a mention
+changes what the agent receives. **`meeting_rooms` in backups**: it names
+sessions on disks that may not be this machine's. `check-meeting.mjs` in
+**verify-ui-change** drives all of it.
+
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
 2026-11-04). A click on the `<dialog>` element closes it only when it

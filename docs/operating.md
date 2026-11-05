@@ -209,6 +209,26 @@ desk is hidden, and says so if the desk is left. The browser shows a read-only
 address strip on the popup; fully chromeless windows are the desktop app's
 job, not the page's.
 
+**Several desks in one chat.** On a floor, **select desks**, check two or
+more, and press **Meeting room**. One window opens with those desks in it:
+who is in the room and what each is doing (working, idle, needs you) in a
+row along the top, one transcript of everything said from then on with each
+desk's words labelled and coloured as its shirt, and one composer. A message
+goes to everyone in the room unless you narrow it with the chips over the box;
+the next one goes to everyone again. Each desk's delivery shows under your
+message on its own: sending, queued, delivered, or not sent with the board's
+reason (an editor holding it, a host offline). The desks never hear each other
+through the room. A desk's question forms, permission prompts, Stop and
+slash-command receipts are answered in the room, each in a box labelled with
+its desk. **Add a desk** offers the floor's other desks that are not in a
+window already; **✕** on a desk, or **Bring back from the meeting room** in
+its panel on the floor, puts it back on the floor. **End meeting**, or
+closing the window, ends it. Ended rooms are drawn nowhere and counted
+nowhere: **Meeting rooms** in the floor's header lists the last twenty,
+newest first, and **Resume** opens one again with each desk back on the
+conversation it had — or says, desk by desk, why not (it left, it moved
+floors, its window is busy, its conversation is gone).
+
 The host only ever reaches *out*. It registers with the server, then holds a
 request open asking for work; the server never connects to a workstation and
 nothing on the workstation listens. If the server is down the host retries; if

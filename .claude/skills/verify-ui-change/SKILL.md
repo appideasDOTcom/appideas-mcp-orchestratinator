@@ -321,6 +321,35 @@ The check tells the two "the click did nothing" causes apart — the card's
 own click branch swallows a button it does not name, which is how the
 first cut of Hide desk failed here and not in the suite.
 
+### seed-meeting.mjs and check-meeting.mjs — a meeting room (#44)
+
+Issue #44 (0.12.0): several desks of one floor in one window.
+[`seed-meeting.mjs`](seed-meeting.mjs) is the floor *and* its host: `lab`
+has bo, cy, dee (live), ed (held by an editor) and `lab2` has zed. As host
+it records each chat as the desk's user turn and answers it, cy saying
+`queued` first. It answers a `/command` with a `receipt`, `sessions` with
+the desk's conversations, and `reopen` by moving the desk's session. It
+prints every work item as a JSON line, which is how the check reads who
+was sent what. A `--ctl` file moves a desk's session between steps.
+[`check-meeting.mjs`](check-meeting.mjs) drives create, the floor while
+desks are out, send to everyone, narrowing, a refusal, a permission
+prompt, Stop, a command receipt, a question form, Remove, Bring back, a
+reload, End, the Recent list, Resume and close, about a minute and a half:
+
+```bash
+PORT=8941 CDP=9281 .claude/skills/verify-ui-change/run-check-meeting.sh "$PWD"
+# … PASS
+```
+
+Two things it cost a round to learn. A label drawn with `text-transform:
+uppercase` reads `CY` through `innerText`; read `textContent` for what the
+page wrote. And this check's own server is found by its PID: `node
+src/server.js` carries its port and DB in the environment, so a `ps | grep
+8951` kill matches nothing. On 2026-11-05 that left a server from the run
+before answering on the port, and check-select read a desk the last run
+had hidden as missing ("testing the twin" above). Kill what you started,
+by the PID you got when you started it.
+
 ### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
 
 Issue #23 (2026-11-04, 0.10.16): **select desks** on a room, check desks,
