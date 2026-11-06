@@ -81,10 +81,15 @@ Two routes considered and set aside:
   Each expands in its own environment, and they differ. The hook has the
   window's. The host has its own, which under the LaunchAgent is `PATH` and
   `HOME` only, so on an installed host such a desk is always unresolved, its
-  key comes from `install.sh --token`, and the startup line names the desk.
-  A window the host opens in tmux has the tmux server's environment, not the
-  operator's shell's, and when the host started that server it lacks the
-  variable too — measured by QA on PR #52, 0 of 2 panes.)
+  key comes from host.json, and the startup line names the desk. install.sh
+  writes host.json's key from `--token`, or from an `ORCH_AUTH_TOKEN`
+  exported in the installing shell. A window the host opens in tmux has the
+  tmux server's environment, not the operator's shell's, and when the host
+  started that server it lacks the variable too (measured by QA on PR #52,
+  0 of 2 panes). So the host gives such a window that one variable, set to
+  its own key, with tmux's `-e` (`paneEnv` in `host/window.js`): only for a
+  key that is nothing but a placeholder the host could not fill, and nothing
+  is written to disk. costmo's ruling, 2026-11-06.)
 - **`--mcp-config` as the primary.** Zero writes to disk, which is attractive,
   but the binding then exists only in the process the host launched. "Open in
   VS Code" would hand the conversation to a window with no board on it, and

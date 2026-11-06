@@ -224,10 +224,12 @@ own binding wins over it, so a machine with even one `.mcp.json` that writes
 the key out needs no `--token`.
 
 A `.mcp.json` that keeps the key out of the tree as `"${ORCH_AUTH_TOKEN}"` is
-the exception: it does need `--token`. Claude Code fills that in from your
-shell, but the host runs as a LaunchAgent, which starts with no shell and
-none of your exported variables, so it cannot read the placeholder. Its log
-says so at startup, naming the desk.
+filled in by Claude Code from your shell, but the host runs as a LaunchAgent,
+which starts with none of your exported variables. So `install.sh` takes the
+key from the shell you run it in: with `ORCH_AUTH_TOKEN` exported there, no
+`--token` is needed, and it is written to the host's own config. Windows the
+host opens for such a repo are given the variable too. Without either, the
+host's log says at startup which desk it could not read a key from.
 
 **6. Open the floor.**
 

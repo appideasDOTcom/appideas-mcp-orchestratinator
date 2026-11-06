@@ -213,6 +213,9 @@ function fixture() {
     `  process.stderr.write('stand-in: unknown mcp subcommand\\n'); process.exit(2);`,
     `}`,
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
+    // The one variable a placeholder desk's window is given (paneEnv in
+    // host/window.js), one line per window started, as the pane has it.
+    `fs.appendFileSync(${JSON.stringify(`${FIX}/pane-env.log`)}, JSON.stringify({ cwd: process.cwd(), key: process.env.ORCH_TEST_PANE_KEY ?? null }) + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
     // yet, and send() sits in waitReady. A ready-delay *file* makes that
@@ -704,6 +707,38 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.state === 'offline' ? true : null), 10000),
     'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
   assert(/dropped desk .*late/.test(host.log), 'which the host also says');
+
+  // A desk whose .mcp.json key is `${ORCH_TEST_PANE_KEY}`, which neither this
+  // host's environment nor the tmux server's sets (QA, PR #52 finding 1;
+  // costmo's ruling B). A window the host opens for it is given that one
+  // variable, set to the key the host signs in with, so Claude Code in it
+  // sends the board's key rather than the placeholder. The window suite has
+  // the cases that get nothing; this is the running host's own wiring
+  // (useKey at boot). The window's roster entry replaces the fixture's, so
+  // the case puts back what was there and closes the window when done.
+  const paneDir = `${FIX}/repo-pane`;
+  mkdirSync(paneDir, { recursive: true });
+  writeFileSync(`${paneDir}/.mcp.json`, JSON.stringify({
+    mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'pane', 'X-Orchestratinator-Key': '${ORCH_TEST_PANE_KEY}' } } },
+  }, null, 2));
+  const rosterWas = readFileSync(`${FIX}/roster.json`, 'utf8');
+  eq((await json('/api/floor/rescan', {})).status, 200, 'a desk whose key is a placeholder nothing here sets is found');
+  assert(await until(async () => (deskOf(await floor(), 'pane')?.hosted?.live === true ? true : null), 10000), 'and hosted');
+  // Opened, not messaged: the stand-in writes whatever it is sent into the
+  // fixture's one transcript, which is `free`'s, and later cases count that.
+  eq((await json('/api/floor/open', { channel: CH, agent: 'pane' })).status, 200, 'the floor opens it');
+  const paneEnvLine = await until(() => {
+    const log = existsSync(`${FIX}/pane-env.log`) ? readFileSync(`${FIX}/pane-env.log`, 'utf8') : '';
+    return log.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.cwd.endsWith('/repo-pane')) ?? null;
+  }, 20000);
+  eq(paneEnvLine?.key ?? null, KEY, "the window the host opens for it has the variable, set to the host's key");
+  try {
+    const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
+    for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);
+  } catch { /* gone */ }
+  writeFileSync(`${FIX}/roster.json`, rosterWas);
+  rmSync(`${paneDir}/.mcp.json`);
+  await json('/api/floor/rescan', {});
 
   /* ── taking a desk from the floor ──────────────────────────────────────────
    * The first door that needs no terminal. The route refuses what the board
@@ -1644,6 +1679,7 @@ try {
   rmSync(inst, { recursive: true, force: true });
   mkdirSync(instBin, { recursive: true });
   mkdirSync(`${inst}/projects`, { recursive: true });
+  mkdirSync(`${inst}/Library/LaunchAgents`, { recursive: true });
   writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
   for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
   for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
