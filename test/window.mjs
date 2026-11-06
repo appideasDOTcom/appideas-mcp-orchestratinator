@@ -721,7 +721,16 @@ async function main() {
       writeFileSync(`${d}/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9/mcp', headers: { 'X-Channel': 'c', 'X-Agent': name, 'X-Orchestratinator-Key': key } } } }));
       return d;
     };
-    const paneEnvOf = async (d) => (await until(() => existsSync(`${d}/env.txt`))) ? readFileSync(`${d}/env.txt`, 'utf8') : '';
+    // Read once `env` has written, not once the file exists: the shell
+    // creates env.txt empty before `env` fills it, so the first cut read
+    // 0 bytes under load, which failed "has the key" and passed every
+    // "nothing" row on an empty file (QA, PR #52 finding 6). The survey line
+    // is in every pane the host opens, as the row at the top of the suite
+    // asserts.
+    const paneEnvOf = async (d) => {
+      const f = `${d}/env.txt`;
+      return (await until(() => existsSync(f) && /^CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1$/m.test(readFileSync(f, 'utf8')))) ? readFileSync(f, 'utf8') : '';
+    };
     delete process.env.ORCH_TEST_PANE_KEY;
     W.useKey('board-key-value');
     const phDir = keyDesk('ph', '${ORCH_TEST_PANE_KEY}');
@@ -740,7 +749,9 @@ async function main() {
     W.useKey(null);
     const keylessDir = keyDesk('keyless', '${ORCH_TEST_PANE_KEY}');
     await W.open(keylessDir);
-    const given = async (d) => /=board-key-value$/m.test(await paneEnvOf(d));
+    // 'unread' rather than false when the pane's environment never arrived,
+    // so a row asserting "nothing" cannot pass on a file that was empty.
+    const given = async (d) => { const e = await paneEnvOf(d); return e ? /=board-key-value$/m.test(e) : 'unread'; };
     eq([await given(litDir), await given(compoundDir), await given(filledDir), await given(keylessDir)], [false, false, false, false],
       'a literal key, a key with text around the placeholder, one the host filled, and a host with no key of its own give the pane nothing');
     eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null)], [['-e', 'X=k'], [], []],
@@ -2098,7 +2109,7 @@ async function main() {
     assert(!sessionEnv.includes('board-key-value'), "the session's environment does not");
     const nextDir = keyDesk('literal-next', 'literal-key');
     await W.open(nextDir);
-    eq(/=board-key-value$/m.test(await paneEnvOf(nextDir)), false, 'and a window opened after it in that session has nothing');
+    eq(await given(nextDir), false, 'and a window opened after it in that session has nothing');
   } finally {
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
     rmSync(FIX, { recursive: true, force: true });
