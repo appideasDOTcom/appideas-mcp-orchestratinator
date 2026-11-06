@@ -180,7 +180,10 @@ placeholder. costmo's ruling: install.sh takes an exported
 gives a window that one variable, set to its own key, with tmux `-e`
 (`paneEnv`), only for a key that is nothing but a placeholder it could not
 fill. Nothing is written to disk. `-e` and not the command's `env` prefix,
-because tmux keeps and prints a pane's start command. When the host has no
+because tmux keeps and prints a pane's start command. And `new-session -e`
+is not `new-window -e`: it writes the *session's* environment, which every
+later window inherits and `show-environment` prints, so the window that
+opens the session unsets it straight after (QA, finding 4). When the host has no
 key at all, its startup line names the desk and the variable.
 
 Two loops run side by side in [`host/index.js`](host/index.js): `watchLoop()`

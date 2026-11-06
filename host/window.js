@@ -1682,6 +1682,14 @@ export async function open(cwd, { resume = null } = {}) {
     ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`])
     : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`]);
   if (!made.ok) return { ok: false, error: made.error, missing: made.missing };
+  // `new-session -e` is not `new-window -e`: it sets the variable in the
+  // *session's* environment, so every later window in it inherited the key
+  // and `tmux show-environment` printed it (QA, PR #52 finding 4, measured on
+  // 3.7c). The first window after a reboot opens the session, and with a
+  // partner's 33 placeholder desks that is likely one of them. Unset at once:
+  // the pane already has its copy, and a later window gets one only by its
+  // own `-e`.
+  if (!has.ok && env.length) await tmux(['set-environment', '-t', `${SESSION}:`, '-u', env[1].split('=')[0]]);
   const [target, pid] = made.out.split('\n')[0].split(SEP);
   if (!target?.trim()) return { ok: false, error: 'tmux created the window but did not say where' };
 

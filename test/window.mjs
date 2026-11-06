@@ -2081,6 +2081,24 @@ async function main() {
     eq(wr.code, 'startup_question', 'and says which kind of not-ready this is');
     assert(/Continue without/.test(wr.error ?? ''), `quoting the dialog rather than saying only "not ready" — ${wr.error}`);
     assert(waitedMs < 5000, `and returns as soon as the question is seen, not after the full ${20_000}ms timeout — took ${waitedMs}ms`);
+    // The first window of a session (QA, PR #52 finding 4). Last, because it
+    // closes the session every case above opened windows in. `new-session -e`
+    // sets the variable in the session's environment, unlike `new-window -e`,
+    // so the placeholder desk that opened the session would have handed the
+    // key to every later window and to `show-environment`.
+    console.log('\n  a placeholder desk that opens the session');
+    await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
+    W.useKey('board-key-value');
+    const firstDir = keyDesk('ph-first', '${ORCH_TEST_PANE_KEY}');
+    const opener = await W.open(firstDir);
+    W.useKey(null);
+    assert(opener.ok && opener.created, `a placeholder desk opens the session${opener.ok ? '' : ` — ${opener.error}`}`);
+    assert(/^ORCH_TEST_PANE_KEY=board-key-value$/m.test(await paneEnvOf(firstDir)), 'its own pane has the key');
+    const sessionEnv = (await run('tmux', ['show-environment', '-t', `${TMUX_SESSION}:`]).catch(() => ({ stdout: '' }))).stdout;
+    assert(!sessionEnv.includes('board-key-value'), "the session's environment does not");
+    const nextDir = keyDesk('literal-next', 'literal-key');
+    await W.open(nextDir);
+    eq(/=board-key-value$/m.test(await paneEnvOf(nextDir)), false, 'and a window opened after it in that session has nothing');
   } finally {
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
     rmSync(FIX, { recursive: true, force: true });
