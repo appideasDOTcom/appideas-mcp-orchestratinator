@@ -166,6 +166,23 @@ the repo's own `data/` directory is test leftovers, not the live database, so
 a row repair goes through `docker compose exec -T orchestratinator node` with
 better-sqlite3 at `$DB_PATH`, never through a file in the working tree.
 
+**A key written `${ORCH_AUTH_TOKEN}` is read in three environments, and
+only one of them is the operator's shell** (PR #52, 0.12.4, 2026-11-06).
+Claude Code expands `${VAR}` in a binding's headers from the window's
+environment, and the host and the hook expand it the same way
+(`expandEnv`, two copies; `:-` is for *unset* only, as 2.1.300 sends ""
+for a set-but-empty variable). But the host runs under the LaunchAgent with
+`PATH` + `HOME` and nothing else, and a window the host opens has the tmux
+server's environment, which the host started. QA measured both: such a
+desk gave the host no key, and its floor-opened windows sent the literal
+placeholder. costmo's ruling: install.sh takes an exported
+`ORCH_AUTH_TOKEN` into host.json when `--token` is not given, and the host
+gives a window that one variable, set to its own key, with tmux `-e`
+(`paneEnv`), only for a key that is nothing but a placeholder it could not
+fill. Nothing is written to disk. `-e` and not the command's `env` prefix,
+because tmux keeps and prints a pane's start command. When the host has no
+key at all, its startup line names the desk and the variable.
+
 Two loops run side by side in [`host/index.js`](host/index.js): `watchLoop()`
 relays the conversation, `run()` handles work. Keep them apart. When they shared
 one loop, delivering a message blocked the relay for up to a minute — the floor
