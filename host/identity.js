@@ -90,6 +90,7 @@ export function expandEnv(value, env = process.env) {
 }
 
 const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+const WHOLE_PLACEHOLDER = /^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}$/;
 
 /** The variables a value names that `env` gives nothing for: unset with no
  *  default, or set but empty. Names only, never the value around them, which
@@ -113,7 +114,20 @@ function deskIn(servers, dir, extra) {
     if (channel && agent && typeof s?.url === 'string') {
       const raw = header(s.headers, 'X-Orchestratinator-Key');
       const key = expandEnv(raw);
-      return { channel, agent, cwd: dir, url: s.url, key, ...(!key && unsetIn(raw).length ? { keyUnset: unsetIn(raw) } : {}), ...extra };
+      const unset = key ? [] : unsetIn(raw);
+      // `keyVar`: the one variable a key that is nothing but a placeholder
+      // names, when this host cannot fill it. A window the host opens for the
+      // desk is given that variable (paneEnv in window.js), because the pane
+      // has no better environment than the host's. A key with text around the
+      // placeholder gets none: the variable set to the board's key would make
+      // the key something else.
+      const whole = raw ? WHOLE_PLACEHOLDER.exec(raw)?.[1] : null;
+      return {
+        channel, agent, cwd: dir, url: s.url, key,
+        ...(unset.length ? { keyUnset: unset } : {}),
+        ...(whole && unset.includes(whole) ? { keyVar: whole } : {}),
+        ...extra,
+      };
     }
   }
   return null;

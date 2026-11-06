@@ -34,8 +34,39 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { readDesk } from './identity.js';
 
 const run = promisify(execFile);
+
+/**
+ * The board's key as this host holds it, for a window that cannot fill its
+ * own. Set by index.js whenever the host settles on a key (useKey).
+ *
+ * A repo whose `.mcp.json` key is `${ORCH_AUTH_TOKEN}` works in the operator's
+ * terminal because their shell exports it. A window the host opens has the
+ * tmux server's environment instead, and when the host started that server
+ * it is the LaunchAgent's `PATH` + `HOME`: measured by QA on PR #52, 0 of 2
+ * panes carried the variable, even from a client that exported it. So Claude
+ * Code sent the literal placeholder, the hook sent no key, and an enforcing
+ * board refused both, for every placeholder desk opened from the floor.
+ * costmo's ruling (PR #52, 2026-11-06): the pane is given that one variable,
+ * set to the host's key, and nothing is written to disk. Only for a desk whose
+ * key names a variable the host could not fill (`keyVar`, identity.js) — a
+ * literal key needs nothing, and one the host filled came from the same
+ * environment the host started the tmux server with.
+ */
+let boardKey = null;
+export function useKey(key) { boardKey = key || null; }
+
+/** tmux `-e` arguments for a window opened in this desk's folder, or none.
+ *  `-e` rather than the `env` the command line already runs through: an
+ *  argument to `env` is part of the pane's start command, which tmux keeps
+ *  and prints (`#{pane_start_command}`, choose-tree), so the key would be on
+ *  every listing of the session. `-e` is the window's environment and
+ *  nothing else (tmux 3.0 and later). */
+export function paneEnv(desk, key = boardKey) {
+  return desk?.keyVar && key ? ['-e', `${desk.keyVar}=${key}`] : [];
+}
 
 /**
  * tmux escapes whatever it thinks the terminal cannot print, so a directory
@@ -1645,9 +1676,11 @@ export async function open(cwd, { resume = null } = {}) {
   // `zz-demo` refuses `new-window -t zz` and accepts `new-window -t zz:`.
   // The trailing colon is the session with no window part, which is the next
   // free index — what the bare name only appeared to mean.
+  // The key a placeholder desk cannot get from the tmux server — see useKey.
+  const env = paneEnv(readDesk(here));
   const made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, `exec ${cmd}`])
-    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, `exec ${cmd}`]);
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`])
+    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`]);
   if (!made.ok) return { ok: false, error: made.error, missing: made.missing };
   const [target, pid] = made.out.split('\n')[0].split(SEP);
   if (!target?.trim()) return { ok: false, error: 'tmux created the window but did not say where' };

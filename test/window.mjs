@@ -706,6 +706,50 @@ async function main() {
     assert(!clean(readAt(a)).includes('for the second desk'), "and neither receives the other's");
     assert(!clean(readAt(b)).includes('for the first desk'), 'in either direction');
 
+    // A desk whose key is a placeholder the host cannot fill (QA, PR #52
+    // finding 1; costmo's ruling B). The pane's environment is the tmux
+    // server's, not the host's or the operator's, so Claude Code in it sent
+    // the literal `${ORCH_AUTH_TOKEN}` and the hook in it sent no key. The
+    // host now gives the pane that one variable, set to its own key, and
+    // nothing else. The stand-in's env.txt is the pane's environment as
+    // started; the hook is a child of the window, so it reads the same one
+    // (its expansion is test:plugin's).
+    console.log('\n  a desk whose key the window cannot fill');
+    const keyDesk = (name, key) => {
+      const d = `${FIX}/keyed/${name}`;
+      mkdirSync(d, { recursive: true });
+      writeFileSync(`${d}/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9/mcp', headers: { 'X-Channel': 'c', 'X-Agent': name, 'X-Orchestratinator-Key': key } } } }));
+      return d;
+    };
+    const paneEnvOf = async (d) => (await until(() => existsSync(`${d}/env.txt`))) ? readFileSync(`${d}/env.txt`, 'utf8') : '';
+    delete process.env.ORCH_TEST_PANE_KEY;
+    W.useKey('board-key-value');
+    const phDir = keyDesk('ph', '${ORCH_TEST_PANE_KEY}');
+    const phOpen = await W.open(phDir);
+    assert(phOpen.ok, `a placeholder desk opens${phOpen.ok ? '' : ` — ${phOpen.error}`}`);
+    assert(/^ORCH_TEST_PANE_KEY=board-key-value$/m.test(await paneEnvOf(phDir)),
+      "its pane is given the variable its key names, set to the host's key");
+    const litDir = keyDesk('literal', 'literal-key');
+    await W.open(litDir);
+    const compoundDir = keyDesk('compound', 'pre-${ORCH_TEST_PANE_KEY}');
+    await W.open(compoundDir);
+    process.env.ORCH_TEST_FILLED_KEY = 'host-filled';
+    const filledDir = keyDesk('filled', '${ORCH_TEST_FILLED_KEY}');
+    await W.open(filledDir);
+    delete process.env.ORCH_TEST_FILLED_KEY;
+    W.useKey(null);
+    const keylessDir = keyDesk('keyless', '${ORCH_TEST_PANE_KEY}');
+    await W.open(keylessDir);
+    const given = async (d) => /=board-key-value$/m.test(await paneEnvOf(d));
+    eq([await given(litDir), await given(compoundDir), await given(filledDir), await given(keylessDir)], [false, false, false, false],
+      'a literal key, a key with text around the placeholder, one the host filled, and a host with no key of its own give the pane nothing');
+    eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null)], [['-e', 'X=k'], [], []],
+      'paneEnv: the variable for a desk that names one, nothing otherwise');
+    // tmux keeps a pane's start command and prints it (choose-tree,
+    // #{pane_start_command}); `-e` is not part of it, so the key is not there.
+    const starts = (await run('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_start_command}'])).stdout;
+    assert(!starts.includes('board-key-value'), 'and the key is not in any pane\'s start command');
+
     // A desk whose folder name begins with the tmux session's name. tmux
     // resolves new-window's `-t` against window names before session names,
     // and by prefix — so once a window called `orch-slice1-demo` existed,

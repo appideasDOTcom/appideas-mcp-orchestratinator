@@ -740,6 +740,7 @@ class Host {
         log(`shared secret: now from ${d.channel}/${d.agent}'s ${d.scope === 'local' ? 'local-scope entry' : '.mcp.json'}${this.cfg.tokenSource ? `, which overrides ${this.cfg.tokenSource}` : ''}  (${reason})`);
         this.cfg.token = d.key;
         this.cfg.tokenSource = 'a desk';
+        W.useKey(d.key);
       }
       const have = this.desks.get(k);
       if (have && have.cwd === W.canonical(d.cwd)) {
@@ -1781,6 +1782,7 @@ async function main() {
       warn(`no shared secret: ${placeholders ?? 'no desk here carries a key'}, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
     }
   }
+  W.useKey(cfg.token);
   if (found.length && !mine.length) {
     warn(`every desk found points at another board — this host serves ${origin} and has nothing to do`);
   }

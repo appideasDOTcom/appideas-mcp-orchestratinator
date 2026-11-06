@@ -1632,6 +1632,36 @@ try {
   assert(/no shared secret: host-test\/ph-agent carries its key as \$\{ORCH_AUTH_TOKEN\}, which this host's environment does not set/.test(bare.out) && /install\.sh --token/.test(bare.out),
     'and with no host.json token it says the same, and how to give it one');
 
+  // install.sh with no --token takes an ORCH_AUTH_TOKEN exported in the
+  // installing shell (costmo's ruling on PR #52 finding 1, D): the shell that
+  // fills in a repo's `${ORCH_AUTH_TOKEN}` for Claude Code is the one that runs
+  // the install, and the LaunchAgent sees none of it. Run against stand-ins
+  // with HOME in the fixture. PATH is the stand-ins, /usr/bin and node's own
+  // directory, and never /bin, which is where the real launchctl is: a real
+  // bootout here would stop the operator's live host. Checked before each run.
+  const inst = `${FIX}/install`;
+  const instBin = `${inst}/bin`;
+  rmSync(inst, { recursive: true, force: true });
+  mkdirSync(instBin, { recursive: true });
+  mkdirSync(`${inst}/projects`, { recursive: true });
+  writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
+  for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
+  for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
+  for (const t of ['cat', 'mkdir', 'sleep']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
+  const instPath = `${instBin}:/usr/bin:${resolve(process.execPath, '..')}`;
+  const install = (args, env = {}) => {
+    const which = execFileSync('/bin/sh', ['-c', 'command -v launchctl'], { env: { PATH: instPath } }).toString().trim();
+    if (which !== `${instBin}/launchctl`) throw new Error(`install.sh would reach ${which}, not the stand-in`);
+    const out = execFileSync('/bin/bash', ['host/install.sh', ...args, `${inst}/projects`], { env: { PATH: instPath, HOME: inst, ...env } }).toString();
+    return { out, conf: JSON.parse(readFileSync(`${inst}/.orchestratinator/host.json`, 'utf8')) };
+  };
+  const fromShell = install([], { ORCH_AUTH_TOKEN: 'shell-key-value' });
+  eq(fromShell.conf.token, 'shell-key-value', 'install.sh with no --token writes an exported ORCH_AUTH_TOKEN to host.json');
+  assert(/shared secret from ORCH_AUTH_TOKEN in this shell/.test(fromShell.out) && !/shell-key-value/.test(fromShell.out),
+    'and says where it came from, without printing it');
+  eq(install(['--token', 'flag-key-value'], { ORCH_AUTH_TOKEN: 'shell-key-value' }).conf.token, 'flag-key-value', '--token still wins over the shell');
+  eq(install([]).conf.token, 'flag-key-value', "and with neither, host.json's token is kept");
+
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
    * it held 7,379 failure lines without a time among them, each reading
