@@ -706,6 +706,61 @@ async function main() {
     assert(!clean(readAt(a)).includes('for the second desk'), "and neither receives the other's");
     assert(!clean(readAt(b)).includes('for the first desk'), 'in either direction');
 
+    // A desk whose key is a placeholder the host cannot fill (QA, PR #52
+    // finding 1; costmo's ruling B). The pane's environment is the tmux
+    // server's, not the host's or the operator's, so Claude Code in it sent
+    // the literal `${ORCH_AUTH_TOKEN}` and the hook in it sent no key. The
+    // host now gives the pane that one variable, set to its own key, and
+    // nothing else. The stand-in's env.txt is the pane's environment as
+    // started; the hook is a child of the window, so it reads the same one
+    // (its expansion is test:plugin's).
+    console.log('\n  a desk whose key the window cannot fill');
+    const keyDesk = (name, key) => {
+      const d = `${FIX}/keyed/${name}`;
+      mkdirSync(d, { recursive: true });
+      writeFileSync(`${d}/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9/mcp', headers: { 'X-Channel': 'c', 'X-Agent': name, 'X-Orchestratinator-Key': key } } } }));
+      return d;
+    };
+    // Read once `env` has written, not once the file exists: the shell
+    // creates env.txt empty before `env` fills it, so the first cut read
+    // 0 bytes under load, which failed "has the key" and passed every
+    // "nothing" row on an empty file (QA, PR #52 finding 6). The survey line
+    // is in every pane the host opens, as the row at the top of the suite
+    // asserts.
+    const paneEnvOf = async (d) => {
+      const f = `${d}/env.txt`;
+      return (await until(() => existsSync(f) && /^CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1$/m.test(readFileSync(f, 'utf8')))) ? readFileSync(f, 'utf8') : '';
+    };
+    delete process.env.ORCH_TEST_PANE_KEY;
+    W.useKey('board-key-value');
+    const phDir = keyDesk('ph', '${ORCH_TEST_PANE_KEY}');
+    const phOpen = await W.open(phDir);
+    assert(phOpen.ok, `a placeholder desk opens${phOpen.ok ? '' : ` — ${phOpen.error}`}`);
+    assert(/^ORCH_TEST_PANE_KEY=board-key-value$/m.test(await paneEnvOf(phDir)),
+      "its pane is given the variable its key names, set to the host's key");
+    const litDir = keyDesk('literal', 'literal-key');
+    await W.open(litDir);
+    const compoundDir = keyDesk('compound', 'pre-${ORCH_TEST_PANE_KEY}');
+    await W.open(compoundDir);
+    process.env.ORCH_TEST_FILLED_KEY = 'host-filled';
+    const filledDir = keyDesk('filled', '${ORCH_TEST_FILLED_KEY}');
+    await W.open(filledDir);
+    delete process.env.ORCH_TEST_FILLED_KEY;
+    W.useKey(null);
+    const keylessDir = keyDesk('keyless', '${ORCH_TEST_PANE_KEY}');
+    await W.open(keylessDir);
+    // 'unread' rather than false when the pane's environment never arrived,
+    // so a row asserting "nothing" cannot pass on a file that was empty.
+    const given = async (d) => { const e = await paneEnvOf(d); return e ? /=board-key-value$/m.test(e) : 'unread'; };
+    eq([await given(litDir), await given(compoundDir), await given(filledDir), await given(keylessDir)], [false, false, false, false],
+      'a literal key, a key with text around the placeholder, one the host filled, and a host with no key of its own give the pane nothing');
+    eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null)], [['-e', 'X=k'], [], []],
+      'paneEnv: the variable for a desk that names one, nothing otherwise');
+    // tmux keeps a pane's start command and prints it (choose-tree,
+    // #{pane_start_command}); `-e` is not part of it, so the key is not there.
+    const starts = (await run('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_start_command}'])).stdout;
+    assert(!starts.includes('board-key-value'), 'and the key is not in any pane\'s start command');
+
     // A desk whose folder name begins with the tmux session's name. tmux
     // resolves new-window's `-t` against window names before session names,
     // and by prefix — so once a window called `orch-slice1-demo` existed,
@@ -2037,6 +2092,24 @@ async function main() {
     eq(wr.code, 'startup_question', 'and says which kind of not-ready this is');
     assert(/Continue without/.test(wr.error ?? ''), `quoting the dialog rather than saying only "not ready" — ${wr.error}`);
     assert(waitedMs < 5000, `and returns as soon as the question is seen, not after the full ${20_000}ms timeout — took ${waitedMs}ms`);
+    // The first window of a session (QA, PR #52 finding 4). Last, because it
+    // closes the session every case above opened windows in. `new-session -e`
+    // sets the variable in the session's environment, unlike `new-window -e`,
+    // so the placeholder desk that opened the session would have handed the
+    // key to every later window and to `show-environment`.
+    console.log('\n  a placeholder desk that opens the session');
+    await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
+    W.useKey('board-key-value');
+    const firstDir = keyDesk('ph-first', '${ORCH_TEST_PANE_KEY}');
+    const opener = await W.open(firstDir);
+    W.useKey(null);
+    assert(opener.ok && opener.created, `a placeholder desk opens the session${opener.ok ? '' : ` — ${opener.error}`}`);
+    assert(/^ORCH_TEST_PANE_KEY=board-key-value$/m.test(await paneEnvOf(firstDir)), 'its own pane has the key');
+    const sessionEnv = (await run('tmux', ['show-environment', '-t', `${TMUX_SESSION}:`]).catch(() => ({ stdout: '' }))).stdout;
+    assert(!sessionEnv.includes('board-key-value'), "the session's environment does not");
+    const nextDir = keyDesk('literal-next', 'literal-key');
+    await W.open(nextDir);
+    eq(await given(nextDir), false, 'and a window opened after it in that session has nothing');
   } finally {
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
     rmSync(FIX, { recursive: true, force: true });

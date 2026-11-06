@@ -740,6 +740,7 @@ class Host {
         log(`shared secret: now from ${d.channel}/${d.agent}'s ${d.scope === 'local' ? 'local-scope entry' : '.mcp.json'}${this.cfg.tokenSource ? `, which overrides ${this.cfg.tokenSource}` : ''}  (${reason})`);
         this.cfg.token = d.key;
         this.cfg.tokenSource = 'a desk';
+        W.useKey(d.key);
       }
       const have = this.desks.get(k);
       if (have && have.cwd === W.canonical(d.cwd)) {
@@ -1762,11 +1763,26 @@ async function main() {
     cfg.tokenSource = 'a desk';
     const others = mine.filter((d) => d.key && d.key !== keyed.key);
     if (others.length) warn(`${others.length} desk${others.length === 1 ? '' : 's'} carr${others.length === 1 ? 'ies' : 'y'} a different key from ${keyed.channel}/${keyed.agent}'s — ${others.map((d) => `${d.channel}/${d.agent}`).join(', ')}. One board takes one key; using ${keyed.channel}/${keyed.agent}'s, and the others will be refused by the board.`);
-  } else if (cfg.token) {
-    log(`shared secret: from ${cfg.tokenSource} (no desk here carries one)`);
   } else {
-    warn(`no shared secret: no desk here carries a key, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
+    // A desk whose key is a placeholder this host cannot fill (`keyUnset`,
+    // host/identity.js) is named, because under launchd that is every such
+    // desk: the LaunchAgent's environment is PATH and HOME, so a repo that
+    // keeps `${ORCH_AUTH_TOKEN}` in its .mcp.json works in its own windows
+    // and gives the host nothing (QA, PR #52 finding 1). Without the name the
+    // log said only that there was no key, and the README had said such a
+    // machine needed no --token.
+    const ph = mine.filter((d) => d.keyUnset);
+    const vars = [...new Set(ph.flatMap((d) => d.keyUnset))].map((v) => `\${${v}}`).join(', ');
+    const placeholders = ph.length
+      ? `${ph[0].channel}/${ph[0].agent}${ph.length > 1 ? ` and ${ph.length - 1} other desk${ph.length === 2 ? '' : 's'}` : ''} carr${ph.length === 1 ? 'ies' : 'y'} its key as ${vars}, which this host's environment does not set`
+      : null;
+    if (cfg.token) {
+      log(`shared secret: from ${cfg.tokenSource} (${placeholders ?? 'no desk here carries one'})`);
+    } else {
+      warn(`no shared secret: ${placeholders ?? 'no desk here carries a key'}, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
+    }
   }
+  W.useKey(cfg.token);
   if (found.length && !mine.length) {
     warn(`every desk found points at another board — this host serves ${origin} and has nothing to do`);
   }

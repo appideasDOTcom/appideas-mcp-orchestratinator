@@ -64,6 +64,27 @@ function header(headers, name) {
   return null;
 }
 
+/** A header value as Claude Code sends it: `${VAR}` and `${VAR:-default}`
+ *  expanded, null when a variable is unset with no default. The default is
+ *  for unset only: set but empty expands as empty, as 2.1.300 sends it, and
+ *  an empty result is no key. The hook runs in
+ *  the window's environment, so this resolves what the window's own MCP
+ *  connection did; read literally, a `${ORCH_AUTH_TOKEN}` key was sent as
+ *  that text and refused. The host has the same function (host/identity.js
+ *  `expandEnv`, where the reasoning is); a change here is a change there. */
+function expandEnv(value, env = process.env) {
+  if (typeof value !== 'string') return null;
+  let missing = false;
+  const out = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) => {
+    const v = env[name];
+    if (v !== undefined) return v;
+    if (fallback !== undefined) return fallback;
+    missing = true;
+    return '';
+  });
+  return missing || !out.trim() ? null : out.trim();
+}
+
 /** The orchestratinator entry in a set of MCP servers, or null. An entry
  *  qualifies only if it carries both X-Channel and X-Agent — that pair is the
  *  orchestratinator's signature, and matching on it rather than on a server
@@ -73,7 +94,7 @@ function identityIn(servers) {
     const channel = header(s?.headers, 'X-Channel');
     const agent = header(s?.headers, 'X-Agent');
     if (channel && agent && typeof s?.url === 'string') {
-      return { channel, agent, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key') };
+      return { channel, agent, url: s.url, key: expandEnv(header(s.headers, 'X-Orchestratinator-Key')) };
     }
   }
   return null;

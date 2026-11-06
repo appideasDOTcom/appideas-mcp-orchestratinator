@@ -45,6 +45,66 @@ export function header(headers, name) {
   return null;
 }
 
+/**
+ * A header value as Claude Code would send it: `${VAR}` and `${VAR:-default}`
+ * expanded against `env`. Null when a variable is unset and has no default —
+ * the value is unknown here, and a guess is worse than nothing.
+ *
+ * Used for the key only, and that is why it exists: a repo that keeps its key
+ * out of the tree writes `"X-Orchestratinator-Key": "${ORCH_AUTH_TOKEN}"`, its
+ * windows connect because Claude Code expands it, and the host used to read
+ * the placeholder literally. A desk's key outranks the environment and
+ * host.json (main()), so the host then signed in with the text
+ * `${ORCH_AUTH_TOKEN}` on every request, and bound every floor-opened window
+ * with it too — reported from a partner's machine with 33 such desks,
+ * 2026-11-05. Unresolved, the desk carries no key and the host's own
+ * (environment, host.json) is used. Channel and agent are not expanded: they
+ * are the window's environment, not the host's, and the two need not agree.
+ * The plugin hook has the same function (`expandEnv` in report.mjs); it runs
+ * in the window's own environment, so there it resolves what Claude Code did.
+ *
+ * Which environment matters, because the host's is not the window's. Under
+ * the LaunchAgent install.sh writes, the host's environment is PATH and HOME
+ * and nothing else (launchd reads no shell profile), so on an installed host
+ * a `${ORCH_AUTH_TOKEN}` desk is always unresolved and its key comes from
+ * host.json (`install.sh --token`). main() names such a desk at startup
+ * (`unsetIn`) so host.log says why there is no key, not only that there is
+ * none. Measured by QA on PR #52, launchd-shaped, 2026-11-06.
+ *
+ * `:-` takes the default only when the variable is unset. Set but empty, it
+ * is expanded as empty, as Claude Code 2.1.300 does (it sends "" for
+ * `${VAR:-dflt}` with `VAR=`; the shell would take the default, and the first
+ * cut here did too — QA, PR #52 Info 2). An empty result is no key.
+ */
+export function expandEnv(value, env = process.env) {
+  if (typeof value !== 'string') return null;
+  let missing = false;
+  const out = value.replace(PLACEHOLDER, (_, name, fallback) => {
+    const v = env[name];
+    if (v !== undefined) return v;
+    if (fallback !== undefined) return fallback;
+    missing = true;
+    return '';
+  });
+  return missing || !out.trim() ? null : out.trim();
+}
+
+const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+const WHOLE_PLACEHOLDER = /^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}$/;
+
+/** The variables a value names that `env` gives nothing for: unset with no
+ *  default, or set but empty. Names only, never the value around them, which
+ *  could be part of a key. For the startup line, not for expansion. */
+export function unsetIn(value, env = process.env) {
+  if (typeof value !== 'string') return [];
+  const names = [];
+  for (const [, name, fallback] of value.matchAll(PLACEHOLDER)) {
+    const v = env[name];
+    if ((v === undefined && fallback === undefined) || v === '') names.push(name);
+  }
+  return [...new Set(names)];
+}
+
 /** The orchestratinator entry in a set of MCP servers, as a desk, or null. The
  *  signature is the pair of headers, never the entry's name. */
 function deskIn(servers, dir, extra) {
@@ -52,7 +112,22 @@ function deskIn(servers, dir, extra) {
     const channel = header(s?.headers, 'X-Channel');
     const agent = header(s?.headers, 'X-Agent');
     if (channel && agent && typeof s?.url === 'string') {
-      return { channel, agent, cwd: dir, url: s.url, key: header(s.headers, 'X-Orchestratinator-Key'), ...extra };
+      const raw = header(s.headers, 'X-Orchestratinator-Key');
+      const key = expandEnv(raw);
+      const unset = key ? [] : unsetIn(raw);
+      // `keyVar`: the one variable a key that is nothing but a placeholder
+      // names, when this host cannot fill it. A window the host opens for the
+      // desk is given that variable (paneEnv in window.js), because the pane
+      // has no better environment than the host's. A key with text around the
+      // placeholder gets none: the variable set to the board's key would make
+      // the key something else.
+      const whole = raw ? WHOLE_PLACEHOLDER.exec(raw)?.[1] : null;
+      return {
+        channel, agent, cwd: dir, url: s.url, key,
+        ...(unset.length ? { keyUnset: unset } : {}),
+        ...(whole && unset.includes(whole) ? { keyVar: whole } : {}),
+        ...extra,
+      };
     }
   }
   return null;

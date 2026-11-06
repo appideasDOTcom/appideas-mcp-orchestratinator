@@ -213,6 +213,9 @@ function fixture() {
     `  process.stderr.write('stand-in: unknown mcp subcommand\\n'); process.exit(2);`,
     `}`,
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
+    // The one variable a placeholder desk's window is given (paneEnv in
+    // host/window.js), one line per window started, as the pane has it.
+    `fs.appendFileSync(${JSON.stringify(`${FIX}/pane-env.log`)}, JSON.stringify({ cwd: process.cwd(), key: process.env.ORCH_TEST_PANE_KEY ?? null }) + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
     // yet, and send() sits in waitReady. A ready-delay *file* makes that
@@ -704,6 +707,38 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'late')?.hosted?.state === 'offline' ? true : null), 10000),
     'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
   assert(/dropped desk .*late/.test(host.log), 'which the host also says');
+
+  // A desk whose .mcp.json key is `${ORCH_TEST_PANE_KEY}`, which neither this
+  // host's environment nor the tmux server's sets (QA, PR #52 finding 1;
+  // costmo's ruling B). A window the host opens for it is given that one
+  // variable, set to the key the host signs in with, so Claude Code in it
+  // sends the board's key rather than the placeholder. The window suite has
+  // the cases that get nothing; this is the running host's own wiring
+  // (useKey at boot). The window's roster entry replaces the fixture's, so
+  // the case puts back what was there and closes the window when done.
+  const paneDir = `${FIX}/repo-pane`;
+  mkdirSync(paneDir, { recursive: true });
+  writeFileSync(`${paneDir}/.mcp.json`, JSON.stringify({
+    mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'pane', 'X-Orchestratinator-Key': '${ORCH_TEST_PANE_KEY}' } } },
+  }, null, 2));
+  const rosterWas = readFileSync(`${FIX}/roster.json`, 'utf8');
+  eq((await json('/api/floor/rescan', {})).status, 200, 'a desk whose key is a placeholder nothing here sets is found');
+  assert(await until(async () => (deskOf(await floor(), 'pane')?.hosted?.live === true ? true : null), 10000), 'and hosted');
+  // Opened, not messaged: the stand-in writes whatever it is sent into the
+  // fixture's one transcript, which is `free`'s, and later cases count that.
+  eq((await json('/api/floor/open', { channel: CH, agent: 'pane' })).status, 200, 'the floor opens it');
+  const paneEnvLine = await until(() => {
+    const log = existsSync(`${FIX}/pane-env.log`) ? readFileSync(`${FIX}/pane-env.log`, 'utf8') : '';
+    return log.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.cwd.endsWith('/repo-pane')) ?? null;
+  }, 20000);
+  eq(paneEnvLine?.key ?? null, KEY, "the window the host opens for it has the variable, set to the host's key");
+  try {
+    const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
+    for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);
+  } catch { /* gone */ }
+  writeFileSync(`${FIX}/roster.json`, rosterWas);
+  rmSync(`${paneDir}/.mcp.json`);
+  await json('/api/floor/rescan', {});
 
   /* ── taking a desk from the floor ──────────────────────────────────────────
    * The first door that needs no terminal. The route refuses what the board
@@ -1586,6 +1621,82 @@ try {
   const none = await runHost(emptyRoot, { ORCH_URL: 'http://127.0.0.1:9911', until: /shared secret/ });
   assert(/no shared secret/.test(none.out) && /install\.sh --token/.test(none.out),
     'and with nothing at all the host says so, and how to give it one');
+
+  // A key written as a placeholder, which Claude Code expands for the window
+  // (2026-11-05, a partner's 33 desks). Read literally, the placeholder beat
+  // the environment and the host signed in with the text `${…}`. The value is
+  // never logged, so which one won is read off "which overrides": it is said
+  // only when the desk's key differs from the environment's.
+  const placeholderAt = (dir, key) => {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(`${dir}/desk`, { recursive: true });
+    writeFileSync(`${dir}/desk/.mcp.json`, JSON.stringify({
+      mcpServers: { orchestratinator: { type: 'http', url: 'http://127.0.0.1:9911/mcp', headers: { 'X-Channel': CH, 'X-Agent': 'ph-agent', 'X-Orchestratinator-Key': key } } },
+    }, null, 2));
+    return dir;
+  };
+  const line = /shared secret[^\n]*\n/;
+  const unset = await runHost(placeholderAt(`${FIX}/ph-unset`, '${ORCH_TEST_UNSET_DESK_KEY}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(host-test\/ph-agent carries its key as \$\{ORCH_TEST_UNSET_DESK_KEY\}, which this host's environment does not set\)/.test(unset.out),
+    "a desk whose key is ${VAR} with VAR unset carries no key, the host's own is used, and the line names the variable");
+  const expanded = await runHost(placeholderAt(`${FIX}/ph-set`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from host-test\/ph-agent's \.mcp\.json\n/.test(expanded.out.replace(/\r/g, '')),
+    "a desk whose key is ${ORCH_AUTH_TOKEN} is read as that variable's value, not as the text");
+  const fallback = await runHost(placeholderAt(`${FIX}/ph-default`, '${ORCH_TEST_UNSET_DESK_KEY:-env-key-value}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from host-test\/ph-agent's \.mcp\.json\n/.test(fallback.out.replace(/\r/g, '')),
+    'and ${VAR:-default} takes the default, as Claude Code does');
+  const empty = await runHost(placeholderAt(`${FIX}/ph-empty`, '${ORCH_TEST_EMPTY_DESK_KEY:-desk-default}'), { ORCH_AUTH_TOKEN: 'env-key-value', ORCH_TEST_EMPTY_DESK_KEY: '', until: line });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(/.test(empty.out),
+    'but not when VAR is set and empty: Claude Code 2.1.300 sends "" then, so the desk carries no key (QA, PR #52 Info 2)');
+  const embedded = await runHost(placeholderAt(`${FIX}/ph-embedded`, 'pre-${ORCH_TEST_UNSET_DESK_KEY}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(host-test\/ph-agent carries its key as \$\{ORCH_TEST_UNSET_DESK_KEY\}/.test(embedded.out) && !/pre-/.test(embedded.out),
+    'an unset VAR inside a longer key is no key, not the text around it, and the text is not logged');
+
+  // The installed host (QA, PR #52 finding 1). install.sh's LaunchAgent gives
+  // the host PATH and HOME only, so ORCH_AUTH_TOKEN is never in its
+  // environment: `undefined` leaves it out, as launchd does. A placeholder
+  // desk then resolves to nothing, host.json's token (`install.sh --token`)
+  // is the key, and the line says which desk could not supply one and why.
+  const hostJson = `${FIX}/ph-host.json`;
+  writeFileSync(hostJson, JSON.stringify({ token: 'file-key-value' }));
+  const installed = await runHost(placeholderAt(`${FIX}/ph-launchd`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: undefined, ORCH_HOST_CONFIG: hostJson, until: line });
+  assert(installed.out.includes(`shared secret: from token in ${hostJson} (host-test/ph-agent carries its key as \${ORCH_AUTH_TOKEN}, which this host's environment does not set)`),
+    "an installed host with a ${ORCH_AUTH_TOKEN} desk uses host.json's token, and names the desk it could not read");
+  assert(!/file-key-value/.test(installed.out), 'without printing it');
+  const bare = await runHost(placeholderAt(`${FIX}/ph-launchd`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: undefined, until: /install\.sh --token[^\n]*\n/ });
+  assert(/no shared secret: host-test\/ph-agent carries its key as \$\{ORCH_AUTH_TOKEN\}, which this host's environment does not set/.test(bare.out) && /install\.sh --token/.test(bare.out),
+    'and with no host.json token it says the same, and how to give it one');
+
+  // install.sh with no --token takes an ORCH_AUTH_TOKEN exported in the
+  // installing shell (costmo's ruling on PR #52 finding 1, D): the shell that
+  // fills in a repo's `${ORCH_AUTH_TOKEN}` for Claude Code is the one that runs
+  // the install, and the LaunchAgent sees none of it. Run against stand-ins
+  // with HOME in the fixture. PATH is the stand-ins, /usr/bin and node's own
+  // directory, and never /bin, which is where the real launchctl is: a real
+  // bootout here would stop the operator's live host. Checked before each run.
+  const inst = `${FIX}/install`;
+  const instBin = `${inst}/bin`;
+  rmSync(inst, { recursive: true, force: true });
+  mkdirSync(instBin, { recursive: true });
+  mkdirSync(`${inst}/projects`, { recursive: true });
+  mkdirSync(`${inst}/Library/LaunchAgents`, { recursive: true });
+  writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
+  for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
+  for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
+  for (const t of ['cat', 'mkdir', 'sleep']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
+  const instPath = `${instBin}:/usr/bin:${resolve(process.execPath, '..')}`;
+  const install = (args, env = {}) => {
+    const which = execFileSync('/bin/sh', ['-c', 'command -v launchctl'], { env: { PATH: instPath } }).toString().trim();
+    if (which !== `${instBin}/launchctl`) throw new Error(`install.sh would reach ${which}, not the stand-in`);
+    const out = execFileSync('/bin/bash', ['host/install.sh', ...args, `${inst}/projects`], { env: { PATH: instPath, HOME: inst, ...env } }).toString();
+    return { out, conf: JSON.parse(readFileSync(`${inst}/.orchestratinator/host.json`, 'utf8')) };
+  };
+  const fromShell = install([], { ORCH_AUTH_TOKEN: 'shell-key-value' });
+  eq(fromShell.conf.token, 'shell-key-value', 'install.sh with no --token writes an exported ORCH_AUTH_TOKEN to host.json');
+  assert(/shared secret from ORCH_AUTH_TOKEN in this shell/.test(fromShell.out) && !/shell-key-value/.test(fromShell.out),
+    'and says where it came from, without printing it');
+  eq(install(['--token', 'flag-key-value'], { ORCH_AUTH_TOKEN: 'shell-key-value' }).conf.token, 'flag-key-value', '--token still wins over the shell');
+  eq(install([]).conf.token, 'flag-key-value', "and with neither, host.json's token is kept");
 
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03

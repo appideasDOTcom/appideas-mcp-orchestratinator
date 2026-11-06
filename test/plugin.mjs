@@ -150,6 +150,19 @@ function writeFixture() {
     mcpServers: { board: { url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'x-channel': CH, 'x-agent': 'casey' } } },
   }));
 
+  // A key kept out of the tree as a placeholder, which Claude Code expands.
+  mkdirSync(`${FIX}/placeholder`, { recursive: true });
+  writeFileSync(`${FIX}/placeholder/.mcp.json`, JSON.stringify({
+    mcpServers: { board: { url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'pat', 'X-Orchestratinator-Key': '${ORCH_TEST_HOOK_KEY}' } } },
+  }));
+  // …with a default, and inside a longer value (QA, PR #52 Info 3).
+  for (const [dir, key] of [['placeholder-default', `\${ORCH_TEST_HOOK_KEY:-${KEY}}`], ['placeholder-pre', 'pre-${ORCH_TEST_HOOK_KEY}']]) {
+    mkdirSync(`${FIX}/${dir}`, { recursive: true });
+    writeFileSync(`${FIX}/${dir}/.mcp.json`, JSON.stringify({
+      mcpServers: { board: { url: `http://127.0.0.1:${PORT}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'pat', 'X-Orchestratinator-Key': key } } },
+    }));
+  }
+
   // MCP servers that are not the orchestratinator: one with no headers, one
   // with only half the signature, one with the pair but no url. None qualify.
   mkdirSync(`${FIX}/notours`, { recursive: true });
@@ -498,6 +511,36 @@ async function main() {
     eq(received.length, 1, 'lowercase x-channel / x-agent still identify a repo');
     eq(received[0].body?.agent, 'casey', 'with the right agent');
     eq(received[0].headers['x-orchestratinator-key'], undefined, 'and a repo with no key sends no key header');
+
+    // `${VAR}` in the key is expanded from the window's environment, as Claude
+    // Code's own connection does; read literally it was sent as the text.
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder` }, { env: { ORCH_TEST_HOOK_KEY: KEY } });
+    await settle();
+    eq(received[0]?.headers['x-orchestratinator-key'], KEY, 'a ${VAR} key is sent as the variable\'s value');
+    // `undefined` leaves the variable out of the hook's environment
+    // altogether: unset, which is not the same as empty below.
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session-2', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder` }, { env: { ORCH_TEST_HOOK_KEY: undefined } });
+    await settle();
+    eq(received.length, 1, 'a ${VAR} key with VAR unset still identifies the repo');
+    eq(received[0]?.headers['x-orchestratinator-key'], undefined, 'and sends no key rather than the placeholder');
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session-3', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder-pre` }, { env: { ORCH_TEST_HOOK_KEY: undefined } });
+    await settle();
+    eq([received.length, received[0]?.headers['x-orchestratinator-key']], [1, undefined],
+      'an unset VAR inside a longer key sends no key, not the text around it');
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session-4', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder-default` }, { env: { ORCH_TEST_HOOK_KEY: undefined } });
+    await settle();
+    eq(received[0]?.headers['x-orchestratinator-key'], KEY, '${VAR:-default} with VAR unset sends the default');
+    // Claude Code 2.1.300 sends "" here, not the default: `:-` is for unset
+    // only (measured by QA, PR #52 Info 2). An empty key is no key.
+    received.length = 0;
+    await fire({ session_id: 'placeholder-session-5', hook_event_name: 'SessionStart', cwd: `${FIX}/placeholder-default` }, { env: { ORCH_TEST_HOOK_KEY: '' } });
+    await settle();
+    eq([received.length, received[0]?.headers['x-orchestratinator-key']], [1, undefined],
+      'and with VAR set but empty sends no key, as Claude Code sends empty rather than the default');
 
     // The signature is the X-Channel + X-Agent pair on an entry with a url.
     // Anything less is some other MCP server and must not put a repo on the

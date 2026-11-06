@@ -6,12 +6,18 @@
 # Writes ~/.orchestratinator/host.json and registers a LaunchAgent so the host
 # starts at login and comes back if it stops. The shared secret is read from a
 # desk's own binding when one exists — a repo's .mcp.json, or the local-scope
-# entry the floor writes — and that always wins; --token (or ORCH_AUTH_TOKEN in
-# the host's environment) is for the machine with no hand-bound repo at all,
-# whose desks will all be taken from the floor, which the host can only do with
-# a key of its own. The server address is read the same way when every desk
-# agrees on one; when they don't, --url settles it and the host refuses to start
-# until something does. Run it again to change the directories.
+# entry the floor writes — and that always wins; --token is for the machine
+# with no hand-bound repo at all, whose desks will all be taken from the floor,
+# which the host can only do with a key of its own. The machine whose repos
+# write the key as "${ORCH_AUTH_TOKEN}" needs one too: the LaunchAgent below
+# starts the host with PATH and HOME and nothing else, so no variable exported
+# in your shell reaches it, and such a desk gives it no key (the host says so
+# at startup, naming the desk). Without --token, an ORCH_AUTH_TOKEN exported
+# in the shell that runs this is written to host.json, so on such a machine
+# running this from your usual shell is enough. The server address is read
+# the same way when every desk agrees on one; when they don't, --url settles
+# it and the host refuses to start until something does. Run it again to
+# change the directories.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,8 +62,22 @@ if [ "$#" -lt 1 ]; then
   echo "            point at more than one (e.g. --url http://localhost:8787)" >&2
   echo "       --token gives the host the board's shared secret, for a machine" >&2
   echo "            with no hand-bound repo to read it from (a repo's own binding" >&2
-  echo "            always wins over it)" >&2
+  echo "            always wins over it). Without it, an ORCH_AUTH_TOKEN exported" >&2
+  echo "            in this shell is used" >&2
   exit 2
+fi
+
+# No --token, and this shell exports ORCH_AUTH_TOKEN: that is the key. The
+# LaunchAgent below never sees this shell's variables, so a repo whose
+# .mcp.json says "${ORCH_AUTH_TOKEN}" (filled in by Claude Code from this very
+# shell) gave the host no key unless --token was typed as well, and the
+# README had said such a machine needed none (QA, PR #52 finding 1). costmo's
+# ruling, 2026-11-06: take it from the installing shell and write it to
+# host.json. --token still wins, and with neither the file's token is kept.
+TOKEN_FROM="--token"
+if [ -z "$TOKEN" ] && [ -n "${ORCH_AUTH_TOKEN:-}" ]; then
+  TOKEN="$ORCH_AUTH_TOKEN"
+  TOKEN_FROM="ORCH_AUTH_TOKEN in this shell"
 fi
 
 NODE="$(command -v node || true)"
@@ -86,7 +106,7 @@ ROOTS="${ROOTS%,}]"
   if (token) c.token = token;
   fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");
 ' "$CONF" "$ROOTS" "$URL" "$TOKEN"
-echo "wrote $CONF"
+echo "wrote $CONF${TOKEN:+ (shared secret from $TOKEN_FROM)}"
 
 # No install step: the host has no dependencies. It drives the `claude` already
 # on this machine — the one that is signed in — through tmux, and talks to the
