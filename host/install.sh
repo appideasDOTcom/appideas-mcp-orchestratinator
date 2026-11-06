@@ -6,12 +6,16 @@
 # Writes ~/.orchestratinator/host.json and registers a LaunchAgent so the host
 # starts at login and comes back if it stops. The shared secret is read from a
 # desk's own binding when one exists — a repo's .mcp.json, or the local-scope
-# entry the floor writes — and that always wins; --token (or ORCH_AUTH_TOKEN in
-# the host's environment) is for the machine with no hand-bound repo at all,
-# whose desks will all be taken from the floor, which the host can only do with
-# a key of its own. The server address is read the same way when every desk
-# agrees on one; when they don't, --url settles it and the host refuses to start
-# until something does. Run it again to change the directories.
+# entry the floor writes — and that always wins; --token is for the machine
+# with no hand-bound repo at all, whose desks will all be taken from the floor,
+# which the host can only do with a key of its own. It is also for the machine
+# whose repos write the key as "${ORCH_AUTH_TOKEN}": the LaunchAgent below
+# starts the host with PATH and HOME and nothing else, so no variable exported
+# in your shell reaches it, and such a desk gives it no key (the host says so
+# at startup, naming the desk). The server address is read the same way when
+# every desk agrees on one; when they don't, --url settles it and the host
+# refuses to start until something does. Run it again to change the
+# directories.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

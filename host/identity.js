@@ -62,18 +62,46 @@ export function header(headers, name) {
  * are the window's environment, not the host's, and the two need not agree.
  * The plugin hook has the same function (`expandEnv` in report.mjs); it runs
  * in the window's own environment, so there it resolves what Claude Code did.
+ *
+ * Which environment matters, because the host's is not the window's. Under
+ * the LaunchAgent install.sh writes, the host's environment is PATH and HOME
+ * and nothing else (launchd reads no shell profile), so on an installed host
+ * a `${ORCH_AUTH_TOKEN}` desk is always unresolved and its key comes from
+ * host.json (`install.sh --token`). main() names such a desk at startup
+ * (`unsetIn`) so host.log says why there is no key, not only that there is
+ * none. Measured by QA on PR #52, launchd-shaped, 2026-11-06.
+ *
+ * `:-` takes the default only when the variable is unset. Set but empty, it
+ * is expanded as empty, as Claude Code 2.1.300 does (it sends "" for
+ * `${VAR:-dflt}` with `VAR=`; the shell would take the default, and the first
+ * cut here did too — QA, PR #52 Info 2). An empty result is no key.
  */
 export function expandEnv(value, env = process.env) {
   if (typeof value !== 'string') return null;
   let missing = false;
-  const out = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) => {
+  const out = value.replace(PLACEHOLDER, (_, name, fallback) => {
     const v = env[name];
-    if (v !== undefined && v !== '') return v;
+    if (v !== undefined) return v;
     if (fallback !== undefined) return fallback;
     missing = true;
     return '';
   });
   return missing || !out.trim() ? null : out.trim();
+}
+
+const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+
+/** The variables a value names that `env` gives nothing for: unset with no
+ *  default, or set but empty. Names only, never the value around them, which
+ *  could be part of a key. For the startup line, not for expansion. */
+export function unsetIn(value, env = process.env) {
+  if (typeof value !== 'string') return [];
+  const names = [];
+  for (const [, name, fallback] of value.matchAll(PLACEHOLDER)) {
+    const v = env[name];
+    if ((v === undefined && fallback === undefined) || v === '') names.push(name);
+  }
+  return [...new Set(names)];
 }
 
 /** The orchestratinator entry in a set of MCP servers, as a desk, or null. The
@@ -83,7 +111,9 @@ function deskIn(servers, dir, extra) {
     const channel = header(s?.headers, 'X-Channel');
     const agent = header(s?.headers, 'X-Agent');
     if (channel && agent && typeof s?.url === 'string') {
-      return { channel, agent, cwd: dir, url: s.url, key: expandEnv(header(s.headers, 'X-Orchestratinator-Key')), ...extra };
+      const raw = header(s.headers, 'X-Orchestratinator-Key');
+      const key = expandEnv(raw);
+      return { channel, agent, cwd: dir, url: s.url, key, ...(!key && unsetIn(raw).length ? { keyUnset: unsetIn(raw) } : {}), ...extra };
     }
   }
   return null;

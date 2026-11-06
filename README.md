@@ -219,9 +219,15 @@ host refuses to guess — name one with
 A machine with no hand-bound repo has nothing to read the shared secret from,
 and the host needs one to talk to the board and to bind desks from the floor.
 Give it the value from `.env` with
-`./host/install.sh --token <ORCH_AUTH_TOKEN> ~/path/to/your/projects` (or set
-`ORCH_AUTH_TOKEN` in the host's environment). A repo's own binding always wins
-over both, so a machine with even one `.mcp.json` needs neither.
+`./host/install.sh --token <ORCH_AUTH_TOKEN> ~/path/to/your/projects`. A repo's
+own binding wins over it, so a machine with even one `.mcp.json` that writes
+the key out needs no `--token`.
+
+A `.mcp.json` that keeps the key out of the tree as `"${ORCH_AUTH_TOKEN}"` is
+the exception: it does need `--token`. Claude Code fills that in from your
+shell, but the host runs as a LaunchAgent, which starts with no shell and
+none of your exported variables, so it cannot read the placeholder. Its log
+says so at startup, naming the desk.
 
 **6. Open the floor.**
 

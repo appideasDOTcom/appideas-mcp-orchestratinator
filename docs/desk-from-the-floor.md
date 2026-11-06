@@ -77,7 +77,14 @@ Two routes considered and set aside:
   not remove it. (The key is the exception, since 2026-11-05: repos that keep
   it out of the tree write `${ORCH_AUTH_TOKEN}`, and reading that literally
   made the host sign in with the placeholder. Both now expand it — `expandEnv`
-  in `host/identity.js` and the hook — and channel and agent still are not.)
+  in `host/identity.js` and the hook — and channel and agent still are not.
+  Each expands in its own environment, and they differ. The hook has the
+  window's. The host has its own, which under the LaunchAgent is `PATH` and
+  `HOME` only, so on an installed host such a desk is always unresolved, its
+  key comes from `install.sh --token`, and the startup line names the desk.
+  A window the host opens in tmux has the tmux server's environment, not the
+  operator's shell's, and when the host started that server it lacks the
+  variable too — measured by QA on PR #52, 0 of 2 panes.)
 - **`--mcp-config` as the primary.** Zero writes to disk, which is attractive,
   but the binding then exists only in the process the host launched. "Open in
   VS Code" would hand the conversation to a window with no board on it, and

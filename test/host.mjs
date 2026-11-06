@@ -1602,14 +1602,35 @@ try {
   };
   const line = /shared secret[^\n]*\n/;
   const unset = await runHost(placeholderAt(`${FIX}/ph-unset`, '${ORCH_TEST_UNSET_DESK_KEY}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
-  assert(/shared secret: from ORCH_AUTH_TOKEN \(no desk here carries one\)/.test(unset.out),
-    "a desk whose key is ${VAR} with VAR unset carries no key, and the host's own is used");
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(host-test\/ph-agent carries its key as \$\{ORCH_TEST_UNSET_DESK_KEY\}, which this host's environment does not set\)/.test(unset.out),
+    "a desk whose key is ${VAR} with VAR unset carries no key, the host's own is used, and the line names the variable");
   const expanded = await runHost(placeholderAt(`${FIX}/ph-set`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
   assert(/shared secret: from host-test\/ph-agent's \.mcp\.json\n/.test(expanded.out.replace(/\r/g, '')),
     "a desk whose key is ${ORCH_AUTH_TOKEN} is read as that variable's value, not as the text");
   const fallback = await runHost(placeholderAt(`${FIX}/ph-default`, '${ORCH_TEST_UNSET_DESK_KEY:-env-key-value}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
   assert(/shared secret: from host-test\/ph-agent's \.mcp\.json\n/.test(fallback.out.replace(/\r/g, '')),
     'and ${VAR:-default} takes the default, as Claude Code does');
+  const empty = await runHost(placeholderAt(`${FIX}/ph-empty`, '${ORCH_TEST_EMPTY_DESK_KEY:-desk-default}'), { ORCH_AUTH_TOKEN: 'env-key-value', ORCH_TEST_EMPTY_DESK_KEY: '', until: line });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(/.test(empty.out),
+    'but not when VAR is set and empty: Claude Code 2.1.300 sends "" then, so the desk carries no key (QA, PR #52 Info 2)');
+  const embedded = await runHost(placeholderAt(`${FIX}/ph-embedded`, 'pre-${ORCH_TEST_UNSET_DESK_KEY}'), { ORCH_AUTH_TOKEN: 'env-key-value', until: line });
+  assert(/shared secret: from ORCH_AUTH_TOKEN \(host-test\/ph-agent carries its key as \$\{ORCH_TEST_UNSET_DESK_KEY\}/.test(embedded.out) && !/pre-/.test(embedded.out),
+    'an unset VAR inside a longer key is no key, not the text around it, and the text is not logged');
+
+  // The installed host (QA, PR #52 finding 1). install.sh's LaunchAgent gives
+  // the host PATH and HOME only, so ORCH_AUTH_TOKEN is never in its
+  // environment: `undefined` leaves it out, as launchd does. A placeholder
+  // desk then resolves to nothing, host.json's token (`install.sh --token`)
+  // is the key, and the line says which desk could not supply one and why.
+  const hostJson = `${FIX}/ph-host.json`;
+  writeFileSync(hostJson, JSON.stringify({ token: 'file-key-value' }));
+  const installed = await runHost(placeholderAt(`${FIX}/ph-launchd`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: undefined, ORCH_HOST_CONFIG: hostJson, until: line });
+  assert(installed.out.includes(`shared secret: from token in ${hostJson} (host-test/ph-agent carries its key as \${ORCH_AUTH_TOKEN}, which this host's environment does not set)`),
+    "an installed host with a ${ORCH_AUTH_TOKEN} desk uses host.json's token, and names the desk it could not read");
+  assert(!/file-key-value/.test(installed.out), 'without printing it');
+  const bare = await runHost(placeholderAt(`${FIX}/ph-launchd`, '${ORCH_AUTH_TOKEN}'), { ORCH_AUTH_TOKEN: undefined, until: /install\.sh --token[^\n]*\n/ });
+  assert(/no shared secret: host-test\/ph-agent carries its key as \$\{ORCH_AUTH_TOKEN\}, which this host's environment does not set/.test(bare.out) && /install\.sh --token/.test(bare.out),
+    'and with no host.json token it says the same, and how to give it one');
 
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
