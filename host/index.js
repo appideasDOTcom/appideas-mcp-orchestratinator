@@ -33,6 +33,10 @@
  *   ORCH_AUTH_TOKEN   the shared secret                     (from .mcp.json if unset)
  *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
  *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
+ *   ORCH_HOST_SUPERVISOR who restarts this process: `app` for the desktop
+ *                     app (launchd is read from XPC_SERVICE_NAME) — host/update.js
+ *   ORCH_FOLDER_DIALOG  a program to run as the folder dialog, or `parent` to
+ *                     ask the process that started this one — host/dialog.js
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -619,7 +623,15 @@ class Host {
     } catch (err) {
       throw failed(failureOf(err));
     }
-    if (!res.ok) throw failed(`→ ${res.status}`);
+    if (!res.ok) {
+      // A refusal's words ride on the error, for the one caller that acts
+      // on them (register(), a protocol mismatch). Read best-effort: a
+      // board that answered with no JSON is still a plain status.
+      const err = failed(`→ ${res.status}`);
+      err.status = res.status;
+      try { err.body = await res.json(); } catch { err.body = null; }
+      throw err;
+    }
     // The signal covers the body too, so a board that sends its headers and
     // then stalls times out here, after the status said 200.
     try { return await res.json(); } catch (err) { throw failed(`→ ${res.status}, body ${failureOf(err)}`); }
@@ -678,10 +690,35 @@ class Host {
     // container that clone's compose project runs here, if any. That is how
     // the board knows which host can update it, and what an update would be
     // refused for before anyone presses it (issue #40, host/update.js).
-    const me = await U.selfReport().catch((err) => ({ clone: { path: U.CLONE, error: err.message } }));
-    const reply = await this.request('/api/host/register', {
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), ...me },
-    });
+    const me = await U.selfReport().catch((err) => ({ clone: { path: U.CLONE, error: err.message }, protocol: U.BUILD.protocol, supervisor: U.supervisor() }));
+    let reply;
+    try {
+      reply = await this.request('/api/host/register', {
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), ...me },
+      });
+    } catch (err) {
+      // The board refusing this host for its protocol (protocolRefusal in
+      // src/floor.js): its words go to the log and to whoever started this
+      // process, once per wording, and the host keeps trying on the run
+      // loop's backoff — a board rebuilt beside a running host is this for
+      // the seconds until the host restarts, and the desktop app shows the
+      // words until one side is updated.
+      if (err.body?.code === 'protocol_mismatch') {
+        const why = err.body.error;
+        if (why !== this.refusedWhy) {
+          error(`registration refused: ${why}`);
+          this.refusedWhy = why;
+          D.tellParent({ type: 'registration', state: 'refused', what: 'protocol', why, board: err.body.board ?? null, host: err.body.host ?? null });
+        }
+        throw new Error(`registration refused (protocol ${err.body.host?.protocol ?? 'none'} here, ${err.body.board?.protocol ?? '?'} at the board)`);
+      }
+      throw err;
+    }
+    if (this.refusedWhy) {
+      log('registration accepted again');
+      this.refusedWhy = null;
+      D.tellParent({ type: 'registration', state: 'accepted' });
+    }
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
     // starts a new conversation instead of continuing the one on screen.
@@ -1788,7 +1825,12 @@ async function main() {
   }
 
   await U.readBuild();
-  log(`build ${U.BUILD.version} at ${U.BUILD.commit?.slice(0, 7) ?? 'an unknown commit'} · clone ${U.CLONE}${U.supervised() ? '' : ' · not under launchd, so the board cannot update this host'}`);
+  const by = U.supervisor();
+  log(`build ${U.BUILD.version} at ${U.BUILD.commit?.slice(0, 7) ?? 'an unknown commit'} · protocol ${U.BUILD.protocol ?? 'none'} · clone ${U.CLONE}${by === 'launchd' ? '' : by === 'app' ? ' · run by the desktop app, which updates it' : by ? ` · run by ${by}, which the board cannot update` : ' · not under launchd, so the board cannot update this host'}`);
+  // The folder dialog's backend, when it is the parent process: said at
+  // startup, because a host told to ask a parent it does not have would
+  // otherwise only be found out at the first click (host/dialog.js).
+  if (D.dialogBackend() === 'parent' && !D.parentPort()) warn('ORCH_FOLDER_DIALOG=parent, but nothing started this process with a message port — this host has no folder dialog');
 
   const host = new Host(cfg);
   host.folders = folders;

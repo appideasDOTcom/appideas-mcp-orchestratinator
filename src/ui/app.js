@@ -1616,6 +1616,9 @@ function latestText(u) {
   const l = u.latest;
   const what = l ? `${l.version ? `v${l.version} · ` : ''}${sha7(l.sha)}` : '?';
   if (st === 'ahead') return `${what} — this build is ahead of ${u.branch}`;
+  // A host the desktop app runs is updated by the app, so the page offers
+  // nothing (`available` is false for it) and says here who does.
+  if (st === 'behind' && u.host?.supervisor === 'app') return `${what} — newer than this build. The Orchestratinator app installs updates on this machine, not this page.`;
   if (st === 'behind') return `${what} — ${u.standing.behind_by ? `${u.standing.behind_by} commit${u.standing.behind_by === 1 ? '' : 's'} newer than this build` : 'newer than this build'}`;
   if (st === 'diverged') return `${what} — this build was made from commits that are not on ${u.branch}`;
   return `${what}${u.standing?.why ? ` — ${u.standing.why}` : ''}`;

@@ -46,8 +46,35 @@
  * dialog that may open behind the browser, which reads as a button that does
  * nothing. Until one is measured, such a host says it has no dialog
  * (`hasDialog()`), and the page draws its own list for it.
+ *
+ * The one backend that is not a command is the parent process
+ * (`ORCH_FOLDER_DIALOG=parent`, task #290 on the desktop channel). The
+ * desktop app runs this host as a child it keeps running, and the person is
+ * clicking on the floor inside that app, so the app's own dialog is the one
+ * that is in front — measured in the app rather than reasoned, which is the
+ * rule above: Electron's dialog.showOpenDialog, with the app frontmost, is
+ * the front window within 0.5 s with keyboard focus in its file list, comes
+ * back to the front with the app, and Escape returns to the app's window
+ * (orchestratinator-desktop-dev, 2026-11-07, macOS 26, Electron 45.2.3,
+ * frontmost read from System Events every 0.5 s for 10 s; the table is in
+ * the app repo's docs/desktop-app.md, "Measured in the app"). So the host
+ * asks the app and the app answers, over the port the app started it with:
+ *
+ *   host → app   { type: 'folder-dialog', id, state: 'open', start, message }
+ *   app → host   { type: 'folder-dialog', id, path: '/…' }
+ *                { type: 'folder-dialog', id, cancelled: true }
+ *                { type: 'folder-dialog', id, error: '…' }
+ *   host → app   { type: 'folder-dialog', id, state: 'close' }   — the host
+ *                closed it (PICK_TIMEOUT_MS, or the host stopping); the app
+ *                takes its dialog down and answers nothing
+ *
+ * The port is Electron's `process.parentPort` (a utility process) or Node's
+ * own IPC channel (`process.send`, a child spawned with stdio 'ipc'), which
+ * is how the host suite plays the app. A host told to ask a parent it was
+ * not started with has no dialog, and says so at startup.
  */
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname } from 'node:path';
@@ -87,16 +114,66 @@ function run(argv) {
 `;
 
 /**
+ * The process that started this one, as something to post to and hear from,
+ * or null when nothing did. Electron's utility process gives
+ * `process.parentPort` (messages arrive as events with `.data`); a Node
+ * child spawned with an 'ipc' entry in stdio gives `process.send` and
+ * 'message' events on process itself. One shape for both: `post(msg)` and
+ * `on(fn)`, which returns the function that stops listening.
+ */
+export function parentPort({ parent = process.parentPort, send = typeof process.send === 'function' ? process.send.bind(process) : null, proc = process } = {}) {
+  if (parent && typeof parent.postMessage === 'function') {
+    return {
+      kind: 'electron',
+      post: (msg) => { try { parent.postMessage(msg); } catch { /* the app is gone; nothing to tell */ } },
+      on: (fn) => {
+        const handler = (e) => fn(e && typeof e === 'object' && 'data' in e ? e.data : e);
+        parent.on('message', handler);
+        if (typeof parent.start === 'function') parent.start();
+        return () => parent.off?.('message', handler) ?? parent.removeListener?.('message', handler);
+      },
+    };
+  }
+  if (send) {
+    return {
+      kind: 'ipc',
+      post: (msg) => { try { send(msg); } catch { /* the channel is closed */ } },
+      on: (fn) => { proc.on('message', fn); return () => proc.off('message', fn); },
+    };
+  }
+  return null;
+}
+
+/** Say something to the parent process, if there is one. What the host says
+ *  on its own account — a registration refused for its protocol — rather
+ *  than in answer to a request; the app shows it. */
+export function tellParent(msg, port = parentPort()) {
+  port?.post(msg);
+}
+
+/** Which kind of backend ORCH_FOLDER_DIALOG and the platform name: `parent`,
+ *  a `program`, the platform's own, or null. */
+export function dialogBackend({ platform = process.platform, env = process.env } = {}) {
+  if (env.ORCH_FOLDER_DIALOG === 'parent') return 'parent';
+  if (env.ORCH_FOLDER_DIALOG) return 'program';
+  if (platform === 'darwin') return 'darwin';
+  return null;
+}
+
+/**
  * The command that shows a folder dialog on this platform, or null where no
  * backend has been measured. Whatever it is, it is given the start folder and
- * answers on stdout with `{"path": "/…"}` or `{"cancelled": true}`.
+ * answers on stdout with `{"path": "/…"}` or `{"cancelled": true}`. The one
+ * backend that is no command is the parent process (the header): for it this
+ * answers `{ parent: true }`, and null when there is no parent to ask.
  *
  * ORCH_FOLDER_DIALOG names a program to run in its place, with the start
  * folder as its one argument. It is the host suite's stand-in for a person —
  * a dialog cannot be clicked from a test — in the way ORCH_HOST_CLAUDE is its
  * stand-in for Claude Code.
  */
-export function dialogCommand(start, { platform = process.platform, env = process.env } = {}) {
+export function dialogCommand(start, { platform = process.platform, env = process.env, port = parentPort() } = {}) {
+  if (env.ORCH_FOLDER_DIALOG === 'parent') return port ? { parent: true } : null;
   if (env.ORCH_FOLDER_DIALOG) return { cmd: env.ORCH_FOLDER_DIALOG, args: [start] };
   if (platform === 'darwin') return { cmd: 'osascript', args: ['-l', 'JavaScript', '-e', JXA, start, MESSAGE] };
   return null;
@@ -107,6 +184,58 @@ export function dialogCommand(start, { platform = process.platform, env = proces
  *  clicks anything. */
 export function hasDialog(opts) {
   return dialogCommand('/', opts) !== null;
+}
+
+/** What the parent said back, as one of three things — or what it sent,
+ *  quoted, when it is none of them. The twin of readAnswer for a port. */
+export function readParentAnswer(m) {
+  if (m && typeof m.path === 'string' && m.path.startsWith('/')) return { ok: true, path: m.path };
+  if (m && m.cancelled === true) return { ok: true, cancelled: true };
+  if (m && typeof m.error === 'string' && m.error) return { ok: false, error: `the app's folder dialog failed: ${m.error}` };
+  let said = '';
+  try { said = JSON.stringify(m); } catch { said = String(m); }
+  return { ok: false, error: `the app answered the folder dialog with something that is not an answer: ${String(said).slice(0, 200)}` };
+}
+
+/**
+ * Ask the parent process for the folder — the same shape as openFolderDialog
+ * returns, for the same caller. The request carries an id and only an answer
+ * with that id counts, so a late answer to a dialog this host already closed
+ * is not taken for the next one's.
+ */
+export function askParent(port, start, { timeoutMs = PICK_TIMEOUT_MS } = {}) {
+  const id = randomUUID();
+  let settled = false;
+  let finish;
+  const done = new Promise((resolve) => {
+    let off = () => {};
+    let timer = null;
+    finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      off();
+      resolve(r);
+    };
+    off = port.on((m) => {
+      if (!m || typeof m !== 'object' || m.type !== 'folder-dialog' || m.id !== id) return;
+      finish(readParentAnswer(m));
+    });
+    timer = setTimeout(() => {
+      port.post({ type: 'folder-dialog', id, state: 'close' });
+      finish({ ok: true, cancelled: true, why: `left open for ${Math.round(timeoutMs / 1000)}s` });
+    }, timeoutMs);
+  });
+  port.post({ type: 'folder-dialog', id, state: 'open', start, message: MESSAGE });
+  return {
+    ok: true,
+    done,
+    close: () => {
+      if (settled) return;
+      port.post({ type: 'folder-dialog', id, state: 'close' });
+      finish({ ok: true, cancelled: true, why: 'closed by the host' });
+    },
+  };
 }
 
 /**
@@ -168,9 +297,10 @@ export function readAnswer({ code, signal, stdout, stderr }) {
  * dialog that lives in a child goes when the child does, so closing one that
  * was left open is ending a process rather than driving a window.
  */
-export function openFolderDialog(start, { timeoutMs = PICK_TIMEOUT_MS, platform, env } = {}) {
-  const c = dialogCommand(start, { platform, env });
-  if (!c) return { ok: false, error: `this host has no folder dialog on ${platform ?? process.platform}` };
+export function openFolderDialog(start, { timeoutMs = PICK_TIMEOUT_MS, platform, env, port = parentPort() } = {}) {
+  const c = dialogCommand(start, { platform, env, port });
+  if (!c) return { ok: false, error: dialogBackend({ platform, env }) === 'parent' ? 'this host was told to ask the process that started it for the folder dialog, and nothing started it with a port' : `this host has no folder dialog on ${platform ?? process.platform}` };
+  if (c.parent) return askParent(port, start, { timeoutMs });
   let child;
   try {
     child = spawn(c.cmd, c.args, { stdio: ['ignore', 'pipe', 'pipe'] });

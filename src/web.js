@@ -201,6 +201,7 @@ function buildState(store, sessions, sessionStats, meta) {
     server: {
       name: meta.name,
       version: meta.version,
+      protocol: meta.protocol ?? null,
       commit: meta.commit ?? null,
       port: meta.port,
       db_path: meta.dbPath,
@@ -565,7 +566,7 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth, sessions, updates }));
+  router.use(createFloorRouter({ store, auth, sessions, updates, protocol: meta.protocol, version: meta.version }));
 
   router.get('/api/state', (_req, res) => {
     const state = buildState(store, sessions, sessionStats, meta);

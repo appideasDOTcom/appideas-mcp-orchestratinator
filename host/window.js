@@ -1372,13 +1372,29 @@ export function pickerOf(screen) {
 }
 
 /** The cache warning a session-only switch raises on a conversation that is
- *  cached for the current model: "Switch model? … 1. Yes, switch to X / 2. No,
- *  go back". Measured 2026-11-03; the digit answers it. */
+ *  cached for what it is leaving: "Switch model? … 1. Yes, switch to X / 2. No,
+ *  go back". Measured 2026-11-03; the digit answers it.
+ *
+ *  An effort-only change raises the same box under another heading, and that
+ *  one was not known until a live desk stood on it (2026-11-06, 2.1.300):
+ *  "Change effort level? / Your next response will be slower and use more
+ *  tokens / This conversation is cached for the current effort level. … /
+ *  ❯ 1. Yes, switch to medium / 2. No, go back". Read as nothing, it was left
+ *  standing: the change was reported unconfirmed after 8 s, and the next two
+ *  tries pasted "/model" at the dialog for a minute each.
+ *
+ *  Read from the bottom of the pane, not found anywhere in the capture — the
+ *  rule reviewingOf follows, and for its reason: a conversation that quotes
+ *  either heading above its composer would otherwise get a `1` typed into
+ *  its message box. */
 export function switchConfirmOf(screen) {
-  const text = String(screen ?? '');
-  if (!/Switch model\?/.test(text)) return null;
-  const m = /❯?\s*1\.\s*(Yes, switch to [^\n]*)/.exec(text);
-  return { yes: m ? m[1].trim() : 'Yes' };
+  const foot = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-10);
+  const at = foot.findIndex((l) => /^\s*(Switch model\?|Change effort level\?)\s*$/.test(l));
+  if (at < 0) return null;
+  const rest = foot.slice(at + 1);
+  if (!/^\s*2\.\s*No, go back\s*$/.test(rest[rest.length - 1] ?? '')) return null;
+  const m = /^\s*❯?\s*1\.\s*(Yes, switch to .*)$/.exec(rest[rest.length - 2] ?? '');
+  return m ? { yes: m[1].trim() } : null;
 }
 
 /** Complete JSONL records written past a byte offset. Never mid-line, for the

@@ -64,6 +64,25 @@ agree and that `/health` and `/api/state` report the same number. Bump one on
 its own — the plugin used to be bumped alone every time a hook changed — and
 the suite goes red instead of the board quietly advertising a build nobody has.
 
+**The protocol number is separate from the version, and is checked.**
+`protocol` in `package.json` and `host/package.json` (one integer, `1` since
+0.12.5) is the host↔board protocol: what crosses `/api/host/*` — the
+register body and reply, the work items, the events. The board reads its
+own off `package.json` (`/health` and `/api/state` carry it), the host
+reads its own off `host/package.json` and sends it on every registration,
+and a host whose number is not the board's is refused in words
+(`protocolRefusal` in `src/floor.js`): the host logs them once, tells the
+process that started it over its port if it has one, keeps trying on its
+usual backoff, and `/api/floor`'s `hosts` rows carry them as `refused`. A
+host that sends no number is one from before there was one and is refused
+the same way. The version still moves in lockstep; the protocol moves only
+when one side would read the other's words wrongly — a field renamed, a
+kind dropped, a reply reshaped — never for a field added. It exists for
+the desktop app, whose packaged host updates on its own schedule
+(docs/desktop-app.md); on a launchd install the mismatch it catches is a
+board rebuilt beside a host nobody restarted, which the board then says
+instead of a desk quietly taking no message.
+
 ## Environment variables
 
 See `.env.example`:
@@ -99,6 +118,20 @@ exist for the suites:
   `ORCH_HOST_DOCKER`, `ORCH_UPDATE_FETCH_URL`, `ORCH_UPDATE_BUILD_TIMEOUT_MS`
   (15 min), `ORCH_UPDATE_HEALTH_TIMEOUT_MS` (3 min), and
   `ORCH_HOST_SUPERVISED=1`, which stands in for launchd.
+
+The host under the desktop app (tasks #288–#290 on the desktop channel):
+
+- `ORCH_HOST_SUPERVISOR` — who starts the host again after it exits: `app`
+  for the desktop app. launchd is read from `XPC_SERVICE_NAME` and needs
+  nothing set. Reported as `supervisor` on every registration; the page
+  offers no update for an app-run host (the app updates it), and the host
+  refuses one at preflight in the same words.
+- `ORCH_FOLDER_DIALOG=parent` — the folder dialog is the process that started
+  the host, asked over Electron's `process.parentPort` or Node's IPC
+  channel; the messages are in the header of `host/dialog.js`. Any other
+  value is a program to run in the dialog's place (the suites' stand-in).
+- `ORCH_HOST_PROTOCOL` — the suites only: stand in for a host from another
+  build. Nothing installed sets it.
 
 `curl -s localhost:8787/health` reports the live session count and lifetime
 connection churn (`opened` / `superseded` / `expired`) — a large `superseded`

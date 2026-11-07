@@ -1354,6 +1354,50 @@ export function ingestHookEvent(store, body, live = null) {
  * minute of a restart — they re-register and re-announce anything pending — so
  * a table would be a table of things that are about to be wrong.
  */
+/**
+ * The host<->board protocol version, and the words a host is refused in when
+ * its number is not the board's (task #288 on the desktop channel).
+ *
+ * The number is `protocol` in package.json and host/package.json, read off
+ * each build (the board's is on /health and /api/state, the host's is sent
+ * on every registration). It covers what crosses /api/host/*: the register
+ * body and reply, the work items and their payloads, the events. It moves
+ * when one side would read the other's words wrongly — a field renamed, a
+ * kind dropped, a reply's shape changed — and not for a field added, which
+ * each side already reads as absent. Until now the server, the host and the
+ * plugin moved in lockstep (`npm run set-version`) and nothing checked; a
+ * host packaged in the desktop app updates on its own schedule, and the
+ * first sign of a mismatch must be a sentence, not a desk that quietly
+ * takes no message.
+ *
+ * Equal or refused, with no range: a host behind the board and a host ahead
+ * of it are both refused, because "the board reads a newer host's events"
+ * is a claim about code that does not exist yet. A host that sends no
+ * number is one from before there was one, and is refused the same way,
+ * naming the build it is on.
+ *
+ * The words say what to do, and that depends on who runs the host: the
+ * desktop app updates its own host, and launchd's host is the clone's code
+ * once it restarts (a deploy that rebuilt the board and left the host
+ * running is exactly this). Said by the board on the refused registration,
+ * in the host's log, to the app through its port, and on /api/floor's hosts.
+ */
+export function protocolRefusal({ board, host }) {
+  const b = Number(board?.protocol);
+  const h = host?.protocol == null ? null : Number(host.protocol);
+  if (Number.isFinite(h) && h === b) return null;
+  const name = host?.name ? `The host "${host.name}"` : 'This host';
+  const hv = host?.version ? `build ${host.version}` : 'an unknown build';
+  const bv = board?.version ? `build ${board.version}` : 'an unknown build';
+  const speaks = h == null ? `sends no protocol version (${hv}, from before there was one)` : `speaks protocol ${h} (${hv})`;
+  const which = h == null || h < b ? 'behind' : 'ahead of';
+  const by = host?.supervisor === 'app' ? 'app' : 'launchd';
+  const fix = which === 'behind'
+    ? (by === 'app' ? 'Update the Orchestratinator app, which carries the host.' : 'Restart the host so it runs the clone\'s current code, or update it from the page.')
+    : (by === 'app' ? 'Update the board to the app\'s build, or install the app build that matches it.' : 'Rebuild the board from the clone the host runs from.');
+  return `${name} is ${which} this board: it ${speaks} and the board speaks protocol ${b} (${bv}). The two must match. ${fix}`;
+}
+
 export function createLive() {
   const partial = new Map();   // deskKey -> text of the reply so far
   const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
@@ -1399,6 +1443,11 @@ export function createLive() {
    * which every open page polls every couple of seconds.
    */
   const folders = new Map(); // host_id -> { at, roots, folders, dialog }
+  /** Hosts refused at registration for their protocol (protocolRefusal), by
+   *  id: the words, and what the host said it was. In memory like the rest —
+   *  a refused host keeps trying, so it is said again within a minute, and
+   *  it is dropped the moment the host registers. */
+  const refused = new Map();       // host_id -> { name, at, why, protocol, version, supervisor }
   /**
    * Each desk's conversations as its host last listed them, for the session
    * picker — in memory for the same reason the folder list is: the host
@@ -1427,6 +1476,7 @@ export function createLive() {
   return {
     recent,
     searches,
+    refused,
     partial,
     folders,
     sessions,
@@ -2608,12 +2658,24 @@ export function buildFloor(store, live = null, sessions = null) {
     host_id: h.host_id,
     name: h.name,
     last_seen: iso(h.last_seen),
-    live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+    // Seen within the window, and not refused since: a refused host is
+    // heard from on every try, which touches nothing, and its row's
+    // last_seen is the registration before the refusal — recent for a
+    // minute after a host comes back on the wrong build, and not live.
+    live: !live?.refused?.has(h.host_id) && secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
     // Only *when* the folder list was reported — the list itself is served by
     // GET /api/floor/folders, on demand. Enough for the page to tell "never
     // reported" from "reported empty" before it opens the dialog.
     folders_at: live?.folders?.get(h.host_id)?.at ?? null,
+    // Refused at its last registration for its protocol (protocolRefusal):
+    // the words, or null. A host refused before it ever registered has no
+    // row and is listed below from the refusal alone.
+    refused: live?.refused?.get(h.host_id)?.why ?? null,
   }));
+  for (const [hostId, r] of live?.refused ?? []) {
+    if (hosts.some((h) => h.host_id === hostId)) continue;
+    hosts.push({ host_id: hostId, name: r.name ?? hostId, last_seen: null, live: false, folders_at: null, refused: r.why });
+  }
 
   return {
     now: new Date(nowMs).toISOString(),
@@ -2642,9 +2704,13 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null, updates = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null }) {
   const router = express.Router();
   const live = createLive();
+  // What this board speaks, for the registration check below. Null only in a
+  // test that builds the router by hand; the server always names it.
+  const boardProtocol = protocol != null && Number.isFinite(Number(protocol)) ? Number(protocol) : null;
+  const boardVersion = version ?? null;
   // An update's steps arrive as host events (src/updates.js).
   live.updates = updates;
 
@@ -2688,6 +2754,18 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const name = str(req.body?.name) ?? hostId;
+    // The protocol check, before anything is written: a host that would
+    // read this board's work wrongly is told so and given nothing. See
+    // protocolRefusal for the number and the words.
+    if (boardProtocol !== null) {
+      const said = { name, protocol: req.body?.protocol, version: str(req.body?.build?.version), supervisor: str(req.body?.supervisor) };
+      const why = protocolRefusal({ board: { protocol: boardProtocol, version: boardVersion }, host: said });
+      if (why) {
+        live.refused.set(hostId, { ...said, protocol: said.protocol == null ? null : Number(said.protocol), at: new Date().toISOString(), why });
+        return res.status(409).json({ error: why, code: 'protocol_mismatch', board: { protocol: boardProtocol, version: boardVersion }, host: { protocol: said.protocol ?? null, version: said.version ?? null } });
+      }
+      live.refused.delete(hostId);
+    }
     store.registerHost(hostId, name, str(req.body?.tmux));
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
@@ -2864,12 +2942,13 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       return {
         host_id: h.host_id,
         name: h.name,
-        live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+        live: !live.refused.has(h.host_id) && secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
         tmux: h.tmux_session ?? null,
         at: f?.at ?? null,
         roots: f?.roots ?? [],
         folders: f?.folders ?? [],
         dialog: f?.dialog === true,
+        refused: live.refused.get(h.host_id)?.why ?? null,
       };
     });
     // The names somebody has saved, by agent id — for the dialog to show the

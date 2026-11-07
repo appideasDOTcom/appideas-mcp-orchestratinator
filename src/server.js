@@ -21,7 +21,14 @@ const NAME = 'appideas-orchestratinator';
 // Read rather than duplicated: a hand-maintained copy of the version drifts from
 // package.json the first time one of them is bumped alone, and the dashboard
 // header then confidently reports a build that doesn't exist.
-const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+const PKG = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const VERSION = PKG.version;
+// The host<->board protocol this build speaks (task #288 on the desktop
+// channel). A host says its own at every registration and is refused, in
+// words, when the two differ — see protocolRefusal in src/floor.js for what
+// the number covers and when it moves. Read from package.json like the
+// version, so it cannot drift from the file a build is read off.
+const PROTOCOL = Number(PKG.protocol);
 // And the commit it was built from, which is what an update compares (issue
 // #40): written into the image at build, read from the clone run bare.
 const COMMIT = buildCommit();
@@ -247,6 +254,7 @@ app.get('/health', (_req, res) => {
     ok: true,
     name: NAME,
     version: VERSION,
+    protocol: PROTOCOL,
     // What a page waiting out an update reads to know the new build is up.
     commit: COMMIT,
     sessions: Object.keys(transports).length,
@@ -405,6 +413,7 @@ app.use(createWebRouter({
   meta: {
     name: NAME,
     version: VERSION,
+    protocol: PROTOCOL,
     commit: COMMIT,
     port: PORT,
     dbPath: DB_PATH,

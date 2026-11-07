@@ -1259,6 +1259,11 @@ async function main() {
     eq(W.effortRowOf(PICKER.replace('○ Low effort', '◐ Medium effort (default)')), 'medium', 'with or without the default mark');
     eq(W.switchConfirmOf('   Switch model?\n   Your next response will be slower\n   ❯ 1. Yes, switch to Haiku 5.5\n     2. No, go back')?.yes, 'Yes, switch to Haiku 5.5',
       'the cache warning a session-only switch raises is read, with its yes');
+    const EFFORT_WARN = '✻ Brewed for 2m 19s · done 11:11 AM\n▔▔▔▔▔▔▔▔\n   Change effort level?\n   Your next response will be slower and use more tokens\n   This conversation is cached for the current effort level. Switching to\n   medium means the full history gets re-read on your next message.\n   ❯ 1. Yes, switch to medium\n     2. No, go back\n';
+    eq(W.switchConfirmOf(EFFORT_WARN)?.yes, 'Yes, switch to medium',
+      'an effort-only change raises the same warning under its own heading (a live desk, 2026-11-06)');
+    eq(W.switchConfirmOf(EFFORT_WARN + '\n❯ \n  ? for shortcuts'), null,
+      'and a conversation that quotes the warning above its composer is not asked it');
     eq(W.switchConfirmOf(PICKER), null, 'and the picker is not it');
 
     console.log('\n  what the window draws for a compaction, a /btw, a /cost');

@@ -1403,6 +1403,47 @@ every step was run against real git and real processes with stand-ins for
 commit, and the host finding the live container from launchd's
 environment) were each run for real.
 
+## The host under the desktop app
+
+Three tasks from the app's agent on the `orchestratinator-desktop` channel
+(#288–#290, 0.12.5, 2026-11-07; the contract there is
+`orchestratinator.consumed`). The app runs `host/index.js` as a child it
+keeps running and shows the board in a webview, and three things that were
+one number, one word and one process came apart:
+
+- **The protocol is a number beside the version, and the board refuses a
+  host that does not speak it.** `protocol` in `package.json` and
+  `host/package.json`; `protocolRefusal` in `src/floor.js` says what it
+  covers and when it moves (a reshaping, never a field added). Equal or
+  refused, no range, and a host that sends none is refused as a build from
+  before there was one — which is every hand-rolled registration in a
+  suite, so each one sends `protocol: PROTOCOL` now. A refused host keeps
+  trying on its backoff, logs the words once, tells its parent over its
+  port, and is on `/api/floor`'s `hosts` as `refused`. On this machine the
+  mismatch it catches is a deploy that rebuilt the board and left the host
+  running: the board now says so instead of a desk quietly taking no
+  message. Do not widen it to a range until there is code that reads an
+  older or newer side correctly; today there is not.
+- **`supervised` became `supervisor`**, and the page's update is launchd's
+  only. `ORCH_HOST_SUPERVISOR=app` is the app; launchd is still read from
+  `XPC_SERVICE_NAME`; `ORCH_HOST_SUPERVISED=1` is still the suites'
+  stand-in for launchd. An app-run host has no clone to move, so the board
+  offers nothing (`available` false, not a button that is only refused),
+  Settings says the app installs updates, and preflight refuses in the
+  same words. A report with `supervised` and no `supervisor` is an older
+  host and means launchd (`supervisorOf`).
+- **The folder dialog has a backend that is not a command.**
+  `ORCH_FOLDER_DIALOG=parent` asks the process that started the host over
+  Electron's `process.parentPort` or Node's IPC channel (the host suite is
+  the app that way), with an id per ask so a late answer to a closed dialog
+  is not the next one's, and `close` so the app takes its dialog down when
+  the host times out or stops. It went in under the rule above it — a
+  backend goes in after it has been watched taking focus — because the
+  app's agent watched Electron's dialog take the front in the app and
+  recorded the table; the header of `host/dialog.js` has it. A host told
+  to ask a parent it was not started with has no dialog and says so at
+  startup.
+
 ## Tests
 
 `npm test` runs eleven suites. `test:host` and `test:window` are not unit tests:

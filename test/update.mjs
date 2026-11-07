@@ -26,6 +26,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { standingOf, refusalOf, branchOf, isNewer } from '../src/updates.js';
 import { gitHeadOf } from '../src/build-info.js';
 
+// What every hand-rolled registration below says it speaks: the board refuses
+// a host with another number, or none (protocolRefusal in src/floor.js).
+const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).protocol;
+const HOST_PROTOCOL = JSON.parse(readFileSync(new URL('../host/package.json', import.meta.url), 'utf8')).protocol;
+
 const PORT = Number(process.env.UPDATE_TEST_PORT ?? 8906);
 const GH_PORT = PORT + 1;
 const STUB_PORT = PORT + 2;
@@ -169,6 +174,10 @@ console.log('\nwhy an update would be refused, before anything is touched:');
   assert(/not running in a Docker container/.test(refusalOf({ ...base, self: { container: null } })), 'a board run bare');
   assert(/none is live/.test(refusalOf({ ...base, host: null })), 'no host beside the board');
   assert(/LaunchAgent/.test(refusalOf({ ...base, report: { ...base.report, supervised: false } })), 'a host nothing would restart');
+  eq(refusalOf({ ...base, report: { ...base.report, supervised: true, supervisor: 'launchd' } }), null, 'a host that names launchd as what restarts it (0.12.5 and on)');
+  const appRun = refusalOf({ ...base, report: { ...base.report, supervised: true, supervisor: 'app' } });
+  assert(/run by the Orchestratinator app, which carries its code and updates it\. This board does not update it — update the app instead\./.test(appRun), `a host the desktop app runs is the app's to update (desktop #289) ("${appRun}")`);
+  assert(/run by systemd, which this board cannot restart/.test(refusalOf({ ...base, report: { ...base.report, supervised: true, supervisor: 'systemd' } })), 'a host run by something the board has no restart for is named');
   const dirty = refusalOf({ ...base, report: { ...base.report, clone: { path: '/x', branch: 'main', dirty: true, changes: ['a', 'b', 'c', 'd'] } } });
   assert(/local changes \(a, b, c, \+1 more\)/.test(dirty), `a dirty clone, naming what is dirty ("${dirty}")`);
   const off = refusalOf({ ...base, report: { ...base.report, clone: { path: '/x', branch: 'issues/40', dirty: false } } });
@@ -451,7 +460,26 @@ try {
     delete process.env.ORCH_HOST_SUPERVISED;
     let r = await run(C2);
     eq(r.last.slice(0, 2), ['preflight', 'refused'], 'a host not under launchd refuses: nothing would start it again');
+    eq(me.supervisor, 'launchd', 'the report names launchd as what restarts it');
+    eq(me.protocol, HOST_PROTOCOL, 'and the protocol host/package.json carries');
+
+    // Run by the desktop app (desktop #289): said in the report, and an
+    // update refused at preflight in the same words the board uses.
+    reset(); freshClone(C1);
+    process.env.ORCH_HOST_SUPERVISOR = 'app';
+    const underApp = await U.selfReport();
+    eq([underApp.supervisor, underApp.supervised], ['app', true], 'ORCH_HOST_SUPERVISOR=app: run by the app, which restarts it');
+    r = await run(C2);
+    eq(r.last.slice(0, 2), ['preflight', 'refused'], 'an app-run host refuses the page\'s update at preflight');
+    assert(/run by the Orchestratinator app, which carries its code and updates it/.test(r.last[2]), `in words that say who does update it ("${r.last[2]}")`);
+    eq(git(CLONE, 'rev-parse', 'HEAD'), C1, 'and touched nothing');
+    process.env.ORCH_HOST_SUPERVISOR = 'Some Thing!';
+    eq((await U.selfReport()).supervisor, null, 'a supervisor the board could not say back is nobody');
+    process.env.ORCH_HOST_SUPERVISOR = 'systemd';
+    eq((await U.selfReport()).supervisor, 'systemd', 'any plain word is reported as given');
+    delete process.env.ORCH_HOST_SUPERVISOR;
     process.env.ORCH_HOST_SUPERVISED = '1';
+    eq((await U.selfReport()).supervisor, 'launchd', 'and the suites\' stand-in for launchd still reads as launchd');
 
     reset(); freshClone(C1);
     writeFileSync(join(CLONE, 'scratch.txt'), 'mine');
@@ -576,7 +604,7 @@ try {
     // container: it must not be the one the board hands the update to.
     const other = () => fetch(`${BOARD}/api/host/register`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
-      body: JSON.stringify({ host_id: 'aaa-host', name: 'Another Mac', desks: [], build: { commit: C1 }, board_container: 'deadbeef'.repeat(8), supervised: true,
+      body: JSON.stringify({ host_id: 'aaa-host', name: 'Another Mac', desks: [], protocol: PROTOCOL, build: { commit: C1 }, board_container: 'deadbeef'.repeat(8), supervised: true,
         clone: { path: '/elsewhere', branch: 'main', head: C1, dirty: false, changes: [] } }),
     });
     await other();
@@ -633,7 +661,7 @@ try {
     // disk before the checkout, say) has not finished the update.
     await fetch(`${BOARD}/api/host/register`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
-      body: JSON.stringify({ host_id: 'upd-host', name: 'Update Mac', desks: [], build: { commit: C1 }, board_container: CONTAINER, supervised: true,
+      body: JSON.stringify({ host_id: 'upd-host', name: 'Update Mac', desks: [], protocol: PROTOCOL, build: { commit: C1 }, board_container: CONTAINER, supervised: true,
         clone: { path: CLONE, branch: 'main', head: C2, dirty: false, changes: [] } }),
     });
     eq((await upd()).run?.state, 'running', 'a host registering on the old build does not close the run');
@@ -666,6 +694,21 @@ try {
     eq(s2.status, 200, 'an update queued for a host that has just died is accepted (it was live a moment ago)');
     const gave = await until(async () => ((await upd()).run?.state === 'failed' ? (await upd()).run : null), 8000);
     assert(gave && /No word from the host on Update Mac .* never picked the update up/.test(gave.error), `and ends as failed, saying the host never took it ("${gave?.error}")`);
+
+    // The board's updater host run by the desktop app (desktop #289): the
+    // page offers no update, Settings says who installs them, and the
+    // dialog would be refused in the same words if it were reached.
+    await fetch(`${BOARD}/api/host/register`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
+      body: JSON.stringify({ host_id: 'upd-host', name: 'Update Mac', desks: [], protocol: PROTOCOL, build: { commit: C1, version: '0.12.5' }, board_container: CONTAINER, supervised: true, supervisor: 'app',
+        clone: { path: '/app/host', branch: null, head: C1, dirty: false, changes: [] } }),
+    });
+    const appBoard = await upd();
+    eq([appBoard.host?.supervisor, appBoard.available, appBoard.standing.state], ['app', false, 'behind'], 'a newer build exists, the host is the app\'s, and the page is offered nothing');
+    eq(page.updateButton(appBoard), null, 'no button in the header');
+    assert(/run by the Orchestratinator app/.test(appBoard.refusal ?? ''), `the refusal names the app ("${appBoard.refusal}")`);
+    assert(/The Orchestratinator app installs updates on this machine, not this page\.$/.test(page.latestText(appBoard)), `Settings says a newer build exists and who installs it ("${page.latestText(appBoard)}")`);
+    eq((await admin('start', { commit: C2 })).status, 409, 'and the route refuses a press');
 
   console.log('\nan update that stops after the rebuild, and finishing it (PR #42 finding 1):');
   {
@@ -733,7 +776,7 @@ try {
     // A host played through the board's own doors, so each event is chosen.
     const reg = (commit) => fetch(`${BOARD}/api/host/register`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
-      body: JSON.stringify({ host_id: 'played', name: 'Played Mac', desks: [], build: { commit }, board_container: CONTAINER, supervised: true,
+      body: JSON.stringify({ host_id: 'played', name: 'Played Mac', desks: [], protocol: PROTOCOL, build: { commit }, board_container: CONTAINER, supervised: true,
         clone: { path: '/played', branch: 'main', head: commit, dirty: false, changes: [] } }),
     });
     const ev = (run_id, step, state, detail = null) => fetch(`${BOARD}/api/host/events`, {

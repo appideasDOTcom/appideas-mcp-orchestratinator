@@ -12,7 +12,11 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, protocolRefusal } from '../src/floor.js';
+
+// The host<->board protocol this tree speaks: every registration a suite
+// rolls by hand is a host, and a host that sends no number is refused.
+const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).protocol;
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -427,7 +431,7 @@ try {
     known.set(desk.agent, desk);
     return fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()] }),
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', protocol: PROTOCOL, desks: [...known.values()] }),
     });
   };
   // Applied-count returned, not just the status: this endpoint answers 200 for a
@@ -678,6 +682,52 @@ try {
   await hWork();
   }
 
+  console.log('\nthe protocol a host speaks, checked at registration (desktop #288)');
+  {
+    const B = { protocol: 2, version: '0.13.0' };
+    eq(protocolRefusal({ board: B, host: { protocol: 2 } }), null, 'the same number is not refused');
+    eq(protocolRefusal({ board: B, host: { protocol: '2' } }), null, 'however it was typed');
+    const behind = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 1, version: '0.12.9' } });
+    assert(/^The host "Mac" is behind this board: it speaks protocol 1 \(build 0\.12\.9\) and the board speaks protocol 2 \(build 0\.13\.0\)\. The two must match\./.test(behind), `a host behind the board is told so, with both builds ("${behind}")`);
+    assert(/Restart the host so it runs the clone's current code, or update it from the page\.$/.test(behind), 'and, for launchd\'s host, what to do: the clone has the code, the host has not restarted');
+    const app = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 1, version: '0.12.9', supervisor: 'app' } });
+    assert(/Update the Orchestratinator app, which carries the host\.$/.test(app), `an app-run host behind the board is sent to the app ("${app}")`);
+    const ahead = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 3, version: '0.14.0' } });
+    assert(/is ahead of this board/.test(ahead) && /Rebuild the board from the clone the host runs from\.$/.test(ahead), `a host ahead of the board is refused too, and sent the other way ("${ahead}")`);
+    const appAhead = protocolRefusal({ board: B, host: { protocol: 3, supervisor: 'app' } });
+    assert(/^This host is ahead of this board/.test(appAhead) && /Update the board to the app's build/.test(appAhead), 'an app ahead of the board: update the board, or install the matching app');
+    const none = protocolRefusal({ board: B, host: { name: 'Old', version: '0.12.4' } });
+    assert(/sends no protocol version \(build 0\.12\.4, from before there was one\)/.test(none) && /is behind this board/.test(none), `a host that sends none is from before there was one, and is behind ("${none}")`);
+    const blank = protocolRefusal({ board: B, host: {} });
+    assert(/^This host is behind this board: it sends no protocol version \(an unknown build, from before there was one\)/.test(blank), 'with no name and no build, said as such');
+
+    // The route: refused in those words, remembered on /api/floor's hosts
+    // and the Take a desk host list, and forgotten the moment it registers.
+    const regAs = (body) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-old', name: 'oldbox', tmux: 'orch', desks: [], ...body }) })
+      .then(async (r) => ({ status: r.status, body: await r.json() }));
+    const old = await regAs({ protocol: PROTOCOL + 1, build: { version: '9.9.9' } });
+    eq([old.status, old.body.code, old.body.board?.protocol, old.body.host?.protocol], [409, 'protocol_mismatch', PROTOCOL, PROTOCOL + 1], 'a registration with another number is refused, naming both');
+    assert(/^The host "oldbox" is ahead of this board/.test(old.body.error), `in protocolRefusal\'s words ("${old.body.error}")`);
+    const fl = await fetch(`${HOST}/api/floor`).then((r) => r.json());
+    const row = fl.hosts.find((h) => h.host_id === 'h-old');
+    eq([row?.live, row?.refused], [false, old.body.error], '/api/floor lists the refused host, not live, with the words — it has no row of its own, so this is the only place the board can say it');
+    const tk = await fetch(`${HOST}/api/floor/folders`).then((r) => r.json());
+    eq(tk.hosts.find((h) => h.host_id === 'h-old')?.refused ?? 'absent', 'absent', 'Take a desk\'s host list is the registered hosts: a host that never registered is not a host to bind with');
+    const okNow = await regAs({ protocol: PROTOCOL });
+    eq(okNow.status, 200, 'the same host speaking the board\'s protocol registers');
+    const fl2 = await fetch(`${HOST}/api/floor`).then((r) => r.json());
+    eq([fl2.hosts.find((h) => h.host_id === 'h-old')?.refused, fl2.hosts.filter((h) => h.host_id === 'h-old').length], [null, 1], 'and the refusal is gone from its one row');
+    const again = await regAs({ protocol: 0 });
+    eq(again.status, 409, 'refused again on a later registration with the wrong number');
+    const fl3 = await fetch(`${HOST}/api/floor`).then((r) => r.json());
+    eq([fl3.hosts.find((h) => h.host_id === 'h-old')?.refused, fl3.hosts.find((h) => h.host_id === 'h-old')?.live], [again.body.error, false], 'said on the row it already has, which is not live however recently it registered before (a refused host takes no work)');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((r) => r.json())).hosts.find((h) => h.host_id === 'h-old')?.live, false, 'nor on Take a desk\'s list');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((r) => r.json())).hosts.find((h) => h.host_id === 'h-old')?.refused, again.body.error, 'and on Take a desk\'s host list');
+    const noNum = await regAs({});
+    assert(noNum.status === 409 && /sends no protocol version/.test(noNum.body.error), 'a registration with no number at all is refused as a host from before there was one');
+    eq((await regAs({ protocol: PROTOCOL })).status, 200, 'restored');
+  }
+
   console.log('\nthe folders a host offers');
   // The list the "take a desk" dialog draws. Every value here is one that
   // cannot be a fallback — a name, a time, a count that nothing on the server
@@ -686,7 +736,7 @@ try {
   const registerWith = (extra) =>
     fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()], ...extra }),
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', protocol: PROTOCOL, desks: [...known.values()], ...extra }),
     });
   const folders = () => fetch(`${HOST}/api/floor/folders`).then((r) => r.json());
   eq((await folders()).hosts.find((h) => h.host_id === 'h-open')?.at ?? null, null,
@@ -2964,7 +3014,7 @@ try {
   const registerMove = (...desks) =>
     fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-move', name: 'movebox', tmux: 'orch', desks }),
+      body: JSON.stringify({ host_id: 'h-move', name: 'movebox', tmux: 'orch', protocol: PROTOCOL, desks }),
     }).then((r) => r.json());
   const workMove = () =>
     fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK })
@@ -3243,7 +3293,7 @@ try {
     const MCH = 'meet-ch';
     const mHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
     const regMeet = (desks) => fetch(`${HOST}/api/host/register`, {
-      method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', name: 'meetbox', tmux: 'orch', desks }),
+      method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', name: 'meetbox', tmux: 'orch', protocol: PROTOCOL, desks }),
     }).then((r) => r.json());
     const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));

@@ -8,7 +8,7 @@
 //   npm run smoke
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 import { VERSIONED, versionIn } from '../scripts/set-version.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -272,6 +272,15 @@ try {
     assert(h.version === want, `and /health reports it (${h.version})`);
     assert(st.server?.version === want,
            `as does /api/state, which is the number the dashboard header prints (${st.server?.version})`);
+    // And the host<->board protocol number beside it (desktop #288): one in
+    // each package, read off the build by the board and by the host, and
+    // the board refuses a host whose number is not its own — so the two
+    // files in one tree must agree, or every host from this tree is refused.
+    const proto = (rel) => JSON.parse(readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')).protocol;
+    assert(Number.isInteger(proto('package.json')) && proto('package.json') >= 1, `package.json carries a protocol number (${proto('package.json')})`);
+    assert(proto('host/package.json') === proto('package.json'), `host/package.json carries the same one (${proto('host/package.json')})`);
+    assert(h.protocol === proto('package.json'), `and /health reports it (${h.protocol})`);
+    assert(st.server?.protocol === proto('package.json'), `as does /api/state (${st.server?.protocol})`);
   }
 
   const health = await (await fetch(`http://localhost:${PORT}/health`)).json();

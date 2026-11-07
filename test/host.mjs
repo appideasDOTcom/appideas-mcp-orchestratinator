@@ -23,7 +23,7 @@ import http from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale } from '../host/dialog.js';
+import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale, parentPort, readParentAnswer, askParent, dialogBackend } from '../host/dialog.js';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -393,7 +393,11 @@ function fixture() {
   ].join('\n'));
 }
 
-function startHost(id = 'host-test-1', extraEnv = {}) {
+function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
+  // `ipc` starts the host the way the desktop app does, with a message port
+  // to the process that started it (Node's channel here, Electron's
+  // parentPort there — host/dialog.js reads both). What the host says over
+  // it is kept in `said`, and `h.send()` answers it.
   const h = spawn('node', ['host/index.js'], {
     env: {
       ...process.env,
@@ -420,9 +424,11 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
       ORCH_ANSWER_TTL_MS: '-1',
       ...extraEnv,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', ...(ipc ? ['ipc'] : [])],
   });
   h.log = '';
+  h.said = [];
+  if (ipc) h.on('message', (m) => h.said.push(m));
   // Kept outside the process too: the last section deliberately kills the host,
   // and everything it said would go with it just when a failure needs reading.
   h.stdout.on('data', (d) => { h.log += d; hostLog += d; });
@@ -1401,6 +1407,145 @@ try {
   eq(readAnswer({ code: null, signal: 'SIGKILL', stdout: '', stderr: 'line one\nexecution error: no screen\n' }).error, 'the folder dialog ended on SIGKILL: execution error: no screen', 'said with how it ended and its last line');
   eq([pickIsStale({ waited_ms: 7000 }, 6000), pickIsStale({ waited_ms: 1000 }, 6000), pickIsStale({}, 6000), pickIsStale({ waited_ms: null }, 6000)], [true, false, false, false],
     'a request the board held for longer than the page waits is stale; a fresh one, and one from a board that does not say, are not');
+
+  /* ── the dialog the parent process shows (desktop #290) ─────────────────────
+   * Under the desktop app the host is a child of the app, the person is
+   * clicking inside the app, and the app's own dialog is the one in front
+   * (measured in the app; the header of host/dialog.js has the table). So
+   * with ORCH_FOLDER_DIALOG=parent the host asks the process that started
+   * it over the port it was started with, and the answer comes back on it.
+   * Here the suite is the app: a Node IPC channel, which host/dialog.js
+   * reads the way it reads Electron's parentPort. */
+  console.log('\n  the dialog the parent process shows (ORCH_FOLDER_DIALOG=parent)');
+  const fakePort = () => {
+    const fns = new Set();
+    return { posted: [], post(m) { this.posted.push(m); }, on(fn) { fns.add(fn); return () => fns.delete(fn); }, say(m) { for (const fn of [...fns]) fn(m); } };
+  };
+  eq([dialogBackend({ env: { ORCH_FOLDER_DIALOG: 'parent' } }), dialogBackend({ env: { ORCH_FOLDER_DIALOG: '/bin/x' } }), dialogBackend({ platform: 'darwin', env: {} }), dialogBackend({ platform: 'linux', env: {} })],
+    ['parent', 'program', 'darwin', null], 'the backend is named by ORCH_FOLDER_DIALOG and the platform');
+  eq(dialogCommand('/x', { env: { ORCH_FOLDER_DIALOG: 'parent' }, port: null }), null, 'told to ask a parent it was not started with, the host has no dialog');
+  eq(dialogCommand('/x', { env: { ORCH_FOLDER_DIALOG: 'parent' }, port: fakePort() }), { parent: true }, 'with one, the dialog is the parent\'s');
+  eq([hasDialog({ env: { ORCH_FOLDER_DIALOG: 'parent' }, port: null }), hasDialog({ platform: 'linux', env: { ORCH_FOLDER_DIALOG: 'parent' }, port: fakePort() })], [false, true], 'which is what the board is told, platform or no platform');
+  eq(parentPort({ parent: undefined, send: null }), null, 'no parentPort and no IPC channel: no parent');
+  const ipcPort = parentPort({ parent: undefined, send: (m) => m, proc: { on() {}, off() {} } });
+  eq(ipcPort?.kind, 'ipc', 'Node\'s channel (process.send) is a parent');
+  const heardEl = [];
+  const el = { posted: [], started: 0, handlers: new Set(), postMessage(m) { this.posted.push(m); }, on(ev, fn) { this.handlers.add(fn); }, off(ev, fn) { this.handlers.delete(fn); }, start() { this.started++; } };
+  const elPort = parentPort({ parent: el, send: (m) => m });
+  eq(elPort?.kind, 'electron', 'and Electron\'s parentPort is, and outranks the channel');
+  const off = elPort.on((m) => heardEl.push(m));
+  for (const fn of el.handlers) fn({ data: { type: 'x' } });
+  eq([heardEl, el.started], [[{ type: 'x' }], 1], 'a message from Electron arrives as an event with .data, and the port is started');
+  off();
+  eq(el.handlers.size, 0, 'and listening can be stopped');
+  eq(readParentAnswer({ type: 'folder-dialog', id: '1', path: '/a/b' }), { ok: true, path: '/a/b' }, 'the parent\'s answer is a path');
+  eq(readParentAnswer({ cancelled: true }), { ok: true, cancelled: true }, 'or that the person closed it');
+  eq(readParentAnswer({ error: 'no screen' }), { ok: false, error: "the app's folder dialog failed: no screen" }, 'or that it failed, in the app\'s words');
+  assert(/not an answer: \{"path":"rel"\}/.test(readParentAnswer({ path: 'rel' }).error), 'and anything else is quoted back, never guessed at');
+  {
+    const port = fakePort();
+    const ask = askParent(port, '/start', { timeoutMs: 60_000 });
+    const open = port.posted[0];
+    eq([open?.type, open?.state, open?.start, typeof open?.id, open?.message], ['folder-dialog', 'open', '/start', 'string', 'Choose the folder your agent lives in'], 'the ask is one message with an id, the start folder and the message to draw');
+    port.say({ type: 'folder-dialog', id: 'someone-else', path: '/wrong' });
+    port.say({ type: 'other', id: open.id, path: '/wrong' });
+    let settledEarly = false;
+    ask.done.then(() => { settledEarly = true; });
+    await sleep(20);
+    eq(settledEarly, false, 'an answer to another id, or of another type, is not this dialog\'s');
+    port.say({ type: 'folder-dialog', id: open.id, path: '/chosen' });
+    eq(await ask.done, { ok: true, path: '/chosen' }, 'the answer with its id is');
+    const ask2 = askParent(port, '/start', { timeoutMs: 60_000 });
+    ask2.close();
+    eq([await ask2.done, port.posted.at(-1)?.state, port.posted.at(-1)?.id], [{ ok: true, cancelled: true, why: 'closed by the host' }, 'close', port.posted.at(-2).id], 'closing it tells the parent to take its dialog down');
+    const ask3 = askParent(port, '/start', { timeoutMs: 50 });
+    eq(await ask3.done, { ok: true, cancelled: true, why: 'left open for 0s' }, 'and one nobody answers is closed by the host, as the command backend\'s is');
+    eq(port.posted.at(-1)?.state, 'close', 'with the same word to the parent');
+  }
+
+  // The real host, started the way the app starts it, with this suite answering.
+  host.kill('SIGTERM');
+  await new Promise((r) => host.once('exit', r));
+  host = startHost('host-test-1', { ORCH_FOLDER_DIALOG: 'parent' }, { ipc: true });
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'a host started with a message port is up');
+  eq((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-1')?.dialog, true, 'and says it has a dialog: the parent\'s');
+  const PICKED2 = `${FIX}/picked-by-app/inner`;
+  mkdirSync(PICKED2, { recursive: true });
+  pickBefore = await pickAt();
+  eq((await pickAsk(`${FIX}/repo-a`)).status, 200, 'the floor asks for the dialog as before');
+  // Each ask is read as the open message *after* the ones already heard,
+  // never "the last one": the next open can arrive after the until that
+  // looks for it, and the last one is then the previous ask's.
+  const opens = () => host.said.filter((m) => m.type === 'folder-dialog' && m.state === 'open');
+  const nextOpen = (after) => until(() => (opens().length > after ? opens()[after] : null), 8000);
+  const askedApp = await nextOpen(0);
+  eq([askedApp?.start, askedApp?.message], [`${FIX}/repo-a`, 'Choose the folder your agent lives in'], 'the host asks the parent, with where to open and what to say');
+  eq((await pickGet()).state, 'open', 'and tells the board the dialog is open');
+  host.send({ type: 'folder-dialog', id: askedApp.id, path: PICKED2 });
+  pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.path], ['chosen', PICKED2], 'the parent\'s answer is the choice, listed and said as the command backend\'s is');
+  assert(/the folder dialog chose .*picked-by-app\/inner/.test(host.log), 'and logged as chosen');
+  const tookApp = await take({ host_id: 'host-test-1', path: PICKED2, channel: CH, agent: 'picked-app', open: false });
+  eq([tookApp.status, (await tookApp.json()).mode], [200, 'take'], 'so it can be taken: the host named it by listing it');
+  await json('/api/floor/desk/leave', { channel: CH, agent: 'picked-app' });
+  await until(async () => (deskOf(await floor(), 'picked-app')?.hosted?.state === 'offline' ? true : null), 20000);
+  pickBefore = await pickAt();
+  await pickAsk(`${FIX}/repo-a`);
+  const askedAgain = await nextOpen(1);
+  assert(askedAgain && askedAgain.id !== askedApp.id, 'a second ask has an id of its own');
+  host.send({ type: 'folder-dialog', id: askedApp.id, path: PICKED2 });
+  await sleep(300);
+  eq((await pickGet()).state, 'open', 'a late answer to the first dialog is not taken for this one');
+  host.send({ type: 'folder-dialog', id: askedAgain.id, cancelled: true });
+  pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.path ?? null], ['cancelled', null], 'the parent saying the person closed it is a cancel');
+  pickBefore = await pickAt();
+  await pickAsk();
+  const askedHome = await nextOpen(2);
+  eq(askedHome?.start, HOME, 'with nothing remembered it asks to open at home');
+  host.send({ type: 'folder-dialog', id: askedHome.id, error: 'the display is asleep' });
+  pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.error], ['failed', "the app's folder dialog failed: the display is asleep"], 'the parent\'s failure is said in its words');
+  pickBefore = await pickAt();
+  await pickAsk();
+  const askedLeft = await nextOpen(3);
+  pickGot = await settled(pickBefore);
+  eq([pickGot?.state, pickGot?.why], ['cancelled', 'left open for 4s'], 'a dialog nobody answers is closed by the host after ORCH_PICK_TIMEOUT_MS');
+  eq(host.said.some((m) => m.type === 'folder-dialog' && m.state === 'close' && m.id === askedLeft.id), true, 'and the parent is told to take it down');
+
+  /* ── the protocol, and who runs the host (desktop #288, #289) ───────────────
+   * A host whose number is not the board's is refused at registration, in
+   * words that say what to do, and the words reach the log, the parent and
+   * /api/floor. The host keeps trying, so a board rebuilt beside a running
+   * host says it for the seconds until the host restarts, and the app shows
+   * it until one side is updated. */
+  console.log('\n  a host refused for its protocol, and one the app runs');
+  host.kill('SIGTERM');
+  await new Promise((r) => host.once('exit', r));
+  host = startHost('host-test-1', { ORCH_HOST_PROTOCOL: '0', ORCH_HOST_SUPERVISOR: 'app', ORCH_FOLDER_DIALOG: 'parent' }, { ipc: true });
+  const toldParent = await until(() => host.said.find((m) => m.type === 'registration' && m.state === 'refused') ?? null, 10000);
+  assert(toldParent, 'the host tells its parent the registration was refused');
+  assert(/^The host "Test Mac" is behind this board: it sends no protocol version|^The host "Test Mac" is behind this board: it speaks protocol 0/.test(toldParent?.why ?? ''), `in the board's words ("${toldParent?.why}")`);
+  assert(/Update the Orchestratinator app, which carries the host\.$/.test(toldParent?.why ?? ''), 'which, for an app-run host, send the person to the app');
+  eq([toldParent?.what, toldParent?.host?.protocol, typeof toldParent?.board?.protocol], ['protocol', 0, 'number'], 'with both numbers');
+  assert(/registration refused: The host "Test Mac" is behind this board/.test(host.log), 'and the log says the same');
+  assert(await until(() => (/registration refused \(protocol 0 here, \d+ at the board\); retrying in/.test(host.log) ? true : null), 8000), 'and keeps trying on the run loop\'s backoff, one short line a try');
+  eq((host.log.match(/registration refused: The host/g) ?? []).length, 1, 'the words once, not once a try');
+  const refusedRow = (await floor()).hosts.find((h) => h.host_id === 'host-test-1');
+  eq([refusedRow?.live, refusedRow?.refused], [false, toldParent?.why], '/api/floor shows the host refused, not live, with the words');
+  assert(/protocol 0 · clone .* run by the desktop app, which updates it/.test(host.log), 'the startup line names the protocol and who runs the host');
+  host.kill('SIGTERM');
+  await new Promise((r) => host.once('exit', r));
+  host = startHost('host-test-1');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'a host speaking the board\'s protocol is back');
+  eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.refused, null, 'and the refusal is gone from its row');
+  host.kill('SIGTERM');
+  await new Promise((r) => host.once('exit', r));
+  host = startHost('host-test-1', { ORCH_FOLDER_DIALOG: 'parent' });
+  assert(await until(() => (/ORCH_FOLDER_DIALOG=parent, but nothing started this process with a message port/.test(host.log) ? true : null), 8000),
+    'a host told to ask a parent it was not started with says so at startup');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'and runs');
+  eq((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-1')?.dialog, false, 'with no dialog, so the page draws its own list for it');
 
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');

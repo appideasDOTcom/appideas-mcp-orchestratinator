@@ -47,20 +47,26 @@ layout.
 
 ### What has to change in this repo first
 
-1. **Versioning stops being one number.** Today the server, host and plugin
-   move in lockstep: `npm run set-version` writes all three, and the update
-   from the page (#40) moves all three to one commit from a git clone. A
-   packaged host updates through the app's own updater, on its own schedule,
-   against a hosted server that updates on ours. So the protocol needs a
-   version that both sides check at registration, with a clear refusal when
-   they disagree. `CAPABILITIES` in `host/update.js` (today just `finish`)
-   is that idea in miniature; widen it to the whole protocol.
-2. **#40 cannot update a packaged host.** It refuses a host launchd is not
-   supervising (`XPC_SERVICE_NAME`), and it updates with `git merge` in a
-   clone. In hosted mode it is switched off (the board must never start an
-   update on a customer's machine) and the app's updater takes its place.
-   The "supervised by launchd" check needs an equivalent that recognises the
-   app.
+The first two landed in 0.12.5 (2026-11-07, tasks #288 and #289 from the
+app's agent on the `orchestratinator-desktop` channel; the contract there,
+`orchestratinator.consumed`, names what the app depends on).
+
+1. **Versioning stops being one number.** ~~Today the server, host and
+   plugin move in lockstep~~ — they still do for the *version*, and the
+   *protocol* is now its own number beside it: `protocol` in `package.json`
+   and `host/package.json`, sent by the host on every registration,
+   compared by the board, and refused in words that say which side to
+   update (`protocolRefusal` in `src/floor.js`; docs/internals.md, "The
+   protocol number is separate from the version"). The refusal reaches the
+   host's log, the app over the host's port (`{ type: 'registration',
+   state: 'refused', why }`), and `/api/floor`'s `hosts` rows. Equal or
+   refused, no ranges: a host ahead of the board is refused too.
+2. **#40 cannot update a packaged host.** The host now reports who restarts
+   it (`supervisor`: `launchd` from `XPC_SERVICE_NAME`, `app` from
+   `ORCH_HOST_SUPERVISOR=app`), the board offers no update at all for an
+   app-run host (`available` is false; Settings says the app installs
+   updates), its dialog and the host's preflight refuse in the same words,
+   and launchd's host is as it was.
 3. **Licensing (GPL-3.0-only).** A distributed desktop app with the GPL host
    and server inside it is a GPL distribution, so the app is GPL too. That
    matters only if the app is meant to be closed source. Running the server
@@ -124,11 +130,18 @@ If the app were only a thin window onto a remote board, with nothing
 running locally. That never happens here, because the host has to run on
 the workstation.
 
-## To measure, whichever framework
+## Measured, whichever framework
 
-**The folder dialog moves from a LaunchAgent into the app process.** That
-probably fixes the focus problem `host/dialog.js` works around (three of the
-four ways measured from a LaunchAgent draw a dialog that never takes focus).
-Confirm it with the **measure-the-desktop** skill rather than assuming it.
-Until then the dialog stays where it is, and the rule in this repo's
-CLAUDE.md holds: no backend goes in before it has been watched taking focus.
+**The folder dialog moves from a LaunchAgent into the app process.** It was
+expected to fix the focus problem `host/dialog.js` works around (three of
+the four ways measured from a LaunchAgent draw a dialog that never takes
+focus), and it was measured rather than assumed, in the app (its agent,
+2026-11-07, macOS 26, Electron 45.2.3): with the app frontmost, Electron's
+`dialog.showOpenDialog` is the front window within 0.5 s with keyboard
+focus in its file list, comes back to the front with the app, and Escape
+returns to the app's window. So the host has a backend for it (task #290):
+`ORCH_FOLDER_DIALOG=parent` asks the process that started the host, over
+Electron's `process.parentPort` or Node's IPC channel, and the app answers
+with the path or a cancel — the messages are in the header of
+`host/dialog.js`. The rule in this repo's CLAUDE.md still holds for any
+other backend: none goes in before it has been watched taking focus.

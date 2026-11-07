@@ -100,6 +100,10 @@ export function stoppedOf(run, commit) {
  * what the board can say from the host's last report, so the confirmation
  * shows the refusal instead of an Update button that would only be refused.
  */
+/** Who restarts the host a report is from: its own word, launchd for an
+ *  older host that said only `supervised: true`, or null for nobody. */
+export const supervisorOf = (report) => report?.supervisor ?? (report?.supervised ? 'launchd' : null);
+
 export function refusalOf({ check, standing, branch, self, host, report, run, finishing = false }) {
   if (runActive(run)) return 'An update is already under way.';
   if (!finishing && (!check?.head?.sha || check.branch !== branch)) return `Nothing has been checked on ${branch} yet. Press Check now first.`;
@@ -113,7 +117,15 @@ export function refusalOf({ check, standing, branch, self, host, report, run, fi
   // it is exactly the one that would be asked. It says what it can do in its
   // report; one that does not say "finish" is not asked to.
   if (finishing && !(report.capabilities ?? []).includes('finish')) return `The host on ${host.name} runs a build from before Finish the update (${short(report.build?.commit) ?? 'an unknown commit'}). It would rebuild again and skip the plugin, so it is not asked. It runs the update's own code once it restarts, and then it can finish.`;
-  if (!report.supervised) return `The host on ${host.name} is not running as its LaunchAgent, so nothing would start it again after the update. Restarting a host is macOS-only today (issues #26, #28).`;
+  // Who restarts the host. An app-run host is the desktop app's to update
+  // (task #289 on the desktop channel): the app carries the host's code and
+  // there is no clone to move, so the page offers nothing for it (`available`
+  // in view) and this is what the dialog says if it is reached. A report
+  // with `supervised` and no `supervisor` is from a host that knew only
+  // launchd, so that is what it means.
+  const by = supervisorOf(report);
+  if (by === 'app') return `The host on ${host.name} is run by the Orchestratinator app, which carries its code and updates it. This board does not update it — update the app instead.`;
+  if (by !== 'launchd') return `The host on ${host.name} is ${by ? `run by ${by}, which this board cannot restart` : 'not running as its LaunchAgent, so nothing would start it again after the update'}. Restarting a host is macOS-only today (issues #26, #28).`;
   const c = report.clone ?? {};
   if (c.error) return `The host could not read its clone: ${c.error}`;
   if (c.dirty) return `The clone at ${c.path} has local changes (${c.changes?.length ? c.changes.slice(0, 3).join(', ') + (c.changes.length > 3 ? `, +${c.changes.length - 3} more` : '') : 'uncommitted'}). It is not updated while it has them.`;
@@ -398,6 +410,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
       build: { version: text(body?.build?.version, 40), commit: text(body?.build?.commit, 40) },
       board_container: text(body?.board_container, 80),
       supervised: body?.supervised === true,
+      supervisor: text(body?.supervisor, 40),
       // What this host's update code can do. Only "finish" so far; a host
       // that sends no list is one from before there was one.
       capabilities: Array.isArray(body?.capabilities) ? body.capabilities.map((c) => text(String(c), 40)).filter(Boolean).slice(0, 20) : [],
@@ -455,8 +468,11 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
       next_check_at: contact.at ? new Date(contact.at + MIN_GAP_MS).toISOString() : null,
       limit_until: contact.reset_at && contact.reset_at > nowMs ? new Date(contact.reset_at).toISOString() : null,
       // Only while checking is on (issue item 5): off, the header shows nothing,
-      // even about a check pressed by hand.
-      available: s.check && isNewer(standing),
+      // even about a check pressed by hand. And never for a board whose host
+      // the desktop app runs: the app updates that machine, so an offer here
+      // would be a button that is only ever refused (#289). Settings still
+      // says a newer build exists (latestText), with who installs it.
+      available: s.check && isNewer(standing) && supervisorOf(report) !== 'app',
       // A run that stopped past the rebuild (stoppedOf): shown until a run
       // finishes it, and its refusal is Finish the update's, not the offer's.
       stopped,
@@ -466,6 +482,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
         build: report.build,
         clone: report.clone,
         supervised: report.supervised,
+        supervisor: supervisorOf(report),
       } : null,
       interrupts: {
         sessions: Object.keys(sessions ?? {}).length,
