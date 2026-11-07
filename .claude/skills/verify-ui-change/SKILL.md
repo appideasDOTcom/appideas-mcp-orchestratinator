@@ -126,7 +126,10 @@ node <your-seed>.mjs        # only now
 
 Seed scripts live in the scratchpad, which is **outside the repo**, so
 `import Database from 'better-sqlite3'` will not resolve. Point the resolver at
-the repo instead of moving the file into it:
+the repo instead of moving the file into it — and run them on a Node 22.14
+or later (nvm has 24.22.2): better-sqlite3 13 is a Node-API 10 binary, and
+this machine's default `node` (20.20.1) segfaults loading it, exit 139 with
+no words. The server says so (`src/node-floor.js`); a seed script does not.
 
 ```js
 import { createRequire } from 'node:module';

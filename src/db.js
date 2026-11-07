@@ -1,3 +1,4 @@
+import './node-floor.js';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';

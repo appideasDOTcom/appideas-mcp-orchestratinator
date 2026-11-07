@@ -56,12 +56,12 @@ reference whose line is found once at the new commit and lists the rest.
 and the dashboard page at `/`, with SQLite underneath. Shipped as one Docker
 container; `src/` is baked into the image and the database lives in a named
 volume. Runs anywhere Docker runs. Without Docker it runs as `npm start` on
-Node 20 or later.
+Node 22.14 or later (better-sqlite3 13 is a Node-API 10 binary).
 
 - Docker: `Dockerfile:1` (`node:22-bookworm-slim`), `docker-compose.yml:1-44`.
 - Transport and tools: `src/server.js:259` (`POST /mcp`), `src/tools.js:28`.
-- Node floor: `package.json` `engines.node` `>=20`; `docs/internals.md:33-39`
-  for the no-Docker path.
+- Node floor: `package.json` `engines.node` `>=22.14`, `src/node-floor.js`;
+  `docs/internals.md`, "Run locally without Docker", for the no-Docker path.
 - Dashboard and floor pages: `src/ui/index.html`, `src/ui/app.js`,
   `src/ui/floor.js`.
 
@@ -261,7 +261,7 @@ Do not mention it.
 
 | For | Needs | Where |
 | --- | --- | --- |
-| The server | Docker and Docker Compose, or Node 20+ without Docker | `docker-compose.yml`, `package.json` `engines`, `docs/internals.md:33-39` |
+| The server | Docker and Docker Compose, or Node 22.14+ without Docker | `docker-compose.yml`, `package.json` `engines`, `docs/internals.md:33-39` |
 | The plugin | Claude Code (terminal or VS Code extension) and `node` on PATH for the hook | `hooks.json:9`, `README.md` step 4 |
 | The host | macOS, Node 20+, `tmux`, and `claude` on PATH signed in | `host/install.sh:26-35, 63-65`, `host/package.json` `engines` |
 | A desk | a repo with the orchestratinator in its `.mcp.json` or local scope, with `X-Channel` and `X-Agent` | `host/identity.js:7-30`, `plugin/hooks/report.mjs:67-80` |

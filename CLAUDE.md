@@ -1443,6 +1443,20 @@ one number, one word and one process came apart:
   recorded the table; the header of `host/dialog.js` has it. A host told
   to ask a parent it was not started with has no dialog and says so at
   startup.
+- **better-sqlite3 is 13, and the board's Node floor is 22.14** (task
+  #291, 0.12.6). 11.x does not compile against Electron 45's V8, and
+  12.11.1 still calls `v8::Context::GetIsolate`; 13 is Node-API with the
+  prebuilt binary for each platform inside the package. Its binary is
+  Node-API 10, and a Node that offers 9 (20.x, 22.x before 22.14) does not
+  fail to load it: the process segfaults, exit 139, with no words.
+  Measured on 20.20.1 — this machine's default `node`, and the one the
+  host's LaunchAgent runs on — and on 22.11.0. So `src/node-floor.js`,
+  imported ahead of better-sqlite3 in `src/db.js`, says it in words, and a
+  suite run here needs a Node 22.14+ on PATH (nvm has 24.22.2). The host
+  has no dependencies and stays at Node 20; the image is node:22 and loads
+  it. A script that `require`s better-sqlite3 from this tree outside the
+  container (the verify-ui-change seeds) is under the same floor and has
+  no guard: a silent exit 139 from one is this, not the page.
 
 ## Tests
 
@@ -1518,6 +1532,24 @@ conversation back", real panes — at load 5.5, and `test:host` alone
 straight after was green (2026-11-03, task 247). Read the channel for
 their announcement before a full run, and if you overlapped, rerun the
 red suite alone before reading the pane.
+
+**Seven take-a-desk reds in `test:host` were a race in the case before
+them, not load** (2026-11-07). "and within seconds the host has bound it"
+and six after it went red with the window suite running beside the host
+suite, and the reading was load; then once more with nothing beside it.
+The host log had the mechanism: `found desk host-test/pane` and, 45.4 s
+later, `dropped desk host-test/pane` and the bind. The placeholder-key
+case (PR #52) opens a window, reads its env line, kills the pane and puts
+the roster back, and the env line is written at the stand-in's first
+breath, before its roster entry. So the host's `waitReady` for that pane's
+pid found nothing in the roster, and could not see the pane die either
+(its exit check reads `#{pane_dead}`, which a target that no longer exists
+does not answer), and sat out `READY_TIMEOUT_MS` with the next section's
+bind in line. When the host's poll won the race the run was green, which
+is why it read as load. The case now waits for the window's
+`remain-on-exit` to read `off`, which `waitReady` sets the moment it finds
+the session, before anything is taken down. A red of that shape again is
+something else; read the host log's gap first.
 
 **One move-section red in `test:host` has now been seen twice with no other
 suite on its ports.** "the new floor holds no session row for the

@@ -738,6 +738,26 @@ try {
     return log.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.cwd.endsWith('/repo-pane')) ?? null;
   }, 20000);
   eq(paneEnvLine?.key ?? null, KEY, "the window the host opens for it has the variable, set to the host's key");
+  // The host's own open is still running: waitReady polls the roster for the
+  // pane's pid and, when it finds it, sets the window's remain-on-exit off
+  // (open set it on). Taking the pane down and putting the roster back before
+  // that left it with no pid to find and no dead pane to notice, so it sat
+  // out READY_TIMEOUT_MS (45 s) with the next section's bind in line behind
+  // it — seven take-a-desk reds, under load on 2026-11-07 and then alone. So
+  // the flag is the observable waited on here, and nothing is torn down
+  // before it. The env line above comes from the stand-in's first breath,
+  // well before its roster entry.
+  const panePaneId = () => {
+    try {
+      const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
+      return panes.split('\n').find((x) => x.endsWith('/repo-pane'))?.split(' ')[0] ?? null;
+    } catch { return null; }
+  };
+  assert(await until(() => {
+    const id = panePaneId();
+    if (!id) return null;
+    try { return execFileSync('tmux', ['show-options', '-w', '-v', '-t', id, 'remain-on-exit']).toString().trim() === 'off' ? true : null; } catch { return null; }
+  }, 20000), 'and the host saw that window register before anything here takes it down');
   try {
     const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
     for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);

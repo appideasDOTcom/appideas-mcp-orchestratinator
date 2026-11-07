@@ -32,6 +32,12 @@ through compose, or add `--build-context gitmeta=./.git`.
 
 ## Run locally without Docker (for hacking on it)
 
+Node 22.14 or later. better-sqlite3 13 is a Node-API 10 binary, and a Node
+that offers Node-API 9 (20.x, 22.x before 22.14) dies on loading it with no
+words at all — exit 139 — so `src/node-floor.js` says so first. The board's
+image is node:22 and has it; the host has no dependencies and still runs on
+Node 20.
+
 ```bash
 npm install
 npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db

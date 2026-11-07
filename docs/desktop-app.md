@@ -49,7 +49,17 @@ layout.
 
 The first two landed in 0.12.5 (2026-11-07, tasks #288 and #289 from the
 app's agent on the `orchestratinator-desktop` channel; the contract there,
-`orchestratinator.consumed`, names what the app depends on).
+`orchestratinator.consumed`, names what the app depends on). One more
+came out of the app's phase 3, the board inside the app (task #291,
+0.12.6): better-sqlite3 11 does not compile against Electron 45's V8
+(`v8::Context::GetIsolate` and the two-argument `v8::External::New` are
+gone), and 12.11.1 still uses the first. 13 is Node-API, with the
+prebuilt binary for each platform inside the package, so the server now
+pins `^13.0.3`. The cost is the Node floor: a Node-API 9 Node (20.x, or
+22.x before 22.14) segfaults loading it, so `engines` says 22.14 and
+`src/node-floor.js` says it in words. The app measured 13.0.3 loading
+under Electron 45.2.3; whether the prebuild loads there without
+`@electron/rebuild` is the app's to measure.
 
 1. **Versioning stops being one number.** ~~Today the server, host and
    plugin move in lockstep~~ — they still do for the *version*, and the
