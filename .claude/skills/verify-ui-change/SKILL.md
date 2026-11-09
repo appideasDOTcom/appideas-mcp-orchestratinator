@@ -126,10 +126,42 @@ node <your-seed>.mjs        # only now
 
 Seed scripts live in the scratchpad, which is **outside the repo**, so
 `import Database from 'better-sqlite3'` will not resolve. Point the resolver at
-the repo instead of moving the file into it — and run them on a Node 22.14
-or later (nvm has 24.22.2): better-sqlite3 13 is a Node-API 10 binary, and
-this machine's default `node` (20.20.1) segfaults loading it, exit 139 with
-no words. The server says so (`src/node-floor.js`); a seed script does not.
+the repo instead of moving the file into it.
+
+**Every script here that opens better-sqlite3, and every runner that starts
+the server, takes the Node floor first.** better-sqlite3 13 is a Node-API 10
+binary, and this machine's default `node` (20.20.1) segfaults loading it:
+exit 139, no words, so a seed says nothing and a server whose output goes
+to `server.log` reads as a dead port. The `run-check-*.sh` runners and
+`shoot-readme.sh` source `scripts/node-floor.sh`, which finds a suitable
+Node; the seeds and checks import `src/node-floor.js`, which says the floor
+in words. A new one needs the same line. For a runner, after `set -u`:
+
+```bash
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
+```
+
+and for a script, after its imports and before the `require`:
+
+```js
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
+```
+
+**A script that plays a host by hand sends the board's protocol number.**
+Since 0.12.5 the board refuses a registration without it, and a refused
+stand-in looks exactly like a page fault: the desk never comes live, the
+check waits out a selector, and the 409 is in nobody's output.
+`board-protocol.mjs` reads the number off the board the script is pointed
+at; its header has the line to copy. `answering-host.mjs`,
+`seed-folders.mjs`, `seed-form.mjs`, `landing-seed.mjs`,
+`nomenclature-seed.mjs` and `check-update.mjs` all register, and all six
+went two days without it. `seed-desk.mjs` writes its host row in SQL and
+was never refused, which is why the checks built on it alone stayed green.
+
+The `catch` is for a copy holding an older commit's `src/`, which has no
+such file. A seed kept in the scratchpad has no relative path to it: run it
+after `. scripts/node-floor.sh`, or it is the silent 139 again.
+`run-check-pop-foot.sh` from a Node 20 shell is the proof (PASS, 2026-11-08).
 
 ```js
 import { createRequire } from 'node:module';

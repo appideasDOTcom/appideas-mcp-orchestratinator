@@ -187,6 +187,30 @@ them) decide what can share the CPU, and the host and window suites should
 still run alone — under load their pane cases go red on timing (CLAUDE.md,
 Tests).
 
+## The Node the copy runs on
+
+A suite that cannot load better-sqlite3 prints no ✗. On this machine's
+default `node` (20.20.1) the server stops on its first import with the
+floor's sentence, and a script that opens better-sqlite3 itself segfaults
+with no words at all (0.12.6, better-sqlite3 13). Neither is a ✗, so a
+mutant run there counts 0 failing and reads as a **survivor**. `run-mutant.sh` and
+`run-page-mutant.sh` source `scripts/node-floor.sh`, and `run-mutants.mjs`
+and `run-batches.mjs` start each suite through it. Start them from any
+shell.
+
+**A run with no ✗ and no ✓ is not a survivor, and every runner says so**
+("THE SUITE DID NOT RUN — not a result", with its last lines). Two causes
+were met on 2026-11-08, packaging the above: the Node, and the suite's
+name. Every suite is `test:<name>` in package.json but smoke, which is
+`smoke`, so `run-mutant.sh … smoke …` ran `npm run test:smoke`, npm said
+"Missing script", and the runner counted 0 failing. A mutant the smoke
+suite catches on its 62nd line read as surviving, and so did the control
+beside it, for the same reason. The runners take `smoke` now. Proven both
+ways from a Node 20 shell: `protocol` dropped from `/health` reads `1
+failing — ✗ and /health reports it (undefined)`, a comment-only change
+reads `SURVIVED (69 ✓)`, and a suite name npm does not have reads as no
+result.
+
 ## What goes in the report
 
 For each item: the test's section and wording, and the mutant that turned

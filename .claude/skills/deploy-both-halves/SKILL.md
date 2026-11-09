@@ -123,6 +123,34 @@ The host started after the bump and the plugin cache already reads
 0.10.20 (`installed_plugins.json`), so both stay. Task 275 went out as
 the server half only on that reading, and the note said so.
 
+## When the deploy moves the protocol, or a dependency
+
+Since 0.12.5 the board refuses a host that does not speak its protocol
+number, and a host that sends none (CLAUDE.md, "The host under the desktop
+app"). `status.sh` prints the three numbers and what the board says of each
+host:
+
+```
+protocol: board=None  tree=1  tree host=1
+host on the board: costmo4.local live=True last_seen=… refused=None
+```
+
+`board=None` is a board from before there was a number, which takes any
+host. Read it before the deploy so the order is no surprise. Once the board
+is rebuilt onto a build that has the number, a host still running older
+code is refused until it is restarted: its log says `registration refused:`
+once and then one short line a try, and the floor shows its desks as
+offline. That is expected between the two restarts and a fault after both.
+The deploy is closed with `refused=None` and `live=True` for the host, and
+with `board` equal to `tree`.
+
+A deploy that changes `package.json`'s dependencies reinstalls them in the
+image, and the rebuild takes about a minute longer. 0.12.6 moves
+better-sqlite3 from 11 to 13: the image's Node (22.23.4) loads it and the
+live database was read through it, read-only, before the tree had it
+(**try-a-dependency**, 2026-11-08: 19 tables, `quick_check: ok`). The host
+half needs nothing for it; the host has no dependencies.
+
 ## The third half: the plugin
 
 Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).

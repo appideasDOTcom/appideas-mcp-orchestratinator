@@ -1,9 +1,14 @@
 # The desktop app: structure and framework
 
 Discussion notes, 2026-11-05, written to be copied into the desktop app's
-repo when it is started. Nothing here is built. It assumes the hosted-service
+repo when it is started. It was started the next day: the app has its own
+repo and its own agent, and asks this repo for what it needs as tasks on
+the `orchestratinator-desktop` channel (what landed is under "What has to
+change in this repo first"). The sections below are still the reasoning,
+as written before any of it was built. They assume the hosted-service
 idea: Orchestratinator boards hosted for paying customers and reached through
-an authenticated desktop app, with the browser kept localhost-only.
+an authenticated desktop app, with the browser kept localhost-only. That
+idea is not decided; the app is being built either way.
 
 ## Decisions so far
 

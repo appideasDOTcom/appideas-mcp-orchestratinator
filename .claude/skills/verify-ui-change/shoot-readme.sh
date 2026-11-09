@@ -18,6 +18,9 @@
 #
 # Read the images afterwards; a green run proves only that every wait was met.
 set -u
+# A Node that can load better-sqlite3 13, or a refusal in words: this machine's
+# default node segfaults on it silently (scripts/node-floor.sh has the why).
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 REPO=${1:-$PWD}
 LANDING=${2:-}
 cd "$REPO" || exit 1

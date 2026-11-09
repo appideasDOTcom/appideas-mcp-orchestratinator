@@ -26,6 +26,7 @@
  * marks every desk it does not name offline, so the two on one host take each
  * other's desks away. check-popout.mjs runs this as `--host h-form`.
  */
+import { boardProtocol } from './board-protocol.mjs';
 const args = process.argv.slice(2);
 const BASE = args[0];
 if (!BASE) { console.error('usage: seed-form.mjs <base-url> [--channel c] [--agent a] [--key k]'); process.exit(1); }
@@ -34,7 +35,7 @@ const CH = opt('--channel', 'page-check'), AG = opt('--agent', 'typist'), KEY = 
 const HK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
 const HOST = opt('--host', 'h1');
 
-const register = () => fetch(`${BASE}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: HOST, name: 'testbox', tmux: 'deskside', desks: [{ channel: CH, agent: AG, cwd: `/repo/${AG}`, window: '@9' }] }) });
+const register = async () => fetch(`${BASE}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: HOST, name: 'testbox', protocol: await boardProtocol(BASE), tmux: 'deskside', desks: [{ channel: CH, agent: AG, cwd: `/repo/${AG}`, window: '@9' }] }) });
 const ingest = (body) => fetch(`${BASE}/api/ingest`, { method: 'POST', headers: HK, body: JSON.stringify({ channel: CH, agent: AG, session_id: `s-${AG}`, cwd: `/repo/${AG}`, ...body }) });
 const deskOf = async () => (await fetch(`${BASE}/api/floor`).then((r) => r.json())).channels.find((c) => c.channel === CH)?.desks.find((d) => d.agent === AG);
 

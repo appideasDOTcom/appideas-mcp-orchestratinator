@@ -39,6 +39,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, copyFileSync, renameSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+// A suite is started through scripts/node-floor.sh, which finds a Node that
+// can load this tree's better-sqlite3 (this machine's default cannot), and
+// under the name package.json gives it: every suite is `test:<name>` but
+// smoke, which is `smoke`. Both were false survivors once (2026-11-08): a
+// suite that never starts prints no ✗, and "0 failing" was read as a mutant
+// nothing caught. So a run with no ✗ and no ✓ is said to be no result.
+const runSuite = (copy, name) => spawnSync('bash', ['-c', '. scripts/node-floor.sh && npm run "$0"', name === 'smoke' ? 'smoke' : `test:${name}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
+const didNotRun = (out) => out.trim().split('\n').filter(Boolean).slice(-4).map((l) => `    ${l.slice(0, 220)}`).join('\n');
 
 const D = dirname(fileURLToPath(import.meta.url));
 const REPO = join(D, '../../..');
@@ -51,11 +59,12 @@ const fresh = () => execFileSync(`${D}/copy-repo.sh`, dest ? [dest] : [], { enco
 
 function suite(copy, name, label) {
   const t0 = Date.now();
-  const run = spawnSync('npm', ['run', `test:${name}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
+  const run = runSuite(copy, name);
   const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
   writeFileSync(`${copy}-${label.replace(/[^\w.-]+/g, '_')}.log`, out);
   const red = out.split('\n').filter((l) => l.includes('✗'));
   const green = out.split('\n').filter((l) => l.includes('✓')).length;
+  if (!red.length && !green) { console.log(`${label} (${name}): THE SUITE DID NOT RUN — not a result. Its last lines:\n${didNotRun(out)}`); return; }
   console.log(`${label} (${name}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing, ${green} ✓`);
   for (const l of red) console.log(`    ${l.trim().slice(0, 220)}`);
   const threw = out.match(/^(TypeError|ReferenceError|SyntaxError|Error)[^\n]*/m);

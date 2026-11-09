@@ -36,9 +36,12 @@ Node 22.14 or later. better-sqlite3 13 is a Node-API 10 binary, and a Node
 that offers Node-API 9 (20.x, 22.x before 22.14) dies on loading it with no
 words at all — exit 139 — so `src/node-floor.js` says so first. The board's
 image is node:22 and has it; the host has no dependencies and still runs on
-Node 20.
+Node 20. `. scripts/node-floor.sh` puts a suitable Node first on PATH for the
+shell it is sourced in (the oldest one nvm has that will do), or says there
+is none.
 
 ```bash
+. scripts/node-floor.sh   # only if `node -p process.versions.napi` is under 10
 npm install
 npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)

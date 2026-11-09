@@ -14,6 +14,11 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { boardProtocol } from './board-protocol.mjs';
+// The Node floor in words, before better-sqlite3 is opened: a Node-API 9 node
+// segfaults on it with none (src/node-floor.js). A copy holding an older src/
+// has no such file, and that is not this script's fault to report.
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
 
 const [dirArg, bp = '8925', gp = '8926', cp = '9275', shotsArg] = process.argv.slice(2);
 const DIR = resolve(dirArg ?? '.');
@@ -53,7 +58,7 @@ await new Promise((r) => gh.listen(GH, r));
 
 let server = null;
 async function startServer(commit) {
-  server = spawn('node', ['src/server.js'], {
+  server = spawn(process.execPath, ['src/server.js'], {
     cwd: DIR,
     env: { ...process.env, PORT: String(PORT), DB_PATH: join(TMP, 'b.db'), ORCH_AUTH_TOKEN: KEY,
       ORCH_GITHUB_API: `http://localhost:${GH}`, ORCH_GITHUB_RAW: `http://localhost:${GH}`, ORCH_UPDATE_REPO: REPO,
@@ -68,8 +73,8 @@ async function stopServer() { if (!server) return; const s = server; server = nu
 // The host, as far as the board can see one.
 const host = { commit: C1, dirty: false };
 const hostPost = (path, body) => fetch(`${BOARD}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY }, body: JSON.stringify(body) }).catch(() => null);
-const register = () => hostPost('/api/host/register', {
-  host_id: 'h1', name: 'testbox', desks: [], folders: [], roots: [],
+const register = async () => hostPost('/api/host/register', {
+  host_id: 'h1', name: 'testbox', protocol: await boardProtocol(BOARD), desks: [], folders: [], roots: [],
   build: { version: '0.10.18', commit: host.commit }, board_container: CONTAINER, supervised: true, capabilities: ['finish'],
   clone: { path: '/Users/op/orch', branch: 'main', head: host.commit, dirty: host.dirty, changes: host.dirty ? ['src/ui/app.js'] : [] },
 });

@@ -20,6 +20,13 @@ git fetch -q origin 2>/dev/null
 echo "HEAD $(git rev-parse --short HEAD) on $(git rev-parse --abbrev-ref HEAD)  upstream $(git rev-parse --short '@{u}' 2>/dev/null || echo none)  origin/develop $(git rev-parse --short origin/develop 2>/dev/null)  dirty files: $(git status --short | wc -l | tr -d ' ')"
 echo "== server half"
 curl -s localhost:8787/health; echo
+# The protocol each side speaks (0.12.5). A board that carries none is a
+# build from before there was one. Unequal is not a fault before a deploy; it
+# is the reading that says the host must be restarted with this one.
+printf 'protocol: board=%s  tree=%s  tree host=%s\n' \
+  "$(curl -s localhost:8787/health | python3 -c 'import sys,json; print(json.load(sys.stdin).get("protocol"))' 2>/dev/null)" \
+  "$(python3 -c 'import json; print(json.load(open("package.json")).get("protocol"))')" \
+  "$(python3 -c 'import json; print(json.load(open("host/package.json")).get("protocol"))')"
 docker inspect -f 'container created={{.Created}} started={{.State.StartedAt}}' appideas-orchestratinator 2>/dev/null
 for sym in "$@"; do
   printf '  %-28s served floor.js=%s app.js=%s · container src/ui/floor.js=%s src/floor.js=%s\n' "$sym" \
@@ -42,6 +49,15 @@ for p in $(pgrep -f 'host/index.js'); do
     *node) echo "ANOTHER HOST: pid $p started $(ps -o lstart= -p "$p") — not launchd's";;
   esac
 done
+# What the board says of its hosts. `refused` in words is a host whose
+# protocol the board would not take: expected between the two halves of a
+# deploy that moves the number, and a fault once both are done.
+curl -s localhost:8787/api/floor | python3 -c '
+import sys, json
+try: hosts = json.load(sys.stdin).get("hosts", [])
+except Exception as e: print("hosts on the board: unreadable (%s)" % e); sys.exit()
+for h in hosts: print("host on the board: %s live=%s last_seen=%s refused=%s" % (h.get("name"), h.get("live"), h.get("last_seen"), h.get("refused")))
+if not hosts: print("hosts on the board: none")'
 echo "newest host/*.js: $(ls -t host/*.js | head -1) modified $(stat -f '%Sm' "$(ls -t host/*.js | head -1)")"
 line=$(grep -n '\[host\] costmo4\|\[host\] .* → http' ~/.orchestratinator/log/host.log | tail -1)
 echo "last registration: ${line:-none}"

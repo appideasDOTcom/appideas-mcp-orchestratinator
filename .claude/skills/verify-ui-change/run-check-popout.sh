@@ -19,6 +19,9 @@
 #   run-page-mutant.sh "<what>" src/ui/floor.js '<old>' '<new>' \
 #     'PORT=8932 CDP=9272 .claude/skills/verify-ui-change/run-check-popout.sh "$PWD"'
 set -u
+# A Node that can load better-sqlite3 13, or a refusal in words: this machine's
+# default node segfaults on it silently (scripts/node-floor.sh has the why).
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; PORT="${PORT:-8931}"; CDP="${CDP:-9271}"
 S="$(mktemp -d "${TMPDIR:-/tmp}/check-popout.XXXXXX")"; mkdir -p "$S/shots"
 taken() { curl -s -m 1 -o /dev/null "localhost:$1/$2"; [ $? -ne 7 ]; }

@@ -9,6 +9,9 @@
 # it killed after. About half a minute. Same port rules as run-check-popout.sh:
 # a PORT or CDP that anything answers on is refused. Announce both first.
 set -u
+# A Node that can load better-sqlite3 13, or a refusal in words: this machine's
+# default node segfaults on it silently (scripts/node-floor.sh has the why).
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; PORT="${PORT:-8933}"; CDP="${CDP:-9273}"
 S="$(mktemp -d "${TMPDIR:-/tmp}/check-pop-foot.XXXXXX")"; mkdir -p "$S/shots"
 taken() { curl -s -m 1 -o /dev/null "localhost:$1/$2"; [ $? -ne 7 ]; }

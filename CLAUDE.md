@@ -1417,7 +1417,17 @@ one number, one word and one process came apart:
   covers and when it moves (a reshaping, never a field added). Equal or
   refused, no range, and a host that sends none is refused as a build from
   before there was one — which is every hand-rolled registration in a
-  suite, so each one sends `protocol: PROTOCOL` now. A refused host keeps
+  suite, so each one sends `protocol: PROTOCOL` now. The page checks'
+  stand-in hosts are hand-rolled registrations too, and six of them were
+  missed for two days. The update check is the one that was run in that
+  state: 15 of 19, "got []" and a selector timing out, over a 409 that
+  nothing printed, so it read as a page fault. The stand-ins behind the
+  backdrop, popout, redraw and meeting checks and the README shots sent no
+  number either. They send what
+  the board they are pointed at reports now (`board-protocol.mjs` in
+  **verify-ui-change**), so a copy holding an older `src/` still works. A
+  change to what the board demands of a host is not done until `grep -rl
+  api/host/register .claude/skills test` has been read. A refused host keeps
   trying on its backoff, logs the words once, tells its parent over its
   port, and is on `/api/floor`'s `hosts` as `refused`. On this machine the
   mismatch it catches is a deploy that rebuilt the board and left the host
@@ -1451,14 +1461,48 @@ one number, one word and one process came apart:
   fail to load it: the process segfaults, exit 139, with no words.
   Measured on 20.20.1 — this machine's default `node`, and the one the
   host's LaunchAgent runs on — and on 22.11.0. So `src/node-floor.js`,
-  imported ahead of better-sqlite3 in `src/db.js`, says it in words, and a
-  suite run here needs a Node 22.14+ on PATH (nvm has 24.22.2). The host
-  has no dependencies and stays at Node 20; the image is node:22 and loads
-  it. A script that `require`s better-sqlite3 from this tree outside the
-  container (the verify-ui-change seeds) is under the same floor and has
-  no guard: a silent exit 139 from one is this, not the page.
+  imported ahead of better-sqlite3 in `src/db.js`, says it in words. The
+  host has no dependencies and stays at Node 20; the image is node:22 and
+  loads it. Two things keep that from costing anyone a round here.
+  `scripts/node-floor.sh` is sourced by every runner under `.claude/skills`
+  and by hand before a suite (`. scripts/node-floor.sh && npm test`): it
+  reads `process.versions.napi`, leaves a good `node` alone, and otherwise
+  puts the oldest nvm Node that has Node-API 10 first on PATH, or refuses in
+  words. And every skill script that opens better-sqlite3 itself, or starts
+  the server as a child, imports the floor first, because a seed that
+  segfaults says nothing and a server whose output goes to a log file reads
+  as a dead port. A new seed, check or runner takes the same line; copy it
+  from `seed-desk.mjs` or `run-check-pop-foot.sh`. **The machine's default
+  Node stays 20, and that is costmo's ruling** (2026-11-08: "I don't want to
+  mess with node versions"; he switches by hand, in one shell, only to run
+  the desktop app). So nothing here may ask him to change it, set an nvm
+  default, or add a version file that a shell acts on: the helper changes
+  PATH inside the script that sources it and nowhere else. Do not re-propose
+  moving his default as the simpler fix. 12.11.1's call is written
+  `context->GetIsolate()`; the qualified name is in no file, which is how a
+  grep by the compiler's name reads that version as clean.
+- **What the app asks for is added beside what runs, never in place of it**
+  (costmo, 2026-11-07: "I do not want to break our current tool along the
+  way"). Each of the four above is off unless the app turns it on, or is
+  the same for launchd as it was: a number both sides already agree on, a
+  word launchd never sets, a dialog backend chosen by an environment
+  variable, a dependency the image already had the Node for. So a task from
+  that channel is closed with what it changes for the board, the launchd
+  host and the plugin as they run today, measured and not reasoned — for a
+  dependency, **try-a-dependency** reads the live database through the new
+  version before the tree has it — and anything that would change what the
+  existing tool does goes to him as a decision first. The one such change so
+  far is the protocol check: a deploy that rebuilds the board and leaves the
+  host running now reads as a refused host, in words, until the host is
+  restarted.
 
 ## Tests
+
+**Run them as `. scripts/node-floor.sh && npm test`.** The server needs a
+Node with Node-API 10 since 0.12.6 and this machine's default `node` does
+not have it (above, "The host under the desktop app"). Without the first
+half the smoke suite stops on its first line, in words; with it the shell
+gets nvm's 24.22.2 and nothing else changes.
 
 `npm test` runs eleven suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
@@ -1549,7 +1593,12 @@ bind in line. When the host's poll won the race the run was green, which
 is why it read as load. The case now waits for the window's
 `remain-on-exit` to read `off`, which `waitReady` sets the moment it finds
 the session, before anything is taken down. A red of that shape again is
-something else; read the host log's gap first.
+something else; read the host log's gap first. The suite prints the host's
+log at its end, every line timed, and a gap of `READY_TIMEOUT_MS` between
+two lines is a window the host was waiting on. The gap in `waitReady` is
+the host's own and is still there: a window closed by hand while it is
+starting holds the host's line for 45 s. It is open, not deliberate, and
+not filed as an issue as of 2026-11-08; only the test was changed.
 
 **One move-section red in `test:host` has now been seen twice with no other
 suite on its ports.** "the new floor holds no session row for the

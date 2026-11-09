@@ -18,6 +18,11 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { boardProtocol } from './board-protocol.mjs';
+// The Node floor in words, before better-sqlite3 is opened: a Node-API 9 node
+// segfaults on it with none (src/node-floor.js). A copy holding an older src/
+// has no such file, and that is not this script's fault to report.
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
 
 /* Everything is derived from this file's own location so the script survives
    being moved, and so it never again lives only in a session scratchpad —
@@ -76,7 +81,7 @@ async function post(path, body) {
   return text;
 }
 
-await post('/api/host/register', { host_id: 'h1', name: 'studio-mac', tmux: 'orch', desks });
+await post('/api/host/register', { host_id: 'h1', name: 'studio-mac', protocol: await boardProtocol(BASE), tmux: 'orch', desks });
 
 /* ---------- MCP sessions: presence, statuses, and the board writes the tray counts from ---------- */
 

@@ -22,6 +22,10 @@ import { readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { open } from './drive.mjs';
+// The Node floor in words, before better-sqlite3 is opened: a Node-API 9 node
+// segfaults on it with none (src/node-floor.js). A copy holding an older src/
+// has no such file, and that is not this script's fault to report.
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const [, , repo, out] = process.argv;

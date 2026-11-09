@@ -10,6 +10,9 @@
 # already on its port), and the pkill matches the port exactly. Announce
 # PORT and CDP on the channel first.
 set -u
+# A Node that can load better-sqlite3 13, or a refusal in words: this machine's
+# default node segfaults on it silently (scripts/node-floor.sh has the why).
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; PORT="${PORT:-8941}"; CDP="${CDP:-9281}"
 S="$(mktemp -d "${TMPDIR:-/tmp}/check-meeting.XXXXXX")"; mkdir -p "$S/shots"
 taken() { curl -s -m 1 -o /dev/null "localhost:$1/$2"; [ $? -ne 7 ]; }
