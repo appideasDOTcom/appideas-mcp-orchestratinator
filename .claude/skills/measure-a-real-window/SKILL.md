@@ -419,6 +419,48 @@ predicted — a desk moved back to a floor it had left by a move missing from
 the recorders a deadline (`seconds`) longer than the session you plan: they
 stopped at ten minutes here, one move before the last reading was taken.
 
+### Two instances on one machine (task 292)
+
+Anything that happens *between* instances needs two of them, a host each,
+and windows both hosts can see. [`two-instances.sh`](probe-desk/two-instances.sh)
+is that rig, with the isolation above: both hosts' roots are one directory
+of yours, and their windows are on a tmux socket named for the rig, in one
+session called `orch`, because two hosts in one session is the real case.
+
+```bash
+T=$D/two-instances.sh; E=$SP/rel
+$T up "$E" "$PWD"                         # servers on 8962 (a) and 8963 (b), from the tree; keys probe-a, probe-b
+$D/make-probe.sh "$E/root/rel-desk"
+$T api "$E" a POST /api/floor/browse "{\"host_id\":\"rel-host-a\",\"path\":\"$E/root/rel-desk\"}"
+$T api "$E" a POST /api/floor/desk   "{\"host_id\":\"rel-host-a\",\"path\":\"$E/root/rel-desk\",\"channel\":\"rel-old\",\"agent\":\"probe\"}"
+$T tmux "$E" send-keys -t orch: Down; sleep 0.6; $T tmux "$E" send-keys -t orch: Enter     # the trust question
+# … then the same two calls on b, with "from_board":"http://localhost:8962": the release
+$T api "$E" b GET "/api/floor/take?host_id=rel-host-b&channel=rel-new&agent=probe"
+$T hosts "$E" "$PWD"                      # after editing host/*.js: the hosts only, the servers stay
+$T api "$E" a POST /api/floor/desk/leave '{"channel":"rel-old","agent":"probe"}'            # removes the binding
+$T down "$E"
+```
+
+To ask a window which instance it is on, send it a message through that
+instance's floor (`/api/floor/chat`) asking it to call `whoami` and repeat
+the channel. That costs a few tokens and is the only proof the window's
+connection moved. What it measured on 2026-11-08: a release with the other
+host's window open seated in 1.2 s and opened a new conversation; one with
+no window resumed the conversation last spoken in (`claude --resume <id>`
+in `ps`), and that window answered as the new instance. Before the host
+looked at bindings, the instance that was left got every turn of the new
+conversation for 40 s; after, its host let go in 0.9 s.
+
+Three things about running it. **A host started from a script keeps the
+script's stdout**, so `up … | tail` never returned until every stream of
+the pair went to the log. **Stop by the pid files, never by a pattern**: a
+`ps | grep "host/index.js"` in a command that itself names that file
+killed the shell running it (exit 144), and the live host matches the same
+pattern. And **a command the harness moved to the background is still
+running**: one that hung on `up` carried on into its `hosts` and `down`
+when its pipe closed, on the same directory as the rerun, and the two
+scripts overwrote each other's pid files.
+
 ## How long a closed window stays in the roster
 
 Issue #24 (task 253, 2026-11-03, 2.1.300): a move closed a desk's window

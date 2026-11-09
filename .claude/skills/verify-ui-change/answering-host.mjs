@@ -7,7 +7,7 @@
  *
  *   answering-host.mjs <base-url> [--host h1] [--name testbox] [--key k]
  *                      [--db data/scratch.db] [--answers answers.json]
- *                      [--no-dialog]
+ *                      [--no-dialog] [--no-release]
  *
  * seed-desk.mjs and seed-folders.mjs put state on the board; neither takes
  * work, so a page that asks a host a question waits eight seconds and says
@@ -37,6 +37,13 @@
  *   recent      `delay` before History's recent list; `rows` replaces it
  *   sessions    not answered unless `answer: true` (then after `delay`):
  *               check-backdrop.mjs needs a Sessions that waits out its 8 s
+ *   bind        not answered unless the file has a `bind` key: then, after
+ *               `delay`, `mode: "bound"` answers as the host does when it
+ *               has seated the desk (naming `released_from` for a release),
+ *               and `mode: "refused"` answers with `error` and the `taking`
+ *               that tells the board which take was refused. For a release
+ *               from another instance (check-release.mjs). `--no-release` is
+ *               a host from before that: it does not say it can.
  *
  * The delays are how a check lands a host's answer while somebody is
  * typing or holding a button (check-redraw.mjs, issue #37).
@@ -78,6 +85,7 @@ const KEY = flag('key', 'k');
 const DB = flag('db', `${REPO}/data/scratch.db`);
 const ANSWERS = flag('answers', null);
 const DIALOG = !args.includes('--no-dialog');
+const RELEASE = !args.includes('--no-release');
 
 const db = new Database(DB);
 const desksOf = () => db.prepare(`SELECT channel, agent, cwd, window_id, sdk_session_id FROM hosted_desks WHERE host_id = ?`).all(HOST)
@@ -101,7 +109,7 @@ const FOLDERS = [
   folder('zeta-newest', '2026-09-30T10:00:00.000Z'),
   folder('mars-elsewhere', '2026-09-30T23:00:00.000Z', { bound: { channel: 'x', agent: 'y', scope: 'project', board: 'http://10.0.0.9:8787' }, other_board: 'http://10.0.0.9:8787' }),
 ];
-const register = async () => post('/api/host/register', { host_id: HOST, name: NAME, protocol: await boardProtocol(base), tmux: 'orch', desks: desksOf(), roots: ['/repo'], folders: FOLDERS, dialog: DIALOG });
+const register = async () => post('/api/host/register', { host_id: HOST, name: NAME, protocol: await boardProtocol(base), tmux: 'orch', desks: desksOf(), roots: ['/repo'], folders: FOLDERS, dialog: DIALOG, ...(RELEASE ? { release: true } : {}) });
 
 const listing = (path, at, bound = {}) => {
   const self = { ...(FOLDERS.find((f) => f.path === path)
@@ -143,6 +151,14 @@ async function answer(w) {
     if (p.mode === 'chosen') return events([listing(p.path, at), { type: 'pick', state: 'chosen', at, start, path: p.path, parent: p.path.split('/').slice(0, -1).join('/') || '/' }]);
     if (p.mode === 'failed') return events([{ type: 'pick', state: 'failed', at, start, error: p.error ?? 'the folder dialog ended with exit code 1: execution error: no screen' }]);
     return events([{ type: 'pick', state: 'cancelled', at, start, why: p.why ?? null }]);
+  }
+  if (w.kind === 'bind') {
+    const b = a.bind;
+    if (!b || b.mode === 'silent') return null;
+    await sleep(b.delay ?? 0);
+    const { channel, agent, path } = w.payload;
+    if (b.mode === 'refused') return events([{ type: 'error', channel, agent, code: 'bind_refused', message: b.error ?? 'refused', taking: { channel, agent } }]);
+    return events([{ type: 'bound', channel, agent, cwd: path, scope: 'local', session_id: b.session_id ?? null, from: w.payload.from ?? null, released_from: w.payload.release?.board ?? null }]);
   }
   if (w.kind === 'recent') {
     await sleep(a.recent?.delay ?? 0);

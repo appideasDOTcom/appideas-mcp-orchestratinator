@@ -612,6 +612,112 @@ found); the host suite's stand-in has `linger.flag`, which is the
 deterministic version. `seed-move.mjs` + `check-card-move.mjs` in
 **verify-ui-change** drive the card on both views.
 
+## Releasing a folder from another instance
+
+Task #292, 0.12.7 (2026-11-08; measured on 2.1.300 with two real hosts and
+a real window, in both directions). Take a desk on a folder bound to
+another instance used to say "is bound to <address>, not this board. Change
+it there." It now releases the folder from that instance and seats it here.
+The need was the desktop app: it runs an instance of its own, so every repo
+of an operator who already uses the Docker one was bound elsewhere and
+refused, and the instance being left may not be running to change anything
+on.
+
+**"Instance" is costmo's word, and the page's, for one running
+orchestratinator.** This file says "board" for that all over, and also for
+the rows-per-agent view. He asked what "board" meant (2026-11-08). New
+words an operator reads say instance, release, and the address. The older
+text is not renamed.
+
+- **The reversal is costmo's, and it is narrow on purpose** ("We need to be
+  able to 'release' an agent so that it can be opened by another
+  instance"). `host/mcp.js` said an entry pointing at another instance is
+  never touched, and that went in with Take a desk itself. No failure is
+  recorded behind it; it is the one-instance rule applied to the config
+  file. What it protected is kept by the shape. Only the folder the
+  operator named is touched, on their click, on the floor taking it. The
+  request names the instance being left (`from_board`). The board checks
+  that against the host's last reading and the host against the disk at the
+  bind, so a binding that changed since the click is refused, not followed.
+  The host still only writes entries for its own instance, and a third
+  instance's entry in the same file stays. Do not widen it to a host
+  releasing on its own judgment.
+- **A release is never a move.** `from` on a bind names a desk on *this*
+  instance for the `bound` handler to unseat and retire. The names a
+  folder carries elsewhere are nobody here, or, after a restore, a real row
+  that is going nowhere. So `seatDesk` has a fourth mode, `release`, that
+  sends `release: { board }` and no `from`, whatever floor it lands on.
+- **Both scopes are cleared.** Local scope by the name each entry was
+  written under (`localEntries`; a hand-added one need not be called
+  `orchestratinator`), and the folder's `.mcp.json` for the named
+  instance. Leaving the file's entry was not an option: beside a local one
+  it raises the approval question on every fresh window, and under another
+  server name the window connects to both instances. That file may be
+  tracked, so a release can dirty a repo's tree, as an import already does.
+  The dialog says so before the click.
+- **The conversation goes by a move's two rules.** A window open in the
+  folder is closed and a new conversation opens (#24's race is the same
+  race). It is found by its folder, whichever host opened it: both hosts
+  see every pane on the tmux server. With no window the desk arrives on
+  the conversation somebody last spoke in (`lastSpokenIn`, the session
+  picker's bounded reads), because this host never watched the folder and
+  has no pin. Measured: the resumed window answered `whoami` as the new
+  instance, in the same conversation. With `open: false` a window is still
+  closed and nothing is opened, which is what a caller working through a
+  list wants.
+- **What became of a take is read from `GET /api/floor/take`**
+  (`live.takes`: asked, then seated or refused in the host's words). The
+  desk being released has no row on this instance, and the board drops a
+  host's error for a desk it has no row for. That was the gap PR #33 closed
+  for a move only, and a plain take's refusal was lost the same way; both
+  are on record now. The host's refusals carry `taking` so the board knows
+  which take. The dialog waits on it (`waitForTake`).
+- **A host says it can (`release: true` at registration), and the protocol
+  number did not move.** A host from before this reads the work as a plain
+  take and leaves the old binding beside the new one, so the board refuses
+  to ask one (`old_host`) and the dialog disables its button with the
+  reason. A field was added and nothing was reshaped, which is the
+  protocol's own rule.
+- **The host being left looks before it acts** (`boundAt`,
+  `letGoIfReleased` in `host/index.js`). It learns a binding has gone at
+  its next rescan, up to a heartbeat later. Measured before the fix: the
+  instance that was left received every turn of the new conversation for
+  40 s, because its host found the other host's window by its folder and
+  followed it. It now reads the binding when work arrives for a desk and
+  when a window comes up in its folder, and lets the desk go: 0.9 s on the
+  same rig. A local-scope file that cannot be read concludes nothing. A
+  host on an older build still takes its heartbeat.
+- **A poll says when its cursor is another instance's** (`since_ahead`).
+  Ids count per instance, so an agent arriving with a remembered `since`
+  above this one's newest id polled empty for ever, and the empty poll
+  wrote that number down as what the agent had read. The poll now reads
+  from this instance's own record of the agent and says so. "Newest" is
+  SQLite's counter for the column (`sqlite_sequence`), not `MAX(id)`:
+  deleting a floor takes its messages, and `MAX(id)` would then fall below
+  cursors this instance handed out itself.
+
+Two calls on the dialog were costmo's, asked both ways (2026-11-08). A
+folder bound elsewhere stays out of **Recently opened**, so five places do
+not fill with another instance's desks on a machine that runs two; it is
+reached with the folder dialog. And the dialog starts on **the floor it was
+opened from**, not the floor the folder had on the other instance, which is
+not offered at all unless this instance has a floor of that name. The agent
+keeps the name the folder gives it. The first cut proposed the floor it
+had; do not put that back.
+
+What a release does not bring: messages, tasks, contracts and the agent's
+floor on the other instance. Those come by backup and restore, and the
+app's "bring everything over" is built on this route in its own repo. The
+conversations are the folder's and come with it.
+
+Not measured: a chat held in an editor across a release (it followed a
+rebind on one instance in 2026-09; a change of address is the same
+re-read, unwatched), and a host being left that runs an older build.
+
+`two-instances.sh` in **measure-a-real-window** is the rig (two throwaway
+instances, a host each, a tmux server of their own), and
+`check-release.mjs` in **verify-ui-change** is the page.
+
 ## History is read off the hosts, not the board
 
 **`turns` is a live tail, not an archive**: the newest 400 rows a desk

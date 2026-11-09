@@ -166,7 +166,11 @@ to the whole system.
 the floor does this for you: pick the folder, name the floor and the seat, and
 the host binds it in Claude Code's own configuration and opens a window there.
 No approval dialog, and the key never leaves that machine. A folder that
-already has a `.mcp.json` entry is imported the same way.
+already has a `.mcp.json` entry is imported the same way. A folder bound to
+another instance of the orchestratinator, at another address, is released
+from it and seated here on the same click: the dialog names the address it
+is leaving before you press. Its conversations come with it; its messages
+and tasks stay on the instance it left.
 
 **4. Install the plugin** — this is what puts each session on the floor.
 

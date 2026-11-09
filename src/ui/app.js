@@ -2123,10 +2123,14 @@ el.dlgBody.addEventListener('click', (e) => {
       const was = ui.deskForm.listing?.self?.bound ?? null;
       const moving = was && was.agent === body.agent && was.channel !== body.channel ? { channel: was.channel, agent: body.agent, to: body.channel } : null;
       const hostName = (ui.deskForm.hosts ?? []).find((h) => h.host_id === body.host_id)?.name ?? null;
+      // A release waits the same way, on the board's own record of the take:
+      // the desk it leaves is on another instance, so there is no desk here
+      // for the host to say a refusal on.
       act(async () => {
-        const before = moving ? await lastTurnIdOf(moving.channel, moving.agent) : null;
+        const before = moving && !body.from_board ? await lastTurnIdOf(moving.channel, moving.agent) : null;
         const r = await floorPost('desk', body);
-        if (moving && r.mode === 'move') await waitForMove(moving, before, hostName);
+        if (r.mode === 'release') await waitForTake(body, hostName);
+        else if (moving && r.mode === 'move') await waitForMove(moving, before, hostName);
         window.floorOpenDesk?.(body.channel, body.agent);
       });
       break;
@@ -2362,10 +2366,12 @@ const RECENT_MAX = 5;
  * actually been run in, newest first, a handful of them.
  *
  * A folder nobody has opened is not recent, whatever its place in the host's
- * list, and one bound to another board cannot be taken from here — a row
- * whose only answer is a refusal is not worth one of five places. Sorted
- * here as well as by the host, so the order does not depend on every hop
- * between the two keeping it.
+ * list. One bound to another instance is left out as well. It used to be
+ * because such a row's only answer was a refusal; it can be released and
+ * taken now (releaseNoteText), and it is still left out, so that five places
+ * do not fill with another instance's desks on a machine that runs two. It
+ * is reached by standing in it. Sorted here as well as by the host, so the
+ * order does not depend on every hop between the two keeping it.
  */
 function recentFolders(folders, max = RECENT_MAX) {
   return (Array.isArray(folders) ? folders : [])
@@ -2434,7 +2440,49 @@ function rememberDir(storage, hostId, dir) {
  */
 function takeBody(fm) {
   const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
-  return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true };
+  // A folder bound to another instance: the take names the instance it is
+  // leaving, as the dialog showed it. That is what makes it a release, and
+  // the board refuses one whose address is no longer what the host reads.
+  const leaving = fm.listing?.self?.other_board ?? null;
+  return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true, ...(leaving ? { from_board: leaving } : {}) };
+}
+
+/**
+ * Whether the folder the dialog stands in can be taken at all: any folder on
+ * this instance or bound to nothing, and one bound to another instance when
+ * the host can release it (a host from before that says nothing, and the
+ * board would refuse it as `old_host`).
+ */
+function takeable(self, host) {
+  return !!self && (!self.other_board || host?.release === true);
+}
+
+/**
+ * What a release does, in one sentence, before the click that does it. Plain
+ * text; the dialog escapes it.
+ *
+ * It names the instance being left, because that is the confirmation: the
+ * request carries the same address and is refused if the folder no longer
+ * says it. And it says the two things a person would otherwise find out
+ * afterwards. The binding comes out of the folder's own .mcp.json when that
+ * is where it is, which is a change in the repo's tree. And what the other
+ * instance holds for this agent (its messages, tasks and floor) stays there:
+ * the conversations are the folder's and come with it.
+ */
+function releaseNoteText(agent, to, board, scope) {
+  const where = scope === 'project' ? 'its entry comes out of the folder\'s .mcp.json (other servers stay)' : 'its entry comes out of Claude Code\'s local scope';
+  return `Releases it from ${board} and seats it here as ${agent} on ${to}: ${where}, and the folder is bound to this instance. A window open in the folder closes and a new conversation opens here — the one it was on stays in its folder, in the session picker and History; with no window open, it opens on its last conversation. Its messages and tasks on ${board} stay there. Refused while a turn is running.`;
+}
+
+/**
+ * What the host did with a take, read off `GET /api/floor/take`: 'seated',
+ * `{ refused }` in the host's words, or null while it has said neither (or
+ * this instance remembers no such take).
+ */
+function takeOutcome(take) {
+  if (take?.state === 'seated') return 'seated';
+  if (take?.state === 'refused') return { refused: take.error ?? 'The host refused and did not say why.' };
+  return null;
 }
 
 /**
@@ -2506,6 +2554,11 @@ function moveOutcome(floor, { channel, agent, to }, beforeId) {
  * (`agentTyped`: set by typing, cleared by browseTo on another folder, by a
  * pick and by a change of host), and only an untyped name is emptied. A
  * bound folder's agent still wins over anything typed.
+ *
+ * A folder bound to another instance fixes the agent the same way and
+ * proposes no floor: the floor it names is that instance's, and the dialog
+ * starts on the floor it was opened from, like an unbound folder (costmo,
+ * 2026-11-08, asked both ways: "The floor you opened from").
  */
 function takeListing(fm, got) {
   fm.listing = got;
@@ -2514,7 +2567,7 @@ function takeListing(fm, got) {
     const b = got.self?.bound ?? null;
     if (b) fm.agent = b.agent;
     else if (!fm.agentTyped) fm.agent = '';
-    if (b) fm.channel = b.channel;
+    if (b && !got.self?.other_board) fm.channel = b.channel;
     else if (fm.wantChannel) fm.channel = fm.wantChannel;
     fm.prefilled = fm.path;
   }
@@ -2554,7 +2607,9 @@ function takeListing(fm, got) {
  * whole idea, and only the floor is yours to choose. Change the floor and
  * the take becomes a move; keep it and it is an import into local scope; an
  * unbound folder asks for a name. One dialog, three modes, decided by what
- * the folder says and what you pick.
+ * the folder says and what you pick. And a fourth, decided by the folder
+ * alone: one bound to another instance is released from it and seated here
+ * (releaseNoteText), where the dialog used to say "Change it there".
  *
  * Two things beside the picker are read rather than asked for. The agent's
  * name is the one it already carries on the board — shown, not typed, and
@@ -2806,7 +2861,7 @@ function renderDeskDialog({ opening = false } = {}) {
   const self = L?.self ?? null;
   const bound = self?.bound ?? null;
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
-  const mode = !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
+  const mode = self?.other_board ? 'release' : !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
   // The floors on the board, never a put-away one — plus whatever the form
   // already holds, so a floor archived while the dialog is open keeps its place
   // in the dropdown rather than silently becoming another floor.
@@ -2826,12 +2881,14 @@ function renderDeskDialog({ opening = false } = {}) {
     : fm.pickNote ? esc(fm.pickNote)
     : '';
 
-  const title = mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
-  const primary = mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
+  const title = mode === 'release' ? `Release ${esc(bound?.agent ?? self.name)} from ${esc(self.other_board)}`
+    : mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
+  const primary = mode === 'release' ? 'Release and seat here'
+    : mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
   const dirRow = (f) => {
     const marks = [
       f.bound && !f.other_board ? `${f.bound.channel} / ${f.bound.agent}` : null,
-      f.other_board ? 'another board' : null,
+      f.other_board ? 'another instance' : null,
       f.sessions > 0 ? 'opened by Claude' : null,
     ].filter(Boolean);
     return `<button type="button" class="dir-row" data-go="${esc(f.path)}" title="Open ${esc(f.name)}"><span class="dir-name">${esc(f.name)}</span><span class="dir-marks">${marks.map(esc).join(' · ')}</span></button>`;
@@ -2851,7 +2908,7 @@ function renderDeskDialog({ opening = false } = {}) {
   let here = '';
   if (self) {
     const where = bound?.scope === 'project' ? 'its .mcp.json' : "Claude Code's local scope";
-    if (self.other_board) here = `<b>${esc(self.name)}</b> is bound to <span class="mono">${esc(self.other_board)}</span>, not this board. Change it there.`;
+    if (self.other_board) here = `<b>${esc(self.name)}</b> is <span class="mono">${esc(bound?.agent ?? '?')}</span> on <span class="mono">${esc(bound?.channel ?? '?')}</span> at <span class="mono">${esc(self.other_board)}</span>, another instance, according to ${where}.`;
     else if (bound) here = `<b>${esc(self.name)}</b> is <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(bound.channel)}</span>, according to ${where}.`;
     else here = `<b>${esc(self.name)}</b> is not a desk yet.${self.sessions > 0 ? ` Claude Code has opened it before (${self.sessions} conversation${self.sessions === 1 ? '' : 's'}).` : ''}`;
   }
@@ -2861,7 +2918,11 @@ function renderDeskDialog({ opening = false } = {}) {
   else if (!hosts.length) notes.push('No host is registered on this board, so there is nobody to bind a folder. Install the host on a machine that has the repos.');
   else if (!liveHosts.length) notes.push('Every host on this board is offline right now.');
   else if (fm.listing?.error) notes.push(`<b>${esc(fm.listing.error)}</b>`);
-  if (self && !self.other_board) {
+  if (self && mode === 'release') {
+    notes.push(takeable(self, host)
+      ? esc(releaseNoteText(bound?.agent ?? fm.agent, channelNow || '…', self.other_board, bound?.scope))
+      : `${esc(host?.name ?? 'This host')} runs a build from before a folder could be released from another instance. It can once it is updated.`);
+  } else if (self) {
     if (mode === 'take') {
       notes.push(`Binds this folder as the agent you name, on the floor you pick, and opens a window there. Nothing in the folder is edited.${self.trusted ? '' : ' Claude Code has not opened it before, so its window will ask the folder-trust question — on the desk, for you to answer.'}`);
     } else if (mode === 'import') {
@@ -2870,7 +2931,7 @@ function renderDeskDialog({ opening = false } = {}) {
       notes.push(esc(moveNoteText(bound.agent, channelNow, bound.channel)));
     }
   }
-  const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
+  const canGo = !!(host?.live && takeable(self, host) && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
   openDialog(`
     <div class="dlg-head"><h3>${title}</h3></div>
     <p class="dlg-sub">${native ? 'choose' : 'open'} the folder your agent lives in, then pick its floor</p>
@@ -2987,6 +3048,36 @@ async function waitForMove(move, beforeId, host) {
     }
   } catch (e) {
     // The form stays, with what a move does, and the error above its buttons.
+    if (note && said !== null) note.textContent = said;
+    throw e;
+  }
+}
+
+/**
+ * A release, waited on like a move: the board accepting it, then the host
+ * making it or refusing it, read off the board's record of the take
+ * (takeOutcome). A refusal is the error act() shows in the dialog, in the
+ * host's words, and the dialog stays for the operator to look at the folder
+ * again: a release that stopped partway says which part took.
+ */
+async function waitForTake(body, host) {
+  const note = el.dlgBody.querySelector('.dlg-note');
+  const said = note?.textContent ?? null;
+  if (note) note.textContent = `Asked ${host ?? 'the host'} to release ${body.agent} from ${body.from_board} — waiting for it to sit down on ${body.channel}…`;
+  const until = Date.now() + MOVE_WAIT_MS;
+  const q = `host_id=${encodeURIComponent(body.host_id)}&channel=${encodeURIComponent(body.channel)}&agent=${encodeURIComponent(body.agent)}`;
+  try {
+    for (;;) {
+      const got = await fetch(`./api/floor/take?${q}`, { headers: { accept: 'application/json' } }).then((r) => r.json()).catch(() => null);
+      const out = takeOutcome(got?.take);
+      if (out === 'seated') return;
+      if (out?.refused) throw new Error(out.refused);
+      if (Date.now() > until) {
+        throw new Error(`No seat on ${body.channel} and no refusal from ${host ?? 'the host'} after ${MOVE_WAIT_MS / 1000}s. The release may yet arrive; look at the folder again to see where it is bound.`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  } catch (e) {
     if (note && said !== null) note.textContent = said;
     throw e;
   }
@@ -3114,7 +3205,14 @@ el.dlgBody.addEventListener('input', (e) => {
   }
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   const go = el.dlgBody.querySelector('[data-do="desk-take"]');
-  if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
+  const host = (fm.hosts ?? []).find((h) => h.host_id === fm.hostId) ?? null;
+  if (go && !go.dataset.held) go.disabled = !(takeable(fm.listing?.self, host) && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
+  // A release's note names the floor it lands on, like a move's.
+  if (fm.listing?.self?.other_board && takeable(fm.listing.self, host)) {
+    const note = el.dlgBody.querySelector('.dlg-note');
+    const b = fm.listing.self.bound;
+    if (note) note.textContent = releaseNoteText(b?.agent ?? fm.agent, channelNow || '…', fm.listing.self.other_board, b?.scope);
+  }
 });
 
 /* ---------- sessions: what a row says ---------- */

@@ -44,7 +44,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { discover, listFolder, originOf } from './identity.js';
+import { discover, listFolder, localEntries, originOf, readDesk, readLocalScope } from './identity.js';
 import * as W from './window.js';
 import * as M from './mcp.js';
 import * as D from './dialog.js';
@@ -299,6 +299,18 @@ class Desk {
       ? live.find((x) => x.sessionId === this.lastSessionId) ?? null
       : null;
     const id = session?.sessionId ?? null;
+    // A process newly holding this desk's conversation: a window that came
+    // up in its folder, whoever opened it. Before it is reported or read,
+    // the folder's binding is read again (Host.boundAt). Released to another
+    // instance, the window that instance's host opens here is found by its
+    // folder like any other, and until this host's next rescan the desk is
+    // still on its list. Measured with two real hosts (task 292,
+    // 2026-11-08): the instance that had been left was sent the new
+    // conversation, every turn of it, for 40 s after the release. Here and
+    // not where a new conversation is adopted above, because a release with
+    // no window to close resumes the conversation this desk is pinned to,
+    // and that is no adoption.
+    if (id && id !== this.sessionId && await this.host.letGoIfReleased(this, 'a window came up in its folder')) return;
     if (id !== this.sessionId) {
       // Only which process holds it changed. The conversation, and how far the
       // floor has read into it, are the desk's and survive the handover.
@@ -686,6 +698,10 @@ class Host {
     // And whether this machine can show its own folder dialog, so the page
     // knows which picker to draw before anybody clicks: the native one, or its
     // own list for a host with no backend. See host/dialog.js.
+    // And that it can release a folder from another instance (`release`,
+    // see bind): a host from before that would read the work as a plain take
+    // and leave the old binding standing beside the new one, so the board
+    // asks only a host that says it can.
     // And itself: the build it runs, the clone it runs from, and the board
     // container that clone's compose project runs here, if any. That is how
     // the board knows which host can update it, and what an update would be
@@ -694,7 +710,7 @@ class Host {
     let reply;
     try {
       reply = await this.request('/api/host/register', {
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -836,6 +852,42 @@ class Host {
   }
 
   /**
+   * Where a desk's folder is bound right now, read off the disk: null when
+   * that is still this desk on this instance, otherwise what it says instead.
+   *
+   * A host learns that a binding has gone at its next rescan, up to a
+   * heartbeat later, and until then acts on the desk as its own. That was
+   * harmless while the only thing that removed a binding was this host's
+   * own leave. A release is another instance's host rebinding the folder
+   * (see bind), and this host is the one being left: it would open a window
+   * in a folder that now answers to the other instance, type the old
+   * floor's messages into it, and relay its conversation back. So the two
+   * moments that matter look first: work for the desk (handle), and a
+   * window coming up in its folder (Desk.watch).
+   *
+   * A local-scope file that cannot be read says nothing either way, and
+   * nothing is concluded from it: Claude Code rewrites it constantly, and a
+   * read that lands mid-write must not cost a desk.
+   */
+  boundAt(desk) {
+    const local = readLocalScope();
+    if (!local.ok) return null;
+    const now = readDesk(desk.cwd, local);
+    if (now && originOf(now.url) === originOf(this.cfg.url) && now.channel === desk.channel && now.agent === desk.agent) return null;
+    return { says: !now ? 'bound to nothing' : originOf(now.url) === originOf(this.cfg.url) ? `${now.channel}/${now.agent} on this instance` : `bound to ${originOf(now.url)}` };
+  }
+
+  /** Drop a desk whose folder no longer binds it here, now rather than at the
+   *  next heartbeat, and say so. True when it was let go. */
+  async letGoIfReleased(desk, when) {
+    const gone = this.boundAt(desk);
+    if (!gone) return false;
+    log(`${desk.label}: ${desk.cwd} is ${gone.says} now (${when}) — letting the desk go`);
+    if (await this.rescan(`its folder is ${gone.says} — ${desk.label}`)) await this.register();
+    return true;
+  }
+
+  /**
    * Take a desk from the floor: bind a folder under this host's roots to a
    * (channel, agent) in Claude Code's local scope — importing, and removing,
    * the folder's own .mcp.json entry for this board if it has one — and open
@@ -859,12 +911,18 @@ class Host {
     // as it was, the board dropped it (no row there until `bound`), so a move
     // the host refused reached no floor at all (QA, PR #33 finding 1). Once
     // the folder is bound to the new names the target is where it belongs.
+    //
+    // `taking` names the desk that was being taken, wherever the refusal is
+    // said. The board keeps what became of each take it accepted under that
+    // name (`live.takes` in src/floor.js), which is the only place a refusal
+    // for a desk with no row on this instance can be read: a plain take, and
+    // every release, since the desk being released sits on another instance.
     let rebound = false;
     const fail = (message, code = 'bind_failed') => {
       const at = p.from && !rebound ? p.from : { channel, agent };
       const said = at === p.from && !message.startsWith('not moved') ? `not moved to ${channel}: ${message}` : message;
       warn(`${channel}/${agent}: ${said}`);
-      return this.emit({ type: 'error', channel: at.channel, agent: at.agent, code, message: said }, true);
+      return this.emit({ type: 'error', channel: at.channel, agent: at.agent, code, message: said, taking: { channel, agent } }, true);
     };
     // Any folder the picker showed can be a desk. The roots used to fence
     // this; the board runs on localhost and that is the security model, so
@@ -880,17 +938,58 @@ class Host {
     // because a running window keeps the headers it started with (measured
     // 2026-09-09). Mid-turn it is refused before anything is touched, quoting
     // the pane rather than guessing why it is busy.
-    if (p.from) {
-      const at = await W.busyAt(dir);
-      if (at.pane && at.busy) return fail(`not moved to ${channel} — the window is still working: ${at.foot}`, 'bind_refused');
+    //
+    // A release is the same close-and-reopen for a folder bound to another
+    // instance (host/mcp.js has the ruling, and why it is this narrow). The
+    // request names the instance being left, and the disk is read again now:
+    // the operator confirmed leaving that one, so a binding that has changed
+    // since the click is refused rather than followed. This instance knows
+    // nothing about that desk's turns, so the pane is the only busy check
+    // there is, where a move between floors has the board's as well.
+    const leaving = typeof p.release?.board === 'string' && p.release.board ? p.release.board : null;
+    if (leaving) {
+      const now = readDesk(dir);
+      const nowAt = now ? originOf(now.url) : null;
+      if (nowAt !== leaving) {
+        const is = !now ? 'bound to nothing' : nowAt === origin ? `bound to this instance already, as ${now.channel}/${now.agent}` : `bound to ${nowAt}`;
+        return fail(`not released: ${dir} is ${is} now, not to ${leaving} as it was when you asked. Look at the folder again.`, 'bind_refused');
+      }
+      if (now.agent !== agent) return fail(`not released: ${dir} names its agent ${now.agent}, and ${agent} was asked for`, 'bind_refused');
     }
-    log(`${channel}/${agent}: binding ${dir}${p.import ? ' — importing its .mcp.json entry' : ''}${p.from ? ` — moving it from ${p.from.channel}/${p.from.agent}` : ''}`);
+    if (p.from || leaving) {
+      const at = await W.busyAt(dir);
+      if (at.pane && at.busy) {
+        return fail(leaving ? `not released from ${leaving} — the window is still working: ${at.foot}` : `not moved to ${channel} — the window is still working: ${at.foot}`, 'bind_refused');
+      }
+    }
+    log(`${channel}/${agent}: binding ${dir}${leaving ? ` — releasing it from ${leaving}` : ''}${!leaving && p.import ? ' — importing its .mcp.json entry' : ''}${p.from ? ` — moving it from ${p.from.channel}/${p.from.agent}` : ''}`);
     // A desk already at this folder — the import case — keeps its conversation:
     // the Desk object survives the rescan (same cwd), and its pinned id is
     // handed to the new binding's registration below.
     const before = [...this.desks.values()].find((d) => d.cwd === dir);
-    const oldLast = before?.lastSessionId ?? null;
-    if (p.import || before) {
+    let oldLast = before?.lastSessionId ?? null;
+    if (leaving) {
+      // The file first: it is the one step that can refuse without having
+      // changed anything (a .mcp.json that is not JSON). Then local scope, by
+      // the name each entry was written under. A step that fails after one
+      // that took says both, because the folder is then half released and
+      // the words on the floor are the only record of which half.
+      const dropped = M.dropProjectEntry(dir, { origin, also: [leaving] });
+      if (!dropped.ok) return fail(`not released: left ${dir}/.mcp.json alone: ${dropped.error}`);
+      if (dropped.removed.length) {
+        log(`${channel}/${agent}: removed ${dropped.removed.join(', ')} from ${dir}/.mcp.json${dropped.kept.length ? ` (kept ${dropped.kept.join(', ')})` : ''}`);
+      }
+      for (const x of dropped.foreign) log(`${channel}/${agent}: left ${x.name} in ${dir}/.mcp.json alone — it points at ${x.board}`);
+      const held = localEntries(dir);
+      const names = held.ok ? held.entries.filter((x) => x.board === leaving).map((x) => x.name) : [M.SERVER_NAME];
+      for (const name of names) {
+        const rm = await M.mcpRemove(dir, name);
+        if (!rm.ok) {
+          return fail(`${dropped.removed.length ? `took the entry for ${leaving} out of ${dir}/.mcp.json, but ` : 'not released: '}could not remove the local-scope entry "${name}" in ${dir}: ${rm.error}`);
+        }
+        if (rm.removed) log(`${channel}/${agent}: removed the local-scope entry "${name}" in ${dir}, which pointed at ${leaving}`);
+      }
+    } else if (p.import || before) {
       const rm = await M.mcpRemove(dir);
       if (!rm.ok) return fail(`could not clear the old local-scope entry in ${dir}: ${rm.error}`);
       if (rm.removed) log(`${channel}/${agent}: removed the previous local-scope entry in ${dir}`);
@@ -902,7 +1001,11 @@ class Host {
       for (const x of dropped.foreign) log(`${channel}/${agent}: left ${x.name} in ${dir}/.mcp.json alone — it points at ${x.board}`);
     }
     const added = await M.mcpAdd(dir, { url: `${this.cfg.url}/mcp`, channel, agent, key: this.cfg.token });
-    if (!added.ok) return fail(`could not bind ${dir}: ${added.error}`);
+    if (!added.ok) {
+      // Past a release's removals there is no binding to put back with: the
+      // old one was another instance's, key and all. Said as it stands.
+      return fail(leaving ? `released ${dir} from ${leaving}, but could not bind it here: ${added.error}. The folder is bound to nothing now.` : `could not bind ${dir}: ${added.error}`);
+    }
     rebound = true;
     log(`${channel}/${agent}: bound ${dir} in local scope`);
     this.addRoot(dir);
@@ -935,16 +1038,37 @@ class Host {
     // window takes the open path below, as it always has, onto its last
     // conversation (#24 Decided 3, costmo 2026-11-03: "Last conversation") —
     // there is no closing window there for the reopen to meet.
-    const fresh = !!p.from && p.open !== false && !!(await W.paneFor(desk.cwd));
+    //
+    // A release goes by the same two rules, for the same reasons. Its window,
+    // when there is one, was opened under the other instance's address and
+    // keeps it until it is closed, whichever host opened it: both hosts on a
+    // machine see every pane on the tmux server and find one by its folder.
+    // With no window to close there is no pin either, since this host never
+    // watched the folder, so the conversation it arrives on is read off the
+    // disk: the one somebody last spoke in, from its tail, because this
+    // instance has none of its turns.
+    const pane = p.from || leaving ? await W.paneFor(desk.cwd) : null;
+    const fresh = !!pane && p.open !== false;
+    if (leaving && !fresh && !oldLast) oldLast = await W.lastSpokenIn(desk.cwd).catch(() => null);
     if (fresh) {
       const since = Date.now();
       desk.intent = { sessionId: null, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
     } else if (oldLast) {
-      await desk.follow(oldLast);
+      await desk.follow(oldLast, leaving ? 'tail' : 'end');
     }
     await this.register();
-    await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: fresh ? null : oldLast, from: p.from ?? null }, true);
-    if (p.open === false) return undefined;
+    await this.emit({ type: 'bound', channel, agent, cwd: dir, scope: 'local', session_id: fresh ? null : oldLast, from: p.from ?? null, released_from: leaving }, true);
+    if (p.open === false) {
+      // Asked to open nothing, a released folder's window is still closed:
+      // left running it goes on talking to the instance it was released
+      // from. Said on the desk if it cannot be, since that is then the state.
+      if (leaving && pane) {
+        const shut = await W.closeWindow(desk.cwd);
+        if (shut.ok) log(`${channel}/${agent}: closed the window that was open under ${leaving}`);
+        else this.emit({ type: 'error', channel, agent, message: `released from ${leaving} and bound here, but its window could not be closed: ${shut.error}. Until it is closed it still talks to ${leaving}.` }, true);
+      }
+      return undefined;
+    }
     if (fresh) {
       await this.reopen(desk, { sessionId: null });
       return undefined;
@@ -1337,6 +1461,18 @@ class Host {
     }
     const desk = this.desks.get(`${item.channel}|${item.agent}`);
     if (!desk) return warn(`work for a desk this host doesn't have: ${item.channel}/${item.agent}`);
+    // Not into a folder that has been released to another instance since
+    // this host last looked (boundAt): said on the desk, in what the disk
+    // says, and the desk let go. The page hands a refused message back to
+    // its box on an error turn, so the words are not lost.
+    {
+      const gone = this.boundAt(desk);
+      if (gone) {
+        await this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'released', message: `not done: ${desk.cwd} is ${gone.says} now, not ${desk.label} on this instance. The desk is let go here.` }, true);
+        await this.letGoIfReleased(desk, `${item.kind} work arrived for it`);
+        return undefined;
+      }
+    }
     switch (item.kind) {
       case 'chat':
         if (typeof item.payload?.text === 'string' && item.payload.text.trim()) await desk.say(item.payload.text);

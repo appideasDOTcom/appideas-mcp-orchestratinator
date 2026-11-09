@@ -268,6 +268,32 @@ function folderRecordOf(f) {
   };
 }
 
+/** How many takes are remembered: the answer to a click made seconds ago, or
+ *  to a caller working through a list of folders. The oldest go first. */
+const TAKES_MAX = 400;
+const takeKey = (hostId, channel, agent) => `${hostId}|${deskKey(channel, agent)}`;
+
+/** A take the board has just handed to a host. Replaces what is known about
+ *  an earlier take of the same names on that host: this is the one in flight. */
+function noteTake(live, hostId, { path, channel, agent, mode, from_board = null }) {
+  const key = takeKey(hostId, channel, agent);
+  live.takes.delete(key);
+  const at = new Date().toISOString();
+  live.takes.set(key, { host_id: hostId, path, channel, agent, mode, from_board, asked_at: at, state: 'asked', at, error: null, code: null });
+  while (live.takes.size > TAKES_MAX) live.takes.delete(live.takes.keys().next().value);
+}
+
+/** The host's word on a take: seated, or refused with what it said. Only a
+ *  take still waiting is settled, so a late word about an older take of the
+ *  same names cannot overwrite the one in flight, and a board that restarted
+ *  in between (and so remembers no take) makes nothing up. */
+function settleTake(live, hostId, channel, agent, word) {
+  const take = live.takes.get(takeKey(hostId, channel, agent));
+  if (!take || take.state !== 'asked') return false;
+  Object.assign(take, word, { at: new Date().toISOString() });
+  return true;
+}
+
 const secondsSince = (isoStr, nowMs) => {
   const at = isoStr ? Date.parse(isoStr) : NaN;
   return Number.isFinite(at) ? (nowMs - at) / 1000 : Infinity;
@@ -1473,7 +1499,21 @@ export function createLive() {
    *  people can be searching for different things at once. */
   const recent = new Map();        // host_id -> { request_id, asked_ms, at, rows, error }
   const searches = new Map();      // search id -> { id, query, deep, asked_ms, hosts: Map(host_id -> { name, at, rows, files, ms, error }) }
+  /**
+   * What became of each take the board accepted and handed to a host: asked,
+   * then seated or refused in the host's words. See TAKES_MAX and noteTake.
+   *
+   * The board accepting a take is not the take, and until this there was one
+   * place a host's refusal could be read: an error turn on a desk the board
+   * has a hosted row for. A move between floors has such a desk, the one it
+   * is leaving. A plain take has none until the host says `bound`, and a
+   * release never has one, because the desk being released sits on another
+   * instance. Both refusals were dropped by the ownership check below and
+   * reached no floor at all (the gap PR #33 closed for a move only).
+   */
+  const takes = new Map();         // takeKey -> { host_id, path, channel, agent, mode, from_board, asked_at, state, at, error, code }
   return {
+    takes,
     recent,
     searches,
     refused,
@@ -1714,9 +1754,15 @@ function applyHostEvent(store, live, hostId, ev) {
       // 253). The move is the operator seating the agent here (#24 Decided 1).
       store.unretireAgent(channel, agent);
     }
+    // Released from another instance: the operator seating the agent here,
+    // like a move (#24 Decided 1), so a row retired on this instance before
+    // it left is the agent's again without waiting for its window to connect.
+    const releasedFrom = str(ev.released_from);
+    if (releasedFrom) store.unretireAgent(channel, agent);
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
-    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: cwd });
+    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: releasedFrom ? `${cwd} — released from ${releasedFrom}` : cwd });
+    settleTake(live, hostId, channel, agent, { state: 'seated' });
     // Something starting on an archived floor brings it back (Decided 6).
     store.wakeChannel(channel, `${ev.from ? 'a desk moved onto it' : 'a host bound a desk on it'}: ${agent}`, agent);
     const sid = str(ev.session_id);
@@ -1726,8 +1772,20 @@ function applyHostEvent(store, live, hostId, ev) {
     else live.publish(key, { type: 'state', state: 'idle' });
     return true;
   }
+  // A host refusing a take says which take (`taking`), and that is recorded
+  // before the ownership check, which drops the error itself whenever the
+  // desk being taken has no row here yet. See `takes` in createLive.
+  let tookWord = false;
+  if (str(ev.type) === 'error' && ev.taking && typeof ev.taking === 'object') {
+    const t = { channel: str(ev.taking.channel), agent: str(ev.taking.agent) };
+    if (t.channel && t.agent) {
+      tookWord = settleTake(live, hostId, t.channel, t.agent, {
+        state: 'refused', error: str(ev.message) ?? 'the host refused and did not say why', code: str(ev.code),
+      });
+    }
+  }
   const desk = store.hostedDesk(channel, agent);
-  if (!desk || desk.host_id !== hostId) return false;
+  if (!desk || desk.host_id !== hostId) return tookWord;
 
   const placeholder = placeholderSession(hostId, channel, agent);
   const sessionId = str(ev.session_id) ?? desk.sdk_session_id ?? placeholder;
@@ -2780,7 +2838,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && r.startsWith('/'));
       // And whether it can show its own folder dialog. Only `true` counts: a
       // host that predates the dialog says nothing, and gets the page's list.
-      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots), dialog: req.body.dialog === true });
+      // And whether it can release a folder from another instance (seatDesk).
+      // Only `true`, for the same reason.
+      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots), dialog: req.body.dialog === true, release: req.body.release === true });
     }
 
     const desks = Array.isArray(req.body?.desks) ? req.body.desks : [];
@@ -2948,6 +3008,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         roots: f?.roots ?? [],
         folders: f?.folders ?? [],
         dialog: f?.dialog === true,
+        release: f?.release === true,
         refused: live.refused.get(h.host_id)?.why ?? null,
       };
     });
@@ -3232,12 +3293,17 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * decided by what the folder is bound as already: `take` (unbound),
    * `import` (bound as these same names in its .mcp.json — the host moves
    * the entry into local scope), and `move` (bound as some other desk).
+   * And a fourth that has to be asked for: `release`, for a folder bound to
+   * another instance, when the request names that instance in `from_board`
+   * (seatDesk has the rule).
    *
    * What is checked here is what the board knows: that the folder is one the
    * host offered (the board never sends a path the host did not name), that
-   * it is on this board, that the names are names, and that the desk is not
-   * already sitting somewhere else. The key is never in the request — the
-   * host binds with its own.
+   * it is on this instance or named as leaving another, that the names are
+   * names, and that the desk is not already sitting somewhere else. The key
+   * is never in the request — the host binds with its own.
+   *
+   * What the host then did is read from `GET /api/floor/take`.
    */
   router.post('/api/floor/desk', auth.adminGuard, (req, res) => {
     const hostId = str(req.body?.host_id);
@@ -3271,7 +3337,22 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!folder) {
       return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
     }
-    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false });
+    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false, fromBoard: str(req.body?.from_board) });
+  });
+
+  /**
+   * What became of a take: `asked` while the host has it, then `seated` or
+   * `refused` with the host's own words and code. Null when this instance
+   * remembers no such take (it keeps them in memory, so a restart forgets).
+   * For the dialog, which waits on a release here, and for anything that
+   * takes desks without a person watching each one come up.
+   */
+  router.get('/api/floor/take', (req, res) => {
+    const hostId = str(req.query.host_id);
+    const channel = str(req.query.channel);
+    const agent = str(req.query.agent);
+    if (!hostId || !channel || !agent) return res.status(400).json({ error: 'host_id, channel and agent are required' });
+    return res.json({ take: live.takes.get(takeKey(hostId, channel, agent)) ?? null });
   });
 
   /**
@@ -3322,9 +3403,34 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * `desk.take` row, the archived-floor wake and the host's bind work are
    * all here, so the card cannot drift from Take a desk (#18 Decided 2).
    */
-  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null }) {
-    if (folder.other_board) {
-      return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, not this board. Change it there.`, code: 'other_board' });
+  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null, fromBoard = null }) {
+    // A folder bound to another instance is released from it and seated
+    // here, when the request says which instance it is leaving. It used to
+    // be refused outright ("Change it there"); costmo reversed that
+    // (2026-11-08, host/mcp.js has the ruling and what keeps it narrow).
+    // Naming the instance is what makes the click mean what the dialog
+    // said: the address in the request must be the one the host last read
+    // off the folder, and the host reads the disk again before it touches
+    // anything. Without it this is still a refusal, with the address in the
+    // body for a caller to confirm and send back.
+    if (folder.other_board && !fromBoard) {
+      return res.status(409).json({
+        error: `That folder is bound to ${folder.other_board}, not this instance. Taking it here releases it from there, and that has to be asked for by name (from_board).`,
+        code: 'other_board', other_board: folder.other_board,
+      });
+    }
+    if (fromBoard && fromBoard !== folder.other_board) {
+      return res.status(409).json({
+        error: folder.other_board
+          ? `That folder is bound to ${folder.other_board} now, not ${fromBoard}. Look at it again before releasing it.`
+          : `That folder is not bound to ${fromBoard} any more. Look at it again.`,
+        code: 'board_changed', other_board: folder.other_board ?? null,
+      });
+    }
+    // Only a host that says it can: one from before this reads the work as a
+    // plain take and leaves the old binding standing beside the new one.
+    if (folder.other_board && live.folders.get(hostRow.host_id)?.release !== true) {
+      return res.status(409).json({ error: `${hostRow.name} runs a build from before a folder could be released from another instance, so it is not asked. It can once it is updated.`, code: 'old_host' });
     }
     // A folder that names its agent names it: the person picks the floor,
     // never a new name for an agent that already has one. The dialog locks
@@ -3332,7 +3438,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (folder.bound && folder.bound.agent !== agent) {
       return res.status(400).json({ error: `This folder already names its agent — ${folder.bound.agent}. Only the floor can change.`, code: 'agent_fixed' });
     }
-    const mode = !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
+    // A release is never a move, whatever floor it lands on: `from` names a
+    // desk on THIS instance for the `bound` handler to unseat and retire,
+    // and the names a folder carries on another instance are either nobody
+    // here or, after a restore, a real row that is not going anywhere.
+    const mode = folder.other_board ? 'release' : !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
     let from = null;
     if (mode === 'move') {
       // The old desk's window is closed by the host and a new conversation
@@ -3357,7 +3467,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // while the host works, and the name it was given is on it when it comes.
     store.ensurePersona(channel, agent);
     if (persona) store.setProfile(channel, agent, { persona });
-    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}${via ? ` — ${via}` : ''}` });
+    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}${mode === 'release' ? ` from ${folder.other_board}` : ''}${via ? ` — ${via}` : ''}` });
     // Naming an archived floor in Take a desk brings it back (Decided 6): the
     // operator typed its name, which is the plainest "I want this floor" there is.
     store.wakeChannel(channel, `a desk was taken on it: ${agent}`, 'operator');
@@ -3365,12 +3475,14 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // Decided 2), and an import keeps the one it has — the host decides both
     // from `from` and the window it finds, never from a flag here. The flag
     // this used to send said "resume" on every move and nothing read it.
+    const release = mode === 'release' ? { board: folder.other_board } : null;
     store.enqueueHostWork(hostRow.host_id, channel, agent, 'bind', {
-      path, channel, agent, import: mode !== 'take', from,
+      path, channel, agent, import: mode === 'import' || mode === 'move', from, release,
       open, queued_at: new Date(nowMs).toISOString(),
     });
+    noteTake(live, hostRow.host_id, { path, channel, agent, mode, from_board: release?.board ?? null });
     live.wake(hostRow.host_id);
-    return res.json({ ok: true, mode, host: hostRow.name, channel, agent });
+    return res.json({ ok: true, mode, host: hostRow.name, host_id: hostRow.host_id, channel, agent, ...(release ? { from_board: release.board } : {}) });
   }
 
   /** Leave a desk: the reverse of taking one. See the host's unbind. */

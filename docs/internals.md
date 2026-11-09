@@ -212,6 +212,16 @@ just means a client opens a session per turn, which is normal and handled.
   claimed a task, then its turn died) can't sit invisibly in `claimed`.
   `status=claimed` inspections never trigger this — only actionable open-task
   listings do.
+- **What became of a take:** `POST /api/floor/desk` answers when the board
+  has handed the bind to a host, not when the host has made it. The board
+  keeps each take in memory (`live.takes`, by host, floor and agent) and
+  `GET /api/floor/take?host_id=&channel=&agent=` reads it: `state` is
+  `asked`, then `seated` (the host's `bound`) or `refused` with the host's
+  `error` and `code`. Null after a restart. A take of a folder bound to
+  another instance needs `from_board` and is mode `release`; without it
+  the refusal is `other_board` and carries the address, with a stale one
+  `board_changed`, and from a host that has not said `release: true`,
+  `old_host`.
 - **The folder list:** each host reports, on every registration, the folders
   under its roots that could become a desk — bound or not, and from which
   file, with the time of the newest transcript Claude Code wrote there. It is

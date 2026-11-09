@@ -169,6 +169,18 @@ try {
   assert(poll1.count === 2, 'pro receives direct message + broadcast');
   const poll2 = await call(pro, 'poll_messages', { since: poll1.cursor });
   assert(poll2.count === 0, 'cursor prevents re-reading messages');
+  assert(poll2.since_ahead === undefined, 'and a cursor of this instance\'s own is not called another\'s');
+  // A cursor remembered from another instance: its ids are a different
+  // sequence, and one above this instance's newest was never issued here.
+  await call(free, 'send_message', { to: 'pro', body: 'one more, after the cursor' });
+  const foreign = await call(pro, 'poll_messages', { since: 900000 });
+  assert(foreign.since_ahead?.asked === 900000 && foreign.since_ahead.read_from === poll1.cursor, 'a since above the newest id here is said to be another instance\'s, and names where it read from instead');
+  assert(foreign.count === 1 && foreign.messages[0].body === 'one more, after the cursor', 'the poll reads from this instance\'s own record of the agent, so what was waiting arrives');
+  assert(foreign.cursor === foreign.messages[0].id, 'and hands back a cursor of this instance\'s');
+  const onward = await call(pro, 'poll_messages', { since: foreign.cursor });
+  assert(onward.count === 0 && onward.since_ahead === undefined, 'which then reads as any other');
+  const stillFar = await call(pro, 'poll_messages', { since: 900000 });
+  assert(stillFar.count === 0 && stillFar.cursor === foreign.cursor, 'the far number is never written down as what the agent has read');
   const selfPoll = await call(free, 'poll_messages', {});
   assert(selfPoll.count === 0, 'sender does not receive its own messages');
 

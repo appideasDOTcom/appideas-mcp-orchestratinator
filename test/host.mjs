@@ -778,7 +778,7 @@ try {
   const argvLog = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'bad name!' })).status, 400, 'an agent name with a space in it is refused');
   eq((await take({ host_id: 'host-test-1', path: '/nope', channel: CH, agent: 'newbie' })).status, 409, 'a folder the host did not offer is refused');
-  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-elsewhere`, channel: CH, agent: 'newbie' })).status, 409, 'a folder bound to another board is refused');
+  eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-elsewhere`, channel: CH, agent: 'newbie' })).status, 409, 'a folder bound to another instance is refused when the take does not name that instance');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-a`, channel: CH, agent: 'somebody-else' })).status, 400, 'a folder that names its agent cannot be taken under another name');
   const argvBefore = argvLog().length;
   const took = await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'newbie', persona: 'Newbie Nine' });
@@ -999,6 +999,183 @@ try {
   await json('/api/floor/desk/leave', { channel: CH, agent: 'outsider' });
   await until(async () => (deskOf(await floor(), 'outsider')?.hosted?.state === 'offline' ? true : null), 20000);
   rmSync(OUT, { recursive: true, force: true });
+
+  /* ── releasing a folder from another instance ───────────────────────────────
+   * A folder bound to another instance, taken here because the take names
+   * the instance it is leaving (costmo, 2026-11-08; host/mcp.js has the
+   * ruling). Each folder is shown by a browse first, which is how a caller
+   * with no roots reaches one. What is asserted is the disk: which entries
+   * went and which stayed, in both scopes, and that a refusal changed
+   * nothing. The window in the folder is "the other instance's": a pane
+   * this host did not open, found by its directory. */
+  console.log('\nreleasing a folder from another instance');
+  {
+    const CHR = 'host-test-rel';
+    const ELSE = 'http://localhost:9';
+    const onRel = (f, agent) => f.channels.find((c) => c.channel === CHR)?.desks.find((d) => d.agent === agent);
+    const takeOf = (agent) => json(`/api/floor/take?host_id=host-test-1&channel=${CHR}&agent=${agent}`).then((r) => r.json()).then((b) => b.take);
+    const settled = (agent) => until(async () => { const t = await takeOf(agent); return t && t.state !== 'asked' ? t : null; }, 30000);
+    const show = async (dir) => {
+      await json('/api/floor/browse', { host_id: 'host-test-1', path: dir });
+      return until(async () => { const g = await browsed(dir); return g.at && g.path === dir ? g : null; }, 15000);
+    };
+    const elsewhere = (agent, extra = {}) => JSON.stringify({
+      mcpServers: { orchestratinator: { type: 'http', url: `${ELSE}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': 'the-other-key' } }, ...extra },
+    }, null, 2);
+    const panesIn = (dir) => {
+      try {
+        return execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}'], { encoding: 'utf8' })
+          .trim().split('\n').map((l) => l.split(' ')).filter(([, d]) => d === dir).map(([id]) => id);
+      } catch { return []; }
+    };
+
+    // In its .mcp.json, beside another server and a third instance's entry.
+    const relA = `${FIX}/rel-project`;
+    mkdirSync(relA, { recursive: true });
+    writeFileSync(`${relA}/.mcp.json`, elsewhere('rel-a', {
+      github: { type: 'http', url: 'http://127.0.0.1:9/mcp' },
+      third: { type: 'http', url: 'http://localhost:7/mcp', headers: { 'X-Channel': 'z', 'X-Agent': 'rel-a' } },
+    }));
+    const SESSION_REL = 'cccccccc-9999-3333-4444-555555555555';
+    const relProject = `${HOME}/.claude/projects/${relA.replace(/[^A-Za-z0-9]/g, '-')}`;
+    mkdirSync(relProject, { recursive: true });
+    writeFileSync(`${relProject}/${SESSION_REL}.jsonl`, [
+      JSON.stringify({ type: 'user', uuid: 'r-u1', timestamp: '2026-11-08T08:00:00Z', message: { content: 'what it was doing on the other instance' } }),
+      JSON.stringify({ type: 'assistant', uuid: 'r-a1', timestamp: '2026-11-08T08:00:05Z', message: { content: [{ type: 'text', text: 'REL-TAIL-SEEN' }] } }),
+      '',
+    ].join('\n'));
+    const shownA = await show(relA);
+    eq([shownA?.self?.other_board, shownA?.self?.bound?.agent], [ELSE, 'rel-a'], 'the host shows the folder as bound to the other instance, and as whom');
+    eq((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-1')?.release, true, 'and says it can release one');
+    const unasked = await take({ host_id: 'host-test-1', path: relA, channel: CHR, agent: 'rel-a', open: false });
+    eq([unasked.status, (await unasked.json()).other_board], [409, ELSE], 'unasked it is refused, with the address to confirm');
+    const argvAtRel = argvLog().length;
+    const relTook = await take({ host_id: 'host-test-1', path: relA, channel: CHR, agent: 'rel-a', open: false, from_board: ELSE });
+    eq([relTook.status, (await relTook.json()).mode], [200, 'release'], 'named, it is taken as a release');
+    eq((await settled('rel-a'))?.state, 'seated', 'and the host seats it');
+    eq(Object.keys(JSON.parse(readFileSync(`${relA}/.mcp.json`, 'utf8')).mcpServers), ['github', 'third'],
+      'its .mcp.json lost the entry for the instance it left, and kept the other server and the third instance\'s entry');
+    const relEntry = localCfg().projects?.[relA]?.mcpServers?.orchestratinator;
+    eq([relEntry?.url, relEntry?.headers], [`${HOST}/mcp`, { 'X-Channel': CHR, 'X-Agent': 'rel-a', 'X-Orchestratinator-Key': KEY }],
+      'and it is bound to this instance in local scope, with this host\'s key, not the one it carried');
+    assert(await until(async () => (onRel(await floor(), 'rel-a')?.hosted?.live ? true : null), 20000), 'the desk is on this instance\'s floor, hosted');
+    eq(onRel(await floor(), 'rel-a')?.hosted?.session_id, SESSION_REL, 'on the conversation somebody last spoke in there — the host had never watched the folder, and read it off the disk');
+    const relLog = host.log.slice(host.log.lastIndexOf('rel-a: binding'));
+    assert(/releasing it from http:\/\/localhost:9/.test(relLog), 'the host log says what it released it from');
+    assert(/removed orchestratinator from .*rel-project\/\.mcp\.json \(kept github, third\)/.test(relLog) && /left third in .*rel-project\/\.mcp\.json alone — it points at http:\/\/localhost:7/.test(relLog),
+      'what it took out of the file, and what it left there and why');
+    eq(argvLog().length, argvAtRel, 'asked to open nothing, it opened no window');
+
+    // A binding that changed between the click and the bind: the board's
+    // reading is the browse, and the disk no longer says it.
+    const relB = `${FIX}/rel-changed`;
+    mkdirSync(relB, { recursive: true });
+    writeFileSync(`${relB}/.mcp.json`, elsewhere('rel-b'));
+    await show(relB);
+    const moved = JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: 'http://localhost:7/mcp', headers: { 'X-Channel': CH, 'X-Agent': 'rel-b' } } } }, null, 2);
+    writeFileSync(`${relB}/.mcp.json`, moved);
+    eq((await take({ host_id: 'host-test-1', path: relB, channel: CHR, agent: 'rel-b', open: false, from_board: ELSE })).status, 200, 'the board accepts a release of what it was last shown');
+    const changed = await settled('rel-b');
+    eq(changed?.state, 'refused', 'and the host, reading the disk, refuses it');
+    assert(/^not released: .*rel-changed is bound to http:\/\/localhost:7 now, not to http:\/\/localhost:9 as it was when you asked/.test(changed?.error ?? ''), `saying what the folder is bound to now — ${changed?.error}`);
+    eq(readFileSync(`${relB}/.mcp.json`, 'utf8'), moved, 'the file is as it was');
+    eq(localCfg().projects?.[relB]?.mcpServers ?? null, null, 'and nothing was bound');
+
+    // In local scope under a name of somebody's own, with a window open in
+    // the folder. Working, it is refused; idle, it is closed and a window
+    // opens on a new conversation, as a move between floors does.
+    const relC = `${FIX}/rel-local`;
+    mkdirSync(relC, { recursive: true });
+    {
+      const cfg = localCfg();
+      cfg.projects[relC] = { mcpServers: { oldboard: { type: 'http', url: `${ELSE}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'rel-c', 'X-Orchestratinator-Key': 'the-other-key' } } } };
+      writeFileSync(`${HOME}/.claude.json`, JSON.stringify(cfg, null, 2));
+    }
+    execFileSync('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', relC, '-n', 'rel-working', 'sh', '-c', "printf '\\n  working (esc to interrupt)\\n'; sleep 300"]);
+    assert(await until(() => (panesIn(relC).length === 1 ? true : null), 8000), 'a window is open in the folder, opened by somebody else');
+    await sleep(500);
+    eq((await show(relC))?.self?.bound?.scope, 'local', 'the folder is shown, bound elsewhere in local scope');
+    eq((await take({ host_id: 'host-test-1', path: relC, channel: CHR, agent: 'rel-c', from_board: ELSE })).status, 200, 'the board accepts it: it knows nothing of that window');
+    const working = await settled('rel-c');
+    assert(working?.state === 'refused' && /^not released from http:\/\/localhost:9 — the window is still working: .*esc to interrupt/.test(working.error ?? ''), `a working window is not closed: refused, quoting its status line — ${working?.error}`);
+    eq(Object.keys(localCfg().projects?.[relC]?.mcpServers ?? {}), ['oldboard'], 'and its binding is untouched');
+    eq(panesIn(relC).length, 1, 'with the window still there');
+    for (const id of panesIn(relC)) execFileSync('tmux', ['kill-pane', '-t', id]);
+    execFileSync('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', relC, '-n', 'rel-idle', 'sleep', '300']);
+    assert(await until(() => (panesIn(relC).length === 1 ? true : null), 8000), 'the same window, now idle');
+    const idlePane = panesIn(relC)[0];
+    const rosterAtRel = readFileSync(`${FIX}/roster.json`, 'utf8');
+    const argvAtRelC = argvLog().length;
+    await show(relC);
+    eq((await take({ host_id: 'host-test-1', path: relC, channel: CHR, agent: 'rel-c', from_board: ELSE })).status, 200, 'asked again');
+    eq((await settled('rel-c'))?.state, 'seated', 'it is seated');
+    eq(Object.keys(localCfg().projects?.[relC]?.mcpServers ?? {}), ['orchestratinator'], 'the entry it carried under another name is gone from local scope, and this instance\'s is there');
+    eq(localCfg().projects?.[relC]?.mcpServers?.orchestratinator?.url, `${HOST}/mcp`, 'pointing here');
+    assert(/removed the local-scope entry "oldboard" in .*rel-local, which pointed at http:\/\/localhost:9/.test(host.log), 'the host says which entry it removed, by its name');
+    assert(await until(() => { const now = panesIn(relC); return now.length === 1 && now[0] !== idlePane ? true : null; }, 30000),
+      'the window that was open under the other instance is closed, and one of this host\'s is open in its place');
+    const relArgv = argvLog().slice(argvAtRelC).split('\n').slice(0, -1);
+    assert(relArgv.length === 1 && !relArgv[0].includes('--resume'), `on a new conversation, like a move that closes a window — ${JSON.stringify(relArgv)}`);
+    // The host's open is still waiting for that window to register (see the
+    // placeholder-key case above): nothing is taken down before it has.
+    assert(await until(() => {
+      const id = panesIn(relC)[0];
+      if (!id) return null;
+      try { return execFileSync('tmux', ['show-options', '-w', '-v', '-t', id, 'remain-on-exit']).toString().trim() === 'off' ? true : null; } catch { return null; }
+    }, 20000), 'and the host saw it register');
+
+    // And the other side of a release: this host as the one being left.
+    // Another instance's host rebinds the folder, and this one learns of it
+    // at its next rescan, a heartbeat (60 s here) later, unless it looks.
+    // Measured with two real hosts before it looked (task 292): the
+    // instance that was left received the new conversation for 40 s. It
+    // looks at two moments, and each is staged as that other host would
+    // leave things: the local-scope entry pointing elsewhere.
+    const rebindAway = (dir) => {
+      const cfg = localCfg();
+      cfg.projects[dir].mcpServers.orchestratinator.url = `${ELSE}/mcp`;
+      writeFileSync(`${HOME}/.claude.json`, JSON.stringify(cfg, null, 2));
+    };
+    const relTurns = (agent) => json(`/api/floor/turns?channel=${CHR}&agent=${agent}`).then((r) => r.json()).then((b) => b.rows ?? []);
+    // Work arriving for the desk: nothing is opened or typed in a folder
+    // that answers to another instance now.
+    rebindAway(relA);
+    const argvAtGone = argvLog().length;
+    await json('/api/floor/chat', { channel: CHR, agent: 'rel-a', text: 'are you still here' });
+    const goneTurn = await until(async () => (await relTurns('rel-a')).find((t) => t.role === 'error' && /^not done: /.test(t.text ?? '')) ?? null, 15000);
+    assert(/^not done: .*rel-project is bound to http:\/\/localhost:9 now, not host-test-rel\/rel-a on this instance/.test(goneTurn?.text ?? ''), `a message for a desk whose folder has been released elsewhere is refused on the desk, in what the disk says — ${goneTurn?.text}`);
+    assert(await until(async () => (onRel(await floor(), 'rel-a')?.hosted?.state === 'offline' ? true : null), 10000), 'and the desk is let go at once, not at the next heartbeat');
+    eq(argvLog().length, argvAtGone, 'no window was opened in that folder');
+    // A window coming up in the folder: the one the other host opens. It is
+    // found by its folder like any other, and must not be followed.
+    const SESSION_THEIRS = 'dddddddd-9999-3333-4444-555555555555';
+    rebindAway(relC);
+    for (const id of panesIn(relC)) { try { execFileSync('tmux', ['kill-pane', '-t', id]); } catch { /* gone */ } }
+    await sleep(WATCH_SETTLE_MS);
+    writeFileSync(`${FIX}/roster.json`, JSON.stringify([...JSON.parse(rosterAtRel), { pid: process.pid, cwd: relC, kind: 'interactive', startedAt: Date.now(), sessionId: SESSION_THEIRS, name: 'theirs' }]));
+    assert(await until(() => (/rel-c: .*rel-local is bound to http:\/\/localhost:9 now \(a window came up in its folder\) — letting the desk go/.test(host.log) ? true : null), 10000),
+      'a window that comes up in a folder released elsewhere is not this desk\'s: the host reads the binding and lets the desk go');
+    assert(await until(async () => (onRel(await floor(), 'rel-c')?.hosted?.state === 'offline' ? true : null), 10000), 'the desk goes offline here within the watch, not the heartbeat');
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH, { readonly: true });
+      const theirs = db.prepare(`SELECT COUNT(*) AS n FROM agent_sessions WHERE session_id = ?`).get(SESSION_THEIRS).n + db.prepare(`SELECT COUNT(*) AS n FROM turns WHERE session_id = ?`).get(SESSION_THEIRS).n;
+      db.close();
+      eq(theirs, 0, 'and nothing of the other instance\'s conversation reached this one');
+    }
+
+    // Put away: both desks left, the windows closed, the roster as it was.
+    for (const agent of ['rel-a', 'rel-c']) {
+      await json('/api/floor/desk/leave', { channel: CHR, agent });
+      await until(async () => (onRel(await floor(), agent)?.hosted?.state === 'offline' ? true : null), 20000);
+    }
+    for (const id of panesIn(relC)) { try { execFileSync('tmux', ['kill-pane', '-t', id]); } catch { /* gone */ } }
+    writeFileSync(`${FIX}/roster.json`, rosterAtRel);
+    for (const d of [relA, relB, relC]) rmSync(d, { recursive: true, force: true });
+    rmSync(relProject, { recursive: true, force: true });
+    await json('/api/floor/rescan', {});
+    await sleep(WATCH_SETTLE_MS);
+  }
 
   // Move: free's folder onto another floor, under its own name. The window
   // is held by the floor and is on SESSION_ID (the fresh conversation from

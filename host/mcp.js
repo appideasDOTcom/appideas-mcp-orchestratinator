@@ -28,8 +28,31 @@
  * the orchestratinator entry for this board when a desk is imported or left —
  * a project entry left beside a local one keeps raising the approval dialog
  * on every fresh window (measured), so removing it is what makes the floor's
- * binding dialog-free. Other servers in the file are kept, and an entry that
- * points at another board is never touched.
+ * binding dialog-free. Other servers in the file are kept.
+ *
+ * **An entry that points at another instance is touched in exactly one case:
+ * a release.** The rule here used to be "never", and it went in with Take a
+ * desk itself: a host serves one instance, and one that rewrote other
+ * instances' entries on its own judgment would pull desks off somebody's
+ * working floor. It also meant a folder bound to one instance could not be
+ * opened by another without a terminal — "Change it there" — which is every
+ * repo of an operator who installs the desktop app beside the Docker one, and
+ * the instance being left may not even be running. costmo reversed it
+ * (2026-11-08: "We need to be able to 'release' an agent so that it can be
+ * opened by another instance"). What the old rule protected is kept by how
+ * narrow the reversal is: only the folder the operator named, only on their
+ * click on the floor that is taking it, only the entries for the instance the
+ * request names — checked against the disk at the moment of the bind, so a
+ * binding that changed since the click is refused, not followed — and the
+ * host still only ever *writes* an entry for its own instance. A third
+ * instance's entry in the same file is left where it is, as before.
+ *
+ * Both scopes are cleared, and leaving the `.mcp.json` entry was not an
+ * option: beside a local entry it raises the approval question on every
+ * fresh window (above), and under another server name the window would
+ * connect to both instances at once. That file may be tracked and shared, so
+ * a release can dirty the repo's tree, exactly as an import already does for
+ * this instance's own entry; the dialog says so before the click.
  */
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -82,9 +105,10 @@ export async function mcpAdd(dir, { url, channel, agent, key }) {
 
 /** Remove `dir`'s local-scope binding. An absent one is not a failure: the
  *  CLI says `No MCP server named "…" in local scope` and exits 1 (measured),
- *  and the caller wanted it gone either way. */
-export async function mcpRemove(dir) {
-  const r = await cli(['mcp', 'remove', '-s', 'local', SERVER_NAME], dir);
+ *  and the caller wanted it gone either way. `name` is for a release, whose
+ *  entry may have been written by hand under a name of its own. */
+export async function mcpRemove(dir, name = SERVER_NAME) {
+  const r = await cli(['mcp', 'remove', '-s', 'local', name], dir);
   if (r.ok) return { ok: true, removed: true };
   if (/No MCP server named/i.test(r.error)) return { ok: true, removed: false };
   return { ok: false, error: `claude mcp remove exited ${r.code ?? '?'} — ${r.error}` };
@@ -96,8 +120,13 @@ export async function mcpRemove(dir) {
  * point at another board are left alone and named in `foreign`; a file that
  * cannot be read as JSON is left alone and refused, because a rewrite would
  * replace whatever the person meant with nothing.
+ *
+ * `also` names further instances whose entries go too: a release passes the
+ * one the folder is leaving (see the header). Whole instances, never
+ * narrowed by channel or agent — a folder is one desk, and an entry for the
+ * instance being left under any names is the binding being released.
  */
-export function dropProjectEntry(dir, { origin, channel = null, agent = null } = {}) {
+export function dropProjectEntry(dir, { origin, channel = null, agent = null, also = [] } = {}) {
   const file = join(dir, '.mcp.json');
   if (!existsSync(file)) return { ok: true, removed: [], kept: [], foreign: [] };
   let raw;
@@ -118,7 +147,7 @@ export function dropProjectEntry(dir, { origin, channel = null, agent = null } =
     const ag = header(s?.headers, 'X-Agent');
     if (!(ch && ag && typeof s?.url === 'string')) { kept.push(name); continue; }
     const board = originOf(s.url);
-    const ours = board === origin && (!channel || ch === channel) && (!agent || ag === agent);
+    const ours = also.includes(board) || (board === origin && (!channel || ch === channel) && (!agent || ag === agent));
     if (ours) removed.push(name);
     else { kept.push(name); foreign.push({ name, board, channel: ch, agent: ag }); }
   }

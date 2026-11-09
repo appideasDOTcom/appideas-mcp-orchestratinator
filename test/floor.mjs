@@ -789,12 +789,96 @@ try {
   rr = await take({ host_id: 'h-open', path: '/repo/not-offered', channel: CH, agent: 'fresh' });
   eq((await rr.json()).code, 'unknown_folder', 'a folder the host did not offer is refused — the board never sends a path the host did not name');
   rr = await take({ host_id: 'h-open', path: '/repo/elsewhere-bound', channel: 'x', agent: 'y' });
-  eq((await rr.json()).code, 'other_board', 'a folder bound to another board is refused');
+  eq((await rr.json()).code, 'other_board', 'a folder bound to another instance is refused when the request does not name that instance');
   rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'wanderer' });
   eq((await rr.json()).code, 'desk_taken', 'a name already seated live at another folder is refused');
   rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: CH, agent: 'someone-else' });
   eq([rr.status, (await rr.json()).code], [400, 'agent_fixed'], 'a folder that names its agent cannot be taken under another name — only the floor can change');
   eq(await takeWork(), [], 'and none of those queued anything');
+
+  /* A release: a folder bound to another instance, taken here because the
+   * request names the instance it is leaving (costmo, 2026-11-08; the
+   * ruling and what keeps it narrow are in host/mcp.js). What the board
+   * checks is the address against the host's last reading, that the host
+   * can do it, and that it is never handed to the host as a move. What the
+   * host did is read from /api/floor/take, because the desk being released
+   * has no row here for a refusal to be said on. */
+  console.log('\nreleasing a folder from another instance');
+  {
+    const OTHER = 'http://10.0.0.9:8787';
+    const ELSE = '/repo/elsewhere-bound';
+    const takeOf = (channel, agent) => fetch(`${HOST}/api/floor/take?host_id=h-open&channel=${channel}&agent=${agent}`).then((r) => r.json()).then((b) => b.take);
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'y' });
+    const plain = await rr.json();
+    eq([rr.status, plain.code, plain.other_board], [409, 'other_board', OTHER], 'unasked, the refusal carries the address the folder is bound to, for a caller to confirm and send back');
+    assert(!/Change it there/.test(plain.error) && /releases it from there/.test(plain.error), `and no longer sends anybody to the other instance to change it — ${plain.error}`);
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'y', from_board: 'http://10.0.0.1:1' });
+    const wrong = await rr.json();
+    eq([rr.status, wrong.code, wrong.other_board], [409, 'board_changed', OTHER], 'an address that is not the one the host last read off the folder is refused, naming the one it is');
+    rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', from_board: OTHER });
+    eq([rr.status, (await rr.json()).code], [409, 'board_changed'], 'and so is a release of a folder that is bound to no other instance at all');
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'y', from_board: OTHER });
+    const old = await rr.json();
+    eq([rr.status, old.code], [409, 'old_host'], 'a host that has not said it can release is not asked: it would read the work as a plain take and leave the old binding standing');
+    assert(/openbox/.test(old.error), 'named, in the refusal');
+    eq(await takeWork(), [], 'and none of those queued anything');
+    eq(await takeOf('x', 'y'), null, 'or left a take on record');
+
+    await registerWith({ roots: ['/repo'], folders: offered, release: true });
+    eq((await folders()).hosts.find((h) => h.host_id === 'h-open')?.release, true, 'a host that says it can is served as one, for the dialog');
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'someone-else', from_board: OTHER });
+    eq([rr.status, (await rr.json()).code], [400, 'agent_fixed'], 'the folder still names its agent: a release changes the instance and may change the floor, never the name');
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'landing', agent: 'y', from_board: OTHER });
+    const asked = await rr.json();
+    eq([rr.status, asked.mode, asked.from_board, asked.host_id], [200, 'release', OTHER, 'h-open'], 'named, it is taken as a release, and the reply says from where and which host has it');
+    const work = await takeWorkFull();
+    eq(work.map((w) => [w.kind, w.payload.path, w.payload.release, w.payload.from, w.payload.import, w.payload.open]),
+      [['bind', ELSE, { board: OTHER }, null, false, true]],
+      'the host is handed a bind that names the instance being left — and no `from`, though the floor differs: the names a folder carries elsewhere are not a desk on this instance to unseat');
+    eq([(await takeOf('landing', 'y'))?.state, (await takeOf('landing', 'y'))?.from_board], ['asked', OTHER], 'the take is on record as asked');
+    const said = 'not released from http://10.0.0.9:8787 — the window is still working: esc to interrupt';
+    eq((await hostEvents([{ type: 'error', channel: 'landing', agent: 'y', code: 'bind_refused', message: said, taking: { channel: 'landing', agent: 'y' } }])).applied, 1,
+      'the host refuses, for a desk this instance has no row for — and the refusal is taken, where it used to be dropped');
+    const refused = await takeOf('landing', 'y');
+    eq([refused?.state, refused?.error, refused?.code], ['refused', said, 'bind_refused'], 'it is on record in the host\'s own words, with its code');
+    assert(!deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'y', 'landing')?.hosted, 'and nothing is hosted there');
+
+    // Asked again: the take in flight replaces the refused one, and a late
+    // word about the old one cannot settle it twice.
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH);
+      db.prepare(`INSERT INTO agents (channel, agent, retired_at) VALUES ('landing', 'y', datetime('now')) ON CONFLICT(channel, agent) DO UPDATE SET retired_at = datetime('now')`).run();
+      db.close();
+    }
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'landing', agent: 'y', from_board: OTHER, open: false });
+    eq(rr.status, 200, 'asked again');
+    eq((await takeWorkFull()).map((w) => w.payload.open), [false], 'with nothing to open, which a caller working through a list of folders asks for');
+    eq((await takeOf('landing', 'y'))?.state, 'asked', 'the record is the take in flight, not the refusal before it');
+    eq((await hostEvents([{ type: 'bound', channel: 'landing', agent: 'y', cwd: ELSE, scope: 'local', session_id: 'sess-y', from: null, released_from: OTHER }])).applied, 1, 'the host answers bound, saying where it was released from');
+    eq((await takeOf('landing', 'y'))?.state, 'seated', 'and the take reads seated');
+    const landed = deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'y', 'landing');
+    eq([landed?.hosted?.live, landed?.hosted?.session_id], [true, 'sess-y'], 'the desk is on this instance\'s floor, hosted, on the conversation the host read off the folder');
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH, { readonly: true });
+      eq(db.prepare(`SELECT retired_at IS NULL AS live FROM agents WHERE channel = 'landing' AND agent = 'y'`).get()?.live, 1, 'a row retired here before the agent left is the agent\'s again: the release is the operator seating it');
+      db.close();
+    }
+    await hostEvents([{ type: 'error', channel: 'landing', agent: 'y', code: 'bind_refused', message: 'a late word about the first try', taking: { channel: 'landing', agent: 'y' } }]);
+    eq((await takeOf('landing', 'y'))?.state, 'seated', 'a refusal that arrives after the seat does not unseat the record');
+    const rows = (await fetch(`${HOST}/api/activity?limit=50&channel=landing`).then((r) => r.json())).rows;
+    eq(rows.filter((r) => r.kind === 'admin.desk.take').map((r) => r.detail), [`release ${ELSE} from ${OTHER}`, `release ${ELSE} from ${OTHER}`], 'each ask is logged as a release, naming the instance');
+    eq(rows.filter((r) => r.kind === 'admin.desk.bound').map((r) => r.detail), [`${ELSE} — released from ${OTHER}`], 'and the seat says where the desk came from');
+    eq((await fetch(`${HOST}/api/floor/take?host_id=h-open&channel=landing`)).status, 400, 'the read needs the host, the floor and the agent');
+    // A plain take's refusal is read the same way: it had no desk to be said on either.
+    rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: 'landing', agent: 'zed' });
+    eq((await rr.json()).mode, 'take', 'a plain take');
+    await takeWork();
+    await hostEvents([{ type: 'error', channel: 'landing', agent: 'zed', code: 'no_key', message: 'this host has no shared secret to bind with', taking: { channel: 'landing', agent: 'zed' } }]);
+    eq([(await takeOf('landing', 'zed'))?.state, (await takeOf('landing', 'zed'))?.code], ['refused', 'no_key'], 'a plain take the host refuses is on record too');
+    await registerWith({ roots: ['/repo'], folders: offered });
+  }
 
   /* The picker: the host lists one folder at a time, and a folder it has
    * shown that way can be taken, whether or not the flat list offered it. */
@@ -1067,10 +1151,10 @@ try {
     const b = src.indexOf('/* ---------- take a desk: the dialog ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the take-a-desk section was not found in src/ui/app.js between its two section comments');
     const tmp = `./data/desk-dialog-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing, takeable, releaseNoteText, takeOutcome };\n`);
     try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
   })();
-  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing } = lifted;
+  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing, takeable, releaseNoteText, takeOutcome } = lifted;
 
   // A move the board accepted is not yet made: the page follows the agent
   // only once its host has seated it on the target, and says the host's
@@ -1108,6 +1192,29 @@ try {
   eq(takeBody({ hostId: 'h-open', path: '/repo/zeta-newest', channel: CH, newChannel: '', agent: ' fresh ', persona: 'Typed Name' }),
     { host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', open: true },
     'what the dialog sends on a take names the host, the folder, the floor and the agent — and no name, even if a form somehow held one');
+  // A release (costmo, 2026-11-08): the dialog's half of it.
+  {
+    const OTHER = 'http://localhost:8787';
+    const elsewhere = { path: '/repo/x', name: 'x', bound: { channel: 'there', agent: 'dev', scope: 'project', board: OTHER }, other_board: OTHER };
+    eq(takeBody({ hostId: 'h', path: '/repo/x', channel: 'there', newChannel: '', agent: 'dev', listing: { self: elsewhere } }),
+      { host_id: 'h', path: '/repo/x', channel: 'there', agent: 'dev', open: true, from_board: OTHER },
+      'a take of a folder bound to another instance names the instance it is leaving, as the dialog showed it — which is what the board checks');
+    eq(Object.hasOwn(takeBody({ hostId: 'h', path: '/repo/x', channel: 'c', newChannel: '', agent: 'dev', listing: { self: { ...elsewhere, other_board: null } } }), 'from_board'), false,
+      'and a folder on this instance names none');
+    eq([takeable(elsewhere, { release: true }), takeable(elsewhere, {}), takeable(elsewhere, null), takeable({ path: '/repo/y', other_board: null }, {}), takeable(null, { release: true })],
+      [true, false, false, true, false],
+      'such a folder can be taken when its host can release it, not from a host that has not said so; any other folder as before; no folder, no');
+    const rel = releaseNoteText('dev', 'there', OTHER, 'project');
+    assert(rel.includes(`Releases it from ${OTHER}`) && rel.includes(`Its messages and tasks on ${OTHER} stay there`), `the note names the instance being left, and what stays on it — ${rel}`);
+    assert(/comes out of the folder's \.mcp\.json \(other servers stay\)/.test(rel), 'and that the folder\'s own .mcp.json is what changes, when that is where the binding is');
+    assert(/comes out of Claude Code's local scope/.test(releaseNoteText('dev', 'there', OTHER, 'local')) && !/\.mcp\.json/.test(releaseNoteText('dev', 'there', OTHER, 'local')), 'or local scope, and then no file in the folder is named');
+    assert(/closes and a new conversation opens here/.test(rel) && /with no window open, it opens on its last conversation/.test(rel) && /Refused while a turn is running/.test(rel),
+      'and what happens to the window and the conversation, by a move\'s two rules');
+    eq([takeOutcome({ state: 'asked' }), takeOutcome(null), takeOutcome(undefined)], [null, null, null], 'a take the host has not answered, or one this instance does not remember, is neither seated nor refused — the page waits');
+    eq(takeOutcome({ state: 'seated' }), 'seated', 'seated once the host says bound');
+    eq(takeOutcome({ state: 'refused', error: 'not released from there — the window is still working' }), { refused: 'not released from there — the window is still working' }, 'refused in the host\'s words');
+    eq(takeOutcome({ state: 'refused', error: null }), { refused: 'The host refused and did not say why.' }, 'and said as that when it gave none');
+  }
 
   // Issue #37: the name is the operator's from the moment a folder is
   // chosen, so a listing arriving after it does not empty what was typed
@@ -1125,6 +1232,12 @@ try {
     fm = form({ agent: 'dev', agentTyped: true });
     takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
     eq([fm.agent, fm.channel], ['cy', 'elsewhere'], 'a bound folder\'s agent wins over anything typed, and proposes its floor');
+    fm = form({ agent: 'dev', agentTyped: true });
+    takeListing(fm, { path: '/repo/a', self: { path: '/repo/a', bound: { channel: 'theirs', agent: 'cy', scope: 'project', board: 'http://localhost:8787' }, other_board: 'http://localhost:8787' } });
+    eq([fm.agent, fm.channel], ['cy', CH], 'a folder bound to another instance fixes its agent too, and proposes no floor of that instance\'s: the dialog stays on the floor it was opened from (costmo, 2026-11-08)');
+    fm = form({ agent: '', channel: 'picked-before', wantChannel: null });
+    takeListing(fm, { path: '/repo/a', self: { path: '/repo/a', bound: { channel: 'theirs', agent: 'cy', scope: 'local', board: 'http://localhost:8787' }, other_board: 'http://localhost:8787' } });
+    eq(fm.channel, 'picked-before', 'and opened from no floor, it keeps whatever the form held, as an unbound folder does');
     fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'dev', agentTyped: false });
     takeListing(fm, listingOf('/repo/b'));
     eq(fm.agent, '', 'a new folder the operator moved to starts with no name: typed values survive a redraw, not a new folder');
@@ -1154,7 +1267,7 @@ try {
     { path: '/repo/once', name: 'once', last_active: '2026-09-30T00:00:00.000Z', other_board: null },
   ]).map((f) => f.name), ['once'], 'a folder Claude Code has never been run in is not recent, wherever it sits in the host\'s list');
   eq(recentFolders([{ path: '/repo/elsewhere', name: 'elsewhere', last_active: '2026-09-30T00:00:00.000Z', other_board: 'http://10.0.0.9:8787' }]), [],
-    'a folder bound to another board is not offered, however recent — it could only be refused');
+    'a folder bound to another instance is not offered, however recent — it is released by standing in it, and five places do not fill with another instance\'s desks');
   eq([recentFolders(undefined), recentFolders([]), recentFolders([{ name: 'no-path', last_active: '2026-09-30T00:00:00.000Z' }])], [[], [], []],
     'no list, an empty list and a folder with no path are all nothing to offer');
 

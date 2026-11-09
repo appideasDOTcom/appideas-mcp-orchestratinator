@@ -3472,6 +3472,20 @@ export async function sessionsIn(cwd, { limit = 30 } = {}) {
   return rows;
 }
 
+/**
+ * The conversation in a folder somebody last spoke in, as the session picker
+ * would list it, or null. For a desk released from another instance (bind in
+ * host/index.js): this host has never watched the folder, so it has no pin
+ * to keep, and the agent should arrive on the conversation it was having
+ * rather than on a blank one. The picker's bounded reads, not resumable()'s
+ * whole-file ones: a release can be one of thirty in a row.
+ */
+export async function lastSpokenIn(cwd) {
+  const rows = (await sessionsIn(cwd)).filter((r) => r.spoken);
+  rows.sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
+  return rows[0]?.id ?? null;
+}
+
 /** A title from a first prompt: its first line, whitespace folded, 80 characters. */
 function clipTitle(s) {
   const line = String(s).trim().split('\n')[0].replace(/\s+/g, ' ');

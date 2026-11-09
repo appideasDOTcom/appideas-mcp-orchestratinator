@@ -182,6 +182,32 @@ export function readLocalScope(file = claudeConfigPath()) {
 }
 
 /**
+ * Every orchestratinator entry Claude Code holds for `dir` in local scope, by
+ * the name it was written under and the instance it points at.
+ *
+ * For a release (host/mcp.js): `claude mcp remove` takes a name, and an entry
+ * somebody added by hand need not be called what this host calls its own.
+ * `ok: false` when the file could not be read — the caller then knows nothing
+ * about the names, which is not the same as there being none.
+ */
+export function localEntries(dir, file = claudeConfigPath()) {
+  let projects;
+  try {
+    projects = JSON.parse(readFileSync(file, 'utf8'))?.projects;
+  } catch {
+    return { ok: false, entries: [] };
+  }
+  const servers = (projects?.[dir] ?? projects?.[real(dir)])?.mcpServers;
+  const entries = [];
+  for (const [name, s] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
+    const channel = header(s?.headers, 'X-Channel');
+    const agent = header(s?.headers, 'X-Agent');
+    if (channel && agent && typeof s?.url === 'string') entries.push({ name, board: originOf(s.url), channel, agent });
+  }
+  return { ok: true, entries };
+}
+
+/**
  * The desk a directory is bound as, or null: its local-scope entry first, then
  * its `.mcp.json`. `local` is a `readLocalScope()` result — pass one in to read
  * the file once for a whole walk.

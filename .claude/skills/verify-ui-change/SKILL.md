@@ -779,6 +779,37 @@ Four things it taught:
   so the patch writes the property wherever it differs from the form. A
   bound folder's agent arriving under typed text is the case.
 
+### check-release.mjs — Take a desk on a folder bound to another instance (task 292)
+
+```bash
+PORT=8961 CDP=9291 .claude/skills/verify-ui-change/run-check-release.sh "$PWD"
+# … PASS · 21 of 21        (about twenty seconds)
+```
+
+[`run-check-release.sh`](run-check-release.sh) serves any directory with
+`answering-host.mjs` twice: `testbox`, which can release and has a folder
+dialog, and `oldbox` (`--no-release --no-dialog`), a host from before
+releases. The folder is the fixture's `mars-elsewhere`, bound to another
+address. It drives the host's own dialog choosing that folder, what the
+form says and fills, a floor typed by name reaching the note, a release
+the host refuses (the wait said in the dialog, then the host's words, the
+dialog still open), one it makes (the dialog gone, the desk hosted, the
+page on the desk), what the host was sent, and the old host's disabled
+button. `answering-host.mjs` answers a `bind` only when the answers file
+has a `bind` key (`mode: "bound" | "refused"`, `delay`, `error`), so
+every older check sees the host it always saw.
+
+Its red was run in a copy holding 67aaac2's `app.js` over the tree's server
+(`copy-repo.sh`, then `git show 67aaac2:src/ui/app.js` into it): the check
+stops at its first wait, because that page says "not this board. Change it
+there." and never the release line.
+
+Two things it cost a run each to learn. **Take a desk is the floor's
+button**: its click is handled in `floor.js`, and on the board view
+`#take-desk` does nothing, so the check opens the floor. And **with two
+hosts the dialog opens on whichever is first**: the check picks the host in
+`#desk-host` the way a person would before it reads anything.
+
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
 Task 264 (2026-11-03). [`hold-proxy.mjs`](hold-proxy.mjs) stands in for a

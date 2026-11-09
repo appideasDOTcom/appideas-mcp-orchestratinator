@@ -765,6 +765,16 @@ export function makeStore(db) {
       `UPDATE agents SET poll_cursor = MAX(poll_cursor, @cursor)
        WHERE channel = @channel AND agent = @agent`
     ),
+    // The highest message id this instance has ever issued. From SQLite's own
+    // counter for the AUTOINCREMENT column, not MAX(id): deleting a floor
+    // takes its messages with it, and MAX(id) would then fall below cursors
+    // this instance itself handed out.
+    messageHighWater: db.prepare(
+      `SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) AS id`
+    ),
+    pollCursorOf: db.prepare(
+      `SELECT poll_cursor FROM agents WHERE channel = @channel AND agent = @agent`
+    ),
     listAgents: db.prepare(
       `SELECT agent, last_seen, status, status_detail, status_at, status_expires_at,
               last_action, last_action_at
@@ -1626,6 +1636,8 @@ export function makeStore(db) {
       q.setAgentStatus.run({ channel, agent, status, detail, ttl: `+${Math.max(0, Math.floor(ttlSeconds))} seconds` }),
     advancePollCursor: (channel, agent, cursor) =>
       q.advancePollCursor.run({ channel, agent, cursor }).changes,
+    messageHighWater: () => q.messageHighWater.get().id,
+    pollCursorOf: (channel, agent) => q.pollCursorOf.get({ channel, agent })?.poll_cursor ?? 0,
     listAgents: (channel) => q.listAgents.all({ channel }),
 
     // --- operator actions -----------------------------------------------------
