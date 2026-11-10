@@ -587,9 +587,7 @@ class Host {
     W.onServerRenewed(({ refused, moved }) => {
       for (const m of moved) {
         const desk = [...this.desks.values()].find((d) => d.cwd === m.cwd);
-        const text = m.ok
-          ? `moved to a fresh terminal window: the old tmux server had lost macOS permission to read ${refused}, and a fresh one can.${m.told ? ' Told the agent so.' : ''}`
-          : `the old tmux server had lost macOS permission to read ${refused}; reopening this desk in a fresh one failed: ${m.error}`;
+        const text = W.renewNote(refused, m);
         if (desk) desk.told(text, m.sessionId);
         else log(`${m.cwd}: ${text}`);
       }

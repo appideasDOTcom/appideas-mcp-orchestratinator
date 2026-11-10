@@ -442,10 +442,13 @@ move did not run or did not work. Read these in order:
 ```sh
 D=/path/to/the/desk
 # 1. Does the floor's server read it? (exit 0 = yes). Its forks are its windows.
-tmux run-shell -t orch: "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
+#    No -t: given a target, a refused read leaves that pane (orch: is a
+#    desk's window) in view-mode, and the desk's next message goes to the
+#    mode, not to Claude Code (QA, PR #54 finding 1). If one is parked, `q`.
+tmux run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
 # 2. Does a fresh server? (the host's freshReads, by hand)
 tmux -L chk -f /dev/null new-session -d -s c 'sleep 30'
-tmux -L chk run-shell -t c: "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
+tmux -L chk run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
 tmux -L chk kill-server
 # 3. The kernel's word. Use /usr/bin/log: zsh has a `log` builtin that eats
 #    the arguments ("too many arguments").

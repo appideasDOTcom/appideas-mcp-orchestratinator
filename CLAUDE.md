@@ -216,13 +216,45 @@ each window's folder at every heartbeat, and `open()` runs the same check
 before it makes a window. When the server is refused and a fresh one is not,
 `renewServer()` waits for working windows to end their turn (up to
 `ORCH_RENEW_WAIT_MS`), kills the server, and resumes each conversation in a
-fresh one. An agent whose turn was cut off, whose question was closed, or
-which had met the refusal is told in the host's words, and each desk gets a
-`host` line. It refuses to kill a server that also runs sessions which are
-not the floor's, and an `open()` of a folder that nothing can read returns
-`unreadable` with nothing moved. `test:renew` drives it on a socket of its
-own, never the default, because the default socket is the live `orch`.
-**diagnose-handoff** has the readings.
+fresh one; a window that had no conversation yet starts one there. An agent
+whose turn was cut off, whose question was closed, or which had met the
+refusal is told in the host's words, and each desk gets a `host` line
+(`renewNote`). It refuses to kill a server that also runs sessions which are
+not the floor's, and an `open()` of a folder that nothing can read (mode
+000, or deleted under its window, which tmux still gives as the pane's path)
+returns `unreadable` with nothing moved. Three rules from QA's review of
+PR #54, each measured:
+- **The read is `run-shell` with no `-t`.** With a target, a refused read
+  writes "returned 1" into that pane and leaves it in view-mode, and
+  `orch:` is a desk's window: its next message went to the mode and the
+  host said `not_delivered`, with the floor's capture showing the screen
+  underneath. Without `-t` the exit is still 1 and no pane changes. Any
+  `run-shell` against the floor's server, by hand included, goes without
+  one.
+- **A move is made once for a refusal.** After the move, the folders are
+  read again on the new server, before any agent is told "readable again".
+  One still refused is said on its desk and kept in `stillRefused`: no
+  check moves for it and no open makes a window in it until the server
+  reads it again. Moving again was a full kill-and-resume at every
+  heartbeat, 3 of 3. `freshReads` is a private socket with no tmux.conf,
+  which is not the server a move makes, so "a fresh server reads it" never
+  promised the move would clear it.
+- **renew()'s own reopens never ask for a move.** They pass `moving`, and
+  a refusal on the new server returns `unreadable` instead. Asking for a
+  move from inside the move returned the promise that was running. It never
+  resolved, so the window was not reopened, and `checkServer()`, awaited on
+  the host's line in `run()`, never returned.
+
+`test:renew` drives it on a socket of its own, never the default, because
+the default socket is the live `orch`. Its refusal belongs to the server
+running when it is set (`refuse()`), as on the day, or `sticky` to every
+server for the move that does not clear it. What it does not drive is
+`index.js`'s two lines, the heartbeat's call and the hook. `test:host` runs
+its host on the default socket beside the live `orch` session, where a
+move is a `kill-server` of the operator's floor (and `renew()`'s own guard
+refuses it because of that session), so the host suite can reach only the
+refusal. The words those two lines carry are `renewNote`, and `test:renew`
+asserts them. **diagnose-handoff** has the readings.
 
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
