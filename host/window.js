@@ -1361,7 +1361,13 @@ export function pickerOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
   const nonEmpty = lines.filter((l) => l.trim());
   const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
-  if (!/s to use this session only/i.test(foot)) return null;
+  // 2.1.322 ends the list with "▸ More models", and with the cursor on it the
+  // footer is "Enter to expand · Esc to cancel" (measured 2026-11-09 at
+  // 80x24). It is still the picker, with the cursor on no model: read as
+  // gone, the walk returned and left the picker open, and the desk's next
+  // /model was typed into it.
+  const onMore = /^Enter to expand\b/i.test(foot) && nonEmpty.some((l) => /^\s*Select model\s*$/.test(l));
+  if (!/s to use this session only/i.test(foot) && !onMore) return null;
   const rows = [];
   for (const l of nonEmpty) {
     const m = /^\s*(❯)?\s*[↑↓]?\s*(\d+)\.\s+(.+?)(?:\s{2,}(.*))?$/.exec(l);
@@ -2117,6 +2123,16 @@ export function effortRowOf(screen) {
   return m ? m[1].toLowerCase() : null;
 }
 
+/** A walk that could not read the picker must not leave it standing: the
+ *  desk's next message or /model would be typed into it (measured on
+ *  2.1.322, where four picks after one such return all failed). Escape only
+ *  when "Select model" is still on screen, since an Escape in a bare
+ *  composer is not nothing. */
+async function closePicker(target) {
+  if (/^\s*Select model\s*$/m.test(await screenOf(target, 40))) await tmux(['send-keys', '-t', target, 'Escape']);
+  return {};
+}
+
 export async function pickModel(cwd, name, opts = {}) {
   return pick(cwd, { model: name }, opts);
 }
@@ -2165,7 +2181,46 @@ export async function pick(cwd, { model = null, effort = null } = {}, { open: au
     await clearComposer(pane.target);
     return { ok: false, code: 'no_picker', error: 'the window did not open its model picker', target: pane.target };
   }
-  const row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
+  let row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
+  // A picker in a short pane shows part of its list. Measured on 2.1.322:
+  // under about 30 rows it draws three models and "… +3 models", and an
+  // "↑" on the first row once it has scrolled, so on a window nobody is
+  // attached to (80x24) Sonnet and Haiku were not on screen, and "sonnet"
+  // was refused as not offered. An attached terminal makes the pane taller,
+  // which is why the same pick worked after Open in Claude. Resizing the
+  // pane to read it would be moving the operator's furniture, so the cursor
+  // is walked down the list and then up it, one key at a time, reading the
+  // pane after each, until the name is on screen or the list ends. The list
+  // is a ring (measured): Down from the last model is "▸ More models", Down
+  // from that is row 1, and Up from row 1 is "▸ More models" again. So each
+  // pass ends on that row or on a cursor that did not move the way it was
+  // sent. The walk below then moves the cursor from wherever this left it.
+  if (name && !row) {
+    const seen = new Map(picker.rows.map((r) => [r.n, r]));
+    for (const dir of ['Down', 'Up']) {
+      for (let i = 0; i < 20 && !row; i++) {
+        const beforeKey = await screenOf(pane.target, 40);
+        await tmux(['send-keys', '-t', pane.target, dir]);
+        await reacted(pane.target, beforeKey, 40);
+        const next = pickerOf(await screenOf(pane.target, 40));
+        if (!next) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while its list was being read' };
+        for (const r of next.rows) seen.set(r.n, r);
+        row = pickerRowFor(next.rows, name);
+        // The end of the list in this direction: the cursor moved onto "▸ More
+        // models" (no number), or wrapped, or did not move. Leaving that row
+        // onto a numbered one counts as moving.
+        const moved = next.cursor != null && (dir === 'Down' ? next.cursor > (picker.cursor ?? -Infinity) : next.cursor < (picker.cursor ?? Infinity));
+        picker = next;
+        if (!moved) break;
+      }
+      if (row) break;
+    }
+    if (!row) {
+      await tmux(['send-keys', '-t', pane.target, 'Escape']);
+      const offered = [...seen.values()].sort((a, b) => a.n - b.n).filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label);
+      return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${offered.join(', ')}` };
+    }
+  }
   if (!row) {
     await tmux(['send-keys', '-t', pane.target, 'Escape']);
     return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${picker.rows.filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label).join(', ')}` };
@@ -2174,10 +2229,11 @@ export async function pick(cwd, { model = null, effort = null } = {}, { open: au
   // each: the same rule as answerQuestion, and for the same reason.
   for (let i = 0; i < 20 && picker.cursor !== row.n; i++) {
     const beforeKey = await screenOf(pane.target, 40);
-    await tmux(['send-keys', '-t', pane.target, row.n > picker.cursor ? 'Down' : 'Up']);
-    await reacted(pane.target, beforeKey);
+    // From "▸ More models" (no number) every model is above.
+    await tmux(['send-keys', '-t', pane.target, row.n > (picker.cursor ?? Infinity) ? 'Down' : 'Up']);
+    await reacted(pane.target, beforeKey, 40);
     picker = pickerOf(await screenOf(pane.target, 40));
-    if (!picker) return { ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the cursor was being moved' };
+    if (!picker) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the cursor was being moved' };
   }
   if (picker.cursor !== row.n) {
     await tmux(['send-keys', '-t', pane.target, 'Escape']);
@@ -2193,9 +2249,9 @@ export async function pick(cwd, { model = null, effort = null } = {}, { open: au
     for (let i = 0; i < 12 && at !== level; i++) {
       const beforeKey = await screenOf(pane.target, 40);
       await tmux(['send-keys', '-t', pane.target, EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(at) ? 'Right' : 'Left']);
-      await reacted(pane.target, beforeKey);
+      await reacted(pane.target, beforeKey, 40);
       at = effortRowOf(await screenOf(pane.target, 40));
-      if (!at) return { ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
+      if (!at) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
     }
     if (at !== level) {
       await tmux(['send-keys', '-t', pane.target, 'Escape']);
@@ -2593,12 +2649,18 @@ const STEP_MS = Number(process.env.ORCH_STEP_MS ?? 350);
 const STEP_SETTLE_MS = Number(process.env.ORCH_STEP_SETTLE_MS ?? 1000);
 const STEP_POLL_MS = Number(process.env.ORCH_STEP_POLL_MS ?? 100);
 
-async function reacted(target, before) {
+// `lines` must be the size `before` was read at. `-S -N` is N lines of
+// scrollback plus the pane, so on a pane with history a 40-line `before`
+// never equals a 12-line read, and every read looked "changed": the
+// picker's walk went on ~200 ms after each key whether or not the window
+// had redrawn, and read a stale cursor as the end of the list (QA, PR #53
+// finding 1; 2 of 3 live windows had 36–74 lines of history).
+async function reacted(target, before, lines = 12) {
   const stop = Date.now() + STEP_SETTLE_MS;
   let last = null;
   while (Date.now() < stop) {
     await sleep(STEP_POLL_MS);
-    const now = await screenOf(target);
+    const now = await screenOf(target, lines);
     // Changed *and* held still: caught mid-redraw, the next key would land in a
     // half-drawn state exactly as it does now.
     if (now !== before && now === last) return true;
