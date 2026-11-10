@@ -35,6 +35,7 @@ import { basename, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { readDesk } from './identity.js';
+import { log, warn } from './log.js';
 
 const run = promisify(execFile);
 
@@ -1581,12 +1582,251 @@ async function clearComposer(target) {
  * it does in any terminal — which, for a repo that has a recent session, is
  * the same conversation the floor was just showing.
  */
-export async function open(cwd, { resume = null } = {}) {
+/* ---------- a tmux server that can no longer read a desk's folder ----------
+ *
+ * Measured 2026-11-10 on macOS 27.0.1, tmux 3.7c, after a desk died with
+ * "Can't read the current directory (EPERM)" mid-session and every window
+ * reopened for it died the same way on its first line:
+ *
+ *   - Every process in the `orch` server (up since 2026-11-08) was refused
+ *     `~/Documents` and every folder under it — `System Policy: <proc>
+ *     deny(1) file-read-data <path>` in the kernel log — except folders
+ *     carrying a `com.apple.macl` grant, which the folder dialog writes when
+ *     a folder is picked in it. So every desk taken through the dialog kept
+ *     working and a desk bound any other way did not, which is why it looked
+ *     like one folder's problem.
+ *   - A fresh tmux server started by the host's own node under launchd read
+ *     all of it, before and after that node exited, and TCC's log showed the
+ *     node's Documents grant intact (authValue=2, user consent) that morning.
+ *     tccd was not consulted at all for the refusals: the old server carried
+ *     a verdict of its own, and nothing short of a new server cleared it.
+ *   - How that server came to carry it was not found: the log from the day it
+ *     started had rotated. So this does not guess at a cause. It tests the one
+ *     thing that matters — can a process this server starts read the folder —
+ *     and when it cannot and a fresh server can, it moves every window to a
+ *     fresh server (costmo's ruling, 2026-11-10: nobody sees this error, even
+ *     once). A window is moved the way the floor reopens one: `--resume` of
+ *     the conversation it held.
+ *
+ * `run-shell` is the check because it is the server forking a shell, exactly
+ * as it forks a window's process: 16 ms, and its exit status is the answer.
+ * That a poisoned server's run-shell is refused like its windows is the same
+ * fork, not separately measured: by the time this was written there was no
+ * poisoned server left to try it on.
+ *
+ * Everything here runs on the host's work line (an open from a work item, or
+ * the heartbeat's check in run()), so nothing is being typed into a window
+ * while the server is replaced. A window mid-turn is waited for, up to
+ * RENEW_WAIT_MS; one holding a question is not, because the answer would
+ * have to come down the line this is holding — it is told instead, once it is
+ * back, as is a turn cut off at the limit and an agent that had already met
+ * the refusal. Those words go into the window labelled as the host's, since
+ * the agent is the one who has to act on them and the operator does not. */
+
+const RENEW_WAIT_MS = Number(process.env.ORCH_RENEW_WAIT_MS ?? 10 * 60_000);
+
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
+
+/** Whether a process this host's tmux server starts can read `dir`. Null when
+ *  there is no server to ask — a new one is made on the next open anyway.
+ *
+ *  `run-shell` with no `-t`, and that is not tidiness. Given a target, a
+ *  command that fails writes "'<cmd>' returned 1" into the target pane and
+ *  puts it in view-mode, and `orch:` is the session's current window — a
+ *  desk. Keys sent to a pane in view-mode go to the mode, so that desk's next
+ *  message was swallowed (`not_delivered`) while the floor's capture showed
+ *  the screen underneath (QA, PR #54 finding 1; measured on tmux 3.7c: with
+ *  `-t` the pane is left in mode, without it the exit is still 1, the words go
+ *  to this client's stdout, and no pane changes). A deleted folder is enough
+ *  to fail the read, at every heartbeat, because tmux goes on reporting it as
+ *  the pane's path. The `has-session` stays: with no server at all,
+ *  `run-shell` fails too, and that is not a refusal. */
+export async function serverReads(dir) {
+  if (!(await tmux(['has-session', '-t', SESSION])).ok) return null;
+  return (await tmux(['run-shell', readsCmd(dir)])).ok;
+}
+
+/** The same question put to a tmux server started now, on a private socket and
+ *  gone straight after. Null if one could not be started. */
+export async function freshReads(dir) {
+  const sock = `orch-check-${process.pid}-${Date.now().toString(36)}`;
+  const made = await tmux(['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', 'check', 'sleep 30']);
+  if (!made.ok) return null;
+  try {
+    return (await tmux(['-L', sock, 'run-shell', readsCmd(dir)])).ok;   // no -t: see serverReads
+  } finally {
+    await tmux(['-L', sock, 'kill-server']);
+  }
+}
+
+let renewing = null;
+let renewedHook = null;
+/** index.js passes a function that puts a line on each moved desk. */
+export function onServerRenewed(fn) { renewedHook = fn; }
+
+/* Folders the floor's server still refused after a move to a fresh one. A
+ * move is made once for a refusal: a second would kill and resume every
+ * window again for nothing, and at the heartbeat that is every minute, each
+ * agent told "carry on" each time (QA, PR #54 finding 2, measured 3 of 3).
+ * Such a folder is said on its desk and skipped, and it leaves this set the
+ * first time the server reads it again. Nobody knows why the refusal came
+ * the first time, so the host does not promise that a second move would
+ * clear what the first did not: the fresh-server check is a private socket
+ * with no tmux.conf, which is not the server the move makes. */
+const stillRefused = new Set();
+
+/** What a desk is told about its window after a move, in the host's words. */
+export function renewNote(refused, m) {
+  if (m.stillRefused) return `the old tmux server had lost macOS permission to read ${refused}, so the host moved every window to a fresh one; the fresh server cannot read ${m.cwd} either. The host will not move the windows again for it.`;
+  if (!m.ok) return `the old tmux server had lost macOS permission to read ${refused}; reopening this desk in a fresh one failed: ${m.error}`;
+  if (!m.sessionId) return `moved to a fresh terminal window: the old tmux server had lost macOS permission to read ${refused}, and a fresh one can. Its window had not started a conversation yet, so it starts one there.`;
+  return `moved to a fresh terminal window: the old tmux server had lost macOS permission to read ${refused}, and a fresh one can.${m.told ? ' Told the agent so.' : ''}`;
+}
+
+/**
+ * Check every window's folder against the server it runs in, and move them
+ * all to a fresh server if any is refused there and readable from a fresh one.
+ * Returns what was done, or null when nothing needed doing.
+ */
+export async function checkServer() {
+  const seen = new Set();
+  for (const p of await panes()) {
+    const dir = canonical(p.cwd);
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if ((await serverReads(dir)) !== false) { stillRefused.delete(dir); continue; }
+    if (stillRefused.has(dir)) continue;
+    // A folder nothing can read — mode 000, or deleted under its window, which
+    // tmux still reports as the pane's path — is no reason to move anything:
+    // a fresh server would be refused it too, at every heartbeat.
+    if ((await freshReads(dir)) !== true) continue;
+    return renewServer(dir);
+  }
+  return null;
+}
+
+/** One move at a time: a second caller waits for the one under way. */
+export function renewServer(refused) {
+  renewing ??= renew(refused).finally(() => { renewing = null; });
+  return renewing;
+}
+
+async function renew(refused) {
+  const others = (await tmux(['list-sessions', '-F', '#{session_name}'])).out?.split('\n').filter((s) => s && s !== SESSION) ?? [];
+  if (others.length) {
+    // The server is the default socket's, so it may hold the person's own
+    // sessions too, and killing it would close them. Said, not done.
+    return { ok: false, refused, error: `the tmux server cannot read ${refused}, and it also runs tmux sessions that are not the floor's (${others.join(', ')}), so the host will not restart it` };
+  }
+  const { sessions = [] } = (await roster()) ?? {};
+  const byPid = new Map(sessions.map((s) => [s.pid, s]));
+  const moving = [];
+  for (const p of await panes()) {
+    const dir = canonical(p.cwd);
+    moving.push({ ...p, cwd: dir, sessionId: byPid.get(p.pid)?.sessionId ?? null, unreadable: (await serverReads(dir)) === false });
+  }
+  warn(`the tmux server cannot read ${refused}; a fresh one can — moving ${moving.length} window(s) to a fresh server`);
+
+  const stop = Date.now() + RENEW_WAIT_MS;
+  for (;;) {
+    let working = 0;
+    for (const p of moving) if (p.sessionId && await busy(p.target)) working++;
+    if (!working || Date.now() >= stop) break;
+    await sleep(1000);
+  }
+  for (const p of moving) {
+    const screen = (await tmux(['capture-pane', '-p', '-t', p.target])).out ?? '';
+    p.asking = !!askingOf(screen);
+    p.interrupted = isBusy(screen);
+  }
+
+  await tmux(['kill-server']);
+  const gone = moving.map((p) => p.pid).filter(Boolean);
+  for (const until = Date.now() + 10_000; Date.now() < until && gone.some(alive);) await sleep(200);
+
+  // Every window comes back, a window with no conversation yet included: it
+  // starts one, as it was about to (most often it stood on a startup question,
+  // which it asks again and the floor offers). Closed and only logged, that
+  // desk lost its window with nothing on the floor to say so (QA, PR #54
+  // Info 6). It is waited for and typed to only with a conversation: there is
+  // nothing to tell a new one, and a window on a startup question would hold
+  // waitReady to its timeout.
+  for (const p of moving) {
+    // `moving`, so that an open the new server refuses as well is said
+    // rather than moved for — from inside this move, open() asking for one
+    // more was this very promise waiting on itself (finding 2: B never
+    // reopened, and checkServer, awaited on the host's line, never returned).
+    p.r = await open(p.cwd, { resume: p.sessionId, moving: true });
+    if (p.r.ok && p.r.created && p.sessionId) await waitReady(p.cwd, { pid: p.r.pid, target: p.r.target });
+  }
+  // Did the move clear what it was for? Read on the new server, before any
+  // agent is told the folder is readable again.
+  for (const p of moving) {
+    p.stillRefused = p.r.code === 'unreadable' || (p.r.ok && (await serverReads(p.cwd)) === false);
+    if (p.stillRefused) stillRefused.add(p.cwd);
+  }
+  const still = moving.filter((p) => p.stillRefused).map((p) => p.cwd);
+  if (still.length) warn(`after moving to a fresh tmux server, it still cannot read ${still.join(', ')}; the host will not move the windows again for that`);
+
+  const moved = [];
+  for (const p of moving) {
+    const r = p.r;
+    const why = !p.sessionId || p.stillRefused ? null
+      : p.interrupted ? 'Your turn was cut off by the move; carry on with what you were doing.'
+        : p.asking ? 'The question or permission request you had open was closed by the move; ask it again.'
+          : p.unreadable ? 'The folder is readable again; if you stopped on a permission error (EPERM), carry on.'
+            : null;
+    if (r.ok && why) {
+      await send(p.cwd, `[Orchestratinator host, not the operator] This window was moved to a fresh terminal server because the old one had lost macOS permission to read this folder. ${why}`);
+    }
+    moved.push({
+      cwd: p.cwd,
+      sessionId: r.resumed ?? p.sessionId,
+      ok: r.ok && !p.stillRefused,
+      stillRefused: p.stillRefused,
+      error: r.ok ? null : r.error ?? null,
+      told: r.ok ? why : null,
+    });
+  }
+  const out = { ok: true, refused, moved };
+  try { renewedHook?.(out); } catch (err) { warn(`after moving to a fresh tmux server: ${err.message}`); }
+  return out;
+}
+
+export async function open(cwd, { resume = null, moving = false } = {}) {
   if (!existsSync(cwd)) return { ok: false, error: `no such directory: ${cwd}` };
 
   const here = canonical(cwd);
   const already = await paneFor(here);
   if (already) return { ok: true, target: already.target, created: false };
+
+  // A window this server starts must be able to read its folder, or Claude
+  // Code exits on its first line with EPERM — see "a tmux server that can no
+  // longer read a desk's folder" above. `moving` is renew() reopening its
+  // windows, and the server it asks is the fresh one; a folder a move has
+  // already failed to clear is not moved for again (see stillRefused).
+  const reads = await serverReads(here);
+  if (reads !== false) stillRefused.delete(here);
+  else if (moving || stillRefused.has(here)) {
+    return { ok: false, code: 'unreadable', error: `the floor's tmux server cannot read ${here}, and moving every window to a fresh server did not change that, so the host will not move them again for it` };
+  } else {
+    const fresh = await freshReads(here);
+    if (fresh === false) {
+      return { ok: false, code: 'unreadable', error: `macOS will not let anything the host starts read ${here} (EPERM), in a new terminal server as well as the current one` };
+    }
+    if (fresh === true) {
+      const r = await renewServer(here);
+      if (!r.ok) return { ok: false, code: 'unreadable', error: r.error };
+      const now = await paneFor(here);
+      if (now) return { ok: true, target: now.target, created: false };
+      // A folder with no window of its own was not among the move's checks.
+      if ((await serverReads(here)) === false) {
+        stillRefused.add(here);
+        return { ok: false, code: 'unreadable', error: `the floor's tmux server cannot read ${here}, and moving every window to a fresh server did not change that, so the host will not move them again for it` };
+      }
+    }
+  }
 
   // A live process claiming this conversation and not in a pane of ours
   // blocks a second copy, whatever kind it is. Opening one "for the floor" is

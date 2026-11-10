@@ -199,6 +199,63 @@ search all return at once and answer later as events; the search goes further
 and runs as a process of its own, because one 70 MB transcript is a third of a
 second of `JSON.parse` on the event loop the relay shares.
 
+**A tmux server can lose the right to read a desk's folder, and the host
+moves every window to a fresh one rather than let a desk see it** (costmo,
+2026-11-10: "I will not accept a user ever seeing this error, even once").
+Measured that day on macOS 27.0.1: the `orch` server, up two days, was
+refused `~/Documents` and everything under it (`System Policy: … deny(1)
+file-read-data` in the kernel log, with tccd never consulted), except
+folders the folder dialog had stamped with a `com.apple.macl` grant. So
+desks taken through the dialog worked, and a desk bound any other way died
+mid-session with "Can't read the current directory (EPERM)", as did every
+window reopened for it. A fresh tmux server started the host's way read all
+of it, and TCC still had the host's Documents grant. Why that one server
+carried the refusal was not found (the log of its first day had rotated), so
+the host does not guess. `checkServer()` runs a 16 ms `run-shell` read of
+each window's folder at every heartbeat, and `open()` runs the same check
+before it makes a window. When the server is refused and a fresh one is not,
+`renewServer()` waits for working windows to end their turn (up to
+`ORCH_RENEW_WAIT_MS`), kills the server, and resumes each conversation in a
+fresh one; a window that had no conversation yet starts one there. An agent
+whose turn was cut off, whose question was closed, or which had met the
+refusal is told in the host's words, and each desk gets a `host` line
+(`renewNote`). It refuses to kill a server that also runs sessions which are
+not the floor's, and an `open()` of a folder that nothing can read (mode
+000, or deleted under its window, which tmux still gives as the pane's path)
+returns `unreadable` with nothing moved. Three rules from QA's review of
+PR #54, each measured:
+- **The read is `run-shell` with no `-t`.** With a target, a refused read
+  writes "returned 1" into that pane and leaves it in view-mode, and
+  `orch:` is a desk's window: its next message went to the mode and the
+  host said `not_delivered`, with the floor's capture showing the screen
+  underneath. Without `-t` the exit is still 1 and no pane changes. Any
+  `run-shell` against the floor's server, by hand included, goes without
+  one.
+- **A move is made once for a refusal.** After the move, the folders are
+  read again on the new server, before any agent is told "readable again".
+  One still refused is said on its desk and kept in `stillRefused`: no
+  check moves for it and no open makes a window in it until the server
+  reads it again. Moving again was a full kill-and-resume at every
+  heartbeat, 3 of 3. `freshReads` is a private socket with no tmux.conf,
+  which is not the server a move makes, so "a fresh server reads it" never
+  promised the move would clear it.
+- **renew()'s own reopens never ask for a move.** They pass `moving`, and
+  a refusal on the new server returns `unreadable` instead. Asking for a
+  move from inside the move returned the promise that was running. It never
+  resolved, so the window was not reopened, and `checkServer()`, awaited on
+  the host's line in `run()`, never returned.
+
+`test:renew` drives it on a socket of its own, never the default, because
+the default socket is the live `orch`. Its refusal belongs to the server
+running when it is set (`refuse()`), as on the day, or `sticky` to every
+server for the move that does not clear it. What it does not drive is
+`index.js`'s two lines, the heartbeat's call and the hook. `test:host` runs
+its host on the default socket beside the live `orch` session, where a
+move is a `kill-server` of the operator's floor (and `renew()`'s own guard
+refuses it because of that session), so the host suite can reach only the
+refusal. The words those two lines carry are `renewNote`, and `test:renew`
+asserts them. **diagnose-handoff** has the readings.
+
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
 [`host/dialog.js`](host/dialog.js), with a backend per platform and only

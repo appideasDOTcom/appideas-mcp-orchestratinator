@@ -430,6 +430,42 @@ are gone within hours, so do not go looking for them after the fact. The
 the board, the forwarder, the VM and the host apart. Its SKILL.md has the
 table for reading one.
 
+## A window that cannot read its own folder (EPERM)
+
+"Can't read the current directory (EPERM)" on a window's first line, or an
+agent's tools getting `Operation not permitted` on its own repo (2026-11-10).
+POSIX modes are not the cause here; the cause is which process is asking.
+The host now moves every window to a fresh server when this happens (CLAUDE.md, "A tmux
+server can lose the right to read a desk's folder"), so seeing it means that
+move did not run or did not work. Read these in order:
+
+```sh
+D=/path/to/the/desk
+# 1. Does the floor's server read it? (exit 0 = yes). Its forks are its windows.
+#    No -t: given a target, a refused read leaves that pane (orch: is a
+#    desk's window) in view-mode, and the desk's next message goes to the
+#    mode, not to Claude Code (QA, PR #54 finding 1). If one is parked, `q`.
+tmux run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
+# 2. Does a fresh server? (the host's freshReads, by hand)
+tmux -L chk -f /dev/null new-session -d -s c 'sleep 30'
+tmux -L chk run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
+tmux -L chk kill-server
+# 3. The kernel's word. Use /usr/bin/log: zsh has a `log` builtin that eats
+#    the arguments ("too many arguments").
+/usr/bin/log show --last 5m --style compact \
+  --predicate 'eventMessage CONTAINS "System Policy" AND eventMessage CONTAINS "'"$D"'"'
+# 4. Which folders that server can read: those carrying a macl grant.
+xattr -px com.apple.macl "$D" 2>/dev/null | tr -d ' \n'; echo
+```
+
+1 refused and 2 reads is the stale server, and the host's heartbeat check
+(`checkServer`, every `ORCH_HOST_HEARTBEAT_MS`) should already have moved
+it. Read `host.log` for "the tmux server cannot read". If both refuse, the
+problem is macOS's grant to the host's process tree, not the server, and
+`open()` says `unreadable`. The agent's own diagnosis will be wrong: on the
+day, it blamed its own `cd` and saved that as a memory. Its process cannot
+lose a grant by changing directory.
+
 ## What not to do
 
 - Do not theorise about environment drift, versions, or infrastructure until
