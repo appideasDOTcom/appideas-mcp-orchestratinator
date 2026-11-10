@@ -2165,7 +2165,43 @@ export async function pick(cwd, { model = null, effort = null } = {}, { open: au
     await clearComposer(pane.target);
     return { ok: false, code: 'no_picker', error: 'the window did not open its model picker', target: pane.target };
   }
-  const row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
+  let row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
+  // A picker in a short pane shows part of its list. Measured on 2.1.322:
+  // under about 30 rows it draws three models and "… +3 models", and an
+  // "↑" on the first row once it has scrolled, so on a window nobody is
+  // attached to (80x24) Sonnet and Haiku were not on screen, and "sonnet"
+  // was refused as not offered. An attached terminal makes the pane taller,
+  // which is why the same pick worked after Open in Claude. Resizing the
+  // pane to read it would be moving the operator's furniture, so the cursor
+  // is walked down the list and then up it, one key at a time, reading the
+  // pane after each, until the name is on screen or the list ends. The walk
+  // below then moves the cursor from wherever this left it.
+  if (name && !row) {
+    const seen = new Map(picker.rows.map((r) => [r.n, r]));
+    for (const dir of ['Down', 'Up']) {
+      for (let i = 0; i < 20 && !row; i++) {
+        const beforeKey = await screenOf(pane.target, 40);
+        await tmux(['send-keys', '-t', pane.target, dir]);
+        await reacted(pane.target, beforeKey);
+        const next = pickerOf(await screenOf(pane.target, 40));
+        if (!next) return { ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while its list was being read' };
+        for (const r of next.rows) seen.set(r.n, r);
+        row = pickerRowFor(next.rows, name);
+        // The end of the list in this direction: the cursor did not move, or
+        // moved onto a row with no number ("▸ More models"), or wrapped.
+        // Leaving a row with no number onto a numbered one counts as moving.
+        const moved = next.cursor != null && (dir === 'Down' ? next.cursor > (picker.cursor ?? -Infinity) : next.cursor < (picker.cursor ?? Infinity));
+        picker = next;
+        if (!moved) break;
+      }
+      if (row) break;
+    }
+    if (!row) {
+      await tmux(['send-keys', '-t', pane.target, 'Escape']);
+      const offered = [...seen.values()].sort((a, b) => a.n - b.n).filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label);
+      return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${offered.join(', ')}` };
+    }
+  }
   if (!row) {
     await tmux(['send-keys', '-t', pane.target, 'Escape']);
     return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${picker.rows.filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label).join(', ')}` };

@@ -100,6 +100,38 @@ not the environment alone, so the survey is not something a probe can currently
 be made to show; `open()` in `host/window.js` says what was done about it
 instead.
 
+## A probe can update the machine's Claude Code
+
+A window started on a profile of its own (`CLAUDE_CONFIG_DIR` pointing at an
+empty directory, as for a first-start measurement) updates the one global
+install of Claude Code that every desk runs. The footer reads
+"Auto-updating…" while it does. **Do not kill the probe until that footer is
+gone.** On 2026-11-09 a probe was torn down about a minute into an npm update
+from 2.1.300 to 2.1.321. That left the old package moved aside as
+`node_modules/@anthropic-ai/.claude-code-<random>`, a 500-byte placeholder
+`claude.exe` in the new one, and no `bin/claude`. Windows already running
+were fine, because each had its binary loaded. Everything that starts
+`claude` fresh failed: the live host's `claude mcp add` logged
+`spawn claude ENOENT`, so a Take a desk on the floor failed, and so would
+every window the floor opened. It went unnoticed for eight hours. It was put
+back by moving the old directory back and relinking `bin/claude`.
+
+`DISABLE_AUTOUPDATER=1` in the pane's environment did not stop it. Measured
+on 2.1.300 with the same profile shape the next day, the window updated the
+install to 2.1.322 and finished. Updating is not the fault, and the
+operator wants Claude Code to update. The fault was interrupting the update.
+So after any probe:
+
+```bash
+claude --version                       # answers, and names the version that is now installed
+ls -la "$(dirname "$(command -v node)")/claude"   # the link exists
+ls -a "$(npm root -g)/@anthropic-ai/"  # no .claude-code-<random> left beside claude-code
+```
+
+A version newer than the one the probe started on is the update having
+finished. Say so in the round's report, since every rule in this skill was
+measured on a version.
+
 ## Getting a window up
 
 Two dialogs stand between `exec claude` and a usable window, and **neither is
