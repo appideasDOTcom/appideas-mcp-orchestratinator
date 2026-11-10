@@ -199,6 +199,31 @@ search all return at once and answer later as events; the search goes further
 and runs as a process of its own, because one 70 MB transcript is a third of a
 second of `JSON.parse` on the event loop the relay shares.
 
+**A tmux server can lose the right to read a desk's folder, and the host
+moves every window to a fresh one rather than let a desk see it** (costmo,
+2026-11-10: "I will not accept a user ever seeing this error, even once").
+Measured that day on macOS 27.0.1: the `orch` server, up two days, was
+refused `~/Documents` and everything under it (`System Policy: … deny(1)
+file-read-data` in the kernel log, with tccd never consulted), except
+folders the folder dialog had stamped with a `com.apple.macl` grant. So
+desks taken through the dialog worked, and a desk bound any other way died
+mid-session with "Can't read the current directory (EPERM)", as did every
+window reopened for it. A fresh tmux server started the host's way read all
+of it, and TCC still had the host's Documents grant. Why that one server
+carried the refusal was not found (the log of its first day had rotated), so
+the host does not guess. `checkServer()` runs a 16 ms `run-shell` read of
+each window's folder at every heartbeat, and `open()` runs the same check
+before it makes a window. When the server is refused and a fresh one is not,
+`renewServer()` waits for working windows to end their turn (up to
+`ORCH_RENEW_WAIT_MS`), kills the server, and resumes each conversation in a
+fresh one. An agent whose turn was cut off, whose question was closed, or
+which had met the refusal is told in the host's words, and each desk gets a
+`host` line. It refuses to kill a server that also runs sessions which are
+not the floor's, and an `open()` of a folder that nothing can read returns
+`unreadable` with nothing moved. `test:renew` drives it on a socket of its
+own, never the default, because the default socket is the live `orch`.
+**diagnose-handoff** has the readings.
+
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
 [`host/dialog.js`](host/dialog.js), with a backend per platform and only

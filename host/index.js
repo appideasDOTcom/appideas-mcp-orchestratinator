@@ -581,6 +581,19 @@ class Host {
   constructor(cfg) {
     this.cfg = cfg;
     this.desks = new Map();
+    // A window moved to a fresh tmux server says so on its desk, in the host's
+    // words — see "a tmux server that can no longer read a desk's folder" in
+    // window.js. A window that is no desk of this board's is only logged.
+    W.onServerRenewed(({ refused, moved }) => {
+      for (const m of moved) {
+        const desk = [...this.desks.values()].find((d) => d.cwd === m.cwd);
+        const text = m.ok
+          ? `moved to a fresh terminal window: the old tmux server had lost macOS permission to read ${refused}, and a fresh one can.${m.told ? ' Told the agent so.' : ''}`
+          : `the old tmux server had lost macOS permission to read ${refused}; reopening this desk in a fresh one failed: ${m.error}`;
+        if (desk) desk.told(text, m.sessionId);
+        else log(`${m.cwd}: ${text}`);
+      }
+    });
     // What discover() last found under the roots that could become a desk;
     // posted with every registration. See rescan().
     this.folders = [];
@@ -1652,6 +1665,10 @@ class Host {
           await this.rescan('heartbeat');
           await this.register();
           lastRegister = Date.now();
+          // On the line, so no window is being typed into while its server
+          // is replaced. Quiet unless a window's folder has become unreadable.
+          const renewed = await W.checkServer().catch((err) => ({ ok: false, error: err.message }));
+          if (renewed && !renewed.ok) warn(renewed.error);
         }
         // The relay starts only after the first registration has landed, and
         // that order is not tidiness. A desk's first watch tick reports which
