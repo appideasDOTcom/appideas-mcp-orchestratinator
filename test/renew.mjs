@@ -222,17 +222,28 @@ async function main() {
   if (typeof lateMove === 'string') throw new Error('the move is waiting on itself; nothing after it can run');
   const ml = lateMove?.moved?.find((m) => m.cwd === late);
   ok(ml?.ok === false && ml.stillRefused === true && /cannot read .* either/.test(W.renewNote(late, ml)), 'its desk is told the fresh server cannot read it either', JSON.stringify(ml));
+  // The words alone do not say nothing moved: an open that moved the floor
+  // again reads the folder on the new server, finds it refused, and returns
+  // the same sentence (QA, PR #54 finding 7). The processes say it.
+  const keptOpen = await panesNow();
   r = await W.open(late, { resume: sess[late] });
-  ok(r.ok === false && r.code === 'unreadable' && /did not change that/.test(r.error), 'an open of it is refused in those words, not moved for', JSON.stringify(r));
+  ok(r.ok === false && r.code === 'unreadable' && /did not change that/.test(r.error), 'an open of it is refused in those words', JSON.stringify(r));
+  ok(JSON.stringify(await panesNow()) === JSON.stringify(keptOpen), 'and nothing is moved for it: the windows are the same processes', JSON.stringify({ keptOpen, now: await panesNow() }));
   writeFileSync(FLAG, '');
   r = await W.open(late, { resume: sess[late] });
   if (r.ok && r.created) await W.waitReady(late, { pid: r.pid, target: r.target, timeoutMs: 8000 });
   ok(r.ok && r.created, 'readable again, it opens', JSON.stringify(r));
 
   await refuse(early, { sticky: true });
+  // received.txt keeps what earlier sections typed, so count around the move.
+  const readableIn = (d) => (readOr(`${d}/received.txt`).match(/readable again/g) ?? []).length;
+  const toldBefore = readableIn(early);
   const earlyMove = await W.checkServer();
   const me = earlyMove?.moved?.find((m) => m.cwd === early);
   ok(me?.ok === false && me.stillRefused === true, 'refused when reopened first: the move finds it still refused', JSON.stringify(me));
+  // Its window did open (it made the new server, so nothing could be read
+  // before it), which is exactly why the gate matters (QA, PR #54 finding 8).
+  ok(me?.told === null && !(await until(() => readableIn(early) > toldBefore, 3000)), 'and its agent is not told the folder is readable again', JSON.stringify({ told: me?.told, received: readOr(`${early}/received.txt`) }));
   const keptE = await panesNow();
   ok((await W.checkServer()) === null, 'and the next check moves nothing');
   ok(JSON.stringify(await panesNow()) === JSON.stringify(keptE), 'the windows are the same processes', JSON.stringify(keptE));
