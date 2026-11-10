@@ -2251,7 +2251,7 @@ export async function pick(cwd, { model = null, effort = null } = {}, { open: au
       await tmux(['send-keys', '-t', pane.target, EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(at) ? 'Right' : 'Left']);
       await reacted(pane.target, beforeKey, 40);
       at = effortRowOf(await screenOf(pane.target, 40));
-      if (!at) return { ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
+      if (!at) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
     }
     if (at !== level) {
       await tmux(['send-keys', '-t', pane.target, 'Escape']);

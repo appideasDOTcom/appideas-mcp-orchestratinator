@@ -1358,13 +1358,15 @@ async function main() {
       // switch back to a model above it walks up. The list ends in "▸ More
       // models", whose footer is "Enter to expand · Esc to cancel", and the
       // cursor goes round: Down from it is row 1, Up from row 1 is it.
+      // lost-foot.flag: after the first arrow the footer is gone and
+      // "Select model" stays, a picker the host cannot read (QA, PR #53 I5).
       `  else if (mode === 'picker') {`,
       `    const MORE = MODELS.length + 1;`,
       `    if (picker.short) { if (picker.cursor < picker.top) picker.top = picker.cursor; if (picker.cursor > picker.top + 2) picker.top = picker.cursor - 2; }`,
       `    const from = picker.short ? picker.top : 1, to = picker.short ? Math.min(MORE, picker.top + 2) : MORE;`,
       `    const rows = []; for (let i = from; i <= to; i++) rows.push('   ' + (picker.cursor === i ? '\\u276f ' : '  ') + (i === MORE ? '\\u25b8   More models' : (i === from && from > 1 ? '\\u2191 ' : '') + i + '.  ' + MODELS[i - 1] + (i === current ? ' \\u2714' : '') + '           For things'));`,
       `    if (to < MORE) rows.push('      \\u2026 +' + (MORE - to) + ' models');`,
-      `    out += top + '\\r\\n   Select model\\r\\n' + rows.join('\\r\\n') + (picker.cursor === MORE ? '\\r\\n   Enter to expand \\u00b7 Esc to cancel' : '\\r\\n   \\u25cb ' + LEVELS[picker.effort][0].toUpperCase() + LEVELS[picker.effort].slice(1) + ' effort \\u2190/\\u2192 to adjust\\r\\n   Enter to set as default \\u00b7 s to use this session only \\u00b7 Esc to cancel');`,
+      `    out += top + '\\r\\n   Select model\\r\\n' + rows.join('\\r\\n') + (picker.lost && picker.moved ? '\\r\\n   \\u2026' : picker.cursor === MORE ? '\\r\\n   Enter to expand \\u00b7 Esc to cancel' : '\\r\\n   \\u25cb ' + LEVELS[picker.effort][0].toUpperCase() + LEVELS[picker.effort].slice(1) + ' effort \\u2190/\\u2192 to adjust\\r\\n   Enter to set as default \\u00b7 s to use this session only \\u00b7 Esc to cancel');`,
       `  }`,
       `  else {`,
       `    const lines = composer.split('\\n');`,
@@ -1378,7 +1380,7 @@ async function main() {
       `  const cmd = /^\\/(\\w+)(?:\\s+(.*))?$/s.exec(text.trim());`,
       `  if (cmd && cmd[1] === 'btw') { mode = 'btw'; pending = { q: cmd[2] ?? '', done: false }; setTimeout(() => { if (mode === 'btw' && pending) { pending.done = true; draw(); } }, 1500); return draw(); }`,
       `  if (cmd && cmd[1] === 'cost') { mode = 'cost'; return draw(); }`,
-      `  if (cmd && cmd[1] === 'model' && !cmd[2]) { mode = 'picker'; picker = { cursor: current, effort: 0, top: 1, short: fs.existsSync(${JSON.stringify(`${CP_DIR}/short-picker.flag`)}) }; return draw(); }`,
+      `  if (cmd && cmd[1] === 'model' && !cmd[2]) { mode = 'picker'; picker = { cursor: current, effort: 0, top: 1, lost: fs.existsSync(${JSON.stringify(`${CP_DIR}/lost-foot.flag`)}), moved: false, short: fs.existsSync(${JSON.stringify(`${CP_DIR}/short-picker.flag`)}) }; return draw(); }`,
       `  if (cmd && cmd[1] === 'compact') {`,
       `    rec({ type: 'user', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args>' } });`,
       // Six seconds: long enough that the message sent behind /compact lands
@@ -1409,7 +1411,7 @@ async function main() {
       `    if (!acc.length) return;`,
       `    if (acc.startsWith('\\x1b[A') || acc.startsWith('\\x1b[B') || acc.startsWith('\\x1b[C') || acc.startsWith('\\x1b[D')) {`,
       `      const k = acc.slice(0, 3); acc = acc.slice(3); key(k);`,
-      `      if (mode === 'picker') { const MORE = MODELS.length + 1; if (k === '\\x1b[A') picker.cursor = picker.cursor === 1 ? MORE : picker.cursor - 1; if (k === '\\x1b[B') picker.cursor = picker.cursor === MORE ? 1 : picker.cursor + 1; if (k === '\\x1b[C') picker.effort = Math.min(LEVELS.length - 1, picker.effort + 1); if (k === '\\x1b[D') picker.effort = Math.max(0, picker.effort - 1); if (picker.short) setTimeout(draw, 400); else draw(); }`,
+      `      if (mode === 'picker') { picker.moved = true; const MORE = MODELS.length + 1; if (k === '\\x1b[A') picker.cursor = picker.cursor === 1 ? MORE : picker.cursor - 1; if (k === '\\x1b[B') picker.cursor = picker.cursor === MORE ? 1 : picker.cursor + 1; if (k === '\\x1b[C') picker.effort = Math.min(LEVELS.length - 1, picker.effort + 1); if (k === '\\x1b[D') picker.effort = Math.max(0, picker.effort - 1); if (picker.short) setTimeout(draw, 400); else draw(); }`,
       `      continue;`,
       `    }`,
       `    if (acc.startsWith('\\x1b\\r')) { acc = acc.slice(2); key('M-Enter'); if (mode === 'composer') { composer += '\\n'; draw(); } continue; }`,
@@ -1516,6 +1518,23 @@ async function main() {
     eq(offList.error, '"gpt" is not on the window\'s picker — it offers Opus 5.5, Fable 5.1, Sonnet 5.5, Haiku 5.5', 'naming every row the walk read, not only the first screen');
     eq(pickerKeys2(mark), [D, D, D, D, U, U, U, U, U, U, '"Escape"'], 'from Opus: down onto "More models", up round to it again, then Escape — each pass stops there and never goes round twice');
     rmSync(`${CP_DIR}/short-picker.flag`);
+
+    // A picker the host loses track of mid-walk is closed, not left standing
+    // to take the desk's next keys. Both walks that can lose it (QA, PR #53 I5).
+    writeFileSync(`${CP_DIR}/lost-foot.flag`, '');
+    mark = cpKeyLog().length;
+    const lostRow = await W.pick(CP_DIR, { model: 'sonnet' });
+    eq(lostRow.code, 'picker_gone', 'a picker that stops reading as one while the cursor moves is given up on');
+    eq(pickerKeys2(mark), [D, '"Escape"'], 'and closed with Escape, since "Select model" is still on screen');
+    mark = cpKeyLog().length;
+    const lostEffort = await W.pick(CP_DIR, { effort: 'high' });
+    eq(lostEffort.code, 'picker_gone', 'the same while the effort row is moved');
+    eq(pickerKeys2(mark), ['"\\u001b[C"', '"Escape"'], 'closed with Escape there too');
+    rmSync(`${CP_DIR}/lost-foot.flag`);
+    mark = cpKeyLog().length;
+    const afresh = await W.pick(CP_DIR, { model: 'opus' });
+    assert(afresh.ok, `and the desk's next pick opens its picker afresh${afresh.ok ? '' : ` — ${afresh.error}`}`);
+    eq(pickerKeys2(mark), ['"s"'], 'on Opus, where it was, so only s');
 
     // /compact: confirmed on the command's record while the window compacts,
     // and a message behind it is said to be held — not timed out.
