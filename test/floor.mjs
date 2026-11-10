@@ -1668,7 +1668,7 @@ try {
     const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/chat-controls-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
@@ -1697,6 +1697,8 @@ try {
     eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'claude-sonnet-5-5' }), 'sonnet', 'an id asked for reads as its family');
     eq(page.modelSelectValue({ model: 'claude-haiku-5-5', model_requested: 'gpt-9' }), 'haiku', 'but an ask the control has no row for leaves the confirmed one showing');
     eq(page.modelSelectValue({ model: null }), '', 'and nothing known is nothing selected');
+    eq(page.PAGE_MODELS.filter((m) => /\d/.test(m.label)), [], 'the model control names families, never a version: the window\'s picker decides the version (costmo, 2026-11-09)');
+    eq(page.PAGE_MODELS.every((m) => page.modelFamily(m.label) === m.value), true, 'and each label reads as the family its value sends');
     eq(page.effortSelectValue({ effort: 'low', effort_requested: 'high' }), 'high', 'the effort select shows the asked-for level while pending');
     eq(page.effortSelectValue({ effort: 'low' }), 'low', 'else the confirmed one');
   }

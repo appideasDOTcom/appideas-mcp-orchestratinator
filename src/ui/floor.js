@@ -4230,12 +4230,19 @@
   ];
   const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
   /** The picker's rows the floor offers by name; the host matches the name
-   *  against the window's own picker, so a model not here still works typed. */
+   *  against the window's own picker, so a model not here still works typed.
+   *  Families only, never versions (costmo, 2026-11-09). The value was
+   *  always the bare family, and the host takes the first row of that
+   *  family the window's picker lists (`pickerRowFor`), so a version here
+   *  was only ever a label, and the first release after it made the label
+   *  wrong: on 2.1.322 the picker lists Fable 5.2 and no 5.1, and "Fable 5.1"
+   *  switched a desk to 5.2. The version a desk runs is the header's, in the
+   *  window's own words. */
   const MODEL_CHOICES = [
-    { value: 'fable', label: 'Fable 5.1' },
-    { value: 'opus', label: 'Opus 5.5' },
-    { value: 'sonnet', label: 'Sonnet 5.5' },
-    { value: 'haiku', label: 'Haiku 5.5' },
+    { value: 'fable', label: 'Fable' },
+    { value: 'opus', label: 'Opus' },
+    { value: 'sonnet', label: 'Sonnet' },
+    { value: 'haiku', label: 'Haiku' },
   ];
 
   /**

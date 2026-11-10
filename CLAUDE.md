@@ -449,7 +449,15 @@ a reasonable argument behind it.
   new sessions"); the probe changed the operator's and they had to be put
   back by hand. The window's picker has `s` for this session only, so the
   host drives it (`pick`): `/model` + Enter, ↑/↓ to the row (a digit
-  SELECTS and starts the switch, so digits are never pressed), ←/→ along
+  SELECTS and starts the switch, so digits are never pressed; in a pane
+  under ~30 rows, 2.1.322 shows three models and "… +3 models", so a row
+  not on screen is looked for by walking the cursor, never by resizing
+  the pane — the floor's Sonnet and Haiku failed on every unattached
+  window until it did, 2026-11-09. The list is a ring ending in "▸ More
+  models", whose footer is "Enter to expand · Esc to cancel", and that is
+  still the picker; read as gone, it was left open and took the desk's
+  next /model. Read before and after each key at one size: `-S -N` on a
+  pane with history differs by size, QA PR #53), ←/→ along
   the effort row, `s`, and `1` on the "Switch model?" cache warning. The
   chat route refuses a bare `/model` (a picker nobody is driving) and an
   effort level the picker has no row for; the page offers both as controls
