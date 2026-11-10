@@ -1271,6 +1271,19 @@ async function main() {
     ].join('\n'));
     eq(PICKER_322?.rows.map((r) => r.n), [1, 2, 3, 4, 5], 'on 2.1.322 the "More models" row is not a model row');
     eq(W.pickerRowFor(PICKER_322.rows, 'fable')?.label, 'Fable 5.2', 'and the floor\'s "Fable" takes whatever Fable the window offers, so a release needs no change on the floor');
+    // The same picker at 80x24 with the cursor moved past Haiku, captured
+    // 2026-11-09: its footer changes, and it is still the picker.
+    const ON_MORE = W.pickerOf([
+      '   Select model',
+      '   Switch between Claude models. Your pick becomes the default for new',
+      '   sessions. For other/previous model names, specify with --model.',
+      '   ↑ 4.  Sonnet 5.5             Most efficient for simpler tasks',
+      '     5.  Haiku 5.5 ✔            Fastest for quick answers',
+      '   ❯ ▸   More models',
+      '   Enter to expand · Esc to cancel',
+    ].join('\n'));
+    eq([ON_MORE?.rows.map((r) => r.n), ON_MORE?.cursor], [[4, 5], null], 'with the cursor on "More models" it is still the picker, its cursor on no model');
+    eq(W.pickerOf('   ❯ ▸   More models\n   Enter to expand · Esc to cancel'), null, 'but that footer alone, with no "Select model" over it, is not');
     eq(W.effortRowOf(PICKER), 'low', 'the effort row reads as its level');
     eq(W.effortRowOf(PICKER.replace('○ Low effort', '◐ Medium effort (default)')), 'medium', 'with or without the default mark');
     eq(W.switchConfirmOf('   Switch model?\n   Your next response will be slower\n   ❯ 1. Yes, switch to Haiku 5.5\n     2. No, go back')?.yes, 'Yes, switch to Haiku 5.5',
@@ -1324,7 +1337,7 @@ async function main() {
       `const fs = require('fs');`,
       `const T = ${JSON.stringify(cpJsonl)}; const K = ${JSON.stringify(cpKeys)};`,
       `const rule = '\\u2500'.repeat(80); const top = '\\u2594'.repeat(80);`,
-      `let composer = '', mode = 'composer', picker = null, compactUntil = 0, pending = null, firstEnter = true, n = 0;`,
+      `let composer = '', mode = 'composer', picker = null, current = 2, compactUntil = 0, pending = null, firstEnter = true, n = 0;`,
       `const rec = (o) => fs.appendFileSync(T, JSON.stringify({ uuid: 'c' + (++n), timestamp: new Date().toISOString(), ...o }) + '\\n');`,
       `const key = (s) => fs.appendFileSync(K, mode + '\\t' + JSON.stringify(s) + '\\n');`,
       `const MODELS = ['Default (recommended)  Fable 5.1', 'Opus 5.5', 'Fable 5.1', 'Sonnet 5.5', 'Haiku 5.5'];`,
@@ -1339,13 +1352,19 @@ async function main() {
       `  else if (mode === 'cost') out += '\\u276f /cost\\r\\n' + top + '\\r\\n   Total cost:            $0.0066\\r\\n   Esc to cancel';`,
       // short-picker.flag: three rows at a time, "↑" on the first once it has
       // scrolled and "… +N models" under the last, the way 2.1.322 draws
-      // its picker in a pane under about 30 rows (measured at 80x24).
+      // its picker in a pane under about 30 rows (measured at 80x24), and
+      // each arrow redrawn 400 ms late, as in QA's slow-redraw probe (PR #53).
+      // The picker opens on the current model, ✔, as the real one does, so a
+      // switch back to a model above it walks up. The list ends in "▸ More
+      // models", whose footer is "Enter to expand · Esc to cancel", and the
+      // cursor goes round: Down from it is row 1, Up from row 1 is it.
       `  else if (mode === 'picker') {`,
+      `    const MORE = MODELS.length + 1;`,
       `    if (picker.short) { if (picker.cursor < picker.top) picker.top = picker.cursor; if (picker.cursor > picker.top + 2) picker.top = picker.cursor - 2; }`,
-      `    const from = picker.short ? picker.top : 1, to = picker.short ? Math.min(MODELS.length, picker.top + 2) : MODELS.length;`,
-      `    const rows = []; for (let i = from; i <= to; i++) rows.push('   ' + (picker.cursor === i ? '\\u276f ' : '  ') + (i === from && from > 1 ? '\\u2191 ' : '') + i + '.  ' + MODELS[i - 1] + (i === 2 ? ' \\u2714' : '') + '           For things');`,
-      `    if (to < MODELS.length) rows.push('      \\u2026 +' + (MODELS.length - to) + ' models');`,
-      `    out += top + '\\r\\n   Select model\\r\\n' + rows.join('\\r\\n') + '\\r\\n   \\u25cb ' + LEVELS[picker.effort][0].toUpperCase() + LEVELS[picker.effort].slice(1) + ' effort \\u2190/\\u2192 to adjust\\r\\n   Enter to set as default \\u00b7 s to use this session only \\u00b7 Esc to cancel';`,
+      `    const from = picker.short ? picker.top : 1, to = picker.short ? Math.min(MORE, picker.top + 2) : MORE;`,
+      `    const rows = []; for (let i = from; i <= to; i++) rows.push('   ' + (picker.cursor === i ? '\\u276f ' : '  ') + (i === MORE ? '\\u25b8   More models' : (i === from && from > 1 ? '\\u2191 ' : '') + i + '.  ' + MODELS[i - 1] + (i === current ? ' \\u2714' : '') + '           For things'));`,
+      `    if (to < MORE) rows.push('      \\u2026 +' + (MORE - to) + ' models');`,
+      `    out += top + '\\r\\n   Select model\\r\\n' + rows.join('\\r\\n') + (picker.cursor === MORE ? '\\r\\n   Enter to expand \\u00b7 Esc to cancel' : '\\r\\n   \\u25cb ' + LEVELS[picker.effort][0].toUpperCase() + LEVELS[picker.effort].slice(1) + ' effort \\u2190/\\u2192 to adjust\\r\\n   Enter to set as default \\u00b7 s to use this session only \\u00b7 Esc to cancel');`,
       `  }`,
       `  else {`,
       `    const lines = composer.split('\\n');`,
@@ -1359,7 +1378,7 @@ async function main() {
       `  const cmd = /^\\/(\\w+)(?:\\s+(.*))?$/s.exec(text.trim());`,
       `  if (cmd && cmd[1] === 'btw') { mode = 'btw'; pending = { q: cmd[2] ?? '', done: false }; setTimeout(() => { if (mode === 'btw' && pending) { pending.done = true; draw(); } }, 1500); return draw(); }`,
       `  if (cmd && cmd[1] === 'cost') { mode = 'cost'; return draw(); }`,
-      `  if (cmd && cmd[1] === 'model' && !cmd[2]) { mode = 'picker'; picker = { cursor: 2, effort: 0, top: 1, short: fs.existsSync(${JSON.stringify(`${CP_DIR}/short-picker.flag`)}) }; return draw(); }`,
+      `  if (cmd && cmd[1] === 'model' && !cmd[2]) { mode = 'picker'; picker = { cursor: current, effort: 0, top: 1, short: fs.existsSync(${JSON.stringify(`${CP_DIR}/short-picker.flag`)}) }; return draw(); }`,
       `  if (cmd && cmd[1] === 'compact') {`,
       `    rec({ type: 'user', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args>' } });`,
       // Six seconds: long enough that the message sent behind /compact lands
@@ -1373,6 +1392,10 @@ async function main() {
       `  rec({ type: 'user', message: { role: 'user', content: text } });`,
       `  draw();`,
       `}`,
+      // Launch lines first, as a real window's pane has 36–74 lines of
+      // history above its alternate screen (QA, PR #53 finding 1): a read
+      // of N lines is N of these plus the pane, so reads of two sizes differ.
+      `process.stdout.write(Array.from({ length: 60 }, (_, i) => 'launch line ' + (i + 1)).join('\\r\\n') + '\\r\\n');`,
       `process.stdout.write('\\x1b[?1049h\\x1b[?2004h');`,
       `draw();`,
       `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
@@ -1386,7 +1409,7 @@ async function main() {
       `    if (!acc.length) return;`,
       `    if (acc.startsWith('\\x1b[A') || acc.startsWith('\\x1b[B') || acc.startsWith('\\x1b[C') || acc.startsWith('\\x1b[D')) {`,
       `      const k = acc.slice(0, 3); acc = acc.slice(3); key(k);`,
-      `      if (mode === 'picker') { if (k === '\\x1b[A') picker.cursor = Math.max(1, picker.cursor - 1); if (k === '\\x1b[B') picker.cursor = Math.min(MODELS.length, picker.cursor + 1); if (k === '\\x1b[C') picker.effort = Math.min(LEVELS.length - 1, picker.effort + 1); if (k === '\\x1b[D') picker.effort = Math.max(0, picker.effort - 1); draw(); }`,
+      `      if (mode === 'picker') { const MORE = MODELS.length + 1; if (k === '\\x1b[A') picker.cursor = picker.cursor === 1 ? MORE : picker.cursor - 1; if (k === '\\x1b[B') picker.cursor = picker.cursor === MORE ? 1 : picker.cursor + 1; if (k === '\\x1b[C') picker.effort = Math.min(LEVELS.length - 1, picker.effort + 1); if (k === '\\x1b[D') picker.effort = Math.max(0, picker.effort - 1); if (picker.short) setTimeout(draw, 400); else draw(); }`,
       `      continue;`,
       `    }`,
       `    if (acc.startsWith('\\x1b\\r')) { acc = acc.slice(2); key('M-Enter'); if (mode === 'composer') { composer += '\\n'; draw(); } continue; }`,
@@ -1396,7 +1419,7 @@ async function main() {
       `    if (ch === '\\r') { key('Enter'); if (mode !== 'composer') continue; if (firstEnter) { firstEnter = false; continue; } submit(); continue; }`,
       `    if (ch === '\\x15') { key('C-u'); composer = ''; draw(); continue; }`,
       `    key(ch);`,
-      `    if (mode === 'picker' && ch === 's') { const label = MODELS[picker.cursor - 1].replace(/^Default \\(recommended\\)\\s+/, ''); rec({ type: 'user', message: { role: 'user', content: '<local-command-stdout>Set model to \`' + label + '\` for this session only' + (picker.effort ? ' with \`' + LEVELS[picker.effort] + '\` effort' : '') + '</local-command-stdout>' } }); mode = 'composer'; draw(); continue; }`,
+      `    if (mode === 'picker' && ch === 's') { const label = MODELS[picker.cursor - 1].replace(/^Default \\(recommended\\)\\s+/, ''); rec({ type: 'user', message: { role: 'user', content: '<local-command-stdout>Set model to \`' + label + '\` for this session only' + (picker.effort ? ' with \`' + LEVELS[picker.effort] + '\` effort' : '') + '</local-command-stdout>' } }); current = picker.cursor; mode = 'composer'; draw(); continue; }`,
       `    if (mode === 'composer') { composer += ch; draw(); }`,
       `  }`,
       `});`,
@@ -1470,19 +1493,28 @@ async function main() {
     eq(keysSince(mark).filter((k) => k[0] === 'picker').map((k) => k[1]), ['"\\u001b[C"', '"\\u001b[C"', '"s"'], 'two Rights from low to high, then s');
     eq((await W.pick(CP_DIR, { effort: 'absurd' })).code, 'bad_effort', 'a level the picker has no row for is refused without a key');
 
-    // A short pane: the picker shows three models and "… +2 models". Haiku
-    // is below the fold; the cursor is walked down to it, read each step.
+    // A short pane: the picker shows three models and "… +N models", opens
+    // on the current model (Sonnet, from the picks above), and redraws each
+    // arrow 400 ms late, over 60 lines of history. Each walk is read after
+    // every key, so a stale read would stop it short (QA, PR #53).
     writeFileSync(`${CP_DIR}/short-picker.flag`, '');
+    const D = '"\\u001b[B"', U = '"\\u001b[A"';
+    const pickerKeys2 = (from) => keysSince(from).filter((k) => k[0] === 'picker').map((k) => k[1]);
     mark = cpKeyLog().length;
     const low = await W.pick(CP_DIR, { model: 'haiku' });
     assert(low.ok, `a model under the fold of a short picker is picked${low.ok ? '' : ` — ${low.error}`}`);
     eq(low.said, 'Set model to Haiku 5.5 for this session only', 'the model asked for, in the window\'s words');
-    eq(keysSince(mark).filter((k) => k[0] === 'picker').map((k) => k[1]), ['"\\u001b[B"', '"\\u001b[B"', '"\\u001b[B"', '"s"'], 'three Downs from Opus, past the fold to Haiku, then s');
+    eq(pickerKeys2(mark), [D, '"s"'], 'one Down from Sonnet, past the fold to Haiku, then s');
+    mark = cpKeyLog().length;
+    const back = await W.pick(CP_DIR, { model: 'opus' });
+    assert(back.ok, `switching back to a model above the fold is picked${back.ok ? '' : ` — ${back.error}`}`);
+    eq(back.said, 'Set model to Opus 5.5 for this session only', 'Opus, in the window\'s words');
+    eq(pickerKeys2(mark), [D, U, U, U, U, '"s"'], 'from Haiku: one Down onto "More models" ends that pass, then four Ups to Opus, then s');
     mark = cpKeyLog().length;
     const offList = await W.pick(CP_DIR, { model: 'gpt' });
     eq(offList.code, 'model_unknown', 'a model on no row of a short picker is still refused');
     eq(offList.error, '"gpt" is not on the window\'s picker — it offers Opus 5.5, Fable 5.1, Sonnet 5.5, Haiku 5.5', 'naming every row the walk read, not only the first screen');
-    eq(keysSince(mark).filter((k) => k[0] === 'picker').pop()?.[1], '"Escape"', 'and the picker is closed with Escape');
+    eq(pickerKeys2(mark), [D, D, D, D, U, U, U, U, U, U, '"Escape"'], 'from Opus: down onto "More models", up round to it again, then Escape — each pass stops there and never goes round twice');
     rmSync(`${CP_DIR}/short-picker.flag`);
 
     // /compact: confirmed on the command's record while the window compacts,
