@@ -275,7 +275,8 @@ Everything the host knows about a window is a text capture of its pane, and
 **every rule for typing into one was measured, not reasoned**. They are recorded
 in [`.claude/skills/watch-the-window`](.claude/skills/watch-the-window/SKILL.md),
 and the obvious guess is wrong in all four cases: on an AskUserQuestion a digit
-*selects* on a single-select, *toggles* on a multi-select, the free-text row
+*selects* on a single-select (and only *moves* on one drawn with previews,
+below), *toggles* on a multi-select, the free-text row
 *withdraws the form* on a single-select but *opens a field* on a multi, and the
 Submit tab is arrived at by answering the last question rather than walked to. A
 day was spent proving each of those; do not adjust `answerSteps()` in
@@ -323,8 +324,9 @@ none of this needs the operator to sit and click.
 ## A question on the floor
 
 Four rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
-2.1.284). Each is the opposite of what the code did the day before, and each
-had a reasonable argument behind the old way — which is why they are here.
+2.1.284), and a fifth from 2026-11-14. Each is the opposite of what the code
+did the day before, and each had a reasonable argument behind the old way —
+which is why they are here.
 
 - **A form with a question unanswered is never sent.** costmo's ruling. The
   window's own review screen warns "You have not answered all questions" and
@@ -388,8 +390,41 @@ had a reasonable argument behind the old way — which is why they are here.
   the picks, or re-measuring the row on the current window — were
   considered and not chosen; do not re-propose them.
 
+- **A question with previews takes its digit as a move, and the host
+  presses Enter once it has read the cursor on that row.** costmo answered
+  such a form from the floor twice on 2026-11-14 and both failed ("the pane
+  did not change after 1"); the host log holds four more from a designer
+  desk, older than its timestamps. Measured on a probe on 2.1.325: a
+  single-select where *any* option carries a `preview` is drawn side by
+  side, with the choices beside the highlighted one's preview. It has no
+  "Type something." row, and its status line reads "Enter to select · ↑/↓
+  to navigate · n to add notes". There `2` moved the cursor and the form
+  stood, and `Enter` recorded "→ Bravo". A plain question in the same form
+  still takes its digit alone, so "digit, then Enter" everywhere is the old
+  bug back: the Enter answers the next tab with its first row. Tab, Left,
+  Right and Shift+Tab walk a preview tab like any other, and a multi-select
+  given previews is an ordinary multi-select. So `answerSteps` is unchanged,
+  and the host decides at the key: when the pane it is about to press a
+  digit into is a preview question (`previewingOf`, the status line, read
+  positionally and rejoined because it wraps at 80 columns), it sends the
+  digit, waits to read the cursor on that row, presses Enter, and waits for
+  the pane to change (`selectRow`). It is the host's and not the board's
+  because the pane says which layout a question got. That holds for a form
+  built from the call, on a desk whose plugin is older than the fix, and a
+  wrong guess presses nothing. A digit with no row behind it ends as
+  `not_on_row` with no Enter sent. That case is real: the form built from
+  the call used to add "Type something." as row 4 of such a question. The
+  hook now forwards `preview: true` for an option that has one, never the
+  text, and `formFromInput` leaves the row out; that half reaches a desk
+  with the next plugin update. The floor does not draw the previews
+  themselves. That was not asked for and is not backlog by default: a
+  preview is a mock-up of any size, and where it would go on the panel is
+  costmo's call.
+
 `form.mjs` in **measure-a-real-window** raises a real form on a probe window,
-reads it both ways, and answers it through the host's own code.
+reads it both ways, and answers it through the host's own code. `raise.sh`
+beside it raises one and leaves it standing, for pressing keys by hand
+before there is a rule to play.
 
 ## A message to a desk that is working
 
@@ -840,9 +875,32 @@ were measured, and each looks like it could be done more simply:
 
 The operator's calls on what the issue left open (Not established): a
 click anywhere on a desk in a selecting room checks it and does nothing
-else. The mode stays on after an action, with the checks kept, so the
-actions chain, and only a second Nudge while one is still in line is
-refused. Mark read shows its count on the control before it runs.
+else. Mark read shows its count on the control before it runs.
+
+**Selection closes itself once an action is sent** (costmo, 2026-11-14,
+0.12.x; `doneActing`). It used to stay on with the checks kept, so that
+actions could chain and because the results were drawn on the checkboxes
+and the toolbar. That was the developer's call, and he reversed it: a mode
+still on after its action read as unfinished. All four actions close it:
+Nudge, Mark read and Hide when their requests have answered, Meeting room
+when its window opened. A nudge is closed on *sent*, not on *typed*, so
+desks are still in line after it (130 ms to close, 41 s to the last
+verdict in check-select.mjs), and the pending bubble's rule is unchanged.
+With the mode gone, nothing drawn on it can report, so costmo chose where
+a desk that was not reached is said: **one line on the room, under its
+header, and only then** (`missedNote`, `missBar`). It is the action's
+summary with the missed desks named and each reason on hover. A run that
+reached every desk leaves nothing. A desk the Nudge control already said
+it could not reach is on the line too. The line goes on a click, and when
+selection is started or ended by hand (`settleBulk`), which keeps only a
+nudge still in line. One that fails after that is new, and the line comes
+back for it. Two alternatives were offered and not chosen: saying it on
+each desk the way its own control does (the bell's 2.5 s red), and staying
+open only on a failure. Do not re-propose either, or the mode staying on.
+One exception is deliberate: a Meeting room window the browser blocked
+leaves the room selecting with its checks, because nothing was done and
+the remedy is the same click again. A second Nudge while one is in line is
+still refused, now when the room is selected again.
 
 Two more rulings went into the same diff:
 - **A floor unread pill opens its dialog every time** (Decided 5). The

@@ -14,12 +14,16 @@
  * check carried across the rebuild; Space on a focused checkbox, with
  * focus kept; check all / uncheck all; the three controls' words before
  * anything runs. Then a bulk nudge with the panel open on the desk last in
- * line, behind a window that never comes up. Its bubble is read past the
- * 30 s grace, and the host's work log for the order. Then mark read, with
- * a message landing after the draw, and the admin rows. Then hide, with
- * the pills, the counts and a pill restoring a desk unchecked. Last, the
- * bell and the card behaving as they did before, once selecting is over.
- * About 90 s, most of it the nudge.
+ * line, behind a window that never comes up. The room stops selecting by
+ * itself once the nudge is sent, and keeps one line naming the desks it
+ * did not reach; the bubble is read past the 30 s grace, and the host's
+ * work log for the order. The line goes on a real click, in the building,
+ * without riding to the floor. Then mark read, with a message landing
+ * after the draw, and the admin rows; then hide, with the pills and the
+ * counts; each closes the selection and leaves no line. Then the bell and
+ * the card behaving as they did before. Last, a nudge still in line when
+ * its room closed: selecting again, a second nudge refused, and the line
+ * appearing when the window gives up. About 100 s, most of it the nudge.
  */
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -150,56 +154,91 @@ await page.shot(`${out}/select-alpha-all.png`, '#floor-rooms');
 
 // The nudge, behind a window that never comes up: cy is in front of gil,
 // and gives up at 34 s, past the 30 s grace gil's bubble would otherwise run.
+// Selection closes itself once the nudge is sent (costmo, 2026-11-14), so
+// what happened is read off the room's own line and gil's bubble.
+const h0 = roomOf(r, 'alpha').h;
 writeFileSync(ANSWERS, JSON.stringify({ delayMs: 1500, opensUpMs: 2500, never: ['cy'], neverMs: 34000 }));
 const workBefore = work().length;
 const t0 = Date.now();
 await page.click('svg.room[data-channel="alpha"] [data-act="sel-nudge"]');
+await page.waitFor("!document.querySelector('svg.room.selecting')", { timeout: 4000 });
+const closedMs = Date.now() - t0;
+r = await read(page);
+show('the nudge is sent: selection closed itself', r);
+ok(closedMs < 4000, `the room stopped selecting by itself, ${closedMs} ms after the click, with nudges still in line`);
+eq([roomOf(r, 'alpha').control, roomOf(r, 'alpha').desks], ['select desks', ['ed', 'ann', 'bo', 'cy', 'di', 'gil']], 'the control is select desks again and no desk has a checkbox');
+eq(roomOf(r, 'alpha').miss, 'nudge: 4 in line · 2 not nudged — ed, di', 'the two desks the board cannot reach are said on the room, with the four in line counted');
+eq(roomOf(r, 'alpha').h, h0 - 52 + 24, 'the toolbar\'s band is gone and the line\'s is there: the desks clear it');
+await page.shot(`${out}/select-alpha-closed-line.png`, '#floor-rooms');
 const seen = [];
 let pastGrace = null;
 for (;;) {
   await sleep(1000);
   r = await read(page);
   const a = roomOf(r, 'alpha');
-  const line = `${a.desks.join(' ')} | gil bubble ${JSON.stringify(r.panel?.pending ?? [])} | nudge chip ${a.bar?.chips[0]}`;
+  const line = `${a.selecting ? 'SELECTING' : 'closed'} | ${a.miss} | gil bubble ${JSON.stringify(r.panel?.pending ?? [])}`;
   if (seen.at(-1)?.line !== line) { seen.push({ s: ((Date.now() - t0) / 1000).toFixed(1), line }); console.log(`  +${seen.at(-1).s}s ${line}`); }
   const s = (Date.now() - t0) / 1000;
   if (s > 31 && s < 33 && !pastGrace) pastGrace = r.panel?.pending ?? [];
-  if (!a.desks.some((d) => /<in line>|<opening>/.test(d)) || s > 75) break;
+  if (!/in line/.test(a.miss ?? '') || s > 75) break;
 }
 r = await read(page);
 show('after the nudge', r);
 const a = roomOf(r, 'alpha');
 ok(!!pastGrace && pastGrace.length === 1 && /in line — 1 desk ahead on testbox/.test(pastGrace[0]) && !/not recorded/.test(pastGrace[0]),
   `past 30 s, gil's bubble still says where it is in the line, not "not recorded" (${JSON.stringify(pastGrace)})`);
-eq(a.desks, ['ed[x]<not nudged!>', 'ann[x]<nudged>', 'bo[x]<nudged>', 'cy[x]<not nudged!>', 'di[x]<not nudged!>', 'gil[x]<nudged>'], 'each desk says what happened to it');
-eq(a.tagTitles.cy, 'Claude Code is open in that window but has not finished starting — something on screen is waiting for an answer.', 'cy\'s says why, in the host\'s words');
-ok(/^No host on this board/.test(a.tagTitles.ed ?? '') && /open in your editor/.test(a.tagTitles.di ?? ''), 'ed and di say why, in the server\'s words');
-eq(a.bar?.sum, 'nudge: 3 nudged · 3 not nudged — cy, ed, di', 'the toolbar counts every desk and names the ones not nudged');
+ok(!a.selecting && seen.every((x) => x.line.startsWith('closed')), 'the room stayed closed the whole time');
+eq(a.miss, 'nudge: 3 nudged · 3 not nudged — cy, ed, di', 'the room\'s line counts every desk and names the ones not nudged, cy joining when its window gave up');
+const why = Object.fromEntries((a.missTitle ?? '').split('\n').filter((l) => /^\w+: /.test(l)).map((l) => [l.slice(0, l.indexOf(':')), l.slice(l.indexOf(':') + 2)]));
+eq(why.cy, 'Claude Code is open in that window but has not finished starting — something on screen is waiting for an answer.', 'on hover, cy\'s reason in the host\'s words');
+ok(/^No host on this board/.test(why.ed ?? '') && /open in your editor/.test(why.di ?? ''), 'and ed\'s and di\'s in the server\'s words');
 const sent = work().slice(workBefore).filter((w) => w.kind === 'chat');
 eq(sent.map((w) => `${w.agent}:${w.payload?.text}:${w.did}`), ['ann:nudge:typed', 'bo:nudge:typed', 'cy:nudge:error', 'gil:nudge:opened, typed'],
   'the host was sent the windowed desks first, then the windowless, and nothing for the two it cannot reach');
 ok(r.panel?.pending.length === 0, 'gil\'s pending bubble is retired by its turn');
-ok(r.rooms.length === 1 && r.panel?.agent === 'gil', 'the mode stayed on, the panel stayed on gil');
+ok(r.rooms.length === 1 && r.panel?.agent === 'gil', 'the panel stayed on gil');
 await page.shot(`${out}/select-alpha-nudged.png`, '#floor-rooms');
 
+// The line is dismissed by a click, a real one, in the building, where a
+// click on a storey otherwise rides to its floor.
+await page.click('#floor-pick [data-floor=""]');
+await page.waitFor("document.querySelectorAll('#floor-rooms svg.room.collapsed').length === 2");
+r = await read(page);
+eq(roomOf(r, 'alpha').miss, 'nudge: 3 nudged · 3 not nudged — cy, ed, di', 'the line is on the storey in the building too');
+await page.press('svg.room[data-channel="alpha"] .missBar .missText');
+await page.waitFor("!document.querySelector('svg.room .missBar')", { timeout: 3000 });
+r = await read(page);
+ok(r.building && r.floor === '', 'a click on the line takes it away and does not ride to the floor');
+ok(!roomOf(r, 'alpha').selecting && roomOf(r, 'alpha').miss === null, 'the storey is as it was before select desks');
+await page.click('#floor-pick [data-floor="alpha"]');
+await page.waitFor("!document.querySelector('#floor-rooms svg.room.collapsed') && document.querySelectorAll('#floor-rooms svg.room').length === 1");
+r = await read(page);
+eq(roomOf(r, 'alpha').h, h0 - 52, 'and the room is its own height again');
+
 // Mark read, with a message to bo landing after the page drew it.
+await page.click('svg.room[data-channel="alpha"] .roomSel');
+await page.waitFor("!!document.querySelector('svg.room.selecting')");
+r = await read(page);
+eq(roomOf(r, 'alpha').desks, ['ed[ ]', 'ann[ ]', 'bo[ ]', 'cy[ ]', 'di[ ]', 'gil[ ]'], 'selecting again starts from nothing: no checks and no tags left from the nudge');
+await page.click('svg.room[data-channel="alpha"] .selAll');
+await page.waitFor("document.querySelector('svg.room[data-channel=\"alpha\"] [data-act=\"sel-read\"]')?.getAttribute('aria-disabled') === 'false'");
 let top = adminTop();
 db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES ('alpha', 'ann', 'bo', '"late"')`).run();
 const label = await page.evalJs(`(() => { const c = document.querySelector('svg.room[data-channel="alpha"] [data-act="sel-read"]'); const t = c.querySelector('.selChipText').textContent; c.dispatchEvent(new MouseEvent('click', { bubbles: true })); return t; })()`);
-await page.waitFor("[...document.querySelectorAll('svg.room[data-channel=\"alpha\"] .selTag')].some((t) => /^read /.test(t.textContent))");
+await page.waitFor("!document.querySelector('svg.room.selecting')", { timeout: 4000 });
 await sleep(2500);
 r = await read(page);
 show('after mark read', r);
 const lateCaught = label === 'Mark read · 7';
 console.log(`    the control read "${label}" when it was clicked${lateCaught ? ' — the drawn payload, before the late message' : ' — a poll had landed first; the late message was drawn'}`);
-eq(roomOf(r, 'alpha').desks.filter((d) => /<read/.test(d)), ['ed[x]<read 3>', 'bo[x]<read 4>'], 'each desk with a backlog says how many it marked');
+ok(!roomOf(r, 'alpha').selecting && roomOf(r, 'alpha').miss === null, 'mark read closed the selection, and reaching every desk it left nothing on the room');
 eq(adminRows(top).map((x) => `${x.action}:${x.actor}:${x.target}`), ['advance:operator:ed', 'advance:operator:bo'], 'one advance row per desk, by operator');
 eq((await floorDesk('bo'))?.board?.unread ?? 0, lateCaught ? 1 : 0, 'the message that arrived after the draw is still unread on bo');
 eq((await floorDesk('ed'))?.board?.unread ?? 0, 0, 'and ed\'s backlog is read');
 
 // Hide two, then restore one from its pill.
-await page.click('svg.room[data-channel="alpha"] .selAll');   // uncheck all
-await sleep(150);
+await page.click('svg.room[data-channel="alpha"] .roomSel');
+await page.waitFor("!!document.querySelector('svg.room.selecting')");
 await page.click('.desk[data-agent="ann"] .selBox');
 await page.click('.desk[data-agent="bo"] .selBox');
 await sleep(150);
@@ -207,21 +246,20 @@ top = adminTop();
 const metaBefore = roomOf(await read(page), 'alpha').meta;
 await page.click('svg.room[data-channel="alpha"] [data-act="sel-hide"]');
 await page.waitFor("document.querySelectorAll('svg.room[data-channel=\"alpha\"] .deskPill').length === 2");
+await page.waitFor("!document.querySelector('svg.room.selecting')", { timeout: 4000 });
 r = await read(page);
 show('after hide', r);
 eq(roomOf(r, 'alpha').pills, ['ann', 'bo'], 'each hidden desk is a pill under the storey');
 eq(roomOf(r, 'alpha').meta, metaBefore, 'and the storey still counts them');
-eq(roomOf(r, 'alpha').bar?.count, '0 of 4', 'their checks went with them');
+ok(!roomOf(r, 'alpha').selecting && roomOf(r, 'alpha').miss === null, 'hide closed the selection and left nothing on the room');
 eq(adminRows(top).map((x) => `${x.action}:${x.actor}:${x.target}`), ['desk.hide:operator:ann', 'desk.hide:operator:bo'], 'one desk.hide row per desk, by operator');
 await page.click('svg.room[data-channel="alpha"] .deskPill[data-agent="ann"]');
 await page.waitFor("!!document.querySelector('svg.room[data-channel=\"alpha\"] .desk[data-agent=\"ann\"]')");
 r = await read(page);
-eq(roomOf(r, 'alpha').desks.find((d) => d.startsWith('ann')), 'ann[ ]', 'a pill still restores in a selecting room, and the desk comes back unchecked');
+eq(roomOf(r, 'alpha').desks.find((d) => d.startsWith('ann')), 'ann', 'a pill restores its desk, with no checkbox: the room is not selecting');
 await page.shot(`${out}/select-alpha-hidden.png`, '#floor-rooms');
 
-// Done: the one-desk controls are as they were.
-await page.click('svg.room[data-channel="alpha"] .roomSel');
-await page.waitFor("!document.querySelector('svg.room.selecting')");
+// The one-desk controls are as they were, with nothing pressed to end selecting.
 const before = work().length;
 await page.click('.desk[data-agent="ann"] .bell');
 await sleep(4000);
@@ -263,27 +301,39 @@ eq(Number(await page.evalJs(`document.querySelector('#dlg [data-do="advance"]').
 await page.click('#dlg [data-do="cancel"]');
 await page.evalJs(`(() => { const c = document.getElementById('autorefresh'); c.checked = true; c.dispatchEvent(new Event('change')); return true; })()`);
 
-// Leaving and coming back while a nudge is still in line. The first cut's
-// rooms signature read "selecting, nothing checked" and "not selecting" as
-// the same once a result was kept, so neither toggle drew (found here).
+// A nudge still in line when its room has closed, and the room selected
+// again meanwhile. The first cut's rooms signature read "selecting, nothing
+// checked" and "not selecting" as the same once a result was kept, so
+// neither toggle drew (found here).
 writeFileSync(ANSWERS, JSON.stringify({ delayMs: 1200, opensUpMs: 2500, never: ['cy'], neverMs: 9000 }));
 await page.click('svg.room[data-channel="alpha"] .roomSel');
 await page.waitFor("!!document.querySelector('svg.room.selecting')");
 await page.click('.desk[data-agent="cy"] .selBox');
 await sleep(150);
 await page.click('svg.room[data-channel="alpha"] [data-act="sel-nudge"]');
-await page.waitFor("[...document.querySelectorAll('.desk[data-agent=\"cy\"] .selTag')].some((t) => t.firstChild?.textContent === 'opening')");
-await page.click('svg.room[data-channel="alpha"] .roomSel');
-await sleep(400);
+await page.waitFor("!document.querySelector('svg.room.selecting')", { timeout: 4000 });
 r = await read(page);
-ok(!roomOf(r, 'alpha').selecting && roomOf(r, 'alpha').control === 'select desks', 'done selecting with a nudge still in line leaves the mode');
+ok(roomOf(r, 'alpha').control === 'select desks' && roomOf(r, 'alpha').miss === null, 'a nudge that has missed nobody yet closes the selection and leaves no line, in line or not');
 await page.click('svg.room[data-channel="alpha"] .roomSel');
-await sleep(400);
+await page.waitFor("!!document.querySelector('svg.room.selecting')", { timeout: 3000 });
 r = await read(page);
-ok(roomOf(r, 'alpha').selecting, 'and selecting again comes back');
+ok(roomOf(r, 'alpha').selecting, 'selecting again while it is in line comes back');
 eq(roomOf(r, 'alpha').desks.find((d) => d.startsWith('cy')), 'cy[ ]<opening>', 'with the nudge still in line on cy, unchecked but still reporting');
-await page.waitFor("[...document.querySelectorAll('.desk[data-agent=\"cy\"] .selTag')].some((t) => t.firstChild?.textContent === 'not nudged')", { timeout: 20000 });
-ok(true, 'and cy\'s nudge ends as not nudged when its window gives up');
+await page.click('.desk[data-agent="cy"] .selBox');
+await sleep(200);
+r = await read(page);
+eq(roomOf(r, 'alpha').bar?.chips[0], 'sel-nudge:Nudge 1 · 1 opens a window:off', 'and a second nudge of it is not offered while the first is in line');
+await page.click('svg.room[data-channel="alpha"] .roomSel');
+await page.waitFor("!document.querySelector('svg.room.selecting')", { timeout: 3000 });
+ok(true, 'done selecting by hand leaves the mode');
+await page.waitFor("!!document.querySelector('svg.room[data-channel=\"alpha\"] .missBar')", { timeout: 20000 });
+r = await read(page);
+eq(roomOf(r, 'alpha').miss, 'nudge: 1 not nudged — cy', 'a nudge that fails after its room closed is said on the room when it happens');
+// Enter on the focused line, as the pointer: it goes.
+await page.evalJs(`document.querySelector('svg.room[data-channel="alpha"] .missBar').focus(); document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); true`);
+await page.waitFor("!document.querySelector('svg.room .missBar')", { timeout: 3000 });
+ok(true, 'and Enter on the focused line dismisses it');
+r = await read(page);
 if (r.errors?.length) ok(false, `no page errors (${JSON.stringify(r.errors)})`);
 
 console.log(`\n${fails ? `${fails} ✗ · FAIL` : 'PASS'}`);

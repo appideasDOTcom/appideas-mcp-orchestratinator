@@ -2697,7 +2697,8 @@ export function questionOf(screen) {
     if (m) tabs.push({ title: m[2].trim(), answered: m[1] === '\u2612', submit: m[1] === '\u2714' });
   }
 
-  // A single-select draws a preview panel to the right of the choices, so every
+  // A single-select whose options carry previews draws a preview panel to
+  // the right of the choices (previewingOf has what else it changes), so every
   // line of the list has somebody else's box on the end of it. Cut by *column*,
   // not by box character: the panel's own text ("Notes: press n to add notes")
   // sits inside it on lines that carry no border at all, and cutting on the
@@ -2990,9 +2991,20 @@ export async function answerQuestion(cwd, steps = []) {
     // somebody typed.
     const arg = typeof step.text === 'string' ? ['-l', step.text] : [String(step.key)];
     if (typeof step.text !== 'string' && !step.key) continue;
+    // A question drawn with a preview panel takes its digit as a move, not a
+    // choice (previewingOf). Read off the screen this key is about to go to,
+    // so it holds for a form built from the call as for one read off the pane.
+    const moves = typeof step.text !== 'string' && /^[1-9]$/.test(String(step.key)) && previewingOf(seen);
     const r = await tmux(['send-keys', '-t', pane.target, ...arg]);
     if (!r.ok) return { ok: false, error: r.error, done };
     const name = typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key);
+    if (moves) {
+      done.push(name);
+      const took = await selectRow(pane.target, Number(step.key));
+      if (!took.ok) return { ...took, done };
+      done.push('Enter(select)');
+      continue;
+    }
     if (typeof step.settle === 'number') await sleep(step.settle);
     // Kept for the report, not acted on: a key the pane did not visibly react
     // to is not a failure by itself — the walk to the left end is meant to be
@@ -3084,6 +3096,89 @@ export async function answerQuestion(cwd, steps = []) {
       `${quiet.length ? `; the pane did not change after ${quiet.join(', ')}` : ''}`,
   };
 }
+
+/**
+ * Whether the question on screen is drawn with a preview panel, read from its
+ * bottom lines.
+ *
+ * A single-choice question where any option carries a `preview` is drawn
+ * side by side: the choices on the left, the highlighted one's preview in a
+ * box on the right, no "Type something." row, and a status line of its own:
+ *
+ *     Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+ *
+ * On that layout a digit only moves the cursor, and Enter is what selects.
+ * Measured on 2.1.325 (2026-11-14) on a probe, after the floor failed to
+ * answer such a form twice on a live desk ("the pane did not change after
+ * 1", the cursor having started on row 1): `2` moved the cursor and swapped
+ * the preview, the form stood, and `Enter` then recorded "→ Bravo". Alone it
+ * submitted; as the first of two questions it went on to the next tab. A
+ * plain question beside it still took its digit alone, as it always has, so
+ * an Enter after *that* digit would answer the tab it had moved on to. One
+ * option of three with a preview is enough for the layout, and a
+ * multi-select given previews is drawn as an ordinary multi-select.
+ *
+ * So the layout is told by the status line and by nothing about the call.
+ * "n to add notes" is on it and on no other form's. Positional, and
+ * rejoined, for askingOf's reasons: at 80 columns the line wraps after
+ * "Tab to switch questions ·".
+ */
+export function previewingOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const foots = lines.slice(-3).join(' ').replace(/\s+/g, ' ');
+  return /enter to select/i.test(foots) && /\bn to add notes\b/i.test(foots);
+}
+
+/**
+ * On a preview question, the digit has just been sent: see the cursor on
+ * that row, press Enter, and see the window take it.
+ *
+ * Each half is read off the pane, not assumed. Enter selects whatever the
+ * cursor is on, so it is pressed only once the cursor is seen on the row
+ * that was asked for. A digit with no row (a form built from an older
+ * hook's call offers a "Type something." this layout does not draw) moves
+ * nothing, and is said as that with nothing selected. And the pane has to
+ * change after the Enter, or the next key of the script would be pressed
+ * into this question as if it were the next.
+ */
+async function selectRow(target, n) {
+  const said = (screen) => String(screen).split('\n').map((l) => l.trim()).filter(Boolean).slice(-2).join(' / ').slice(0, 180);
+  const stop = Date.now() + SELECT_ROW_MS;
+  let screen = '';
+  let on = false;
+  for (;;) {
+    screen = await screenOf(target);
+    const q = previewingOf(screen) ? questionOf(screen) : null;
+    on = q?.options?.[q.cursor]?.n === n;
+    if (on || Date.now() >= stop) break;
+    await sleep(STEP_POLL_MS);
+  }
+  if (!on) {
+    return {
+      ok: false,
+      code: 'not_on_row',
+      screen,
+      error: `this question takes a number as a move and Enter as the choice, and the cursor was not seen on row ${n} after ${n} was sent,` +
+        ` so Enter was not pressed — its last two lines read "${said(screen)}"`,
+    };
+  }
+  const r = await tmux(['send-keys', '-t', target, 'Enter']);
+  if (!r.ok) return { ok: false, error: r.error };
+  // Changed and still, or just changed: a form that submitted leaves a
+  // working window, whose status line never holds still.
+  if (!(await reacted(target, screen)) && (await screenOf(target)) === screen) {
+    return {
+      ok: false,
+      code: 'not_selected',
+      screen,
+      error: `the window did not take Enter on row ${n} — its last two lines read "${said(screen)}"`,
+    };
+  }
+  return { ok: true };
+}
+
+/** How long the cursor is looked for on the row a digit was sent for, on a preview question. */
+const SELECT_ROW_MS = Number(process.env.ORCH_SELECT_ROW_MS ?? 2000);
 
 /** The review screen's own words. Matching the question rather than the footer
  *  keeps this independent of how many choices the confirmation offers. */

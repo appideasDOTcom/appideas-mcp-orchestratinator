@@ -667,6 +667,17 @@ function askForOptions(store, live, channel, agent, requestId) {
  * this", is not an answer and is left out here as it is there. A lone
  * single-select draws no tab strip; anything else does.
  *
+ * One layout has no free-text row at all: a single-select where any option
+ * carries a `preview`. The window draws it side by side, the choices beside
+ * the highlighted one's preview, and "Type something." is not among them
+ * (measured on 2.1.325, 2026-11-14: three choices on the pane where this
+ * built four). The row is left out for it, because a row offered here and
+ * absent there is a digit that moves nothing. A multi-select given previews
+ * is drawn as any other multi-select and keeps its row. The hook sends the
+ * fact as `preview: true` (plugin/hooks/report.mjs); the call's own input
+ * has the text. The keys for that layout are the host's, read off the pane
+ * at the moment of pressing (`previewingOf`, host/window.js).
+ *
  * Null when the numbering cannot be trusted: no questions, a choice with no
  * label, or a list long enough that the hook may have cut it
  * (plugin/hooks/report.mjs keeps 8 questions of 12 choices; the tool allows 4
@@ -683,6 +694,7 @@ export function formFromInput(input) {
     const given = Array.isArray(q?.options) ? q.options : [];
     if (!str(q?.question) || !given.length || given.length >= 12 || given.some((o) => !str(o?.label))) return null;
     const multi = q.multiSelect === true;
+    const previewed = !multi && given.some((o) => o?.preview === true || (typeof o?.preview === 'string' && o.preview.trim() !== ''));
     const options = given.map((o, k) => ({
       n: k + 1,
       text: str(o.label),
@@ -690,7 +702,7 @@ export function formFromInput(input) {
       checked: multi ? false : null,
       other: false,
     }));
-    options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
+    if (!previewed) options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
     questions.push({
       tab: i, tab_title: str(q.header), strip, question: str(q.question),
       kind: multi ? 'multi' : 'single', options, cursor: 0, submit: multi,
@@ -841,11 +853,21 @@ export function unansweredOf(questions, answers) {
  * Every mechanic here was measured on a real prompt, and two of them are not
  * what you would guess:
  *
- *   - on a single-select a digit only *moves the cursor*; Enter is what selects,
- *     and selecting advances to the next tab by itself;
+ *   - on a single-select a digit *selects*, and selecting advances to the
+ *     next tab by itself, so an Enter after it answers that next tab;
  *   - on a multi-select a digit *toggles that box outright* and leaves the
  *     cursor where it was, so choices are pressed by number and Enter is never
  *     used — there it would toggle whatever the cursor happens to be on.
+ *
+ * One layout is the exception, and its keys are not written here: a
+ * single-select whose options carry previews takes the digit as a move and
+ * Enter as the choice (measured on 2.1.325, 2026-11-14). This still emits the
+ * digit alone for it. The host adds the Enter when the pane it is about to
+ * press into is drawn that way, having read the cursor on the row
+ * (`previewingOf`, `selectRow` in host/window.js). It is the host's because
+ * the pane is what says which layout a question got, for a form built from
+ * the call as for one read off the pane, and an Enter decided here on a
+ * wrong guess would answer the next question with its first row.
  *
  * Positions are counted from the left end rather than detected: which tab is
  * showing is marked by colour, and a plain capture has none. So the sequence

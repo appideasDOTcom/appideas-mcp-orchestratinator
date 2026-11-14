@@ -11,6 +11,9 @@ return JSON.stringify({
     h: Number(r.getAttribute('viewBox').split(' ')[3]),
     meta: r.querySelector('.roomMeta')?.textContent ?? null,
     control: own(r.querySelector('.roomSel')),
+    // The line a finished action left on the room (missedNote), and its reasons.
+    miss: own(r.querySelector('.missBar .missText')),
+    missTitle: r.querySelector('.missBar > title')?.textContent ?? null,
     bar: r.querySelector('.selBar') ? {
       all: r.querySelector('.selAll')?.getAttribute('aria-checked'),
       allText: own(r.querySelector('.selAll .selText')),

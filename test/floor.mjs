@@ -2183,6 +2183,25 @@ try {
     eq(rows(formFromInput(INPUT.slice(1)).questions).map((q) => [q.strip, q.options.at(-1).n, q.options.at(-1).text]), [[true, 5, 'Type something']],
       'a lone multi-select has one, and its free-text row is the next number, spelled as a multi spells it');
     eq(built.questions[0].options[0].detail, 'Use red for the probe.', 'each choice keeps its description');
+    // A question with a preview has no free-text row. The call and the
+    // pane's reading below are one real form (2.1.325 at 80x24, 2026-11-14):
+    // the first question's options each had a preview, the second's none.
+    const PREVIEW_INPUT = [
+      { question: 'Where should it go?', header: 'Where', multiSelect: false, options: [
+        { label: 'Alpha', description: 'first', preview: 'AAA box' }, { label: 'Bravo', description: 'second', preview: 'BBB box' }, { label: 'Charlie', description: 'third', preview: 'CCC box' }] },
+      { question: 'Which plain one?', header: 'Plain', multiSelect: false, options: [{ label: 'Red', description: 'red' }, { label: 'Green', description: 'green' }] },
+    ];
+    const PREVIEW_PANE = [['Where', true, 'single', [[1, 'Alpha', false, null], [2, 'Bravo', false, null], [3, 'Charlie', false, null]]],
+      ['Plain', true, 'single', [[1, 'Red', false, null], [2, 'Green', false, null], [3, 'Type something.', true, null]]]];
+    const flat = (qs) => qs.map((q) => [q.tab_title, q.strip, q.kind, q.options.map((o) => [o.n, o.text, !!o.other, o.checked])]);
+    eq(flat(formFromInput(PREVIEW_INPUT).questions), PREVIEW_PANE,
+      'form-from-input: a question whose options carry a preview is built without "Type something.", as the pane draws it, and the plain one beside it keeps its row');
+    const flagged = PREVIEW_INPUT.map((q) => ({ ...q, options: q.options.map(({ preview, ...o }) => ({ ...o, ...(preview ? { preview: true } : {}) })) }));
+    eq(flat(formFromInput(flagged).questions), PREVIEW_PANE, 'the same from the hook\'s copy, which carries the preview as a flag and not its text');
+    eq(flat(formFromInput([{ ...PREVIEW_INPUT[0], options: [PREVIEW_INPUT[0].options[0], { label: 'Bravo' }, { label: 'Charlie', preview: '  ' }] }]).questions)[0][3].length, 3,
+      'one option with a preview is enough: the window draws the whole question that way (measured)');
+    eq(flat(formFromInput([{ ...PREVIEW_INPUT[0], multiSelect: true }]).questions)[0][3].at(-1), [4, 'Type something', true, false],
+      'and a multi-select given previews keeps its free-text row: it is drawn as any other multi-select (measured)');
     eq(built.tabs.map((t) => t.title), ['Colour', 'Toppings', 'Submit'], 'and the tabs are the headers, then Submit');
     eq([formFromInput(null), formFromInput([]), formFromInput([{ question: 'Q?', options: [{ label: 'A' }, { description: 'no label' }] }]),
       formFromInput([{ question: 'Q?', options: Array.from({ length: 12 }, (_, i) => ({ label: `c${i}` })) }])],
@@ -2716,10 +2735,10 @@ try {
     };
     const { deskRows } = await lift('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */',
       '  /* ---------- a desk\'s place on the floor: the drawing ---------- */', ['deskRows']);
-    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary } = await lift(
+    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary, missedNote, bulkKept } = await lift(
       '  /* ---------- bulk selection: what the page decides ---------- */',
       '  /* ---------- bulk selection: the drawing ---------- */',
-      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary']);
+      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary', 'missedNote', 'bulkKept']);
 
     const CHB = 'bulky';
     const events = hostEvents;
@@ -2847,6 +2866,27 @@ try {
     eq(bulkTag({ kind: 'read', entries: [{ agent: 'hook', state: 'sending', count: 4 }] }, 'hook', null)?.text, 'marking', 'a mark-read still on its way is not called a failure before its answer');
     eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'done' }] }, 'win', { nudge: { ok: true } }), null, 'a desk back from its pill has nothing left to say about the hide');
     eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }] }, 'win', null), { text: 'not hidden', kind: 'bad', title: 'HTTP 500' }, 'and one the hide did not reach says so');
+
+    // Selection closes itself once an action is sent (costmo, 2026-11-14),
+    // so what it did not reach is said on the room, and only that.
+    eq(missedNote({ nudge: rec }), { text: 'nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', title: 'ed: held\nhook: no host' },
+      'a room whose nudge missed desks keeps one line: every desk counted, the missed ones named, each reason on hover');
+    eq(missedNote({ nudge: { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }, { agent: 'cold', state: 'line', host: 'openbox' }] } }), null,
+      'a nudge that has missed nobody leaves nothing on the room, in line or landed');
+    eq(missedNote({ read: { kind: 'read', entries: [{ agent: 'hook', state: 'done', cleared: 4 }] }, hide: { kind: 'hide', entries: [{ agent: 'win', state: 'done' }] } }), null,
+      'nor does a mark read or a hide that reached every desk');
+    eq(missedNote({ nudge: { ...rec, at: 1 }, hide: { kind: 'hide', at: 2, entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }, { agent: 'cold', state: 'done' }] }, read: { kind: 'read', at: 3, entries: [{ agent: 'hook', state: 'done', cleared: 4 }] } })?.text,
+      'hide: 1 hidden · 1 not hidden — win   ·   nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', 'two actions that each missed a desk are both on it, newest first, and one that missed nobody is not');
+    eq(missedNote(null), null, 'and a room that did nothing says nothing');
+    // Seen (the line clicked, or selection started or ended by hand): only
+    // a nudge still in line is kept, for the pending bubble and its verdict.
+    const kept = bulkKept({ nudge: rec, read: { kind: 'read', entries: [{ agent: 'hook', state: 'failed', words: 'x' }] } });
+    eq(kept?.nudge.entries.map((e) => `${e.agent}:${e.state}`), ['cold:line'], 'a seen room keeps only the nudge still in line');
+    eq([missedNote(kept), !!kept.read], [null, false], 'so its line is gone');
+    eq(bulkWait(kept.nudge.entries, 'cold', true)?.note, 'opening its window — the host waits up to 45 s for it', 'and the desk in line still waits on the same facts');
+    kept.nudge.entries[0].state = 'failed'; kept.nudge.entries[0].words = 'never came up';
+    eq(missedNote(kept), { text: 'nudge: 1 not nudged — cold', title: 'cold: never came up' }, 'a nudge that fails after that is new, and the room says it');
+    eq(bulkKept({ nudge: { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }] } }), null, 'with nothing in line, a seen room keeps nothing');
 
     // Decided 5: a desk's unread pill opens its backlog dialog every time.
     // The dialog reads app.js's /api/state copy, polled apart from the

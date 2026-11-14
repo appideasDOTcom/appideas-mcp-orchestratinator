@@ -367,18 +367,27 @@ queue order**, as `run()` does: windowed desks after `delayMs`, windowless
 after their window comes up, and a desk named in `never` with waitReady's
 error after `neverMs`. The answers file is re-read per item.
 [`check-select.mjs`](check-select.mjs) drives both views with
-[`probe-select.js`](probe-select.js), about 2 minutes:
+[`probe-select.js`](probe-select.js), about 2 minutes. Since 2026-11-14
+the selection closes itself once an action is sent, so after each action
+the check waits for `svg.room.selecting` to be gone and reads the room's
+own line (`miss` and `missTitle` in the probe), not tags on checkboxes:
 
 ```bash
 PORT=8905 DB_PATH=/tmp/select.db ORCH_AUTH_TOKEN=k node src/server.js &
 node .claude/skills/verify-ui-change/seed-select.mjs http://localhost:8905 /tmp/select.db /tmp/select-host.json > /tmp/select-work.jsonl &
 node --experimental-websocket .claude/skills/verify-ui-change/check-select.mjs http://localhost:8905 /tmp/shots /tmp/select.db /tmp/select-host.json /tmp/select-work.jsonl
-# … 54 ✓ · PASS
+# … 66 ✓ · PASS
 ```
 
 What it proves beyond the suite: a click on a selecting storey in the
 building checks a desk instead of riding to it. The selection survives a
-rebuild and a change of view, and Space keeps focus on the checkbox. With
+rebuild and a change of view, and Space keeps focus on the checkbox. The
+room stops selecting by itself after each of Nudge, Mark read and Hide
+(130 ms after the Nudge click, with four desks still in line). The room's
+line names the desks not reached and follows the line as it resolves; a
+real click on it in the building dismisses it without riding to the
+floor, and the room's height comes back; mark read and hide, which reach
+every desk, leave no line. With
 the panel open on the desk last in line behind a window that never comes
 up, its bubble still reads `in line — 1 desk ahead on testbox` **past the
 30 s grace**. The host's work log reads windowed first, then windowless,
@@ -400,8 +409,13 @@ out of it:
   rooms are rebuilt only when their signature changes. The first cut wrote
   "selecting, nothing checked" and "not selecting" alike once a result was
   kept, so "done selecting" and selecting again both did nothing. The last
-  step of the check exists for that: leave and come back while a nudge is
-  still in line.
+  step of the check exists for that: select again and leave by hand while
+  a nudge is still in line, then wait for the room's line when it fails.
+
+Three other checks pressed "done selecting" after an action and had to
+stop: check-meeting.mjs, check-popout.mjs and readme-shot.mjs. A click on
+`[data-act="select-room"]` after an action now *starts* a selection. Wait
+for `!document.querySelector('svg.room.selecting')` instead.
 
 ### check-chatbox.mjs — the chat box's height (issue #13, 0.10.17)
 

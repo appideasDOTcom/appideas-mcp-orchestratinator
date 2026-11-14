@@ -305,11 +305,9 @@ None of them should have to be discovered by accident:
     a window opened first (*"Nudge 4 · 2 open a window"*), and each of those
     desks reads *no window*. A desk the board can't reach, such as one held
     by an editor or one with no host, is not sent anything and reads *can't
-    nudge*, with the reason on hover. Afterwards each desk reads *in line*,
-    *opening*, *nudged* or *not nudged* (with the reason). The toolbar
-    counts them and names the ones that weren't nudged. If one of those
-    desks' conversation is open beside you, its message bubble says where it
-    is in the line rather than counting to "not recorded".
+    nudge*, with the reason on hover. If one of the nudged desks'
+    conversation is open beside you, its message bubble says where it is in
+    the line rather than counting to "not recorded".
   - **Mark read** is the backlog dialog's **Mark all read (operator)**, on
     every checked desk with something unread. The count is on the control
     before you press it (*"Mark read · 7"*). It marks up to the newest
@@ -320,10 +318,14 @@ None of them should have to be discovered by accident:
 
   While a room is selecting, a click anywhere on a desk checks or unchecks
   it: nothing rings, nothing opens, and in the building nothing takes you to
-  the floor. The mode stays on after an action, with the same desks checked,
-  so you can chain them (mark a backlog read, then nudge the same desks to
-  look again). **done selecting** ends it, and anything still on its way
-  carries on.
+  the floor. Picking an action ends the selection: once it has been sent
+  (or, for **Meeting room**, once its window has opened) the room is back
+  as it was, and anything still on its way carries on. If an action did not
+  reach a desk, the room keeps one line under its header that counts the
+  desks and names the ones missed (*"nudge: 3 nudged · 1 not nudged —
+  cy"*), with each reason on hover. Click the line to dismiss it. When
+  every desk was reached, nothing is left behind. **done selecting** leaves
+  the selection without doing anything.
 - **Edit avatar.** Rename an agent and pick its look: gender, shirt, hair,
   skin. The name and the look belong to the *agent*, not to one desk, so a
   company agent edited here changes on every floor it sits — which is the

@@ -2046,6 +2046,105 @@ async function main() {
     const wholeRead = await W.readQuestions(wholeForm);
     eq([wholeRead.ok, wholeRead.questions?.length], [true, 2], `the same walk over a form that fits reads both questions — ${wholeRead.error ?? ''}`);
 
+    // A question with previews takes its digit as a move and Enter as the
+    // choice. Measured on 2.1.325 (2026-11-14) after the floor failed twice
+    // on one: `2` moved the cursor and the form stood; `Enter` then recorded
+    // the answer. A plain question in the same form still takes its digit
+    // alone, and an Enter after that one answers the next tab. The stand-in
+    // does both, on the alternate screen, and writes every key it was sent
+    // and what each question was answered with.
+    const previewPane = async (name, tabs) => {
+      const dir = `${PROMPT_DIR}/${name}`;
+      mkdirSync(dir, { recursive: true });
+      const script = `${dir}/run.cjs`;
+      writeFileSync(script, [
+        '#!/usr/bin/env node',
+        `const fs = require('fs');`,
+        `const tabs = ${JSON.stringify(tabs)};`,
+        `let at = 0, cur = 0; const picked = []; const keys = [];`,
+        `const note = () => fs.writeFileSync(${JSON.stringify(`${dir}/keys.json`)}, JSON.stringify({ keys, picked }));`,
+        `const strip = () => tabs.length > 1 ? '←  ' + tabs.map((t, i) => (picked[i] ? '☒ ' : '☐ ') + t.title).join('  ') + '  ✔ Submit  →' : ' ☐ ' + tabs[0].title;`,
+        `const screen = () => {`,
+        `  if (at === tabs.length + 1) return ['⏺ answered: ' + picked.join(', '), '', '─'.repeat(60), '❯ ', '─'.repeat(60), '  ⏵⏵ auto mode on (shift+tab to cycle)'];`,
+        `  if (at === tabs.length) return [strip(), '', 'Review your answers', '', 'Ready to submit your answers?', '', '❯ 1. Submit answers', '  2. Cancel'];`,
+        `  const t = tabs[at];`,
+        `  const rows = t.rows.map((r, i) => (i === cur ? '❯ ' : '  ') + (i + 1) + '. ' + r);`,
+        `  if (!t.preview) return [strip(), '', t.q, '', ...rows, '─'.repeat(60), '  ' + (t.rows.length + 1) + '. Chat about this', '',`,
+        `    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel'];`,
+        `  const box = ['┌──────────────────────┐', '│ ' + (t.rows[cur] + ' box').padEnd(21) + '│', '└──────────────────────┘', 'Notes: press n to add notes'];`,
+        `  const n = Math.max(rows.length, box.length);`,
+        `  const side = Array.from({ length: n }, (_, i) => (rows[i] ?? '').padEnd(34) + (box[i] ?? ''));`,
+        `  return [strip(), '', t.q, '', ...side, '─'.repeat(60), '  Chat about this', '',`,
+        `    'Enter to select · ↑/↓ to navigate · n to add notes · ' + (tabs.length > 1 ? 'Tab to switch questions ·' : 'Esc to cancel'), ...(tabs.length > 1 ? ['Esc to cancel'] : [])];`,
+        `};`,
+        `const draw = () => process.stdout.write('\\x1b[H\\x1b[2J' + screen().join('\\r\\n'));`,
+        `const pick = (i) => { picked[at] = tabs[at].rows[i]; at = tabs.length === 1 ? 2 : at + 1; cur = 0; };`,
+        `process.stdout.write('\\x1b[?1049h');`,
+        `draw(); note();`,
+        `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+        `process.stdin.resume();`,
+        `process.stdin.on('data', (buf) => {`,
+        `  const s = buf.toString('latin1');`,
+        `  if (at > tabs.length) return;`,
+        `  if (/\\x1b[\\[O]D/.test(s)) { keys.push('Left'); at = Math.max(0, at - 1); cur = 0; }`,
+        `  else if (s === '\\t') { keys.push('Tab'); at = Math.min(tabs.length, at + 1); cur = 0; }`,
+        `  else if (s === '\\r') {`,
+        `    keys.push('Enter');`,
+        `    if (at === tabs.length) at = tabs.length + 1; else pick(cur);`,
+        `  } else if (/^[1-9]$/.test(s)) {`,
+        `    keys.push(s);`,
+        `    if (at === tabs.length) { if (s === '1') at = tabs.length + 1; }`,
+        `    else if (tabs[at].preview) { if (Number(s) <= tabs[at].rows.length) cur = Number(s) - 1; }`,
+        `    else if (Number(s) <= tabs[at].rows.length) pick(Number(s) - 1);`,
+        `  } else return;`,
+        `  draw(); note();`,
+        `});`,
+        `setTimeout(() => process.exit(0), 90000);`,
+      ].join('\n'));
+      chmodSync(script, 0o755);
+      await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', dir, script]).catch(() => {});
+      return drawn(dir);
+    };
+    const keysOf = (dir) => JSON.parse(readFileSync(`${dir}/keys.json`, 'utf8'));
+    const WHERE = { title: 'Where', q: 'Where should it go?', rows: ['Alpha', 'Bravo', 'Charlie'], preview: true };
+    const PLAIN = { title: 'Plain', q: 'Which plain one?', rows: ['Red', 'Green', 'Type something.'], preview: false };
+
+    const twoTabs = await previewPane('preview-then-plain', [WHERE, PLAIN]);
+    const two = await W.answerQuestion(twoTabs, [{ key: 'Left' }, { key: 'Left' }, { key: 'Left' }, { key: '2' }, { key: '1' }]);
+    assert(two.ok, `a form with a preview question and a plain one is answered — ${two.error ?? ''}`);
+    eq(two.done, ['Left', 'Left', 'Left', '2', 'Enter(select)', '1', 'Enter(confirm)'],
+      'the preview question gets Enter after its digit, the plain one beside it its digit alone');
+    eq(keysOf(twoTabs), { keys: ['Left', 'Left', 'Left', '2', 'Enter', '1', 'Enter'], picked: ['Bravo', 'Red'] },
+      'and the window recorded the rows that were chosen, not the rows the cursor started on');
+
+    // The case that failed on the live desk: one question, and the choice is
+    // the row the cursor is already on, so the digit changes nothing at all.
+    const lonePreview = await previewPane('lone-preview', [WHERE]);
+    const lone = await W.answerQuestion(lonePreview, [{ key: '1' }]);
+    assert(lone.ok, `a lone preview question answered with its first row is submitted — ${lone.error ?? ''}`);
+    eq([lone.done, keysOf(lonePreview)], [['1', 'Enter(select)'], { keys: ['1', 'Enter'], picked: ['Alpha'] }],
+      'with Enter pressed once the cursor is read on row 1, though the digit moved nothing');
+
+    // A row that is not there. A form built from an older hook's call offers
+    // "Type something." as row 4 on a question this layout draws three rows
+    // for; the digit moves nothing, and Enter would take the row the cursor
+    // was left on. So Enter is not pressed, by this step or the next.
+    const noRow = await previewPane('preview-no-row', [WHERE]);
+    const absent = await W.answerQuestion(noRow, [{ key: '4' }, { key: 'Enter', final: true, clarify: true }]);
+    eq([absent.ok, absent.code, absent.done], [false, 'not_on_row', ['4']], 'a digit for a row the question does not have selects nothing');
+    assert(/cursor was not seen on row 4/.test(absent.error ?? '') && /n to add notes/.test(absent.error ?? ''), `and says what it read off the pane — ${absent.error ?? ''}`);
+    eq(keysOf(noRow), { keys: ['4'], picked: [] }, 'no Enter reached the window, so nothing was answered with the wrong row');
+
+    // The layout is told by the status line, as 2.1.325 drew it at 80
+    // columns, where it wraps; not by the words appearing anywhere.
+    eq([
+      W.previewingOf('←  ☐ Where  ☐ Plain  ✔ Submit  →\n\nWhere should it go?\n\n❯ 1. Alpha                        ┌──────────────────────────────────────────┐\n  2. Bravo                        │ AAA box line one                         │\n  3. Charlie                      ├─── ✂ ─── 5 lines hidden ─────────────────┤\n                                  └──────────────────────────────────────────┘\n\n                                  Notes: press n to add notes\n\n' + `${'─'.repeat(80)}\n  Chat about this\n\nEnter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions ·\nEsc to cancel\n`),
+      W.previewingOf(' ☐ Where\n\nWhere should it go?\n\n❯ 1. Alpha                        ┌────────┐\n  2. Bravo                        │ AAA box│\n  3. Charlie                      └────────┘\n                                  Notes: press n to add notes\n' + `${'─'.repeat(80)}\n  Chat about this\n\nEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n`),
+      W.previewingOf('←  ☒ Where  ☐ Plain  ✔ Submit  →\n\nWhich plain one?\n\n❯ 1. Red\n  2. Green\n  3. Type something.\n' + `${'─'.repeat(80)}\n  4. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n`),
+      W.previewingOf('  Its footer read: Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n  and the digit did nothing.\n' + `${RULE60}\n❯ \n${RULE60}\n  ⏵⏵ auto mode on (shift+tab to cycle)\n`),
+    ], [true, true, false, false],
+      'previewingOf: a preview question is one, wrapped footer or not; a plain question is not; the same words quoted above a composer are not');
+
     // Busy is not stopped, and the difference cost a whole form.
     //
     // A sequence is a dozen keystrokes and the window works between them. When

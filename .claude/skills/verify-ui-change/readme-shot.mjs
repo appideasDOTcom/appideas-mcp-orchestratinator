@@ -101,7 +101,7 @@ console.log(`06-meeting-room at ${roomW}x${roomH}`);
 await room.click('[data-act="meeting-end"]').catch(() => {});
 await room.close().catch(() => {});
 await pause(floor, 2500);
-await floor.click(`svg.room[data-channel="${TT}"] [data-act="select-room"]`).catch(() => {});
+// Opening the room closed the selection by itself; nothing to press.
 await floor.waitFor(`!document.querySelector('svg.room.selecting')`);
 await pause(floor, 800);
 

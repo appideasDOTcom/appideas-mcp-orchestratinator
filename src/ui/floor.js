@@ -87,6 +87,10 @@
      down to clear the band for as long as it is there; roomGeometry and
      deskXY carry the offset, so an envelope lands where the desk is. */
   const SEL_BAND = 52;
+  /* The line a room keeps once selection has closed itself, when an action
+     did not reach a desk (missedNote): one row of text under the header.
+     Carried the way the toolbar's band is, so the desks clear it. */
+  const MISS_BAND = 24;
   const DESK_W = 168;
   const GAP = 30;
   /* One width for every floor: a full row of desks, whatever the room holds.
@@ -407,7 +411,9 @@
     // room most ticks, and a check that lived on the node would be gone at
     // the next one. `bulk` is what the last action of each kind did, desk by
     // desk — kept past the end of selecting, because a nudge still in line
-    // is what the chat panel's pending bubble reads (bulkWait).
+    // is what the chat panel's pending bubble reads (bulkWait), and a desk
+    // an action did not reach is said on the room until it is dismissed
+    // (missedNote).
     select: new Map(),
     bulk: new Map(),
     // A seat change in flight: { channel, agent, act, since }. Outside the DOM
@@ -1330,11 +1336,12 @@
    * `collapsed` is the building view: one row, and the rest of the floor scrolls
    * past it.
    */
-  function roomGeometry(n, collapsed, pillLines = 0, selecting = false) {
+  function roomGeometry(n, collapsed, pillLines = 0, band = 0) {
     const cols = COLS;
     const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / cols));
-    // The selection toolbar's band, under the header, when the room has one.
-    const top = selecting ? SEL_BAND : 0;
+    // The band under the header, when the room has one: the selection
+    // toolbar's, or the line a finished action left (roomBand).
+    const top = band;
     // The last row contributes only what it draws below the desk origin (the
     // nameplate), not a whole cell — a full DESK_H there leaves every room
     // ending in a band of empty carpet that reads as "somebody is missing".
@@ -2571,6 +2578,43 @@
     return `hide: ${parts.filter(Boolean).join(' · ')}`;
   }
 
+  /**
+   * What a room says after selection has closed itself, or null when every
+   * checked desk was reached.
+   *
+   * Selection closes once an action is sent (costmo, 2026-11-14), and the
+   * tags and the toolbar's line that used to report it go with the mode. A
+   * clean run leaves nothing on the room. A desk that was not reached is
+   * the one thing that must still be said, so the room keeps one line under
+   * its header: the action's own summary, every desk counted and the missed
+   * ones named, with each desk's reason on hover in the words it was
+   * refused with. A desk the Nudge control already said it could not reach
+   * is on the line too: it was checked, and it was not nudged.
+   */
+  function missedNote(b) {
+    const recs = ['nudge', 'read', 'hide'].map((k) => b?.[k])
+      .filter((r) => r?.entries?.some((e) => e.state === 'refused' || e.state === 'failed'))
+      .sort((x, y) => (y.at ?? 0) - (x.at ?? 0));
+    if (!recs.length) return null;
+    const why = recs.flatMap((r) => r.entries
+      .filter((e) => e.state === 'refused' || e.state === 'failed')
+      .map((e) => `${e.agent}: ${e.words || 'no reason was given'}`));
+    return { text: recs.map(bulkSummary).join('   ·   '), title: why.join('\n') };
+  }
+
+  /**
+   * What is left of a room's results once the operator has seen them: the
+   * line dismissed, or selection started or ended by hand. Only a nudge
+   * still in line, because the chat panel's pending bubble waits on it
+   * (bulkWait) and it may yet fail. One that does is new, and is said on the
+   * room when it happens. aheadOf counts line entries only, so dropping the
+   * settled ones moves nobody in the line.
+   */
+  function bulkKept(b) {
+    const line = b?.nudge?.entries.filter((e) => e.state === 'line') ?? [];
+    return line.length ? { nudge: { ...b.nudge, entries: line } } : null;
+  }
+
   /* ---------- bulk selection: the drawing ---------- */
 
   /* 11px mono advances about 6.6 units at the room's scale: what the header's
@@ -2595,6 +2639,33 @@
     return live ?? ['nudge', 'read', 'hide'].map((k) => b[k])
       .filter((r) => r?.entries.some((e) => e.agent === agent))
       .sort((x, y) => y.at - x.at)[0] ?? null;
+  }
+
+  /** The band under a room's header: the toolbar while it selects, else the line a finished action left, else none. */
+  function roomBand(channel) {
+    if (ui.select.has(channel)) return SEL_BAND;
+    return missedNote(ui.bulk.get(channel)) ? MISS_BAND : 0;
+  }
+
+  /**
+   * The line a finished action left on a room (missedNote), in its own
+   * band under the header. The whole line is the control: a click takes it
+   * away, and so does starting a selection.
+   */
+  function missBar(c, note, geo) {
+    const g = el('g', {
+      class: 'missBar', transform: `translate(0 ${HEAD_BAND})`,
+      'data-act': 'bulk-seen', 'data-channel': c.channel, 'data-fk': `${c.channel}|bulk-seen`,
+      role: 'button', tabindex: '0', 'aria-label': `${note.text}. Dismiss.`,
+    });
+    g.appendChild(el('rect', { x: 0, y: 0, width: geo.w, height: MISS_BAND, class: 'missBand' }));
+    const room_ = Math.floor((geo.w - (PAD - 6) * 2 - 22) / 5.9);
+    const t = el('text', { x: PAD - 6, y: 16, class: 'missText' });
+    t.textContent = note.text.length > room_ ? `${note.text.slice(0, room_ - 1)}…` : note.text;
+    g.appendChild(t);
+    g.appendChild(el('text', { x: geo.w - PAD + 6, y: 16, 'text-anchor': 'end', class: 'missX' })).textContent = '✕';
+    g.appendChild(el('title')).textContent = `${note.title}\nClick to dismiss.`;
+    return g;
   }
 
   /** A control in the toolbar: a chip the size of a word, disabled with its reason. */
@@ -2710,7 +2781,7 @@
     const { drawn, pills } = deskRows(c);
     const tray = deskPillTray(pills);
     const selecting = ui.select.has(c.channel);
-    const geo = roomGeometry(drawn.length, collapsed, tray.lines, selecting);
+    const geo = roomGeometry(drawn.length, collapsed, tray.lines, roomBand(c.channel));
     const svg = el('svg', {
       class: `room${collapsed ? ' collapsed' : ''}${selecting ? ' selecting' : ''}`,
       viewBox: `0 0 ${geo.w} ${geo.h}`,
@@ -2771,6 +2842,10 @@
       svg.appendChild(sel);
     }
     if (selecting) svg.appendChild(selToolbar(c, drawn, geo));
+    else {
+      const note = missedNote(ui.bulk.get(c.channel));
+      if (note) svg.appendChild(missBar(c, note, geo));
+    }
 
     // Envelopes are appended to this layer so they sit above the furniture and
     // can be removed without touching anything that was drawn from data.
@@ -2843,9 +2918,9 @@
     // list, and a desk that is empty or put away is nowhere an envelope can
     // land, so it is skipped.
     const { drawn } = deskRows(c);
-    // Selecting moves the desks down by the toolbar's band; ask the same way
-    // room() did, or the envelope lands a band above the desk.
-    const geo = roomGeometry(drawn.length, svg.classList.contains('collapsed'), 0, ui.select.has(channel));
+    // A band under the header moves the desks down by its height; ask the
+    // same way room() did, or the envelope lands a band above the desk.
+    const geo = roomGeometry(drawn.length, svg.classList.contains('collapsed'), 0, roomBand(channel));
     const idx = (a) => drawn.findIndex((d) => d.agent === a);
     const from = idx(fromAgent);
     if (from < 0) return;
@@ -5993,15 +6068,19 @@
     const key = `new-${Math.random().toString(36).slice(2, 8)}`;
     let w = null;
     try { w = window.open(`${location.pathname}${meetingQuery({ channel, agents: chip.agents })}`, meetingName(key), popoutFeatures(meetingPlace(window.screen))); } catch { w = null; }
+    // A blocked window is an action that did nothing, so the room stays
+    // selecting with its checks: the remedy is the same click again, and
+    // closing would have the operator check every desk a second time.
     if (!w) { meetSelNote.set(channel, 'meeting room: the browser blocked the window'); render(); return; }
-    meetSelNote.set(channel, `meeting room: ${chip.agents.join(', ')}`);
+    meetSelNote.delete(channel);
     // Out from this click, as a detach is: the floor's composer for each
     // desk goes now. The window's own `here` replaces these within a moment.
     for (const a of chip.agents) {
       ui.outs.set(outKey(channel, a), { at: Date.now(), id: null, meeting: 'new' });
       ui.popWins.set(outKey(channel, a), w);
     }
-    render();
+    // The window is open, so the selection is done with (doneActing).
+    doneActing(channel, ui.select.get(channel));
   }
 
   /** The rooms open in a window now, by id: the Recent list leaves them out, and Resume of one brings it to the front. */
@@ -6529,6 +6608,13 @@
       toggleSelecting(selCtl.dataset.channel);
       return;
     }
+    // The line a finished action left on a room: a click takes it away.
+    const seenCtl = e.target.closest?.('svg.room [data-act="bulk-seen"]');
+    if (seenCtl && ui.on) {
+      settleBulk(seenCtl.dataset.channel);
+      render();
+      return;
+    }
     // While a room is selecting, a click on a desk checks or unchecks it,
     // wherever it lands: the bell, the nameplate, the sign, a pill. Nothing
     // rings, no card or conversation opens, and in the building nothing
@@ -6953,16 +7039,47 @@
     return got;
   };
 
-  /** A room's results are kept while it selects, and while a nudge from it is still in line. */
+  /**
+   * A room's results are kept while it selects, while a nudge from it is
+   * still in line, and while a desk it did not reach is still on the
+   * room's line (missedNote). A run that reached every desk leaves nothing.
+   */
   function pruneBulk(channel) {
     const b = ui.bulk.get(channel);
     if (!b || ui.select.has(channel)) return;
-    if (!b.nudge?.entries.some((e) => e.state === 'line')) ui.bulk.delete(channel);
+    if (!b.nudge?.entries.some((e) => e.state === 'line') && !missedNote(b)) ui.bulk.delete(channel);
+  }
+
+  /** The operator has seen this room's results: only a nudge still in line is kept (bulkKept). */
+  function settleBulk(channel) {
+    const kept = bulkKept(ui.bulk.get(channel));
+    if (kept) ui.bulk.set(channel, kept); else ui.bulk.delete(channel);
+  }
+
+  /**
+   * An action has been sent: the room stops selecting and is drawn as it
+   * was before select desks was pressed (costmo, 2026-11-14). It used to
+   * stay selecting with the same desks checked, so that actions could chain
+   * and because the results were drawn on the checkboxes. The operator's
+   * reading was that a mode still on after its action looks unfinished.
+   * What an action did not reach is said on the room instead (missedNote).
+   *
+   * `set` is the selection the action started from. A room the operator
+   * left and started selecting again while the requests were out has a new
+   * Set, and that one is theirs to end.
+   */
+  function doneActing(channel, set) {
+    if (set && ui.select.get(channel) === set) ui.select.delete(channel);
+    pruneBulk(channel);
+    render();
   }
 
   function toggleSelecting(channel) {
     // What the last Meeting room click came to is about this selection.
     meetSelNote.delete(channel);
+    // Starting or ending by hand is the operator having seen what the last
+    // action left: its line goes, and a nudge still in line carries on.
+    settleBulk(channel);
     if (ui.select.has(channel)) ui.select.delete(channel);
     else {
       ui.select.set(channel, new Set());
@@ -7008,15 +7125,15 @@
    * that desk's: it is recorded against it, shown on it, and the next desk
    * is sent its own.
    *
-   * The mode stays on afterwards, with the same desks checked (the issue's
-   * Not established line, the developer's call). The results are drawn on
-   * the checked desks, which would go with the mode. The actions also
-   * chain: mark a backlog read, then nudge the same desks to look again.
-   * The one guard is a second Nudge while the first is still in line, which
-   * would queue every desk twice.
+   * The mode ends when the action's requests have all answered
+   * (doneActing). Until then the checked desks say `marking` or `in line`
+   * under their boxes, for the moment that lasts. The one guard is a second
+   * Nudge while the first is still in line, which would queue every desk
+   * twice: a room selecting again finds its Nudge off until the line clears.
    */
   async function bulkAct(channel, kind) {
-    if (!ui.select.has(channel)) return;
+    const set = ui.select.get(channel);
+    if (!set) return;
     const desks = checkedHere(channel);
     const b = ui.bulk.get(channel) ?? {};
     ui.bulk.set(channel, b);
@@ -7048,7 +7165,7 @@
         }
       }
       stampFronts(rec);
-      render();
+      doneActing(channel, set);
       tick();
       return;
     }
@@ -7069,7 +7186,7 @@
           e.words = String(err.message ?? err);
         }
       }
-      render();
+      doneActing(channel, set);
       tick();
       return;
     }
@@ -7079,21 +7196,16 @@
       const rec = { kind: 'hide', at: Date.now(), entries: desks.map((d) => ({ agent: d.agent, persona: d.persona, state: 'sending' })) };
       b.hide = rec;
       render();
-      const set = ui.select.get(channel);
       for (const e of rec.entries) {
         try {
           await post('./api/admin/desk/hide', { channel, agent: e.agent });
           e.state = 'done';
-          // A hidden desk is a pill, and its check goes with it. Restored
-          // from the pill later, it comes back unchecked, not still lined up
-          // for whatever this room does next.
-          set?.delete(e.agent);
         } catch (err) {
           e.state = 'failed';
           e.words = String(err.message ?? err);
         }
       }
-      render();
+      doneActing(channel, set);
       tick();
     }
   }
@@ -7552,7 +7664,7 @@
     // different things about what a desk is.
     // Bulk selection's controls, and a desk in a selecting room, which the
     // pointer checks rather than opens.
-    const selEl = document.activeElement?.closest?.('svg.room [data-act="select-room"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
+    const selEl = document.activeElement?.closest?.('svg.room [data-act="select-room"], svg.room [data-act="bulk-seen"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
     if (selEl) {
       e.preventDefault();
       selEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));

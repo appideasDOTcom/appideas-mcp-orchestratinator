@@ -339,6 +339,39 @@ What `form.mjs` was built to measure, and what it found on 2.1.284
   `form.mjs` reads the pane on the socket directly, so only the host's keys
   are delayed.
 
+**A question with previews** (2.1.325, 2026-11-14). Ask for options that
+"each carry the optional preview field" and the window draws the question
+side by side. What was measured, each on a real form:
+
+| form | keys | what the window did |
+|---|---|---|
+| one question, previews | `2` | cursor to row 2, preview swapped, form standing |
+| | then `Enter` | "→ Bravo", form gone, no review screen |
+| preview question, then a plain one | `Left Left Left 2 Enter` | first tab ☒, second tab showing |
+| | then `3` | review screen with Bravo and Blue |
+| plain, preview, plain | `Tab`, `Left`, `Right`, `BTab` on the preview tab | each walked the strip as on a plain tab |
+| one option of three with a preview | (drawn) | the whole question side by side; "No preview available" on the other rows |
+| multi-select given previews | (drawn) | an ordinary multi-select, with "Type something" |
+| one question, previews, three rows | `4` | nothing: no such row, cursor still on row 1 |
+
+The layout has no "Type something." row, its status line is "Enter to select
+· ↑/↓ to navigate · n to add notes · Esc to cancel" (with "Tab to switch
+questions" before the last part in a form of several, wrapping at 80
+columns), and a preview taller than the pane's room is clipped by the
+window ("✂ 5 lines hidden"), so the form itself was not cut at 80x24.
+`form.mjs` answers these through the host as any other form; the rows it
+prints for `formFromInput` match the pane's now that the call-built form
+leaves the free-text row out.
+
+[`raise.sh`](raise.sh) is how the table was made: it raises a form and
+leaves it standing, where `form.mjs` answers or cancels the one it raises.
+
+```bash
+.claude/skills/measure-a-real-window/raise.sh 'one single-select question: header "Where", …' 14
+tmux -L probe send-keys -t p:probe 2; tmux -L probe capture-pane -p -t p:probe | grep -v '^\s*$' | tail -12
+tmux -L probe send-keys -t p:probe Escape     # when done
+```
+
 Timing on a probe is the floor of it, not the case: last digit to "Ready to
 submit your answers?" was 28–57 ms on a window with a short conversation. A
 desk with a long one was not measured — forms are not raised on his desks.

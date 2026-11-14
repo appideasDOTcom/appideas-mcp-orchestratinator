@@ -82,17 +82,14 @@ ok(await m.evalJs(`getComputedStyle(document.querySelector('.topbar')).display =
 ok(!/old answer|old question/.test(await text(m, '#p-turns')), 'the transcript starts now: nothing a desk said before it joined');
 ok(workSince(w0).length === 0, 'opening the room typed into nobody');
 
-const selSum = () => floor.evalJs(`document.querySelector('svg.room.selecting .selSum')?.textContent ?? null`);
-ok(/meeting room: bo, cy, dee/.test(await selSum() ?? ''), 'the toolbar\'s line says what the click came to', await selSum());
+// Opening the room is an action sent, so the selection closes itself
+// (costmo, 2026-11-14) and nothing is left on the room: every desk was reached.
+await floor.waitFor(`!document.querySelector('svg.room.selecting')`, { timeout: 3000 })
+  .then(() => ok(true, 'the floor\'s room stopped selecting by itself when the window opened'), (e) => ok(false, 'the floor\'s room stopped selecting by itself when the window opened', e.message));
+ok(await floor.evalJs(`!document.querySelector('svg.room .missBar') && document.querySelector('svg.room[data-channel="lab"] [data-act="select-room"]')?.textContent.startsWith('select desks')`),
+  'with select desks back on its header and no line left on it');
 
 console.log('\nthe floor while the desks are in it');
-await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
-await sleep(300);
-await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
-await floor.waitFor(`!!document.querySelector('svg.room.selecting')`);
-ok(!/meeting room:/.test(await selSum() ?? ''), 'and forgets it when the selection is done with — it is not left on the line', await selSum());
-await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
-await sleep(300);
 await openOnFloor(floor, 'bo');
 let fp = await floorPanel(floor);
 ok(!fp.composer && fp.back === 'Bring back from the meeting room' && /meeting room/.test(fp.why ?? ''), 'the floor panel for a participant: no composer, and the way back', JSON.stringify(fp));

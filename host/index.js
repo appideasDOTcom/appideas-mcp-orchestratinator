@@ -1443,7 +1443,10 @@ class Host {
           // the pane has, or may have, the operator's choices in it — "did not
           // land" was said about exactly that once, about answers that had
           // landed. What is known is that it was not submitted.
-          const standing = r.code === 'still_asking' || r.code === 'not_confirmed';
+          // A preview question the host could not put its cursor on, or
+          // that did not take Enter, is the same fact: the form is standing
+          // with nothing chosen on that question (selectRow, host/window.js).
+          const standing = ['still_asking', 'not_confirmed', 'not_on_row', 'not_selected'].includes(r.code);
           this.emit({
             type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed',
             message: `${standing ? 'the form was not submitted' : 'your answers did not land'} — ${r.error}`,
