@@ -544,29 +544,62 @@ a reasonable argument behind it.
   `ORCH_BTW_LINGER_MS` for anyone looking at the window, then closed with
   Escape — the host does close it, on purpose, because a dialog left
   standing takes the next message instead of the composer.
-- **A model or effort change from the floor is this session's only**
-  (costmo, #10 Decided 4). `/model <name>` and `/effort <level>` as commands
-  write the person's machine-wide default (`~/.claude/settings.json`
-  `model`, `modelSettings.<model>.effortLevel` — "saved as your default for
-  new sessions"); the probe changed the operator's and they had to be put
-  back by hand. The window's picker has `s` for this session only, so the
-  host drives it (`pick`): `/model` + Enter, ↑/↓ to the row (a digit
-  SELECTS and starts the switch, so digits are never pressed; in a pane
-  under ~30 rows, 2.1.322 shows three models and "… +3 models", so a row
-  not on screen is looked for by walking the cursor, never by resizing
-  the pane — the floor's Sonnet and Haiku failed on every unattached
-  window until it did, 2026-11-09. The list is a ring ending in "▸ More
-  models", whose footer is "Enter to expand · Esc to cancel", and that is
-  still the picker; read as gone, it was left open and took the desk's
-  next /model. Read before and after each key at one size: `-S -N` on a
-  pane with history differs by size, QA PR #53), ←/→ along
-  the effort row, `s`, and `1` on the "Switch model?" cache warning. The
-  chat route refuses a bare `/model` (a picker nobody is driving) and an
-  effort level the picker has no row for; the page offers both as controls
-  and shows asked-for beside confirmed until the window confirms —
-  PreModelSwitch/PostModelSwitch, the stdout record, and the `model` on the
-  transcript's next reply, which is how the header follows a `/model`
-  typed into the window.
+- **A model or effort change from the floor is the window's own command,
+  and so the default for new sessions** (costmo, 2026-11-14, reversing #10
+  Decided 4, so the floor does what the window and the editor do). The
+  host types `/model <name>` or `/effort <level>` like any other command
+  (`send()`), and the window's line is the receipt and names what the
+  board takes as confirmed (`switchedTo`): "Set model to Haiku 5.5 and
+  saved as your default for new sessions", "Set effort level to low (saved
+  as your default for new sessions): …". The default is the machine's the
+  desk's host runs on (`~/.claude/settings.json` `model`,
+  `modelSettings.<model>.effortLevel`). For the eleven days before, a
+  change was "this session only": the host opened the window's picker,
+  walked its rows and pressed `s` (`pick()`, PR #53's short-pane walk
+  with it). That is removed, not kept with Enter in place of `s`, and the
+  reason was measured on 2.1.325: Enter in the picker saves the cursor's
+  row *and* the effort row together ("Set model to Sonnet 5.5 and saved
+  as your default for new sessions with medium effort"), so an effort
+  change on one desk re-saved that desk's model as the machine's default,
+  over whatever another desk had just chosen. The commands save the one
+  thing each names, resolve a family themselves ("fable" was Fable 5.2),
+  and answer an unknown name in words with nothing saved. Do not bring
+  the picker back for either. Four things the command path needed, each
+  measured that day:
+  - **"Switch model?" still stands between a `/model` and its line** on a
+    conversation cached for its model, behind the command as behind the
+    picker. The host answers `1`, once (`switchConfirmOf`, read from the
+    pane's last lines; it used to match the words anywhere in the capture,
+    and a conversation quoting them would have had a `1` typed into its
+    composer).
+  - **A refusal is a `system` record, not a user one.** "Model 'x' not
+    found" is written with subtype `local_command` and its text in
+    `content`. Read as user records only, the host waited out twenty
+    seconds on a window that had answered at once (`stdoutOf`).
+  - **Neither is typed into a working window.** `/model haiku` into a
+    running turn is taken at once and raises "Switch model?" over the
+    work. `/effort` mid-turn was not measured and is held to the same
+    rule. Refused before a key is pressed, in words on the desk.
+  - **The page's selects are written only where they changed**
+    (`fillSelect` in `src/ui/floor.js`). The panel is drawn again on every
+    poll and stream event, and both selects were emptied and refilled each
+    time: twice in the two seconds after a panel opens, then every 2 s.
+    costmo's report was a pick in those first seconds not taking, with the
+    drop-down left open. The rewrites were measured (a MutationObserver's
+    count; 0 now). That they were the cause is read from how Chrome
+    replaces an open select's menu when its rows change, and could not be
+    watched, because a headless browser draws no menu. The selects are
+    also dimmed, with the reason, whenever Send is: a choice goes out
+    through `sendChat`, which sends nothing while the window is asking.
+  The chat route still refuses a bare `/model` (a picker nobody is
+  driving) and an effort level that is not one of the window's; the page
+  shows asked-for beside confirmed until the window confirms —
+  PreModelSwitch/PostModelSwitch, the window's line, and the `model` on
+  the transcript's next reply, which is how the header follows a `/model`
+  typed into the window. Not done, and noticed: a change the host refuses
+  (a working desk) or the window does (an unknown name) leaves "x asked"
+  beside the select until something confirms a model; nothing clears an
+  asked-for on a refusal, and that was so under the picker too.
 - **A paste of four or more lines, or of more than 800 characters, is
   wrapped in `<pasted_content>`** and the model is told it "may contain
   instructions the user did not write" — exactly wrong for the operator's
@@ -1205,9 +1238,9 @@ names each input by its prompt's request id. The panel only ever drew one
 form, which is why the name was never scoped before. A prompt box's
 answering spinner is per desk for the same reason (`ui.answering` is a Map).
 
-Left out on purpose. **Model and effort controls**: a desk's select drives
-its window's picker, so a room would need one per desk; `/model sonnet`
-narrowed to one desk takes the same route. **A reading view**: History
+Left out on purpose. **Model and effort controls**: a desk's select types
+`/model` or `/effort` into its own window, so a room would need one per
+desk; `/model sonnet` narrowed to one desk takes the same route. **A reading view**: History
 reads a meeting desk in the floor's panel, because reading types into
 nothing (renderPanel's `outMeeting` branch). **Audit rows**: a room is a
 window arrangement, like a popout, and popouts write none; the reopens a
@@ -1681,12 +1714,14 @@ with a restore step, the commit landed mid-run, and `8788a6d` reached
 **A composer pane and a command-aware stand-in, since 0.10.9.** The window
 suite's `composer-desk` pane (`run.cjs` in `test/window.mjs`) is a node
 program on the alternate screen that draws what Claude Code draws — a
-composer box, the `/btw` overlay with its answer arriving late, the model
-picker with its effort row, the compaction spinner — writes the records
-Claude Code writes, drops the first Enter the way a paste-consumed one is
-dropped, and logs every key it is sent by mode. That log is how "no Enter
-after a command that opened something" and "two Downs then `s`, never a
-digit" are asserted rather than assumed. The host suite's stand-in answers
+composer box, the `/btw` overlay with its answer arriving late, the
+"Switch model?" warning (with `switch.flag`), the compaction spinner —
+writes the records Claude Code writes (a `/model` or `/effort` line as a
+user record, a refusal as a `system` one), drops the first Enter the way a
+paste-consumed one is dropped, and logs every key it is sent by mode. That
+log is how "no Enter after a command that opened something" and "the
+warning got one key, the digit" are asserted rather than assumed. It drew
+the model picker until 2026-11-14, when the host stopped driving one. The host suite's stand-in answers
 `/clear` with a new session file and a roster change, `/btw` with an
 overlay, and any other command with its `<command-name>` record. Neither
 has a composer the way the real window does for a *typed* message, so the

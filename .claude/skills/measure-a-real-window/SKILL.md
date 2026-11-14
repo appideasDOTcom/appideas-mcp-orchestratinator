@@ -423,10 +423,11 @@ What to know before trusting a reading from it:
   from the floor when the settings change.
 - **`/model <name>` and `/effort <level>` as commands write the operator's
   machine-wide default** (`~/.claude/settings.json` `model`,
-  `modelSettings.<model>.effortLevel`). The probe changed his, twice, and
-  they were put back by hand — read that file before and after any
-  measurement that touches a model, and restore it. The picker's `s` does
-  not write it.
+  `modelSettings.<model>.effortLevel`), and so does Enter in the picker.
+  The probe changed his, twice, and they were put back by hand — copy that
+  file before any measurement that touches a model and put it back after
+  ("A model or effort change", below). Only the picker's `s` does not
+  write it.
 - **A compaction needs a context behind it.** Read `filler.txt` once (~85k
   tokens) for a 10–15 s manual one; `/autocompact 100k` and two reads
   provoked an auto one that thrashed three times and ended in a StopFailure
@@ -483,6 +484,62 @@ predicted — a desk moved back to a floor it had left by a move missing from
 *every* floor's payload, because the move had retired its row there. Give
 the recorders a deadline (`seconds`) longer than the session you plan: they
 stopped at ten minutes here, one move before the last reading was taken.
+
+## A model or effort change
+
+Since 2026-11-14 the floor changes a model or an effort level by typing the
+window's own command, which saves the choice as the default for new
+sessions (costmo's ruling; before it the host drove the picker and pressed
+`s`). Everything below was read off a probe on 2.1.325 that day. The probe
+runs on the operator's own profile, so every one of these writes his
+`~/.claude/settings.json`:
+
+```bash
+cp -p ~/.claude/settings.json "$SP/settings.json.before"; shasum ~/.claude/settings.json
+# … measure …
+cp -p "$SP/settings.json.before" ~/.claude/settings.json; shasum ~/.claude/settings.json   # the same hash
+```
+
+A window started while the file is changed starts on the probe's model, so
+keep the stretch short and put the file back before reading results.
+
+| keys | the window's line | what settings.json gained |
+|---|---|---|
+| `/model`, ↓ to Haiku, Enter | Set model to Haiku 5.5 and saved as your default for new sessions | `model: haiku` |
+| `/model`, ↑ to Sonnet, → on the effort row, Enter | …Sonnet 5.5 and saved as your default for new sessions with high effort | `model: sonnet`, `modelSettings.claude-sonnet-5-5.effortLevel: high` |
+| `/model`, ← on the effort row only, Enter | …Sonnet 5.5 and saved as your default for new sessions with medium effort | the model again, and the effort |
+| `/model opus` | Set model to Opus 5.5 and saved as your default for new sessions | `model: opus` |
+| `/model fable` | Set model to Fable 5.2 and saved… | `model: fable` |
+| `/model nonsense-9` | Model 'nonsense-9' not found | nothing |
+| `/effort low` | Set effort level to low (saved as your default for new sessions): Quick, straightforward… | `modelSettings.<current model>.effortLevel: low`, `model` untouched |
+
+The third row is why the host types the commands and does not press Enter
+in the picker: an effort change there saves the model too. Three more
+things, each seen once on purpose:
+
+- **"Switch model?"** stands between a `/model` and its line whenever the
+  conversation has a reply cached for the current model, behind the command
+  and behind the picker alike. It replaces the composer, its last two lines
+  are `❯ 1. Yes, switch to X` and `2. No, go back`, and `1` answers it.
+  With no reply since the last switch it does not appear.
+- **Into a running turn**, `/model haiku` is taken at once and the warning
+  is drawn over the work. Answered `1`, the line appears as a notice above
+  the composer and the turn carries on. The host refuses instead.
+- **A refusal is recorded differently.** A command that ran writes its
+  `<command-name>` and `<local-command-stdout>` as user records; "Model
+  'x' not found" writes both as `system` records with subtype
+  `local_command` and the text in `content`.
+
+[`send.mjs`](send.mjs) plays any of these through the host's own `send()`
+from the tree, against the probe, with no board or host in the loop. To see
+the host meet the warning, give the conversation a turn first, record the
+pane while it sends, and look for the choice in the recording:
+
+```bash
+(for i in $(seq 1 80); do tmux -L probe capture-pane -p -t p:probe | grep -v '^\s*$' | tail -3 | tr '\n' '|'; echo; sleep 0.08; done) > "$SP/rec.log" &
+ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p node .claude/skills/measure-a-real-window/send.mjs "$SP/probe" '/model sonnet'; wait
+grep -c 'Yes, switch to' "$SP/rec.log"      # above 0: the warning stood, and the send still ended ok
+```
 
 ## How long a closed window stays in the roster
 

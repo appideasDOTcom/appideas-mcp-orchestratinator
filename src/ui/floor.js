@@ -3474,13 +3474,14 @@
              model and effort above, Sessions and Leave desk below; the grid
              is in styles.css and the order here is the reading order. -->
         <div class="p-desk">
-          <!-- The model and the effort level, for this session only: the host
-               drives the window's own picker and presses s. What the window
-               confirmed is selected; what was asked for shows beside it until
-               the picker says so. -->
+          <!-- The model and the effort level: the window's own /model and
+               /effort, so a choice is also the default for new sessions on
+               that machine. What the window confirmed is selected; what was
+               asked for shows beside it until the window says so. Rows,
+               value and title are fillSelect's, in renderPanel. -->
           <span class="p-asked mono muted hidden"></span>
-          <select class="input p-sel" data-act="set-model" title="Change the model for this session only — the window's own picker, with s" aria-label="Model for this session"></select>
-          <select class="input p-sel" data-act="set-effort" title="Change the effort level for this session only — the window's own picker, with s" aria-label="Effort for this session"></select>
+          <select class="input p-sel" data-act="set-model" aria-label="Model, saved as the default for new sessions"></select>
+          <select class="input p-sel" data-act="set-effort" aria-label="Effort level, saved as the default for new sessions"></select>
           <button class="btn" data-act="sessions" title="Pick another of this folder's conversations for the desk, or start a new one">${LINK_LABEL.sessions}</button>
           <!-- The reverse of taking a desk: the binding goes, the window
                closes, the seat stays. Always confirmed in a dialog first.
@@ -3639,6 +3640,35 @@
       ` · ${presence} · ${d.turns} turn${d.turns === 1 ? '' : 's'}`;
   }
 
+  /**
+   * Draw a `<select>`: its rows, its value, whether it can be used, its
+   * title — writing each only when it differs from what is there.
+   *
+   * The panel is drawn again on every poll and every event of the desk's
+   * stream, and both selects used to be emptied and refilled each time,
+   * changed or not. Measured 2026-11-14 with a MutationObserver on a seeded
+   * desk: two rewrites in the two seconds after a panel opens (the turns
+   * landing, then the first poll) and one every two seconds for as long as
+   * it stayed open. costmo's report was a pick in a panel's first seconds
+   * not taking, with the drop-down still open. The rewrites are what was
+   * measured; that they are the cause is read from how Chrome treats an
+   * open select whose rows change (it takes the menu down and puts a new
+   * one up), and was not watched: a headless browser draws no menu, so no
+   * check here can click one. So the rows are compared as they were written
+   * (`drawnRows`, not `innerHTML`, which the browser re-serialises), and an
+   * unchanged select is not touched at all. Rows that really did change —
+   * the "model…" placeholder leaving when the window first names its model
+   * — are written once, as they must be.
+   */
+  const drawnRows = new WeakMap();
+  function fillSelect(sel, rows, value, disabled, title) {
+    const html = rows.map((r) => `<option value="${esc(r.value)}">${esc(r.label)}</option>`).join('');
+    if (drawnRows.get(sel) !== html) { sel.innerHTML = html; drawnRows.set(sel, html); }
+    if (sel.value !== value) sel.value = value;
+    if (sel.disabled !== disabled) sel.disabled = disabled;
+    if (sel.title !== title) sel.title = title;
+  }
+
   function renderPanel() {
     const wrap = $('floor-panel');
     if (!ui.open) {
@@ -3766,31 +3796,26 @@
     wrap.querySelector('.p-persona').textContent = d.persona;
     wrap.querySelector('.p-meta').textContent = panelMeta(d);
     // The model and effort controls: the window's confirmed value selected,
-    // what was asked for beside it until the picker confirms. Both change
-    // this session only (costmo, #10 Decided 4) — the host drives the
-    // window's own picker and presses `s`, never the command that saves a
-    // machine-wide default.
+    // what was asked for beside it until the window confirms. A change is
+    // the window's own /model or /effort, so it is saved as the default for
+    // new sessions on that desk's machine (costmo, 2026-11-14, reversing #10
+    // Decided 4's "this session only").
     const modelSel = wrap.querySelector('[data-act="set-model"]');
     const effortSel = wrap.querySelector('[data-act="set-effort"]');
     if (modelSel && effortSel) {
       const fam = modelFamily(s.model);
-      const known = MODEL_CHOICES.some((m) => m.value === fam);
-      modelSel.innerHTML = [
-        ...(s.model && !known ? [`<option value="${esc(fam)}">${esc(s.model)}</option>`] : []),
-        ...(!s.model ? ['<option value="">model…</option>'] : []),
-        ...MODEL_CHOICES.map((m) => `<option value="${m.value}">${m.label}</option>`),
-      ].join('');
+      // Dimmed exactly when Send is: a choice goes out through the same
+      // door (sendChat), which sends nothing while the window is asking
+      // something, and a control that takes a pick and drops it is worse
+      // than one that says it cannot take one.
+      const why = selectBlock(canChat, held, d.nudge?.code === 'asking', d.persona);
       // While a change is asked for, the select shows it rather than snapping
       // back to the old value until the window confirms; the asked-for note
       // beside it says which it is.
-      modelSel.value = modelSelectValue(s);
-      modelSel.disabled = !canChat;
-      effortSel.innerHTML = [
-        ...(!s.effort ? ['<option value="">effort…</option>'] : []),
-        ...EFFORT_LEVELS.map((l) => `<option value="${l}">${l}</option>`),
-      ].join('');
-      effortSel.value = effortSelectValue(s);
-      effortSel.disabled = !canChat;
+      fillSelect(modelSel, modelOptions(s), modelSelectValue(s), !!why,
+        why ?? 'Change the model — saved as the default for new sessions on this desk’s machine, as /model is');
+      fillSelect(effortSel, effortOptions(s), effortSelectValue(s), !!why,
+        why ?? 'Change the effort level — saved as the default for new sessions on this desk’s machine, as /effort is');
       const asked = wrap.querySelector('.p-asked');
       const askedText = [
         s.model_requested && modelFamily(s.model_requested) !== fam ? `${s.model_requested} asked` : '',
@@ -4299,20 +4324,20 @@
   const FLOOR_COMMANDS = [
     { name: 'clear', args: '', hint: 'start a new conversation on this desk' },
     { name: 'compact', args: '', hint: 'summarise the conversation to free context' },
-    { name: 'model', args: 'name', hint: 'change the model — this session only' },
-    { name: 'effort', args: 'level', hint: 'change the effort level — this session only' },
+    { name: 'model', args: 'name', hint: 'change the model — saved as the default for new sessions' },
+    { name: 'effort', args: 'level', hint: 'change the effort level — saved as the default for new sessions' },
     { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools' },
   ];
   const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
-  /** The picker's rows the floor offers by name; the host matches the name
-   *  against the window's own picker, so a model not here still works typed.
+  /** The models the floor offers by name; the name goes to the window's own
+   *  /model, which knows more of them, so a model not here still works typed.
    *  Families only, never versions (costmo, 2026-11-09). The value was
-   *  always the bare family, and the host takes the first row of that
-   *  family the window's picker lists (`pickerRowFor`), so a version here
-   *  was only ever a label, and the first release after it made the label
-   *  wrong: on 2.1.322 the picker lists Fable 5.2 and no 5.1, and "Fable 5.1"
-   *  switched a desk to 5.2. The version a desk runs is the header's, in the
-   *  window's own words. */
+   *  always the bare family, which the window resolves to whatever it has
+   *  of that family ("/model fable" was Fable 5.2 on 2.1.325), so a version
+   *  here was only ever a label, and the first release after it made the
+   *  label wrong: on 2.1.322 the window had Fable 5.2 and no 5.1, and
+   *  "Fable 5.1" switched a desk to 5.2. The version a desk runs is the
+   *  header's, in the window's own words. */
   const MODEL_CHOICES = [
     { value: 'fable', label: 'Fable' },
     { value: 'opus', label: 'Opus' },
@@ -4344,7 +4369,7 @@
    * asked for and the window has not confirmed yet. Asked-for and confirmed
    * are shown apart on purpose — a /model typed into the window never
    * reached the header before (issue #10), and a change asked from here is
-   * not a change until the picker says so.
+   * not a change until the window says so.
    */
   function modelLine(s) {
     if (!s) return '';
@@ -4373,6 +4398,40 @@
   /** The effort select: the asked-for level while pending, else the confirmed one. */
   function effortSelectValue(s) {
     return s?.effort_requested ?? s?.effort ?? '';
+  }
+
+  /**
+   * The model select's rows: the families the floor offers, under a row for
+   * a model that is none of them (in the window's own words), or under a
+   * "model…" placeholder while the window has named none. As data, so the
+   * drawing can tell an unchanged list from a changed one (fillSelect).
+   */
+  function modelOptions(s, choices = MODEL_CHOICES) {
+    const fam = modelFamily(s?.model);
+    return [
+      ...(s?.model && !choices.some((m) => m.value === fam) ? [{ value: fam, label: s.model }] : []),
+      ...(!s?.model ? [{ value: '', label: 'model…' }] : []),
+      ...choices.map((m) => ({ value: m.value, label: m.label })),
+    ];
+  }
+  /** The effort select's rows: the levels, under a placeholder while none is known. */
+  function effortOptions(s) {
+    return [
+      ...(!s?.effort ? [{ value: '', label: 'effort…' }] : []),
+      ...EFFORT_LEVELS.map((l) => ({ value: l, label: l })),
+    ];
+  }
+
+  /**
+   * Why the model and effort selects cannot take a choice right now, or
+   * null. The same three reasons Send has, in the composer's own words: a
+   * choice is sent as a message, and one the board would refuse or the page
+   * would not send must not look like one that was taken.
+   */
+  function selectBlock(canChat, held, asking, persona) {
+    if (asking) return `${persona} is asking something — answer it above first.`;
+    if (canChat) return null;
+    return held ? `${persona}’s conversation is open in your editor.` : `${persona}’s machine isn’t reachable right now.`;
   }
 
   /** The compacting line: which kind, and for how long. */

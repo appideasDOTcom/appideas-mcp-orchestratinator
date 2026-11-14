@@ -1243,52 +1243,36 @@ async function main() {
     eq(W.stillInComposer(PICKER, '/model'), false, 'a picker is not a composer: nothing is pressed into it');
     eq(W.composerOf(PICKER), null, '(the box reader agrees)');
 
-    console.log('\n  the model picker, read off the pane');
-    const pickerRead = W.pickerOf(PICKER);
-    eq(pickerRead?.cursor, 4, 'the cursor row');
-    eq(pickerRead?.rows.map((r) => r.n), [1, 2, 3, 4, 5, 8], 'every numbered row, including one under the scroll mark');
-    eq(pickerRead?.rows.find((r) => r.n === 4), { n: 4, label: 'Sonnet 5.5', current: true, cursor: true, description: 'Most efficient for simpler tasks' }, 'the current row carries its tick, without it in the label');
-    eq(W.pickerOf(screenWith('❯ /model')), null, 'a composer is not a picker');
-    eq(W.pickerRowFor(pickerRead.rows, 'sonnet')?.n, 4, '"sonnet" is the Sonnet row');
-    eq(W.pickerRowFor(pickerRead.rows, 'claude-haiku-5-5')?.n, 5, 'an id names its row');
-    eq(W.pickerRowFor(pickerRead.rows, 'Opus 5')?.n, 8, 'a versioned name is exact about the version');
-    eq(W.pickerRowFor(pickerRead.rows, 'opus')?.n, 2, 'and an unversioned one takes the first of the family');
-    eq(W.pickerRowFor(pickerRead.rows, 'fable')?.n, 3, 'never the Default row, which is a default under whatever name');
-    eq(W.pickerRowFor(pickerRead.rows, 'gpt'), null, 'a model the picker does not offer is nothing');
-    // 2.1.322's picker, captured 2026-11-09 on a probe: Fable 5.2 replaced
-    // 5.1, and older models moved under a "More models" row with no number.
-    const PICKER_322 = W.pickerOf([
-      '   Select model',
-      '   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.',
-      '     1.  Default (recommended)  Fable 5.2',
-      '     2.  Opus 5.5               For complex work and everyday tasks',
-      '   ❯ 3.  Fable 5.2 ✔            For your toughest challenges',
-      '     4.  Sonnet 5.5             Most efficient for simpler tasks',
-      '     5.  Haiku 5.5              Fastest for quick answers',
-      '     ▸   More models',
-      '   ◐ Medium effort (default) ←/→ to adjust',
-      '   Enter to set as default · s to use this session only · Esc to cancel',
-    ].join('\n'));
-    eq(PICKER_322?.rows.map((r) => r.n), [1, 2, 3, 4, 5], 'on 2.1.322 the "More models" row is not a model row');
-    eq(W.pickerRowFor(PICKER_322.rows, 'fable')?.label, 'Fable 5.2', 'and the floor\'s "Fable" takes whatever Fable the window offers, so a release needs no change on the floor');
-    // The same picker at 80x24 with the cursor moved past Haiku, captured
-    // 2026-11-09: its footer changes, and it is still the picker.
-    const ON_MORE = W.pickerOf([
-      '   Select model',
-      '   Switch between Claude models. Your pick becomes the default for new',
-      '   sessions. For other/previous model names, specify with --model.',
-      '   ↑ 4.  Sonnet 5.5             Most efficient for simpler tasks',
-      '     5.  Haiku 5.5 ✔            Fastest for quick answers',
-      '   ❯ ▸   More models',
-      '   Enter to expand · Esc to cancel',
-    ].join('\n'));
-    eq([ON_MORE?.rows.map((r) => r.n), ON_MORE?.cursor], [[4, 5], null], 'with the cursor on "More models" it is still the picker, its cursor on no model');
-    eq(W.pickerOf('   ❯ ▸   More models\n   Enter to expand · Esc to cancel'), null, 'but that footer alone, with no "Select model" over it, is not');
-    eq(W.effortRowOf(PICKER), 'low', 'the effort row reads as its level');
-    eq(W.effortRowOf(PICKER.replace('○ Low effort', '◐ Medium effort (default)')), 'medium', 'with or without the default mark');
-    eq(W.switchConfirmOf('   Switch model?\n   Your next response will be slower\n   ❯ 1. Yes, switch to Haiku 5.5\n     2. No, go back')?.yes, 'Yes, switch to Haiku 5.5',
-      'the cache warning a session-only switch raises is read, with its yes');
+    console.log('\n  what a /model or /effort line says, and the cache warning before it');
+    // Each line as a real window wrote it on 2.1.325 (2026-11-14).
+    eq(W.switchedTo('Set model to `Haiku 5.5` and saved as your default for new sessions'),
+      { said: 'Set model to Haiku 5.5 and saved as your default for new sessions', model: 'Haiku 5.5', effort: null },
+      "/model's line: the sentence without its backticks, and the model in the window's own label");
+    eq(W.switchedTo('Set effort level to low (saved as your default for new sessions): Quick, straightforward implementation with minimal overhead'),
+      { said: 'Set effort level to low (saved as your default for new sessions): Quick, straightforward implementation with minimal overhead', model: null, effort: 'low' },
+      "/effort's line names a level and no model");
+    eq((({ model, effort }) => [model, effort])(W.switchedTo('Set model to `Sonnet 5.5` and saved as your default for new sessions with `high` effort')), ['Sonnet 5.5', 'high'],
+      'the line a person\'s own Enter in the picker writes names both');
+    eq((({ model, effort }) => [model, effort])(W.switchedTo('Set model to `Haiku 5.5` for this session only with `medium` effort')), ['Haiku 5.5', 'medium'],
+      'and so does the one their `s` writes');
+    eq(W.switchedTo("Model 'gpt' not found"), { said: "Model 'gpt' not found", model: null, effort: null }, 'a refusal is its own sentence and confirms nothing');
+    const SWITCH = [
+      '⏺ pong',
+      '▔'.repeat(80),
+      '   Switch model?',
+      '   Your next response will be slower and use more tokens',
+      '   This conversation is cached for the current model. Switching to Haiku 5.5',
+      '   means the full history gets re-read.',
+      '   ❯ 1. Yes, switch to Haiku 5.5',
+      '     2. No, go back',
+      '',
+    ].join('\n');
+    eq(W.switchConfirmOf(SWITCH)?.yes, 'Yes, switch to Haiku 5.5', 'the cache warning a model switch raises is read, with its yes');
+    eq(W.switchConfirmOf(screenWith('❯ ').replace(RULE2, `${SWITCH}\n${RULE2}`)), null,
+      'a conversation that quotes the warning above a composer is not one: it is read at the bottom of the pane');
+    eq(W.switchConfirmOf(SWITCH.replace('   Switch model?\n', '')), null, 'nor are two such choices under any other title');
     eq(W.switchConfirmOf(PICKER), null, 'and the picker is not it');
+    eq(W.stillInComposer(SWITCH, '/model haiku'), false, 'the warning has no composer, so no Enter is pressed into it');
 
     console.log('\n  what the window draws for a compaction, a /btw, a /cost');
     const COMPACTING = [
@@ -1319,9 +1303,9 @@ async function main() {
 
     /* ── a composer pane: the receipts, against a real pane ───────────────
      * A node stand-in on the alternate screen that draws what Claude Code
-     * draws — a composer box, a /btw overlay, the model picker, the
-     * compaction spinner — and writes the records Claude Code writes, so
-     * send() and pick() are driven exactly as on a desk. It logs every key it
+     * draws — a composer box, a /btw overlay, the "Switch model?" warning,
+     * the compaction spinner — and writes the records Claude Code writes, so
+     * send() is driven exactly as on a desk. It logs every key it
      * is sent, which is how the rule "no Enter after a command that opened
      * something" is proved rather than assumed. */
     console.log('\n  slash commands against a composer pane');
@@ -1337,11 +1321,14 @@ async function main() {
       `const fs = require('fs');`,
       `const T = ${JSON.stringify(cpJsonl)}; const K = ${JSON.stringify(cpKeys)};`,
       `const rule = '\\u2500'.repeat(80); const top = '\\u2594'.repeat(80);`,
-      `let composer = '', mode = 'composer', picker = null, current = 2, compactUntil = 0, pending = null, firstEnter = true, n = 0;`,
+      `let composer = '', mode = 'composer', compactUntil = 0, pending = null, firstEnter = true, n = 0;`,
       `const rec = (o) => fs.appendFileSync(T, JSON.stringify({ uuid: 'c' + (++n), timestamp: new Date().toISOString(), ...o }) + '\\n');`,
       `const key = (s) => fs.appendFileSync(K, mode + '\\t' + JSON.stringify(s) + '\\n');`,
-      `const MODELS = ['Default (recommended)  Fable 5.1', 'Opus 5.5', 'Fable 5.1', 'Sonnet 5.5', 'Haiku 5.5'];`,
-      `const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];`,
+      `const MODELS = ['Opus 5.5', 'Fable 5.2', 'Sonnet 5.5', 'Haiku 5.5'];`,
+      // What /model <name> and /effort <level> write when they run, as on
+      // 2.1.325: the command's record, then its line as a user record.
+      `const ran = (name, args, line) => { rec({ type: 'user', message: { role: 'user', content: '<command-name>/' + name + '</command-name>\\n<command-message>' + name + '</command-message>\\n<command-args>' + args + '</command-args>' } }); rec({ type: 'user', message: { role: 'user', content: '<local-command-stdout>' + line + '</local-command-stdout>' } }); };`,
+      `const setModel = (p) => ran('model', p.name, 'Set model to \`' + p.label + '\` and saved as your default for new sessions');`,
       `function draw() {`,
       `  let out = '\\x1b[H\\x1b[2J';`,
       // The answer is drawn 1.5 s after the question, under a footer without
@@ -1350,24 +1337,9 @@ async function main() {
       // still screen would press Enter into.
       `  if (mode === 'btw') out += '\\u276f /clear\\r\\n' + top + '\\r\\n    /btw ' + pending.q + '\\r\\n' + (pending.done ? '      42\\r\\n    \\u2191/\\u2193 to scroll \\u00b7 c to copy \\u00b7 f to fork \\u00b7 Esc to close' : '    Esc to close');`,
       `  else if (mode === 'cost') out += '\\u276f /cost\\r\\n' + top + '\\r\\n   Total cost:            $0.0066\\r\\n   Esc to cancel';`,
-      // short-picker.flag: three rows at a time, "↑" on the first once it has
-      // scrolled and "… +N models" under the last, the way 2.1.322 draws
-      // its picker in a pane under about 30 rows (measured at 80x24), and
-      // each arrow redrawn 400 ms late, as in QA's slow-redraw probe (PR #53).
-      // The picker opens on the current model, ✔, as the real one does, so a
-      // switch back to a model above it walks up. The list ends in "▸ More
-      // models", whose footer is "Enter to expand · Esc to cancel", and the
-      // cursor goes round: Down from it is row 1, Up from row 1 is it.
-      // lost-foot.flag: after the first arrow the footer is gone and
-      // "Select model" stays, a picker the host cannot read (QA, PR #53 I5).
-      `  else if (mode === 'picker') {`,
-      `    const MORE = MODELS.length + 1;`,
-      `    if (picker.short) { if (picker.cursor < picker.top) picker.top = picker.cursor; if (picker.cursor > picker.top + 2) picker.top = picker.cursor - 2; }`,
-      `    const from = picker.short ? picker.top : 1, to = picker.short ? Math.min(MORE, picker.top + 2) : MORE;`,
-      `    const rows = []; for (let i = from; i <= to; i++) rows.push('   ' + (picker.cursor === i ? '\\u276f ' : '  ') + (i === MORE ? '\\u25b8   More models' : (i === from && from > 1 ? '\\u2191 ' : '') + i + '.  ' + MODELS[i - 1] + (i === current ? ' \\u2714' : '') + '           For things'));`,
-      `    if (to < MORE) rows.push('      \\u2026 +' + (MORE - to) + ' models');`,
-      `    out += top + '\\r\\n   Select model\\r\\n' + rows.join('\\r\\n') + (picker.lost && picker.moved ? '\\r\\n   \\u2026' : picker.cursor === MORE ? '\\r\\n   Enter to expand \\u00b7 Esc to cancel' : '\\r\\n   \\u25cb ' + LEVELS[picker.effort][0].toUpperCase() + LEVELS[picker.effort].slice(1) + ' effort \\u2190/\\u2192 to adjust\\r\\n   Enter to set as default \\u00b7 s to use this session only \\u00b7 Esc to cancel');`,
-      `  }`,
+      // switch.flag: a /model on this conversation raises the cache warning
+      // first, where the composer was, as on a real window with any history.
+      `  else if (mode === 'switch') out += '\\u23fa ok\\r\\n' + top + '\\r\\n   Switch model?\\r\\n   Your next response will be slower and use more tokens\\r\\n   This conversation is cached for the current model. Switching to ' + pending.label + '\\r\\n   means the full history gets re-read.\\r\\n   \\u276f 1. Yes, switch to ' + pending.label + '\\r\\n     2. No, go back';`,
       `  else {`,
       `    const lines = composer.split('\\n');`,
       `    const busy = Date.now() < compactUntil;`,
@@ -1380,7 +1352,16 @@ async function main() {
       `  const cmd = /^\\/(\\w+)(?:\\s+(.*))?$/s.exec(text.trim());`,
       `  if (cmd && cmd[1] === 'btw') { mode = 'btw'; pending = { q: cmd[2] ?? '', done: false }; setTimeout(() => { if (mode === 'btw' && pending) { pending.done = true; draw(); } }, 1500); return draw(); }`,
       `  if (cmd && cmd[1] === 'cost') { mode = 'cost'; return draw(); }`,
-      `  if (cmd && cmd[1] === 'model' && !cmd[2]) { mode = 'picker'; picker = { cursor: current, effort: 0, top: 1, lost: fs.existsSync(${JSON.stringify(`${CP_DIR}/lost-foot.flag`)}), moved: false, short: fs.existsSync(${JSON.stringify(`${CP_DIR}/short-picker.flag`)}) }; return draw(); }`,
+      // A name the window does not know is refused in a system record, not a
+      // user one (measured 2026-11-14); one it knows is set, behind the
+      // warning when switch.flag is there.
+      `  if (cmd && cmd[1] === 'model' && cmd[2]) {`,
+      `    const name = cmd[2].trim(); const label = MODELS.find((m) => m.toLowerCase().startsWith(name.toLowerCase()));`,
+      `    if (!label) { rec({ type: 'system', subtype: 'local_command', level: 'info', content: '<command-name>/model</command-name>\\n<command-message>model</command-message>\\n<command-args>' + name + '</command-args>' }); rec({ type: 'system', subtype: 'local_command', level: 'info', content: "<local-command-stdout>Model '" + name + "' not found</local-command-stdout>" }); return draw(); }`,
+      `    if (fs.existsSync(${JSON.stringify(`${CP_DIR}/switch.flag`)})) { mode = 'switch'; pending = { name, label }; return draw(); }`,
+      `    setModel({ name, label }); return draw();`,
+      `  }`,
+      `  if (cmd && cmd[1] === 'effort' && cmd[2]) { ran('effort', cmd[2].trim(), 'Set effort level to ' + cmd[2].trim() + ' (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation'); return draw(); }`,
       `  if (cmd && cmd[1] === 'compact') {`,
       `    rec({ type: 'user', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args>' } });`,
       // Six seconds: long enough that the message sent behind /compact lands
@@ -1411,7 +1392,6 @@ async function main() {
       `    if (!acc.length) return;`,
       `    if (acc.startsWith('\\x1b[A') || acc.startsWith('\\x1b[B') || acc.startsWith('\\x1b[C') || acc.startsWith('\\x1b[D')) {`,
       `      const k = acc.slice(0, 3); acc = acc.slice(3); key(k);`,
-      `      if (mode === 'picker') { picker.moved = true; const MORE = MODELS.length + 1; if (k === '\\x1b[A') picker.cursor = picker.cursor === 1 ? MORE : picker.cursor - 1; if (k === '\\x1b[B') picker.cursor = picker.cursor === MORE ? 1 : picker.cursor + 1; if (k === '\\x1b[C') picker.effort = Math.min(LEVELS.length - 1, picker.effort + 1); if (k === '\\x1b[D') picker.effort = Math.max(0, picker.effort - 1); if (picker.short) setTimeout(draw, 400); else draw(); }`,
       `      continue;`,
       `    }`,
       `    if (acc.startsWith('\\x1b\\r')) { acc = acc.slice(2); key('M-Enter'); if (mode === 'composer') { composer += '\\n'; draw(); } continue; }`,
@@ -1421,7 +1401,8 @@ async function main() {
       `    if (ch === '\\r') { key('Enter'); if (mode !== 'composer') continue; if (firstEnter) { firstEnter = false; continue; } submit(); continue; }`,
       `    if (ch === '\\x15') { key('C-u'); composer = ''; draw(); continue; }`,
       `    key(ch);`,
-      `    if (mode === 'picker' && ch === 's') { const label = MODELS[picker.cursor - 1].replace(/^Default \\(recommended\\)\\s+/, ''); rec({ type: 'user', message: { role: 'user', content: '<local-command-stdout>Set model to \`' + label + '\` for this session only' + (picker.effort ? ' with \`' + LEVELS[picker.effort] + '\` effort' : '') + '</local-command-stdout>' } }); current = picker.cursor; mode = 'composer'; draw(); continue; }`,
+      `    if (mode === 'switch' && ch === '1') { setModel(pending); mode = 'composer'; pending = null; draw(); continue; }`,
+      `    if (mode === 'switch' && ch === '2') { mode = 'composer'; pending = null; draw(); continue; }`,
       `    if (mode === 'composer') { composer += ch; draw(); }`,
       `  }`,
       `});`,
@@ -1477,64 +1458,43 @@ async function main() {
     eq([bareModel.ok, bareModel.code], [false, 'picker'], 'a bare /model is refused before anything is typed');
     eq(keysSince(mark).length, 0, 'and the window saw no key for it');
 
-    // /model <name>: the picker, the cursor walked to the row, `s` — never a
-    // digit, never Enter, never the command that saves a default.
+    // /model <name>: the window's own command, as typed. Its line is the
+    // receipt, and what it names is what the board takes as confirmed. No
+    // picker is opened, so nothing is walked: no arrow, no digit, no `s`.
+    const noPickerKeys = (from) => !keysSince(from).some((k) => /^"(\\u001b\[[ABCD]|s|\d)"$/.test(k[1]));
     mark = cpKeyLog().length;
-    const picked = await W.pick(CP_DIR, { model: 'sonnet' });
-    assert(picked.ok && picked.session_only, `the model is picked for this session only${picked.ok ? '' : ` — ${picked.error}`}`);
-    eq(picked.said, 'Set model to Sonnet 5.5 for this session only', 'in the window\'s own words');
-    const pickerKeys = keysSince(mark).filter((k) => k[0] === 'picker').map((k) => k[1]);
-    eq(pickerKeys, ['"\\u001b[B"', '"\\u001b[B"', '"s"'], 'two Downs from Opus to Sonnet, then s — no digit, no Enter');
-    assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:') && k[1] !== '"paste:6"'), 'and the only paste was /model itself');
+    const picked = await W.send(CP_DIR, '/model sonnet');
+    assert(picked.ok && picked.command === 'model', `/model <name> is confirmed on the window's own line${picked.ok ? '' : ` — ${picked.error}`}`);
+    eq([picked.said, picked.model], ['Set model to Sonnet 5.5 and saved as your default for new sessions', 'Sonnet 5.5'],
+      'in the window\'s words: saved as the default, and the model named for the board');
+    assert(cpRecords().some((r) => r.type === 'user' && /<command-args>sonnet<\/command-args>/.test(r.message?.content ?? '')), 'the window ran it as the command, with the name as typed');
+    assert(noPickerKeys(mark), 'and the window saw no arrow, no digit and no s: the command was typed and submitted, nothing more');
 
-    // /effort <level>: the same picker, its effort row walked with →.
+    // /effort <level>: the same, and it names only the effort — an effort
+    // change saves no model, which Enter in the picker did.
     mark = cpKeyLog().length;
-    const effort = await W.pick(CP_DIR, { effort: 'high' });
-    assert(effort.ok, `the effort is picked${effort.ok ? '' : ` — ${effort.error}`}`);
-    eq([effort.effort, effort.session_only], ['high', true], 'this session only, at the level asked');
-    eq(keysSince(mark).filter((k) => k[0] === 'picker').map((k) => k[1]), ['"\\u001b[C"', '"\\u001b[C"', '"s"'], 'two Rights from low to high, then s');
-    eq((await W.pick(CP_DIR, { effort: 'absurd' })).code, 'bad_effort', 'a level the picker has no row for is refused without a key');
+    const effort = await W.send(CP_DIR, '/effort high');
+    assert(effort.ok && effort.command === 'effort', `/effort <level> is confirmed on the window's own line${effort.ok ? '' : ` — ${effort.error}`}`);
+    eq([effort.effort, effort.model], ['high', null], 'the level the window names, and no model');
+    assert(/^Set effort level to high \(saved as your default for new sessions\)/.test(effort.said ?? ''), 'in the window\'s words');
+    assert(noPickerKeys(mark), 'typed and submitted, like the model');
 
-    // A short pane: the picker shows three models and "… +N models", opens
-    // on the current model (Sonnet, from the picks above), and redraws each
-    // arrow 400 ms late, over 60 lines of history. Each walk is read after
-    // every key, so a stale read would stop it short (QA, PR #53).
-    writeFileSync(`${CP_DIR}/short-picker.flag`, '');
-    const D = '"\\u001b[B"', U = '"\\u001b[A"';
-    const pickerKeys2 = (from) => keysSince(from).filter((k) => k[0] === 'picker').map((k) => k[1]);
-    mark = cpKeyLog().length;
-    const low = await W.pick(CP_DIR, { model: 'haiku' });
-    assert(low.ok, `a model under the fold of a short picker is picked${low.ok ? '' : ` — ${low.error}`}`);
-    eq(low.said, 'Set model to Haiku 5.5 for this session only', 'the model asked for, in the window\'s words');
-    eq(pickerKeys2(mark), [D, '"s"'], 'one Down from Sonnet, past the fold to Haiku, then s');
-    mark = cpKeyLog().length;
-    const back = await W.pick(CP_DIR, { model: 'opus' });
-    assert(back.ok, `switching back to a model above the fold is picked${back.ok ? '' : ` — ${back.error}`}`);
-    eq(back.said, 'Set model to Opus 5.5 for this session only', 'Opus, in the window\'s words');
-    eq(pickerKeys2(mark), [D, U, U, U, U, '"s"'], 'from Haiku: one Down onto "More models" ends that pass, then four Ups to Opus, then s');
-    mark = cpKeyLog().length;
-    const offList = await W.pick(CP_DIR, { model: 'gpt' });
-    eq(offList.code, 'model_unknown', 'a model on no row of a short picker is still refused');
-    eq(offList.error, '"gpt" is not on the window\'s picker — it offers Opus 5.5, Fable 5.1, Sonnet 5.5, Haiku 5.5', 'naming every row the walk read, not only the first screen');
-    eq(pickerKeys2(mark), [D, D, D, D, U, U, U, U, U, U, '"Escape"'], 'from Opus: down onto "More models", up round to it again, then Escape — each pass stops there and never goes round twice');
-    rmSync(`${CP_DIR}/short-picker.flag`);
+    // A name the window does not know: its refusal is a system record, and
+    // is the receipt — said at once, confirming nothing.
+    const askedAt = Date.now();
+    const unknown = await W.send(CP_DIR, '/model gpt');
+    eq([unknown.ok, unknown.said, unknown.model], [true, "Model 'gpt' not found", null], 'a model the window does not know is said in its words, and names no model');
+    assert(Date.now() - askedAt < 15000, `without the twenty seconds a missing receipt is waited for (${Date.now() - askedAt} ms)`);
 
-    // A picker the host loses track of mid-walk is closed, not left standing
-    // to take the desk's next keys. Both walks that can lose it (QA, PR #53 I5).
-    writeFileSync(`${CP_DIR}/lost-foot.flag`, '');
+    // A conversation cached for its model asks first. The host says yes
+    // with the digit, once, and the window's line follows.
+    writeFileSync(`${CP_DIR}/switch.flag`, '');
     mark = cpKeyLog().length;
-    const lostRow = await W.pick(CP_DIR, { model: 'sonnet' });
-    eq(lostRow.code, 'picker_gone', 'a picker that stops reading as one while the cursor moves is given up on');
-    eq(pickerKeys2(mark), [D, '"Escape"'], 'and closed with Escape, since "Select model" is still on screen');
-    mark = cpKeyLog().length;
-    const lostEffort = await W.pick(CP_DIR, { effort: 'high' });
-    eq(lostEffort.code, 'picker_gone', 'the same while the effort row is moved');
-    eq(pickerKeys2(mark), ['"\\u001b[C"', '"Escape"'], 'closed with Escape there too');
-    rmSync(`${CP_DIR}/lost-foot.flag`);
-    mark = cpKeyLog().length;
-    const afresh = await W.pick(CP_DIR, { model: 'opus' });
-    assert(afresh.ok, `and the desk's next pick opens its picker afresh${afresh.ok ? '' : ` — ${afresh.error}`}`);
-    eq(pickerKeys2(mark), ['"s"'], 'on Opus, where it was, so only s');
+    const cached = await W.send(CP_DIR, '/model haiku');
+    assert(cached.ok, `a /model that raises "Switch model?" is still confirmed${cached.ok ? '' : ` — ${cached.error}`}`);
+    eq([cached.said, cached.model], ['Set model to Haiku 5.5 and saved as your default for new sessions', 'Haiku 5.5'], 'on the line the window writes once the warning is answered');
+    eq(keysSince(mark).filter((k) => k[0] === 'switch').map((k) => k[1]), ['"1"'], 'the warning got one key, the digit — and no Enter, which a retry on a still screen would have pressed');
+    rmSync(`${CP_DIR}/switch.flag`);
 
     // /compact: confirmed on the command's record while the window compacts,
     // and a message behind it is said to be held — not timed out.
@@ -1542,6 +1502,13 @@ async function main() {
     const comp = await W.send(CP_DIR, '/compact');
     assert(comp.ok && comp.command === 'compact', `/compact is confirmed${comp.ok ? '' : ` — ${comp.error}`}`);
     eq([comp.said, comp.compacting], ['compacting the conversation', true], 'as compacting, since the window is');
+    // A model or effort change is the one thing not typed into a working
+    // window: it would raise its warning over the turn.
+    mark = cpKeyLog().length;
+    const busyModel = await W.send(CP_DIR, '/model opus');
+    eq([busyModel.ok, busyModel.code], [false, 'busy'], 'a model change is refused while the window is working');
+    eq((await W.send(CP_DIR, '/effort low')).code, 'busy', 'and so is an effort change');
+    eq(keysSince(mark).length, 0, 'with no key sent for either');
     const behind = await W.send(CP_DIR, 'sent while it compacts');
     assert(behind.ok && behind.queued, `a message sent into a compaction is taken${behind.ok ? '' : ` — ${behind.error}`}`);
     eq(behind.held, 'compacting', 'and said to be held by the compaction, with no twenty-second wait');

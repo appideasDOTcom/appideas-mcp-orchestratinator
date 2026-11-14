@@ -541,6 +541,38 @@ is a state no host could have produced. `probe-chat-panel.js` reads the
 meta line, both selects, the asked-for note, the slash rows and the last
 rows (with the compaction summary's open/closed) in one call.
 
+Since 2026-11-14 it also carries a verdict for the two selects (✓ / ✗ lines,
+then `PASS · the selects`), and a runner with the whole fixture, so a page
+mutant can be read off it:
+
+```bash
+PORT=8922 CDP=9262 .claude/skills/verify-ui-change/run-check-chat-controls.sh "$PWD"
+#   ✓ neither select is rewritten while nothing about it changes — an open menu is left standing
+#   ✓ while the window asks, both are dimmed and say why — a pick then would be dropped
+#   ✓ over the whole run each is rewritten once — its placeholder row leaving …
+```
+
+Three things from building that part:
+
+- **"Is this element being redrawn?" is a MutationObserver's count, not a
+  look.** The panel is drawn on every poll and stream event, and a control
+  rebuilt with identical contents looks the same in every probe and every
+  screenshot. Observe `childList` on the element, let polls go by, and read
+  the count. Wait on the polls themselves, not on a sleep:
+  `performance.getEntriesByType('resource').filter((e) => e.name.endsWith('/api/floor')).length`
+  rising by three. Before the fix it read one rewrite of each select per
+  poll and two in the first two seconds of a panel; after, 0.
+- **A headless browser draws no `<select>` menu, so no check can click
+  one.** What the operator reported (a pick not taking, the drop-down left
+  open) happens in the menu, which Chrome on macOS takes down and puts up
+  again when the select's rows change. The check proves the rows are left
+  alone; that this cures the report was costmo's to see on his screen. Say
+  which of the two a result is.
+- **A regex in a template string loses its backslashes.** `` `/\/api\/floor$/` ``
+  inside backticks is `//api/floor$/`, a comment, and the page threw
+  "Unexpected token 'for'" on the next line. Use `endsWith`, or put the
+  browser code in a probe file, which is what `probe()` is for.
+
 ### check-backdrop.mjs — a click outside a dialog's contents (issue #11)
 
 Every dialog on the board, four gestures each, through `press()` and

@@ -1414,8 +1414,8 @@ try {
   let rr2 = await say('/model');
   eq([rr2.status, (await rr2.json()).code], [400, 'picker'], 'a bare /model is refused — it would open a picker nobody is driving');
   rr2 = await say('/effort absurd');
-  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the picker does not have is refused');
-  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the picker\'s');
+  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the window does not have is refused');
+  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the window\'s');
   rr2 = await say('/model haiku');
   eq(rr2.status, 200, '/model <name> goes to the host');
   assert((await takeWork()).includes('chat'), 'as chat work — the host decides it is a picker');
@@ -1453,22 +1453,22 @@ try {
   // the window's session rather than "the desk's newest".
   await sleep(1100);
   await post(ev('twofold', 's-two-editor', 'Stop', {}));
-  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 for this session only', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 and saved as your default for new sessions', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
   two = await sessOf('twofold');
-  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the picker's words land on the window's session the host named");
+  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the window's words land on the window's session the host named");
   await post(ev('twofold', 's-two-window', 'SessionEnd', { reason: 'prompt_input_exit' }));
   await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: null }]);
   eq((await sessOf('twofold'))?.model, 'claude-fable-5-1', 'and the other live session was never touched');
 
   // The host's receipts, in the command's own terms (issue #9).
   const noteOf = async (agent) => deskOf(await floor(), agent)?.delivery ?? null;
-  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 for this session only with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
+  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
   let ty = await sessOf('typist');
-  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "the picker's receipt confirms the effort and clears both asked-fors");
-  eq(ty?.model, 'Haiku 5.5', "and the picker's own words stand as the model until a hook or a reply names the id — the select follows at once");
+  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "a receipt naming both confirms the effort and clears both asked-fors");
+  eq(ty?.model, 'Haiku 5.5', "and the window's own words stand as the model until a hook or a reply names the id — the select follows at once");
   eq((await noteOf('typist'))?.state, 'done', 'and the composer\'s note says the command is done');
-  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 for this session only with xhigh effort', 'in the window\'s words');
-  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 for this session only with xhigh effort', tool_name: 'host' }]);
+  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', 'in the window\'s words');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', tool_name: 'host' }]);
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'assistant', text: '10', via: '/btw' }]);
   eq((await noteOf('typist'))?.state, 'done', "the command's own lines — the host's sentence, a /btw answer — do not take the note down");
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'user', text: 'the next thing' }]);
@@ -1505,11 +1505,11 @@ try {
     const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/chat-controls-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue, modelOptions, effortOptions, selectBlock };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
-    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the picker\'s levels');
+    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the window\'s levels');
     eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'a slash alone offers every command');
     eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
     eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
@@ -1538,6 +1538,29 @@ try {
     eq(page.PAGE_MODELS.every((m) => page.modelFamily(m.label) === m.value), true, 'and each label reads as the family its value sends');
     eq(page.effortSelectValue({ effort: 'low', effort_requested: 'high' }), 'high', 'the effort select shows the asked-for level while pending');
     eq(page.effortSelectValue({ effort: 'low' }), 'low', 'else the confirmed one');
+    // The selects' rows are data, so the drawing can leave an unchanged
+    // select untouched (fillSelect): the same session gives the same rows.
+    const fams = page.PAGE_MODELS.map((m) => m.value);
+    eq(page.modelOptions({ model: 'claude-haiku-5-5' }).map((o) => o.value), fams, 'a model the control offers: the families and nothing else');
+    eq(page.modelOptions({ model: null }).map((o) => [o.value, o.label])[0], ['', 'model…'], 'no model named yet: a placeholder row first');
+    eq(page.modelOptions({ model: 'Mystery 9' })[0], { value: 'mystery', label: 'Mystery 9' }, 'a model that is none of them: its own row, in the window\'s words');
+    eq(JSON.stringify(page.modelOptions({ model: 'claude-haiku-5-5', model_requested: 'opus', effort: 'low' })), JSON.stringify(page.modelOptions({ model: 'claude-haiku-5-5' })),
+      'and what was asked for, or the effort, changes no row — only a change of model can');
+    eq(page.effortOptions({ effort: 'low' }).map((o) => o.value), EFFORT_LEVELS, 'the effort rows are the levels');
+    eq(page.effortOptions({}).map((o) => o.value), ['', ...EFFORT_LEVELS], 'under a placeholder while none is known');
+    // The selects are dimmed when Send is, in the composer's words: a
+    // choice is sent as a message, and one that would be dropped is not taken.
+    eq(page.selectBlock(true, false, false, 'Bo'), null, 'a desk that can be typed into takes a choice');
+    eq(page.selectBlock(true, false, true, 'Bo'), 'Bo is asking something — answer it above first.', 'a window that is asking takes none — Send would send nothing — and says so');
+    eq(page.selectBlock(false, true, false, 'Bo'), 'Bo’s conversation is open in your editor.', 'nor one an editor holds');
+    eq(page.selectBlock(false, false, false, 'Bo'), 'Bo’s machine isn’t reachable right now.', 'nor one whose host is away');
+    // The hints say what a choice does now (costmo, 2026-11-14).
+    for (const list of [page.PAGE_COMMANDS, FLOOR_COMMANDS]) {
+      for (const name of ['model', 'effort']) {
+        const hint = list.find((c) => c.name === name).hint;
+        assert(/default for new sessions/.test(hint) && !/session only/.test(hint), `/${name} is offered as saving the default, on the page and the server alike — "${hint}"`);
+      }
+    }
   }
 
   console.log('\nstopping a turn');
