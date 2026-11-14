@@ -436,8 +436,42 @@ table for reading one.
 agent's tools getting `Operation not permitted` on its own repo (2026-11-10).
 POSIX modes are not the cause here; the cause is which process is asking.
 The host now moves every window to a fresh server when this happens (CLAUDE.md, "A tmux
-server can lose the right to read a desk's folder"), so seeing it means that
-move did not run or did not work. Read these in order:
+server can lose the right to read a desk's folder"), so seeing it on a floor
+window means that move did not run or did not work. It did work the one time
+it was seen live: 2026-11-14 20:19:14Z, four windows moved, a `host` line on
+each desk, and no desk saw the error.
+
+**First, check that your own shell is not the one refused.** On 2026-11-14 the
+refusal landed on the operator's terminal app instead: from 12:13 local, every
+process under iTerm2 was refused `~/Documents` (Claude Code, git, zsh, node,
+java, ruby). That included a coordinator conversation running there, whose
+every command in the repo gave EPERM, and whose plugin hook could not read
+`report.mjs`. A `-L` server started *from that shell* was refused too. It is
+responsible to the terminal, not to itself the way the host's servers are. So
+probe 2 below, run from a refused shell, reads 1 and sends you to "macOS's
+grant to the host" when the host is fine. The kernel log names the
+process; grouping it shows whose tree is refused:
+
+```sh
+cd /tmp; /bin/ls ~/Documents >/dev/null 2>&1; echo "my shell: $?"   # 1 = you are the refused one
+/usr/bin/log show --last 1h --style compact \
+  --predicate 'eventMessage CONTAINS "System Policy" AND eventMessage CONTAINS "Documents"' |
+  sed -nE 's/.*System Policy: ([^(]+)\(([0-9]+)\).*/\1(\2)/p' | sort | uniq -c | sort -rn | head
+# then walk a named pid's parents: ps -o pid=,ppid=,command= -p <pid>, repeated
+```
+
+(`GamePolicyAgent` reads `~/Documents` a few times an hour and is refused
+every day. It is noise.) The remedy for a refused terminal is the operator's,
+outside anything the floor runs. They set the terminal under Privacy & Security
+→ Files & Folders, and a process that was already running stayed refused after
+it was set. The conversation came back once it was moved onto the floor (a
+fresh `claude --resume` in the host's server). Whether a terminal relaunch
+alone clears it was not measured. Until then, and only with the operator's
+go-ahead (it is their floor's server), commands can run through the host's
+server, which reads: `tmux run-shell "cd '<repo>' && <command>"`, with no `-t`
+(below), and the output comes back to your shell. A whole deploy was run
+that way that day (docker compose, the plugin update, every reading).
+`launchctl kickstart` needs no read and runs from anywhere.
 
 ```sh
 D=/path/to/the/desk
@@ -446,7 +480,9 @@ D=/path/to/the/desk
 #    desk's window) in view-mode, and the desk's next message goes to the
 #    mode, not to Claude Code (QA, PR #54 finding 1). If one is parked, `q`.
 tmux run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
-# 2. Does a fresh server? (the host's freshReads, by hand)
+# 2. Does a fresh server? (the host's freshReads, by hand). Only meaningful
+#    from a shell that reads ~/Documents itself (above); from a refused one
+#    this server is refused for the shell's sake, not the host's.
 tmux -L chk -f /dev/null new-session -d -s c 'sleep 30'
 tmux -L chk run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
 tmux -L chk kill-server

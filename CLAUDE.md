@@ -256,6 +256,16 @@ refuses it because of that session), so the host suite can reach only the
 refusal. The words those two lines carry are `renewNote`, and `test:renew`
 asserts them. **diagnose-handoff** has the readings.
 
+It has been seen live once, and the floor was spared: on 2026-11-14 at
+20:19:14Z the heartbeat moved all four windows, with a `host` line on each
+desk. The same afternoon the refusal also landed on the operator's
+terminal: from 12:13 local every process under iTerm2 was refused
+`~/Documents`, so a conversation run there could not read its own repo. A
+server it started was refused as well, and that is not the host's to move.
+So an agent whose own commands get EPERM checks its own shell before
+reading the floor's (diagnose-handoff, first step). Moving the conversation onto the floor
+is what brought it back.
+
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
 [`host/dialog.js`](host/dialog.js), with a backend per platform and only
