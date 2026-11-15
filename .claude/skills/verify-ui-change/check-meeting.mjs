@@ -29,6 +29,12 @@ const ok = (cond, msg, extra = '') => {
   console.log(`  ${cond ? '✓' : '✗'} ${msg}${cond || !extra ? '' : `  (${extra})`}`);
   if (!cond) fails++;
 };
+// A step that throws ends the check with a ✗ row naming it and the FAIL
+// verdict, where it used to die with no verdict (QA, PR #55 Info 4; the
+// same lines are in check-select.mjs and check-chat-controls.mjs).
+const stopped = (e) => { total++; fails++; console.log(`  ✗ the check stopped on: ${String(e?.message ?? e).split('\n')[0]}`); console.log(`\nFAIL · ${fails} of ${total} red`); process.exit(1); };
+process.on('uncaughtException', stopped);
+process.on('unhandledRejection', stopped);
 const work = () => readFileSync(WORK, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const workSince = (n) => work().slice(n);
 const isMeeting = (u) => u.includes('meeting=');

@@ -46,7 +46,18 @@ const P = fileURLToPath(new URL('./probe-select.js', import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let fails = 0;
-const ok = (cond, msg) => { console.log(`  ${cond ? '✓' : '✗'} ${msg}`); if (!cond) fails++; };
+let rows = 0;
+const ok = (cond, msg) => { rows++; console.log(`  ${cond ? '✓' : '✗'} ${msg}`); if (!cond) fails++; };
+// A step that throws (a wait that times out, a press on something that is
+// not there) ends the check with a ✗ row naming it and the FAIL verdict.
+// Without this the check died with rows printed and no verdict, and
+// run-page-mutants.mjs reported the mutant as "THE CHECK DID NOT FINISH",
+// the line that is read as the machine (QA, PR #55 Info 4: the Nudge
+// mutant printed twelve ✗ and then died on a press of a line that was not
+// drawn).
+const stopped = (e) => { rows++; fails++; console.log(`  ✗ the check stopped on: ${String(e?.message ?? e).split('\n')[0]}`); console.log(`\nFAIL · ${fails} of ${rows} red`); process.exit(1); };
+process.on('uncaughtException', stopped);
+process.on('unhandledRejection', stopped);
 // A wait for the behaviour under test is a row, not a bare await: a page
 // that never gets there then reads ✗ and FAIL. Bare, the check died on the
 // wait's exception with no verdict, and run-page-mutants.mjs reported the
@@ -352,6 +363,34 @@ await page.click('svg.room[data-channel="alpha"] [data-act="sel-nudge"]');
 await waited("!!document.querySelector('svg.room[data-channel=\"alpha\"] .missBar')", { timeout: 6000 });
 r = await read(page);
 ok(!roomOf(r, 'alpha').selecting && /1 not nudged — ed$/.test(roomOf(r, 'alpha').miss ?? ''), `a nudge the board refuses for ed is on the room's line (${roomOf(r, 'alpha').miss})`);
+// An envelope flown while the room holds its line leaves from the desk as
+// it is drawn, under the line's band, and not from where the desk stood
+// without it (QA, PR #55 Info 6). Caught by an observer at the moment it
+// is added, with the sender's place and the line read in the same task:
+// an envelope is on the page for 1.4 s at most and goes with any redraw of
+// its room, so a poll for it missed it (the first cut of this step read
+// null on an unmutated page).
+await page.evalJs(`(() => {
+  window.__env = null;
+  const rooms = document.getElementById('floor-rooms');
+  window.__envObs = new MutationObserver((list) => {
+    for (const m of list) for (const n of m.addedNodes) {
+      if (window.__env || n.nodeType !== 1 || !n.classList?.contains('envelope')) continue;
+      const svg = n.closest('svg.room');
+      const num = (re, text) => { const x = re.exec(text ?? ''); return x && [Number(x[1]), Number(x[2])]; };
+      window.__env = { channel: svg?.dataset.channel ?? null, line: !!svg?.querySelector('.missBar'),
+        desk: num(/translate\\(([-\\d.]+) ([-\\d.]+)\\)/, svg?.querySelector('.desk[data-agent="ed"]')?.getAttribute('transform')),
+        from: num(/^M ([-\\d.]+) ([-\\d.]+)/, n.querySelector('animateMotion')?.getAttribute('path')) };
+    }
+  });
+  window.__envObs.observe(rooms, { childList: true, subtree: true });
+  return true; })()`);
+db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES ('alpha', 'ed', 'ann', '"under the line"')`).run();
+await waited('!!window.__env', { timeout: 10000 });
+const env = JSON.parse(await page.evalJs('JSON.stringify(window.__env)'));
+await page.evalJs('window.__envObs.disconnect(); true');
+ok(!!env && env.channel === 'alpha' && env.line && !!env.desk && !!env.from && env.from[0] === env.desk[0] + 84 && env.from[1] === env.desk[1] + 20,
+  `an envelope sent while the room holds its line leaves from the desk where it is drawn under the line (${JSON.stringify(env)})`);
 await page.click('svg.room[data-channel="alpha"] .roomSel');
 await waited("!!document.querySelector('svg.room.selecting')", { timeout: 3000 });
 await waited("!document.querySelector('svg.room .missBar')", { timeout: 3000 });
@@ -367,6 +406,9 @@ ok(!roomOf(r, 'alpha').selecting && roomOf(r, 'alpha').miss === null, 'and endin
 r = await read(page);
 if (r.errors?.length) ok(false, `no page errors (${JSON.stringify(r.errors)})`);
 
-console.log(`\n${fails ? `${fails} ✗ · FAIL` : 'PASS'}`);
+// The verdict line holds no ✗: run-page-mutant.sh counts that character as
+// a red, and reads "PASS · " or "FAIL · " at the start of a line as the
+// check having finished (it used to print "N ✗ · FAIL" and a bare "PASS").
+console.log(`\n${fails ? `FAIL · ${fails} of ${rows} red` : `PASS · ${rows} of ${rows}`}`);
 await page.close();
 process.exit(fails ? 1 : 0);

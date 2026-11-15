@@ -46,6 +46,14 @@ const box = (text, enter = true) => `(() => { const ta = document.querySelector(
 // mutant can be read off this check; the rest prints what the page drew.
 let bad = 0;
 const ok = (cond, label) => { console.log(`  ${cond ? '✓' : '✗'} ${label}`); if (!cond) bad++; };
+// A step that throws (a wait that times out, a press on something that is
+// not there) ends the check with a ✗ row naming it and the FAIL verdict.
+// Without this the check died with rows printed and no verdict, and
+// run-page-mutants.mjs reported the mutant as "THE CHECK DID NOT FINISH",
+// the line that is read as the machine (QA, PR #55 Info 4).
+const stopped = (e) => { bad++; console.log(`  ✗ the check stopped on: ${String(e?.message ?? e).split('\n')[0]}`); console.log(`FAIL · ${bad} of the select checks`); process.exit(1); };
+process.on('uncaughtException', stopped);
+process.on('unhandledRejection', stopped);
 
 const page = await open({ base, view: 'floor' });
 await page.resize(1500, 1000);

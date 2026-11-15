@@ -1201,7 +1201,7 @@ try {
     await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
       tool_input: { questions: [{ question: 'Where should it go?', header: 'Where', multiSelect: false,
         options: [{ label: 'Alpha', description: 'First.', preview: true }, { label: 'Bravo', description: 'Second.', preview: true }, { label: 'Charlie', description: 'Third.', preview: true }] }] } });
-    const pv = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.header === 'Where' ? q : null; }, 25000);
+    const pv = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 25000);
     assert(!!pv, 'a question with previews is on the desk');
     eq(pv?.questions?.[0]?.options?.length, 3, 'with its three rows and no free-text row, as the window draws it');
     const errsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));

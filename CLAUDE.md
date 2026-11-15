@@ -572,6 +572,19 @@ a reasonable argument behind it.
     pane's last lines; it used to match the words anywhere in the capture,
     and a conversation quoting them would have had a `1` typed into its
     composer).
+  - **The same dialog has a second title, "Change effort level?", and the
+    host answers it for an `/effort` the same way** (QA, PR #55 finding 1).
+    It is in 2.1.325's strings with the model's lines under it, raised when
+    an effort change would rewrite the cached prefix. It has not been seen
+    on a window: `/effort <another level>` after a reply went straight
+    through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (probe,
+    2026-11-15), because those take effort per turn. So the read is the
+    measured one with the binary's title, and a desk on a model that does
+    not take effort per turn is where it would stand. Unanswered, on the
+    suite's stand-in, the `/effort` ended `not_delivered` and the desk's
+    next message was pasted into the dialog for a minute. A change the
+    window was told to keep writes "Kept effort level as <level>" (the
+    binary again), which names no level set and so clears the asked-for.
   - **A refusal is a `system` record, not a user one.** "Model 'x' not
     found" is written with subtype `local_command` and its text in
     `content`. Read as user records only, the host waited out twenty
@@ -668,7 +681,9 @@ a reasonable argument behind it.
   costmo read it as "an artifact outlined in white saying /model opus … a
   message that has not yet sent". So: a done command draws no bubble, and
   the line labeled `host` carries what was typed and what happened —
-  "/model opus — Set model to Opus 5.5 for this session only".
+  "/model opus — Set model to Opus 5.5 and saved as your default for new
+  sessions" (the receipt since 2026-11-14; it read "for this session only"
+  while the host drove the picker).
 - **A live session outranks an ended one, and a hosted desk's session is
   its window's.** A `/clear` ends one session and starts the next in the
   same second, and on `updated_at` alone the two tied: the floor showed the
@@ -1249,6 +1264,20 @@ tooltip says what a click on it will do (`meetingToTitle`, which reads it
 off `meetingToClick`). The **everyone** chip is as it was. Do not bring
 the plain toggle back.
 
+**A choice that comes to name the whole room is everyone, stored as
+everyone** (`meetingToLeft`; QA, PR #55 finding 2). The chips and the hint
+are drawn from who is lit, the stored choice was a list, and the two came
+apart when desks left: narrowed to Bo with the others removed, the room lit
+**everyone** and said everyone hears, while the choice was still "Bo". A
+desk added next was not lit, and the next message went to Bo alone in a
+room that had just said everyone hears. Now a desk leaving takes itself out
+of the choice, and a choice naming every desk left becomes everyone, as
+`meetingToClick` already wrote it. This was the developer's pick of QA's
+two readings (the other: keep the list and say "Only Bo" in a room of
+one), on the ground that the page had already told the operator everyone
+hears. It is open to costmo's reversal. The rule below about a desk added
+to a narrowed room stands: such a room no longer reads as narrowed.
+
 **The chips' choice stays after a send** (costmo, the same day, reversing
 #44 Decided 2's "narrowed for this one message"). It used to go back to
 everyone once a message was taken, so a run of messages to one desk was a
@@ -1745,6 +1774,15 @@ both full suites. Four sightings, each alone or under load, each green on
 the next run: the session rows at the moment of the move are still unread,
 and that is now overdue rather than next.
 
+**Fifth, 2026-11-15**, in the PR #55 round, with seven reds before it in
+*Take a desk* ("and within seconds the host has bound it and registered
+the desk" and the six rows that read that binding): load average 57 at the
+suite's start and 171 at its end, from another project's Android and Xcode
+test builds on this machine, with a page-mutant run of ours beside it.
+`test:host` alone at load 7 twenty minutes later read 327 ✓ and 0 ✗. The
+session rows were again not read: the round was a review's fixes, none in
+the move.
+
 **Two more `test:host` reds seen once, in a mutant's run in a copy**
 (2026-11-14, load 5.5, nothing else on the ports): "a turn written while
 the send is still in flight reaches the floor anyway" and "the floor
@@ -1816,6 +1854,19 @@ overlay, and any other command with its `<command-name>` record. Neither
 has a composer the way the real window does for a *typed* message, so the
 typed delivery (`typeInto`) is proved on the composer pane and on a real
 probe, and the plain stand-in gets a paste.
+
+**Three fixtures from PR #55's review (2026-11-15), each for a path no
+fixture reached.** The composer pane's `effort-ask.flag` makes an
+`/effort` raise "Change effort level?", and that dialog stands 700 ms
+after its digit, so a host that answers at every look is seen pressing
+twice (the "once" in `send()`). A tab marked `deaf` in the window suite's
+`previewPane` logs Enter and does nothing with it, which is the only way
+`not_selected` is reached. And the host suite's `prompt.flag` takes
+`preview`: a preview-layout question drawn once and never redrawn, so the
+cursor stays on row 1 whatever digit is sent and the answer ends
+`not_on_row`, said on the desk as "the form was not submitted". The desk's
+form names a question's header `tab_title`; the first cut of that case
+waited on `header` and was red at a pushed SHA (**answer-a-qa-review**).
 
 **The host suite's stand-in can be slow to die, and can start fresh under
 an id of its own, since 0.10.10** — two flag files, read the way the others

@@ -500,6 +500,12 @@ cp -p ~/.claude/settings.json "$SP/settings.json.before"; shasum ~/.claude/setti
 cp -p "$SP/settings.json.before" ~/.claude/settings.json; shasum ~/.claude/settings.json   # the same hash
 ```
 
+Copying the whole file back also undoes anything else that changed in it
+meanwhile, and the operator changes his own effort level from his windows
+(he had, minutes before the 2026-11-15 measurement). Compare first, and if
+any key other than `model`, `modelSettings` and `effortLevel` differs, put
+back those three alone.
+
 A window started while the file is changed starts on the probe's model, so
 keep the stretch short and put the file back before reading results.
 
@@ -529,6 +535,37 @@ things, each seen once on purpose:
   `<command-name>` and `<local-command-stdout>` as user records; "Model
   'x' not found" writes both as `system` records with subtype
   `local_command` and the text in `content`.
+
+- **"Change effort level?" is the same dialog under another title, and
+  no probe has raised it** (QA, PR #55 finding 1; 2026-11-15, 2.1.325).
+  The binary's strings hold both titles over the same lines and the same
+  two choices, and its condition for the effort one is a change that would
+  rewrite the cached prefix: a model that does not take effort per turn.
+  Each of the four families the floor offers was given a reply and then
+  `/effort <another level>` through `send.mjs`, with the pane recorded:
+
+  | model | change | the window's line | frames with the dialog |
+  |---|---|---|---|
+  | Fable 5.2 | high → medium | Set effort level to medium (saved as your default…) | 0 |
+  | Opus 5.5 | high → low | Set effort level to low (saved…) | 0 |
+  | Sonnet 5.5 | (default) → low | Set effort level to low (saved…) | 0 |
+  | Haiku 5.5 | (default) → low, a reply, → high | Set effort level to high (saved…) | 0 |
+
+  "Switch model?" stood in the same recordings on each `/model` between
+  them (1–3 frames) and was answered. So the host's read of the effort
+  title is the model's measured shape with the binary's words, and
+  `test/window.mjs`'s stand-in raises it under `effort-ask.flag`. To read
+  the strings again on a new version (the binary is the platform package,
+  not `bin/claude.exe`'s wrapper):
+
+  ```bash
+  B="$(npm root -g)/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude"
+  python3 -I -c "import sys,re;d=open(sys.argv[1],'rb').read();m=re.search(rb'Change effort level\?',d);print(d[m.start()-80:m.end()+420].decode('utf8','replace') if m else 'gone')" "$B"
+  ```
+
+  If a probe ever does show it, record its last lines and what `1` and
+  `2` write, and put the real "Kept effort level as …" record's type
+  (user or `system`) beside `stdoutOf`.
 
 [`send.mjs`](send.mjs) plays any of these through the host's own `send()`
 from the tree, against the probe, with no board or host in the loop. To see

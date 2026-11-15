@@ -47,6 +47,18 @@ inversions table says which of your assertions they already trust.
   show; a first cut asserted both wrongly, costmo pushed the tree while the
   suite ran, and QA measured a red at that SHA (0d18a9f). Diff rows by
   identity against a set taken before.
+- **A new case in a slow suite is run before it rests in the tree.** On
+  2026-11-15 (PR #55) costmo committed the tree as `d5c391b` and nudged QA
+  while the round was still being written, with nothing announced. The
+  two fixes in it were green. A new `test:host` case was not: it waited on
+  `questions[0].header`, and the desk's form calls that field `tab_title`.
+  The host suite takes five minutes and had not been run, so the SHA had
+  four ✗ of mine in it. Write such a case, run its suite straight away
+  (or in a copy, **mutate-in-a-copy**), and only then go on to the next
+  file. When a push lands mid-round anyway, tell QA at once what is in it,
+  file by file: green there, red there, half done there, only in the tree.
+  They hold the lanes that cannot be measured and say which half they
+  measured.
 - **One mutant per fault line**, in a copy (**mutate-in-a-copy**): the fix
   removed must turn exactly the new assertion red. Name the mutant and the
   assertion in the reply; QA predicts their own inversions from it.

@@ -396,11 +396,47 @@ the check waits for `svg.room.selecting` to be gone and reads the room's
 own line (`miss` and `missTitle` in the probe), not tags on checkboxes:
 
 ```bash
-PORT=8905 DB_PATH=/tmp/select.db ORCH_AUTH_TOKEN=k node src/server.js &
-node .claude/skills/verify-ui-change/seed-select.mjs http://localhost:8905 /tmp/select.db /tmp/select-host.json > /tmp/select-work.jsonl &
-node --experimental-websocket .claude/skills/verify-ui-change/check-select.mjs http://localhost:8905 /tmp/shots /tmp/select.db /tmp/select-host.json /tmp/select-work.jsonl
-# … 66 ✓ · PASS
+PORT=8943 CDP=9283 .claude/skills/verify-ui-change/run-check-select.sh "$PWD"     # the repo, or a copy holding a mutant
+# … PASS · 73 of 73
 ```
+
+[`run-check-select.sh`](run-check-select.sh) starts the server, the seed
+and a Chrome of its own and kills all three (it had no runner until PR
+#55, and QA wrote their own to review it). By hand it is the three lines
+in `seed-select.mjs`'s header. Two things about its rows, both from QA's
+review of PR #55 (Info 4):
+
+- **A wait for the behaviour under test is a row** (`waited()` in the
+  check): "the room stopped selecting by itself" used to be a bare
+  `await page.waitFor(…)`, so a page that never stopped selecting ended
+  the check on the wait's exception with no ✗ and no verdict, and
+  `run-page-mutants.mjs` reported the mutant as "THE CHECK DID NOT
+  FINISH", which reads as the machine. A wait that only sets up the next
+  step may stay bare; one that *is* the claim goes through `ok()`.
+  `check-chat-controls.mjs` had the same at the selects being dimmed.
+  Rows alone were not enough: with the Nudge's `doneActing` out, the
+  check printed twelve ✗ and then died on a `press` of a line that was not
+  drawn, still with no verdict (QA, at d5c391b). So the three checks that
+  go through the mutant runner (select, chat-controls, meeting) also end
+  on any thrown step with a ✗ row naming it and the FAIL verdict
+  (`stopped`, on `uncaughtException` and `unhandledRejection`; a
+  top-level `await` that rejects reaches both).
+- **The verdict line is `PASS · N of N` or `FAIL · M of N red`.** It was
+  `N ✗ · FAIL` and a bare `PASS`: the first holds a ✗, which
+  `run-page-mutant.sh` counts as a red row, and neither starts with the
+  `PASS · ` / `FAIL · ` the runners look for. `check-popout.mjs` and
+  `check-pop-foot.mjs` still print the old form, and their runners match
+  it; change both together if either is put through the mutant runner.
+- **Something on the page for a second is caught by an observer, not a
+  poll.** An envelope lives 1.4 s at most and goes with any redraw of its
+  room. The step that reads where one leaves from (Info 6: under the
+  room's line, not a band above the desk) first polled for
+  `.envelope animateMotion` every 50 ms, and on an unmutated page read
+  nothing in 8 s, then on a mutant found the envelope with its path
+  already gone. It now installs a `MutationObserver` before the message
+  is written and records the path, the sender's place and the line in
+  the task that adds the node. Anything drawn and removed inside a poll
+  interval wants the same.
 
 What it proves beyond the suite: a click on a selecting storey in the
 building checks a desk instead of riding to it. The selection survives a
@@ -410,7 +446,11 @@ room stops selecting by itself after each of Nudge, Mark read and Hide
 line names the desks not reached and follows the line as it resolves; a
 real click on it in the building dismisses it without riding to the
 floor, and the room's height comes back; mark read and hide, which reach
-every desk, leave no line. With
+every desk, leave no line. A line left by a desk the board refused goes
+when selection is started by hand, and ending it by hand does not bring
+it back (the last step; without `settleBulk` in `toggleSelecting` the
+missed desk keeps its tag in the new selection and the line returns when
+it ends, two rows red). With
 the panel open on the desk last in line behind a window that never comes
 up, its bubble still reads `in line — 1 desk ahead on testbox` **past the
 30 s grace**. The host's work log reads windowed first, then windowless,
