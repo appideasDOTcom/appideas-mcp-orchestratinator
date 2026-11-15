@@ -732,8 +732,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -1520,6 +1520,15 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .selBand { fill: color-mix(in srgb, var(--accent) 7%, var(--surface-2)); }
 .selText { fill: var(--text); font: 11px var(--mono); }
 .selSum  { fill: var(--muted); font: 10.5px var(--mono); }
+/* What a finished action did not reach, left on the room once selection has
+   closed itself: the block colour, because it is the one thing still to read. */
+.missBar { cursor: pointer; }
+.missBar:focus { outline: none; }
+.missBand { fill: color-mix(in srgb, var(--block) 9%, var(--surface-2)); }
+.missText { fill: var(--block); font: 10.5px var(--mono); }
+.missX { fill: var(--muted); font: 11px var(--mono); }
+.missBar:hover .missX, .missBar:focus-visible .missX { fill: var(--text); }
+.missBar:hover .missBand, .missBar:focus-visible .missBand { fill: color-mix(in srgb, var(--block) 15%, var(--surface-2)); }
 .selAll, .selChip, .selBox { cursor: pointer; }
 .selAll:focus, .selChip:focus, .selBox:focus { outline: none; }
 .selAllBox { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; }
@@ -1828,6 +1837,16 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
   font-size: 12px; background: var(--surface);
 }
 .m-part .m-state { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+/* The box is a control: a click outside its buttons hides or shows this
+   desk's part of the transcript. Hidden reads as off without dimming its
+   badges, bell or stop sign, which all still work. */
+.m-part[data-act="m-show"] { cursor: pointer; user-select: none; }
+.m-part[data-act="m-show"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.m-part.m-off { border-style: dashed; border-left-style: solid; border-top-style: solid; }
+.m-part.m-off:not(.s-needs-you) { background: transparent; }
+.m-part.m-off .m-row-name b { text-decoration: line-through; opacity: .6; }
+.m-part.m-off .m-state { opacity: .6; }
+.m-part .m-off-word { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 .m-part.s-working .m-state { color: var(--busy); }
 .m-part.s-needs-you { border-color: color-mix(in srgb, var(--wait) 55%, var(--border)); border-left-color: var(--m-c); background: var(--wait-bg); }
 .m-part.s-needs-you .m-state { color: var(--wait); font-weight: 600; }

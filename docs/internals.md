@@ -137,8 +137,12 @@ just means a client opens a session per turn, which is normal and handled.
   <level>`, refuses a bare `/model` and an unknown level, and hands every
   slash command to the host as chat work. The host answers with two events
   of its own: `receipt` (a command confirmed on its own receipt — the
-  sentence, and for the picker the model and effort it set) and `model`
-  (the model the transcript's latest reply names). `FLOOR_COMMANDS` in
+  sentence, and for a `/model` or `/effort` the model and effort the
+  window's own line names) and `model`
+  (the model the transcript's latest reply names). A change that was not
+  made clears the asked-for side: the host's `error` names the `command`
+  it was typing, and a `/model` or `/effort` receipt can confirm nothing
+  (the window's "Model 'x' not found"). `FLOOR_COMMANDS` in
   [`src/floor.js`](../src/floor.js) is the list the composer offers; the
   page carries the same list, and `test/floor.mjs` checks the two agree.
 - **Dashboard:** a separate Express router on the same port. `GET /api/state`

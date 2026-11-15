@@ -256,6 +256,16 @@ refuses it because of that session), so the host suite can reach only the
 refusal. The words those two lines carry are `renewNote`, and `test:renew`
 asserts them. **diagnose-handoff** has the readings.
 
+It has been seen live once, and the floor was spared: on 2026-11-14 at
+20:19:14Z the heartbeat moved all four windows, with a `host` line on each
+desk. The same afternoon the refusal also landed on the operator's
+terminal: from 12:13 local every process under iTerm2 was refused
+`~/Documents`, so a conversation run there could not read its own repo. A
+server it started was refused as well, and that is not the host's to move.
+So an agent whose own commands get EPERM checks its own shell before
+reading the floor's (diagnose-handoff, first step). Moving the conversation onto the floor
+is what brought it back.
+
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
 [`host/dialog.js`](host/dialog.js), with a backend per platform and only
@@ -275,7 +285,8 @@ Everything the host knows about a window is a text capture of its pane, and
 **every rule for typing into one was measured, not reasoned**. They are recorded
 in [`.claude/skills/watch-the-window`](.claude/skills/watch-the-window/SKILL.md),
 and the obvious guess is wrong in all four cases: on an AskUserQuestion a digit
-*selects* on a single-select, *toggles* on a multi-select, the free-text row
+*selects* on a single-select (and only *moves* on one drawn with previews,
+below), *toggles* on a multi-select, the free-text row
 *withdraws the form* on a single-select but *opens a field* on a multi, and the
 Submit tab is arrived at by answering the last question rather than walked to. A
 day was spent proving each of those; do not adjust `answerSteps()` in
@@ -323,8 +334,9 @@ none of this needs the operator to sit and click.
 ## A question on the floor
 
 Four rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
-2.1.284). Each is the opposite of what the code did the day before, and each
-had a reasonable argument behind the old way — which is why they are here.
+2.1.284), and a fifth from 2026-11-14. Each is the opposite of what the code
+did the day before, and each had a reasonable argument behind the old way —
+which is why they are here.
 
 - **A form with a question unanswered is never sent.** costmo's ruling. The
   window's own review screen warns "You have not answered all questions" and
@@ -388,8 +400,41 @@ had a reasonable argument behind the old way — which is why they are here.
   the picks, or re-measuring the row on the current window — were
   considered and not chosen; do not re-propose them.
 
+- **A question with previews takes its digit as a move, and the host
+  presses Enter once it has read the cursor on that row.** costmo answered
+  such a form from the floor twice on 2026-11-14 and both failed ("the pane
+  did not change after 1"); the host log holds four more from a designer
+  desk, older than its timestamps. Measured on a probe on 2.1.325: a
+  single-select where *any* option carries a `preview` is drawn side by
+  side, with the choices beside the highlighted one's preview. It has no
+  "Type something." row, and its status line reads "Enter to select · ↑/↓
+  to navigate · n to add notes". There `2` moved the cursor and the form
+  stood, and `Enter` recorded "→ Bravo". A plain question in the same form
+  still takes its digit alone, so "digit, then Enter" everywhere is the old
+  bug back: the Enter answers the next tab with its first row. Tab, Left,
+  Right and Shift+Tab walk a preview tab like any other, and a multi-select
+  given previews is an ordinary multi-select. So `answerSteps` is unchanged,
+  and the host decides at the key: when the pane it is about to press a
+  digit into is a preview question (`previewingOf`, the status line, read
+  positionally and rejoined because it wraps at 80 columns), it sends the
+  digit, waits to read the cursor on that row, presses Enter, and waits for
+  the pane to change (`selectRow`). It is the host's and not the board's
+  because the pane says which layout a question got. That holds for a form
+  built from the call, on a desk whose plugin is older than the fix, and a
+  wrong guess presses nothing. A digit with no row behind it ends as
+  `not_on_row` with no Enter sent. That case is real: the form built from
+  the call used to add "Type something." as row 4 of such a question. The
+  hook now forwards `preview: true` for an option that has one, never the
+  text, and `formFromInput` leaves the row out; that half reaches a desk
+  with the next plugin update. The floor does not draw the previews
+  themselves. That was not asked for and is not backlog by default: a
+  preview is a mock-up of any size, and where it would go on the panel is
+  costmo's call.
+
 `form.mjs` in **measure-a-real-window** raises a real form on a probe window,
-reads it both ways, and answers it through the host's own code.
+reads it both ways, and answers it through the host's own code. `raise.sh`
+beside it raises one and leaves it standing, for pressing keys by hand
+before there is a rule to play.
 
 ## A message to a desk that is working
 
@@ -499,29 +544,96 @@ a reasonable argument behind it.
   `ORCH_BTW_LINGER_MS` for anyone looking at the window, then closed with
   Escape — the host does close it, on purpose, because a dialog left
   standing takes the next message instead of the composer.
-- **A model or effort change from the floor is this session's only**
-  (costmo, #10 Decided 4). `/model <name>` and `/effort <level>` as commands
-  write the person's machine-wide default (`~/.claude/settings.json`
-  `model`, `modelSettings.<model>.effortLevel` — "saved as your default for
-  new sessions"); the probe changed the operator's and they had to be put
-  back by hand. The window's picker has `s` for this session only, so the
-  host drives it (`pick`): `/model` + Enter, ↑/↓ to the row (a digit
-  SELECTS and starts the switch, so digits are never pressed; in a pane
-  under ~30 rows, 2.1.322 shows three models and "… +3 models", so a row
-  not on screen is looked for by walking the cursor, never by resizing
-  the pane — the floor's Sonnet and Haiku failed on every unattached
-  window until it did, 2026-11-09. The list is a ring ending in "▸ More
-  models", whose footer is "Enter to expand · Esc to cancel", and that is
-  still the picker; read as gone, it was left open and took the desk's
-  next /model. Read before and after each key at one size: `-S -N` on a
-  pane with history differs by size, QA PR #53), ←/→ along
-  the effort row, `s`, and `1` on the "Switch model?" cache warning. The
-  chat route refuses a bare `/model` (a picker nobody is driving) and an
-  effort level the picker has no row for; the page offers both as controls
-  and shows asked-for beside confirmed until the window confirms —
-  PreModelSwitch/PostModelSwitch, the stdout record, and the `model` on the
-  transcript's next reply, which is how the header follows a `/model`
-  typed into the window.
+- **A model or effort change from the floor is the window's own command,
+  and so the default for new sessions** (costmo, 2026-11-14, reversing #10
+  Decided 4, so the floor does what the window and the editor do). The
+  host types `/model <name>` or `/effort <level>` like any other command
+  (`send()`), and the window's line is the receipt and names what the
+  board takes as confirmed (`switchedTo`): "Set model to Haiku 5.5 and
+  saved as your default for new sessions", "Set effort level to low (saved
+  as your default for new sessions): …". The default is the machine's the
+  desk's host runs on (`~/.claude/settings.json` `model`,
+  `modelSettings.<model>.effortLevel`). For the eleven days before, a
+  change was "this session only": the host opened the window's picker,
+  walked its rows and pressed `s` (`pick()`, PR #53's short-pane walk
+  with it). That is removed, not kept with Enter in place of `s`, and the
+  reason was measured on 2.1.325: Enter in the picker saves the cursor's
+  row *and* the effort row together ("Set model to Sonnet 5.5 and saved
+  as your default for new sessions with medium effort"), so an effort
+  change on one desk re-saved that desk's model as the machine's default,
+  over whatever another desk had just chosen. The commands save the one
+  thing each names, resolve a family themselves ("fable" was Fable 5.2),
+  and answer an unknown name in words with nothing saved. Do not bring
+  the picker back for either. Four things the command path needed, each
+  measured that day:
+  - **"Switch model?" still stands between a `/model` and its line** on a
+    conversation cached for its model, behind the command as behind the
+    picker. The host answers `1`, once (`switchConfirmOf`, read from the
+    pane's last lines; it used to match the words anywhere in the capture,
+    and a conversation quoting them would have had a `1` typed into its
+    composer).
+  - **The same dialog has a second title, "Change effort level?", and the
+    host answers it for an `/effort` the same way** (QA, PR #55 finding 1).
+    It is in 2.1.325's strings with the model's lines under it, raised when
+    an effort change would rewrite the cached prefix. It has not been seen
+    on a window: `/effort <another level>` after a reply went straight
+    through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (probe,
+    2026-11-15), because those take effort per turn. So the read is the
+    measured one with the binary's title, and a desk on a model that does
+    not take effort per turn is where it would stand. Unanswered, on the
+    suite's stand-in, the `/effort` ended `not_delivered` and the desk's
+    next message was pasted into the dialog for a minute. A change the
+    window was told to keep writes "Kept effort level as <level>" (the
+    binary again), which names no level set and so clears the asked-for.
+  - **A refusal is a `system` record, not a user one.** "Model 'x' not
+    found" is written with subtype `local_command` and its text in
+    `content`. Read as user records only, the host waited out twenty
+    seconds on a window that had answered at once (`stdoutOf`).
+  - **Neither is typed into a working window.** `/model haiku` into a
+    running turn is taken at once and raises "Switch model?" over the
+    work. `/effort` mid-turn was not measured and is held to the same
+    rule. Refused before a key is pressed, in words on the desk.
+  - **The page's selects are written only where they changed**
+    (`fillSelect` in `src/ui/floor.js`). The panel is drawn again on every
+    poll and stream event, and both selects were emptied and refilled each
+    time: twice in the two seconds after a panel opens, then every 2 s.
+    costmo's report was a pick in those first seconds not taking, with the
+    drop-down left open. The rewrites were measured (a MutationObserver's
+    count; 0 now). That they were the cause is read from how Chrome
+    replaces an open select's menu when its rows change, and could not be
+    watched, because a headless browser draws no menu. The selects are
+    also dimmed, with the reason, whenever Send is: a choice goes out
+    through `sendChat`, which sends nothing while the window is asking.
+  The chat route still refuses a bare `/model` (a picker nobody is
+  driving) and an effort level that is not one of the window's; the page
+  shows asked-for beside confirmed until the window confirms —
+  PreModelSwitch/PostModelSwitch, the window's line, and the `model` on
+  the transcript's next reply, which is how the header follows a `/model`
+  typed into the window. **A change that was not made stops being asked
+  for** (costmo, the same day; `unask` in `applyHostEvent`). An asked-for
+  used to be cleared only by a confirmation, so a change the host refused
+  (a working desk) or the window did (an unknown name) left the select on
+  the model that was picked, not the one the window was on, with "x asked"
+  beside it. The host reports a reply's model only when it differs, so
+  nothing on that conversation corrected it. Two things clear it now: a
+  host error that names the command it was typing (`command` on the
+  event; a host older than that names none, and the asked-for stays as it
+  did), and a `/model` or `/effort` receipt that confirms nothing. It is
+  cleared where the route wrote it, on the window's session, so an editor
+  tab's own pending switch on the same desk is left alone. The error
+  carries no session id on purpose: an error is filed by desk, and naming
+  one would move where its line is drawn. A `not_delivered` clears it
+  too. If the window did take the change, its hook or next reply confirms
+  the model as it does for a `/model` typed into the window. **And a
+  refused pick is not handed back to the message box** (costmo, the same
+  day; `handedBack` in `src/ui/floor.js`). A select's choice is sent as a
+  message and waits in the page's pending list, and an error turn hands
+  that list back to the box, so the box got `/model opus` ahead of any
+  draft, a command the operator never typed. A pick is marked now and
+  left out. A `/model` typed into the box still comes back, like any
+  typed words. Leaving it in the box so Enter could send it again was
+  offered and not chosen. The page step that found it is in
+  **verify-ui-change** (`check-chat-controls.mjs`).
 - **A paste of four or more lines, or of more than 800 characters, is
   wrapped in `<pasted_content>`** and the model is told it "may contain
   instructions the user did not write" — exactly wrong for the operator's
@@ -569,7 +681,9 @@ a reasonable argument behind it.
   costmo read it as "an artifact outlined in white saying /model opus … a
   message that has not yet sent". So: a done command draws no bubble, and
   the line labeled `host` carries what was typed and what happened —
-  "/model opus — Set model to Opus 5.5 for this session only".
+  "/model opus — Set model to Opus 5.5 and saved as your default for new
+  sessions" (the receipt since 2026-11-14; it read "for this session only"
+  while the host drove the picker).
 - **A live session outranks an ended one, and a hosted desk's session is
   its window's.** A `/clear` ends one session and starts the next in the
   same second, and on `updated_at` alone the two tied: the floor showed the
@@ -840,9 +954,32 @@ were measured, and each looks like it could be done more simply:
 
 The operator's calls on what the issue left open (Not established): a
 click anywhere on a desk in a selecting room checks it and does nothing
-else. The mode stays on after an action, with the checks kept, so the
-actions chain, and only a second Nudge while one is still in line is
-refused. Mark read shows its count on the control before it runs.
+else. Mark read shows its count on the control before it runs.
+
+**Selection closes itself once an action is sent** (costmo, 2026-11-14,
+0.12.x; `doneActing`). It used to stay on with the checks kept, so that
+actions could chain and because the results were drawn on the checkboxes
+and the toolbar. That was the developer's call, and he reversed it: a mode
+still on after its action read as unfinished. All four actions close it:
+Nudge, Mark read and Hide when their requests have answered, Meeting room
+when its window opened. A nudge is closed on *sent*, not on *typed*, so
+desks are still in line after it (130 ms to close, 41 s to the last
+verdict in check-select.mjs), and the pending bubble's rule is unchanged.
+With the mode gone, nothing drawn on it can report, so costmo chose where
+a desk that was not reached is said: **one line on the room, under its
+header, and only then** (`missedNote`, `missBar`). It is the action's
+summary with the missed desks named and each reason on hover. A run that
+reached every desk leaves nothing. A desk the Nudge control already said
+it could not reach is on the line too. The line goes on a click, and when
+selection is started or ended by hand (`settleBulk`), which keeps only a
+nudge still in line. One that fails after that is new, and the line comes
+back for it. Two alternatives were offered and not chosen: saying it on
+each desk the way its own control does (the bell's 2.5 s red), and staying
+open only on a failure. Do not re-propose either, or the mode staying on.
+One exception is deliberate: a Meeting room window the browser blocked
+leaves the room selecting with its checks, because nothing was done and
+the remedy is the same click again. A second Nudge while one is in line is
+still refused, now when the room is selected again.
 
 Two more rulings went into the same diff:
 - **A floor unread pill opens its dialog every time** (Decided 5). The
@@ -1113,6 +1250,77 @@ An `@` later in a sentence is the operator's words. A name that is nobody
 in the room sends nothing and leaves the box as it was. Mentions outrank
 the chips for that message.
 
+**A click on a name's chip means that desk, so with everyone lit it is a
+solo** (costmo, 2026-11-14; `meetingToClick`). The chips were plain
+toggles. With everyone lit, the first click on Bo took Bo *out*, and
+"only Bo" in a room of four was three clicks on the others. He read it as
+working "the opposite of how one would expect". His rule: everyone lit, a
+click leaves only that desk; one lit, a click on it gives everyone back
+and a click on another adds that one; some lit but not all, a click
+toggles. So the chips never reach "nobody" by a click: the last lit chip
+gives everyone back. A room still stands at nobody when the one desk
+chosen leaves it, and a click then adds the desk clicked. Each chip's
+tooltip says what a click on it will do (`meetingToTitle`, which reads it
+off `meetingToClick`). The **everyone** chip is as it was. Do not bring
+the plain toggle back.
+
+**A choice that comes to name the whole room is everyone, stored as
+everyone** (`meetingToLeft`; QA, PR #55 finding 2). The chips and the hint
+are drawn from who is lit, the stored choice was a list, and the two came
+apart when desks left: narrowed to Bo with the others removed, the room lit
+**everyone** and said everyone hears, while the choice was still "Bo". A
+desk added next was not lit, and the next message went to Bo alone in a
+room that had just said everyone hears. Now a desk leaving takes itself out
+of the choice, and a choice naming every desk left becomes everyone, as
+`meetingToClick` already wrote it. This was the developer's pick of QA's
+two readings (the other: keep the list and say "Only Bo" in a room of
+one), on the ground that the page had already told the operator everyone
+hears. It is open to costmo's reversal. The rule below about a desk added
+to a narrowed room stands: such a room no longer reads as narrowed.
+
+**The chips' choice stays after a send** (costmo, the same day, reversing
+#44 Decided 2's "narrowed for this one message"). It used to go back to
+everyone once a message was taken, so a run of messages to one desk was a
+click before each. Now it stays until the operator changes it, and it is
+kept on the page only (`ui.meeting.to`): a reload, or the room opened
+again, starts at everyone, which he asked for. An `@name` at the start of
+the box is still for that one message and leaves the chips as they were.
+A desk added while the room is narrowed is not lit, because the choice
+was made without it. Do not re-propose the reset.
+
+**A participant's box is a control: a click on it hides or shows that
+desk's part of the transcript** (costmo, 2026-11-14; `meetingShown`,
+`m.hide`). The click is any part of the box that is not one of its
+buttons. Each button has a `data-act` of its own and the handler takes
+the nearest, so the box gets only the clicks that landed on none of them,
+a dimmed button's included. Five things were decided in building it, none
+of them his words, so each is open to his reversal:
+- **A desk's conversation is what it said and what was said to it.** Its
+  own turns go. A message goes only when every desk it went to is hidden,
+  and one that stays is drawn whole, with the hidden desk's delivery line
+  under it: a refusal is still said. The room's notes always stay.
+- **Hiding is not muting.** A hidden desk still hears what the chips or an
+  `@name` send it, and its prompt box still stands against the composer:
+  a question that needs the operator is never put away. The hint under
+  the box names a hidden desk that will hear the next message
+  (`meetingHiddenNote`), and drops its own second half to make room. The
+  longer line squeezed "Nudge everyone · 1 unread" onto two lines at the
+  room's own width, seen in the check's picture and pinned there.
+- **It lives on the page, like the chips' choice.** A reload or the room
+  opened again shows everyone.
+- **A hidden desk that leaves the room is shown again**, because what it
+  said stays in the transcript and it has no box left to click.
+- **The row of boxes keeps focus through its own redraw.** It is drawn
+  whole whenever a desk's state changes, so Enter on a focused box worked
+  once and then the next poll left focus on the body, one check run in
+  two. `renderMeeting` now puts focus back on the same control of the
+  same desk, which also holds for a bell or a pill reached by Tab.
+
+The filter runs over the list `meetingItems` made and reorders nothing,
+which is what puts a desk's turns back "properly inline" when it is shown
+again. A reply being typed by a hidden desk is not drawn either; no
+fixture streams a reply, so that one line is read, not measured.
+
 **A desk Resume could not bring back for a reason that may pass stays in
 the room's record, `absent`, and absent is on the floor**: it is not in
 the room for containment either way, so its broadcasts reach the floor
@@ -1137,9 +1345,9 @@ names each input by its prompt's request id. The panel only ever drew one
 form, which is why the name was never scoped before. A prompt box's
 answering spinner is per desk for the same reason (`ui.answering` is a Map).
 
-Left out on purpose. **Model and effort controls**: a desk's select drives
-its window's picker, so a room would need one per desk; `/model sonnet`
-narrowed to one desk takes the same route. **A reading view**: History
+Left out on purpose. **Model and effort controls**: a desk's select types
+`/model` or `/effort` into its own window, so a room would need one per
+desk; `/model sonnet` narrowed to one desk takes the same route. **A reading view**: History
 reads a meeting desk in the floor's panel, because reading types into
 nothing (renderPanel's `outMeeting` branch). **Audit rows**: a room is a
 window arrangement, like a popout, and popouts write none; the reopens a
@@ -1522,7 +1730,9 @@ x.db-shm`). And a word starting with `=` is a command lookup, so `echo
 flags (`invalid argument -m=eeting`). Use `command grep -i -e "pat"`. Shell
 scripts are not affected, because `sh` does not load the function. And
 `md5` is not installed: a comparison of two `$(md5 -q …)` is two empty
-strings and always equal. Use `shasum`.
+strings and always equal. Use `shasum`, and say which: with no flag it is
+SHA-1, and one sent to QA unlabelled was set against their sha256 of the
+same file and read as two files (PR #55 round 4). `shasum -a 256`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
@@ -1565,6 +1775,66 @@ re-review of PR #49 (dc6de34): red once in one of ten single-suite host runs
 both full suites. Four sightings, each alone or under load, each green on
 the next run: the session rows at the moment of the move are still unread,
 and that is now overdue rather than next.
+
+**Fifth, 2026-11-15**, in the PR #55 round, with seven reds before it in
+*Take a desk* ("and within seconds the host has bound it and registered
+the desk" and the six rows that read that binding): load average 57 at the
+suite's start and 171 at its end, from another project's Android and Xcode
+test builds on this machine, with a page-mutant run of ours beside it.
+`test:host` alone at load 7 twenty minutes later read 327 ✓ and 0 ✗. The
+session rows were again not read: the round was a review's fixes, none in
+the move.
+
+**Sixth, the same day**, in QA's close of PR #55 at f5c2a92: their first
+chain run, load 16–27 with their own page lane beside it; 327 ✓ in the
+second.
+
+**The red now reads the rows itself** (2026-11-15, after the sixth). They
+were never read because they are gone with the run's database before
+anyone looks. When that assertion fails, the suite prints the session row
+(its floor, and its times beside the board's clock), the newest turns
+filed under the old conversation's id with the floor each was filed on,
+and the host's log from the move on. A session row is keyed by its id
+alone, so the red means something filed under the old id named the new
+floor after the move. The print says which kind. Run with the mutant the
+case was written against (the move's `bound` naming the conversation it
+left; control 327 ✓, the mutant that one red), it read: the row on the
+new floor, updated in the second of the bind, and every turn under that
+id still on the old floor. So that mutant is an event that writes no
+turn. A turn on the new floor in the print would instead be the relay
+still reading the old transcript after the rebind. Which one the six
+sightings were is not known. The next sighting is read, not rerun.
+
+**A key log is read after a wait, not straight after `send()`** (QA,
+PR #55 Info 9). The composer stand-in writes its log when a key reaches
+it, and `send()` returns when tmux has taken the key. "which the host
+closed afterwards, once" read the log at once and found no Escape in 1 of
+QA's 4 window runs (load 24–84), with the composer back on the next row.
+It waits for the Escape now and then counts it. A count of keys taken
+straight after a send that ends on a key has the same gap. **And a count
+by mode is not a count** (Info 10): the first Escape puts the stand-in
+back in composer mode, so a second was logged there, and with the host
+made to send two the row still read "once". It is the shape of the
+effort dialog's "once", which needed a dialog that stands 700 ms: a key
+log filtered by the mode a key ends cannot see a repeat. **And an absence
+has nothing to wait on** (Info 11). The first fix counted the Escape in
+every mode 400 ms after the composer was back, and an Escape logged
+600 ms late went unseen. The row now stands at the end of the composer
+section, after a dozen sends that each waited on their own receipts: every
+Escape the pane took, by mode, is `btw` then `cost` and none in a
+composer. When the thing to prove is that a key did not arrive, read the
+whole log after later work has been observed, not after a sleep.
+
+**Two more `test:host` reds seen once, in a mutant's run in a copy**
+(2026-11-14, load 5.5, nothing else on the ports): "a turn written while
+the send is still in flight reaches the floor anyway" and "the floor
+gained a turn rather than replaying the transcript", both in *hearing the
+desk while a message is still going in*, which waits 4 s on the relay.
+The mutant was a field dropped from the host's error event, 500 lines
+away. Run again beside an unmutated control, the control read 320 ✓ and
+the mutant only its predicted red. The cause was not looked for.
+`run-mutants.mjs --control` is how to tell such a red from a mutant's in
+the same run (**mutate-in-a-copy**).
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
@@ -1613,17 +1883,32 @@ with a restore step, the commit landed mid-run, and `8788a6d` reached
 **A composer pane and a command-aware stand-in, since 0.10.9.** The window
 suite's `composer-desk` pane (`run.cjs` in `test/window.mjs`) is a node
 program on the alternate screen that draws what Claude Code draws — a
-composer box, the `/btw` overlay with its answer arriving late, the model
-picker with its effort row, the compaction spinner — writes the records
-Claude Code writes, drops the first Enter the way a paste-consumed one is
-dropped, and logs every key it is sent by mode. That log is how "no Enter
-after a command that opened something" and "two Downs then `s`, never a
-digit" are asserted rather than assumed. The host suite's stand-in answers
+composer box, the `/btw` overlay with its answer arriving late, the
+"Switch model?" warning (with `switch.flag`), the compaction spinner —
+writes the records Claude Code writes (a `/model` or `/effort` line as a
+user record, a refusal as a `system` one), drops the first Enter the way a
+paste-consumed one is dropped, and logs every key it is sent by mode. That
+log is how "no Enter after a command that opened something" and "the
+warning got one key, the digit" are asserted rather than assumed. It drew
+the model picker until 2026-11-14, when the host stopped driving one. The host suite's stand-in answers
 `/clear` with a new session file and a roster change, `/btw` with an
 overlay, and any other command with its `<command-name>` record. Neither
 has a composer the way the real window does for a *typed* message, so the
 typed delivery (`typeInto`) is proved on the composer pane and on a real
 probe, and the plain stand-in gets a paste.
+
+**Three fixtures from PR #55's review (2026-11-15), each for a path no
+fixture reached.** The composer pane's `effort-ask.flag` makes an
+`/effort` raise "Change effort level?", and that dialog stands 700 ms
+after its digit, so a host that answers at every look is seen pressing
+twice (the "once" in `send()`). A tab marked `deaf` in the window suite's
+`previewPane` logs Enter and does nothing with it, which is the only way
+`not_selected` is reached. And the host suite's `prompt.flag` takes
+`preview`: a preview-layout question drawn once and never redrawn, so the
+cursor stays on row 1 whatever digit is sent and the answer ends
+`not_on_row`, said on the desk as "the form was not submitted". The desk's
+form names a question's header `tab_title`; the first cut of that case
+waited on `header` and was red at a pushed SHA (**answer-a-qa-review**).
 
 **The host suite's stand-in can be slow to die, and can start fresh under
 an id of its own, since 0.10.10** — two flag files, read the way the others

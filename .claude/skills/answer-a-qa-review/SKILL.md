@@ -47,6 +47,18 @@ inversions table says which of your assertions they already trust.
   show; a first cut asserted both wrongly, costmo pushed the tree while the
   suite ran, and QA measured a red at that SHA (0d18a9f). Diff rows by
   identity against a set taken before.
+- **A new case in a slow suite is run before it rests in the tree.** On
+  2026-11-15 (PR #55) costmo committed the tree as `d5c391b` and nudged QA
+  while the round was still being written, with nothing announced. The
+  two fixes in it were green. A new `test:host` case was not: it waited on
+  `questions[0].header`, and the desk's form calls that field `tab_title`.
+  The host suite takes five minutes and had not been run, so the SHA had
+  four ✗ of mine in it. Write such a case, run its suite straight away
+  (or in a copy, **mutate-in-a-copy**), and only then go on to the next
+  file. When a push lands mid-round anyway, tell QA at once what is in it,
+  file by file: green there, red there, half done there, only in the tree.
+  They hold the lanes that cannot be measured and say which half they
+  measured.
 - **One mutant per fault line**, in a copy (**mutate-in-a-copy**): the fix
   removed must turn exactly the new assertion red. Name the mutant and the
   assertion in the reply; QA predicts their own inversions from it.
@@ -77,6 +89,36 @@ asserts in order; the mutants and the assertion each turned red; which SHA
 holds what (costmo may have pushed mid-work — say "the pushed X has the
 first cut; the rework is in the working tree"). The same goes in the task's
 completion note, with the suite's exit and counts.
+
+## The rounds after the first close
+
+A close is not always the end. QA's closing message can carry a new Info
+item marked "for your notes" or "yours to take or leave", found while
+re-measuring. PR #55 had three (Info 9, 10 and 11), each a way the last
+round's own test could miss its fault, and so four closes, at `f5c2a92`,
+`72017ab`, `0387b47` and `27efc57`. Each is a small round of the same
+shape: fix in the tree, a control and the mutants in a copy, the account
+to `appideas-qa` as a message (every thread is resolved by then, so there
+is nothing to reply under), and QA re-measures at costmo's next push and
+posts a closing note. What those rounds taught:
+
+- **Tell costmo the PR was approvable at the close.** The later rounds
+  harden tests and block nothing, and merge and deploy are his at any of
+  them. Say so in the report, in one line, each time.
+- **The candidate test is run from outside the tree** (`run-batches.mjs
+  --overlay`, **mutate-in-a-copy**), and copied in when its control is
+  green. This is the rule above, with the tool that makes it the easy way.
+- **Take QA's pin as a mutant and run it** before answering, and before
+  offering a different fix. Their pin is usually a change to a stand-in.
+  Four runs settle it: control, fault, fault with the pin, pin alone.
+- **A fix for "the test reads too early" is not a longer wait.** Info 9
+  was a read straight after `send()`, Info 10 a count that could not see a
+  repeat, Info 11 the 400 ms sleep that answered Info 10. What held was a
+  row that needs no timer: the whole key log, read at the end of the
+  section, after later sends had waited on their own receipts (CLAUDE.md,
+  Tests, "an absence has nothing to wait on").
+- **A hash is given with its algorithm.** Bare `shasum` is SHA-1, QA
+  reads sha256, and the two were taken for two files.
 
 ## What the channel gets
 

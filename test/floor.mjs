@@ -1414,8 +1414,8 @@ try {
   let rr2 = await say('/model');
   eq([rr2.status, (await rr2.json()).code], [400, 'picker'], 'a bare /model is refused — it would open a picker nobody is driving');
   rr2 = await say('/effort absurd');
-  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the picker does not have is refused');
-  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the picker\'s');
+  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the window does not have is refused');
+  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the window\'s');
   rr2 = await say('/model haiku');
   eq(rr2.status, 200, '/model <name> goes to the host');
   assert((await takeWork()).includes('chat'), 'as chat work — the host decides it is a picker');
@@ -1453,27 +1453,89 @@ try {
   // the window's session rather than "the desk's newest".
   await sleep(1100);
   await post(ev('twofold', 's-two-editor', 'Stop', {}));
-  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 for this session only', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 and saved as your default for new sessions', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
   two = await sessOf('twofold');
-  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the picker's words land on the window's session the host named");
+  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the window's words land on the window's session the host named");
   await post(ev('twofold', 's-two-window', 'SessionEnd', { reason: 'prompt_input_exit' }));
   await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: null }]);
   eq((await sessOf('twofold'))?.model, 'claude-fable-5-1', 'and the other live session was never touched');
 
   // The host's receipts, in the command's own terms (issue #9).
   const noteOf = async (agent) => deskOf(await floor(), agent)?.delivery ?? null;
-  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 for this session only with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
+  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
   let ty = await sessOf('typist');
-  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "the picker's receipt confirms the effort and clears both asked-fors");
-  eq(ty?.model, 'Haiku 5.5', "and the picker's own words stand as the model until a hook or a reply names the id — the select follows at once");
+  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "a receipt naming both confirms the effort and clears both asked-fors");
+  eq(ty?.model, 'Haiku 5.5', "and the window's own words stand as the model until a hook or a reply names the id — the select follows at once");
   eq((await noteOf('typist'))?.state, 'done', 'and the composer\'s note says the command is done');
-  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 for this session only with xhigh effort', 'in the window\'s words');
-  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 for this session only with xhigh effort', tool_name: 'host' }]);
+  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', 'in the window\'s words');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', tool_name: 'host' }]);
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'assistant', text: '10', via: '/btw' }]);
   eq((await noteOf('typist'))?.state, 'done', "the command's own lines — the host's sentence, a /btw answer — do not take the note down");
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'user', text: 'the next thing' }]);
   eq(await noteOf('typist'), null, 'the operator\'s next message does');
   eq(((await turns('typist')).rows ?? []).find((t) => t.text === '10')?.via, '/btw', 'and a /btw answer is the agent\'s, labeled by the command');
+
+  // A change that was not made stops being asked for (costmo, 2026-11-14).
+  // It used to stand until something confirmed a model: the select showed
+  // the model that was picked, not the one the window was on.
+  await register({ channel: CH, agent: 'changer', cwd: '/repo/changer', window: '@16' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: 's-changer', cwd: '/repo/changer' }]);
+  await post(ev('changer', 's-changer', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  await post(ev('changer', 's-changer', 'Stop', { effort_level: 'medium' }));
+  const change = async (text) => {
+    const r = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'changer', text }) });
+    await takeWork();
+    return r.status;
+  };
+  const asked = async () => { const s = await sessOf('changer'); return [s?.model, s?.model_requested, s?.effort, s?.effort_requested]; };
+  eq([await change('/model sonnet'), await change('/effort high')], [200, 200], 'a model and an effort change are both asked of a desk');
+  eq(await asked(), ['claude-opus-5-5', 'sonnet', 'medium', 'high'], 'and both stand as asked for');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'not_delivered', message: 'the window did not record the message' }]);
+  eq(await asked(), ['claude-opus-5-5', 'sonnet', 'medium', 'high'], 'an error that names no command leaves them standing: it may be about anything');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'model', message: 'the desk is working — change the model when the turn ends' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', 'high'], 'a model change the host refused is no longer asked for, and the effort asked beside it still is');
+  eq(((await turns('changer')).rows ?? []).at(-1)?.text, 'the desk is working — change the model when the turn ends', 'with the refusal on the desk in words');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'effort', message: 'the desk is working — change the effort level when the turn ends' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'and so with an effort change');
+  await change('/model gpt');
+  eq((await asked())[1], 'gpt', 'a name the window does not have is asked for like any other');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'model', said: "Model 'gpt' not found", text: '/model gpt', session_id: 's-changer' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], "and the window's refusal, a receipt that names no model, clears it with the model as it was");
+  await change('/effort low');
+  // The sentence is 2.1.325's own for a change it was told to keep ("No, go
+  // back" on "Change effort level?"), read from its strings and not seen on
+  // a window (QA, PR #55 finding 1). The rule under test is the receipt
+  // naming no level it was set to, whatever its words.
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'effort', said: 'Kept effort level as medium', text: '/effort low', session_id: 's-changer' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'the same for an effort receipt that names no level');
+  await change('/model sonnet');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'btw', said: 'answered in the window', text: '/btw hello', session_id: 's-changer' }]);
+  eq((await asked())[1], 'sonnet', "another command's receipt clears nothing");
+  // On the window's session, as the ask was (PR #32 finding 1): an editor
+  // tab on the same desk, newer by the clock, keeps what its own window
+  // asked for.
+  await post(ev('changer', 's-changer-editor', 'SessionStart', { source: 'startup', model: 'claude-fable-5-1' }));
+  await sleep(1100);
+  await post(ev('changer', 's-changer-editor', 'PreModelSwitch', { from_model: 'claude-fable-5-1', to_model: 'claude-haiku-5-5', requested_model: 'haiku', source: 'picker' }));
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'model', message: 'the desk is working — change the model when the turn ends' }]);
+  eq((await asked())[1], null, "the refusal clears the ask on the window's session");
+  await post(ev('changer', 's-changer', 'SessionEnd', { reason: 'prompt_input_exit' }));
+  await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: null }]);
+  eq((await asked()).slice(0, 2), ['claude-fable-5-1', 'claude-haiku-5-5'], "and not the one the editor's own picker made on the other session");
+  // A desk whose window has never registered has only the board's
+  // placeholder for a session, and the route writes its ask on the desk's
+  // newest row (here the one an editor's hooks made). A receipt that names
+  // that placeholder clears it there: the placeholder is no row of its own
+  // to clear (QA, PR #55 Info 7).
+  await register({ channel: CH, agent: 'unseated', cwd: '/repo/unseated', window: '@17' });
+  await post(ev('unseated', 's-unseated-editor', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  const unseated = async () => { const d = deskOf(await floor(), 'unseated'); return [d?.hosted?.session_id, d?.session?.session_id, d?.session?.effort_requested ?? null]; };
+  const askUnseated = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'unseated', text: '/effort high' }) });
+  await takeWork();
+  eq([askUnseated.status, await unseated()], [200, [`host:h-open:${CH}:unseated`, 's-unseated-editor', 'high']],
+    "an effort change asked of a desk on its placeholder stands on the desk's newest session");
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'unseated', command: 'effort', said: 'Kept effort level as medium', text: '/effort high', session_id: `host:h-open:${CH}:unseated` }]);
+  eq((await unseated())[2], null, 'and a receipt that names only the placeholder clears it where it was written');
 
   // The transcript's model, reported by the host when it changes.
   await hostEvents([{ type: 'model', channel: CH, agent: 'typist', session_id: 's-typist', model: 'claude-opus-5-5' }]);
@@ -1505,11 +1567,11 @@ try {
     const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/chat-controls-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue, modelOptions, effortOptions, selectBlock, handedBack };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
-    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the picker\'s levels');
+    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the window\'s levels');
     eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'a slash alone offers every command');
     eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
     eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
@@ -1538,6 +1600,34 @@ try {
     eq(page.PAGE_MODELS.every((m) => page.modelFamily(m.label) === m.value), true, 'and each label reads as the family its value sends');
     eq(page.effortSelectValue({ effort: 'low', effort_requested: 'high' }), 'high', 'the effort select shows the asked-for level while pending');
     eq(page.effortSelectValue({ effort: 'low' }), 'low', 'else the confirmed one');
+    // The selects' rows are data, so the drawing can leave an unchanged
+    // select untouched (fillSelect): the same session gives the same rows.
+    const fams = page.PAGE_MODELS.map((m) => m.value);
+    eq(page.modelOptions({ model: 'claude-haiku-5-5' }).map((o) => o.value), fams, 'a model the control offers: the families and nothing else');
+    eq(page.modelOptions({ model: null }).map((o) => [o.value, o.label])[0], ['', 'model…'], 'no model named yet: a placeholder row first');
+    eq(page.modelOptions({ model: 'Mystery 9' })[0], { value: 'mystery', label: 'Mystery 9' }, 'a model that is none of them: its own row, in the window\'s words');
+    eq(JSON.stringify(page.modelOptions({ model: 'claude-haiku-5-5', model_requested: 'opus', effort: 'low' })), JSON.stringify(page.modelOptions({ model: 'claude-haiku-5-5' })),
+      'and what was asked for, or the effort, changes no row — only a change of model can');
+    eq(page.effortOptions({ effort: 'low' }).map((o) => o.value), EFFORT_LEVELS, 'the effort rows are the levels');
+    eq(page.effortOptions({}).map((o) => o.value), ['', ...EFFORT_LEVELS], 'under a placeholder while none is known');
+    // The selects are dimmed when Send is, in the composer's words: a
+    // choice is sent as a message, and one that would be dropped is not taken.
+    eq(page.selectBlock(true, false, false, 'Bo'), null, 'a desk that can be typed into takes a choice');
+    eq(page.selectBlock(true, false, true, 'Bo'), 'Bo is asking something — answer it above first.', 'a window that is asking takes none — Send would send nothing — and says so');
+    eq(page.selectBlock(false, true, false, 'Bo'), 'Bo’s conversation is open in your editor.', 'nor one an editor holds');
+    eq(page.selectBlock(false, false, false, 'Bo'), 'Bo’s machine isn’t reachable right now.', 'nor one whose host is away');
+    // What an error turn gives back to the box: typed words, never a pick.
+    eq(page.handedBack([{ text: 'a paragraph somebody wrote' }, { text: '/model opus', pick: true }, { text: 'and a second' }]), 'a paragraph somebody wrote\n\nand a second',
+      'an error hands back what was typed, in order — and not a pick from a select, which was never in the box');
+    eq(page.handedBack([{ text: '/effort high', pick: true }]), '', 'a refused pick alone hands back nothing');
+    eq(page.handedBack([{ text: '/model opus' }]), '/model opus', 'a /model typed into the box is the operator\'s words and comes back like any other');
+    // The hints say what a choice does now (costmo, 2026-11-14).
+    for (const list of [page.PAGE_COMMANDS, FLOOR_COMMANDS]) {
+      for (const name of ['model', 'effort']) {
+        const hint = list.find((c) => c.name === name).hint;
+        assert(/default for new sessions/.test(hint) && !/session only/.test(hint), `/${name} is offered as saving the default, on the page and the server alike — "${hint}"`);
+      }
+    }
   }
 
   console.log('\nstopping a turn');
@@ -2183,6 +2273,25 @@ try {
     eq(rows(formFromInput(INPUT.slice(1)).questions).map((q) => [q.strip, q.options.at(-1).n, q.options.at(-1).text]), [[true, 5, 'Type something']],
       'a lone multi-select has one, and its free-text row is the next number, spelled as a multi spells it');
     eq(built.questions[0].options[0].detail, 'Use red for the probe.', 'each choice keeps its description');
+    // A question with a preview has no free-text row. The call and the
+    // pane's reading below are one real form (2.1.325 at 80x24, 2026-11-14):
+    // the first question's options each had a preview, the second's none.
+    const PREVIEW_INPUT = [
+      { question: 'Where should it go?', header: 'Where', multiSelect: false, options: [
+        { label: 'Alpha', description: 'first', preview: 'AAA box' }, { label: 'Bravo', description: 'second', preview: 'BBB box' }, { label: 'Charlie', description: 'third', preview: 'CCC box' }] },
+      { question: 'Which plain one?', header: 'Plain', multiSelect: false, options: [{ label: 'Red', description: 'red' }, { label: 'Green', description: 'green' }] },
+    ];
+    const PREVIEW_PANE = [['Where', true, 'single', [[1, 'Alpha', false, null], [2, 'Bravo', false, null], [3, 'Charlie', false, null]]],
+      ['Plain', true, 'single', [[1, 'Red', false, null], [2, 'Green', false, null], [3, 'Type something.', true, null]]]];
+    const flat = (qs) => qs.map((q) => [q.tab_title, q.strip, q.kind, q.options.map((o) => [o.n, o.text, !!o.other, o.checked])]);
+    eq(flat(formFromInput(PREVIEW_INPUT).questions), PREVIEW_PANE,
+      'form-from-input: a question whose options carry a preview is built without "Type something.", as the pane draws it, and the plain one beside it keeps its row');
+    const flagged = PREVIEW_INPUT.map((q) => ({ ...q, options: q.options.map(({ preview, ...o }) => ({ ...o, ...(preview ? { preview: true } : {}) })) }));
+    eq(flat(formFromInput(flagged).questions), PREVIEW_PANE, 'the same from the hook\'s copy, which carries the preview as a flag and not its text');
+    eq(flat(formFromInput([{ ...PREVIEW_INPUT[0], options: [PREVIEW_INPUT[0].options[0], { label: 'Bravo' }, { label: 'Charlie', preview: '  ' }] }]).questions)[0][3].length, 3,
+      'one option with a preview is enough: the window draws the whole question that way (measured)');
+    eq(flat(formFromInput([{ ...PREVIEW_INPUT[0], multiSelect: true }]).questions)[0][3].at(-1), [4, 'Type something', true, false],
+      'and a multi-select given previews keeps its free-text row: it is drawn as any other multi-select (measured)');
     eq(built.tabs.map((t) => t.title), ['Colour', 'Toppings', 'Submit'], 'and the tabs are the headers, then Submit');
     eq([formFromInput(null), formFromInput([]), formFromInput([{ question: 'Q?', options: [{ label: 'A' }, { description: 'no label' }] }]),
       formFromInput([{ question: 'Q?', options: Array.from({ length: 12 }, (_, i) => ({ label: `c${i}` })) }])],
@@ -2716,10 +2825,10 @@ try {
     };
     const { deskRows } = await lift('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */',
       '  /* ---------- a desk\'s place on the floor: the drawing ---------- */', ['deskRows']);
-    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary } = await lift(
+    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary, missedNote, bulkKept } = await lift(
       '  /* ---------- bulk selection: what the page decides ---------- */',
       '  /* ---------- bulk selection: the drawing ---------- */',
-      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary']);
+      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary', 'missedNote', 'bulkKept']);
 
     const CHB = 'bulky';
     const events = hostEvents;
@@ -2847,6 +2956,27 @@ try {
     eq(bulkTag({ kind: 'read', entries: [{ agent: 'hook', state: 'sending', count: 4 }] }, 'hook', null)?.text, 'marking', 'a mark-read still on its way is not called a failure before its answer');
     eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'done' }] }, 'win', { nudge: { ok: true } }), null, 'a desk back from its pill has nothing left to say about the hide');
     eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }] }, 'win', null), { text: 'not hidden', kind: 'bad', title: 'HTTP 500' }, 'and one the hide did not reach says so');
+
+    // Selection closes itself once an action is sent (costmo, 2026-11-14),
+    // so what it did not reach is said on the room, and only that.
+    eq(missedNote({ nudge: rec }), { text: 'nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', title: 'ed: held\nhook: no host' },
+      'a room whose nudge missed desks keeps one line: every desk counted, the missed ones named, each reason on hover');
+    eq(missedNote({ nudge: { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }, { agent: 'cold', state: 'line', host: 'openbox' }] } }), null,
+      'a nudge that has missed nobody leaves nothing on the room, in line or landed');
+    eq(missedNote({ read: { kind: 'read', entries: [{ agent: 'hook', state: 'done', cleared: 4 }] }, hide: { kind: 'hide', entries: [{ agent: 'win', state: 'done' }] } }), null,
+      'nor does a mark read or a hide that reached every desk');
+    eq(missedNote({ nudge: { ...rec, at: 1 }, hide: { kind: 'hide', at: 2, entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }, { agent: 'cold', state: 'done' }] }, read: { kind: 'read', at: 3, entries: [{ agent: 'hook', state: 'done', cleared: 4 }] } })?.text,
+      'hide: 1 hidden · 1 not hidden — win   ·   nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', 'two actions that each missed a desk are both on it, newest first, and one that missed nobody is not');
+    eq(missedNote(null), null, 'and a room that did nothing says nothing');
+    // Seen (the line clicked, or selection started or ended by hand): only
+    // a nudge still in line is kept, for the pending bubble and its verdict.
+    const kept = bulkKept({ nudge: rec, read: { kind: 'read', entries: [{ agent: 'hook', state: 'failed', words: 'x' }] } });
+    eq(kept?.nudge.entries.map((e) => `${e.agent}:${e.state}`), ['cold:line'], 'a seen room keeps only the nudge still in line');
+    eq([missedNote(kept), !!kept.read], [null, false], 'so its line is gone');
+    eq(bulkWait(kept.nudge.entries, 'cold', true)?.note, 'opening its window — the host waits up to 45 s for it', 'and the desk in line still waits on the same facts');
+    kept.nudge.entries[0].state = 'failed'; kept.nudge.entries[0].words = 'never came up';
+    eq(missedNote(kept), { text: 'nudge: 1 not nudged — cold', title: 'cold: never came up' }, 'a nudge that fails after that is new, and the room says it');
+    eq(bulkKept({ nudge: { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }] } }), null, 'with nothing in line, a seen room keeps nothing');
 
     // Decided 5: a desk's unread pill opens its backlog dialog every time.
     // The dialog reads app.js's /api/state copy, polled apart from the
@@ -3404,7 +3534,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingShown, meetingHiddenNote, meetingResumePlan, meetingTo, meetingToClick, meetingToLeft, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -3453,6 +3583,25 @@ try {
     eq(pg.meetingItems([{ agent: 'bo', turns: [{ id: 1, role: 'user', text: 'x', created_at: '2026-11-05T10:00:00Z' }] }, { agent: 'cy', turns: [{ id: 2, role: 'user', text: 'x', created_at: '2026-11-05T10:05:00Z' }] }], [], [])
       .map((it) => it.key), ['u:1', 'u:2'], 'and five minutes apart they are two');
 
+    // A participant's box hides or shows that desk's part of the transcript
+    // (costmo, 2026-11-14). items: a message to bo and cy, each one's reply,
+    // a note, words typed into both windows, a message to bo alone.
+    const keysWith = (...hidden) => pg.meetingShown(items, new Set(hidden)).map((it) => it.key);
+    eq(pg.meetingShown(items, new Set()), items, 'with nobody hidden the transcript is the transcript, the same list');
+    eq(keysWith('cy'), ['send:1', 't:22', 'n:3', 'u:30', 'send:2'], 'a hidden desk\'s own turns are gone, and a message that also went to a desk still shown stays');
+    eq(keysWith('bo'), ['send:1', 't:25', 'n:3', 'u:30'], 'a message that went only to the hidden desk goes with it — pending or not');
+    eq(keysWith('bo', 'cy'), ['n:3'], 'with every desk it went to hidden a message is gone too; the room\'s notes are always here');
+    eq(keysWith('dee'), items.map((it) => it.key), 'hiding a desk that said nothing and was sent nothing changes nothing');
+    eq(pg.meetingShown(items, new Set(['cy'])).find((it) => it.key === 'send:1').send.entries.map((e) => e.agent), ['bo', 'cy'],
+      'a message kept is drawn whole: the hidden desk\'s delivery line is still under it');
+    const shownAgain = pg.meetingShown(items, new Set());
+    eq([shownAgain.map((it) => it.key), shownAgain.indexOf(items.find((it) => it.key === 't:25'))], [['send:1', 't:22', 't:25', 'n:3', 'u:30', 'send:2'], 2],
+      'shown again, the desk\'s turns are back in line where they were said');
+    eq(pg.meetingShown([{ key: 'send:9', kind: 'send', send: { entries: [] } }], new Set(['bo'])).length, 1, 'a message that went to nobody is not hidden by anyone');
+    eq([pg.meetingHiddenNote(['bo', 'cy'], new Set(['cy']), (a) => a.toUpperCase()), pg.meetingHiddenNote(['bo', 'cy'], new Set(['bo', 'cy', 'dee']), (a) => a), pg.meetingHiddenNote(['bo'], new Set(['cy']), (a) => a), pg.meetingHiddenNote(['bo'], new Set(), (a) => a)],
+      ['Replies from CY are hidden above.', 'Replies from bo, cy are hidden above.', '', ''],
+      'the line under the box names a hidden desk only when it will hear the message');
+
     const H = (extra = {}) => ({ host: 'box', window: 'bo', live: true, held: 'floor', session_id: 'S1', ...extra });
     const chans = (deskList, others = []) => [{ channel: 'lab', desks: deskList }, ...others];
     const roomOf = (participants) => ({ channel: 'lab', participants });
@@ -3499,6 +3648,47 @@ try {
 
     eq([pg.meetingTo(['a', 'b'], null), pg.meetingTo(['a', 'b'], new Set(['b', 'z']))], [['a', 'b'], ['b']], 'everyone by default; narrowed, only desks still in the room');
     eq([pg.meetingToLine(['a', 'b'], true, (x) => x.toUpperCase()), pg.meetingToLine(['a'], true, (x) => x)], ['everyone (A, B)', 'a'], 'the line over a message names who heard it');
+
+    // A click on a To chip (costmo, 2026-11-14): with everyone lit a name is
+    // a solo, the last lit chip gives everyone back, and between the two a
+    // name is a toggle. Null is everyone.
+    const R = ['bo', 'cy', 'dee', 'ed'];
+    const lit = (to) => (to ? [...to].sort() : 'everyone');
+    const after = (room, start, ...clicks) => lit(clicks.reduce((to, a) => pg.meetingToClick(room, to, a), start));
+    eq(after(R, null, 'cy'), ['cy'], 'with everyone lit, a click on a name leaves only that desk hearing the next message — not everyone but it');
+    eq(after(R, null, 'cy', 'cy'), 'everyone', 'a click on the only lit name gives everyone back');
+    eq(after(R, null, 'cy', 'dee'), ['cy', 'dee'], 'with one lit, a click on another adds it');
+    eq(after(R, null, 'cy', 'dee', 'bo'), ['bo', 'cy', 'dee'], 'with some lit and not all, a click on an unlit name adds it');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'dee'), ['bo', 'cy'], 'and a click on a lit one takes it out');
+    eq(after(R, null, 'cy', 'dee', 'dee'), ['cy'], 'down to one, which stays lit');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'ed'), 'everyone', 'adding the last one is everyone again, written as everyone and not as a list of all four');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'ed', 'ed'), ['ed'], 'so the click after that is a solo again');
+    eq(R.map((a) => after(R, new Set(['cy']), a)), [['bo', 'cy'], 'everyone', ['cy', 'dee'], ['cy', 'ed']], 'from one lit: every other name adds itself, and its own gives everyone');
+    eq(after(R, new Set(R), 'bo'), ['bo'], 'a list that names the whole room is everyone, and a click on it is a solo');
+    eq(after(R, new Set(['cy', 'gone']), 'cy'), 'everyone', 'a desk that left the room is not counted: cy is the only one lit, so its click gives everyone');
+    eq(after(R, new Set(), 'dee'), ['dee'], 'with nobody lit (the one desk chosen left the room), a click adds the desk clicked');
+    eq(after(['bo', 'cy'], null, 'bo', 'cy'), 'everyone', 'in a room of two, the solo and then the other is everyone');
+    eq(after(['bo'], null, 'bo'), 'everyone', 'a room of one stays everyone');
+    eq(lit(pg.meetingToClick(R, new Set(['cy']), 'zed')), ['cy'], 'a name that is not in the room changes nothing');
+    // A desk leaves the room under a choice (QA, PR #55 finding 2). The room
+    // given is who is still in it.
+    const left = (room, to) => lit(pg.meetingToLeft(room, to));
+    eq(left(['bo'], new Set(['bo'])), 'everyone', 'narrowed to Bo and the others gone, Bo is the whole room: the choice is everyone, as the chips and the hint already said');
+    eq(left(['bo', 'ed'], new Set(['bo', 'cy', 'ed'])), 'everyone', 'so is a choice of several once the one desk left out of it has gone');
+    eq(left(['bo', 'dee'], new Set(['bo', 'cy'])), ['bo'], 'a room still narrowed stays narrowed, without the desk that left');
+    eq(left(['cy', 'dee'], new Set(['bo'])), [], 'the one desk chosen leaving leaves nobody chosen, as before: the room asks who hears');
+    eq([left(['bo', 'cy'], null), left([], new Set(['bo']))], ['everyone', 'everyone'], 'everyone stays everyone, and an emptied room has no choice left in it');
+    eq(lit(pg.meetingToClick(['bo', 'ed'], pg.meetingToLeft(['bo'], new Set(['bo'])), 'ed')), ['ed'], 'and a desk added after that is lit with the rest: a click on it is a solo, not an add');
+    const kept = new Set(['bo', 'cy']);
+    pg.meetingToLeft(['bo'], kept);
+    eq([...kept].sort(), ['bo', 'cy'], 'the set it was given is left as it was');
+    const start = new Set(['cy', 'dee']);
+    pg.meetingToClick(R, start, 'cy');
+    eq([...start].sort(), ['cy', 'dee'], 'the set it was given is left as it was');
+    const T = (to, a) => pg.meetingToTitle(R, to, a, a.toUpperCase());
+    eq([T(null, 'cy'), T(new Set(['cy']), 'cy'), T(new Set(['cy']), 'dee'), T(new Set(['cy', 'dee']), 'dee'), T(new Set(['bo', 'cy', 'dee']), 'ed')],
+      ['Only CY hears your messages', 'Everyone hears your messages', 'DEE hears your messages too', 'Leave DEE out of your messages', 'Everyone hears your messages'],
+      'each chip says on hover what a click on it will do');
   }
 } catch (err) {
   failures++;

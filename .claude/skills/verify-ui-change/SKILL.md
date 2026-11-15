@@ -334,7 +334,10 @@ prints every work item as a JSON line, which is how the check reads who
 was sent what. A `--ctl` file moves a desk's session between steps.
 [`check-meeting.mjs`](check-meeting.mjs) drives create, the floor while
 desks are out, send to everyone, a nudge (the unread badges, one desk's
-bell, the backlog dialog's Mark all read, Nudge everyone), narrowing, a refusal, a permission
+bell, the backlog dialog's Mark all read, Nudge everyone), a click on each To chip (solo with
+everyone lit, everyone back from the last lit one, a toggle between, and each chip's hover words;
+`chipClick('bo')` is how a later step narrows to one desk; the choice stays after a send, so a
+step that needs everyone again clicks `[data-act="m-to-all"]`), narrowing, a refusal, a permission
 prompt, Stop, a command receipt, a question form, Remove, Bring back, a
 reload, End, the Recent list, Resume and close, about a minute and a half:
 
@@ -342,6 +345,26 @@ reload, End, the Recent list, Resume and close, about a minute and a half:
 PORT=8941 CDP=9281 .claude/skills/verify-ui-change/run-check-meeting.sh "$PWD"
 # … PASS
 ```
+
+Since 2026-11-14 it also drives a participant's box as a control: every
+box clicked off and on again, a real click on a name and on a state word,
+a dimmed button in the box (which must not toggle it), Enter on the
+focused box, a turn arriving while its desk is hidden, a hidden desk
+removed, and a reload. `rows()` reads the transcript as `{ key, by, to,
+body }`, with `by` from `data-said-by` on a desk's turn and `to` from a
+message's delivery lines; `boxOf(a)` reads a box. Two things from building
+it. **Count the fixture before writing the expectation.** The first cut
+expected one message to Cy alone to go with Cy, and the room held two: the
+one sent by name, and the nudge Cy's bell had rung eighty lines earlier.
+The page was right and the check was red. The step now finds them by
+their delivery lines and says how many it found. And **a step that reads
+focus needs a redraw forced under it**: focus survived on one run in two
+only because no poll had redrawn the row yet, so the step makes Bo start
+working first. A third came from its mutants: **a wrapped label inside a
+fixed-height button does not change the button's height.** The Nudge
+button is 28px whatever its label does, so a check on its rect passed
+with "unread" spilled under it and the mutant survived. `scrollHeight`
+reads it (26px on one line, 40px wrapped).
 
 Two things it cost a round to learn. A label drawn with `text-transform:
 uppercase` reads `CY` through `innerText`; read `textContent` for what the
@@ -367,18 +390,67 @@ queue order**, as `run()` does: windowed desks after `delayMs`, windowless
 after their window comes up, and a desk named in `never` with waitReady's
 error after `neverMs`. The answers file is re-read per item.
 [`check-select.mjs`](check-select.mjs) drives both views with
-[`probe-select.js`](probe-select.js), about 2 minutes:
+[`probe-select.js`](probe-select.js), about 2 minutes. Since 2026-11-14
+the selection closes itself once an action is sent, so after each action
+the check waits for `svg.room.selecting` to be gone and reads the room's
+own line (`miss` and `missTitle` in the probe), not tags on checkboxes:
 
 ```bash
-PORT=8905 DB_PATH=/tmp/select.db ORCH_AUTH_TOKEN=k node src/server.js &
-node .claude/skills/verify-ui-change/seed-select.mjs http://localhost:8905 /tmp/select.db /tmp/select-host.json > /tmp/select-work.jsonl &
-node --experimental-websocket .claude/skills/verify-ui-change/check-select.mjs http://localhost:8905 /tmp/shots /tmp/select.db /tmp/select-host.json /tmp/select-work.jsonl
-# … 54 ✓ · PASS
+PORT=8943 CDP=9283 .claude/skills/verify-ui-change/run-check-select.sh "$PWD"     # the repo, or a copy holding a mutant
+# … PASS · 73 of 73
 ```
+
+[`run-check-select.sh`](run-check-select.sh) starts the server, the seed
+and a Chrome of its own and kills all three (it had no runner until PR
+#55, and QA wrote their own to review it). By hand it is the three lines
+in `seed-select.mjs`'s header. Two things about its rows, both from QA's
+review of PR #55 (Info 4):
+
+- **A wait for the behaviour under test is a row** (`waited()` in the
+  check): "the room stopped selecting by itself" used to be a bare
+  `await page.waitFor(…)`, so a page that never stopped selecting ended
+  the check on the wait's exception with no ✗ and no verdict, and
+  `run-page-mutants.mjs` reported the mutant as "THE CHECK DID NOT
+  FINISH", which reads as the machine. A wait that only sets up the next
+  step may stay bare; one that *is* the claim goes through `ok()`.
+  `check-chat-controls.mjs` had the same at the selects being dimmed.
+  Rows alone were not enough: with the Nudge's `doneActing` out, the
+  check printed twelve ✗ and then died on a `press` of a line that was not
+  drawn, still with no verdict (QA, at d5c391b). So the three checks that
+  go through the mutant runner (select, chat-controls, meeting) also end
+  on any thrown step with a ✗ row naming it and the FAIL verdict
+  (`stopped`, on `uncaughtException` and `unhandledRejection`; a
+  top-level `await` that rejects reaches both).
+- **The verdict line is `PASS · N of N` or `FAIL · M of N red`.** It was
+  `N ✗ · FAIL` and a bare `PASS`: the first holds a ✗, which
+  `run-page-mutant.sh` counts as a red row, and neither starts with the
+  `PASS · ` / `FAIL · ` the runners look for. `check-popout.mjs` and
+  `check-pop-foot.mjs` still print the old form, and their runners match
+  it; change both together if either is put through the mutant runner.
+- **Something on the page for a second is caught by an observer, not a
+  poll.** An envelope lives 1.4 s at most and goes with any redraw of its
+  room. The step that reads where one leaves from (Info 6: under the
+  room's line, not a band above the desk) first polled for
+  `.envelope animateMotion` every 50 ms, and on an unmutated page read
+  nothing in 8 s, then on a mutant found the envelope with its path
+  already gone. It now installs a `MutationObserver` before the message
+  is written and records the path, the sender's place and the line in
+  the task that adds the node. Anything drawn and removed inside a poll
+  interval wants the same.
 
 What it proves beyond the suite: a click on a selecting storey in the
 building checks a desk instead of riding to it. The selection survives a
-rebuild and a change of view, and Space keeps focus on the checkbox. With
+rebuild and a change of view, and Space keeps focus on the checkbox. The
+room stops selecting by itself after each of Nudge, Mark read and Hide
+(130 ms after the Nudge click, with four desks still in line). The room's
+line names the desks not reached and follows the line as it resolves; a
+real click on it in the building dismisses it without riding to the
+floor, and the room's height comes back; mark read and hide, which reach
+every desk, leave no line. A line left by a desk the board refused goes
+when selection is started by hand, and ending it by hand does not bring
+it back (the last step; without `settleBulk` in `toggleSelecting` the
+missed desk keeps its tag in the new selection and the line returns when
+it ends, two rows red). With
 the panel open on the desk last in line behind a window that never comes
 up, its bubble still reads `in line — 1 desk ahead on testbox` **past the
 30 s grace**. The host's work log reads windowed first, then windowless,
@@ -400,8 +472,13 @@ out of it:
   rooms are rebuilt only when their signature changes. The first cut wrote
   "selecting, nothing checked" and "not selecting" alike once a result was
   kept, so "done selecting" and selecting again both did nothing. The last
-  step of the check exists for that: leave and come back while a nudge is
-  still in line.
+  step of the check exists for that: select again and leave by hand while
+  a nudge is still in line, then wait for the room's line when it fails.
+
+Three other checks pressed "done selecting" after an action and had to
+stop: check-meeting.mjs, check-popout.mjs and readme-shot.mjs. A click on
+`[data-act="select-room"]` after an action now *starts* a selection. Wait
+for `!document.querySelector('svg.room.selecting')` instead.
 
 ### check-chatbox.mjs — the chat box's height (issue #13, 0.10.17)
 
@@ -526,6 +603,54 @@ as the seed host — the same doors a plugin and a host use, so nothing here
 is a state no host could have produced. `probe-chat-panel.js` reads the
 meta line, both selects, the asked-for note, the slash rows and the last
 rows (with the compaction summary's open/closed) in one call.
+
+Since 2026-11-14 it also carries a verdict for the two selects (✓ / ✗ lines,
+then `PASS · the selects`), and a runner with the whole fixture, so a page
+mutant can be read off it:
+
+```bash
+PORT=8922 CDP=9262 .claude/skills/verify-ui-change/run-check-chat-controls.sh "$PWD"
+#   ✓ neither select is rewritten while nothing about it changes — an open menu is left standing
+#   ✓ while the window asks, both are dimmed and say why — a pick then would be dropped
+#   ✓ over the whole run each is rewritten once — its placeholder row leaving …
+#   ✓ a model change the host refused is no longer shown as asked for
+#   ✓ and the select is back on the model the window is on, not the one that was picked
+#   ✓ and the message box holds the draft it held, with no command put into it
+```
+
+The last two are a refused change: a pick of `opus`, then the host's
+`error` posted as the seed host with `command: 'model'`, which is how the
+board knows what was refused. A host event is a full step here because the
+seed host is registered; no real host is needed to show a refusal. The
+step also puts a draft in the box first and reads it back after. That
+line exists because the step, when it only printed the box, showed
+`/model sonnet\n\n/model opus` in it: `settle()` hands pending messages
+back to the box on an error turn, and a select's pick is pending in the
+same list. No suite and no earlier check had looked at the box after a
+refusal. costmo ruled it out of the box the same day (`handedBack`). When
+a step drives a control, print what is around it as well as the control;
+this one was found by a `box:` field added in passing.
+
+Three things from building that part:
+
+- **"Is this element being redrawn?" is a MutationObserver's count, not a
+  look.** The panel is drawn on every poll and stream event, and a control
+  rebuilt with identical contents looks the same in every probe and every
+  screenshot. Observe `childList` on the element, let polls go by, and read
+  the count. Wait on the polls themselves, not on a sleep:
+  `performance.getEntriesByType('resource').filter((e) => e.name.endsWith('/api/floor')).length`
+  rising by three. Before the fix it read one rewrite of each select per
+  poll and two in the first two seconds of a panel; after, 0.
+- **A headless browser draws no `<select>` menu, so no check can click
+  one.** What the operator reported (a pick not taking, the drop-down left
+  open) happens in the menu, which Chrome on macOS takes down and puts up
+  again when the select's rows change. The check proves the rows are left
+  alone; that this cures the report was costmo's to see on his screen. Say
+  which of the two a result is.
+- **A regex in a template string loses its backslashes.** `` `/\/api\/floor$/` ``
+  inside backticks is `//api/floor$/`, a comment, and the page threw
+  "Unexpected token 'for'" on the next line. Use `endsWith`, or put the
+  browser code in a probe file, which is what `probe()` is for.
 
 ### check-backdrop.mjs — a click outside a dialog's contents (issue #11)
 

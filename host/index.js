@@ -456,27 +456,33 @@ class Desk {
     // have a window open — those differ for exactly as long as it takes to
     // switch apps, which is when the floor is used.
     const id = await this.resumeId();
-    const cmd = W.commandOf(text);
-    // A model or effort change is this session's only, never the machine's
-    // default (costmo, #10 Decided 4): the window's picker and its `s`, not
-    // the command, which saves a default. See pick() in window.js.
-    const r = cmd?.name === 'model' && cmd.args ? await W.pick(this.cwd, { model: cmd.args }, { open: true, resume: id })
-      : cmd?.name === 'effort' && cmd.args ? await W.pick(this.cwd, { effort: cmd.args }, { open: true, resume: id })
-      : await W.send(this.cwd, text, { open: true, resume: id });
+    // Everything goes in as typed, a model or effort change included: the
+    // window's own /model and /effort, which save the choice as the default
+    // for new sessions (costmo, 2026-11-14, reversing #10 Decided 4). The
+    // picker that was driven here for "this session only" is gone, and why it
+    // was not kept with Enter in place of `s` is beside send() in window.js.
+    const r = await W.send(this.cwd, text, { open: true, resume: id });
     if (r.note) this.told(r.note, id);
     if (!r.ok) {
-      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
+      // The command that was being typed, when it was one: a model or effort
+      // change that ends here was not made, and the board stops showing it as
+      // asked for (it used to stand on the select until the model next
+      // changed). No session id beside it: an error is filed by desk, on
+      // whatever conversation the board holds for it, and naming one here
+      // would move where the line is drawn.
+      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null, command: W.commandOf(text)?.name ?? null }, true);
     } else if (r.command && r.said) {
       // A command's receipt, in its own terms — a new conversation started,
       // compacting, the model set, answered in the window. Said on the desk
       // as one line labeled host carrying what was typed and what happened
-      // ("/model opus — Set model to Opus 5.5 for this session only"): the
+      // ("/model opus — Set model to Opus 5.5 and saved as your default for
+      // new sessions"): the
       // page draws no bubble for a done command, so this line is the record
       // of it. And to the composer, as the end of its wait.
       this.told(`${text.trim()} — ${r.said}`, r.session_id ?? id);
       this.host.emit({
         type: 'receipt', channel: this.channel, agent: this.agent, command: r.command, said: r.said, text,
-        // The window's session, always: the board writes the picker's words
+        // The window's session, always: the board writes the window's words
         // and a compaction's state to it, not to "the desk's newest".
         session_id: r.session_id ?? id ?? null, model: r.model ?? null, effort: r.effort ?? null, compacting: !!r.compacting,
       }, true);
@@ -1443,7 +1449,10 @@ class Host {
           // the pane has, or may have, the operator's choices in it — "did not
           // land" was said about exactly that once, about answers that had
           // landed. What is known is that it was not submitted.
-          const standing = r.code === 'still_asking' || r.code === 'not_confirmed';
+          // A preview question the host could not put its cursor on, or
+          // that did not take Enter, is the same fact: the form is standing
+          // with nothing chosen on that question (selectRow, host/window.js).
+          const standing = ['still_asking', 'not_confirmed', 'not_on_row', 'not_selected'].includes(r.code);
           this.emit({
             type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed',
             message: `${standing ? 'the form was not submitted' : 'your answers did not land'} — ${r.error}`,

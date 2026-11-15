@@ -310,12 +310,18 @@ function fixture() {
     `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
     String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
     // And a flag file that leaves the window asking something: a permission
-    // menu (`bash`) or a one-question form (`form`), drawn once at the bottom
+    // menu (`bash`), a one-question form (`form`) or one with previews
+    // (`preview`), drawn once at the bottom
     // of the pane and never redrawn — for an answer that waited in the host's
     // line past ANSWER_TTL_MS (QA, PR #49 finding 2 and Info 4).
     `const PROMPT_FLAG = ${JSON.stringify(`${FIX}/prompt.flag`)};`,
     `let promptKind = ''; try { promptKind = fs.readFileSync(PROMPT_FLAG, 'utf8').trim(); } catch {}`,
-    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"] })};`,
+    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"],
+      // A question drawn with previews, as 2.1.325 draws one: the choices
+      // beside the highlighted one's preview, no "Type something." row, and
+      // "n to add notes" on its status line. Never redrawn, so a digit moves
+      // nothing here (QA, PR #55 Info 8).
+      preview: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Where", "", "Where should it go?", "", "❯ 1. Alpha                        ┌────────┐", "  2. Bravo                        │ AAA box│", "  3. Charlie                      └────────┘", "                                  Notes: press n to add notes", "────────────────────────────────────────────────────────────────────────────────", "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"] })};`,
     `for (const l of PROMPTS[promptKind] ?? []) process.stdout.write(l + '\\n');`,
     // A prompt takes a bare key with no Enter, as a person pressing one
     // would, and a tty in canonical mode holds it until a newline that never
@@ -910,6 +916,17 @@ try {
   assert(/esc to interrupt/.test(errTurn?.text ?? ''), `quoting the pane's status line — ${errTurn?.text}`);
   eq(paneOf(), busyPanes, 'and the working window is left exactly as it was');
   eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_B, `still on its conversation (was ${idBefore})`);
+
+  // A model change asked of that working window: the host refuses it before
+  // a key is pressed, and the board stops showing it as asked for. The error
+  // names the command, which is the only way the board knows what was
+  // refused; without it the select kept the model that was picked until the
+  // window's model next changed (costmo, 2026-11-14).
+  eq((await chat('free', '/model sonnet')).status, 200, 'a model change is queued for the working window — the board cannot see the pane');
+  const busyModel = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /change the model when the turn ends/.test(r.text ?? '')) ?? null, 15000);
+  assert(!!busyModel, 'the host refuses it in words on the desk');
+  eq(deskOf(await floor(), 'free')?.session?.model_requested ?? null, null, 'and the model is no longer asked for: the select shows what the window is on');
+  eq(paneOf(), busyPanes, 'with the working window left as it was');
   rmSync(`${FIX}/busy.flag`, { force: true });
 
   // A fresh conversation: no --resume, and the desk follows whatever id the
@@ -1019,8 +1036,30 @@ try {
     const { default: Database } = await import('better-sqlite3');
     const db = new Database(DB_PATH, { readonly: true });
     const onNew = db.prepare(`SELECT session_id FROM agent_sessions WHERE channel = ? AND agent = ?`).all(CH2, 'free').map((r) => r.session_id);
+    // This row has gone red by itself six times (CLAUDE.md, Tests), each
+    // time green on the next run, and each time nobody read the rows,
+    // because by then they were gone with the run's database. So a red
+    // reads them itself. A session row is keyed by its id alone, so "on the
+    // new floor" means something filed under the old conversation's id
+    // named the new floor, after the move. The row's times against the
+    // board's clock say when, the turns filed under that id say whether it
+    // was a turn (and on which floor) or an event that writes none, and the
+    // host's log from the move on says what the host was doing.
+    const read = !onNew.includes(SESSION_ID) ? null : {
+      row: db.prepare(`SELECT channel, agent, started_at, updated_at, ended_at, transcript FROM agent_sessions WHERE session_id = ?`).get(SESSION_ID),
+      clock: db.prepare(`SELECT datetime('now') AS t`).get().t,
+      turns: db.prepare(`SELECT id, channel, agent, role, tool_name, created_at, substr(text, 1, 60) AS text FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT 8`).all(SESSION_ID),
+    };
     db.close();
-    assert(!onNew.includes(SESSION_ID), `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+    assert(!read, `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+    if (read) {
+      const say = (l) => console.log(`      · ${l}`);
+      say(`the row, read at ${read.clock} by the board's clock: ${JSON.stringify(read.row)}`);
+      say(`the newest turns filed under that id (${read.turns.length}, newest first):`);
+      for (const t of read.turns) say(`  ${JSON.stringify(t)}`);
+      say('the host log from the move on:');
+      for (const l of host.log.slice(host.log.lastIndexOf('moving it from host-test/free')).split('\n').filter(Boolean).slice(0, 40)) say(`  ${l.slice(0, 200)}`);
+    }
   }
   const turnsOnNew = await json(`/api/floor/turns?channel=${CH2}&agent=free`).then((r) => r.json());
   eq((turnsOnNew.rows ?? []).filter((r) => r.role === 'error').map((r) => r.text), [], 'its chat on the new floor does not open on a refusal (#24 Decided 2)');
@@ -1173,6 +1212,25 @@ try {
     assert(await until(async () => (hostLog.slice(log0).includes('-old answer, and its question is still on screen — answering it') ? true : null), 15000),
       'an old answer whose form is still on screen is pressed — this call site, not only askedStill (Info 4)');
     assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its keys reached the window');
+
+    // A preview question the host could not answer is said as a form that
+    // was not submitted, not as answers that did not land (QA, PR #55 Info
+    // 8). The stand-in never redraws, so the cursor stays on row 1 whatever
+    // digit is sent: the host reads that, presses no Enter, and the desk is
+    // told the form is still standing. "Did not land" was once said about
+    // answers that had landed (issue #7), and here nothing was chosen at all.
+    await reopenAsking('preview');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Where should it go?', header: 'Where', multiSelect: false,
+        options: [{ label: 'Alpha', description: 'First.', preview: true }, { label: 'Bravo', description: 'Second.', preview: true }, { label: 'Charlie', description: 'Third.', preview: true }] }] } });
+    const pv = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 25000);
+    assert(!!pv, 'a question with previews is on the desk');
+    eq(pv?.questions?.[0]?.options?.length, 3, 'with its three rows and no free-text row, as the window draws it');
+    const errsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+    eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: pv?.request_id, answers: [{ choose: [2] }] })).status, 200, 'its answer is queued');
+    const unplaced = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && !errsBefore.has(r.id)) ?? null, 20000);
+    assert(/^the form was not submitted — this question takes a number as a move and Enter as the choice, and the cursor was not seen on row 2/.test(unplaced?.text ?? ''),
+      `a preview question whose cursor never reached the row is said as a form not submitted — ${unplaced?.text ?? 'no error turn'}`);
 
     rmSync(`${FIX}/prompt.flag`, { force: true });
     assert(await closeByHand(), 'the asking window is closed by hand');

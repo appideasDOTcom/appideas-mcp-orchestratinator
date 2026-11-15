@@ -1353,39 +1353,37 @@ export function overlayOf(screen) {
 }
 
 /**
- * The model picker, read off the pane: numbered rows, which one the cursor is
- * on, which one is current (✔). Its footer is the bottom line — "Enter to set
- * as default · s to use this session only · Esc to cancel" — and that line is
- * what makes it a picker; the rows are read only once it is.
+ * The cache warning a model switch raises on a conversation that is cached
+ * for the current model: "Switch model? … 1. Yes, switch to X / 2. No, go
+ * back". Measured 2026-11-03 behind the picker's `s`, and 2026-11-14 on
+ * 2.1.325 behind `/model <name>` as a command, mid-turn included; the digit
+ * answers it.
+ *
+ * The same dialog has a second title, "Change effort level?", for an
+ * `/effort <level>` that would rewrite the cached prefix (QA, PR #55
+ * finding 1), and is read as the same thing. That title is read from
+ * 2.1.325's own strings, where it shares every other line with the model's
+ * ("This conversation is cached for the current effort level. Switching
+ * to X means the full history gets re-read.", the same two choices). It
+ * has not been seen on a window: `/effort <another level>` after a reply
+ * went straight through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5
+ * (probe, 2026-11-15), because those take effort per turn and a change
+ * keeps the cache. So the read is the model's, measured, with the title
+ * the binary gives; a desk on a model that does not take effort per turn
+ * is where it would stand.
+ *
+ * Read by position, like every other prompt: the dialog stands where the
+ * composer was, so its two choices are the pane's last two lines and its
+ * title is a few lines above them. It used to be the words anywhere in the
+ * capture, and a conversation that quotes "Switch model?" (this file's own
+ * desk does) would have had a `1` typed into its composer.
  */
-export function pickerOf(screen) {
-  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
-  const nonEmpty = lines.filter((l) => l.trim());
-  const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
-  // 2.1.322 ends the list with "▸ More models", and with the cursor on it the
-  // footer is "Enter to expand · Esc to cancel" (measured 2026-11-09 at
-  // 80x24). It is still the picker, with the cursor on no model: read as
-  // gone, the walk returned and left the picker open, and the desk's next
-  // /model was typed into it.
-  const onMore = /^Enter to expand\b/i.test(foot) && nonEmpty.some((l) => /^\s*Select model\s*$/.test(l));
-  if (!/s to use this session only/i.test(foot) && !onMore) return null;
-  const rows = [];
-  for (const l of nonEmpty) {
-    const m = /^\s*(❯)?\s*[↑↓]?\s*(\d+)\.\s+(.+?)(?:\s{2,}(.*))?$/.exec(l);
-    if (!m) continue;
-    rows.push({ n: Number(m[2]), label: m[3].replace(/\s*✔\s*$/, '').trim(), current: /✔/.test(m[3]), cursor: !!m[1], description: (m[4] ?? '').trim() });
-  }
-  return rows.length ? { rows, cursor: rows.find((r) => r.cursor)?.n ?? null } : null;
-}
-
-/** The cache warning a session-only switch raises on a conversation that is
- *  cached for the current model: "Switch model? … 1. Yes, switch to X / 2. No,
- *  go back". Measured 2026-11-03; the digit answers it. */
 export function switchConfirmOf(screen) {
-  const text = String(screen ?? '');
-  if (!/Switch model\?/.test(text)) return null;
-  const m = /❯?\s*1\.\s*(Yes, switch to [^\n]*)/.exec(text);
-  return { yes: m ? m[1].trim() : 'Yes' };
+  const nonEmpty = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const yes = /^\s*❯?\s*1\.\s*(Yes, switch to .+)$/.exec(nonEmpty[nonEmpty.length - 2] ?? '');
+  if (!yes || !/^\s*❯?\s*2\.\s*No, go back\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) return null;
+  if (!nonEmpty.slice(-9, -2).some((l) => /^\s*(Switch model|Change effort level)\?\s*$/.test(l))) return null;
+  return { yes: yes[1].trim() };
 }
 
 /** Complete JSONL records written past a byte offset. Never mid-line, for the
@@ -1409,8 +1407,15 @@ const SGR = /\x1b\[[0-9;]*m/g;
  *  tags and the SGR codes the window wrote inside them taken off. */
 function stdoutOf(records) {
   for (const d of records) {
-    if (d.type !== 'user' || d.isMeta) continue;
-    const t = textOf(d.message?.content);
+    // A command that did its job writes its line as a user record. One that
+    // refused writes it as a `system` record instead (subtype
+    // `local_command`, the text in `content`): measured 2026-11-14 on
+    // 2.1.325, "/model nonsense-9" left "Model 'nonsense-9' not found" there
+    // and nowhere else, and read as user records only, the host waited out
+    // twenty seconds on a window that had answered at once.
+    const refused = d.type === 'system' && d.subtype === 'local_command';
+    if (!refused && (d.type !== 'user' || d.isMeta)) continue;
+    const t = refused ? String(d.content ?? '') : textOf(d.message?.content);
     const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(t);
     if (m) return m[1].replace(SGR, '').trim();
   }
@@ -1426,6 +1431,26 @@ function commandRecordIn(records, name) {
 }
 
 /**
+ * What the window's own line says a `/model` or `/effort` did: the sentence
+ * (its first line, without the backticks the record carries), and the model
+ * and effort it names. Three shapes, each read off a real window on 2.1.325
+ * (2026-11-14):
+ *
+ *   Set model to `Haiku 5.5` and saved as your default for new sessions
+ *   Set model to `Sonnet 5.5` and saved as your default for new sessions with `high` effort
+ *   Set effort level to low (saved as your default for new sessions): Quick, …
+ *
+ * and the older "for this session only" forms, which a window's own picker
+ * still writes when a person presses `s` in it.
+ */
+export function switchedTo(stdout) {
+  const said = String(stdout ?? '').split('\n')[0].replace(/`/g, '').trim();
+  const model = /^Set model to (.+?)(?= and saved\b| for this session\b| with [a-z]+ effort\b|$)/i.exec(said);
+  const effort = /^Set effort level to ([a-z]+)\b/i.exec(said) ?? /\bwith ([a-z]+) effort\b/i.exec(said);
+  return { said, model: model ? model[1].trim() : null, effort: effort ? effort[1].toLowerCase() : null };
+}
+
+/**
  * The receipt a slash command actually produces, read where it is actually
  * written. Each is measured (2026-11-03, 2.1.300, issue #9), and none of them
  * is "a user record containing the text", which is what deliveryOf looks for
@@ -1438,10 +1463,13 @@ function commandRecordIn(records, name) {
  *   /compact  `<command-name>/compact` in the same file, then the window is
  *             compacting (see compactingOf) for 10–150 s
  *   /model X  `<command-name>/model…<command-args>X` plus a stdout record
- *             "Set model to `Sonnet 5.5` and saved as your default…", in the
- *             same millisecond; the args are in their own tag, so the text
- *             "/model X" is in no record
- *   /effort X the same shape: "Set effort level to low (saved as your default…"
+ *             "Set model to `Sonnet 5.5` and saved as your default for new
+ *             sessions", in the same millisecond; the args are in their own
+ *             tag, so the text "/model X" is in no record. A name the window
+ *             does not know is "Model 'X' not found", and nothing is saved
+ *             (re-measured 2026-11-14, 2.1.325)
+ *   /effort X the same shape: "Set effort level to low (saved as your default
+ *             for new sessions): Quick, straightforward…"
  *   /btw      nothing in any file; the overlay (btwOverlayOf)
  *   other     the command record, with whatever stdout followed it
  *
@@ -1483,8 +1511,13 @@ async function commandReceipt(cmd, { path, before, projectDir: dir, since, scree
     }
     case 'model':
     case 'effort': {
-      if (stdout) return { state: 'done', said: stdout.split('\n')[0] };
-      return null;
+      if (!stdout) return null;
+      // The window's line is the sentence, and what it names is what the
+      // board takes as confirmed: the model by the window's own label
+      // ("Sonnet 5.5") until a hook or the next reply names the id, the
+      // effort by its level. A line that names neither ("Model 'gpt' not
+      // found") confirms nothing, and is still what the desk is told.
+      return { state: 'done', ...switchedTo(stdout) };
     }
     case 'btw': {
       const o = btwOverlayOf(screen, cmd.args);
@@ -1966,8 +1999,9 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
 /**
  * The window a message to this repo goes into, opening one when allowed.
  *
- * The first half of send(), on its own because the model picker needs the
- * same window the same way. Returns the pane, the conversation's transcript
+ * The first half of send(). It stands on its own because the model picker's
+ * driver once needed the same window the same way (pick(), removed
+ * 2026-11-14). Returns the pane, the conversation's transcript
  * path (null for a stand-in with no session, which is what the tests drive),
  * and what opening it had to say.
  */
@@ -2029,9 +2063,25 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
   const cmd = commandOf(text);
   // A bare /model opens a picker in the window, and a picker is not something
-  // to leave standing behind a desk — the next paste would land in it. The
-  // floor changes a model with pickModel (this session only, costmo's ruling
-  // 2026-11-03); a caller that sends the bare command is told so instead.
+  // to leave standing behind a desk — the next paste would land in it. A
+  // caller that sends the bare command is told so instead.
+  //
+  // With a name, /model goes in as typed, and so does /effort <level>: the
+  // window's own commands, which save the choice as the person's default for
+  // new sessions — costmo's ruling, 2026-11-14, reversing #10 Decided 4
+  // ("this session only"), so the floor does what the window and the editor
+  // do. For the eleven days between, the host drove the window's picker and
+  // pressed `s` instead (pick(), removed with the ruling). It is not kept
+  // behind the command with Enter in place of `s`, and the reason was
+  // measured, not preferred: Enter in the picker saves the row the cursor is
+  // on *and* the effort row together ("Set model to Sonnet 5.5 and saved as
+  // your default for new sessions with medium effort"), so an effort change
+  // on one desk re-saved that desk's model as the machine's default, over
+  // whatever another desk had just chosen. The commands save the one thing
+  // each names. They also know their own names ("fable" is whatever Fable
+  // the window has; an unknown one is "Model 'x' not found", nothing saved),
+  // which the picker's rows had to be walked for, at whatever height the
+  // pane happened to be.
   if (cmd?.name === 'model' && !cmd.args) {
     return { ok: false, code: 'picker', error: 'a bare /model opens a picker in the window — name the model (/model sonnet), or use the model control on the desk' };
   }
@@ -2079,6 +2129,17 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // So: paste now, and let deliveryOf say which of the two receipts came back.
   // `wasBusy` is only for the sentence at the end — nothing branches on it.
   const wasBusy = await busy(pane.target);
+
+  // The one thing that is not typed into a working window: a model or
+  // effort change. Measured 2026-11-14 on 2.1.325: `/model haiku` into a
+  // running turn is taken at once, and on a conversation with any history it
+  // raises "Switch model?" over the work — a dialog nobody asked for in the
+  // middle of a turn, which takes the keys of whatever is sent next.
+  // `/effort` mid-turn was not measured, and is held to the same rule until
+  // it is. Refused before a key is pressed, and said on the desk.
+  if ((cmd?.name === 'model' || cmd?.name === 'effort') && wasBusy) {
+    return { ok: false, code: 'busy', target: pane.target, error: `the desk is working — change the ${cmd.name === 'model' ? 'model' : 'effort level'} when the turn ends` };
+  }
 
   // Where the transcript stood before anything was typed. Taken here rather
   // than after the paste because getting the text in can itself take a while
@@ -2139,6 +2200,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
 
   // The receipt: a command has its own (commandReceipt), a message has the
   // turn or the queue (deliveryOf). Each is read where it is written.
+  let switchYes = false;          // "Switch model?" / "Change effort level?" has been answered
   const receipt = async () => {
     // A command that closes the window (/exit) has the pane's absence as its
     // receipt; a message cannot be received by a pane that is gone.
@@ -2146,6 +2208,22 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       return { state: 'done', said: 'the window closed' };
     }
     const screen = await screenOf(pane.target);
+    // "Switch model?" stands between a /model and its receipt on any
+    // conversation cached for the current model. The operator asked for the
+    // switch, so the host says yes, once, with the digit (measured: `1`
+    // answers it; the window's line follows). The dialog has no composer, so
+    // nothing below presses Enter into it (stillInComposer).
+    //
+    // "Change effort level?" is the same dialog behind an /effort (QA,
+    // PR #55 finding 1; switchConfirmOf has what is and is not measured
+    // about it). Unanswered, it stood: the /effort ended not_delivered at
+    // twenty seconds and the desk's next message was pasted into the dialog
+    // for a minute.
+    if ((cmd?.name === 'model' || cmd?.name === 'effort') && !switchYes && switchConfirmOf(screen)) {
+      await tmux(['send-keys', '-t', pane.target, '1']);
+      switchYes = true;
+      return null;
+    }
     if (cmd) return commandReceipt(cmd, { path, before, projectDir: projectDir(here), since, screen });
     const got = path ? await deliveryOf(path, before, text) : null;
     return got ? { state: got } : null;
@@ -2311,213 +2389,6 @@ export async function awaitCompaction(cwd, { path = null, before = 0 } = {}) {
     return { ok: true, compacted: true, said: `compacted the conversation${n(m.preTokens) && n(m.postTokens) ? `: ${n(m.preTokens)} → ${n(m.postTokens)} tokens` : ''}` };
   }
   return { ok: true, compacted: false, said: seen ? 'the compaction ended without a record of what it did' : 'no compaction ran' };
-}
-
-/** How long the picker is given to appear, and a switch to be confirmed. */
-const PICKER_MS = Number(process.env.ORCH_PICKER_MS ?? 8000);
-
-/**
- * Which picker row a model name means. "sonnet", "Sonnet 5.5" and
- * "claude-sonnet-5-5" all name the same row; the "Default (recommended)"
- * row is never the answer to a name, because it is the operator's default
- * under whatever name, not the model asked for.
- */
-export function pickerRowFor(rows, name) {
-  const want = String(name ?? '').trim().toLowerCase();
-  if (!want) return null;
-  const idm = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(want);
-  const family = idm ? idm[1] : want.split(/[\s-]+/)[0];
-  const version = idm ? (idm[3] ? `${idm[2]}.${idm[3]}` : idm[2]) : (want.match(/\d+(?:\.\d+)?/)?.[0] ?? null);
-  const candidates = rows.filter((r) => !/^default\b/i.test(r.label));
-  const exact = candidates.find((r) => r.label.toLowerCase() === want);
-  if (exact) return exact;
-  const byBoth = candidates.filter((r) => r.label.toLowerCase().includes(family) && (!version || r.label.includes(version)));
-  if (byBoth.length) return byBoth[0];
-  if (!version) return candidates.find((r) => r.label.toLowerCase().startsWith(family)) ?? null;
-  return null;
-}
-
-/**
- * Change this session's model through the window's own picker — this session
- * only.
- *
- * `/model <name>` as a command writes the person's default for every new
- * session on the machine (~/.claude/settings.json `model`; the window says
- * "saved as your default for new sessions"), and a partner switching a desk
- * from the floor must not reset the operator's machine — costmo's ruling
- * (#10 Decided 4, 2026-11-03). The picker's `s` is the window's own
- * session-only switch, so that is what is pressed. Measured on 2.1.300:
- * `/model` + Enter draws the picker with the cursor on the current row; ↑/↓
- * move it; a digit SELECTS (and starts the switch, as default), so digits
- * are never pressed here; `s` on a conversation cached for the current
- * model raises "Switch model? … 1. Yes, switch to X / 2. No, go back", and
- * `1` answers it; the receipt is the stdout record "Set model to `X` for
- * this session only", with PreModelSwitch/PostModelSwitch around it.
- */
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
-
-/** The picker's effort row — "◐ Medium effort (default) ←/→ to adjust" — as
- *  the level it reads, or null when the picker shows none. */
-export function effortRowOf(screen) {
-  const m = /^\s*[^\w\s]?\s*([A-Za-z]+) effort(?: \(default\))?\s+←\/→ to adjust/m.exec(String(screen ?? ''));
-  return m ? m[1].toLowerCase() : null;
-}
-
-/** A walk that could not read the picker must not leave it standing: the
- *  desk's next message or /model would be typed into it (measured on
- *  2.1.322, where four picks after one such return all failed). Escape only
- *  when "Select model" is still on screen, since an Escape in a bare
- *  composer is not nothing. */
-async function closePicker(target) {
-  if (/^\s*Select model\s*$/m.test(await screenOf(target, 40))) await tmux(['send-keys', '-t', target, 'Escape']);
-  return {};
-}
-
-export async function pickModel(cwd, name, opts = {}) {
-  return pick(cwd, { model: name }, opts);
-}
-
-/**
- * The same picker, for the effort level: its "○ Low effort ←/→ to adjust" row
- * moves with ←/→, and `s` applies the row and the model together — measured
- * 2026-11-03 as "Set model to `Haiku 5.5` for this session only with
- * `medium` effort", with nothing written to settings.json. `/effort <level>`
- * as a command saves the person's default instead, which is why it is not
- * what the floor sends.
- */
-export async function pickEffort(cwd, level, opts = {}) {
-  return pick(cwd, { effort: level }, opts);
-}
-
-export async function pick(cwd, { model = null, effort = null } = {}, { open: autoOpen = false, resume = null } = {}) {
-  const name = typeof model === 'string' && model.trim() ? model.trim() : null;
-  const level = typeof effort === 'string' && effort.trim() ? effort.trim().toLowerCase() : null;
-  if (!name && !level) return { ok: false, error: 'name a model or an effort level' };
-  if (level && !EFFORT_LEVELS.includes(level)) return { ok: false, code: 'bad_effort', error: `effort is one of ${EFFORT_LEVELS.join(', ')}, not "${effort}"` };
-  const w = await windowFor(cwd, { open: autoOpen, resume });
-  if (!w.ok) return w;
-  const { pane, path } = w;
-  // Only measured on an idle window. A picker over a running turn is a
-  // dialog nobody asked for in the middle of work.
-  if (await busy(pane.target)) return { ok: false, code: 'busy', error: 'the desk is working — change the model when the turn ends' };
-  const before = path ? await transcriptSize(path) : 0;
-  const put = await pasteInto(pane.target, '/model');
-  if (!put.ok) return { ...put, target: pane.target };
-  await settled(pane.target, {});
-  await tmux(['send-keys', '-t', pane.target, 'Enter']);
-  let picker = null;
-  let stop = Date.now() + PICKER_MS;
-  let pressed = 1;
-  while (!picker && Date.now() < stop) {
-    await sleep(200);
-    const screen = await screenOf(pane.target, 40);
-    picker = pickerOf(screen);
-    if (!picker && pressed < SUBMIT_ATTEMPTS && stillInComposer(screen, '/model')) {
-      await tmux(['send-keys', '-t', pane.target, 'Enter']);
-      pressed++;
-    }
-  }
-  if (!picker) {
-    await clearComposer(pane.target);
-    return { ok: false, code: 'no_picker', error: 'the window did not open its model picker', target: pane.target };
-  }
-  let row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
-  // A picker in a short pane shows part of its list. Measured on 2.1.322:
-  // under about 30 rows it draws three models and "… +3 models", and an
-  // "↑" on the first row once it has scrolled, so on a window nobody is
-  // attached to (80x24) Sonnet and Haiku were not on screen, and "sonnet"
-  // was refused as not offered. An attached terminal makes the pane taller,
-  // which is why the same pick worked after Open in Claude. Resizing the
-  // pane to read it would be moving the operator's furniture, so the cursor
-  // is walked down the list and then up it, one key at a time, reading the
-  // pane after each, until the name is on screen or the list ends. The list
-  // is a ring (measured): Down from the last model is "▸ More models", Down
-  // from that is row 1, and Up from row 1 is "▸ More models" again. So each
-  // pass ends on that row or on a cursor that did not move the way it was
-  // sent. The walk below then moves the cursor from wherever this left it.
-  if (name && !row) {
-    const seen = new Map(picker.rows.map((r) => [r.n, r]));
-    for (const dir of ['Down', 'Up']) {
-      for (let i = 0; i < 20 && !row; i++) {
-        const beforeKey = await screenOf(pane.target, 40);
-        await tmux(['send-keys', '-t', pane.target, dir]);
-        await reacted(pane.target, beforeKey, 40);
-        const next = pickerOf(await screenOf(pane.target, 40));
-        if (!next) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while its list was being read' };
-        for (const r of next.rows) seen.set(r.n, r);
-        row = pickerRowFor(next.rows, name);
-        // The end of the list in this direction: the cursor moved onto "▸ More
-        // models" (no number), or wrapped, or did not move. Leaving that row
-        // onto a numbered one counts as moving.
-        const moved = next.cursor != null && (dir === 'Down' ? next.cursor > (picker.cursor ?? -Infinity) : next.cursor < (picker.cursor ?? Infinity));
-        picker = next;
-        if (!moved) break;
-      }
-      if (row) break;
-    }
-    if (!row) {
-      await tmux(['send-keys', '-t', pane.target, 'Escape']);
-      const offered = [...seen.values()].sort((a, b) => a.n - b.n).filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label);
-      return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${offered.join(', ')}` };
-    }
-  }
-  if (!row) {
-    await tmux(['send-keys', '-t', pane.target, 'Escape']);
-    return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${picker.rows.filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label).join(', ')}` };
-  }
-  // Walk the cursor to the row, one key at a time, reading the pane after
-  // each: the same rule as answerQuestion, and for the same reason.
-  for (let i = 0; i < 20 && picker.cursor !== row.n; i++) {
-    const beforeKey = await screenOf(pane.target, 40);
-    // From "▸ More models" (no number) every model is above.
-    await tmux(['send-keys', '-t', pane.target, row.n > (picker.cursor ?? Infinity) ? 'Down' : 'Up']);
-    await reacted(pane.target, beforeKey, 40);
-    picker = pickerOf(await screenOf(pane.target, 40));
-    if (!picker) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the cursor was being moved' };
-  }
-  if (picker.cursor !== row.n) {
-    await tmux(['send-keys', '-t', pane.target, 'Escape']);
-    return { ok: false, code: 'picker_cursor', target: pane.target, error: `could not put the cursor on ${row.label}` };
-  }
-  if (level) {
-    // ←/→ along the effort row until it reads the level, one key at a time.
-    let at = effortRowOf(await screenOf(pane.target, 40));
-    if (!at) {
-      await tmux(['send-keys', '-t', pane.target, 'Escape']);
-      return { ok: false, code: 'no_effort_row', target: pane.target, error: 'the picker shows no effort row to adjust' };
-    }
-    for (let i = 0; i < 12 && at !== level; i++) {
-      const beforeKey = await screenOf(pane.target, 40);
-      await tmux(['send-keys', '-t', pane.target, EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(at) ? 'Right' : 'Left']);
-      await reacted(pane.target, beforeKey, 40);
-      at = effortRowOf(await screenOf(pane.target, 40));
-      if (!at) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
-    }
-    if (at !== level) {
-      await tmux(['send-keys', '-t', pane.target, 'Escape']);
-      return { ok: false, code: 'effort_unreached', target: pane.target, error: `the effort row would not move to ${level} (it reads ${at})` };
-    }
-  }
-  await tmux(['send-keys', '-t', pane.target, '-l', 's']);
-  let confirmed = false;
-  stop = Date.now() + PICKER_MS;
-  while (Date.now() < stop) {
-    await sleep(200);
-    const stdout = path ? stdoutOf(await recordsSince(path, before)) : null;
-    if (stdout && /model/i.test(stdout)) {
-      const em = /with `?([a-z]+)`? effort/i.exec(stdout);
-      return {
-        ok: true, target: pane.target, confirmed: true, command: name ? 'model' : 'effort', said: stdout.split('\n')[0].replace(/`/g, ''),
-        model: row.label, effort: em ? em[1].toLowerCase() : (level ?? null), session_only: /this session only/i.test(stdout),
-      };
-    }
-    const screen = await screenOf(pane.target, 40);
-    if (!confirmed && switchConfirmOf(screen)) {
-      await tmux(['send-keys', '-t', pane.target, '1']);
-      confirmed = true;
-    }
-  }
-  return { ok: false, code: 'model_unconfirmed', target: pane.target, error: `pressed s on ${row.label} and the window gave no sign of switching within ${Math.round(PICKER_MS / 1000)}s` };
 }
 
 /**
@@ -2697,7 +2568,8 @@ export function questionOf(screen) {
     if (m) tabs.push({ title: m[2].trim(), answered: m[1] === '\u2612', submit: m[1] === '\u2714' });
   }
 
-  // A single-select draws a preview panel to the right of the choices, so every
+  // A single-select whose options carry previews draws a preview panel to
+  // the right of the choices (previewingOf has what else it changes), so every
   // line of the list has somebody else's box on the end of it. Cut by *column*,
   // not by box character: the panel's own text ("Notes: press n to add notes")
   // sits inside it on lines that carry no border at all, and cutting on the
@@ -2891,10 +2763,11 @@ const STEP_POLL_MS = Number(process.env.ORCH_STEP_POLL_MS ?? 100);
 
 // `lines` must be the size `before` was read at. `-S -N` is N lines of
 // scrollback plus the pane, so on a pane with history a 40-line `before`
-// never equals a 12-line read, and every read looked "changed": the
-// picker's walk went on ~200 ms after each key whether or not the window
-// had redrawn, and read a stale cursor as the end of the list (QA, PR #53
-// finding 1; 2 of 3 live windows had 36–74 lines of history).
+// never equals a 12-line read, and every read looked "changed": the model
+// picker's walk (since removed) went on ~200 ms after each key whether or
+// not the window had redrawn, and read a stale cursor as the end of the
+// list (QA, PR #53 finding 1; 2 of 3 live windows had 36–74 lines of
+// history). The rule outlives the walk: any caller passes its own size.
 async function reacted(target, before, lines = 12) {
   const stop = Date.now() + STEP_SETTLE_MS;
   let last = null;
@@ -2990,9 +2863,20 @@ export async function answerQuestion(cwd, steps = []) {
     // somebody typed.
     const arg = typeof step.text === 'string' ? ['-l', step.text] : [String(step.key)];
     if (typeof step.text !== 'string' && !step.key) continue;
+    // A question drawn with a preview panel takes its digit as a move, not a
+    // choice (previewingOf). Read off the screen this key is about to go to,
+    // so it holds for a form built from the call as for one read off the pane.
+    const moves = typeof step.text !== 'string' && /^[1-9]$/.test(String(step.key)) && previewingOf(seen);
     const r = await tmux(['send-keys', '-t', pane.target, ...arg]);
     if (!r.ok) return { ok: false, error: r.error, done };
     const name = typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key);
+    if (moves) {
+      done.push(name);
+      const took = await selectRow(pane.target, Number(step.key));
+      if (!took.ok) return { ...took, done };
+      done.push('Enter(select)');
+      continue;
+    }
     if (typeof step.settle === 'number') await sleep(step.settle);
     // Kept for the report, not acted on: a key the pane did not visibly react
     // to is not a failure by itself — the walk to the left end is meant to be
@@ -3084,6 +2968,89 @@ export async function answerQuestion(cwd, steps = []) {
       `${quiet.length ? `; the pane did not change after ${quiet.join(', ')}` : ''}`,
   };
 }
+
+/**
+ * Whether the question on screen is drawn with a preview panel, read from its
+ * bottom lines.
+ *
+ * A single-choice question where any option carries a `preview` is drawn
+ * side by side: the choices on the left, the highlighted one's preview in a
+ * box on the right, no "Type something." row, and a status line of its own:
+ *
+ *     Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+ *
+ * On that layout a digit only moves the cursor, and Enter is what selects.
+ * Measured on 2.1.325 (2026-11-14) on a probe, after the floor failed to
+ * answer such a form twice on a live desk ("the pane did not change after
+ * 1", the cursor having started on row 1): `2` moved the cursor and swapped
+ * the preview, the form stood, and `Enter` then recorded "→ Bravo". Alone it
+ * submitted; as the first of two questions it went on to the next tab. A
+ * plain question beside it still took its digit alone, as it always has, so
+ * an Enter after *that* digit would answer the tab it had moved on to. One
+ * option of three with a preview is enough for the layout, and a
+ * multi-select given previews is drawn as an ordinary multi-select.
+ *
+ * So the layout is told by the status line and by nothing about the call.
+ * "n to add notes" is on it and on no other form's. Positional, and
+ * rejoined, for askingOf's reasons: at 80 columns the line wraps after
+ * "Tab to switch questions ·".
+ */
+export function previewingOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const foots = lines.slice(-3).join(' ').replace(/\s+/g, ' ');
+  return /enter to select/i.test(foots) && /\bn to add notes\b/i.test(foots);
+}
+
+/**
+ * On a preview question, the digit has just been sent: see the cursor on
+ * that row, press Enter, and see the window take it.
+ *
+ * Each half is read off the pane, not assumed. Enter selects whatever the
+ * cursor is on, so it is pressed only once the cursor is seen on the row
+ * that was asked for. A digit with no row (a form built from an older
+ * hook's call offers a "Type something." this layout does not draw) moves
+ * nothing, and is said as that with nothing selected. And the pane has to
+ * change after the Enter, or the next key of the script would be pressed
+ * into this question as if it were the next.
+ */
+async function selectRow(target, n) {
+  const said = (screen) => String(screen).split('\n').map((l) => l.trim()).filter(Boolean).slice(-2).join(' / ').slice(0, 180);
+  const stop = Date.now() + SELECT_ROW_MS;
+  let screen = '';
+  let on = false;
+  for (;;) {
+    screen = await screenOf(target);
+    const q = previewingOf(screen) ? questionOf(screen) : null;
+    on = q?.options?.[q.cursor]?.n === n;
+    if (on || Date.now() >= stop) break;
+    await sleep(STEP_POLL_MS);
+  }
+  if (!on) {
+    return {
+      ok: false,
+      code: 'not_on_row',
+      screen,
+      error: `this question takes a number as a move and Enter as the choice, and the cursor was not seen on row ${n} after ${n} was sent,` +
+        ` so Enter was not pressed — its last two lines read "${said(screen)}"`,
+    };
+  }
+  const r = await tmux(['send-keys', '-t', target, 'Enter']);
+  if (!r.ok) return { ok: false, error: r.error };
+  // Changed and still, or just changed: a form that submitted leaves a
+  // working window, whose status line never holds still.
+  if (!(await reacted(target, screen)) && (await screenOf(target)) === screen) {
+    return {
+      ok: false,
+      code: 'not_selected',
+      screen,
+      error: `the window did not take Enter on row ${n} — its last two lines read "${said(screen)}"`,
+    };
+  }
+  return { ok: true };
+}
+
+/** How long the cursor is looked for on the row a digit was sent for, on a preview question. */
+const SELECT_ROW_MS = Number(process.env.ORCH_SELECT_ROW_MS ?? 2000);
 
 /** The review screen's own words. Matching the question rather than the footer
  *  keeps this independent of how many choices the confirmation offers. */

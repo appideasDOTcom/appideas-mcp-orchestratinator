@@ -181,16 +181,20 @@ export function commandOf(text) {
  * no way to read it from outside — and anything not on it passes through as
  * typed, confirmed on the window's record of having run it.
  *
- * `/model` and `/effort` are not sent as commands at all: as commands they
- * save the person's machine-wide default ("saved as your default for new
- * sessions"), and a change from the floor is this session's only (costmo,
- * #10 Decided 4, 2026-11-03). The host drives the window's picker instead.
+ * `/model <name>` and `/effort <level>` go to the window as typed, like the
+ * rest, and so save the person's default for new sessions on that machine
+ * ("saved as your default for new sessions") — costmo's ruling, 2026-11-14,
+ * so the floor does what the window and the editor do. It reverses #10
+ * Decided 4 (2026-11-03), under which a change from the floor was that
+ * session's only and the host drove the window's picker to make it so; the
+ * reasoning for the commands over the picker is beside send() in
+ * host/window.js.
  */
 export const FLOOR_COMMANDS = [
   { name: 'clear', args: false, hint: 'start a new conversation on this desk', receipt: 'the new conversation\u2019s first record' },
   { name: 'compact', args: false, hint: 'summarise the conversation to free context', receipt: 'the window compacting' },
-  { name: 'model', args: 'name', hint: 'change the model for this session only', receipt: 'the window\u2019s own picker' },
-  { name: 'effort', args: 'level', hint: 'change the effort level for this session only', receipt: 'the window\u2019s own picker' },
+  { name: 'model', args: 'name', hint: 'change the model, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
+  { name: 'effort', args: 'level', hint: 'change the effort level, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
 ];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -667,6 +671,17 @@ function askForOptions(store, live, channel, agent, requestId) {
  * this", is not an answer and is left out here as it is there. A lone
  * single-select draws no tab strip; anything else does.
  *
+ * One layout has no free-text row at all: a single-select where any option
+ * carries a `preview`. The window draws it side by side, the choices beside
+ * the highlighted one's preview, and "Type something." is not among them
+ * (measured on 2.1.325, 2026-11-14: three choices on the pane where this
+ * built four). The row is left out for it, because a row offered here and
+ * absent there is a digit that moves nothing. A multi-select given previews
+ * is drawn as any other multi-select and keeps its row. The hook sends the
+ * fact as `preview: true` (plugin/hooks/report.mjs); the call's own input
+ * has the text. The keys for that layout are the host's, read off the pane
+ * at the moment of pressing (`previewingOf`, host/window.js).
+ *
  * Null when the numbering cannot be trusted: no questions, a choice with no
  * label, or a list long enough that the hook may have cut it
  * (plugin/hooks/report.mjs keeps 8 questions of 12 choices; the tool allows 4
@@ -683,6 +698,7 @@ export function formFromInput(input) {
     const given = Array.isArray(q?.options) ? q.options : [];
     if (!str(q?.question) || !given.length || given.length >= 12 || given.some((o) => !str(o?.label))) return null;
     const multi = q.multiSelect === true;
+    const previewed = !multi && given.some((o) => o?.preview === true || (typeof o?.preview === 'string' && o.preview.trim() !== ''));
     const options = given.map((o, k) => ({
       n: k + 1,
       text: str(o.label),
@@ -690,7 +706,7 @@ export function formFromInput(input) {
       checked: multi ? false : null,
       other: false,
     }));
-    options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
+    if (!previewed) options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
     questions.push({
       tab: i, tab_title: str(q.header), strip, question: str(q.question),
       kind: multi ? 'multi' : 'single', options, cursor: 0, submit: multi,
@@ -841,11 +857,21 @@ export function unansweredOf(questions, answers) {
  * Every mechanic here was measured on a real prompt, and two of them are not
  * what you would guess:
  *
- *   - on a single-select a digit only *moves the cursor*; Enter is what selects,
- *     and selecting advances to the next tab by itself;
+ *   - on a single-select a digit *selects*, and selecting advances to the
+ *     next tab by itself, so an Enter after it answers that next tab;
  *   - on a multi-select a digit *toggles that box outright* and leaves the
  *     cursor where it was, so choices are pressed by number and Enter is never
  *     used — there it would toggle whatever the cursor happens to be on.
+ *
+ * One layout is the exception, and its keys are not written here: a
+ * single-select whose options carry previews takes the digit as a move and
+ * Enter as the choice (measured on 2.1.325, 2026-11-14). This still emits the
+ * digit alone for it. The host adds the Enter when the pane it is about to
+ * press into is drawn that way, having read the cursor on the row
+ * (`previewingOf`, `selectRow` in host/window.js). It is the host's because
+ * the pane is what says which layout a question got, for a form built from
+ * the call as for one read off the pane, and an Enter decided here on a
+ * wrong guess would answer the next question with its first row.
  *
  * Positions are counted from the left end rather than detected: which tab is
  * showing is marked by colour, and a plain capture has none. So the sequence
@@ -1693,6 +1719,31 @@ function applyHostEvent(store, live, hostId, ev) {
     store.setHostedState(channel, agent, s);
     live.publish(key, { type: 'state', state: s });
   };
+  /**
+   * A model or effort change the window did not make: what the floor asked
+   * for stops standing beside what the window has. `what` is 'model' or
+   * 'effort'.
+   *
+   * Nothing used to do this. An asked-for was cleared only by a confirmation
+   * — the window's line, a hook, a reply naming another model — so a change
+   * the host refused (a working desk) or the window did ("Model 'x' not
+   * found") left the select showing the model that was picked, not the one
+   * the window was on, with "x asked" beside it, until the model next
+   * changed. The host reports a reply's model only when it differs, so on
+   * that conversation nothing ever corrected it (costmo, 2026-11-14: fix it).
+   *
+   * Cleared where the route wrote it: the window's session — the one the
+   * event names, and the roster's on the hosted desk — and only on "the
+   * desk's newest" when neither is a real id (PR #32 finding 1). An empty
+   * string is the cleared value; NULL in these statements means "leave it".
+   */
+  const unask = (what) => {
+    const cleared = { [what]: '' };
+    const ids = [...new Set([str(ev.session_id), desk.sdk_session_id].filter((id) => id && !String(id).startsWith('host:')))];
+    if (ids.length) for (const id of ids) store.setRequestedFor(id, cleared);
+    else store.setRequested(channel, agent, cleared);
+    live.publish(key, { type: 'session', session_id: ids[0] ?? sessionId });
+  };
 
   switch (str(ev.type)) {
     /**
@@ -1911,7 +1962,7 @@ function applyHostEvent(store, live, hostId, ev) {
     /**
      * A slash command did its job, in its own terms: the host read the
      * command's own receipt (a new conversation's first record, the window
-     * compacting, the picker's "Set model to … for this session only", the
+     * compacting, the window's "Set model to … and saved as your default", the
      * /btw overlay) and says so here. The sentence is already on the desk as
      * a line labeled host; this is the structured half — the session the
      * desk moved to, the model or effort confirmed — and the note that ends
@@ -1923,23 +1974,28 @@ function applyHostEvent(store, live, hostId, ev) {
       if (!command) return false;
       const sid = str(ev.session_id) ?? sessionId;
       if (str(ev.model) || str(ev.effort)) {
-        // The picker names a model by its label ("Haiku 5.5"), the hooks by
-        // id; the id wins when the hook arrives, and clears the asked-for
-        // either way. Effort has no hook of its own: the picker's word, and
-        // the next Stop's effort.level, are its only confirmations.
+        // The window's line names a model by its label ("Haiku 5.5"), the
+        // hooks by id; the id wins when the hook arrives, and clears the
+        // asked-for either way. Effort has no hook of its own: the window's
+        // line, and the next Stop's effort.level, are its only confirmations.
         // On the window's session when the host names it — the one it drove
         // — and only on "the desk's newest live" for a host that does not.
-        // With two live sessions on one desk the picker's words landed on
+        // With two live sessions on one desk the window's words landed on
         // the other, newer one (QA, PR #32 finding 1).
         const named = !!str(ev.session_id);
         if (str(ev.effort)) { if (named) store.setEffort(sid, str(ev.effort)); else store.setDeskEffort(channel, agent, str(ev.effort)); }
-        // The picker's own words ("Opus 5.5") stand as the model until a hook
+        // The window's own words ("Opus 5.5") stand as the model until a hook
         // or the next reply names the id — a window on the older plugin
         // sends no PostModelSwitch, and the select snapped back to the
         // previous model until the reply came (costmo, 2026-11-03).
         if (str(ev.model)) { if (named) store.setModel(sid, str(ev.model)); else store.setDeskModel(channel, agent, str(ev.model)); }
         live.publish(key, { type: 'session', session_id: sid });
       }
+      // The window answered and confirmed nothing: "Model 'gpt' not found",
+      // a change it kept as it was. Its line is on the desk; what was asked
+      // for is no longer pending, and the select goes back to what stands.
+      if (command === 'model' && !str(ev.model)) unask('model');
+      if (command === 'effort' && !str(ev.effort)) unask('effort');
       if (ev.compacting) {
         store.setCompacting(sid, 'manual');
         state('working');
@@ -2137,6 +2193,13 @@ function applyHostEvent(store, live, hostId, ev) {
       // explaining that it was not — and the browser hands the words back to
       // the compose box on an error turn, so the message is not lost by this.
       if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
+      // A model or effort change that ended here was not made, as far as
+      // anyone read: the desk was working, the window was asking, or its
+      // line never came. The host names the command it was typing (a host
+      // from before 2026-11-14 does not, and the asked-for stays as it did).
+      // If the window took it after all, its hook or its next reply confirms
+      // the model, as for a /model typed into the window.
+      if (str(ev.command) === 'model' || str(ev.command) === 'effort') unask(str(ev.command));
       // An answer that never took is not just an error to report — the window
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
@@ -3048,8 +3111,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // A slash command goes to the window as typed, and the host confirms it
     // on the command's own receipt (FLOOR_COMMANDS). Two are checked here,
     // because their failure would otherwise be a dialog left standing in
-    // somebody's window: a bare /model opens a picker nobody is driving, and
-    // an effort level the picker does not have cannot be reached.
+    // somebody's window, or a wait for a line the window never writes: a bare
+    // /model opens a picker nobody is driving, and an effort level that is
+    // not one of the window's is answered here, in the floor's words.
     const cmd = commandOf(text);
     if (cmd?.name === 'model' && !cmd.args) {
       return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. A bare /model opens a picker in the window.', code: 'picker' });
@@ -3064,7 +3128,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
 
     const h = check.hosted;
     // What the floor asked for, shown apart from what the window confirms —
-    // the picker's receipt or the hook clears it.
+    // the window's own line or the hook clears it.
     // On the window's session — the roster's, which the host reports on the
     // hosted desk — not the desk's newest live row, which with two live
     // sessions is the other one (QA, PR #32 finding 1). A desk whose window

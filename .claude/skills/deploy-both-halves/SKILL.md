@@ -11,10 +11,11 @@ under launchd from the working tree. A deploy is therefore two restarts and
 two sets of readings, and the completion note is the readings — "I rebuilt
 it" is not one. Done three times on 2026-11-02 (tasks 237, 239, and the
 version bump); this is the procedure that was run each time. **There is a
-third half when `plugin/` changed** — the hooks every window runs come from
-Claude Code's plugin cache, not from the tree — and it has its own step
-below; a deploy that skipped it (QA, PR #32) leaves every window on the
-old hooks.
+third half when `plugin/` changed** — the hooks every window runs are
+loaded at the window's start, and on Claude Code 2.1.325 straight from the
+tree's `plugin/` (before that, from a cache the update copied into) — and
+it has its own step below; a deploy that skipped it (QA, PR #32) left every
+window on the old hooks.
 
 ## Before touching anything
 
@@ -54,7 +55,10 @@ Three things to check in it:
   that is a question for the channel, not a stash. **The exception is a
   preview, and only costmo can ask for one.** He types in the window to see
   the change before committing it, as in "rebuild and restart so I can
-  see the difference now" (twice for #43, 2026-11-05). Deploy the dirty
+  see the difference now" (twice for #43, 2026-11-05), or "rebuild and
+reload" typed straight after a change was reported as in the tree and not
+deployed (2026-11-14, with `src/floor.js` and `host/index.js` both
+changed, so both halves went). Deploy the dirty
   tree, but only the halves it touches: for a page change that is the
   container alone, and the host stays up. Say UNCOMMITTED on the channel
   before and after, and say that `/health`'s `commit` is HEAD, not what
@@ -69,15 +73,43 @@ Three things to check in it:
   are announced; a deploy does not collide with them, but a suite you run
   alongside the deploy does.
 
+- **Who your announcement reaches.** `send_message`'s reply says so. While
+  the operator has you in a meeting room, a broadcast goes to the room's
+  other participants and nobody else, and the reply carries
+  `meeting_room.reached`. On 2026-11-14 every deploy and port announcement
+  of the session reached appideas-qa and theme-developer only, because
+  both were in room 24 with the coordinator. QA was the reader that
+  mattered, so nothing was lost that day. If `reached` does not name QA,
+  send it again with `to: "appideas-qa"`: a direct message goes where it
+  is addressed, in or out of a room.
+
 ## The restart
 
 ```bash
 # say so on the channel first — QA's MCP session drops with the server
 docker compose up -d --build 2>&1 | tail -4      # must print "Recreated", not "Running"
 launchctl kickstart -k gui/$(id -u)/com.appideas.orchestratinator-host
-sleep 8
+.claude/skills/deploy-both-halves/settled.sh src/floor.js       # waits for the host to read live; then each file's hash, container against tree
 .claude/skills/deploy-both-halves/status.sh askUnanswered promptOffer
 ```
+
+[`settled.sh`](settled.sh) replaced a `sleep 8` here (2026-11-14). An
+agent's shell refuses a bare foreground `sleep`, and eight seconds was a
+guess. It waits on the fact, a hosted desk reading live in `/api/floor`,
+and says how long that took (0–2 s on the day). Then, for each `src/` file
+named, it prints the container's sha256 against the tree's:
+`src/floor.js: container a5f252c76fca = tree`. That is the proof for a
+change in `src/` outside the page, where `board-counts.sh`'s `app.js` hash
+says nothing and a symbol count needs a symbol that was absent before.
+`unask` read 2 in the served `app.js` before its deploy, inside
+`unasked`. It exits 1 on `DIFFERS`, `NOT IN THE CONTAINER` (a `host/`
+file: the image holds no host) and `HOST NOT LIVE`; each was run.
+
+A both-halves deploy leaves two failure lines in the host log, from the
+host that was going away while the container was replaced: the work poll
+`failed (UND_ERR_SOCKET: other side closed)` and `unregister not delivered
+(… ECONNRESET)`, both timed inside the swap and before the new
+registration line. They are not the new host's.
 
 `Container … Running` instead of `Recreated` means the image did not change
 and your edit is not in it. Chaining the two restarts behind `npm test` once
@@ -126,9 +158,24 @@ the server half only on that reading, and the note said so.
 ## The third half: the plugin
 
 Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).
-The marketplace is a directory source pointing at this tree, so the update
-installs from the working tree — it must be clean at the commit being
-deployed. Measured 2026-11-03 (task 251):
+
+**On Claude Code 2.1.325 there is no copy to make** (2026-11-14, deploying
+2c0a75f, whose `report.mjs` changed with the version unchanged at 0.12.6).
+`claude plugin update` answered "orchestratinator-floor is read from its
+folder, …/plugin: nothing to update. Edits there take effect at the next
+session start or /reload-plugins", and the kernel log that day had a
+window's hook `node` reading `…/appideas-mcp-orchestratinator/plugin/hooks/report.mjs`,
+the tree's path. `installed_plugins.json` still named the 0.12.6 cache
+directory, whose `report.mjs` was the old one, so that file no longer
+says what windows run: do not compare hashes against it. Still run the
+update and quote its answer, because an older Claude Code on another
+machine copies. The note then says the change reaches each window at its
+next start or `/reload-plugins`, and the tree, not a cache, is what they
+load, which is one more reason it must be clean at the commit deployed.
+
+On older Claude Code, the marketplace is a directory source pointing at
+this tree, so the update installs from the working tree — it must be clean
+at the commit being deployed. Measured 2026-11-03 (task 251):
 
 ```bash
 grep -E '"version"|installPath' ~/.claude/plugins/installed_plugins.json   # before: the cache path and version

@@ -212,7 +212,8 @@ console.log('\na bulk nudge from a selecting room, for a desk that is out (#23)'
   await pop.waitFor(`[...document.querySelectorAll('#p-turns .t-pending')].some((n) => n.textContent.includes(${JSON.stringify(want)}))`, { timeout: 8000 })
     .then(() => ok(true, `the popout draws its bubble with the room's line: "${want}"`),
       async (e) => ok(false, `the popout draws its bubble with the room's line: "${want}"`, (await pop.evalJs(`[...document.querySelectorAll('#p-turns .t-pending')].map((n) => n.textContent).join(' | ')`)) || e.message));
-  await floor.click('svg.room.selecting [data-act="select-room"]');
+  // The nudge is sent, so the room stopped selecting by itself.
+  await floor.waitFor(`!document.querySelector('svg.room.selecting')`, { timeout: 4000 });
   await host([{ type: 'holder', channel: CH, agent: 'bo', holder: 'floor', window: 'bo-window' }]);
 }
 

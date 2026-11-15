@@ -334,8 +334,9 @@ The composer takes a slash command too: `/clear`, `/compact`, `/btw <question>`
 and anything else Claude Code knows, each confirmed on the window's own
 receipt and said in its own terms — a new conversation started, compacting,
 answered in the window (with the answer). The model and effort controls on
-the panel's foot change **this session only**, through the window's own
-picker; your machine-wide default is never touched from the floor. While a
+the panel's foot are the window's own `/model` and `/effort`, so a choice is
+also **saved as the default for new sessions** on that desk's machine, the
+way it is when you change it in Claude Code or your editor. While a
 desk compacts, the floor says so, and a message sent meanwhile is held and
 read when the compaction ends.
 

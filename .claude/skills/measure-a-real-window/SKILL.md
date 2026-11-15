@@ -339,6 +339,39 @@ What `form.mjs` was built to measure, and what it found on 2.1.284
   `form.mjs` reads the pane on the socket directly, so only the host's keys
   are delayed.
 
+**A question with previews** (2.1.325, 2026-11-14). Ask for options that
+"each carry the optional preview field" and the window draws the question
+side by side. What was measured, each on a real form:
+
+| form | keys | what the window did |
+|---|---|---|
+| one question, previews | `2` | cursor to row 2, preview swapped, form standing |
+| | then `Enter` | "→ Bravo", form gone, no review screen |
+| preview question, then a plain one | `Left Left Left 2 Enter` | first tab ☒, second tab showing |
+| | then `3` | review screen with Bravo and Blue |
+| plain, preview, plain | `Tab`, `Left`, `Right`, `BTab` on the preview tab | each walked the strip as on a plain tab |
+| one option of three with a preview | (drawn) | the whole question side by side; "No preview available" on the other rows |
+| multi-select given previews | (drawn) | an ordinary multi-select, with "Type something" |
+| one question, previews, three rows | `4` | nothing: no such row, cursor still on row 1 |
+
+The layout has no "Type something." row, its status line is "Enter to select
+· ↑/↓ to navigate · n to add notes · Esc to cancel" (with "Tab to switch
+questions" before the last part in a form of several, wrapping at 80
+columns), and a preview taller than the pane's room is clipped by the
+window ("✂ 5 lines hidden"), so the form itself was not cut at 80x24.
+`form.mjs` answers these through the host as any other form; the rows it
+prints for `formFromInput` match the pane's now that the call-built form
+leaves the free-text row out.
+
+[`raise.sh`](raise.sh) is how the table was made: it raises a form and
+leaves it standing, where `form.mjs` answers or cancels the one it raises.
+
+```bash
+.claude/skills/measure-a-real-window/raise.sh 'one single-select question: header "Where", …' 14
+tmux -L probe send-keys -t p:probe 2; tmux -L probe capture-pane -p -t p:probe | grep -v '^\s*$' | tail -12
+tmux -L probe send-keys -t p:probe Escape     # when done
+```
+
 Timing on a probe is the floor of it, not the case: last digit to "Ready to
 submit your answers?" was 28–57 ms on a window with a short conversation. A
 desk with a long one was not measured — forms are not raised on his desks.
@@ -390,10 +423,11 @@ What to know before trusting a reading from it:
   from the floor when the settings change.
 - **`/model <name>` and `/effort <level>` as commands write the operator's
   machine-wide default** (`~/.claude/settings.json` `model`,
-  `modelSettings.<model>.effortLevel`). The probe changed his, twice, and
-  they were put back by hand — read that file before and after any
-  measurement that touches a model, and restore it. The picker's `s` does
-  not write it.
+  `modelSettings.<model>.effortLevel`), and so does Enter in the picker.
+  The probe changed his, twice, and they were put back by hand — copy that
+  file before any measurement that touches a model and put it back after
+  ("A model or effort change", below). Only the picker's `s` does not
+  write it.
 - **A compaction needs a context behind it.** Read `filler.txt` once (~85k
   tokens) for a 10–15 s manual one; `/autocompact 100k` and two reads
   provoked an auto one that thrashed three times and ended in a StopFailure
@@ -450,6 +484,119 @@ predicted — a desk moved back to a floor it had left by a move missing from
 *every* floor's payload, because the move had retired its row there. Give
 the recorders a deadline (`seconds`) longer than the session you plan: they
 stopped at ten minutes here, one move before the last reading was taken.
+
+## A model or effort change
+
+Since 2026-11-14 the floor changes a model or an effort level by typing the
+window's own command, which saves the choice as the default for new
+sessions (costmo's ruling; before it the host drove the picker and pressed
+`s`). Everything below was read off a probe on 2.1.325 that day. The probe
+runs on the operator's own profile, so every one of these writes his
+`~/.claude/settings.json`:
+
+```bash
+cp -p ~/.claude/settings.json "$SP/settings.json.before"; shasum -a 256 ~/.claude/settings.json
+# … measure …
+python3 .claude/skills/measure-a-real-window/restore-settings.py "$SP/settings.json.before"
+# differs before restore: {"model": ["claude-fable-5-2", "haiku"]}
+# restored byte for byte — sha256 d4fc2d75…        ← the hash from before
+```
+
+Copying the whole file back also undoes anything else that changed in it
+meanwhile, and the operator changes his own effort level from his windows
+(he had, minutes before the 2026-11-15 measurement). So
+[`restore-settings.py`](restore-settings.py) puts back `model`,
+`modelSettings` and `effortLevel` alone. When nothing else differs it
+writes the saved bytes and the hash is the one from before. When another
+key differs it keeps that key, names it, and the hash is a new one. Run on
+two throwaway files (a second argument names the file to restore): keys of
+a probe's only, byte for byte; `theme` changed meanwhile, kept and named; a
+file that is not JSON, exit 2 and nothing written.
+
+A window started while the file is changed starts on the probe's model, so
+keep the stretch short and put the file back before reading results.
+
+| keys | the window's line | what settings.json gained |
+|---|---|---|
+| `/model`, ↓ to Haiku, Enter | Set model to Haiku 5.5 and saved as your default for new sessions | `model: haiku` |
+| `/model`, ↑ to Sonnet, → on the effort row, Enter | …Sonnet 5.5 and saved as your default for new sessions with high effort | `model: sonnet`, `modelSettings.claude-sonnet-5-5.effortLevel: high` |
+| `/model`, ← on the effort row only, Enter | …Sonnet 5.5 and saved as your default for new sessions with medium effort | the model again, and the effort |
+| `/model opus` | Set model to Opus 5.5 and saved as your default for new sessions | `model: opus` |
+| `/model fable` | Set model to Fable 5.2 and saved… | `model: fable` |
+| `/model nonsense-9` | Model 'nonsense-9' not found | nothing |
+| `/effort low` | Set effort level to low (saved as your default for new sessions): Quick, straightforward… | `modelSettings.<current model>.effortLevel: low`, `model` untouched |
+
+The third row is why the host types the commands and does not press Enter
+in the picker: an effort change there saves the model too. Three more
+things, each seen once on purpose:
+
+- **"Switch model?"** stands between a `/model` and its line whenever the
+  conversation has a reply cached for the current model, behind the command
+  and behind the picker alike. It replaces the composer, its last two lines
+  are `❯ 1. Yes, switch to X` and `2. No, go back`, and `1` answers it.
+  With no reply since the last switch it does not appear.
+- **Into a running turn**, `/model haiku` is taken at once and the warning
+  is drawn over the work. Answered `1`, the line appears as a notice above
+  the composer and the turn carries on. The host refuses instead.
+- **A refusal is recorded differently.** A command that ran writes its
+  `<command-name>` and `<local-command-stdout>` as user records; "Model
+  'x' not found" writes both as `system` records with subtype
+  `local_command` and the text in `content`.
+
+- **"Change effort level?" is the same dialog under another title, and
+  no probe has raised it** (QA, PR #55 finding 1; 2026-11-15, 2.1.325).
+  The binary's strings hold both titles over the same lines and the same
+  two choices, and its condition for the effort one is a change that would
+  rewrite the cached prefix: a model that does not take effort per turn.
+  Each of the four families the floor offers was given a reply and then
+  `/effort <another level>` through `send.mjs`, with the pane recorded:
+
+  | model | change | the window's line | frames with the dialog |
+  |---|---|---|---|
+  | Fable 5.2 | high → medium | Set effort level to medium (saved as your default…) | 0 |
+  | Opus 5.5 | high → low | Set effort level to low (saved…) | 0 |
+  | Sonnet 5.5 | (default) → low | Set effort level to low (saved…) | 0 |
+  | Haiku 5.5 | (default) → low, a reply, → high | Set effort level to high (saved…) | 0 |
+
+  "Switch model?" stood in the same recordings on each `/model` between
+  them (1–3 frames) and was answered. So the host's read of the effort
+  title is the model's measured shape with the binary's words, and
+  `test/window.mjs`'s stand-in raises it under `effort-ask.flag`. To read
+  the strings again on a new version (the binary is the platform package,
+  not `bin/claude.exe`'s wrapper):
+
+  ```bash
+  B="$(npm root -g)/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude"
+  python3 -I -c "import sys,re;d=open(sys.argv[1],'rb').read();m=re.search(rb'Change effort level\?',d);print(d[m.start()-80:m.end()+420].decode('utf8','replace') if m else 'gone')" "$B"
+  ```
+
+  If a probe ever does show it, record its last lines and what `1` and
+  `2` write, and put the real "Kept effort level as …" record's type
+  (user or `system`) beside `stdoutOf`.
+
+[`send.mjs`](send.mjs) plays any of these through the host's own `send()`
+from the tree, against the probe, with no board or host in the loop. To see
+the host meet the warning, give the conversation a turn first, record the
+pane while it sends, and look for the choice in the recording:
+
+```bash
+.claude/skills/measure-a-real-window/record-pane.sh "$SP/rec-model.log" -- \
+  env ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p \
+  node .claude/skills/measure-a-real-window/send.mjs "$SP/probe" '/model sonnet'
+# frames: <how many were taken>
+# frames with 'Switch model?': <1 to 3 on 2026-11-15>   ← above 0: the warning stood, and the send still ended ok
+# frames with 'Change effort level?': 0
+```
+
+[`record-pane.sh`](record-pane.sh) records the pane about seven times a
+second while any command runs, and counts the frames holding each `-p
+<words>` (the two titles when none is given). The frames stay in the log.
+**A count of 0 is a reading only beside a count above 0 from the same
+recorder**: the four 0s in the effort table above stand because "Switch
+model?" was counted in the same recordings. It can be run with no Claude
+Code at all, on a tmux socket of its own (`PROBE_SOCKET`): a pane that
+drew "Change effort level?" for a second read 8 frames of it and 0 of the
+other title, and with no pane on the socket it exits 2 and says so.
 
 ## How long a closed window stays in the roster
 

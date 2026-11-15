@@ -305,6 +305,18 @@ async function main() {
     eq(received[0]?.body?.tool_input?.questions?.map((q) => `${q.header}|${q.question}|${q.options.length}`), ['Scope|Which scope should step one audit?|2'],
       'an AskUserQuestion carries its questions, headers and options — the floor drew choices under the tool\'s name without them');
     assert(!('not' in (received[0]?.body?.tool_input?.questions?.[1] ?? {})), 'and nothing that is not a question');
+    eq(received[0]?.body?.tool_input?.questions?.[0]?.options.map((o) => 'preview' in o), [false, false], 'an option with no preview says nothing about one');
+
+    // A preview changes how the window draws the question (no free-text row,
+    // a digit that only moves), so that an option has one travels — as a
+    // fact. The text does not: a preview is a mock-up of any length.
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'PermissionRequest', cwd: `${FIX}/repo`, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Where should it go?', header: 'Where', multiSelect: false, options: [{ label: 'Alpha', description: 'first', preview: '┌────┐\n│ AAA │\n└────┘' }, { label: 'Bravo', preview: '   ' }, { label: 'Charlie' }] }] } });
+    await settle();
+    eq(received[0]?.body?.tool_input?.questions?.[0]?.options.map((o) => o.preview ?? null), [true, null, null],
+      'an option with a preview is flagged, and one whose preview is blank or absent is not');
+    assert(!JSON.stringify(received[0]?.body ?? {}).includes('AAA'), 'and the preview\'s own text is not sent');
 
     // ---- what must never be reported ----
     received.length = 0;

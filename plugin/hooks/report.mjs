@@ -300,9 +300,14 @@ function reduceToolInput(input) {
       question: clip(typeof q.question === 'string' ? q.question : '', 500),
       header: clip(typeof q.header === 'string' ? q.header : '', 60),
       multiSelect: q.multiSelect === true,
+      // `preview` is forwarded as a fact, not as its text: a question where
+      // any option has one is drawn without a free-text row (measured on
+      // 2.1.325, 2026-11-14), and the board builds the form's rows from this
+      // when the host cannot read the pane (formFromInput, src/floor.js).
       options: Array.isArray(q.options) ? q.options.slice(0, 12).map((o) => ({
         label: clip(typeof o?.label === 'string' ? o.label : '', 120),
         description: clip(typeof o?.description === 'string' ? o.description : '', 300),
+        ...(typeof o?.preview === 'string' && o.preview.trim() ? { preview: true } : {}),
       })) : [],
     } : null)).filter((q) => q && q.question);
     if (qs.length) out.questions = qs;

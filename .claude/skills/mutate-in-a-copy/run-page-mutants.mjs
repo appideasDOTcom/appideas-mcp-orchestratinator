@@ -32,7 +32,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const destAt = args.indexOf('--dest');
 const dest = destAt >= 0 ? args[destAt + 1] : join(tmpdir(), 'orch-page-copy');
-const [spec, check] = args.filter((a, i) => a !== '--dest' && i !== destAt + 1);
+// Without --dest, destAt is -1 and `i !== destAt + 1` dropped the first
+// argument: the tool printed its usage for the very line its header gives
+// (2026-11-14). Only a --dest that is there takes its value out of the list.
+const [spec, check] = args.filter((a, i) => destAt < 0 || (i !== destAt && i !== destAt + 1));
 if (!spec || !check) {
   console.error("usage: run-page-mutants.mjs <mutants.json> '<check command>' [--dest <dir>]");
   process.exit(2);
@@ -51,4 +54,10 @@ for (const [name, file, oldText, newText] of list) {
 // here means every red above is in doubt.
 let out = '';
 try { out = execFileSync('bash', ['-c', check], { cwd: copy, encoding: 'utf8' }); } catch (e) { out = e.stdout ?? ''; }
-console.log(`control: ${out.split('\n').find((l) => /^(PASS|FAIL) /.test(l)) ?? 'THE CHECK DID NOT FINISH'}`);
+const verdict = out.split('\n').find((l) => /^(PASS|FAIL) /.test(l));
+console.log(`control: ${verdict ?? 'THE CHECK DID NOT FINISH'}`);
+// With no verdict, say what the check did say. On 2026-11-14 a control ended
+// this way once, at load average 90 from another desk's builds, and this
+// line was all there was: the run had to be repeated to learn it was the
+// machine (4 of 4 green straight after, and green in the batch run again).
+if (!verdict) for (const l of out.split('\n').filter(Boolean).slice(-6)) console.log(`    ${l.slice(0, 220)}`);

@@ -61,6 +61,52 @@ behaviour green. Every batch's reds were the ones predicted for its mutants.
 In the report, say which assertions are expected to stay green at the base
 and why.
 
+**A test being written goes into the copy, not the tree: `--overlay`**
+(2026-11-15). The tree is committed whenever costmo chooses, and a copy is
+made from the tree, so the easy way to run a new test in a copy is to
+write it in the tree first. In PR #55's third round a new window-suite
+row stood in the tree, unrun, for the minutes its control took, and was
+taken back out by hand. Write the candidate outside the repo and name it:
+
+```bash
+cp test/window.mjs "$SP/window.candidate.mjs"      # edit this one
+node .claude/skills/mutate-in-a-copy/run-batches.mjs "$SP/batches.json" \
+     --overlay test/window.mjs="$SP/window.candidate.mjs"
+# overlay: test/window.mjs ← …/window.candidate.mjs (sha256 <the candidate's>)
+# control (window, 160s): 0 failing, 406 ✓
+# twice (window, 158s): 1 failing, 405 ✓
+cp "$SP/window.candidate.mjs" test/window.mjs && shasum -a 256 test/window.mjs   # the overlay's hash
+```
+
+The control now proves the candidate, and each batch's mutants can name
+text that exists only in it. A candidate kept inside the repo is refused,
+and so is a path that would leave the copy. Run once on the markdown
+suite with a row added: the control read 38 ✓ against the tree's 37, a
+mutant of that row's own words read it red, and without `--overlay` the
+same mutant said DID NOT APPLY, because the row is not in the tree.
+
+**A reviewer's pin is a mutant of the stand-in, and it goes in a batch
+with the fault** (PR #55 Info 11). QA showed a test's blind spot by making
+the window suite's stand-in log one key 600 ms late. That pin is a change
+to `test/window.mjs` like any other, so the claim "the new row sees the
+fault even then" is four runs of one file: a control, the fault alone,
+the fault with the pin, and the pin alone, which must be green, since a
+pin that is red by itself proves nothing about the row. The stand-in is
+written inside a template literal, so its text in the file already has
+doubled backslashes (`'\\t'`), and JSON doubles them again (`"\\\\t"`).
+`mutate.py` wants the old text exactly once and says how many times it
+found it, which is how a wrong count of backslashes shows. Run a
+counter-proposal against the reviewer's pin before sending it: "read the
+keys by order" was offered to QA untested in that round, and their pin
+passed it too.
+
+**Give a hash with its algorithm, and keep the file you measured.** Bare
+`shasum` is SHA-1. A SHA-1 sent to QA as "the file I measured" was set
+against their sha256 of the same file, and their closing note said the
+runs might be of an earlier cut. The measured copy was still in the
+scratchpad, so one command settled it. Say `shasum -a 256`, and `git show
+<sha>:<path> | shasum -a 256` for the pushed file.
+
 **A red you did not predict in an older section is load first** (task 255,
 20:27Z): QA's clean-clone suite started on the same ports during the
 tool's base run, and the base read 19 red. Those were the predicted 11,
@@ -68,6 +114,16 @@ plus 8 in sections nobody touched (the thought, the subagent's words, the
 folder dialog). Read the channel for a QA announcement before believing
 those, and rerun once the ports are quiet. Rerun at 20:53Z with nothing
 else on them, it read the predicted 11 and 268 ✓.
+
+**`run-mutants.mjs --control` settles it in the same run** (2026-11-14).
+It runs each suite in the list once more at the end with nothing mutated:
+`CONTROL [nothing mutated] (floor, 10s): 0 failing, 1057 ✓`. That day a
+host mutant read three reds: the one predicted, and "a turn written while
+the send is still in flight reaches the floor anyway" with "the floor
+gained a turn rather than replaying the transcript", in a section 500
+lines from the change, at load 5.5 with nothing else on the ports. Run
+again beside a control, the control was 320 ✓ and the mutant had its one
+red. Report an unpredicted red with what the control read, not as "load".
 
 Keep the JSON file outside the repo. A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
@@ -162,6 +218,38 @@ node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs /tmp/page.json \
   'PORT=8916 CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'
 # [["the operator's height is not a floor", "src/ui/floor.js", "const floorH = Math.max(base, set ?? 0);", "const floorH = base;"], …]
 ```
+
+The file a page mutant breaks need not be a page file. The check's runner
+serves the whole copy, so a mutant in `src/floor.js` is read off the page
+the same way. On 2026-11-14 the board's clearing of a refused model change
+was removed there, and `run-check-chat-controls.sh` went red on the two
+select lines. And until that day the command above printed its own usage:
+without `--dest` the tool dropped its first argument. It was run both ways
+after the repair.
+
+**An unpredicted red beside the predicted one can be the check's own
+race, and the control will not show it** (2026-11-14, check-meeting.mjs).
+A mutant in the room's hint line read two reds: the hint, and "everything
+else is where it was", with one extra row, Bo's "stopped.". The step
+before had posted that turn and the step read the transcript before it
+was drawn, so it arrived later as a row nobody expected. The control was
+green and so were five tree runs: the race lost about one run in ten.
+Read what the extra or missing row *is* before blaming the mutant or the
+load; here the fix was a `waitFor` on that row in the check. And **a
+survivor can be the check measuring a box that cannot change**: the same
+batch's "hint at full length" mutant passed, because the check compared
+the Nudge button's rect and that button is a fixed 28px. `scrollHeight`
+turned it red (verify-ui-change, check-meeting).
+
+**"THE CHECK DID NOT FINISH" is the machine until shown otherwise; read
+`uptime` before the code.** The same day, with another desk's emulator
+and Xcode builds holding the load average at 66–90, a control ended that
+way once and two of three mutants did in the next batch. Each died in
+`open()` (`drive.mjs:96`, the page's first load), before any step of the
+check. The check itself was green 4 of 4 on the tree in between. The tool
+now prints a control's last lines when it has no verdict, as it already
+did for a mutant. A mutant that did not finish is not a result either way:
+run it again, and report the run in which it reached a verdict.
 
 Two things a new page check needs before it can be mutation-tested this
 way, both learned on issue #13:
