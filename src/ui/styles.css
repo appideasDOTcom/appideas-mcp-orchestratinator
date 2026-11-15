@@ -1837,6 +1837,16 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
   font-size: 12px; background: var(--surface);
 }
 .m-part .m-state { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+/* The box is a control: a click outside its buttons hides or shows this
+   desk's part of the transcript. Hidden reads as off without dimming its
+   badges, bell or stop sign, which all still work. */
+.m-part[data-act="m-show"] { cursor: pointer; user-select: none; }
+.m-part[data-act="m-show"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.m-part.m-off { border-style: dashed; border-left-style: solid; border-top-style: solid; }
+.m-part.m-off:not(.s-needs-you) { background: transparent; }
+.m-part.m-off .m-row-name b { text-decoration: line-through; opacity: .6; }
+.m-part.m-off .m-state { opacity: .6; }
+.m-part .m-off-word { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 .m-part.s-working .m-state { color: var(--busy); }
 .m-part.s-needs-you { border-color: color-mix(in srgb, var(--wait) 55%, var(--border)); border-left-color: var(--m-c); background: var(--wait-bg); }
 .m-part.s-needs-you .m-state { color: var(--wait); font-weight: 600; }

@@ -1246,8 +1246,51 @@ toggles. So the chips never reach "nobody" by a click: the last lit chip
 gives everyone back. A room still stands at nobody when the one desk
 chosen leaves it, and a click then adds the desk clicked. Each chip's
 tooltip says what a click on it will do (`meetingToTitle`, which reads it
-off `meetingToClick`). The **everyone** chip and the reset to everyone
-after a send are as they were. Do not bring the plain toggle back.
+off `meetingToClick`). The **everyone** chip is as it was. Do not bring
+the plain toggle back.
+
+**The chips' choice stays after a send** (costmo, the same day, reversing
+#44 Decided 2's "narrowed for this one message"). It used to go back to
+everyone once a message was taken, so a run of messages to one desk was a
+click before each. Now it stays until the operator changes it, and it is
+kept on the page only (`ui.meeting.to`): a reload, or the room opened
+again, starts at everyone, which he asked for. An `@name` at the start of
+the box is still for that one message and leaves the chips as they were.
+A desk added while the room is narrowed is not lit, because the choice
+was made without it. Do not re-propose the reset.
+
+**A participant's box is a control: a click on it hides or shows that
+desk's part of the transcript** (costmo, 2026-11-14; `meetingShown`,
+`m.hide`). The click is any part of the box that is not one of its
+buttons. Each button has a `data-act` of its own and the handler takes
+the nearest, so the box gets only the clicks that landed on none of them,
+a dimmed button's included. Five things were decided in building it, none
+of them his words, so each is open to his reversal:
+- **A desk's conversation is what it said and what was said to it.** Its
+  own turns go. A message goes only when every desk it went to is hidden,
+  and one that stays is drawn whole, with the hidden desk's delivery line
+  under it: a refusal is still said. The room's notes always stay.
+- **Hiding is not muting.** A hidden desk still hears what the chips or an
+  `@name` send it, and its prompt box still stands against the composer:
+  a question that needs the operator is never put away. The hint under
+  the box names a hidden desk that will hear the next message
+  (`meetingHiddenNote`), and drops its own second half to make room. The
+  longer line squeezed "Nudge everyone · 1 unread" onto two lines at the
+  room's own width, seen in the check's picture and pinned there.
+- **It lives on the page, like the chips' choice.** A reload or the room
+  opened again shows everyone.
+- **A hidden desk that leaves the room is shown again**, because what it
+  said stays in the transcript and it has no box left to click.
+- **The row of boxes keeps focus through its own redraw.** It is drawn
+  whole whenever a desk's state changes, so Enter on a focused box worked
+  once and then the next poll left focus on the body, one check run in
+  two. `renderMeeting` now puts focus back on the same control of the
+  same desk, which also holds for a bell or a pill reached by Tab.
+
+The filter runs over the list `meetingItems` made and reorders nothing,
+which is what puts a desk's turns back "properly inline" when it is shown
+again. A reply being typed by a hidden desk is not drawn either; no
+fixture streams a reply, so that one line is read, not measured.
 
 **A desk Resume could not bring back for a reason that may pass stays in
 the room's record, `absent`, and absent is on the floor**: it is not in

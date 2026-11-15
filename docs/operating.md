@@ -223,7 +223,13 @@ goes to everyone in the room unless you narrow it: with the chips over the
 box, or by starting it with names (`@bo @cy look at this` goes to Bo and Cy,
 and they receive "look at this"). With every chip lit, a click on a name
 leaves only that desk; click another name to add it, click a lit one to
-take it out, and click the last lit one for everyone again. The next one goes to everyone again. Each desk's delivery shows under your
+take it out, and click the last lit one for everyone again. The chips stay
+as you set them from one message to the next, until you change them or
+reload the window; names typed at the start of the box are for that one
+message only. To read fewer desks at once, click a desk's box in the row
+along the top (anywhere but its buttons): its part of the transcript is
+put away and the box reads **hidden**; click it again and everything it
+said is back where it was said. A hidden desk still hears your messages. Each desk's delivery shows under your
 message on its own: sending, queued, delivered, or not sent with the board's
 reason (an editor holding it, a host offline). The desks never hear each other
 through the room, and what they say to each other on the board stays in

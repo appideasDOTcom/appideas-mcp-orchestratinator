@@ -3519,7 +3519,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToClick, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingShown, meetingHiddenNote, meetingResumePlan, meetingTo, meetingToClick, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -3567,6 +3567,25 @@ try {
     eq(items.find((it) => it.key === 'u:30').agents, ['bo', 'cy'], 'the same words on two desks within two minutes, not sent by this window, are one message to both');
     eq(pg.meetingItems([{ agent: 'bo', turns: [{ id: 1, role: 'user', text: 'x', created_at: '2026-11-05T10:00:00Z' }] }, { agent: 'cy', turns: [{ id: 2, role: 'user', text: 'x', created_at: '2026-11-05T10:05:00Z' }] }], [], [])
       .map((it) => it.key), ['u:1', 'u:2'], 'and five minutes apart they are two');
+
+    // A participant's box hides or shows that desk's part of the transcript
+    // (costmo, 2026-11-14). items: a message to bo and cy, each one's reply,
+    // a note, words typed into both windows, a message to bo alone.
+    const keysWith = (...hidden) => pg.meetingShown(items, new Set(hidden)).map((it) => it.key);
+    eq(pg.meetingShown(items, new Set()), items, 'with nobody hidden the transcript is the transcript, the same list');
+    eq(keysWith('cy'), ['send:1', 't:22', 'n:3', 'u:30', 'send:2'], 'a hidden desk\'s own turns are gone, and a message that also went to a desk still shown stays');
+    eq(keysWith('bo'), ['send:1', 't:25', 'n:3', 'u:30'], 'a message that went only to the hidden desk goes with it — pending or not');
+    eq(keysWith('bo', 'cy'), ['n:3'], 'with every desk it went to hidden a message is gone too; the room\'s notes are always here');
+    eq(keysWith('dee'), items.map((it) => it.key), 'hiding a desk that said nothing and was sent nothing changes nothing');
+    eq(pg.meetingShown(items, new Set(['cy'])).find((it) => it.key === 'send:1').send.entries.map((e) => e.agent), ['bo', 'cy'],
+      'a message kept is drawn whole: the hidden desk\'s delivery line is still under it');
+    const shownAgain = pg.meetingShown(items, new Set());
+    eq([shownAgain.map((it) => it.key), shownAgain.indexOf(items.find((it) => it.key === 't:25'))], [['send:1', 't:22', 't:25', 'n:3', 'u:30', 'send:2'], 2],
+      'shown again, the desk\'s turns are back in line where they were said');
+    eq(pg.meetingShown([{ key: 'send:9', kind: 'send', send: { entries: [] } }], new Set(['bo'])).length, 1, 'a message that went to nobody is not hidden by anyone');
+    eq([pg.meetingHiddenNote(['bo', 'cy'], new Set(['cy']), (a) => a.toUpperCase()), pg.meetingHiddenNote(['bo', 'cy'], new Set(['bo', 'cy', 'dee']), (a) => a), pg.meetingHiddenNote(['bo'], new Set(['cy']), (a) => a), pg.meetingHiddenNote(['bo'], new Set(), (a) => a)],
+      ['Replies from CY are hidden above.', 'Replies from bo, cy are hidden above.', '', ''],
+      'the line under the box names a hidden desk only when it will hear the message');
 
     const H = (extra = {}) => ({ host: 'box', window: 'bo', live: true, held: 'floor', session_id: 'S1', ...extra });
     const chans = (deskList, others = []) => [{ channel: 'lab', desks: deskList }, ...others];
@@ -3641,7 +3660,7 @@ try {
     eq([...start].sort(), ['cy', 'dee'], 'the set it was given is left as it was');
     const T = (to, a) => pg.meetingToTitle(R, to, a, a.toUpperCase());
     eq([T(null, 'cy'), T(new Set(['cy']), 'cy'), T(new Set(['cy']), 'dee'), T(new Set(['cy', 'dee']), 'dee'), T(new Set(['bo', 'cy', 'dee']), 'ed')],
-      ['Only CY hears the next message', 'Everyone hears the next message', 'DEE hears the next message too', 'Leave DEE out of the next message', 'Everyone hears the next message'],
+      ['Only CY hears your messages', 'Everyone hears your messages', 'DEE hears your messages too', 'Leave DEE out of your messages', 'Everyone hears your messages'],
       'each chip says on hover what a click on it will do');
   }
 } catch (err) {

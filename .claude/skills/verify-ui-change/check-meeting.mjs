@@ -109,6 +109,18 @@ ok(msg && msg.delivs.join('|') === 'Bo delivered|Cy delivered|Dee delivered' && 
 ok(await m.evalJs(`[...document.querySelectorAll('#p-turns .m-msg')].length === 1`), 'drawn once, though three desks recorded it');
 const heard = await m.evalJs(`JSON.stringify([...document.querySelectorAll('#p-turns .t-assistant')].map((n) => [n.querySelector('.t-who').childNodes[0].textContent, n.querySelector('.t-body').textContent]))`).then(JSON.parse);
 ok(['Bo', 'Cy', 'Dee'].every((p) => heard.some(([who, body]) => who === p && body === `${p.toLowerCase()} heard: hello room`)), 'every reply comes back, labelled with its desk', JSON.stringify(heard));
+// A participant's box, clicked outside its buttons, hides or shows that
+// desk's part of the transcript (costmo, 2026-11-14).
+const rows = () => m.evalJs(`JSON.stringify([...document.querySelectorAll('#p-turns > [data-key]')].map((n) => ({ key: n.dataset.key, by: n.dataset.saidBy ?? null, to: [...n.querySelectorAll('.m-deliv b')].map((b) => b.textContent), body: n.querySelector('.t-body')?.textContent ?? n.textContent })))`).then(JSON.parse);
+const keys = (list) => JSON.stringify(list.map((r) => r.key));
+const boxOf = (a) => m.evalJs(`(() => { const n = document.querySelector('.m-part[data-for-agent="${a}"]'); return JSON.stringify({ off: n.classList.contains('m-off'), shown: n.dataset.shown, word: n.querySelector('.m-off-word')?.textContent ?? null, title: n.title, focused: document.activeElement === n }); })()`).then(JSON.parse);
+const boxClick = (a) => m.click(`.m-part[data-for-agent="${a}"] .m-row-name b`);
+console.log('\nevery conversation hidden, and shown again');
+const first = await rows();
+for (const a of ['bo', 'cy', 'dee']) await boxClick(a);
+ok((await rows()).length === 0 && /Every conversation here is hidden\. Click a name above/.test(await text(m, '#p-turns')), 'with every box clicked off the transcript says so, and how to get it back', await text(m, '#p-turns'));
+for (const a of ['bo', 'cy', 'dee']) await boxClick(a);
+ok(keys(await rows()) === keys(first) && first.length >= 4, 'and with each clicked on again it is the transcript it was, row for row', `${keys(first)} → ${keys(await rows())}`);
 const sent = workSince(w0).filter((x) => x.kind === 'chat');
 ok(sent.length === 3 && new Set(sent.map((x) => x.agent)).size === 3 && sent.every((x) => x.payload.text === 'hello room'), 'one chat per desk reached the host, the words as typed', JSON.stringify(sent.map((x) => x.agent)));
 ok(await m.evalJs(`document.querySelector('#p-text').value === ''`), 'the box is empty after the send');
@@ -155,27 +167,27 @@ const allOn = () => m.evalJs(`document.querySelector('.m-to [data-act="m-to-all"
 const tip = (a) => m.evalJs(`document.querySelector('.m-to .m-to-one[data-agent="${a}"]').title`);
 const chipClick = (a) => m.click(`.m-to [data-act="m-to"][data-agent="${a}"]`);
 ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'the room starts with every name lit', await lit());
-ok(await tip('cy') === 'Only Cy hears the next message', 'and a name says on hover that a click makes it the only one', await tip('cy'));
+ok(await tip('cy') === 'Only Cy hears your messages', 'and a name says on hover that a click makes it the only one', await tip('cy'));
 await chipClick('cy');
 ok(await lit() === '["cy"]' && !(await allOn()), 'with everyone lit, a click on Cy leaves Cy alone lit — not everyone but Cy', await lit());
-ok(/Only Cy hears this one/.test(await text(m, '.p-hint')), 'and the hint under the box says so', await text(m, '.p-hint'));
-ok(await tip('cy') === 'Everyone hears the next message' && await tip('dee') === 'Dee hears the next message too', 'the lit name now offers everyone, the others offer to join', `${await tip('cy')} | ${await tip('dee')}`);
+ok(/Only Cy hears what you send, until you choose again/.test(await text(m, '.p-hint')), 'and the hint under the box says so', await text(m, '.p-hint'));
+ok(await tip('cy') === 'Everyone hears your messages' && await tip('dee') === 'Dee hears your messages too', 'the lit name now offers everyone, the others offer to join', `${await tip('cy')} | ${await tip('dee')}`);
 await chipClick('cy');
 ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'a click on the only lit name gives everyone back', await lit());
 await chipClick('cy');
 await chipClick('dee');
 ok(await lit() === '["cy","dee"]', 'with one lit, a click on another adds it', await lit());
-ok(await tip('dee') === 'Leave Dee out of the next message', 'and with some lit a lit name offers to step out', await tip('dee'));
+ok(await tip('dee') === 'Leave Dee out of your messages', 'and with some lit a lit name offers to step out', await tip('dee'));
 await chipClick('dee');
 ok(await lit() === '["cy"]', 'with some lit and not all, a click on a lit name takes it out', await lit());
 await chipClick('dee');
 await chipClick('bo');
 ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'and adding the last one is everyone again', await lit());
 
-console.log('\nnarrowed to one desk, for one message');
+console.log('\nnarrowed to one desk, and it stays narrowed after a send');
 await chipClick('bo');
 ok(await lit() === '["bo"]', 'one click on Bo, with everyone lit, narrows to Bo', await lit());
-ok(/Only Bo hears this one/.test(await text(m, '.p-hint')), 'the hint says who hears it', await text(m, '.p-hint'));
+ok(/Only Bo hears what you send, until you choose again/.test(await text(m, '.p-hint')), 'the hint says who hears it, and that it stays', await text(m, '.p-hint'));
 w0 = work().length;
 await say(m, 'just for bo');
 await m.waitFor(`[...document.querySelectorAll('#p-turns .t-body')].some((n) => n.textContent === 'bo heard: just for bo')`, { timeout: 8000 }).catch(() => {});
@@ -183,7 +195,24 @@ msg = await msgNode(m, 'just for bo');
 ok(msg && /you → Bo$/i.test(msg.who.trim()) && msg.delivs.join('|') === 'Bo delivered', 'the transcript shows it went to Bo only', JSON.stringify(msg));
 await sleep(1500);
 ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.agent)) === '["bo"]', 'and only Bo\'s host was handed it');
-ok(await m.evalJs(`document.querySelector('.m-to [data-act="m-to-all"]').classList.contains('on')`), 'the next message goes to everyone again');
+// costmo, 2026-11-14: a send keeps the choice. It used to go back to everyone.
+ok(await lit() === '["bo"]' && !(await allOn()), 'after the send, Bo is still the only name lit — the choice is not put back to everyone', await lit());
+ok(/Only Bo hears what you send/.test(await text(m, '.p-hint')), 'and the hint still says so, with the box empty', await text(m, '.p-hint'));
+w0 = work().length;
+await say(m, 'bo again');
+await m.waitFor(`[...document.querySelectorAll('#p-turns .t-body')].some((n) => n.textContent === 'bo heard: bo again')`, { timeout: 8000 }).catch(() => {});
+msg = await msgNode(m, 'bo again');
+ok(msg && /you → Bo$/i.test(msg.who.trim()) && msg.delivs.join('|') === 'Bo delivered', 'so the next message goes to Bo only, with nothing clicked', JSON.stringify(msg));
+await sleep(1500);
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.agent)) === '["bo"]', 'and only Bo\'s host was handed that one too');
+w0 = work().length;
+await say(m, '@cy only cy, by name');
+await m.waitFor(`[...document.querySelectorAll('#p-turns .t-body')].some((n) => n.textContent === 'cy heard: only cy, by name')`, { timeout: 8000 }).catch(() => {});
+await sleep(1500);
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.agent)) === '["cy"]', 'a name at the start of the box still outranks the chips for its one message');
+ok(await lit() === '["bo"]', 'and leaves the chips as they were: Bo', await lit());
+await m.click('.m-to [data-act="m-to-all"]');
+ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'the everyone chip puts it back to everyone', await lit());
 
 console.log('\nin line, and narrowed by name');
 writeFileSync(CTL, JSON.stringify({ slow: { bo: 4000 } }));
@@ -258,10 +287,84 @@ await sleep(1500);
 ok(workSince(w0).some((x) => x.kind === 'interrupt' && x.agent === 'bo'), 'and stops Bo, nobody else');
 await hostEv([{ type: 'turn', channel: 'lab', agent: 'bo', session_id: 'sess-bo', role: 'assistant', text: 'stopped.', at: new Date().toISOString(), uuid: 'stop-2' }]);
 
+console.log('\na click on a participant\'s box hides its part of the transcript');
+// The step before posted Bo's "stopped."; read the transcript only once it
+// is drawn, or it turns up later as a row this step did not expect.
+await m.waitFor(`[...document.querySelectorAll('#p-turns .t-body')].some((n) => n.textContent === 'stopped.')`, { timeout: 8000 }).catch(() => {});
+const all0 = await rows();
+// The button's box is a fixed height, so a label wrapped onto a second
+// line shows only as its contents being taller than the box.
+const nudgeH = () => m.evalJs(`document.querySelector('[data-act="m-nudge-all"]').scrollHeight`);
+const nudgeH0 = await nudgeH();
+const cyOnly = all0.find((r) => r.body === 'only cy, by name');
+const both = all0.find((r) => r.body === 'just you two');
+ok(!!cyOnly && !!both && all0.some((r) => r.by === 'cy') && all0.some((r) => r.by === 'dee') && all0.some((r) => r.by === 'bo'),
+  'the fixture: Bo, Cy and Dee have each said something, and there is a message to Cy alone and one to Cy and Dee', keys(all0));
+ok(/^Click to hide Cy’s part of the conversation below/.test((await boxOf('cy')).title), 'a box says on hover what a click on it does', (await boxOf('cy')).title);
+await m.press('.m-part[data-for-agent="cy"] .m-row-name b');
+let box = await boxOf('cy');
+ok(box.off && box.shown === 'no' && box.word === 'hidden' && /is hidden\. Click to show it again/.test(box.title), 'a real click on Cy\'s name marks its box hidden, in a word and on hover', JSON.stringify(box));
+await m.shot(`${shots}/meeting-hidden.png`, null, { scale: 1 });
+let now = await rows();
+ok(!now.some((r) => r.by === 'cy'), 'nothing Cy said is in the transcript', keys(now));
+ok(!now.some((r) => r.key === cyOnly.key), 'nor is the message that went to Cy alone');
+ok(now.some((r) => r.key === both.key) && (await msgNode(m, 'hello room'))?.delivs.join('|') === 'Bo delivered|Cy delivered|Dee delivered',
+  'a message that also went to a desk still shown stays, drawn whole, with Cy\'s delivery line under it', JSON.stringify(await msgNode(m, 'hello room')));
+// Every message to Cy alone goes with it: the one sent by name, and the
+// nudge its bell rang earlier (the first cut of this step forgot the bell).
+const cyAlone = (r) => r.to.length > 0 && r.to.every((who) => who === 'Cy');
+ok(all0.filter(cyAlone).length >= 2 && all0.filter(cyAlone).some((r) => r.key === cyOnly.key), 'the fixture holds more than one message to Cy alone', JSON.stringify(all0.filter(cyAlone).map((r) => r.body)));
+const want0 = all0.filter((r) => r.by !== 'cy' && !cyAlone(r));
+ok(keys(now) === keys(want0), 'every message to Cy alone is gone, and everything else is where it was, in the same order',
+  `missing ${JSON.stringify(want0.filter((r) => !now.some((x) => x.key === r.key)))} · extra ${JSON.stringify(now.filter((r) => !want0.some((x) => x.key === r.key)))} · ${keys(now)}`);
+ok(/Replies from Cy are hidden above\.$/.test(await text(m, '.p-hint')), 'the hint under the box says Cy will hear the next message with its replies hidden', await text(m, '.p-hint'));
+ok(await nudgeH() === nudgeH0, 'and the longer hint does not squeeze the Nudge button onto a second line', `${nudgeH0}px → ${await nudgeH()}px`);
+await hostEv([{ type: 'turn', channel: 'lab', agent: 'cy', session_id: 'sess-cy', role: 'assistant', text: 'cy, said while hidden', at: new Date().toISOString(), uuid: 'hid-1' }]);
+await hostEv([{ type: 'turn', channel: 'lab', agent: 'bo', session_id: 'sess-bo', role: 'assistant', text: 'bo, said meanwhile', at: new Date().toISOString(), uuid: 'hid-2' }]);
+await m.waitFor(`[...document.querySelectorAll('#p-turns .t-body')].some((n) => n.textContent === 'bo, said meanwhile')`, { timeout: 8000 }).catch(() => {});
+now = await rows();
+ok(now.some((r) => r.body === 'bo, said meanwhile') && !now.some((r) => r.body === 'cy, said while hidden'), 'what Cy says while hidden does not appear; what Bo says does');
+const stopOff = await m.evalJs(`document.querySelector('.m-part[data-for-agent="cy"] [data-act="stop"]').disabled`);
+await m.press('.m-part[data-for-agent="cy"] [data-act="stop"]');
+await m.click('.m-part[data-for-agent="cy"] [data-act="stop"]');
+await sleep(300);
+ok(stopOff && (await boxOf('cy')).off, 'a click on a button in the box, even a dimmed one, is not a click on the box: Cy stays hidden', JSON.stringify(await boxOf('cy')));
+await m.press('.m-part[data-for-agent="dee"] .m-state');
+now = await rows();
+box = await boxOf('dee');
+ok(box.off && box.focused && !now.some((r) => r.by === 'dee' || r.by === 'cy') && now.some((r) => r.by === 'bo'), 'a click on Dee\'s box hides Dee too, leaving Bo\'s', JSON.stringify(box));
+ok(!now.some((r) => r.key === both.key) && now.some((r) => r.body === 'hello room'), 'the message to Cy and Dee goes once both are hidden; the one Bo also heard stays');
+await m.key('Enter');
+await sleep(200);
+now = await rows();
+box = await boxOf('dee');
+ok(!box.off && box.shown === 'yes' && box.word === null && box.focused, 'Enter on the focused box shows Dee again, and the box keeps the focus', JSON.stringify(box));
+ok(now.some((r) => r.by === 'dee') && now.some((r) => r.key === both.key) && !now.some((r) => r.by === 'cy'), 'Dee\'s part and the message to Cy and Dee are back; Cy is still hidden');
+// A poll that changes a desk's state redraws the whole row of boxes. Focus
+// must come through it, or Enter works once.
+await fetch(`${base}/api/ingest`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
+  body: JSON.stringify({ channel: 'lab', agent: 'bo', session_id: 'sess-bo', hook_event_name: 'UserPromptSubmit', cwd: '/repo/bo', message: 'carry on' }) });
+const redrawn = await m.waitFor(`document.querySelector('.m-part[data-for-agent="bo"]').classList.contains('s-working')`, { timeout: 8000 }).then(() => true, () => false);
+ok(redrawn && (await boxOf('dee')).focused, 'the row of boxes redrawn under it (Bo starts working) leaves the focus on Dee\'s box', JSON.stringify({ redrawn, box: await boxOf('dee') }));
+await fetch(`${base}/api/ingest`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
+  body: JSON.stringify({ channel: 'lab', agent: 'bo', session_id: 'sess-bo', hook_event_name: 'Stop', cwd: '/repo/bo' }) });
+await m.waitFor(`!document.querySelector('.m-part[data-for-agent="bo"]').classList.contains('s-working')`, { timeout: 8000 }).catch(() => {});
+await m.press('.m-part[data-for-agent="cy"] .m-row-name b');
+now = await rows();
+const was = all0.map((r) => r.key);
+const back = now.map((r) => r.key).filter((k) => was.includes(k));
+ok(!(await boxOf('cy')).off && JSON.stringify(back) === JSON.stringify(was), 'Cy clicked on again: every row that was there is back, in the order it was said', `${JSON.stringify(was)} → ${keys(now)}`);
+const iBo = now.findIndex((r) => r.body === 'bo, said meanwhile');
+const iCy = now.findIndex((r) => r.body === 'cy, said while hidden');
+ok(iCy >= 0 && iBo === iCy + 1 && iCy >= all0.length, 'and what Cy said while hidden is there now, in line: after everything before it and ahead of what Bo said next', `cy ${iCy}, bo ${iBo} of ${now.length}`);
+ok(!/hidden above/.test(await text(m, '.p-hint')), 'with nobody hidden the hint says nothing about it', await text(m, '.p-hint'));
+await m.shot(`${shots}/meeting-shown.png`, null, { scale: 1 });
+
 console.log('\na slash command, and its receipt');
 await chipClick('bo');
 ok(await lit() === '["bo"]', 'one click on Bo narrows the command to Bo', await lit());
 await say(m, '/compact');
+ok(await lit() === '["bo"]', 'and Bo is still the only name lit after it', await lit());
 await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === '/compact'); return n && /done in/.test(n.textContent); })()`, { timeout: 8000 }).catch(() => {});
 msg = await msgNode(m, '/compact');
 ok(msg?.delivs.join('|') === "Bo /compact — done in bo's window" && !msg.pending, 'the command\'s receipt stands under it, in the window\'s words', JSON.stringify(msg));
@@ -297,11 +400,14 @@ formSeed.kill();
 formSeed2.kill();
 
 console.log('\nRemove, and Bring back from the floor');
+await boxClick('dee');
+const deeHid = (await boxOf('dee')).off && !/dee heard: hello room/.test(await text(m, '#p-turns'));
 await m.click('.m-part[data-for-agent="dee"] [data-act="m-remove"]');
 await sleep(600);
+ok(deeHid, 'Dee\'s part is hidden before it is removed (the fixture for the line after next)');
 ok(JSON.stringify(await parts(m)) === '["bo","cy","ed"]', 'Remove takes Dee out of the room');
 ok(/Dee went back to the floor/.test(await text(m, '#p-turns')), 'and the transcript says so');
-ok(/dee heard: hello room/.test(await text(m, '#p-turns')), 'what Dee said while here stays in it');
+ok(/dee heard: hello room/.test(await text(m, '#p-turns')), 'what Dee said while here stays in it, and is shown again: a desk that left has no box to click');
 await openOnFloor(floor, 'dee');
 await floor.waitFor(`!!document.querySelector('#floor-panel #p-text')`, { timeout: 5000 }).catch(() => {});
 fp = await floorPanel(floor);
@@ -323,12 +429,17 @@ await floor.waitFor(`!!document.querySelector('#floor-panel #p-text')`, { timeou
 ok((await floorPanel(floor)).composer, 'and the floor panel is Cy\'s chat again');
 
 console.log('\na reload is the same room');
+const litBeforeReload = await lit();
+await boxClick('ed');
+const edHid = (await boxOf('ed')).off;
 await m.evalJs('location.reload(); 1');
 await sleep(1500);
 m = await attach(isMeeting);
 await m.waitFor(`document.querySelectorAll('.m-part').length === 2`, { timeout: 12000 }).catch(() => {});
 ok(JSON.stringify(await parts(m)) === '["bo","ed"]' && Number(new URLSearchParams(await m.evalJs('location.search')).get('meeting')) === roomId,
   'reloaded, the window opens the same room with the same desks', JSON.stringify(await parts(m)));
+ok(litBeforeReload === '["bo"]' && await lit() === '["bo","ed"]' && await allOn(), 'the choice of Bo alone, kept through every send since, does not outlive the reload: everyone is lit', `${litBeforeReload} → ${await lit()}`);
+ok(edHid && await m.evalJs(`document.querySelectorAll('.m-part.m-off').length === 0`), 'Ed\'s part, hidden before the reload, is shown after it: what is hidden is the page\'s, not the room\'s record');
 await openOnFloor(floor, 'bo');
 await floor.waitFor(`!!document.querySelector('#floor-panel [data-act="bring-back"]')`, { timeout: 5000 }).catch(() => {});
 ok(!(await floorPanel(floor)).composer, 'and Bo is still out of the floor\'s panel');

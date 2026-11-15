@@ -336,7 +336,8 @@ was sent what. A `--ctl` file moves a desk's session between steps.
 desks are out, send to everyone, a nudge (the unread badges, one desk's
 bell, the backlog dialog's Mark all read, Nudge everyone), a click on each To chip (solo with
 everyone lit, everyone back from the last lit one, a toggle between, and each chip's hover words;
-`chipClick('bo')` is how a later step narrows to one desk), narrowing, a refusal, a permission
+`chipClick('bo')` is how a later step narrows to one desk; the choice stays after a send, so a
+step that needs everyone again clicks `[data-act="m-to-all"]`), narrowing, a refusal, a permission
 prompt, Stop, a command receipt, a question form, Remove, Bring back, a
 reload, End, the Recent list, Resume and close, about a minute and a half:
 
@@ -344,6 +345,26 @@ reload, End, the Recent list, Resume and close, about a minute and a half:
 PORT=8941 CDP=9281 .claude/skills/verify-ui-change/run-check-meeting.sh "$PWD"
 # … PASS
 ```
+
+Since 2026-11-14 it also drives a participant's box as a control: every
+box clicked off and on again, a real click on a name and on a state word,
+a dimmed button in the box (which must not toggle it), Enter on the
+focused box, a turn arriving while its desk is hidden, a hidden desk
+removed, and a reload. `rows()` reads the transcript as `{ key, by, to,
+body }`, with `by` from `data-said-by` on a desk's turn and `to` from a
+message's delivery lines; `boxOf(a)` reads a box. Two things from building
+it. **Count the fixture before writing the expectation.** The first cut
+expected one message to Cy alone to go with Cy, and the room held two: the
+one sent by name, and the nudge Cy's bell had rung eighty lines earlier.
+The page was right and the check was red. The step now finds them by
+their delivery lines and says how many it found. And **a step that reads
+focus needs a redraw forced under it**: focus survived on one run in two
+only because no poll had redrawn the row yet, so the step makes Bo start
+working first. A third came from its mutants: **a wrapped label inside a
+fixed-height button does not change the button's height.** The Nudge
+button is 28px whatever its label does, so a check on its rect passed
+with "unread" spilled under it and the mutant survived. `scrollHeight`
+reads it (26px on one line, 40px wrapped).
 
 Two things it cost a round to learn. A label drawn with `text-transform:
 uppercase` reads `CY` through `innerText`; read `textContent` for what the

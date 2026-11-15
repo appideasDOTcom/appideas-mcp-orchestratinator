@@ -4877,6 +4877,39 @@
   }
 
   /**
+   * The transcript with some desks' conversations put away (costmo,
+   * 2026-11-14: a click on a participant's box, outside its buttons, hides
+   * or shows that desk's part). `hidden` is a Set of agents. A desk's
+   * conversation is what it said and what was said to it:
+   *
+   *   its own turns      — gone while it is hidden
+   *   a message to desks — gone only when every desk it went to is hidden;
+   *                        one still shown keeps it, drawn whole, with each
+   *                        desk's delivery under it as before
+   *   the room's notes   — always here: who joined, who left and what could
+   *                        not be done are about the room, not one desk
+   *
+   * It filters the list meetingItems made and reorders nothing, so a desk
+   * shown again has every turn back where it was said.
+   */
+  function meetingShown(items, hidden) {
+    if (!hidden?.size) return items;
+    const shown = (agent) => !hidden.has(agent);
+    return items.filter((it) => {
+      if (it.kind === 'turn') return shown(it.agent);
+      if (it.kind === 'user') return it.agents.some(shown);
+      if (it.kind === 'send') return !it.send.entries.length || it.send.entries.some((e) => shown(e.agent));
+      return true;
+    });
+  }
+
+  /** The line under the box when somebody who will hear the message is hidden: its reply would arrive unseen. */
+  function meetingHiddenNote(to, hidden, nameOf) {
+    const out = (to ?? []).filter((a) => hidden?.has(a));
+    return out.length ? `Replies from ${out.map(nameOf).join(', ')} are hidden above.` : '';
+  }
+
+  /**
    * What Resume does with each participant of a room as it ended
    * (`room.participants`, as the board recorded them), against the floor
    * now. `act`:
@@ -4976,11 +5009,18 @@
     return { to, text: rest, unknown };
   }
 
-  /** Who a room message goes to: everyone in the room, or the ones chosen for this one message (Decided 2). */
+  /**
+   * Who a room message goes to: everyone in the room, or the ones the chips
+   * choose. A choice stays until the operator changes it or the window is
+   * reloaded (costmo, 2026-11-14); it used to go back to everyone after
+   * each send (#44 Decided 2), and a run of messages to one desk was a
+   * click before every one. It lives on the page only: a reload, or the
+   * room opened again, starts at everyone.
+   */
   const meetingTo = (inRoom, chosen) => (chosen ? inRoom.filter((a) => chosen.has(a)) : [...inRoom]);
 
   /**
-   * A click on a participant's To chip: who hears the next message after it
+   * A click on a participant's To chip: who hears the room's messages after it
    * (costmo, 2026-11-14). Null is everyone. The chips were plain toggles, so
    * the first click on a name, with everyone lit, took that one desk *out*,
    * and reaching "only Bo" in a room of four was three clicks on the others.
@@ -5009,9 +5049,9 @@
   function meetingToTitle(inRoom, chosen, agent, name) {
     const lit = meetingTo(inRoom, chosen);
     const next = meetingToClick(inRoom, chosen, agent);
-    if (!next) return lit.length === inRoom.length ? `${name} hears the next message` : 'Everyone hears the next message';
-    if (lit.length === inRoom.length) return `Only ${name} hears the next message`;
-    return next.has(agent) ? `${name} hears the next message too` : `Leave ${name} out of the next message`;
+    if (!next) return lit.length === inRoom.length ? `${name} hears your messages` : 'Everyone hears your messages';
+    if (lit.length === inRoom.length) return `Only ${name} hears your messages`;
+    return next.has(agent) ? `${name} hears your messages too` : `Leave ${name} out of your messages`;
   }
 
   /** The line over a room message: who it went to, by name. Everyone, while it was everyone in the room. */
@@ -5502,6 +5542,9 @@
     p.partial = '';
     m.left.push(p);
     m.to?.delete(agent);
+    // What it said while here stays in the transcript, and it has no box
+    // left to click, so a hidden desk is shown again as it goes.
+    m.hide.delete(agent);
     if (words) meetingNote(words);
     meetingSave();
     openMeetingStream();
@@ -5672,7 +5715,7 @@
   async function startMeeting(spec) {
     const m = ui.meeting = {
       id: spec.id, channel: spec.channel, phase: 'starting', error: null,
-      parts: [], left: [], sends: [], notes: [], seq: 0, to: null, nodes: new Map(), room: null, sig: null,
+      parts: [], left: [], sends: [], notes: [], seq: 0, to: null, hide: new Set(), nodes: new Map(), room: null, sig: null,
       absent: new Set(),   // kept in the record for the next Resume, though not in the room now
     };
     render();
@@ -5761,7 +5804,8 @@
    * nudge's order (nudgePlan — the open windows first, so a window still
    * coming up keeps only itself waiting), each desk refused in the board's
    * own words and the rest sent anyway. The words leave the box once any
-   * desk has them; who hears goes back to everyone for the next message.
+   * desk has them. Who hears is left as the chips have it: a send does not
+   * put it back to everyone (meetingTo).
    */
   async function sendMeeting(given = null, { nudge = false } = {}) {
     const m = ui.meeting;
@@ -5806,7 +5850,6 @@
     stampFronts(s);
     if (taken && s.fromBox) {
       box.value = '';
-      m.to = null;
       stashDraft();
       drawSlash();
     }
@@ -5944,6 +5987,7 @@
     if (it.kind === 'turn') {
       const node = turnNode(it.turn, meetPersona(it.agent));
       node.classList.add('m-said');
+      node.dataset.saidBy = it.agent;
       node.style.setProperty('--m-c', meetColour(it.agent));
       return node;
     }
@@ -6040,12 +6084,22 @@
       const st = d ? deskState(d) : 'away';
       return {
         p, d, st, word: p.reopen ? 'reopening…' : MEET_STATE_WORD[st] ?? st, stop: stopBlock(d),
-        pills: d ? signPills(d) : [], nudge: d?.nudge ?? null,
+        pills: d ? signPills(d) : [], nudge: d?.nudge ?? null, off: m.hide.has(p.agent),
       };
     });
-    const partsSig = JSON.stringify(parts.map((x) => [x.p.agent, x.d?.persona, x.d?.shirt, x.d?.hair, x.st, x.word, x.stop, x.pills, x.nudge]));
+    const partsSig = JSON.stringify(parts.map((x) => [x.p.agent, x.d?.persona, x.d?.shirt, x.d?.hair, x.st, x.word, x.stop, x.pills, x.nudge, x.off]));
     if (partsEl.dataset.sig !== partsSig) {
       partsEl.dataset.sig = partsSig;
+      // The row is drawn whole, and a poll redraws it whenever a desk's
+      // state changes, so focus inside it is put back on the same control
+      // of the same desk afterwards. Without that, Enter on a box worked
+      // once: the next state change left focus on the body (seen in
+      // check-meeting.mjs, one run in two).
+      const held = partsEl.contains(document.activeElement) ? document.activeElement : null;
+      const heldAt = held && {
+        agent: held.closest('[data-for-agent]')?.dataset.forAgent, act: held.dataset.act,
+        which: held.dataset.which ?? null, kind: held.dataset.kind ?? null,
+      };
       // Two rows (costmo): the name, its state and the way out, then the
       // desk's badges. The badges are the desk's own pills — unread,
       // assigned, claimed — its bell and its stop sign:
@@ -6055,11 +6109,18 @@
       // own strike().
       const bellTitle = (who, n) => (!n?.ok ? `Can't nudge ${who}: ${n?.reason ?? 'nothing is known about this desk yet'}`
         : n.opens ? `Nudge ${who} — opens its window first, resuming its conversation` : `Nudge ${who}: type “nudge” into its window`);
-      partsEl.innerHTML = parts.length ? parts.map(({ p, d, st, word, stop, pills, nudge }) => `
-        <span class="m-part s-${esc(st)}${pills.some((x) => x.act === 'unread') ? ' has-unread' : ''}" role="listitem" data-for-channel="${esc(m.channel)}" data-for-agent="${esc(p.agent)}" style="--m-c:${esc(d?.shirt ?? 'var(--muted)')};--m-h:${esc(d?.hair ?? 'var(--muted)')}">
+      // The box itself is a control (costmo, 2026-11-14): a click on it that
+      // is not on one of its buttons hides or shows this desk's part of the
+      // transcript (meetingShown). Every button in it carries a data-act of
+      // its own, and the click handler takes the nearest, so the box only
+      // ever gets the clicks that landed on none of them.
+      const showTitle = (who, off) => (off ? `${who}’s part of the conversation is hidden. Click to show it again, where it was said.`
+        : `Click to hide ${who}’s part of the conversation below. Its messages still arrive; click again to show them.`);
+      partsEl.innerHTML = parts.length ? parts.map(({ p, d, st, word, stop, pills, nudge, off }) => `
+        <span class="m-part s-${esc(st)}${pills.some((x) => x.act === 'unread') ? ' has-unread' : ''}${off ? ' m-off' : ''}" role="listitem" tabindex="0" data-act="m-show" data-shown="${off ? 'no' : 'yes'}" title="${esc(showTitle(d?.persona ?? p.agent, off))}" data-for-channel="${esc(m.channel)}" data-for-agent="${esc(p.agent)}" style="--m-c:${esc(d?.shirt ?? 'var(--muted)')};--m-h:${esc(d?.hair ?? 'var(--muted)')}">
           <span class="m-row m-row-name">
           <b>${esc(d?.persona ?? p.agent)}</b>
-          <span class="m-state">${esc(word)}</span>
+          <span class="m-state">${esc(word)}</span>${off ? '<span class="m-off-word">hidden</span>' : ''}
           <button class="btn m-remove" data-act="m-remove" title="Take ${esc(d?.persona ?? p.agent)} out of the meeting room: back on the floor, its own chat working there again" aria-label="Remove ${esc(d?.persona ?? p.agent)} from the meeting room">✕</button>
           </span>
           <span class="m-row m-row-badges">
@@ -6068,6 +6129,12 @@
           <button class="btn stopbtn m-stop" data-act="stop" ${stop ? 'disabled' : ''} title="${esc(stop ?? `Stop ${d?.persona ?? p.agent}`)}" aria-label="${esc(stop ? `Cannot stop ${d?.persona ?? p.agent}` : `Stop ${d?.persona ?? p.agent}`)}"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
           </span>
         </span>`).join('') : '<span class="muted m-empty">Nobody is in this meeting room. Add a desk from the floor, or end it.</span>';
+      if (heldAt?.agent && heldAt.act) {
+        const part = [...partsEl.querySelectorAll('.m-part')].find((n) => n.dataset.forAgent === heldAt.agent);
+        const again = heldAt.act === 'm-show' ? part
+          : [...(part?.querySelectorAll(`[data-act="${heldAt.act}"]`) ?? [])].find((n) => (n.dataset.which ?? null) === heldAt.which && (n.dataset.kind ?? null) === heldAt.kind);
+        again?.focus();
+      }
     }
 
     // Each participant's prompt, labelled with its desk: one box each, drawn
@@ -6093,7 +6160,7 @@
       if (form) askWarn(form);
     }
 
-    // Who hears the next message: everyone, unless narrowed for this one.
+    // Who hears the room's messages: everyone, unless the chips narrow it.
     const inRoomNow = m.parts.map((p) => p.agent);
     const to = meetingTo(inRoomNow, m.to);
     const everyone = to.length === m.parts.length;
@@ -6115,17 +6182,24 @@
     nudgeBtn.title = nudgeChip.title;
     nudgeBtn.disabled = nudgeChip.disabled || m.phase !== 'live';
     nudgeBtn.classList.toggle('waiting', nudgeChip.waiting);
-    wrap.querySelector('.p-hint').textContent = !m.parts.length ? ''
+    // Hiding a desk's conversation does not stop it hearing: say so while
+    // one that will hear this is hidden, or its reply arrives unseen. The
+    // line then drops its second half, so it stays about as long as it
+    // was: a longer one squeezes the Nudge button onto two lines.
+    const hidNote = named.unknown.length ? '' : meetingHiddenNote(named.to ?? to, m.hide, meetPersona);
+    const hint = !m.parts.length ? ''
       : named.unknown.length ? `Nobody in this room is called @${named.unknown.join(', @')}.`
-      : named.to ? `Only ${named.to.map(meetPersona).join(', ')} ${named.to.length === 1 ? 'hears' : 'hear'} this one; the @names are not sent.`
-      : !to.length ? 'Nobody is chosen to hear the next message.'
-        : everyone ? `Everyone in the room hears this. Enter sends, Shift+Enter for a new line.`
-          : `Only ${to.map(meetPersona).join(', ')} ${to.length === 1 ? 'hears' : 'hear'} this one; the next goes to everyone again.`;
+      : named.to ? `Only ${named.to.map(meetPersona).join(', ')} ${named.to.length === 1 ? 'hears' : 'hear'} this one${hidNote ? '.' : '; the @names are not sent.'}`
+      : !to.length ? 'Nobody is chosen to hear your messages.'
+        : everyone ? `Everyone in the room hears this.${hidNote ? '' : ' Enter sends, Shift+Enter for a new line.'}`
+          : `Only ${to.map(meetPersona).join(', ')} ${to.length === 1 ? 'hears' : 'hear'} what you send${hidNote ? '.' : ', until you choose again.'}`;
+    wrap.querySelector('.p-hint').textContent = hidNote ? `${hint} ${hidNote}` : hint;
 
     // The transcript: keyed, so a turn on screen stays exactly where it is,
     // and a message's line of deliveries is redrawn in place as each lands.
     const box = $('p-turns');
-    const items = meetingItems(meetEveryone(), m.sends, m.notes);
+    const every = meetingItems(meetEveryone(), m.sends, m.notes);
+    const items = meetingShown(every, m.hide);
     const want = new Set(items.map((it) => it.key));
     for (const [k, node] of m.nodes) if (!want.has(k)) { node.remove(); m.nodes.delete(k); }
     box.querySelector('.q-empty')?.remove();
@@ -6149,12 +6223,13 @@
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'q-empty';
-      empty.textContent = m.parts.length ? 'Say something to the room. Each desk’s replies come back here, labelled with its name.' : '';
+      empty.textContent = every.length ? 'Every conversation here is hidden. Click a name above to show it again.'
+        : m.parts.length ? 'Say something to the room. Each desk’s replies come back here, labelled with its name.' : '';
       box.appendChild(empty);
     }
     // Replies being written right now, one per desk, at the bottom.
     for (const p of m.parts) {
-      if (!p.partial) continue;
+      if (!p.partial || m.hide.has(p.agent)) continue;
       const node = document.createElement('div');
       node.className = 't t-assistant t-partial m-said';
       node.style.setProperty('--m-c', meetColour(p.agent));
@@ -6861,10 +6936,20 @@
     } else if (act.dataset.act === 'm-remove') {
       const to = targetOf(act);
       if (to) meetingRemove(to.agent, `${meetPersona(to.agent)} went back to the floor.`);
+    } else if (act.dataset.act === 'm-show') {
+      // A participant's box, clicked outside its buttons: hide or show its
+      // part of the transcript. The redraw keeps focus on the box clicked
+      // (renderMeeting), so Enter again is the way back.
+      const m = ui.meeting;
+      const to = targetOf(act);
+      if (m && to) {
+        if (m.hide.has(to.agent)) m.hide.delete(to.agent); else m.hide.add(to.agent);
+        render();
+      }
     } else if (act.dataset.act === 'm-to-all') {
       if (ui.meeting) { ui.meeting.to = null; render(); }
     } else if (act.dataset.act === 'm-to') {
-      // Who hears the next message. With everyone lit a name is a solo, not
+      // Who hears the room's messages. With everyone lit a name is a solo, not
       // a toggle: the rules and why are meetingToClick's.
       const m = ui.meeting;
       if (m) {
@@ -7779,6 +7864,14 @@
     if (selEl) {
       e.preventDefault();
       selEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return;
+    }
+    // A participant's box in a meeting room, when the box itself has focus
+    // and not a button inside it.
+    const partEl = document.activeElement?.matches?.('.m-part[data-act="m-show"]') ? document.activeElement : null;
+    if (partEl) {
+      e.preventDefault();
+      partEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       return;
     }
     const arrowEl = document.activeElement?.closest?.('svg.room .deskArrow');
