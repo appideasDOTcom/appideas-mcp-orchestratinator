@@ -910,6 +910,17 @@ try {
   assert(/esc to interrupt/.test(errTurn?.text ?? ''), `quoting the pane's status line — ${errTurn?.text}`);
   eq(paneOf(), busyPanes, 'and the working window is left exactly as it was');
   eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_B, `still on its conversation (was ${idBefore})`);
+
+  // A model change asked of that working window: the host refuses it before
+  // a key is pressed, and the board stops showing it as asked for. The error
+  // names the command, which is the only way the board knows what was
+  // refused; without it the select kept the model that was picked until the
+  // window's model next changed (costmo, 2026-11-14).
+  eq((await chat('free', '/model sonnet')).status, 200, 'a model change is queued for the working window — the board cannot see the pane');
+  const busyModel = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /change the model when the turn ends/.test(r.text ?? '')) ?? null, 15000);
+  assert(!!busyModel, 'the host refuses it in words on the desk');
+  eq(deskOf(await floor(), 'free')?.session?.model_requested ?? null, null, 'and the model is no longer asked for: the select shows what the window is on');
+  eq(paneOf(), busyPanes, 'with the working window left as it was');
   rmSync(`${FIX}/busy.flag`, { force: true });
 
   // A fresh conversation: no --resume, and the desk follows whatever id the

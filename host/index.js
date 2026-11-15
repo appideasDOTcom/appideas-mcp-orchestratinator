@@ -464,7 +464,13 @@ class Desk {
     const r = await W.send(this.cwd, text, { open: true, resume: id });
     if (r.note) this.told(r.note, id);
     if (!r.ok) {
-      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null }, true);
+      // The command that was being typed, when it was one: a model or effort
+      // change that ends here was not made, and the board stops showing it as
+      // asked for (it used to stand on the select until the model next
+      // changed). No session id beside it: an error is filed by desk, on
+      // whatever conversation the board holds for it, and naming one here
+      // would move where the line is drawn.
+      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null, command: W.commandOf(text)?.name ?? null }, true);
     } else if (r.command && r.said) {
       // A command's receipt, in its own terms — a new conversation started,
       // compacting, the model set, answered in the window. Said on the desk

@@ -596,10 +596,22 @@ a reasonable argument behind it.
   shows asked-for beside confirmed until the window confirms —
   PreModelSwitch/PostModelSwitch, the window's line, and the `model` on
   the transcript's next reply, which is how the header follows a `/model`
-  typed into the window. Not done, and noticed: a change the host refuses
-  (a working desk) or the window does (an unknown name) leaves "x asked"
-  beside the select until something confirms a model; nothing clears an
-  asked-for on a refusal, and that was so under the picker too.
+  typed into the window. **A change that was not made stops being asked
+  for** (costmo, the same day; `unask` in `applyHostEvent`). An asked-for
+  used to be cleared only by a confirmation, so a change the host refused
+  (a working desk) or the window did (an unknown name) left the select on
+  the model that was picked, not the one the window was on, with "x asked"
+  beside it. The host reports a reply's model only when it differs, so
+  nothing on that conversation corrected it. Two things clear it now: a
+  host error that names the command it was typing (`command` on the
+  event; a host older than that names none, and the asked-for stays as it
+  did), and a `/model` or `/effort` receipt that confirms nothing. It is
+  cleared where the route wrote it, on the window's session, so an editor
+  tab's own pending switch on the same desk is left alone. The error
+  carries no session id on purpose: an error is filed by desk, and naming
+  one would move where its line is drawn. A `not_delivered` clears it
+  too. If the window did take the change, its hook or next reply confirms
+  the model as it does for a `/model` typed into the window.
 - **A paste of four or more lines, or of more than 800 characters, is
   wrapped in `<pasted_content>`** and the model is told it "may contain
   instructions the user did not write" — exactly wrong for the operator's

@@ -1475,6 +1475,50 @@ try {
   eq(await noteOf('typist'), null, 'the operator\'s next message does');
   eq(((await turns('typist')).rows ?? []).find((t) => t.text === '10')?.via, '/btw', 'and a /btw answer is the agent\'s, labeled by the command');
 
+  // A change that was not made stops being asked for (costmo, 2026-11-14).
+  // It used to stand until something confirmed a model: the select showed
+  // the model that was picked, not the one the window was on.
+  await register({ channel: CH, agent: 'changer', cwd: '/repo/changer', window: '@16' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: 's-changer', cwd: '/repo/changer' }]);
+  await post(ev('changer', 's-changer', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  await post(ev('changer', 's-changer', 'Stop', { effort_level: 'medium' }));
+  const change = async (text) => {
+    const r = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'changer', text }) });
+    await takeWork();
+    return r.status;
+  };
+  const asked = async () => { const s = await sessOf('changer'); return [s?.model, s?.model_requested, s?.effort, s?.effort_requested]; };
+  eq([await change('/model sonnet'), await change('/effort high')], [200, 200], 'a model and an effort change are both asked of a desk');
+  eq(await asked(), ['claude-opus-5-5', 'sonnet', 'medium', 'high'], 'and both stand as asked for');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'not_delivered', message: 'the window did not record the message' }]);
+  eq(await asked(), ['claude-opus-5-5', 'sonnet', 'medium', 'high'], 'an error that names no command leaves them standing: it may be about anything');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'model', message: 'the desk is working — change the model when the turn ends' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', 'high'], 'a model change the host refused is no longer asked for, and the effort asked beside it still is');
+  eq(((await turns('changer')).rows ?? []).at(-1)?.text, 'the desk is working — change the model when the turn ends', 'with the refusal on the desk in words');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'effort', message: 'the desk is working — change the effort level when the turn ends' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'and so with an effort change');
+  await change('/model gpt');
+  eq((await asked())[1], 'gpt', 'a name the window does not have is asked for like any other');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'model', said: "Model 'gpt' not found", text: '/model gpt', session_id: 's-changer' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], "and the window's refusal, a receipt that names no model, clears it with the model as it was");
+  await change('/effort low');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'effort', said: 'Effort level not changed', text: '/effort low', session_id: 's-changer' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'the same for an effort receipt that names no level');
+  await change('/model sonnet');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'btw', said: 'answered in the window', text: '/btw hello', session_id: 's-changer' }]);
+  eq((await asked())[1], 'sonnet', "another command's receipt clears nothing");
+  // On the window's session, as the ask was (PR #32 finding 1): an editor
+  // tab on the same desk, newer by the clock, keeps what its own window
+  // asked for.
+  await post(ev('changer', 's-changer-editor', 'SessionStart', { source: 'startup', model: 'claude-fable-5-1' }));
+  await sleep(1100);
+  await post(ev('changer', 's-changer-editor', 'PreModelSwitch', { from_model: 'claude-fable-5-1', to_model: 'claude-haiku-5-5', requested_model: 'haiku', source: 'picker' }));
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'model', message: 'the desk is working — change the model when the turn ends' }]);
+  eq((await asked())[1], null, "the refusal clears the ask on the window's session");
+  await post(ev('changer', 's-changer', 'SessionEnd', { reason: 'prompt_input_exit' }));
+  await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: null }]);
+  eq((await asked()).slice(0, 2), ['claude-fable-5-1', 'claude-haiku-5-5'], "and not the one the editor's own picker made on the other session");
+
   // The transcript's model, reported by the host when it changes.
   await hostEvents([{ type: 'model', channel: CH, agent: 'typist', session_id: 's-typist', model: 'claude-opus-5-5' }]);
   eq((await sessOf('typist'))?.model, 'claude-opus-5-5', "the model that wrote the last reply is the session's model");

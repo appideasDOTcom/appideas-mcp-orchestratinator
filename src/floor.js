@@ -1719,6 +1719,31 @@ function applyHostEvent(store, live, hostId, ev) {
     store.setHostedState(channel, agent, s);
     live.publish(key, { type: 'state', state: s });
   };
+  /**
+   * A model or effort change the window did not make: what the floor asked
+   * for stops standing beside what the window has. `what` is 'model' or
+   * 'effort'.
+   *
+   * Nothing used to do this. An asked-for was cleared only by a confirmation
+   * — the window's line, a hook, a reply naming another model — so a change
+   * the host refused (a working desk) or the window did ("Model 'x' not
+   * found") left the select showing the model that was picked, not the one
+   * the window was on, with "x asked" beside it, until the model next
+   * changed. The host reports a reply's model only when it differs, so on
+   * that conversation nothing ever corrected it (costmo, 2026-11-14: fix it).
+   *
+   * Cleared where the route wrote it: the window's session — the one the
+   * event names, and the roster's on the hosted desk — and only on "the
+   * desk's newest" when neither is a real id (PR #32 finding 1). An empty
+   * string is the cleared value; NULL in these statements means "leave it".
+   */
+  const unask = (what) => {
+    const cleared = { [what]: '' };
+    const ids = [...new Set([str(ev.session_id), desk.sdk_session_id].filter((id) => id && !String(id).startsWith('host:')))];
+    if (ids.length) for (const id of ids) store.setRequestedFor(id, cleared);
+    else store.setRequested(channel, agent, cleared);
+    live.publish(key, { type: 'session', session_id: ids[0] ?? sessionId });
+  };
 
   switch (str(ev.type)) {
     /**
@@ -1966,6 +1991,11 @@ function applyHostEvent(store, live, hostId, ev) {
         if (str(ev.model)) { if (named) store.setModel(sid, str(ev.model)); else store.setDeskModel(channel, agent, str(ev.model)); }
         live.publish(key, { type: 'session', session_id: sid });
       }
+      // The window answered and confirmed nothing: "Model 'gpt' not found",
+      // a change it kept as it was. Its line is on the desk; what was asked
+      // for is no longer pending, and the select goes back to what stands.
+      if (command === 'model' && !str(ev.model)) unask('model');
+      if (command === 'effort' && !str(ev.effort)) unask('effort');
       if (ev.compacting) {
         store.setCompacting(sid, 'manual');
         state('working');
@@ -2163,6 +2193,13 @@ function applyHostEvent(store, live, hostId, ev) {
       // explaining that it was not — and the browser hands the words back to
       // the compose box on an error turn, so the message is not lost by this.
       if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
+      // A model or effort change that ended here was not made, as far as
+      // anyone read: the desk was working, the window was asking, or its
+      // line never came. The host names the command it was typing (a host
+      // from before 2026-11-14 does not, and the asked-for stays as it did).
+      // If the window took it after all, its hook or its next reply confirms
+      // the model, as for a /model typed into the window.
+      if (str(ev.command) === 'model' || str(ev.command) === 'effort') unask(str(ev.command));
       // An answer that never took is not just an error to report — the window
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
