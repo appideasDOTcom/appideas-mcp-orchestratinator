@@ -1469,13 +1469,10 @@ async function main() {
     await until(() => keysSince(mark).some((k) => k[0] === 'btw' && k[1] === '"Escape"'));
     eq(keysSince(mark).filter((k) => k[0] === 'btw' && k[1] === '"Escape"').length, 1, 'which the host closed afterwards, once');
     assert(await until(async () => W.composerOf((await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout) !== null), 'so the composer is back');
-    // "Once" by mode alone was not once: the first Escape puts the stand-in
-    // back in composer mode, so a second one is logged there and the count
-    // above still read 1 (QA, PR #55 Info 10: the host made to send it
-    // twice, 405 ✓). Counted in every mode, a moment after the composer is
-    // back, so a second key has had time to be logged.
-    await sleep(400);
-    eq(keysSince(mark).filter((k) => k[1] === '"Escape"').map((k) => k[0]), ['btw'], 'and no second Escape followed it into the composer');
+    // "Once" by mode alone is not once: the first Escape puts the stand-in
+    // back in composer mode, so a second is logged there and the count above
+    // still reads 1 (QA, PR #55 Info 10). Every Escape this pane took is
+    // counted at the end of the section, below, where no wait is needed.
 
     // /cost: a screen the host cannot name, carried to the desk and closed.
     const cost = await W.send(CP_DIR, '/cost');
@@ -1561,6 +1558,16 @@ async function main() {
     eq([compactEnd.ok, compactEnd.compacted, compactEnd.said], [true, true, 'Compacted (ctrl+o to see full summary)'], "the compaction's end is watched for and said in the window's own words");
     assert(await until(() => cpRecords().some((r) => r.type === 'user' && r.message?.content === 'sent while it compacts'), 10000),
       'and the window reads it when the compaction ends');
+
+    // Every Escape the pane was sent over the whole section, by the mode it
+    // was logged in: one closing the /btw overlay, one closing /cost's
+    // screen, and none in a composer, where a repeat of either would land.
+    // Read here and not beside the /btw because an absence has nothing to
+    // wait on: the first cut slept 400 ms and looked, and an Escape logged
+    // 600 ms late went unseen (QA, PR #55 Info 11). By now a dozen sends
+    // have each waited on their own receipts, tens of seconds on.
+    eq(cpKeyLog().filter((k) => k[1] === '"Escape"').map((k) => k[0]), ['btw', 'cost'],
+      'over the whole section the pane took two Escapes, one closing each overlay, and none in its composer');
 
     // The failure a person is most likely to actually hit: `claude` is not on
     // PATH, or whatever runs in its place dies on its first line. That used to

@@ -1796,10 +1796,16 @@ It waits for the Escape now and then counts it. A count of keys taken
 straight after a send that ends on a key has the same gap. **And a count
 by mode is not a count** (Info 10): the first Escape puts the stand-in
 back in composer mode, so a second was logged there, and with the host
-made to send two the row still read "once". A row beside it now counts
-the Escape in every mode, 400 ms after the composer is back. It is the
-shape of the effort dialog's "once", which needed a dialog that stands
-700 ms: a key log filtered by the mode a key ends cannot see a repeat.
+made to send two the row still read "once". It is the shape of the
+effort dialog's "once", which needed a dialog that stands 700 ms: a key
+log filtered by the mode a key ends cannot see a repeat. **And an absence
+has nothing to wait on** (Info 11). The first fix counted the Escape in
+every mode 400 ms after the composer was back, and an Escape logged
+600 ms late went unseen. The row now stands at the end of the composer
+section, after a dozen sends that each waited on their own receipts: every
+Escape the pane took, by mode, is `btw` then `cost` and none in a
+composer. When the thing to prove is that a key did not arrive, read the
+whole log after later work has been observed, not after a sleep.
 
 **Two more `test:host` reds seen once, in a mutant's run in a copy**
 (2026-11-14, load 5.5, nothing else on the ports): "a turn written while
