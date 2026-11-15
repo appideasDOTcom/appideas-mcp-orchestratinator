@@ -444,6 +444,25 @@ await openOnFloor(floor, 'bo');
 await floor.waitFor(`!!document.querySelector('#floor-panel [data-act="bring-back"]')`, { timeout: 5000 }).catch(() => {});
 ok(!(await floorPanel(floor)).composer, 'and Bo is still out of the floor\'s panel');
 
+console.log('\na choice that comes to name the whole room is everyone');
+// QA, PR #55 finding 2: narrowed to Bo with the others then removed, the
+// room lit "everyone" and said everyone hears, the stored choice was still
+// Bo, and a desk added next was left out of the next message.
+await chipClick('bo');
+ok(await lit() === '["bo"]' && !(await allOn()), 'narrowed to Bo, with Ed still in the room', await lit());
+await m.click('.m-part[data-for-agent="ed"] [data-act="m-remove"]');
+await m.waitFor(`document.querySelectorAll('.m-part').length === 1`, { timeout: 5000 }).catch(() => {});
+ok(await lit() === '["bo"]' && await allOn() && /Everyone in the room hears this/.test(await text(m, '.p-hint')),
+  'Ed removed, Bo is the whole room, and the room says everyone hears', `${await lit()} | ${await text(m, '.p-hint')}`);
+await m.waitFor(`[...document.querySelectorAll('.m-add option')].some((o) => o.value === 'ed')`, { timeout: 8000 }).catch(() => {});
+await m.evalJs(`(() => { const s = document.querySelector('.m-add'); s.value = 'ed'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+await m.waitFor(`document.querySelectorAll('.m-part').length === 2`, { timeout: 5000 }).catch(() => {});
+ok(await lit() === '["bo","ed"]' && await allOn(), 'and means it: Ed, added next, is lit with Bo — the choice was everyone, not a list of one', await lit());
+await say(m, 'after the leave');
+await m.waitFor(`[...document.querySelectorAll('#p-turns .m-msg')].some((x) => x.querySelector('.t-body')?.textContent === 'after the leave')`, { timeout: 8000 }).catch(() => {});
+msg = await msgNode(m, 'after the leave');
+ok(msg && /you → everyone \(Bo, Ed\)/i.test(msg.who), 'so the next message goes to both, as the room said it would', JSON.stringify(msg?.who));
+
 console.log('\na second room cannot take a desk this one holds');
 const other = await open({ base: `${base}/?meeting=new&channel=lab&agents=bo,dee` });
 await other.waitFor(`/is in a window already/.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 15000 }).catch(() => {});

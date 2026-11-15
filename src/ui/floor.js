@@ -5045,6 +5045,30 @@
     return now.size === inRoom.length ? null : now;
   }
 
+  /**
+   * The To choice once a desk has left the room; `inRoom` is who is still
+   * in it (QA, PR #55 finding 2). The desk is taken out of the choice, and a
+   * choice that now names every desk left is everyone, stored as everyone.
+   *
+   * It used to be kept as the list. Narrowed to Bo with the others then
+   * removed, Bo was the whole room: the chips lit "everyone" and the hint
+   * said everyone hears, because both are drawn from who is lit, while the
+   * stored choice was still "Bo". So a desk added next was not lit and the
+   * next message skipped it, in a room that had just said everyone hears.
+   * The rule that a desk added to a narrowed room is not lit stands: this
+   * room no longer reads as narrowed, so it is not. meetingToClick already
+   * reads a list naming the whole room as everyone; this is the same rule
+   * at the other place the room changes under a choice.
+   *
+   * A choice left naming nobody (the one desk chosen left, others remain)
+   * stays at nobody, as before: the room then says "Choose who hears this".
+   */
+  function meetingToLeft(inRoom, chosen) {
+    if (!chosen) return null;
+    const now = new Set(inRoom.filter((a) => chosen.has(a)));
+    return now.size === inRoom.length ? null : now;
+  }
+
   /** What a click on that chip will do, for its tooltip: read off meetingToClick, so the two cannot disagree. */
   function meetingToTitle(inRoom, chosen, agent, name) {
     const lit = meetingTo(inRoom, chosen);
@@ -5541,7 +5565,7 @@
     p.release = null;
     p.partial = '';
     m.left.push(p);
-    m.to?.delete(agent);
+    m.to = meetingToLeft(m.parts.map((x) => x.agent), m.to);
     // What it said while here stays in the transcript, and it has no box
     // left to click, so a hidden desk is shown again as it goes.
     m.hide.delete(agent);

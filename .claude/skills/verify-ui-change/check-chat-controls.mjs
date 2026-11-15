@@ -78,14 +78,17 @@ ok(titles.length === 2 && titles.every((t) => /default for new sessions/.test(t)
 // A window that is asking takes no choice: Send sends nothing then, and a
 // select that took a pick would drop it without a word. Dimmed, with why.
 await ingest({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } });
-await page.waitFor(`document.querySelector('#floor-panel [data-act="set-model"]').disabled`, { timeout: 8000 });
+// Waited for as a fact, not a bare await: a page that never dims them goes
+// on to the row below and reads ✗, where it used to end the check on the
+// wait's exception with no verdict (QA, PR #55 Info 4).
+await page.waitFor(`document.querySelector('#floor-panel [data-act="set-model"]').disabled`, { timeout: 8000 }).catch(() => {});
 const asking = await page.evalJs(`[...document.querySelectorAll('#floor-panel .p-sel')].map((s) => ({ disabled: s.disabled, title: s.title }))`);
 console.log('== while the window asks:', JSON.stringify(asking), 'send disabled:', await page.evalJs(`document.querySelector('#floor-panel [data-act="send"]').disabled`));
 ok(asking.every((x) => x.disabled && /is asking something/.test(x.title)), 'while the window asks, both are dimmed and say why — a pick then would be dropped');
 // A Stop closes the prompt: one of the four hooks that mean work happened (CLEARS_AWAITING).
 await ingest({ hook_event_name: 'Stop' });
-await page.waitFor(`!document.querySelector('#floor-panel [data-act="set-model"]').disabled`, { timeout: 8000 });
-ok(true, 'and both take a choice again once the prompt is gone');
+ok(await page.waitFor(`!document.querySelector('#floor-panel [data-act="set-model"]').disabled`, { timeout: 8000 }).then(() => true, () => false),
+  'and both take a choice again once the prompt is gone');
 
 await page.evalJs(box('/co', false));
 let r = await read(); console.log('== slash menu on /co:', JSON.stringify({ hidden: r.slashHidden, rows: r.slashRows }));

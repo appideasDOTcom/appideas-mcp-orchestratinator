@@ -310,12 +310,18 @@ function fixture() {
     `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
     String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
     // And a flag file that leaves the window asking something: a permission
-    // menu (`bash`) or a one-question form (`form`), drawn once at the bottom
+    // menu (`bash`), a one-question form (`form`) or one with previews
+    // (`preview`), drawn once at the bottom
     // of the pane and never redrawn — for an answer that waited in the host's
     // line past ANSWER_TTL_MS (QA, PR #49 finding 2 and Info 4).
     `const PROMPT_FLAG = ${JSON.stringify(`${FIX}/prompt.flag`)};`,
     `let promptKind = ''; try { promptKind = fs.readFileSync(PROMPT_FLAG, 'utf8').trim(); } catch {}`,
-    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"] })};`,
+    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"],
+      // A question drawn with previews, as 2.1.325 draws one: the choices
+      // beside the highlighted one's preview, no "Type something." row, and
+      // "n to add notes" on its status line. Never redrawn, so a digit moves
+      // nothing here (QA, PR #55 Info 8).
+      preview: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Where", "", "Where should it go?", "", "❯ 1. Alpha                        ┌────────┐", "  2. Bravo                        │ AAA box│", "  3. Charlie                      └────────┘", "                                  Notes: press n to add notes", "────────────────────────────────────────────────────────────────────────────────", "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"] })};`,
     `for (const l of PROMPTS[promptKind] ?? []) process.stdout.write(l + '\\n');`,
     // A prompt takes a bare key with no Enter, as a person pressing one
     // would, and a tty in canonical mode holds it until a newline that never
@@ -1184,6 +1190,25 @@ try {
     assert(await until(async () => (hostLog.slice(log0).includes('-old answer, and its question is still on screen — answering it') ? true : null), 15000),
       'an old answer whose form is still on screen is pressed — this call site, not only askedStill (Info 4)');
     assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its keys reached the window');
+
+    // A preview question the host could not answer is said as a form that
+    // was not submitted, not as answers that did not land (QA, PR #55 Info
+    // 8). The stand-in never redraws, so the cursor stays on row 1 whatever
+    // digit is sent: the host reads that, presses no Enter, and the desk is
+    // told the form is still standing. "Did not land" was once said about
+    // answers that had landed (issue #7), and here nothing was chosen at all.
+    await reopenAsking('preview');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Where should it go?', header: 'Where', multiSelect: false,
+        options: [{ label: 'Alpha', description: 'First.', preview: true }, { label: 'Bravo', description: 'Second.', preview: true }, { label: 'Charlie', description: 'Third.', preview: true }] }] } });
+    const pv = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.header === 'Where' ? q : null; }, 25000);
+    assert(!!pv, 'a question with previews is on the desk');
+    eq(pv?.questions?.[0]?.options?.length, 3, 'with its three rows and no free-text row, as the window draws it');
+    const errsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+    eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: pv?.request_id, answers: [{ choose: [2] }] })).status, 200, 'its answer is queued');
+    const unplaced = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && !errsBefore.has(r.id)) ?? null, 20000);
+    assert(/^the form was not submitted — this question takes a number as a move and Enter as the choice, and the cursor was not seen on row 2/.test(unplaced?.text ?? ''),
+      `a preview question whose cursor never reached the row is said as a form not submitted — ${unplaced?.text ?? 'no error turn'}`);
 
     rmSync(`${FIX}/prompt.flag`, { force: true });
     assert(await closeByHand(), 'the asking window is closed by hand');

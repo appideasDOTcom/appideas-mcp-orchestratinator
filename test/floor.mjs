@@ -1502,10 +1502,11 @@ try {
   await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'model', said: "Model 'gpt' not found", text: '/model gpt', session_id: 's-changer' }]);
   eq(await asked(), ['claude-opus-5-5', null, 'medium', null], "and the window's refusal, a receipt that names no model, clears it with the model as it was");
   await change('/effort low');
-  // The sentence here is made up. What a window says about an effort change
-  // it does not make was not measured; the rule under test is the receipt
-  // naming no level, whatever its words.
-  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'effort', said: 'Effort level not changed', text: '/effort low', session_id: 's-changer' }]);
+  // The sentence is 2.1.325's own for a change it was told to keep ("No, go
+  // back" on "Change effort level?"), read from its strings and not seen on
+  // a window (QA, PR #55 finding 1). The rule under test is the receipt
+  // naming no level it was set to, whatever its words.
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'effort', said: 'Kept effort level as medium', text: '/effort low', session_id: 's-changer' }]);
   eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'the same for an effort receipt that names no level');
   await change('/model sonnet');
   await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'btw', said: 'answered in the window', text: '/btw hello', session_id: 's-changer' }]);
@@ -1521,6 +1522,20 @@ try {
   await post(ev('changer', 's-changer', 'SessionEnd', { reason: 'prompt_input_exit' }));
   await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: null }]);
   eq((await asked()).slice(0, 2), ['claude-fable-5-1', 'claude-haiku-5-5'], "and not the one the editor's own picker made on the other session");
+  // A desk whose window has never registered has only the board's
+  // placeholder for a session, and the route writes its ask on the desk's
+  // newest row (here the one an editor's hooks made). A receipt that names
+  // that placeholder clears it there: the placeholder is no row of its own
+  // to clear (QA, PR #55 Info 7).
+  await register({ channel: CH, agent: 'unseated', cwd: '/repo/unseated', window: '@17' });
+  await post(ev('unseated', 's-unseated-editor', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  const unseated = async () => { const d = deskOf(await floor(), 'unseated'); return [d?.hosted?.session_id, d?.session?.session_id, d?.session?.effort_requested ?? null]; };
+  const askUnseated = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'unseated', text: '/effort high' }) });
+  await takeWork();
+  eq([askUnseated.status, await unseated()], [200, [`host:h-open:${CH}:unseated`, 's-unseated-editor', 'high']],
+    "an effort change asked of a desk on its placeholder stands on the desk's newest session");
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'unseated', command: 'effort', said: 'Kept effort level as medium', text: '/effort high', session_id: `host:h-open:${CH}:unseated` }]);
+  eq((await unseated())[2], null, 'and a receipt that names only the placeholder clears it where it was written');
 
   // The transcript's model, reported by the host when it changes.
   await hostEvents([{ type: 'model', channel: CH, agent: 'typist', session_id: 's-typist', model: 'claude-opus-5-5' }]);
@@ -3519,7 +3534,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingShown, meetingHiddenNote, meetingResumePlan, meetingTo, meetingToClick, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingShown, meetingHiddenNote, meetingResumePlan, meetingTo, meetingToClick, meetingToLeft, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -3655,6 +3670,18 @@ try {
     eq(after(['bo', 'cy'], null, 'bo', 'cy'), 'everyone', 'in a room of two, the solo and then the other is everyone');
     eq(after(['bo'], null, 'bo'), 'everyone', 'a room of one stays everyone');
     eq(lit(pg.meetingToClick(R, new Set(['cy']), 'zed')), ['cy'], 'a name that is not in the room changes nothing');
+    // A desk leaves the room under a choice (QA, PR #55 finding 2). The room
+    // given is who is still in it.
+    const left = (room, to) => lit(pg.meetingToLeft(room, to));
+    eq(left(['bo'], new Set(['bo'])), 'everyone', 'narrowed to Bo and the others gone, Bo is the whole room: the choice is everyone, as the chips and the hint already said');
+    eq(left(['bo', 'ed'], new Set(['bo', 'cy', 'ed'])), 'everyone', 'so is a choice of several once the one desk left out of it has gone');
+    eq(left(['bo', 'dee'], new Set(['bo', 'cy'])), ['bo'], 'a room still narrowed stays narrowed, without the desk that left');
+    eq(left(['cy', 'dee'], new Set(['bo'])), [], 'the one desk chosen leaving leaves nobody chosen, as before: the room asks who hears');
+    eq([left(['bo', 'cy'], null), left([], new Set(['bo']))], ['everyone', 'everyone'], 'everyone stays everyone, and an emptied room has no choice left in it');
+    eq(lit(pg.meetingToClick(['bo', 'ed'], pg.meetingToLeft(['bo'], new Set(['bo'])), 'ed')), ['ed'], 'and a desk added after that is lit with the rest: a click on it is a solo, not an add');
+    const kept = new Set(['bo', 'cy']);
+    pg.meetingToLeft(['bo'], kept);
+    eq([...kept].sort(), ['bo', 'cy'], 'the set it was given is left as it was');
     const start = new Set(['cy', 'dee']);
     pg.meetingToClick(R, start, 'cy');
     eq([...start].sort(), ['cy', 'dee'], 'the set it was given is left as it was');

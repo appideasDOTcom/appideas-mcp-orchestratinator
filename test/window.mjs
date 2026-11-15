@@ -1271,6 +1271,11 @@ async function main() {
     eq(W.switchConfirmOf(screenWith('❯ ').replace(RULE2, `${SWITCH}\n${RULE2}`)), null,
       'a conversation that quotes the warning above a composer is not one: it is read at the bottom of the pane');
     eq(W.switchConfirmOf(SWITCH.replace('   Switch model?\n', '')), null, 'nor are two such choices under any other title');
+    // The dialog's other title (QA, PR #55 finding 1): 2.1.325's own
+    // strings, with the model's lines under it. Not seen on a window.
+    const EFFORT_ASK = SWITCH.replace('Switch model?', 'Change effort level?').replace('current model. Switching to Haiku 5.5', 'current effort level. Switching to high').replace('Yes, switch to Haiku 5.5', 'Yes, switch to high');
+    eq(W.switchConfirmOf(EFFORT_ASK)?.yes, 'Yes, switch to high', 'the same warning under "Change effort level?", which an /effort raises, is read too');
+    eq(W.switchConfirmOf(EFFORT_ASK.replace('Change effort level?', 'Change something else?')), null, 'and still under no third title');
     eq(W.switchConfirmOf(PICKER), null, 'and the picker is not it');
     eq(W.stillInComposer(SWITCH, '/model haiku'), false, 'the warning has no composer, so no Enter is pressed into it');
 
@@ -1339,7 +1344,11 @@ async function main() {
       `  else if (mode === 'cost') out += '\\u276f /cost\\r\\n' + top + '\\r\\n   Total cost:            $0.0066\\r\\n   Esc to cancel';`,
       // switch.flag: a /model on this conversation raises the cache warning
       // first, where the composer was, as on a real window with any history.
-      `  else if (mode === 'switch') out += '\\u23fa ok\\r\\n' + top + '\\r\\n   Switch model?\\r\\n   Your next response will be slower and use more tokens\\r\\n   This conversation is cached for the current model. Switching to ' + pending.label + '\\r\\n   means the full history gets re-read.\\r\\n   \\u276f 1. Yes, switch to ' + pending.label + '\\r\\n     2. No, go back';`,
+      // effort-ask.flag: an /effort raises the same dialog under its other
+      // title, "Change effort level?" (2.1.325's strings; QA, PR #55
+      // finding 1), and that one stands 700 ms after its digit, so a host
+      // that says yes at every look would be seen pressing twice.
+      `  else if (mode === 'switch') out += '\\u23fa ok\\r\\n' + top + '\\r\\n   ' + pending.title + '\\r\\n   Your next response will be slower and use more tokens\\r\\n   This conversation is cached for the current ' + pending.noun + '. Switching to ' + pending.label + '\\r\\n   means the full history gets re-read.\\r\\n   \\u276f 1. Yes, switch to ' + pending.label + '\\r\\n     2. No, go back';`,
       `  else {`,
       `    const lines = composer.split('\\n');`,
       `    const busy = Date.now() < compactUntil;`,
@@ -1358,10 +1367,15 @@ async function main() {
       `  if (cmd && cmd[1] === 'model' && cmd[2]) {`,
       `    const name = cmd[2].trim(); const label = MODELS.find((m) => m.toLowerCase().startsWith(name.toLowerCase()));`,
       `    if (!label) { rec({ type: 'system', subtype: 'local_command', level: 'info', content: '<command-name>/model</command-name>\\n<command-message>model</command-message>\\n<command-args>' + name + '</command-args>' }); rec({ type: 'system', subtype: 'local_command', level: 'info', content: "<local-command-stdout>Model '" + name + "' not found</local-command-stdout>" }); return draw(); }`,
-      `    if (fs.existsSync(${JSON.stringify(`${CP_DIR}/switch.flag`)})) { mode = 'switch'; pending = { name, label }; return draw(); }`,
+      `    if (fs.existsSync(${JSON.stringify(`${CP_DIR}/switch.flag`)})) { mode = 'switch'; pending = { title: 'Switch model?', noun: 'model', label, yes: () => setModel({ name, label }) }; return draw(); }`,
       `    setModel({ name, label }); return draw();`,
       `  }`,
-      `  if (cmd && cmd[1] === 'effort' && cmd[2]) { ran('effort', cmd[2].trim(), 'Set effort level to ' + cmd[2].trim() + ' (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation'); return draw(); }`,
+      `  if (cmd && cmd[1] === 'effort' && cmd[2]) {`,
+      `    const level = cmd[2].trim();`,
+      `    const set = () => ran('effort', level, 'Set effort level to ' + level + ' (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation');`,
+      `    if (fs.existsSync(${JSON.stringify(`${CP_DIR}/effort-ask.flag`)})) { mode = 'switch'; pending = { title: 'Change effort level?', noun: 'effort level', label: level, yes: set, slow: 700 }; return draw(); }`,
+      `    set(); return draw();`,
+      `  }`,
       `  if (cmd && cmd[1] === 'compact') {`,
       `    rec({ type: 'user', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args>' } });`,
       // Six seconds: long enough that the message sent behind /compact lands
@@ -1401,7 +1415,11 @@ async function main() {
       `    if (ch === '\\r') { key('Enter'); if (mode !== 'composer') continue; if (firstEnter) { firstEnter = false; continue; } submit(); continue; }`,
       `    if (ch === '\\x15') { key('C-u'); composer = ''; draw(); continue; }`,
       `    key(ch);`,
-      `    if (mode === 'switch' && ch === '1') { setModel(pending); mode = 'composer'; pending = null; draw(); continue; }`,
+      `    if (mode === 'switch' && ch === '1') {`,
+      `      const p = pending; const go = () => { p.yes(); mode = 'composer'; pending = null; draw(); };`,
+      `      if (!p.slow) go(); else if (!p.taken) { p.taken = true; setTimeout(go, p.slow); }`,
+      `      continue;`,
+      `    }`,
       `    if (mode === 'switch' && ch === '2') { mode = 'composer'; pending = null; draw(); continue; }`,
       `    if (mode === 'composer') { composer += ch; draw(); }`,
       `  }`,
@@ -1495,6 +1513,20 @@ async function main() {
     eq([cached.said, cached.model], ['Set model to Haiku 5.5 and saved as your default for new sessions', 'Haiku 5.5'], 'on the line the window writes once the warning is answered');
     eq(keysSince(mark).filter((k) => k[0] === 'switch').map((k) => k[1]), ['"1"'], 'the warning got one key, the digit — and no Enter, which a retry on a still screen would have pressed');
     rmSync(`${CP_DIR}/switch.flag`);
+
+    // The same dialog behind an /effort (QA, PR #55 finding 1). Unanswered,
+    // the /effort ended not_delivered with the dialog standing, and the
+    // desk's next message was pasted into it. The stand-in's dialog stands
+    // 700 ms after its digit, so "once" is the host's doing, not the
+    // window's speed.
+    writeFileSync(`${CP_DIR}/effort-ask.flag`, '');
+    mark = cpKeyLog().length;
+    const effortAsked = await W.send(CP_DIR, '/effort low');
+    assert(effortAsked.ok, `an /effort that raises "Change effort level?" is still confirmed${effortAsked.ok ? '' : ` — ${effortAsked.error}`}`);
+    eq([effortAsked.effort, effortAsked.model], ['low', null], 'on the line the window writes once it is answered: the level, and no model');
+    eq(keysSince(mark).filter((k) => k[0] === 'switch').map((k) => k[1]), ['"1"'], 'it got one key, the digit, though it stood for 700 ms after it: the host says yes once');
+    assert(await until(async () => W.composerOf((await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout) !== null), 'and the composer is back for the next message');
+    rmSync(`${CP_DIR}/effort-ask.flag`);
 
     // /compact: confirmed on the command's record while the window compacts,
     // and a message behind it is said to be held — not timed out.
@@ -2057,7 +2089,9 @@ async function main() {
         `  else if (s === '\\t') { keys.push('Tab'); at = Math.min(tabs.length, at + 1); cur = 0; }`,
         `  else if (s === '\\r') {`,
         `    keys.push('Enter');`,
-        `    if (at === tabs.length) at = tabs.length + 1; else pick(cur);`,
+        // `deaf`: a question that logs Enter and does nothing with it, for
+        // the window that did not take the choice (not_selected).
+        `    if (at === tabs.length) at = tabs.length + 1; else if (!tabs[at].deaf) pick(cur);`,
         `  } else if (/^[1-9]$/.test(s)) {`,
         `    keys.push(s);`,
         `    if (at === tabs.length) { if (s === '1') at = tabs.length + 1; }`,
@@ -2101,6 +2135,16 @@ async function main() {
     eq([absent.ok, absent.code, absent.done], [false, 'not_on_row', ['4']], 'a digit for a row the question does not have selects nothing');
     assert(/cursor was not seen on row 4/.test(absent.error ?? '') && /n to add notes/.test(absent.error ?? ''), `and says what it read off the pane — ${absent.error ?? ''}`);
     eq(keysOf(noRow), { keys: ['4'], picked: [] }, 'no Enter reached the window, so nothing was answered with the wrong row');
+
+    // A window that takes the move and not the Enter: the cursor is read on
+    // the row, Enter is pressed, and the pane stays exactly as it was. Said
+    // as that, with the form standing, and no further key pressed into a
+    // question that was not answered (QA, PR #55 Info 7).
+    const deafPane = await previewPane('preview-deaf', [{ ...WHERE, deaf: true }, PLAIN]);
+    const unheard = await W.answerQuestion(deafPane, [{ key: 'Left' }, { key: 'Left' }, { key: 'Left' }, { key: '2' }, { key: '1' }]);
+    eq([unheard.ok, unheard.code, unheard.done], [false, 'not_selected', ['Left', 'Left', 'Left', '2']], 'a preview question that does not take Enter is said as not selected');
+    assert(/did not take Enter on row 2/.test(unheard.error ?? ''), `in words that name the row — ${unheard.error ?? ''}`);
+    eq(keysOf(deafPane), { keys: ['Left', 'Left', 'Left', '2', 'Enter'], picked: [] }, "and the next question's digit was never pressed into this one");
 
     // The layout is told by the status line, as 2.1.325 drew it at 80
     // columns, where it wraps; not by the words appearing anywhere.

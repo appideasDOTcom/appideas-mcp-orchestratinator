@@ -1359,6 +1359,19 @@ export function overlayOf(screen) {
  * 2.1.325 behind `/model <name>` as a command, mid-turn included; the digit
  * answers it.
  *
+ * The same dialog has a second title, "Change effort level?", for an
+ * `/effort <level>` that would rewrite the cached prefix (QA, PR #55
+ * finding 1), and is read as the same thing. That title is read from
+ * 2.1.325's own strings, where it shares every other line with the model's
+ * ("This conversation is cached for the current effort level. Switching
+ * to X means the full history gets re-read.", the same two choices). It
+ * has not been seen on a window: `/effort <another level>` after a reply
+ * went straight through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5
+ * (probe, 2026-11-15), because those take effort per turn and a change
+ * keeps the cache. So the read is the model's, measured, with the title
+ * the binary gives; a desk on a model that does not take effort per turn
+ * is where it would stand.
+ *
  * Read by position, like every other prompt: the dialog stands where the
  * composer was, so its two choices are the pane's last two lines and its
  * title is a few lines above them. It used to be the words anywhere in the
@@ -1369,7 +1382,7 @@ export function switchConfirmOf(screen) {
   const nonEmpty = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
   const yes = /^\s*❯?\s*1\.\s*(Yes, switch to .+)$/.exec(nonEmpty[nonEmpty.length - 2] ?? '');
   if (!yes || !/^\s*❯?\s*2\.\s*No, go back\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) return null;
-  if (!nonEmpty.slice(-9, -2).some((l) => /^\s*Switch model\?\s*$/.test(l))) return null;
+  if (!nonEmpty.slice(-9, -2).some((l) => /^\s*(Switch model|Change effort level)\?\s*$/.test(l))) return null;
   return { yes: yes[1].trim() };
 }
 
@@ -2187,7 +2200,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
 
   // The receipt: a command has its own (commandReceipt), a message has the
   // turn or the queue (deliveryOf). Each is read where it is written.
-  let switchYes = false;          // "Switch model?" has been answered
+  let switchYes = false;          // "Switch model?" / "Change effort level?" has been answered
   const receipt = async () => {
     // A command that closes the window (/exit) has the pane's absence as its
     // receipt; a message cannot be received by a pane that is gone.
@@ -2200,7 +2213,13 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     // switch, so the host says yes, once, with the digit (measured: `1`
     // answers it; the window's line follows). The dialog has no composer, so
     // nothing below presses Enter into it (stillInComposer).
-    if (cmd?.name === 'model' && !switchYes && switchConfirmOf(screen)) {
+    //
+    // "Change effort level?" is the same dialog behind an /effort (QA,
+    // PR #55 finding 1; switchConfirmOf has what is and is not measured
+    // about it). Unanswered, it stood: the /effort ended not_delivered at
+    // twenty seconds and the desk's next message was pasted into the dialog
+    // for a minute.
+    if ((cmd?.name === 'model' || cmd?.name === 'effort') && !switchYes && switchConfirmOf(screen)) {
       await tmux(['send-keys', '-t', pane.target, '1']);
       switchYes = true;
       return null;
