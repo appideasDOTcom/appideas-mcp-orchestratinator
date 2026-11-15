@@ -1036,8 +1036,30 @@ try {
     const { default: Database } = await import('better-sqlite3');
     const db = new Database(DB_PATH, { readonly: true });
     const onNew = db.prepare(`SELECT session_id FROM agent_sessions WHERE channel = ? AND agent = ?`).all(CH2, 'free').map((r) => r.session_id);
+    // This row has gone red by itself six times (CLAUDE.md, Tests), each
+    // time green on the next run, and each time nobody read the rows,
+    // because by then they were gone with the run's database. So a red
+    // reads them itself. A session row is keyed by its id alone, so "on the
+    // new floor" means something filed under the old conversation's id
+    // named the new floor, after the move. The row's times against the
+    // board's clock say when, the turns filed under that id say whether it
+    // was a turn (and on which floor) or an event that writes none, and the
+    // host's log from the move on says what the host was doing.
+    const read = !onNew.includes(SESSION_ID) ? null : {
+      row: db.prepare(`SELECT channel, agent, started_at, updated_at, ended_at, transcript FROM agent_sessions WHERE session_id = ?`).get(SESSION_ID),
+      clock: db.prepare(`SELECT datetime('now') AS t`).get().t,
+      turns: db.prepare(`SELECT id, channel, agent, role, tool_name, created_at, substr(text, 1, 60) AS text FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT 8`).all(SESSION_ID),
+    };
     db.close();
-    assert(!onNew.includes(SESSION_ID), `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+    assert(!read, `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+    if (read) {
+      const say = (l) => console.log(`      · ${l}`);
+      say(`the row, read at ${read.clock} by the board's clock: ${JSON.stringify(read.row)}`);
+      say(`the newest turns filed under that id (${read.turns.length}, newest first):`);
+      for (const t of read.turns) say(`  ${JSON.stringify(t)}`);
+      say('the host log from the move on:');
+      for (const l of host.log.slice(host.log.lastIndexOf('moving it from host-test/free')).split('\n').filter(Boolean).slice(0, 40)) say(`  ${l.slice(0, 200)}`);
+    }
   }
   const turnsOnNew = await json(`/api/floor/turns?channel=${CH2}&agent=free`).then((r) => r.json());
   eq((turnsOnNew.rows ?? []).filter((r) => r.role === 'error').map((r) => r.text), [], 'its chat on the new floor does not open on a refusal (#24 Decided 2)');

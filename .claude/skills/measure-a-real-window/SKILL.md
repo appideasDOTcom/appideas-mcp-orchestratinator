@@ -495,16 +495,23 @@ runs on the operator's own profile, so every one of these writes his
 `~/.claude/settings.json`:
 
 ```bash
-cp -p ~/.claude/settings.json "$SP/settings.json.before"; shasum ~/.claude/settings.json
+cp -p ~/.claude/settings.json "$SP/settings.json.before"; shasum -a 256 ~/.claude/settings.json
 # … measure …
-cp -p "$SP/settings.json.before" ~/.claude/settings.json; shasum ~/.claude/settings.json   # the same hash
+python3 .claude/skills/measure-a-real-window/restore-settings.py "$SP/settings.json.before"
+# differs before restore: {"model": ["claude-fable-5-2", "haiku"]}
+# restored byte for byte — sha256 d4fc2d75…        ← the hash from before
 ```
 
 Copying the whole file back also undoes anything else that changed in it
 meanwhile, and the operator changes his own effort level from his windows
-(he had, minutes before the 2026-11-15 measurement). Compare first, and if
-any key other than `model`, `modelSettings` and `effortLevel` differs, put
-back those three alone.
+(he had, minutes before the 2026-11-15 measurement). So
+[`restore-settings.py`](restore-settings.py) puts back `model`,
+`modelSettings` and `effortLevel` alone. When nothing else differs it
+writes the saved bytes and the hash is the one from before. When another
+key differs it keeps that key, names it, and the hash is a new one. Run on
+two throwaway files (a second argument names the file to restore): keys of
+a probe's only, byte for byte; `theme` changed meanwhile, kept and named; a
+file that is not JSON, exit 2 and nothing written.
 
 A window started while the file is changed starts on the probe's model, so
 keep the stretch short and put the file back before reading results.
@@ -573,10 +580,23 @@ the host meet the warning, give the conversation a turn first, record the
 pane while it sends, and look for the choice in the recording:
 
 ```bash
-(for i in $(seq 1 80); do tmux -L probe capture-pane -p -t p:probe | grep -v '^\s*$' | tail -3 | tr '\n' '|'; echo; sleep 0.08; done) > "$SP/rec.log" &
-ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p node .claude/skills/measure-a-real-window/send.mjs "$SP/probe" '/model sonnet'; wait
-grep -c 'Yes, switch to' "$SP/rec.log"      # above 0: the warning stood, and the send still ended ok
+.claude/skills/measure-a-real-window/record-pane.sh "$SP/rec-model.log" -- \
+  env ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p \
+  node .claude/skills/measure-a-real-window/send.mjs "$SP/probe" '/model sonnet'
+# frames: <how many were taken>
+# frames with 'Switch model?': <1 to 3 on 2026-11-15>   ← above 0: the warning stood, and the send still ended ok
+# frames with 'Change effort level?': 0
 ```
+
+[`record-pane.sh`](record-pane.sh) records the pane about seven times a
+second while any command runs, and counts the frames holding each `-p
+<words>` (the two titles when none is given). The frames stay in the log.
+**A count of 0 is a reading only beside a count above 0 from the same
+recorder**: the four 0s in the effort table above stand because "Switch
+model?" was counted in the same recordings. It can be run with no Claude
+Code at all, on a tmux socket of its own (`PROBE_SOCKET`): a pane that
+drew "Change effort level?" for a second read 8 frames of it and 0 of the
+other title, and with no pane on the socket it exits 2 and says so.
 
 ## How long a closed window stays in the roster
 

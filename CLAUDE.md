@@ -1730,7 +1730,9 @@ x.db-shm`). And a word starting with `=` is a command lookup, so `echo
 flags (`invalid argument -m=eeting`). Use `command grep -i -e "pat"`. Shell
 scripts are not affected, because `sh` does not load the function. And
 `md5` is not installed: a comparison of two `$(md5 -q …)` is two empty
-strings and always equal. Use `shasum`.
+strings and always equal. Use `shasum`, and say which: with no flag it is
+SHA-1, and one sent to QA unlabelled was set against their sha256 of the
+same file and read as two files (PR #55 round 4). `shasum -a 256`.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
@@ -1786,6 +1788,22 @@ the move.
 **Sixth, the same day**, in QA's close of PR #55 at f5c2a92: their first
 chain run, load 16–27 with their own page lane beside it; 327 ✓ in the
 second.
+
+**The red now reads the rows itself** (2026-11-15, after the sixth). They
+were never read because they are gone with the run's database before
+anyone looks. When that assertion fails, the suite prints the session row
+(its floor, and its times beside the board's clock), the newest turns
+filed under the old conversation's id with the floor each was filed on,
+and the host's log from the move on. A session row is keyed by its id
+alone, so the red means something filed under the old id named the new
+floor after the move. The print says which kind. Run with the mutant the
+case was written against (the move's `bound` naming the conversation it
+left; control 327 ✓, the mutant that one red), it read: the row on the
+new floor, updated in the second of the bind, and every turn under that
+id still on the old floor. So that mutant is an event that writes no
+turn. A turn on the new floor in the print would instead be the relay
+still reading the old transcript after the rebind. Which one the six
+sightings were is not known. The next sighting is read, not rerun.
 
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches

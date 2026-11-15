@@ -61,6 +61,52 @@ behaviour green. Every batch's reds were the ones predicted for its mutants.
 In the report, say which assertions are expected to stay green at the base
 and why.
 
+**A test being written goes into the copy, not the tree: `--overlay`**
+(2026-11-15). The tree is committed whenever costmo chooses, and a copy is
+made from the tree, so the easy way to run a new test in a copy is to
+write it in the tree first. In PR #55's third round a new window-suite
+row stood in the tree, unrun, for the minutes its control took, and was
+taken back out by hand. Write the candidate outside the repo and name it:
+
+```bash
+cp test/window.mjs "$SP/window.candidate.mjs"      # edit this one
+node .claude/skills/mutate-in-a-copy/run-batches.mjs "$SP/batches.json" \
+     --overlay test/window.mjs="$SP/window.candidate.mjs"
+# overlay: test/window.mjs ← …/window.candidate.mjs (sha256 <the candidate's>)
+# control (window, 160s): 0 failing, 406 ✓
+# twice (window, 158s): 1 failing, 405 ✓
+cp "$SP/window.candidate.mjs" test/window.mjs && shasum -a 256 test/window.mjs   # the overlay's hash
+```
+
+The control now proves the candidate, and each batch's mutants can name
+text that exists only in it. A candidate kept inside the repo is refused,
+and so is a path that would leave the copy. Run once on the markdown
+suite with a row added: the control read 38 ✓ against the tree's 37, a
+mutant of that row's own words read it red, and without `--overlay` the
+same mutant said DID NOT APPLY, because the row is not in the tree.
+
+**A reviewer's pin is a mutant of the stand-in, and it goes in a batch
+with the fault** (PR #55 Info 11). QA showed a test's blind spot by making
+the window suite's stand-in log one key 600 ms late. That pin is a change
+to `test/window.mjs` like any other, so the claim "the new row sees the
+fault even then" is four runs of one file: a control, the fault alone,
+the fault with the pin, and the pin alone, which must be green, since a
+pin that is red by itself proves nothing about the row. The stand-in is
+written inside a template literal, so its text in the file already has
+doubled backslashes (`'\\t'`), and JSON doubles them again (`"\\\\t"`).
+`mutate.py` wants the old text exactly once and says how many times it
+found it, which is how a wrong count of backslashes shows. Run a
+counter-proposal against the reviewer's pin before sending it: "read the
+keys by order" was offered to QA untested in that round, and their pin
+passed it too.
+
+**Give a hash with its algorithm, and keep the file you measured.** Bare
+`shasum` is SHA-1. A SHA-1 sent to QA as "the file I measured" was set
+against their sha256 of the same file, and their closing note said the
+runs might be of an earlier cut. The measured copy was still in the
+scratchpad, so one command settled it. Say `shasum -a 256`, and `git show
+<sha>:<path> | shasum -a 256` for the pushed file.
+
 **A red you did not predict in an older section is load first** (task 255,
 20:27Z): QA's clean-clone suite started on the same ports during the
 tool's base run, and the base read 19 red. Those were the predicted 11,
