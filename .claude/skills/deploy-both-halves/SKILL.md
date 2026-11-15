@@ -73,6 +73,16 @@ changed, so both halves went). Deploy the dirty
   are announced; a deploy does not collide with them, but a suite you run
   alongside the deploy does.
 
+- **Who your announcement reaches.** `send_message`'s reply says so. While
+  the operator has you in a meeting room, a broadcast goes to the room's
+  other participants and nobody else, and the reply carries
+  `meeting_room.reached`. On 2026-11-14 every deploy and port announcement
+  of the session reached appideas-qa and theme-developer only, because
+  both were in room 24 with the coordinator. QA was the reader that
+  mattered, so nothing was lost that day. If `reached` does not name QA,
+  send it again with `to: "appideas-qa"`: a direct message goes where it
+  is addressed, in or out of a room.
+
 ## The restart
 
 ```bash

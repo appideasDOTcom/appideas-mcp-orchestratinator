@@ -181,6 +181,20 @@ select lines. And until that day the command above printed its own usage:
 without `--dest` the tool dropped its first argument. It was run both ways
 after the repair.
 
+**An unpredicted red beside the predicted one can be the check's own
+race, and the control will not show it** (2026-11-14, check-meeting.mjs).
+A mutant in the room's hint line read two reds: the hint, and "everything
+else is where it was", with one extra row, Bo's "stopped.". The step
+before had posted that turn and the step read the transcript before it
+was drawn, so it arrived later as a row nobody expected. The control was
+green and so were five tree runs: the race lost about one run in ten.
+Read what the extra or missing row *is* before blaming the mutant or the
+load; here the fix was a `waitFor` on that row in the check. And **a
+survivor can be the check measuring a box that cannot change**: the same
+batch's "hint at full length" mutant passed, because the check compared
+the Nudge button's rect and that button is a fixed 28px. `scrollHeight`
+turned it red (verify-ui-change, check-meeting).
+
 **"THE CHECK DID NOT FINISH" is the machine until shown otherwise; read
 `uptime` before the code.** The same day, with another desk's emulator
 and Xcode builds holding the load average at 66–90, a control ended that
