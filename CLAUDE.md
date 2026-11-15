@@ -1669,12 +1669,23 @@ server half is [`src/updates.js`](src/updates.js), the host half
   board. Not in `BACKUP_TABLES`: a restore that turned checking back on
   would be a setting changed by a file nobody looked inside.
 
-Not measured: a real update end to end on the live board. It replaces the
-board's container and restarts the live host, which is costmo's to call;
-every step was run against real git and real processes with stand-ins for
-`docker` and `claude`, and the two Docker halves (the image recording its
-commit, and the host finding the live container from launchd's
-environment) were each run for real.
+A real update on the live board was read once, 2026-11-15, when costmo
+merged PR #55, put the clone on `main` at the merge by hand and pressed
+Update (run `mwi3pd86-ddfc8e0`, `e651798` → `ddfc8e0`). It took 8.6 s from
+the run's start to the host back as the commit: preflight, 0.7 s; the
+rebuild and `/health` answering as `ddfc8e0`, 6.5 s; the host's exit to
+its registration under launchd, 0.8 s. The run closed `done`. The host
+logged one failed work poll while the container was replaced, which is
+the relay riding out the restart. Read afterwards: `/health` at the
+commit, the served `floor.js`, `app.js` and `hub.js` byte for byte the
+tree's, and the host's process started after every `host/*.js` on disk.
+Two steps did nothing in that run, so they are still measured only on
+stand-ins: the fetch and fast-forward (the clone was already at the
+commit) and `claude plugin update` (`plugin/` was the same in both
+commits). Before that day every step had been run against real git and
+real processes with stand-ins for `docker` and `claude`, and the two
+Docker halves (the image recording its commit, and the host finding the
+live container from launchd's environment) each for real.
 
 ## Tests
 
