@@ -334,7 +334,9 @@ prints every work item as a JSON line, which is how the check reads who
 was sent what. A `--ctl` file moves a desk's session between steps.
 [`check-meeting.mjs`](check-meeting.mjs) drives create, the floor while
 desks are out, send to everyone, a nudge (the unread badges, one desk's
-bell, the backlog dialog's Mark all read, Nudge everyone), narrowing, a refusal, a permission
+bell, the backlog dialog's Mark all read, Nudge everyone), a click on each To chip (solo with
+everyone lit, everyone back from the last lit one, a toggle between, and each chip's hover words;
+`chipClick('bo')` is how a later step narrows to one desk), narrowing, a refusal, a permission
 prompt, Stop, a command receipt, a question form, Remove, Bring back, a
 reload, End, the Recent list, Resume and close, about a minute and a half:
 

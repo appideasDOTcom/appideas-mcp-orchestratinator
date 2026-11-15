@@ -1235,6 +1235,20 @@ An `@` later in a sentence is the operator's words. A name that is nobody
 in the room sends nothing and leaves the box as it was. Mentions outrank
 the chips for that message.
 
+**A click on a name's chip means that desk, so with everyone lit it is a
+solo** (costmo, 2026-11-14; `meetingToClick`). The chips were plain
+toggles. With everyone lit, the first click on Bo took Bo *out*, and
+"only Bo" in a room of four was three clicks on the others. He read it as
+working "the opposite of how one would expect". His rule: everyone lit, a
+click leaves only that desk; one lit, a click on it gives everyone back
+and a click on another adds that one; some lit but not all, a click
+toggles. So the chips never reach "nobody" by a click: the last lit chip
+gives everyone back. A room still stands at nobody when the one desk
+chosen leaves it, and a click then adds the desk clicked. Each chip's
+tooltip says what a click on it will do (`meetingToTitle`, which reads it
+off `meetingToClick`). The **everyone** chip and the reset to everyone
+after a send are as they were. Do not bring the plain toggle back.
+
 **A desk Resume could not bring back for a reason that may pass stays in
 the room's record, `absent`, and absent is on the floor**: it is not in
 the room for containment either way, so its broadcasts reach the floor

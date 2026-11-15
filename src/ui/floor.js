@@ -4979,6 +4979,41 @@
   /** Who a room message goes to: everyone in the room, or the ones chosen for this one message (Decided 2). */
   const meetingTo = (inRoom, chosen) => (chosen ? inRoom.filter((a) => chosen.has(a)) : [...inRoom]);
 
+  /**
+   * A click on a participant's To chip: who hears the next message after it
+   * (costmo, 2026-11-14). Null is everyone. The chips were plain toggles, so
+   * the first click on a name, with everyone lit, took that one desk *out*,
+   * and reaching "only Bo" in a room of four was three clicks on the others.
+   * He read that as backwards: a click on a name means that desk. So:
+   *
+   *   everyone lit        → only the one clicked (solo)
+   *   one lit, clicked    → everyone again
+   *   one lit, another    → that one is added
+   *   some lit, not all   → the one clicked is toggled
+   *
+   * Nothing here reaches "nobody": the last lit chip gives everyone back
+   * rather than going dark. A room can still stand at nobody when the one
+   * desk chosen leaves it, and a click then adds the desk clicked.
+   */
+  function meetingToClick(inRoom, chosen, agent) {
+    if (!inRoom.includes(agent)) return chosen ?? null;
+    const now = new Set(meetingTo(inRoom, chosen));
+    if (now.size === inRoom.length) { now.clear(); now.add(agent); }
+    else if (now.size === 1 && now.has(agent)) return null;
+    else if (now.has(agent)) now.delete(agent);
+    else now.add(agent);
+    return now.size === inRoom.length ? null : now;
+  }
+
+  /** What a click on that chip will do, for its tooltip: read off meetingToClick, so the two cannot disagree. */
+  function meetingToTitle(inRoom, chosen, agent, name) {
+    const lit = meetingTo(inRoom, chosen);
+    const next = meetingToClick(inRoom, chosen, agent);
+    if (!next) return lit.length === inRoom.length ? `${name} hears the next message` : 'Everyone hears the next message';
+    if (lit.length === inRoom.length) return `Only ${name} hears the next message`;
+    return next.has(agent) ? `${name} hears the next message too` : `Leave ${name} out of the next message`;
+  }
+
   /** The line over a room message: who it went to, by name. Everyone, while it was everyone in the room. */
   function meetingToLine(to, everyone, nameOf) {
     if (!to.length) return 'nobody';
@@ -6059,7 +6094,8 @@
     }
 
     // Who hears the next message: everyone, unless narrowed for this one.
-    const to = meetingTo(m.parts.map((p) => p.agent), m.to);
+    const inRoomNow = m.parts.map((p) => p.agent);
+    const to = meetingTo(inRoomNow, m.to);
     const everyone = to.length === m.parts.length;
     const toEl = wrap.querySelector('.m-to');
     const toSig = JSON.stringify([m.parts.map((p) => [p.agent, meetPersona(p.agent), meetColour(p.agent), meetHair(p.agent)]), to]);
@@ -6067,7 +6103,7 @@
       toEl.dataset.sig = toSig;
       toEl.innerHTML = m.parts.length ? `<span class="muted m-to-label">To</span>
         <button type="button" class="chip${everyone ? ' on' : ''}" data-act="m-to-all" aria-pressed="${everyone}">everyone</button>
-        ${m.parts.map((p) => `<button type="button" class="chip m-to-one${to.includes(p.agent) ? ' on' : ''}" data-act="m-to" data-agent="${esc(p.agent)}" aria-pressed="${to.includes(p.agent)}" style="--m-c:${esc(meetColour(p.agent))};--m-h:${esc(meetHair(p.agent))}">${esc(meetPersona(p.agent))}</button>`).join('')}` : '';
+        ${m.parts.map((p) => `<button type="button" class="chip m-to-one${to.includes(p.agent) ? ' on' : ''}" data-act="m-to" data-agent="${esc(p.agent)}" aria-pressed="${to.includes(p.agent)}" title="${esc(meetingToTitle(inRoomNow, m.to, p.agent, meetPersona(p.agent)))}" style="--m-c:${esc(meetColour(p.agent))};--m-h:${esc(meetHair(p.agent))}">${esc(meetPersona(p.agent))}</button>`).join('')}` : '';
     }
     const ta = $('p-text');
     ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room… (start with @name for some)' : `Message ${to.map(meetPersona).join(', ')}…`;
@@ -6828,12 +6864,11 @@
     } else if (act.dataset.act === 'm-to-all') {
       if (ui.meeting) { ui.meeting.to = null; render(); }
     } else if (act.dataset.act === 'm-to') {
-      // Who hears the next message: each desk a toggle, everyone to start.
+      // Who hears the next message. With everyone lit a name is a solo, not
+      // a toggle: the rules and why are meetingToClick's.
       const m = ui.meeting;
       if (m) {
-        const now = new Set(meetingTo(m.parts.map((p) => p.agent), m.to));
-        if (now.has(act.dataset.agent)) now.delete(act.dataset.agent); else now.add(act.dataset.agent);
-        m.to = now.size === m.parts.length ? null : now;
+        m.to = meetingToClick(m.parts.map((p) => p.agent), m.to, act.dataset.agent);
         render();
       }
     } else if (act.dataset.act === 'read-back') {

@@ -221,7 +221,9 @@ row along the top, one transcript of everything said from then on with each
 desk's words labelled and coloured as its shirt, and one composer. A message
 goes to everyone in the room unless you narrow it: with the chips over the
 box, or by starting it with names (`@bo @cy look at this` goes to Bo and Cy,
-and they receive "look at this"). The next one goes to everyone again. Each desk's delivery shows under your
+and they receive "look at this"). With every chip lit, a click on a name
+leaves only that desk; click another name to add it, click a lit one to
+take it out, and click the last lit one for everyone again. The next one goes to everyone again. Each desk's delivery shows under your
 message on its own: sending, queued, delivered, or not sent with the board's
 reason (an editor holding it, a host offline). The desks never hear each other
 through the room, and what they say to each other on the board stays in

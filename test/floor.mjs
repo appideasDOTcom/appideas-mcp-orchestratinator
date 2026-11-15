@@ -3519,7 +3519,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToClick, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -3614,6 +3614,35 @@ try {
 
     eq([pg.meetingTo(['a', 'b'], null), pg.meetingTo(['a', 'b'], new Set(['b', 'z']))], [['a', 'b'], ['b']], 'everyone by default; narrowed, only desks still in the room');
     eq([pg.meetingToLine(['a', 'b'], true, (x) => x.toUpperCase()), pg.meetingToLine(['a'], true, (x) => x)], ['everyone (A, B)', 'a'], 'the line over a message names who heard it');
+
+    // A click on a To chip (costmo, 2026-11-14): with everyone lit a name is
+    // a solo, the last lit chip gives everyone back, and between the two a
+    // name is a toggle. Null is everyone.
+    const R = ['bo', 'cy', 'dee', 'ed'];
+    const lit = (to) => (to ? [...to].sort() : 'everyone');
+    const after = (room, start, ...clicks) => lit(clicks.reduce((to, a) => pg.meetingToClick(room, to, a), start));
+    eq(after(R, null, 'cy'), ['cy'], 'with everyone lit, a click on a name leaves only that desk hearing the next message — not everyone but it');
+    eq(after(R, null, 'cy', 'cy'), 'everyone', 'a click on the only lit name gives everyone back');
+    eq(after(R, null, 'cy', 'dee'), ['cy', 'dee'], 'with one lit, a click on another adds it');
+    eq(after(R, null, 'cy', 'dee', 'bo'), ['bo', 'cy', 'dee'], 'with some lit and not all, a click on an unlit name adds it');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'dee'), ['bo', 'cy'], 'and a click on a lit one takes it out');
+    eq(after(R, null, 'cy', 'dee', 'dee'), ['cy'], 'down to one, which stays lit');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'ed'), 'everyone', 'adding the last one is everyone again, written as everyone and not as a list of all four');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'ed', 'ed'), ['ed'], 'so the click after that is a solo again');
+    eq(R.map((a) => after(R, new Set(['cy']), a)), [['bo', 'cy'], 'everyone', ['cy', 'dee'], ['cy', 'ed']], 'from one lit: every other name adds itself, and its own gives everyone');
+    eq(after(R, new Set(R), 'bo'), ['bo'], 'a list that names the whole room is everyone, and a click on it is a solo');
+    eq(after(R, new Set(['cy', 'gone']), 'cy'), 'everyone', 'a desk that left the room is not counted: cy is the only one lit, so its click gives everyone');
+    eq(after(R, new Set(), 'dee'), ['dee'], 'with nobody lit (the one desk chosen left the room), a click adds the desk clicked');
+    eq(after(['bo', 'cy'], null, 'bo', 'cy'), 'everyone', 'in a room of two, the solo and then the other is everyone');
+    eq(after(['bo'], null, 'bo'), 'everyone', 'a room of one stays everyone');
+    eq(lit(pg.meetingToClick(R, new Set(['cy']), 'zed')), ['cy'], 'a name that is not in the room changes nothing');
+    const start = new Set(['cy', 'dee']);
+    pg.meetingToClick(R, start, 'cy');
+    eq([...start].sort(), ['cy', 'dee'], 'the set it was given is left as it was');
+    const T = (to, a) => pg.meetingToTitle(R, to, a, a.toUpperCase());
+    eq([T(null, 'cy'), T(new Set(['cy']), 'cy'), T(new Set(['cy']), 'dee'), T(new Set(['cy', 'dee']), 'dee'), T(new Set(['bo', 'cy', 'dee']), 'ed')],
+      ['Only CY hears the next message', 'Everyone hears the next message', 'DEE hears the next message too', 'Leave DEE out of the next message', 'Everyone hears the next message'],
+      'each chip says on hover what a click on it will do');
   }
 } catch (err) {
   failures++;

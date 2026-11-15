@@ -147,9 +147,34 @@ ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.ag
 const nudges = await m.evalJs(`[...document.querySelectorAll('#p-turns .m-msg')].filter((x) => x.querySelector('.t-body')?.textContent === 'nudge').length`);
 ok(nudges === 2, 'as one message in the transcript, not one per desk', String(nudges));
 
+console.log('\na click on a name in the To row');
+// costmo, 2026-11-14: with everyone lit a name is a solo; the only lit name
+// gives everyone back; between the two a name is a toggle.
+const lit = () => m.evalJs(`JSON.stringify([...document.querySelectorAll('.m-to .m-to-one.on')].map((b) => b.dataset.agent))`);
+const allOn = () => m.evalJs(`document.querySelector('.m-to [data-act="m-to-all"]').classList.contains('on')`);
+const tip = (a) => m.evalJs(`document.querySelector('.m-to .m-to-one[data-agent="${a}"]').title`);
+const chipClick = (a) => m.click(`.m-to [data-act="m-to"][data-agent="${a}"]`);
+ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'the room starts with every name lit', await lit());
+ok(await tip('cy') === 'Only Cy hears the next message', 'and a name says on hover that a click makes it the only one', await tip('cy'));
+await chipClick('cy');
+ok(await lit() === '["cy"]' && !(await allOn()), 'with everyone lit, a click on Cy leaves Cy alone lit — not everyone but Cy', await lit());
+ok(/Only Cy hears this one/.test(await text(m, '.p-hint')), 'and the hint under the box says so', await text(m, '.p-hint'));
+ok(await tip('cy') === 'Everyone hears the next message' && await tip('dee') === 'Dee hears the next message too', 'the lit name now offers everyone, the others offer to join', `${await tip('cy')} | ${await tip('dee')}`);
+await chipClick('cy');
+ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'a click on the only lit name gives everyone back', await lit());
+await chipClick('cy');
+await chipClick('dee');
+ok(await lit() === '["cy","dee"]', 'with one lit, a click on another adds it', await lit());
+ok(await tip('dee') === 'Leave Dee out of the next message', 'and with some lit a lit name offers to step out', await tip('dee'));
+await chipClick('dee');
+ok(await lit() === '["cy"]', 'with some lit and not all, a click on a lit name takes it out', await lit());
+await chipClick('dee');
+await chipClick('bo');
+ok(await lit() === '["bo","cy","dee"]' && await allOn(), 'and adding the last one is everyone again', await lit());
+
 console.log('\nnarrowed to one desk, for one message');
-await m.click('.m-to [data-act="m-to"][data-agent="cy"]');
-await m.click('.m-to [data-act="m-to"][data-agent="dee"]');
+await chipClick('bo');
+ok(await lit() === '["bo"]', 'one click on Bo, with everyone lit, narrows to Bo', await lit());
 ok(/Only Bo hears this one/.test(await text(m, '.p-hint')), 'the hint says who hears it', await text(m, '.p-hint'));
 w0 = work().length;
 await say(m, 'just for bo');
@@ -234,9 +259,8 @@ ok(workSince(w0).some((x) => x.kind === 'interrupt' && x.agent === 'bo'), 'and s
 await hostEv([{ type: 'turn', channel: 'lab', agent: 'bo', session_id: 'sess-bo', role: 'assistant', text: 'stopped.', at: new Date().toISOString(), uuid: 'stop-2' }]);
 
 console.log('\na slash command, and its receipt');
-await m.click('.m-to [data-act="m-to"][data-agent="cy"]');
-await m.click('.m-to [data-act="m-to"][data-agent="dee"]');
-await m.click('.m-to [data-act="m-to"][data-agent="ed"]');
+await chipClick('bo');
+ok(await lit() === '["bo"]', 'one click on Bo narrows the command to Bo', await lit());
 await say(m, '/compact');
 await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === '/compact'); return n && /done in/.test(n.textContent); })()`, { timeout: 8000 }).catch(() => {});
 msg = await msgNode(m, '/compact');
