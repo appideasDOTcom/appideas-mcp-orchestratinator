@@ -1469,6 +1469,13 @@ async function main() {
     await until(() => keysSince(mark).some((k) => k[0] === 'btw' && k[1] === '"Escape"'));
     eq(keysSince(mark).filter((k) => k[0] === 'btw' && k[1] === '"Escape"').length, 1, 'which the host closed afterwards, once');
     assert(await until(async () => W.composerOf((await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout) !== null), 'so the composer is back');
+    // "Once" by mode alone was not once: the first Escape puts the stand-in
+    // back in composer mode, so a second one is logged there and the count
+    // above still read 1 (QA, PR #55 Info 10: the host made to send it
+    // twice, 405 ✓). Counted in every mode, a moment after the composer is
+    // back, so a second key has had time to be logged.
+    await sleep(400);
+    eq(keysSince(mark).filter((k) => k[1] === '"Escape"').map((k) => k[0]), ['btw'], 'and no second Escape followed it into the composer');
 
     // /cost: a screen the host cannot name, carried to the desk and closed.
     const cost = await W.send(CP_DIR, '/cost');
