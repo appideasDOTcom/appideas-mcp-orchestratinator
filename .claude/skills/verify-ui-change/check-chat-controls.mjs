@@ -15,7 +15,9 @@
  * session with the model and effort carried; the foot as two rows of two.
  * And since 2026-11-14: both selects untouched across three polls and a
  * turn (a MutationObserver's count, 0), their titles, and both dimmed with
- * the reason while the window asks something.
+ * the reason while the window asks something; and a pick the host refuses
+ * (its `error` naming the command) leaving the select on the window's model
+ * with nothing shown as asked for.
  * Hooks are posted to /api/ingest with the seed's key, host events to
  * /api/host/events as the seed host (h1 unless told otherwise) — the same
  * doors a real plugin and host use, so nothing here is a state no host
@@ -110,6 +112,29 @@ await ingest({ hook_event_name: 'PreModelSwitch', from_model: 'claude-haiku-5-5'
 await ingest({ hook_event_name: 'PostModelSwitch', from_model: 'claude-haiku-5-5', to_model: 'claude-sonnet-5-5', requested_model: 'sonnet', source: 'picker' });
 await page.waitFor(`document.querySelector('#floor-panel .p-asked').classList.contains('hidden')`, { timeout: 10000 });
 r = await read(); console.log('== confirmed by the hooks:', JSON.stringify({ model: r.model.value, meta: r.meta }));
+
+// A change that is refused stops being asked for (2026-11-14). The host's
+// error names the command it was typing, and the board clears the ask: the
+// select goes back to the model the window is on. Before, it stayed on the
+// pick, with "opus asked" beside it, until the window's model next changed.
+// And the box keeps what was in it: settle() hands typed words back to it on
+// an error turn, and a select's pick used to come back with them, ahead of
+// the draft, as a command nobody typed.
+await page.evalJs(`(() => { const ta = document.querySelector('#p-text'); ta.value = 'half a thought'; ta.dispatchEvent(new Event('input', { bubbles: true })); return ta.value; })()`);
+await page.evalJs(`(() => { const s = document.querySelector('#floor-panel [data-act="set-model"]'); s.value = 'opus'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`);
+await page.waitFor(`!document.querySelector('#floor-panel .p-asked').classList.contains('hidden')`, { timeout: 8000 });
+r = await read(); console.log('== model select → opus:', JSON.stringify({ model: r.model.value, asked: r.asked.text }));
+const REFUSAL = 'the desk is working — change the model when the turn ends';
+await hostEvents([{ type: 'error', channel: CH, agent: AG, code: 'busy', command: 'model', message: REFUSAL }]);
+const unasked = await page.waitFor(`document.querySelector('#floor-panel .p-asked').classList.contains('hidden')`, { timeout: 8000 }).then(() => true, () => false);
+r = await read(); console.log('== refused by the host:', JSON.stringify({ model: r.model.value, asked: r.asked, last: r.rows.at(-1)?.text, box: r.textarea }));
+ok(unasked && r.asked.hidden, 'a model change the host refused is no longer shown as asked for');
+ok(r.model.value === 'sonnet', 'and the select is back on the model the window is on, not the one that was picked');
+ok(r.rows.some((x) => x.text.includes(REFUSAL)), 'with the refusal on the desk in words');
+ok(r.textarea === 'half a thought', 'and the message box holds the draft it held, with no command put into it');
+await page.evalJs(`(() => { const ta = document.querySelector('#p-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); return ta.value; })()`);
+// The error leaves the desk awaiting on it; the window's next hook clears that.
+await ingest({ hook_event_name: 'UserPromptSubmit', message: 'carry on' });
 
 await ingest({ hook_event_name: 'Stop', effort_level: 'medium' });
 await ingest({ hook_event_name: 'PreCompact', trigger: 'manual' });

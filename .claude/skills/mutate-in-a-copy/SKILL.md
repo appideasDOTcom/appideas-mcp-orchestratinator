@@ -69,6 +69,16 @@ folder dialog). Read the channel for a QA announcement before believing
 those, and rerun once the ports are quiet. Rerun at 20:53Z with nothing
 else on them, it read the predicted 11 and 268 ✓.
 
+**`run-mutants.mjs --control` settles it in the same run** (2026-11-14).
+It runs each suite in the list once more at the end with nothing mutated:
+`CONTROL [nothing mutated] (floor, 10s): 0 failing, 1057 ✓`. That day a
+host mutant read three reds: the one predicted, and "a turn written while
+the send is still in flight reaches the floor anyway" with "the floor
+gained a turn rather than replaying the transcript", in a section 500
+lines from the change, at load 5.5 with nothing else on the ports. Run
+again beside a control, the control was 320 ✓ and the mutant had its one
+red. Report an unpredicted red with what the control read, not as "load".
+
 Keep the JSON file outside the repo. A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
 that way on 2026-11-02 and had to be discounted in the report; say so if
@@ -162,6 +172,24 @@ node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs /tmp/page.json \
   'PORT=8916 CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'
 # [["the operator's height is not a floor", "src/ui/floor.js", "const floorH = Math.max(base, set ?? 0);", "const floorH = base;"], …]
 ```
+
+The file a page mutant breaks need not be a page file. The check's runner
+serves the whole copy, so a mutant in `src/floor.js` is read off the page
+the same way. On 2026-11-14 the board's clearing of a refused model change
+was removed there, and `run-check-chat-controls.sh` went red on the two
+select lines. And until that day the command above printed its own usage:
+without `--dest` the tool dropped its first argument. It was run both ways
+after the repair.
+
+**"THE CHECK DID NOT FINISH" is the machine until shown otherwise; read
+`uptime` before the code.** The same day, with another desk's emulator
+and Xcode builds holding the load average at 66–90, a control ended that
+way once and two of three mutants did in the next batch. Each died in
+`open()` (`drive.mjs:96`, the page's first load), before any step of the
+check. The check itself was green 4 of 4 on the tree in between. The tool
+now prints a control's last lines when it has no verdict, as it already
+did for a mutant. A mutant that did not finish is not a result either way:
+run it again, and report the run in which it reached a verdict.
 
 Two things a new page check needs before it can be mutation-tested this
 way, both learned on issue #13:

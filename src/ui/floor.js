@@ -4434,6 +4434,19 @@
     return held ? `${persona}’s conversation is open in your editor.` : `${persona}’s machine isn’t reachable right now.`;
   }
 
+  /**
+   * The words an error turn hands back to the message box: what was typed
+   * and is still pending, and nothing else. A pick from the model or effort
+   * select is sent as a message (`/model opus`) and waits in the same list,
+   * so a refused pick used to land in the box, ahead of any draft, as a
+   * command the operator never typed (costmo, 2026-11-14: keep it out). The
+   * refusal is on the desk in words and the select is back on what the
+   * window has; the pick is made again from the select.
+   */
+  function handedBack(sending) {
+    return sending.filter((p) => !p.pick).map((p) => p.text).filter(Boolean).join('\n\n');
+  }
+
   /** The compacting line: which kind, and for how long. */
   function compactingLine(c, nowMs = Date.now()) {
     if (!c?.since) return '';
@@ -4512,7 +4525,9 @@
     // because clobbering whatever is in the box now would be the same mistake in
     // the other direction.
     if (rows.some((r) => r.role === 'error')) {
-      const lost = ui.sending.map((pnd) => pnd.text).filter(Boolean).join('\n\n');
+      // What was typed, that is. A select's pick is pending here too, and is
+      // not the box's to be given (handedBack).
+      const lost = handedBack(ui.sending);
       ui.sending = [];
       const box = $('p-text');
       if (lost && box) {
@@ -7428,7 +7443,7 @@
    * generic failure, because "the host is offline" is something the person can
    * act on and "failed" is not.
    */
-  async function sendChat(given = null) {
+  async function sendChat(given = null, { pick = false } = {}) {
     // A meeting room's composer is #p-text too, so Enter and the saved
     // prompts are this file's; what Send does there is the room's.
     if (ui.meeting) return sendMeeting(given);
@@ -7447,7 +7462,9 @@
       if (!r.ok) throw new Error(body.error ?? `send failed (${r.status})`);
       // Accepted by the board is not the same as in the conversation, so it
       // shows as sending until the window itself reports it.
-      ui.sending = ui.sending.concat([{ text, at: Date.now() }]);
+      // A select's choice is marked: an error turn hands typed words back to
+      // the box, and this was never in it.
+      ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(pick ? { pick: true } : {}) }]);
       if (fromBox) {
         $('p-text').value = '';
         stashDraft();   // handed over: no longer a draft
@@ -7681,7 +7698,7 @@
     if (act !== 'set-model' && act !== 'set-effort') return;
     const v = e.target.value;
     if (!v) return;
-    sendChat(act === 'set-model' ? `/model ${v}` : `/effort ${v}`);
+    sendChat(act === 'set-model' ? `/model ${v}` : `/effort ${v}`, { pick: true });
   });
 
   document.addEventListener('input', (e) => {

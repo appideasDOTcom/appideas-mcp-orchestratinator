@@ -550,7 +550,23 @@ PORT=8922 CDP=9262 .claude/skills/verify-ui-change/run-check-chat-controls.sh "$
 #   ✓ neither select is rewritten while nothing about it changes — an open menu is left standing
 #   ✓ while the window asks, both are dimmed and say why — a pick then would be dropped
 #   ✓ over the whole run each is rewritten once — its placeholder row leaving …
+#   ✓ a model change the host refused is no longer shown as asked for
+#   ✓ and the select is back on the model the window is on, not the one that was picked
+#   ✓ and the message box holds the draft it held, with no command put into it
 ```
+
+The last two are a refused change: a pick of `opus`, then the host's
+`error` posted as the seed host with `command: 'model'`, which is how the
+board knows what was refused. A host event is a full step here because the
+seed host is registered; no real host is needed to show a refusal. The
+step also puts a draft in the box first and reads it back after. That
+line exists because the step, when it only printed the box, showed
+`/model sonnet\n\n/model opus` in it: `settle()` hands pending messages
+back to the box on an error turn, and a select's pick is pending in the
+same list. No suite and no earlier check had looked at the box after a
+refusal. costmo ruled it out of the box the same day (`handedBack`). When
+a step drives a control, print what is around it as well as the control;
+this one was found by a `box:` field added in passing.
 
 Three things from building that part:
 

@@ -55,7 +55,10 @@ Three things to check in it:
   that is a question for the channel, not a stash. **The exception is a
   preview, and only costmo can ask for one.** He types in the window to see
   the change before committing it, as in "rebuild and restart so I can
-  see the difference now" (twice for #43, 2026-11-05). Deploy the dirty
+  see the difference now" (twice for #43, 2026-11-05), or "rebuild and
+reload" typed straight after a change was reported as in the tree and not
+deployed (2026-11-14, with `src/floor.js` and `host/index.js` both
+changed, so both halves went). Deploy the dirty
   tree, but only the halves it touches: for a page change that is the
   container alone, and the host stays up. Say UNCOMMITTED on the channel
   before and after, and say that `/health`'s `commit` is HEAD, not what
@@ -76,9 +79,27 @@ Three things to check in it:
 # say so on the channel first — QA's MCP session drops with the server
 docker compose up -d --build 2>&1 | tail -4      # must print "Recreated", not "Running"
 launchctl kickstart -k gui/$(id -u)/com.appideas.orchestratinator-host
-sleep 8
+.claude/skills/deploy-both-halves/settled.sh src/floor.js       # waits for the host to read live; then each file's hash, container against tree
 .claude/skills/deploy-both-halves/status.sh askUnanswered promptOffer
 ```
+
+[`settled.sh`](settled.sh) replaced a `sleep 8` here (2026-11-14). An
+agent's shell refuses a bare foreground `sleep`, and eight seconds was a
+guess. It waits on the fact, a hosted desk reading live in `/api/floor`,
+and says how long that took (0–2 s on the day). Then, for each `src/` file
+named, it prints the container's sha256 against the tree's:
+`src/floor.js: container a5f252c76fca = tree`. That is the proof for a
+change in `src/` outside the page, where `board-counts.sh`'s `app.js` hash
+says nothing and a symbol count needs a symbol that was absent before.
+`unask` read 2 in the served `app.js` before its deploy, inside
+`unasked`. It exits 1 on `DIFFERS`, `NOT IN THE CONTAINER` (a `host/`
+file: the image holds no host) and `HOST NOT LIVE`; each was run.
+
+A both-halves deploy leaves two failure lines in the host log, from the
+host that was going away while the container was replaced: the work poll
+`failed (UND_ERR_SOCKET: other side closed)` and `unregister not delivered
+(… ECONNRESET)`, both timed inside the swap and before the new
+registration line. They are not the new host's.
 
 `Container … Running` instead of `Recreated` means the image did not change
 and your edit is not in it. Chaining the two restarts behind `npm test` once

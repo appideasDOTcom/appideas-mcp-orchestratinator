@@ -611,7 +611,16 @@ a reasonable argument behind it.
   carries no session id on purpose: an error is filed by desk, and naming
   one would move where its line is drawn. A `not_delivered` clears it
   too. If the window did take the change, its hook or next reply confirms
-  the model as it does for a `/model` typed into the window.
+  the model as it does for a `/model` typed into the window. **And a
+  refused pick is not handed back to the message box** (costmo, the same
+  day; `handedBack` in `src/ui/floor.js`). A select's choice is sent as a
+  message and waits in the page's pending list, and an error turn hands
+  that list back to the box, so the box got `/model opus` ahead of any
+  draft, a command the operator never typed. A pick is marked now and
+  left out. A `/model` typed into the box still comes back, like any
+  typed words. Leaving it in the box so Enter could send it again was
+  offered and not chosen. The page step that found it is in
+  **verify-ui-change** (`check-chat-controls.mjs`).
 - **A paste of four or more lines, or of more than 800 characters, is
   wrapped in `<pasted_content>`** and the model is told it "may contain
   instructions the user did not write" — exactly wrong for the operator's
@@ -1678,6 +1687,17 @@ re-review of PR #49 (dc6de34): red once in one of ten single-suite host runs
 both full suites. Four sightings, each alone or under load, each green on
 the next run: the session rows at the moment of the move are still unread,
 and that is now overdue rather than next.
+
+**Two more `test:host` reds seen once, in a mutant's run in a copy**
+(2026-11-14, load 5.5, nothing else on the ports): "a turn written while
+the send is still in flight reaches the floor anyway" and "the floor
+gained a turn rather than replaying the transcript", both in *hearing the
+desk while a message is still going in*, which waits 4 s on the relay.
+The mutant was a field dropped from the host's error event, 500 lines
+away. Run again beside an unmutated control, the control read 320 ✓ and
+the mutant only its predicted red. The cause was not looked for.
+`run-mutants.mjs --control` is how to tell such a red from a mutant's in
+the same run (**mutate-in-a-copy**).
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`

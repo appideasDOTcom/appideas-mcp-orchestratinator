@@ -1502,6 +1502,9 @@ try {
   await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'model', said: "Model 'gpt' not found", text: '/model gpt', session_id: 's-changer' }]);
   eq(await asked(), ['claude-opus-5-5', null, 'medium', null], "and the window's refusal, a receipt that names no model, clears it with the model as it was");
   await change('/effort low');
+  // The sentence here is made up. What a window says about an effort change
+  // it does not make was not measured; the rule under test is the receipt
+  // naming no level, whatever its words.
   await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'effort', said: 'Effort level not changed', text: '/effort low', session_id: 's-changer' }]);
   eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'the same for an effort receipt that names no level');
   await change('/model sonnet');
@@ -1549,7 +1552,7 @@ try {
     const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/chat-controls-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue, modelOptions, effortOptions, selectBlock };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue, modelOptions, effortOptions, selectBlock, handedBack };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
@@ -1598,6 +1601,11 @@ try {
     eq(page.selectBlock(true, false, true, 'Bo'), 'Bo is asking something — answer it above first.', 'a window that is asking takes none — Send would send nothing — and says so');
     eq(page.selectBlock(false, true, false, 'Bo'), 'Bo’s conversation is open in your editor.', 'nor one an editor holds');
     eq(page.selectBlock(false, false, false, 'Bo'), 'Bo’s machine isn’t reachable right now.', 'nor one whose host is away');
+    // What an error turn gives back to the box: typed words, never a pick.
+    eq(page.handedBack([{ text: 'a paragraph somebody wrote' }, { text: '/model opus', pick: true }, { text: 'and a second' }]), 'a paragraph somebody wrote\n\nand a second',
+      'an error hands back what was typed, in order — and not a pick from a select, which was never in the box');
+    eq(page.handedBack([{ text: '/effort high', pick: true }]), '', 'a refused pick alone hands back nothing');
+    eq(page.handedBack([{ text: '/model opus' }]), '/model opus', 'a /model typed into the box is the operator\'s words and comes back like any other');
     // The hints say what a choice does now (costmo, 2026-11-14).
     for (const list of [page.PAGE_COMMANDS, FLOOR_COMMANDS]) {
       for (const name of ['model', 'effort']) {
