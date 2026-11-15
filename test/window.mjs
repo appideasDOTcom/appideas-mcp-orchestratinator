@@ -1461,6 +1461,12 @@ async function main() {
     assert(btw.ok && btw.command === 'btw', `/btw is confirmed on its overlay${btw.ok ? '' : ` — ${btw.error}`}`);
     eq([btw.said, btw.answer], ['answered in the window', '42'], 'with the answer read off the window');
     eq(keysSince(mark).filter((k) => k[0] === 'btw' && k[1] === '"Enter"').length, 0, 'and nothing pressed Enter into the overlay');
+    // The log is the stand-in's, written when the key reaches it, and
+    // send() returns when tmux has taken the key. Read straight after, the
+    // log once held no Escape yet (QA, PR #55 Info 9: 1 red in 4 runs, at
+    // load 24–84, with the composer back on the next row). Waited for, then
+    // counted, so "once" still means once.
+    await until(() => keysSince(mark).some((k) => k[0] === 'btw' && k[1] === '"Escape"'));
     eq(keysSince(mark).filter((k) => k[0] === 'btw' && k[1] === '"Escape"').length, 1, 'which the host closed afterwards, once');
     assert(await until(async () => W.composerOf((await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout) !== null), 'so the composer is back');
 

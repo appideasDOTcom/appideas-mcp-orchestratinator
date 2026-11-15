@@ -1783,6 +1783,18 @@ test builds on this machine, with a page-mutant run of ours beside it.
 session rows were again not read: the round was a review's fixes, none in
 the move.
 
+**Sixth, the same day**, in QA's close of PR #55 at f5c2a92: their first
+chain run, load 16–27 with their own page lane beside it; 327 ✓ in the
+second.
+
+**A key log is read after a wait, not straight after `send()`** (QA,
+PR #55 Info 9). The composer stand-in writes its log when a key reaches
+it, and `send()` returns when tmux has taken the key. "which the host
+closed afterwards, once" read the log at once and found no Escape in 1 of
+QA's 4 window runs (load 24–84), with the composer back on the next row.
+It waits for the Escape now and then counts it. A count of keys taken
+straight after a send that ends on a key has the same gap.
+
 **Two more `test:host` reds seen once, in a mutant's run in a copy**
 (2026-11-14, load 5.5, nothing else on the ports): "a turn written while
 the send is still in flight reaches the floor anyway" and "the floor
