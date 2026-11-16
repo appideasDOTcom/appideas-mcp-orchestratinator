@@ -611,13 +611,12 @@ onto another floor from the real page (the browser check has it against
 seed-sessions' host, and real windows have it through the floor's route,
 `I AM ms-b/qa`); and Resume of a room with a real second session in it
 (the browser check has it; a real window has the `--resume` half, asked
-back through the route). **Also owed, after the commit that ships it**: the
-marketing facts' re-anchor (**reanchor-marketing-facts**; the round moved
-`host/window.js`, `host/index.js`, `src/floor.js`, `src/db.js` and both
-page scripts), with three facts changed in substance: the version
-(0.12.9), a new table (`desk_twins`), and thirteen suites where the file
-says eleven. No network call was added: a seat's binding file is written
-by the host on its own disk.
+back through the route). **The marketing facts' re-anchor was owed too, and was done at
+`9a344f5`** (2026-11-16, after PR #57's round was pushed; the file's
+header has the count). Two things this note had wrong: the file states no
+suite count, so there was no "eleven" to correct, and the 0.12.9 feature
+needed a row of its own, which the note did not list. No network call was
+added: a seat's binding file is written by the host on its own disk.
 
 **What the round that answered QA's review of PR #57 ran, and left**
 (2026-11-16, the release check; nine findings, in `src/floor.js`,
