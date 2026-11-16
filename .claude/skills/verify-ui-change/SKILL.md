@@ -495,6 +495,56 @@ stale entry is re-pointed at the line's new wording, never counted as a
 survivor. Each entry's first field says what is wrong with the mutant,
 which is what to predict the red from.
 
+**Page checks not run in the 0.12.8 round, owed at its hand-off**
+(2026-11-16; costmo asked for only the covering checks per turn). Run in
+that round: check-meeting-box, check-meeting, check-select, check-pop-foot
+and check-take-floor. Not run, though the round touched what they read:
+check-popout (the popout's desk is drawn through the same `desk()`, whose
+arguments changed), check-hide, check-archive and check-card-move (rooms
+are laid out by `floorPlan` now), and check-redraw and check-backdrop
+(Take a desk's `takeListing` changed). Strike this paragraph when they
+have been run.
+
+### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
+
+Opened while standing on a floor, Take a desk leaves the floor field alone
+when a folder is chosen, so a folder bound elsewhere is a move to this
+floor; from all floors a bound folder still proposes its own.
+
+```bash
+PORT=8947 CDP=9287 .claude/skills/verify-ui-change/run-check-take-floor.sh "$PWD"
+# … PASS · 8 of 8          (about fifteen seconds)
+```
+
+[`run-check-take-floor.sh`](run-check-take-floor.sh) serves any directory
+with `seed-desk.mjs`'s desk on `lab` and `answering-host.mjs`, whose
+answers file binds `/repo/deep/nest/bound-here` as `cy` on `elsewhere`.
+Its red was run on a copy holding the app.js from before the change
+(`copy-repo.sh`, then `git show 0f1ecb3:src/ui/app.js` into it): four of
+eight red, and the all-floors row green, since that behaviour did not
+change. Three things it taught in an afternoon:
+
+- **A fixture value equal to the old code's answer passes on the old
+  code.** "A floor picked by hand is kept" first picked the first floor
+  that was not `lab`, which was `elsewhere`, the bound folder's own floor
+  and exactly what the old rule wrote. The row was green on the old code.
+  It picks a floor that is neither now ("a fallback that happens to match
+  the fixture", above, from the other side).
+- **Choosing a folder before the dialog knows its host asks nobody.**
+  `browseTo()` returns at once while the form has no host, and the form
+  has none until `/api/floor/folders` answers. The first cut chose at
+  once. Its first section passed because two rows of reading came first,
+  and its second died on a ten-second wait with nothing sent. Wait for
+  the Choose folder button to be enabled, which is what a person waits
+  for.
+- **A wait that times out should say what the page held.** `choose()`
+  throws with the dialog's agent, floor and text. "waitFor timed out"
+  said nothing; the dialog's text showed a form still on `lab` with no
+  folder, and the host's work log showed no browse had been sent.
+- A folder is chosen with `browseTo()`, the function a row's click calls,
+  because this host has a folder dialog and the page draws no rows. Say
+  so when reporting from it.
+
 ### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
 
 Issue #23 (2026-11-04, 0.10.16): **select desks** on a room, check desks,
@@ -1254,7 +1304,17 @@ cost rounds here — worth knowing even if you hand-roll something else:
 - **`click()` dispatches a bubbling `MouseEvent`.** Floor pills are delegated and
   read the event target; a bare `.click()` on some of them does nothing.
 
-Beyond those four, a check has these (issues #13 and #19):
+Beyond those four, a check has these (issues #13 and #19, and the 0.12.8
+round for the last two):
+
+- **`page.windowBounds()`** is the page's window as the browser has it
+  (`left`, `top`, `width`, `height`, `windowState`), and
+  `windowBounds({ … })` places it first. Use it when a page moves or
+  raises another window: what the page's own `screenX` says is the page's
+  word.
+- **`page.scheme('light' | 'dark' | null)`** sets the colour scheme the
+  page is told. A headless Chrome takes the machine's, so one of the two
+  palettes is otherwise never looked at.
 
 - **`attach(match)` and `targets()`**, exported beside `open()`. A popup a
   page opens is a CDP target of its own: `attach` waits for one whose URL
@@ -1299,6 +1359,8 @@ whole question.
 | History | `#history`; `#dlg #hist-query` (type, then dispatch a `keydown` with `key: 'Enter'`), `#dlg #hist-deep`, rows `#dlg .hist-row`, the coverage line `#dlg .hist-cover` |
 | a conversation open to read | `#floor-panel` `dataset.reading` (the session id — wait on this), `.p-reading-state`, `[data-act="read-back"]`; `#p-text` must be absent |
 | a desk's Sessions rows | `#floor-panel [data-act="sessions"]`, then `#dlg .sess-row` (`.sess-title`, `.sess-meta`, `.sess-detail`) |
+| a meeting's box on the floor | `svg.room .meetBox[data-meeting="<room id>"]`: `.meetFrame` (the edge), `.meetLabel` ("In a meeting", `data-act="meet-raise"`), `.meetEnd` (`data-act="meet-end"`, `aria-disabled`). Read a placard's words from `.meetTabText`'s own text nodes: its `<title>` is a sibling in the same group |
+| Take a desk's floor and button | `#dlg #desk-channel` (its `value`), `#dlg [data-do="desk-take"]` (its words: Take desk / Move to <floor> / Bring onto the floor); wait for `#dlg [data-do="desk-pick"]` enabled before choosing a folder |
 
 Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true}))` — the
 handler is delegated and reads the event target.

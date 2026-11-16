@@ -2081,6 +2081,33 @@ operator's live floor.
 
 ## Conventions
 
+- **In a development turn, run the tests that cover what you touched;
+  the long runs wait for the hand-off, and you say which.** costmo,
+  2026-11-16, building the meeting box in his window: "limit tests you run
+  during turn-by-turn development to those that are about code you've
+  touched (and related)", because the time a task takes had grown. And,
+  the same hour: "I am in no way opposed to thorough testing. I'm just
+  wanting for us to be more picky about when we're running which tests,
+  being confident that no release will pass without a full run." So in a
+  turn: the suite the change is in (`npm run test:floor` is eight
+  seconds), the page checks that read the changed code, and a mutant or
+  two where a new test has never been seen red. Left for the QA hand-off
+  or the release: the full `npm test`, the page checks that only might be
+  affected, and any mutation batch longer than a few minutes. What was
+  left is written where the next agent will find it (a paragraph in the
+  skill beside the check, the mutant list kept there too), and said in
+  the report. It is a rule about when, not about how much: do not thin a
+  test to save a run.
+- **When the platform will not do all of it, ship the nearest thing that
+  works and say what is unmeasured.** His words on the "In a meeting"
+  click, where a browser decides what a page may do to a window: "I'll
+  take as much as we can reasonably do … get as close to the desired
+  features as possible without delaying progress." He then tried it on
+  his three monitors and reported the one case that fell short, which is
+  how the window-management permission was found in ten minutes. A
+  headless browser could not have said. Do not hold a change for a
+  measurement only his desktop can make, and do not build a fallback for
+  a failure nobody has seen.
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
 - **The tree is committed whenever costmo chooses, so an edit is not

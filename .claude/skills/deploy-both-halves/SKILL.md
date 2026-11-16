@@ -155,6 +155,23 @@ The host started after the bump and the plugin cache already reads
 0.10.20 (`installed_plugins.json`), so both stay. Task 275 went out as
 the server half only on that reading, and the note said so.
 
+**The served version is `/health`'s, or `update.current.version` in
+`/api/state`. Not the last `"version"` in that payload.** On 2026-11-16,
+straight after a bump to 0.12.8, a one-line `sed` over `/api/state` read
+0.12.7. It had matched `update.latest.version`, which is the newest build
+on GitHub's `main`, and the payload has no top-level `version`. `/health`
+said 0.12.8 all along. Read `/health`, or parse the JSON and name the
+field.
+
+**A preview's commit label is HEAD's, so the next clean deploy is diffed
+by hash.** After an uncommitted preview, `/health` names the commit the
+tree stood on, not what is served. When costmo then commits and asks for
+a rebuild, "what changed since what is running" is the served files'
+sha256 against the tree's (`/floor.js`, `/app.js`, `/styles.css`), and
+the host's start time against the last change under `host/`. Three
+deploys went that way on 2026-11-16: each time one page file differed,
+the host and the plugin were already current, and the note said so.
+
 ## The third half: the plugin
 
 Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).
@@ -196,6 +213,17 @@ directory, not a measurement on a live window: do not drive anyone's desk
 to prove it. Say in the note which event hooks the running windows still
 have, and that until they restart the board gets those events only from
 the host's transcript side (compaction state, model switches on 0.10.9).
+
+**On 2.1.325 a version bump is still copied** (2026-11-16, the 0.12.8
+bump). With `plugin/` unchanged but for its manifest's version, the same
+command that said "nothing to update" two days earlier answered
+`Plugin "orchestratinator-floor" updated from 0.12.7 to 0.12.8 for scope
+user. Restart to apply changes.`, and `installed_plugins.json` moved to a
+`…/orchestratinator-floor/0.12.8` cache directory. So on this version
+both readings have been seen: an edit with the version unchanged is "read
+from its folder", and a changed version is copied. Which of the two a
+window then loads was not measured that day. Quote the answer the command
+gives; do not predict it.
 
 **When only the manifest's version moved** (`npm run set-version` bumps
 all three files; 0.10.10 changed no hook), still update — the cache's
