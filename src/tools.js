@@ -152,9 +152,14 @@ export function registerTools(server, { store, context }) {
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent, 'poll_messages');
-      const rows = store.pollMessages(channel, agent, args.since ?? 0, args.limit ?? 100);
+      // A second session reads nothing from before it was made, whatever
+      // `since` it sends: its first poll, with none, used to hand it the
+      // floor's oldest hundred broadcasts, which its agent's first desk has
+      // (QA, PR #57 finding 2; desk_twins.start_cursor in src/db.js).
+      const since = Math.max(args.since ?? 0, store.twinOf(channel, agent)?.start_cursor ?? 0);
+      const rows = store.pollMessages(channel, agent, since, args.limit ?? 100);
       const messages = rows.map((r) => ({ ...r, body: safeParse(r.body) }));
-      const cursor = messages.length ? messages[messages.length - 1].id : (args.since ?? 0);
+      const cursor = messages.length ? messages[messages.length - 1].id : since;
       // Remember how far this agent has read so the dashboard can show a
       // meaningful unread count. Best-effort — never fail the poll over it.
       try { store.advancePollCursor(channel, agent, cursor); } catch { /* ignore */ }

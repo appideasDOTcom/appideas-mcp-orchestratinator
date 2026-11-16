@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
@@ -64,15 +64,21 @@ const deskOf = (f, agent, channel = CH) =>
   f.channels.find((c) => c.channel === channel)?.desks.find((d) => d.agent === agent);
 
 rmDb(DB_PATH);
-const server = spawn('node', ['src/server.js'], {
+// How long this suite's board watches a silent meeting room before it reads
+// its window as gone (TWIN_UNHEARD_MS in src/floor.js; 90 s on a real board).
+const UNHEARD_MS = 3000;
+// A function, because one section restarts the board on the same database.
+const startServer = () => spawn('node', ['src/server.js'], {
   // FLOOR_SESSION_TTL_MINUTES at its 1-minute floor, so the staleness assertions
   // can age a session out with a direct SQL touch instead of a real hour.
   env: {
     ...process.env, PORT: String(PORT), DB_PATH,
     ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
+    ORCH_TWIN_UNHEARD_MS: String(UNHEARD_MS),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
+let server = startServer();
 
 try {
   if (!(await waitHealthy())) throw new Error('server never became healthy');
@@ -4129,6 +4135,135 @@ try {
     await floor();
     eq([await desk(SA, r.body.agent), await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ? AND agent = ?`).get(SA, r.body.agent).n)], [null, 0],
       'one its host never seated gives its name back after two minutes, room or no room');
+
+    // A room that is open and merely silent (QA, PR #57 finding 1). Every
+    // window stopped for longer than a room stays live — a laptop asleep —
+    // and the first page poll afterwards reached the board before the room's
+    // touch: the session was closed in a meeting nobody had ended. `hush`
+    // is that silence: the room's last touch, 200 s ago.
+    const hush = (id) => sql((db) => db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-200 seconds') WHERE id = ?`).run(id));
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    const quiet = r.body.agent;
+    await work();
+    await seated(SA, quiet, 'sdk-quiet');
+    await age(quiet, 60);
+    rm = await room(['rae', quiet]);
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'a room that is open and has not been heard from keeps its second session at the look that finds it so: the board was not watching while it was silent');
+    eq((await op('/api/floor/meeting/touch', { id: rm.id })).body.live, true, 'its window, awake again, says the room is open');
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [], 'heard from inside the watch, the room has its session still, however long ago the silence was found');
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'silent again later, it is watched afresh from that look, not from the first one');
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [quiet], 'watched for the whole of it and still silent, its window is gone without a word: the session is closed');
+    await gone(SA, quiet);
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+
+    // A second session's mail (QA, PR #57 finding 2), through the agents'
+    // own MCP tools: it starts where it is made, not at the floor's first
+    // message, and a name taken again starts where it stopped.
+    const mcp = async (agent, tool, args = {}) => {
+      const h = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': SA, 'X-Agent': agent, 'x-orchestratinator-key': KEY };
+      const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: h, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'floor-test', version: '0' } } }) });
+      await init.text();
+      const sid = init.headers.get('mcp-session-id');
+      await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }).then((x) => x.text());
+      const x = await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } }) });
+      const text = await x.text();
+      const data = text.includes('data:') ? text.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5)).join('') : text;
+      return JSON.parse(JSON.parse(data).result.content[0].text);
+    };
+    const unreadOf = async (agent) => (await desk(SA, agent))?.board?.unread ?? null;
+    const leave = async (agent) => { await op('/api/floor/desk/leave', { channel: SA, agent }); await work(); await gone(SA, agent); };
+    // Sent by quinn-2, which is in no room: rae is in one, and a broadcast
+    // from inside a room reaches only that room.
+    await mcp('quinn-2', 'send_message', { body: 'before the second session, one' });
+    await mcp('quinn-2', 'send_message', { body: 'before the second session, two' });
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    const mail = r.body.agent;
+    await work();
+    await seated(SA, mail, 'sdk-mail');
+    const who = await mcp(mail, 'whoami');
+    eq([who.agent, who.session_of, /^You are a second session of quinn on this channel/.test(who.note ?? '')], [mail, 'quinn', true], 'whoami tells a second session that it is one, and whose (through the tool)');
+    eq((await mcp('quinn', 'whoami')).session_of ?? null, null, 'and tells the agent\'s first desk nothing of the kind');
+    eq(await unreadOf(mail), 0, 'a second session starts with nothing unread: what the floor carried before it was made is in its first desk\'s mail');
+    eq((await mcp(mail, 'poll_messages')).count, 0, 'and its first poll, with no `since`, is handed none of it');
+    await mcp('quinn-2', 'send_message', { body: 'after it was made' });
+    eq(await unreadOf(mail), 1, 'what is sent after it was made is its to read');
+    eq((await mcp(mail, 'poll_messages')).messages.map((m) => m.body), ['after it was made'], 'and its poll returns that, and only that');
+    await leave(mail);
+    await mcp('quinn-2', 'send_message', { body: 'while it was away', to: mail });
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: mail, meeting: true });
+    eq(r.body.agent, mail, 'the name is taken again');
+    await work();
+    await seated(SA, mail, 'sdk-mail-2');
+    eq([await unreadOf(mail), (await mcp(mail, 'poll_messages')).messages.map((m) => m.body)], [1, ['while it was away']], 'a name taken again starts where it stopped: what was addressed to it while it was away is not lost');
+    await leave(mail);
+    await sql((db) => db.prepare(`UPDATE agents SET poll_cursor = 0 WHERE channel = ? AND agent = ?`).run(SA, mail));
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: mail, meeting: true });
+    await work();
+    await seated(SA, mail, 'sdk-mail-3');
+    eq(await unreadOf(mail), 0, 'and one whose row never read anything (a session made before this) starts at the newest, as a new name does');
+
+    // Which session a name means, at the two tools that ask (QA, PR #57
+    // finding 4): the rule was pinned as a function and at neither call.
+    await age(mail, 60);
+    rm = await room(['rae', mail]);
+    let sent = await mcp('rae', 'send_message', { body: 'to the one in my room', to: 'quinn' });
+    eq([sent.to, sent.addressed_as], [mail, 'quinn'], 'send_message: a name written from inside a meeting room with one of that agent\'s sessions goes to that session, and the reply says so');
+    eq((await mcp(mail, 'poll_messages')).messages.map((m) => m.body), ['to the one in my room'], 'which is the one that reads it');
+    let task = await mcp('rae', 'open_task', { title: 'for the one in my room', assignee: 'quinn' });
+    eq([task.assignee, task.addressed_as], [mail, 'quinn'], 'open_task: the same name is assigned to the same session');
+    eq((await mcp(mail, 'list_tasks', { status: 'open', mine: true })).tasks.map((t) => t.title), ['for the one in my room'], 'which is the one that lists it as its own');
+    sent = await mcp('quinn-2', 'send_message', { body: 'from outside the room', to: 'quinn' });
+    eq([sent.to, sent.addressed_as ?? null], ['quinn', null], 'written from outside the room, the name is the agent\'s first desk');
+    task = await mcp('quinn-2', 'open_task', { title: 'for the first desk', assignee: 'quinn' });
+    eq([task.assignee, task.addressed_as ?? null], ['quinn', null], 'and so is a task\'s');
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    await closes();
+    await gone(SA, mail);
+
+    // A bind onto a name one of the folder's extra desks carries (QA, PR
+    // #57 finding 3). The host gives the name to the folder's own binding
+    // and closes that desk's window, so it is Leave's rule: never mid-turn.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    await work();
+    await seated(SB, 'quinn', 'sdk-qb2');
+    await hev([{ type: 'turn', channel: SB, agent: 'quinn', session_id: 'sdk-qb2', role: 'tool', text: 'Bash: make' }]);
+    r = await op('/api/floor/desk/leave', { channel: SB, agent: 'quinn' });
+    eq([r.status, r.body.code], [409, 'working'], 'a working seat is not left');
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: SB });
+    eq([r.status, r.body.code, r.body.error], [409, 'working', seatWorkingWords(SB, 'quinn')], 'and the folder\'s own desk is not moved onto its name either: the move would close the working seat\'s window');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn' });
+    eq([r.status, r.body.code], [409, 'working'], 'nor is the folder taken there from Take a desk');
+    eq((await work()).length, 0, 'with nothing queued by any of the three');
+    await hev([{ type: 'turn', channel: SB, agent: 'quinn', session_id: 'sdk-qb2', role: 'assistant', text: 'done' }]);
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: SB });
+    eq([r.status, r.body.mode, (await work()).map((x) => `${x.kind}:${x.channel}/${x.agent}`)], [200, 'move', [`bind:${SB}/quinn`]], 'once its turn has ended, the move is taken and handed to the host');
+
+    // What a host said about seats outlives the board (QA, PR #57 finding
+    // 5). It was the board's memory, a host registers once a minute, and
+    // the board calls a host live from its row for 90 s: after every
+    // restart the operator was told a current host "runs a build from
+    // before…". The board is restarted here on the same database, and the
+    // host does not register again.
+    server.kill();
+    await sleep(300);
+    server = startServer();
+    if (!(await waitHealthy())) throw new Error('the board did not come back');
+    const hostNow = (await floor()).hosts.find((h) => h.host_id === 'h-seat');
+    eq([hostNow?.live, hostNow?.seats], [true, true], 'a board that restarted still knows a live host can seat a second desk, before that host has registered again');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says so');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn-2', meeting: true });
+    eq([r.status, r.body.code ?? null], [200, null], 'so another session is not refused as "a build from before"');
+    await work();
 
     // Deleting the floor takes the links with it, like its meeting rooms.
     assert(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ?`).get(SA).n) > 0, 'the floor has a second session on it');

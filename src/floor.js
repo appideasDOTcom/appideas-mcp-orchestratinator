@@ -508,6 +508,19 @@ const TWIN_ENDED_S = 15;
    back, and how long a host is given to close one before it is asked again. */
 const TWIN_UNSEATED_S = 120;
 const TWIN_CLOSE_RETRY_MS = 30_000;
+/* How long the board watches an open room it has found silent before it
+   reads the silence as the room's window being gone. A room that is open
+   and unheard for MEETING_LIVE_SECONDS is two things the board cannot tell
+   apart at one look: a window that crashed, and one that was stopped with
+   everything else (a laptop asleep), where the page poll that runs this
+   sweep reaches the board before the room's touch does. QA measured the
+   second closing a session whose meeting was never ended (PR #57 finding
+   1: a browser stopped 165 s, closed 2 of 2). So silence counts from the
+   look that first finds it: a window that is there says so within its
+   30 s touch, or within Chrome's one wake-up a minute when it is hidden,
+   and 90 s is past both. A crashed window's session closes that much
+   later than it did, which nobody is waiting on. The suites shorten it. */
+const TWIN_UNHEARD_MS = Math.max(0, Number(process.env.ORCH_TWIN_UNHEARD_MS ?? 90_000));
 
 /**
  * Close the second sessions that are in no meeting room now (costmo,
@@ -518,9 +531,11 @@ const TWIN_CLOSE_RETRY_MS = 30_000;
  * A second session made for a room (`for_meeting`) belongs to rooms: it is
  * left while any room that names it as present is live or ended only a
  * moment ago, and closed otherwise — End meeting, a Remove, Bring back, or
- * the room's window gone without a word (not live after
- * MEETING_LIVE_SECONDS). Closed is the desk's own Leave: the host closes
- * its window and drops the seat, and its `unbound` takes the row away.
+ * the room's window gone without a word: not live after
+ * MEETING_LIVE_SECONDS, and still unheard TWIN_UNHEARD_MS after the look
+ * that first found it so (`stillWatched`; a window that slept is not gone).
+ * Closed is the desk's own Leave: the host closes its window and drops the
+ * seat, and its `unbound` takes the row away.
  *
  * Never mid-turn. Leave refuses a working desk, and so does this: the
  * session is closed when its turn has ended, at a later look. Asked of a
@@ -532,6 +547,19 @@ const TWIN_CLOSE_RETRY_MS = 30_000;
  */
 export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {}) {
   const closed = [];
+  // An open room that is not live: held while the board has not yet watched
+  // it stay silent for TWIN_UNHEARD_MS. The watch is kept by the room's last
+  // touch, so one heard from and silent again later is watched afresh, with
+  // no look needed in between to notice it was live.
+  const stillWatched = (r) => {
+    if (r.ended_at) return false;
+    const seen = live.unheard.get(r.id);
+    if (!seen || seen.live_at !== r.live_at) {
+      live.unheard.set(r.id, { at: nowMs, live_at: r.live_at });
+      return TWIN_UNHEARD_MS > 0;
+    }
+    return nowMs - seen.at < TWIN_UNHEARD_MS;
+  };
   for (const t of store.listTwins()) {
     if (!t.for_meeting) continue;
     const k = deskKey(t.channel, t.agent);
@@ -552,7 +580,7 @@ export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {
     // final — the moment's grace is for a window that may be reloading.
     const held = store.meetingsOn(t.channel)
       .filter((r) => r.participants.some((p) => p.agent === t.agent && !p.absent))
-      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S));
+      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || stillWatched(r));
     if (held) continue;
     const last = store.lastTurns().find((x) => x.channel === t.channel && x.agent === t.agent) ?? null;
     if (switchable(h, last, nowMs, { editorOk: true }).error) continue;
@@ -568,6 +596,14 @@ export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {
 
 /** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
 export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor opened in that folder is the other desk, so this conversation stays in the floor\'s window; Open in tmux reaches it.';
+
+/**
+ * A bind that would take a name from a working seat: the folder is being
+ * bound to names one of its extra desks already carries on that floor.
+ */
+export function seatWorkingWords(channel, agent) {
+  return `${agent} already has a desk on ${channel} in this folder, and it is working — its host says so, or its last turn is a tool call. Binding the folder to that name closes that desk's window mid-turn. Wait for it to finish, or stop it first.`;
+}
 
 /** A host from before seats (host/seats.js) cannot be asked for one. */
 export function noSeatsWords(hostName) {
@@ -1556,19 +1592,18 @@ export function createLive() {
    *  people can be searching for different things at once. */
   const recent = new Map();        // host_id -> { request_id, asked_ms, at, rows, error }
   const searches = new Map();      // search id -> { id, query, deep, asked_ms, hosts: Map(host_id -> { name, at, rows, files, ms, error }) }
-  /** Which hosts can put a second desk in a folder (host/seats.js), as each
-   *  said at its last registration. A host from before seats says nothing,
-   *  and is not asked: it would not know the work. */
-  const seating = new Map();       // host_id -> true
   /** A second session being closed because it is in no meeting room now:
    *  when the host was asked, so it is asked once and not at every poll. */
   const closing = new Map();       // deskKey -> ms
+  /** Open meeting rooms the sweep found silent: when it first looked, and
+   *  the touch it was silent since (sweepTwins' `stillWatched`). */
+  const unheard = new Map();       // room id -> { at, live_at }
   /** Seats that were just left: when, so their closed windows' last hooks
    *  do not seat them again (ingestHookEvent). */
   const left = new Map();          // deskKey -> ms
   return {
-    seating,
     closing,
+    unheard,
     left,
     recent,
     searches,
@@ -2838,7 +2873,9 @@ export function buildFloor(store, live = null, sessions = null) {
     // reported" from "reported empty" before it opens the dialog.
     folders_at: live?.folders?.get(h.host_id)?.at ?? null,
     // Whether it can put a second desk in a folder (host/seats.js).
-    seats: live?.seating?.get(h.host_id) === true,
+    // Its own word at its last registration, kept on its row: a board that
+    // restarted still knows it (hosts.seats in src/db.js).
+    seats: !!h.seats,
   }));
 
   return {
@@ -2914,8 +2951,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const name = str(req.body?.name) ?? hostId;
-    store.registerHost(hostId, name, str(req.body?.tmux));
-    if (req.body?.seats === true) live.seating.set(hostId, true); else live.seating.delete(hostId);
+    // `seats`: it can put a second desk in a folder (host/seats.js). A host
+    // from before seats says nothing, and is not asked: it would not know
+    // the work.
+    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3101,7 +3140,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         dialog: f?.dialog === true,
         // Whether it can put a second desk in a folder: Take a desk offers
         // "New desk here" only on a host that can.
-        seats: live.seating.get(h.host_id) === true,
+        seats: !!h.seats,
       };
     });
     // The names somebody has saved, by agent id — for the dialog to show the
@@ -3469,7 +3508,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!h || h.state === 'offline' || !hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
       return res.status(409).json({ error: noHostWords(hostRow?.name ?? h?.host_name ?? h?.host_id ?? null), code: 'no_host' });
     }
-    if (!live.seating.get(hostRow.host_id)) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
+    if (!hostRow.seats) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
     const base = store.twinOf(channel, agent)?.base ?? agent;
     // Asked for by name and there already, as this agent's: that is it.
     const there = as ? store.twinOf(channel, as) : null;
@@ -3559,7 +3598,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       if (!folder.bound) {
         return res.status(400).json({ error: 'That folder is not a desk yet, so there is no agent to seat a second time. Take the desk first.', code: 'not_bound' });
       }
-      if (!live.seating.get(hostRow.host_id)) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
+      if (!hostRow.seats) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
       const base = folder.bound.agent;
       let id = base;
       if (!store.nameFree(channel, base)) {
@@ -3598,6 +3637,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         error: `${channel}/${agent} already sits at ${already.cwd} on ${already.host_name ?? already.host_id}. Pick another name, or leave that desk first.`,
         code: 'desk_taken',
       });
+    }
+    // A desk of this name in this very folder that is one of the folder's
+    // extra desks (a seat, host/seats.js) gives the name up to the folder's
+    // own binding: the host closes its window and removes it (`bind()`). So
+    // Leave's rule holds for it as for the desk that moves — never mid-turn.
+    // It was checked for neither: Leave on a working seat was refused and a
+    // move onto its name was taken (QA, PR #57 finding 3). The host refuses
+    // the same thing from the pane, for a window that started working since.
+    if (already && already.scope === 'seat' && already.cwd === path) {
+      const last = store.lastTurns().find((t) => t.channel === channel && t.agent === agent) ?? null;
+      if (isWorking(already, last) && already.state !== 'offline' && secondsSince(iso(already.host_seen), nowMs) < HOST_STALE_SECONDS) {
+        return res.status(409).json({ error: seatWorkingWords(channel, agent), code: 'working' });
+      }
     }
     // The seat exists from this moment, so the desk is drawn — as not hosted —
     // while the host works, and the name it was given is on it when it comes.
