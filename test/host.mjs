@@ -737,6 +737,16 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'pane')?.hosted?.live === true ? true : null), 10000), 'and hosted');
   // Opened, not messaged: the stand-in writes whatever it is sent into the
   // fixture's one transcript, which is `free`'s, and later cases count that.
+  //
+  // The window registers late here, on purpose (QA, PR #57 Info 10). This
+  // case kills the pane as soon as it has read what the pane was given, and
+  // whether the host had seen the window ready by then was a race. When it
+  // had not, the host waited 45 s on a window that was gone, with its line
+  // held, and the seven rows of "taking a desk" below failed for it. That
+  // was the "Take a desk seven", read as load four times. With the delay
+  // the host is always still waiting when the pane goes.
+  writeFileSync(`${FIX}/ready-delay.flag`, '8000');
+  const paneOpenedAt = host.log.length;
   eq((await json('/api/floor/open', { channel: CH, agent: 'pane' })).status, 200, 'the floor opens it');
   const paneEnvLine = await until(() => {
     const log = existsSync(`${FIX}/pane-env.log`) ? readFileSync(`${FIX}/pane-env.log`, 'utf8') : '';
@@ -747,9 +757,13 @@ try {
     const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
     for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);
   } catch { /* gone */ }
+  rmSync(`${FIX}/ready-delay.flag`, { force: true });
   writeFileSync(`${FIX}/roster.json`, rosterWas);
   rmSync(`${paneDir}/.mcp.json`);
   await json('/api/floor/rescan', {});
+  assert(await until(() => (/dropped desk .*\/pane .*asked from the floor/.test(host.log.slice(paneOpenedAt)) ? true : null), 10000),
+    'a window closed while the host was still waiting for it to start does not hold the host\'s line: what is asked of it next is done at once',
+  );
 
   /* ── taking a desk from the floor ──────────────────────────────────────────
    * The first door that needs no terminal. The route refuses what the board

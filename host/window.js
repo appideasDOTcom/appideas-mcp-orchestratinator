@@ -670,8 +670,28 @@ export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = nul
     // Did it exit? A window that is gone is never going to become ready, and
     // waiting the full timeout to say nothing useful about it helps nobody.
     if (target) {
-      const dead = await tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
-      if (dead.ok && dead.out.trim() === '1') {
+      const dead = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{pane_dead}']);
+      const [paneNow, deadNow] = dead.ok ? dead.out.trim().split(' ') : [];
+      // Gone altogether, not exited: killed with its window, by hand or by
+      // whatever closed it. tmux does not say so. Asked about a pane that no
+      // longer exists it answers for another pane of the session, exit 0
+      // (measured on 3.7c: `display-message -p -t 'p:@1.%1' '#{pane_dead}'`
+      // after `kill-pane` printed 0), so the read above took a closed window
+      // for a live one and this loop waited out the whole timeout on it —
+      // 45 s with the host's line held, every piece of work behind it
+      // waiting. That was test:host's "Take a desk seven" (QA, PR #57 Info
+      // 10: 46 s of nothing in the host's log, then a bind that took 37 ms).
+      // So the pane is asked for by its id, and an answer about another one
+      // is the window being gone.
+      const paneAsked = /%\d+$/.exec(target)?.[0] ?? null;
+      if (dead.ok && paneAsked && paneNow && paneNow !== paneAsked) {
+        return {
+          ok: false,
+          code: 'window_gone',
+          error: 'the window was closed before Claude Code had finished starting in it',
+        };
+      }
+      if (dead.ok && deadNow === '1') {
         const last = await tmux(['capture-pane', '-p', '-t', target, '-S', '-40']);
         await tmux(['kill-window', '-t', target]);
         const said = (last.out ?? '').split('\n').map((l) => l.trimEnd()).filter(Boolean).slice(-6).join(' / ');

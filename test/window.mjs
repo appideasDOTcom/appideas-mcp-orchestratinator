@@ -1084,6 +1084,21 @@ async function main() {
         `and sends the operator to ${pageLabel}, not to a command to type — ${cold.error}`);
       assert(/The window is showing: .*Starting \(waited for \S*never-ready for \d+s; the roster had /.test(cold.error ?? ''), 'still quoting the window, what it waited for and the roster');
 
+      // The same window, closed while it is being waited on (QA, PR #57 Info
+      // 10). Killed, not exited, so there is no dead pane left to read; tmux
+      // answers a question about it for another pane of the session, and the
+      // wait used to run its whole length on a window that was not there.
+      const coldPane = await W.paneFor(coldDir);
+      const goneStarted = Date.now();
+      const waitingOnIt = W.waitReady(coldDir, { timeoutMs: 20_000, target: coldPane?.target });
+      await sleep(900);
+      await run('tmux', ['kill-pane', '-t', coldPane?.target]).catch(() => {});
+      const goneNow = await waitingOnIt;
+      const goneMs = Date.now() - goneStarted;
+      eq([goneNow.ok, goneNow.code, goneNow.error], [false, 'window_gone', 'the window was closed before Claude Code had finished starting in it'],
+        'a window closed while it is being waited on is said to be gone, in words');
+      assert(goneMs < 6000, `at the next look, not after the full ${20_000}ms — took ${goneMs}ms`);
+
       // A composer that keeps the message through every Enter: a raw-mode
       // pane drawing the box composerOf reads, which never submits.
       const boxDir = `${FIX}/keeps-it`;
