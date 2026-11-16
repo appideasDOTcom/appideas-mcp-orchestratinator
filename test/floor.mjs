@@ -4148,6 +4148,10 @@ try {
     await seated(SA, quiet, 'sdk-quiet');
     await age(quiet, 60);
     rm = await room(['rae', quiet]);
+    // The name is one a room above held until it ended a few seconds ago,
+    // and a room ended that lately still holds its sessions (a reload). Aged,
+    // so the only room these rows read is the silent one.
+    await sql((db) => db.prepare(`UPDATE meeting_rooms SET ended_at = datetime('now', '-60 seconds') WHERE channel = ? AND ended_at IS NOT NULL`).run(SA));
     await hush(rm.id);
     await sleep(2100);
     await floor();
