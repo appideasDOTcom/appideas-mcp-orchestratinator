@@ -595,7 +595,13 @@ onto another floor from the real page (the browser check has it against
 seed-sessions' host, and real windows have it through the floor's route,
 `I AM ms-b/qa`); and Resume of a room with a real second session in it
 (the browser check has it; a real window has the `--resume` half, asked
-back through the route).
+back through the route). **Also owed, after the commit that ships it**: the
+marketing facts' re-anchor (**reanchor-marketing-facts**; the round moved
+`host/window.js`, `host/index.js`, `src/floor.js`, `src/db.js` and both
+page scripts), with three facts changed in substance: the version
+(0.12.9), a new table (`desk_twins`), and twelve suites where the file
+says eleven. No network call was added: a seat's binding file is written
+by the host on its own disk.
 
 ### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
 
