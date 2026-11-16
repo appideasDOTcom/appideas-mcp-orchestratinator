@@ -391,7 +391,7 @@ seed is as check-meeting.mjs expects), its own Chrome, and
 
 ```bash
 PORT=8945 CDP=9285 .claude/skills/verify-ui-change/run-check-meeting-box.sh "$PWD"
-# … PASS · 101 of 101      (about a minute and a half)
+# … PASS · 105 of 105      (about a minute and a half)
 ```
 
 It opens real meeting windows from the selection toolbar and reads: the box
@@ -430,6 +430,16 @@ it taught:
   `windowBounds({ left, top, width, height })` places it first: a headless
   screen is 800x600 and a window that fills it cannot be told from one
   that never moved.
+- **A desktop the browser does not have is told to the page, and the row
+  says so.** Moving a window to another screen needs Chrome's
+  window-management permission, asked with `getScreenDetails()`. A headless
+  Chrome has one screen and puts no question, so `leave(page, 'granted' |
+  'denied' | null)` sets `screen.isExtended` and the answer, and the
+  window is put past the screen's edge with `windowBounds`. The rows prove
+  that the page asks once, only for a window on another screen, and moves
+  again when the answer is yes. They do not prove the window crosses: that
+  is Chrome's, seen on costmo's three screens or not at all. The first
+  row of the step is the fixture's own (`far.left >= scr.width`).
 - **Headless is not the desktop for a raise.** Headless left a minimized
   window minimized after `focus()` (measured 2026-11-16 with
   `windowState('minimized')`, then `windowBounds()` reading `minimized`
@@ -458,16 +468,18 @@ of the room, a `here` and a `gone` drawing the rooms, the window acting on
 evidence yet: the handler ahead of the storey, Enter, the clip, the stale
 ending state, the signature, the draw order, the click's box, the reload,
 the card, "Ending…", the handle close, the edge's width and the hover
-rule. Five more were written for the "In a meeting" click and not run
+rule. Eight more were written for the "In a meeting" click and not run
 either (its handler ahead of the storey, the second focus, the fit, the
-place sent by a tab with no handle, Enter). All eighteen are owed before
+place sent by a tab with no handle, Enter, and three for the leave to
+cross screens: asked for a window on this screen, the move not made
+again, asked on a desktop of one screen). All twenty-one are owed before
 this ships, at the hand-off or the release run, not in a development turn
-(about 35 minutes). The three suite mutants for where a raised window goes
-were run, each red.
+(about 40 minutes). The three suite mutants for where a raised window goes
+were run, each red; the one for `meetingElsewhere` is written and owed.
 
 Both lists are kept beside the check, because a list in a scratchpad is
 gone with the session: [`mutants-meeting-box.page.json`](mutants-meeting-box.page.json)
-(all twenty-two; the first four are the ones already run) and
+(all twenty-five; the first four are the ones already run) and
 [`mutants-meeting-box.suite.json`](mutants-meeting-box.suite.json):
 
 ```bash

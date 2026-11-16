@@ -283,7 +283,9 @@ None of them should have to be discovered by accident:
   already knows its folder and its host, so you pick only the floor, and the
   page goes there with you. It is the same move Take a desk makes when you
   choose a folder that is bound elsewhere, with the same refusals in the
-  same words (not while a turn is running; not without its host). If the
+  same words (not while a turn is running; not without its host). Take a
+  desk opened while you are on a floor keeps that floor when you choose a
+  folder, so a folder bound elsewhere comes to the floor you are on. If the
   floor holds the agent's window, that window closes and **a new
   conversation** opens on the new floor — the one it was on stays in its
   folder, in the session picker and History. With no window open, it opens

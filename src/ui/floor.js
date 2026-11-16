@@ -2427,6 +2427,26 @@
     };
   }
 
+  /**
+   * Whether a window stands on another screen than the one a click was made
+   * on: its centre is outside `area`. A window with no place to read (the
+   * floor holds no handle to it) counts as elsewhere, so the question is
+   * asked rather than assumed away.
+   *
+   * It decides one thing: whether to ask the browser for leave to place
+   * windows on any screen. Without that leave Chrome keeps a moved window
+   * on the screen it is on: costmo, on two 4K monitors and a laptop
+   * (2026-11-16), saw a room on another monitor come to the front and stop
+   * in the corner of its own screen nearest the pointer. The browser asks
+   * the operator once, so it is asked only when a move has to cross.
+   */
+  function meetingElsewhere(win, area) {
+    const cx = win.left + win.width / 2;
+    const cy = win.top + win.height / 2;
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return true;
+    return cx < area.left || cx >= area.left + area.width || cy < area.top || cy >= area.top + area.height;
+  }
+
   /* ---------- a meeting on the floor: the drawing ---------- */
 
   /** One meeting's box: the frame behind its desks, and the two placards on its top edge. */
@@ -6588,7 +6608,8 @@
    * because a minimized window has no place to be moved to until it is
    * back; then the size, if the window is larger than this screen; then
    * the place; then focus again, for a browser that orders by the last
-   * call. A floor tab with no handle asks the room's window to do the same
+   * call. A window on another screen needs the browser's leave to cross
+   * (`across`, below), asked once. A floor tab with no handle asks the room's window to do the same
    * to itself (`focus`, carrying the place). A window may move itself, and
    * whether it may raise itself is the browser's to decide, so that path is
    * the best this tab can do and not a promise.
@@ -6599,17 +6620,38 @@
     const scr = window.screen;
     const area = { left: scr.availLeft ?? 0, top: scr.availTop ?? 0, width: scr.availWidth, height: scr.availHeight };
     const w = keys.map((k) => ui.popWins.get(k)).find((x) => x && !x.closed) ?? null;
+    // The browser's leave to place a window on any screen (its "window
+    // management" permission), asked from inside the click, which is the
+    // only time the browser will put the question. On a desktop of one
+    // screen there is nothing to cross and nothing is asked. Granted once,
+    // it is not asked again; refused, the window still comes to the front
+    // and as near as its own screen lets it, which is where this started.
+    const across = () => {
+      if (!scr.isExtended || typeof window.getScreenDetails !== 'function') return Promise.resolve(false);
+      try { return window.getScreenDetails().then(() => true, () => false); } catch { return Promise.resolve(false); }
+    };
     if (w) {
       try {
         w.focus();
+        const was = { left: w.screenX, top: w.screenY, width: w.outerWidth, height: w.outerHeight };
         const place = meetingRaisePlace(at, { width: w.outerWidth || MEET_W, height: w.outerHeight }, area);
-        if (place.width !== w.outerWidth || place.height !== w.outerHeight) w.resizeTo(place.width, place.height);
-        w.moveTo(place.left, place.top);
-        w.focus();
+        const put = () => {
+          if (place.width !== w.outerWidth || place.height !== w.outerHeight) w.resizeTo(place.width, place.height);
+          w.moveTo(place.left, place.top);
+          w.focus();
+        };
+        put();
+        // On another screen, the move above stopped at that screen's edge
+        // unless the leave was already given; with it, the same move lands.
+        if (meetingElsewhere(was, area)) across().then((ok) => { try { if (ok && !w.closed) put(); } catch { /* closed meanwhile */ } });
         return;
       } catch { /* closed under the click, or no longer ours to move: ask it instead */ }
     }
-    say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1), at, area });
+    const ask = () => say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1), at, area });
+    ask();
+    // Where that window stands is not this tab's to read, so on a desktop
+    // of several screens the leave is asked for, and the window asked again.
+    across().then((ok) => { if (ok) ask(); });
   }
 
   /** The pointer of a click, in screen coordinates; for a key press or a click with no pointer behind it, the middle of the control it was made on. */

@@ -110,8 +110,8 @@
  [
   "the room's window is moved but not brought to the front",
   "src/ui/floor.js",
-  "        w.moveTo(place.left, place.top);\n        w.focus();\n        return;",
-  "        w.moveTo(place.left, place.top);\n        return;"
+  "          w.moveTo(place.left, place.top);\n          w.focus();\n        };",
+  "          w.moveTo(place.left, place.top);\n        };"
  ],
  [
   "a window larger than the screen is not made to fit it",
@@ -130,5 +130,23 @@
   "src/ui/floor.js",
   "closest?.('svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"meet-end\"],",
   "closest?.('svg.room [data-act=\"meet-end\"],"
+ ],
+ [
+  "the browser is asked for its leave though the window is on this screen",
+  "src/ui/floor.js",
+  "if (meetingElsewhere(was, area)) across().then(",
+  "if (true) across().then("
+ ],
+ [
+  "with the leave given, the move is not made again",
+  "src/ui/floor.js",
+  "try { if (ok && !w.closed) put(); } catch",
+  "try { if (false) put(); } catch"
+ ],
+ [
+  "the leave is asked on a desktop of one screen",
+  "src/ui/floor.js",
+  "if (!scr.isExtended || typeof window.getScreenDetails !== 'function') return Promise.resolve(false);",
+  "if (typeof window.getScreenDetails !== 'function') return Promise.resolve(false);"
  ]
 ]

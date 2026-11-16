@@ -2490,9 +2490,21 @@ function moveOutcome(floor, { channel, agent, to }, beforeId) {
 /**
  * What the host listed, and the form filled from the folder it stands in.
  *
- * Filled once per folder: the folder's own binding fixes the agent and
- * proposes the floor; an unbound folder asks for a name, on the floor the
- * dialog was opened from. Typed values survive a redraw, not a new folder.
+ * Filled once per folder: the folder's own binding fixes the agent; an
+ * unbound folder asks for a name. Typed values survive a redraw, not a new
+ * folder.
+ *
+ * The floor is the operator's, not the folder's, when the dialog was
+ * opened from a floor (`wantChannel`; costmo, 2026-11-16). Standing on a
+ * floor and pressing Take a desk means "bring an agent here", so choosing
+ * a folder does not change the floor: it stays the one the dialog opened
+ * on, or whatever the operator has picked since. A folder bound on another
+ * floor is then a move to this one, which the title and the note under
+ * the form say before anything is pressed. It used to take the folder's
+ * own floor, so the operator chose a folder to bring over and the dialog
+ * quietly became "bring it onto the floor it is already on". Opened from
+ * all floors, where no floor is being looked at, a bound folder still
+ * proposes its own.
  *
  * "Not a new folder" is decided when the folder is chosen, not when its
  * listing arrives (issue #37). The listing comes a moment after the choice,
@@ -2511,8 +2523,8 @@ function takeListing(fm, got) {
     const b = got.self?.bound ?? null;
     if (b) fm.agent = b.agent;
     else if (!fm.agentTyped) fm.agent = '';
-    if (b) fm.channel = b.channel;
-    else if (fm.wantChannel) fm.channel = fm.wantChannel;
+    if (!fm.wantChannel) { if (b) fm.channel = b.channel; }
+    else if (!fm.channel) fm.channel = fm.wantChannel;
     fm.prefilled = fm.path;
   }
 }
@@ -2548,10 +2560,11 @@ function takeListing(fm, got) {
  * The folder you stand in fills the form. A folder that already names its
  * agent (in its .mcp.json, or in Claude Code's local scope) fixes the agent:
  * the field is locked, because "my agent lives in this directory" is the
- * whole idea, and only the floor is yours to choose. Change the floor and
- * the take becomes a move; keep it and it is an import into local scope; an
- * unbound folder asks for a name. One dialog, three modes, decided by what
- * the folder says and what you pick.
+ * whole idea, and only the floor is yours to choose. A floor other than the
+ * folder's own makes the take a move; its own makes it an import into local
+ * scope; an unbound folder asks for a name. One dialog, three modes, decided
+ * by what the folder says and what you pick. The floor starts as the one
+ * you are standing on and a folder does not change it (takeListing).
  *
  * Two things beside the picker are read rather than asked for. The agent's
  * name is the one it already carries on the board — shown, not typed, and

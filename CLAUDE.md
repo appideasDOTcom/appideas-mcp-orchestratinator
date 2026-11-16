@@ -770,6 +770,23 @@ opposite of what ran before.
   move, stays behind undrawn (#20) — a new floor named in a refused move is
   an empty storey until removed, as with any take the host refuses.
 
+- **Take a desk opened from a floor keeps that floor when a folder is
+  chosen** (costmo, 2026-11-16, 0.12.8; `takeListing` in `src/ui/app.js`).
+  A bound folder used to put its own floor in the form, so an operator
+  standing on a floor who chose a folder to bring over got "bring it onto
+  the floor it is already on". Now the floor is the operator's: the one
+  the dialog opened on, or whatever they have picked in it since, and a
+  folder bound elsewhere is a move to it, said by the title, the note and
+  the button ("Move to lab") before anything is pressed. Opened from all
+  floors, where no floor is being looked at, a bound folder still proposes
+  its own. The reading taken of "should not change": a floor the operator
+  picked by hand in the dialog also survives the next folder, where an
+  unbound folder used to put it back to the floor the dialog opened on.
+  Read on a page with a folder bound on another floor: from `lab` the
+  form held `lab` and "Move to lab"; from all floors it held the folder's
+  floor and "Bring onto the floor". The folder was chosen through
+  `browseTo()`, which is what a row's click calls, not through a click.
+
 Two page facts behind the card. **"All floors" with two or more floors is
 the building, and a storey there is navigation** — a click on a desk rides
 to its floor, so no card is ever open in it; a card opens on one floor, or
@@ -1421,19 +1438,34 @@ say, so they are costmo's to see on his screen, and neither was held for
   closed and the room opened again at the pointer (a reload of the room,
   which is End then Open). Not built ahead of the measurement, because a
   wrong guess reloads rooms that were raised perfectly well.
-- **Another monitor.** The arithmetic is tested with a monitor at negative
-  coordinates. Whether Chrome lets `moveTo` cross screens without the
-  Window Management permission was not measured.
+- **Another monitor.** Measured by costmo on two 4K monitors and a
+  laptop, the same day: without the browser's window-management
+  permission, a room on another monitor came to the front and stopped in
+  the corner of its own screen nearest the pointer. Chrome keeps a moved
+  window on the screen it is on. So when the room's window stands on
+  another screen than the click (`meetingElsewhere`: its centre is outside
+  that screen), `raiseMeeting` asks for the permission from inside the
+  click (`getScreenDetails()`), and makes the same move again once it is
+  given. Chrome puts the question to the operator once per site. It is
+  asked only then: never on a desktop of one screen (`screen.isExtended`),
+  never for a window already on this screen. Refused, the behaviour is
+  what he saw, which he called acceptable. That the grant makes the move
+  cross is Chrome's documented behaviour and was not seen by me: the page
+  check stages the desktop (`leave()`), so it proves the asking and the
+  second move, not the crossing. His to see.
+
+He reported only the monitor case after trying it, so the minimized path
+is as built; nothing was said either way about a minimized window.
 
 Riding along: a desk's open nameplate card now follows the desk when the
 rooms are redrawn, since desks move with nothing clicked. Two things not
 built, both deliberate for now: a box for a meeting whose every desk is
 hidden or empty is not drawn (nothing to put in it; its window still has
 End), and the board view shows nothing of a meeting. `check-meeting-box.mjs`
-in **verify-ui-change** is the page; twenty-two page mutants are written
+in **verify-ui-change** is the page; twenty-five page mutants are written
 for it and four were run, each red where predicted, before costmo asked
 for long runs to wait for the hand-off or release (2026-11-16). The other
-eighteen are untested claims until then; the list and the command are
+twenty-one are untested claims until then; the list and the command are
 kept beside the check (`mutants-meeting-box.page.json`).
 
 **A dialog holding a text field closes only from its own buttons and on

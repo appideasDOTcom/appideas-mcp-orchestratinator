@@ -110,5 +110,12 @@
   "src/ui/floor.js",
   "top: clamp(at.y - height / 2, area.top, area.top + area.height - height),",
   "top: clamp(at.y, area.top, area.top + area.height - height),"
+ ],
+ [
+  "a window whose centre is on the next screen is taken to be on this one",
+  "floor",
+  "src/ui/floor.js",
+  "return cx < area.left || cx >= area.left + area.width || cy < area.top || cy >= area.top + area.height;",
+  "return cx + win.width / 2 < area.left || cx - win.width / 2 >= area.left + area.width || cy < area.top || cy >= area.top + area.height;"
  ]
 ]

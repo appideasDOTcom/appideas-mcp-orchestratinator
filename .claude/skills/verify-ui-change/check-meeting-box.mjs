@@ -206,6 +206,40 @@ await sleep(400);
 did = await calls(A.m);
 ok(big.width > scr.width && did.some((x) => x[0] === 'resizeTo' && x[1] === scr.width && x[2] === scr.height) && did.findIndex((x) => x[0] === 'resizeTo') < did.findIndex((x) => x[0] === 'moveTo'),
   'a window larger than this screen is made to fit it before it is placed', JSON.stringify({ big, scr, did }));
+// On another screen. A headless browser has one screen and no question to
+// put, so the desktop is told to the page: `screen.isExtended`, and the
+// browser's answer to getScreenDetails(), which is its leave to place
+// windows on any screen. The window is put past this screen's edge.
+const leave = (page, answer) => page.evalJs(`(() => {
+  window.__asked = 0;
+  Object.defineProperty(screen, 'isExtended', { configurable: true, get: () => ${answer !== null} });
+  window.getScreenDetails = () => { window.__asked++; return ${answer === 'granted' ? 'Promise.resolve({})' : `Promise.reject(new DOMException('denied', 'NotAllowedError'))`}; };
+  return true; })()`);
+const far = await A.m.windowBounds({ left: scr.width + 300, top: 40, width: 420, height: 330 });
+const off = far.left >= scr.width;
+ok(off, 'the fixture: the browser let the room\'s window be put past this screen\'s right edge', JSON.stringify(far));
+await leave(floor, 'granted');
+await watchCalls(A.m);
+await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetLabel`);
+await sleep(500);
+click = await lastClick(floor);
+want = placeFor(click, far, scr);
+did = await calls(A.m);
+ok(await floor.evalJs('window.__asked') === 1 && JSON.stringify(did) === JSON.stringify([['focus'], ['moveTo', want.left, want.top], ['focus'], ['moveTo', want.left, want.top], ['focus']]),
+  'a window on another screen: the browser is asked, once, for its leave to place windows on any screen, and with it the move is made again, to the same place', JSON.stringify({ asked: await floor.evalJs('window.__asked'), want, did }));
+await A.m.windowBounds({ left: scr.width + 300, top: 40, width: 420, height: 330 });
+await leave(floor, 'denied');
+await watchCalls(A.m);
+await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetLabel`);
+await sleep(500);
+did = await calls(A.m);
+ok(await floor.evalJs('window.__asked') === 1 && did.filter((x) => x[0] === 'moveTo').length === 1 && did.at(-1)[0] === 'focus', 'refused, the window is still brought to the front and moved once, as far as its screen lets it', JSON.stringify(did));
+await A.m.windowBounds({ left: 12, top: 8, width: 420, height: 330 });
+await watchCalls(A.m);
+await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetLabel`);
+await sleep(400);
+ok(await floor.evalJs('window.__asked') === 1 && (await calls(A.m)).filter((x) => x[0] === 'moveTo').length === 1, 'and a window already on this screen is moved with nothing asked, on a desktop of several screens too');
+await leave(floor, null);
 await watchCalls(A.m);
 ok(await floor.evalJs(`(() => { const e = document.querySelector('svg.room .meetBox[data-meeting="${A.id}"] .meetLabel'); e.focus(); return document.activeElement === e; })()`), 'the label takes focus');
 await floor.key('Enter');

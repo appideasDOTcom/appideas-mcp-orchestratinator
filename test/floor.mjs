@@ -1074,7 +1074,27 @@ try {
     eq(fm.agent, 'dev', 'and so is one typed before the home folder is listed, on a dialog opened with no folder');
     fm = form({ agent: 'dev', agentTyped: true });
     takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
-    eq([fm.agent, fm.channel], ['cy', 'elsewhere'], 'a bound folder\'s agent wins over anything typed, and proposes its floor');
+    eq([fm.agent, fm.channel], ['cy', CH], 'a bound folder\'s agent wins over anything typed, and the floor stays the one the dialog was opened from: bringing it here is what the operator came to do');
+    // The floor is the operator's when the dialog was opened from one
+    // (costmo, 2026-11-16): choosing a folder never changes it.
+    fm = form({ channel: 'picked', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, 'picked', 'a floor the operator picked in the dialog is kept when a bound folder is chosen after it');
+    fm = form({ channel: 'picked', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.channel, 'picked', 'and when an unbound one is');
+    fm = form({ channel: '__new__', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, '__new__', 'a new floor being named is not taken away either');
+    fm = form({ channel: null });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, CH, 'a form with no floor in it gets the one the dialog was opened from, not the folder\'s');
+    fm = form({ channel: null, wantChannel: null });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, 'elsewhere', 'opened from all floors, where no floor is being looked at, a bound folder still proposes its own');
+    fm = form({ channel: 'picked', wantChannel: null, path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.channel, 'picked', 'and an unbound one leaves the floor as it is there');
     fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'dev', agentTyped: false });
     takeListing(fm, listingOf('/repo/b'));
     eq(fm.agent, '', 'a new folder the operator moved to starts with no name: typed values survive a redraw, not a new folder');
@@ -3709,7 +3729,7 @@ try {
     writeFileSync(tmpBox, [
       ...[...decls, { at: bh.index, text: bh[0] }].sort((a, b) => a.at - b.at).map((d) => d.text),
       cut('  /* ---------- a meeting on the floor: what the page decides ---------- */', '  /* ---------- a meeting on the floor: the drawing ---------- */'),
-      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
+      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
     ].join('\n'));
     let fp;
     try { fp = await import(new URL(tmpBox, `file://${process.cwd()}/`)); } finally { rmSync(tmpBox, { force: true }); }
@@ -3833,6 +3853,15 @@ try {
       'a window taller than the screen it is brought to is made to fit it: one opened full height on a tall monitor does not hang off a short one');
     eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 2000, height: 400 }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 100, width: 1440, height: 400 }, 'nor a wider one off its side');
     eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 0, height: NaN }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 0, width: 1440, height: 900 }, 'and a size that is not a size is the screen\'s, never nothing');
+    // Whether the move has to cross to another screen, which is when the
+    // browser is asked for its leave to place windows on any of them.
+    const here = { left: 0, top: 25, width: 1920, height: 1055 };
+    eq([fp.meetingElsewhere({ left: 1100, top: 25, width: 760, height: 1055 }, here), fp.meetingElsewhere({ left: 1700, top: 400, width: 760, height: 600 }, here)], [false, true],
+      'a room\'s window on the screen that was clicked needs no leave to be moved; one whose centre is on the next screen does, though its edge is on this one');
+    eq([fp.meetingElsewhere({ left: -2000, top: 100, width: 760, height: 900 }, here), fp.meetingElsewhere({ left: 400, top: 1200, width: 760, height: 900 }, here), fp.meetingElsewhere({ left: 400, top: -1400, width: 760, height: 900 }, here)], [true, true, true],
+      'a monitor to the left, below or above is another screen');
+    eq([fp.meetingElsewhere({ left: undefined, top: undefined, width: 760, height: 600 }, here), fp.meetingElsewhere({ left: 10, top: 30, width: NaN, height: 600 }, here)], [true, true],
+      'and a window with no place to read is asked about, not assumed to be here');
     eq([fp.meetNames([]), fp.meetNames(['Bo']), fp.meetNames(['Bo', 'Cy']), fp.meetNames(['Bo', 'Cy', 'Dee'])], ['', 'Bo', 'Bo and Cy', 'Bo, Cy and Dee'], 'names are joined the way a sentence joins them');
   }
 } catch (err) {
