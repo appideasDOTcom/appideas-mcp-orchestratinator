@@ -107,9 +107,48 @@ suite prints `FAIL <name>` and `ok   <name>` where the others print ✗ and
 about a run with two reds. **0 ✓ beside 0 failing is a suite the runner
 cannot read, never a survivor**: run the mutant by hand in the copy before
 believing either number. The lists for one agent with several sessions are
-kept here and beside the page check: `mutants-sessions.suite.json` (55,
+kept here and beside the page check: `mutants-sessions.suite.json` (54,
 across `floor`, `seats`, `plugin` and `renew`) and
-`../verify-ui-change/mutants-sessions.page.json`. Several suites at once is
+`../verify-ui-change/mutants-sessions.page.json`. `mutants-pr57.suite.json`
+(16: 13 `floor`, 3 `seats`) is the round that answered QA's review of
+PR #57: the silent room, a second session's mail, a bind onto a working
+seat's name, the two tools that ask which session a name means, and what
+a host said about seats across a board restart.
+
+**Run `validate-mutants.mjs` on every kept list after a round, not only
+the one you wrote.** QA found one kept row that no longer applied (PR #57
+Info 6: `cardRefusal` had taken the text it replaced). Validating all of
+them that day found two more: a sessions row the round's own fix had
+reworded, and a meeting-box page row that had not applied since 0.12.9. A
+row that does not apply is not red, it is unread, and the count in the
+notes goes on including it.
+
+**Lines of the seats work that no row reads, and why they are left**
+(QA's inversions on PR #57, Info 7; each stayed green there). Two were
+given rows in that round: a bind onto a name a seat carries (Q2) and the
+folder's own desk falling back onto a conversation its seat is running
+(Q3). The rest, by QA's ids, for whoever touches the line next:
+- Q1, `sit()` refusing a name that is already a desk at another folder.
+  The board never asks for one: a hosted desk under a name makes the name
+  taken, and the new desk gets a number. It is the host's belt against a
+  board that disagrees with it, and reaching it means a `seat` work item
+  written by hand.
+- Q9, `open()` refusing a seat whose binding file is missing. The host
+  rewrites the file whenever it looks at its desks, so the fixture has to
+  delete it and hold the rewrite off.
+- Q10, a real binding outranking a seat of the same name in
+  `host/identity.js`. `bind()` removes the seat's record before it binds,
+  so the two only meet if that removal fails.
+- Q11, a moved seat's note said on its own desk and not its folder's.
+  That is `index.js`'s handler for a move to a fresh tmux server, which
+  `test:renew` does not drive (CLAUDE.md says why: the host suite's host
+  is on the default socket beside the live `orch`).
+- Q12, History listing a shared folder once.
+- P3, Take a desk reading that the name is taken on *another* floor
+  (check-sessions' case is the agent's own floor).
+- Q7 and Q8 are a second belt in every flow the suites have (QA's words).
+None is a finding. A row for any of them needs a fixture of its own, and
+was not written at a release check. Several suites at once is
 several copies: `--dest` each, and `FLOOR_TEST_PORT` for more than one
 floor lane (8911–8913 that day, three lanes, about four minutes for 34).
 

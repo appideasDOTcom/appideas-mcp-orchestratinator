@@ -896,12 +896,63 @@ What the board adds, and costmo's four rulings (each an AskUserQuestion,
   waits for the turn), and the desk leaves the floor whole: seat, row, link,
   and its conversations ended. The conversation stays in the folder, and
   Resume makes the session again on it (`meetingResumePlan`'s `twin` step).
-  Keeping it as a desk was the other offer. Three timings, each for a
+  Keeping it as a desk was the other offer. Four timings, each for a
   reason: 30 s after it is made (its room is recorded a moment later, by the
   room's window), 15 s after a room ends by its window going away (a reload
   ends a room and opens it again; End meeting says `final` and is not
-  waited for), and two minutes for one its host never seated. The sweep runs
+  waited for), two minutes for one its host never seated, and 90 s of
+  watching an open room the sweep has found silent (below). The sweep runs
   from the routes a page polls, not on a timer of the board's own.
+- **A window that slept is not gone** (QA, PR #57 finding 1;
+  `stillWatched`, `TWIN_UNHEARD_MS`). "Gone without a word" was "not live
+  after `MEETING_LIVE_SECONDS`", read at one look. A room that is open and
+  150 s unheard is also every window stopped together, a laptop asleep, and
+  then the page poll that runs the sweep reaches the board before the
+  room's touch does. QA measured it: a browser stopped 165 s lost the
+  session in 2 of 2 runs, in a meeting nobody had ended, and the room's
+  window then saved itself without it. Now the silence counts from the
+  look that first finds it. The watch is kept by the room's last touch
+  (`live.unheard`: room id, when, and the `live_at` it was silent since),
+  so a room heard from and silent again later is watched afresh with no
+  look needed in between. 90 s, because a window that is there touches
+  within 30 s, or within Chrome's one wake-up a minute when it is hidden.
+  A crashed window's session closes that much later than it did. The
+  number is the developer's, open to costmo's reversal; how long a room
+  contains its broadcasts (150 s) is unchanged. A real sleep, where the
+  board's clock stops too, is still not measured: if the clock has caught
+  up by the first request the room reads silent and is watched, and if it
+  has not the room still reads live. Do not go back to closing at the
+  first silent look.
+- **A second session's mail starts where it is made** (QA, PR #57 finding
+  2; `desk_twins.start_cursor`). Its `agents` row is made when its window
+  connects, and was made at cursor 0, so every broadcast the floor had
+  ever carried read as unread for it (7 of 7 measured, 222 on this floor
+  that day), the room's Nudge counted them, and its first poll with no
+  `since` was handed the oldest hundred. A second session is not a new
+  agent: what was sent before it was made is in its first desk's mail,
+  read or waiting. So a name never on the board starts at the floor's
+  newest message, and a name taken again starts where it stopped, so a
+  message addressed to it while it was away is not lost. A row at 0 (one
+  that never read, or a session made before this) starts at the newest
+  too. The link holds the number, the row `touchAgent` makes takes it,
+  `createTwin` brings an existing row up to it, and `poll_messages` floors
+  `since` at it for a second session. Two readings that were not taken:
+  the first desk's own cursor (both sessions would then read, and maybe
+  act on, the same unread broadcasts), and the stored cursor as the
+  default `since` for every agent (a change to the tool for everybody, at
+  a release check). Left as it was, on purpose: New desk here on
+  *another* floor is the agent's first desk there and starts at that
+  floor's first message, as any agent arriving on a floor always has.
+- **A bind does not take a name from a working seat** (QA, PR #57 finding
+  3). A folder bound to names one of its seats already carries on that
+  floor closes that seat's window (`bind()`: two desks cannot answer to
+  one name, and the folder's own entry is what its windows connect with).
+  Leave on that seat was refused mid-turn and the bind was not. Both doors
+  onto a bind refuse it now in one sentence (`seatWorkingWords`, in
+  `seatDesk`), and the host refuses from the pane, quoting it, for a
+  window that started working after the board looked. The host says it on
+  the desk the move is from, or on the seat itself for a take: both have a
+  row.
 - **Leave room asks first**, with the panel's own Leave desk dialog.
 
 And two of his from the same day, on the nameplate card: **Leave room**
@@ -917,7 +968,12 @@ is where Bring back from the meeting room is, so the lock strands nobody.
 **Bring back takes the agent out of every room**, on every floor
 (`agentDesks`): an agent's desks are the ones of its name out of its folder
 on its host. The name alone is not the agent, because `developer` on two
-floors is two repos.
+floors is two repos. The folder there is its last segment, since the
+payload carries no path: two folders of one name on one host, each with an
+agent of the same name, are one agent to it, and Bring back on either
+takes both out of their rooms (QA, PR #57 Info 9, read, no fixture built).
+Known and left: the fix is the path on the payload, which no finding has
+asked for.
 
 Two things found only by running it, and both are why the last tier is not
 optional:
@@ -943,10 +999,19 @@ kind of its own** (`seat`), never a flag on an existing one: a host from
 before it ignores a kind it does not know ("work for a desk this host
 doesn't have"), where `bind` with `seat: true` would have been carried out
 as a move by every older host. A **word at registration** (`seats: true`),
-kept by the board per host (`live.seating`) and on the payload
+kept by the board on the host's row (`hosts.seats`) and on the payload
 (`hosts[].seats`), so the page can dim the control with the reason and the
 route refuses in the same words (`noSeatsWords`), as `capabilities:
-["finish"]` does for an update. And **the refusal said on a desk that has
+["finish"]` does for an update. **On its row, not in the server's
+memory** (QA, PR #57 finding 5): it was a Map, a host registers once a
+minute, and the board calls a host live from its row for 90 s, so for up
+to a minute after every restart the board told the operator that a
+current host "runs a build from before… Update it", just after a deploy.
+What a host last said is kept where "when it was last seen" is. Anything
+else the board decides from a registration and reads while the host is
+still "live" has the same gap; the folder list and the update report are
+the two that remain in memory, and both say "not reported yet" rather
+than a refusal. And **the refusal said on a desk that has
 a row**: a desk being made has none until `bound`, and an error for it is
 dropped, so `sit()` says it on the desk it was made beside, as a refused
 move is said where the agent still is.
@@ -2032,7 +2097,7 @@ in 0.12.6. The image builds from `package.json` with its own Node, so the
 live board is unaffected; which of the two this branch should say is
 costmo's.
 
-`npm test` runs twelve suites. `test:host` and `test:window` are not unit tests:
+`npm test` runs thirteen suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
 `claude` (a `.cjs`, because this package is `"type": "module"`). They use their
 own tmux session names and ports, so they are safe to run beside a live host —
@@ -2383,6 +2448,32 @@ missed). And **a row that says something "stays" proves nothing while the
 thing is too young to be looked at**: "a session made by New desk here is
 not a room's to close" was green on the mutant that closed it, because the
 sweep leaves any session alone for its first 30 s. The row ages it first.
+
+Three more from PR #57's round (2026-11-16), each a way a row read
+something other than what it named:
+- **A name the fixture uses twice carries the first use's holds.** The
+  floor suite makes `quinn-3` for one room, ends the room, and makes
+  `quinn-3` again. A room that ended inside 15 s still holds every session
+  it lists, so the silent-room rows read "not closed" for the wrong reason
+  and then "not closed" where they wanted a close. The rows age the ended
+  rooms first, and say so. Before trusting a "stays" on a reused name,
+  check what else on the floor still lists it.
+- **A broadcast from a desk in a live room is contained, in a test too.**
+  The mail rows first sent their "before" and "after" broadcasts from
+  `rae`, which an earlier row had left in a live room, so nobody outside
+  it heard them. They are sent by a desk in no room.
+- **The floor suite restarts its board once**, on the same database, for
+  the one thing only a restart shows (what a host said about seats). It
+  is in the last section that talks to the server, because everything the
+  board keeps in memory is gone after it. `startServer()` is the function;
+  a new row that needs a restart goes beside that one, not earlier.
+
+The seats stand-in can look mid-turn: a message containing `look busy`
+draws "esc to interrupt" as the pane's last line, and `look idle` ends
+it. Its last turn is still a reply, so the board takes it for idle, which
+is the one case the host's own busy check is for. The floor suite runs its
+board with `ORCH_TWIN_UNHEARD_MS=3000`, so the silent-room rows wait
+seconds and not a minute and a half.
 
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so

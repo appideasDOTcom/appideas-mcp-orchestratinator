@@ -73,6 +73,14 @@ inversions table says which of your assertions they already trust.
   Read the channel before anything long: their clean-clone runs share this
   machine's CPU, and a run of yours overlapping theirs went red in six
   `test:host` pane cases that were green alone (CLAUDE.md, Tests).
+- **Look for a commit before every long run and before every message to
+  QA** (`git log -1 --format='%h %ci'`). On PR #57 (2026-11-16) he pushed
+  `94eb28d` and `bd557e7` while the round was being written, and it was
+  noticed eight minutes later, by chance, when `git status` listed fewer
+  files than had been edited. The first of the two held a test row that
+  was red for its fixture's reason, and QA could have started on it.
+  Nothing announces a commit; the tree looking cleaner than it should is
+  the only sign.
 - **When costmo commits mid-round, prove what was measured was the
   commit.** He committed PR #56's fixes twice while mutants were still
   running in copies. The copy was taken before the commit, so the reading

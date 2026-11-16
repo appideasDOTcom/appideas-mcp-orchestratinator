@@ -181,6 +181,11 @@ function fixture() {
     `      if (text) {`,
     `        rec({ type: 'user', uuid: 'u' + process.pid + '-' + (++n), timestamp: new Date().toISOString(), message: { content: text } });`,
     `        rec({ type: 'assistant', uuid: 'a' + process.pid + '-' + n, timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'I AM ' + (me ? me.channel + '/' + me.agent : 'nobody') + ' on ' + id }] } });`,
+    // A window mid-turn, as the host reads one: the pane's last line. Its
+    // last turn is still the reply above, so the board takes it for idle,
+    // which is the case the host's own check is for.
+    `        if (/look busy/.test(text)) process.stdout.write('\\nesc to interrupt');`,
+    `        if (/look idle/.test(text)) process.stdout.write('\\nidle now\\n');`,
     `      }`,
     `      continue;`,
     `    }`,
@@ -445,6 +450,22 @@ try {
   a = await ask(SB, 'quinn', 'other floor, still there?');
   assert(/^I AM seat-b\/quinn on /.test(a.answer ?? '') && (a.answer ?? '').endsWith(sidB), 'and so does the other floor\'s', a);
 
+  // The folder's own desk never falls back onto a conversation one of its
+  // seats is running (QA, PR #57 Info 7, Q3: the seat's half had a row and
+  // this half had none). The seat spoke last, so its conversation is the
+  // folder's newest; resumed here as well, two windows would write one
+  // transcript.
+  console.log('\n  the folder\'s own desk, asked back onto a conversation that is gone');
+  const startsBefore = starts().length;
+  r = await op('/api/floor/reopen', { channel: SA, agent: 'quinn', session_id: 'gone-from-the-folder' });
+  eq(r.status, 200, 'the board takes the reopen');
+  const fellBack = await until(() => (starts().length > startsBefore ? starts().at(-1) : null), 20000);
+  eq([fellBack?.me && `${fellBack.me.channel}/${fellBack.me.agent}`, fellBack?.argv[0], fellBack?.argv[1]], [`${SA}/quinn`, '--resume', sidA],
+    'its window resumes the newest conversation in the folder that no seat is running: its own, and not the seat\'s, which spoke last');
+  const ownBack = await until(async () => { const d = await desk(SA, 'quinn'); return d?.hosted?.live && d.hosted.held === 'floor' && d.hosted.session_id === sidA ? d : null; }, 20000);
+  assert(!!ownBack, 'and the desk is on it', (await desk(SA, 'quinn'))?.hosted);
+  eq((await desk(SB, 'quinn'))?.hosted?.session_id, sidB, 'the seat is on its own, untouched');
+
   console.log('\n  a second session brought back on the conversation it had');
   r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'quinn-2', session_id: sid2, meeting: true });
   eq(r.body.agent, 'quinn-2', 'it is asked for by its old name');
@@ -470,6 +491,43 @@ try {
   await hook(s1.env, { session_id: sidB, ...asks });
   q = await until(async () => { const f = await floor(); return f.queue.length ? f.queue : null; }, 6000);
   eq((q ?? []).map((x) => `${x.channel}/${x.agent}`), [`${SB}/quinn`], 'its hook still reports, from the window\'s own file, though the folder binds nothing');
+
+  // A bind onto a name one of the folder's seats carries (QA, PR #57
+  // finding 3, and Q2: no row reached this branch of bind() at all). The
+  // seat gives the name up to the folder's own binding, which closes its
+  // window, so never mid-turn. The board refuses from the desk's last turn
+  // (test:floor); here the last turn is a reply and the pane says working.
+  console.log('\n  the folder bound to a name one of its seats carries');
+  await hook(s1.env, { session_id: sidB, hook_event_name: 'Stop', last_assistant_message: 'ok' });
+  await until(async () => ((await floor()).queue.length === 0 ? true : null), 6000);
+  a = await ask(SB, 'quinn', 'look busy');
+  assert(/^I AM seat-b\/quinn on /.test(a.answer ?? ''), 'the seat is mid-turn, by its pane', a);
+  const seatPid = panes().find((p) => p.seat === tag)?.pid;
+  const unbound = await until(async () => {
+    const f = (await json('/api/floor/folders').then((x) => x.json())).hosts.find((h) => h.host_id === 'seats-host')?.folders.find((x) => x.path === REPO);
+    return f && !f.bound ? true : null;
+  }, 70000);
+  assert(!!unbound, 'the board has the folder as naming no desk of its own');
+  r = await op('/api/floor/desk', { host_id: 'seats-host', path: REPO, channel: SB, agent: 'quinn' });
+  eq([r.status, r.body.mode], [200, 'take'], 'the board takes the folder for the seat\'s name: by its last turn the seat is idle');
+  const no = await until(async () => (await turns(SB, 'quinn')).find((t) => t.role === 'error' && /still working/.test(t.text ?? '')) ?? null, 20000);
+  assert(/^not bound to seat-b\/quinn — quinn already has a desk on seat-b in this folder, and its window is still working: esc to interrupt$/.test(no?.text ?? ''), 'the host refuses it, quoting the pane, on the desk that is there', no?.text ?? (await turns(SB, 'quinn')).slice(-3));
+  eq([panes().map((p) => p.seat), alive(seatPid)], [[tag], true], 'the seat\'s window is left open');
+  eq(JSON.parse(readFileSync(`${SEATS}/seats.json`, 'utf8')).seats.map((x) => `${x.channel}/${x.agent}`), [`${SB}/quinn`], 'and it is still a seat');
+  eq((await desk(SB, 'quinn'))?.hosted?.scope, 'seat', 'nothing was bound');
+  a = await ask(SB, 'quinn', 'look idle');
+  assert(/^I AM seat-b\/quinn on /.test(a.answer ?? ''), 'its turn ends', a);
+  r = await op('/api/floor/desk', { host_id: 'seats-host', path: REPO, channel: SB, agent: 'quinn' });
+  eq(r.status, 200, 'asked again');
+  const own = await until(async () => { const d = await desk(SB, 'quinn'); return d?.hosted?.live && d.hosted.scope === 'local' ? d : null; }, 30000);
+  assert(!!own, 'the folder is bound to the name, as the folder\'s own desk', (await desk(SB, 'quinn'))?.hosted);
+  eq(own?.hosted?.seat, false, 'which is no seat');
+  eq(JSON.parse(readFileSync(`${SEATS}/seats.json`, 'utf8')).seats, [], 'the seat gave the name up: its record is gone');
+  assert(await until(() => (!alive(seatPid) ? true : null), 8000), 'and its window was closed');
+  eq(panes().filter((p) => p.seat).length, 0, 'no window carries a seat\'s tag now');
+  a = await ask(SB, 'quinn', 'who are you now?');
+  assert(/^I AM seat-b\/quinn on /.test(a.answer ?? ''), 'a message is answered under the name', a);
+  eq(starts().at(-1)?.argv.includes('--mcp-config'), false, 'by the folder\'s own window, started plain: the folder\'s entry is what it connects with');
 
   console.log('\n  what the run leaves behind');
   await stopHost(host);

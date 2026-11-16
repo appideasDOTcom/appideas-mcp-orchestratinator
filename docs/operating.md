@@ -277,7 +277,12 @@ there. **Bring back from the meeting room** on any of the agent's desks
 takes the agent out of **every** room it is in, on every floor. A session
 made for a room closes when it is in none (End meeting, ✕, Bring back, or
 the room's window gone for good): its window closes and its desk leaves the
-floor, never in the middle of a turn. Its conversation stays in the folder,
+floor, never in the middle of a turn. A window that only slept is not
+gone: after a silence the instance watches the room for a minute and a
+half before it closes anything, and a room whose window speaks in that
+time keeps its sessions. A second session starts with nothing unread:
+what the floor carried before it was made is in the agent's first desk's
+mail. Its conversation stays in the folder,
 where History reads it, and **Resume** of that room makes the session again
 on it. A session its host cannot start is said in the room, in the host's
 words, and the room carries on with the desks that did arrive.

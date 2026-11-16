@@ -591,10 +591,12 @@ its room, instead of sleeping half a minute three times.
 **What the 0.12.9 round ran, and what it left for the release** (costmo's
 rule: the suites and page checks a change reaches, the full chain once at
 the SHA that ships). Run, each alone, on the tree as it stood at the end:
-all twelve suites (`smoke`, `admin`, `auth`, `boardlog`, `capture`,
+all thirteen suites (`smoke`, `admin`, `auth`, `boardlog`, `capture`,
 `floor`, `markdown`, `plugin`, `update`, `host`, `window`, `renew`,
-`seats`); 55 suite mutants and 11 page mutants, every one red, controls
-green; check-sessions, and the page checks whose code it touched:
+`seats`); the kept lists' suite and page mutants, every one red, controls
+green (the lists hold 54 + 4 suite mutants and 11 + 1 page mutants,
+sessions and the room's Nudge; this line said "twelve suites" and "55 and
+11" until QA counted them, PR #57 Info 6 and 8); check-sessions, and the page checks whose code it touched:
 check-take-floor, check-meeting-box, check-meeting, check-select and
 check-redraw (their results are in the round's report). **Not run, and
 owed at the release**: `npm test` as one chain; check-popout, check-chatbox,
@@ -613,9 +615,26 @@ back through the route). **Also owed, after the commit that ships it**: the
 marketing facts' re-anchor (**reanchor-marketing-facts**; the round moved
 `host/window.js`, `host/index.js`, `src/floor.js`, `src/db.js` and both
 page scripts), with three facts changed in substance: the version
-(0.12.9), a new table (`desk_twins`), and twelve suites where the file
+(0.12.9), a new table (`desk_twins`), and thirteen suites where the file
 says eleven. No network call was added: a seat's binding file is written
 by the host on its own disk.
+
+**What the round that answered QA's review of PR #57 ran, and left**
+(2026-11-16, the release check; nine findings, in `src/floor.js`,
+`src/db.js`, `src/tools.js` and `host/index.js`, none in `src/ui/`). Run,
+each alone: `floor`, `seats`, `host`, `smoke`, `admin`, `auth`, `boardlog`
+and `update`; the 16 mutants of `mutants-pr57.suite.json` in four copies,
+each lane beside a control, every one red; and one page mutant, the
+meeting-box row that had not applied since 0.12.9, written again and run
+with its control. **Not run, and still owed at the release**: everything
+in the paragraph above, and `window`, `renew`, `markdown`, `plugin` and
+`capture`, which the round's files do not reach. No page file changed,
+so the only page check run was check-meeting-box, as that one mutant's
+control (119 of 119). **Not measured**: a real sleep (finding 1
+was found with a stopped browser and fixed against an aged row; whether
+Docker's clock has caught up by the first request after a wake is still
+unknown), and a real host refusing a bind onto a working seat (the seats
+stand-in draws the pane's last line).
 
 ### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
 

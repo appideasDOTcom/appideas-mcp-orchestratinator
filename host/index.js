@@ -683,10 +683,11 @@ class Host {
     for (const d of this.desks.values()) {
       const held = await W.holderOf(d.where, d.lastSessionId).catch(() => null);
       desks.push({
+        // `scope` is 'seat' for an extra desk in a folder that is another
+        // desk's, and that is what the board reads to offer no editor
+        // handoff for it. A `seat` boolean was sent beside it and read by
+        // nothing (QA, PR #57 Info 7); it is gone.
         channel: d.channel, agent: d.agent, cwd: d.cwd, scope: d.scope,
-        // An extra desk in a folder that is another desk's: the floor's
-        // window only, so the board offers no editor handoff for it.
-        seat: !!d.seat,
         session_id: d.lastSessionId,
         window: held?.where === 'floor' ? held.window : null,
         outside_pid: held?.where === 'editor' ? held.pid : null,
@@ -910,6 +911,15 @@ class Host {
     // with, and two desks cannot answer to one name.
     const twin = this.desks.get(`${channel}|${agent}`);
     if (twin?.seat) {
+      // Never mid-turn, as for the folder's own window above and for a
+      // seat that is left: this closes the seat's window. The board refuses
+      // it too, from the desk's last turn; this is the pane's word, for a
+      // window that started working since (QA, PR #57 finding 3: the check
+      // above reads the folder's own window, and this one had none).
+      const at = await W.busyAt(twin.where);
+      if (at.pane && at.busy) {
+        return fail(`${p.from ? `not moved to ${channel}` : `not bound to ${channel}/${agent}`} — ${agent} already has a desk on ${channel} in this folder, and its window is still working: ${at.foot}`, 'bind_refused');
+      }
       if (await W.paneFor(twin.where)) await W.closeWindow(twin.where);
       S.removeSeat(channel, agent, origin);
       log(`${channel}/${agent}: its seat at ${twin.cwd} is replaced by the folder's own binding`);

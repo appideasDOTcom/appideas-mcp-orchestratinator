@@ -320,6 +320,6 @@ plugin/       The Claude Code plugin (orchestratinator-floor) — the floor's ho
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 scripts/
   set-version.mjs   Writes the version into all three files that carry one
-test/         Twelve suites; test:host, test:window, test:renew and test:seats
+test/         Thirteen suites; test:host, test:window, test:renew and test:seats
               drive real tmux panes, the first and last against a real server
 ```

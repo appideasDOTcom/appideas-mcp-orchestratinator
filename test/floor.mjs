@@ -3938,7 +3938,7 @@ try {
     };
     /** The host seating a desk it was asked for: it registers it and says `bound`. */
     const seated = async (channel, agent, session = null) => {
-      sDesks.set(`${channel}|${agent}`, { channel, agent, cwd: '/repo/quinn', scope: 'seat', seat: true, session_id: session, window: '@9' });
+      sDesks.set(`${channel}|${agent}`, { channel, agent, cwd: '/repo/quinn', scope: 'seat', session_id: session, window: '@9' });
       const r = await hev([{ type: 'bound', channel, agent, cwd: '/repo/quinn', scope: 'seat', session_id: null, from: null }]);
       await reg();
       return r;
