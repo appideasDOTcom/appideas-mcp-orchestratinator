@@ -378,6 +378,87 @@ which once they are running, read each one's environment:
 `ps eww -p <pid> | tr ' ' '\n' | grep -E '^(PORT|DB_PATH)='`. A QA page
 run or a `run-check-*.sh` may own one, so kill only yours.
 
+### check-meeting-box.mjs — a meeting's box on the floor (2026-11-16)
+
+The desks in a meeting room stand in a box of their own on the floor, with
+"In a meeting" and an End meeting button on its corners.
+[`run-check-meeting-box.sh`](run-check-meeting-box.sh) serves any directory
+with `seed-meeting.mjs --more` (five more live desks on `lab`, nine in all,
+so one floor holds two meetings and desks besides; without the flag the
+seed is as check-meeting.mjs expects), its own Chrome, and
+[`check-meeting-box.mjs`](check-meeting-box.mjs), reading the page through
+[`probe-meeting-box.js`](probe-meeting-box.js):
+
+```bash
+PORT=8945 CDP=9285 .claude/skills/verify-ui-change/run-check-meeting-box.sh "$PWD"
+# … PASS · 90 of 90        (about a minute and a half)
+```
+
+It opens real meeting windows from the selection toolbar and reads: the box
+from the click and one box throughout; three to a row, the box's edge and
+both placards with their words measured on their plates; an envelope
+leaving a boxed desk from where it is drawn; a second meeting stacked
+under the first; a desk brought back; End pressed in a selecting room; the
+building (boxes side by side in the one row, "End" around one desk, a real
+press that does not ride to the floor, a press on the box's carpet that
+does); End by keyboard with every desk back where it stood and an open
+card following its desk; Resume; a window that never hears `end`, closed
+by the floor; a second floor tab with no window to close; a reload of the
+room's window; and both themes. Pictures land in the run's `shots/`. What
+it taught:
+
+- **A state drawn for a moment is read from a MutationObserver's log**
+  (`watchBoxes`). Two boxes for one meeting half-way through its desks, a
+  placard reading "Ending…", a box emptying a desk at a time: each is gone
+  before a poll reads it. The log keeps each box's room, button text,
+  whether it can be pressed, and who its label names.
+- **A second press can be swallowed by the first one's state.** The first
+  run read two reds that were one bug: a room resumed four seconds after
+  its End came back still "Ending…", and the next step's press on it did
+  nothing. That step asserts the fixture too (`dropped === 1`), which is
+  what showed the press had not been taken.
+- **"The window did not hear it" is staged on the sender.** The floor's
+  `BroadcastChannel.prototype.postMessage` is wrapped to drop `end`
+  (`deaf()`), which is what a window loaded before the build is. The
+  receiver's handler is inside the page's closure and cannot be reached.
+- **Count the fixture before writing the expectation**, again: a row
+  expected Ed to move up 100px when a one-row box left; it moves 44.
+- **`page.scheme('light' | 'dark' | null)`** in `drive.mjs` sets the
+  colour scheme the page is told. A headless Chrome takes the machine's,
+  so a colour that only works in one theme is otherwise never looked at.
+- **What is clipped is asked with `elementFromPoint`.** A rect is the same
+  whether or not a clip path cuts it. The storey's clip is widened for a
+  box, and the row for it asks what is under a point on the box's edge.
+
+Mutants: thirteen suite mutants (`test:floor`, "a meeting on the floor"),
+all red, one only after a missing assertion was added. Of seventeen page
+mutants, four were run and were red where predicted (the batch's naming
+of the room, a `here` and a `gone` drawing the rooms, the window acting on
+`end`); the other thirteen were stopped unrun on 2026-11-16 and are not
+evidence yet: the handler ahead of the storey, Enter, the clip, the stale
+ending state, the signature, the draw order, the click's box, the reload,
+the card, "Ending…", the handle close, the edge's width and the hover
+rule. They are owed before this ships, at the hand-off or the release
+run, not in a development turn (about 25 minutes).
+
+Both lists are kept beside the check, because a list in a scratchpad is
+gone with the session: [`mutants-meeting-box.page.json`](mutants-meeting-box.page.json)
+(all seventeen; the first four are the ones already run) and
+[`mutants-meeting-box.suite.json`](mutants-meeting-box.suite.json):
+
+```bash
+node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs .claude/skills/verify-ui-change/mutants-meeting-box.page.json \
+  'PORT=8946 CDP=9286 .claude/skills/verify-ui-change/run-check-meeting-box.sh "$PWD"' --dest "$TMPDIR/orch-page-copy-box"
+node .claude/skills/mutate-in-a-copy/run-mutants.mjs .claude/skills/verify-ui-change/mutants-meeting-box.suite.json \
+  --dest "$TMPDIR/orch-suite-copy-box" --control
+```
+
+A kept list goes stale as the code moves. That fails safe: `mutate.py`
+wants each old text exactly once and says DID NOT APPLY otherwise, so a
+stale entry is re-pointed at the line's new wording, never counted as a
+survivor. Each entry's first field says what is wrong with the mutant,
+which is what to predict the red from.
+
 ### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
 
 Issue #23 (2026-11-04, 0.10.16): **select desks** on a room, check desks,

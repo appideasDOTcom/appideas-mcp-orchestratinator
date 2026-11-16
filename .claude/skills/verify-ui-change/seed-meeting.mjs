@@ -3,13 +3,15 @@
  * A floor to hold a meeting room on (issue #44), with a host that does what
  * a room asks of it, on a throwaway server.
  *
- *   seed-meeting.mjs <base-url> --db <scratch.db> [--key k] > work.jsonl
+ *   seed-meeting.mjs <base-url> --db <scratch.db> [--key k] [--more] > work.jsonl
  *
  * Desks, all on host h1 ("testbox"):
  *   lab/bo, lab/cy, lab/dee   live, idle, a conversation each (sess-<agent>)
  *   lab/ed                    held by an editor (outside_pid): the room's
  *                             messages to it are refused, in the board's words
  *   lab2/zed                  another floor, so Add offers nothing from it
+ *   lab/fay … lab/jo          with `--more` only: five more live desks, so
+ *                             one floor holds two meetings and desks besides
  *
  * And mail on the board: two unread messages for bo, one for cy.
  *
@@ -66,6 +68,10 @@ const DESKS = [
   { channel: 'lab', agent: 'dee' },
   { channel: 'lab', agent: 'ed', editor: 4242 },
   { channel: 'lab2', agent: 'zed' },
+  // `--more`: five more live desks on lab, for a floor with room for two
+  // meetings and desks left over (check-meeting-box.mjs). After the others,
+  // so the desks check-meeting.mjs reads keep their seats.
+  ...(args.includes('--more') ? ['fay', 'gus', 'hal', 'ivy', 'jo'].map((agent) => ({ channel: 'lab', agent })) : []),
 ];
 db.prepare(`INSERT OR REPLACE INTO hosts (host_id, name, last_seen) VALUES (?, ?, datetime('now'))`).run(HOST, 'testbox');
 DESKS.forEach((d, i) => {

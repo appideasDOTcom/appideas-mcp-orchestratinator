@@ -732,8 +732,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -1554,6 +1554,38 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .selTag.ok   { fill: var(--idle); }
 .selTag.bad  { fill: var(--block); }
 .selTag.note { fill: var(--muted); }
+
+/* A meeting on the floor (costmo, 2026-11-16).
+   -------------------------------------------
+   The desks in a meeting room stand in a box of their own. Its edge is a
+   light grey in both themes, and 2.5px on screen whatever size the room is
+   drawn at (a room is scaled to its width, and a stroke in the drawing's
+   own units would be 3px on a wide floor and 1.5 on a narrow one). The
+   carpet inside is a shade off the floor's, mixed with transparent so it
+   lifts with the storey under the pointer in the building.
+
+   The two placards sit on the box's top edge at its corners, filled, so
+   the edge does not show through them. The label is the edge's own grey
+   with dark words on it, in either theme. End meeting is the same plate
+   drawn as a control: the surface colour with the grey edge, and the
+   block colour under the pointer, because it ends something. */
+:root { --meet-line: #b8bec7; --meet-ink: #1b2026; }
+.meetFrame {
+  fill: color-mix(in srgb, var(--text) 4%, transparent);
+  stroke: var(--meet-line); stroke-width: 2.5px; vector-effect: non-scaling-stroke;
+}
+.meetTabBox { stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+.meetTabText { font: 600 10.5px var(--mono); }
+.meetLabel .meetTabBox { fill: var(--meet-line); stroke: var(--meet-line); }
+.meetLabel .meetTabText { fill: var(--meet-ink); }
+.meetEnd { cursor: pointer; }
+.meetEnd:focus { outline: none; }
+.meetEnd .meetTabBox { fill: var(--surface); stroke: var(--meet-line); }
+.meetEnd .meetTabText { fill: var(--text); }
+.meetEnd:not(.disabled):hover .meetTabBox, .meetEnd:not(.disabled):focus-visible .meetTabBox { fill: var(--block-bg); stroke: var(--block); }
+.meetEnd:not(.disabled):hover .meetTabText, .meetEnd:not(.disabled):focus-visible .meetTabText { fill: var(--block); }
+.meetEnd.disabled { cursor: default; }
+.meetEnd.disabled .meetTabText { fill: var(--muted); }
 
 /* A selecting storey in the building is operated on, not ridden from: no
    pointer over its carpet, no lift, and its desks show their checkboxes. */

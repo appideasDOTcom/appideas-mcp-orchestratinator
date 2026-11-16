@@ -246,6 +246,13 @@ async function connect(target) {
       await cmd('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: dpr, mobile: false });
       return { width, height, dpr };
     },
+    /**
+     * Tell the page which colour scheme the reader prefers: 'light', 'dark',
+     * or null for the browser's own. The stylesheet has one palette per
+     * scheme and a headless Chrome takes the machine's, so a colour that
+     * only works on one of them is otherwise never looked at.
+     */
+    scheme: async (value) => cmd('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: value ?? '' }] }),
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
     /**

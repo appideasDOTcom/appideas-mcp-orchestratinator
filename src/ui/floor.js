@@ -84,8 +84,8 @@
      header while a room is selecting, rather than a takeover of the header's
      second line. That line is the board's channel stats, and an operator
      choosing which desks to act on is the one reading it most. The desks move
-     down to clear the band for as long as it is there; roomGeometry and
-     deskXY carry the offset, so an envelope lands where the desk is. */
+     down to clear the band for as long as it is there; floorPlan carries
+     the offset, so an envelope lands where the desk is. */
   const SEL_BAND = 52;
   /* The line a room keeps once selection has closed itself, when an action
      did not reach a desk (missedNote): one row of text under the header.
@@ -449,6 +449,9 @@
     popout: null,
     outs: new Map(),
     popWins: new Map(),
+    // Meetings the floor's End meeting was pressed for, by room id, with
+    // when: the placard reads "Ending…" until the desks are back.
+    meetEnding: new Map(),
     fate: null,
     mem: null,
     lastDesk: null,      // the popout's desk as last read, for a header after it is gone
@@ -1322,45 +1325,9 @@
 
   /* ---------- drawing ---------- */
 
-  /**
-   * A floor is always the width of a *full* floor, whatever it happens to hold,
-   * and a short row is left-aligned inside it.
-   *
-   * It used to size itself to its own occupancy, which made the same desk a
-   * different size from one channel to the next — the floor trades on
-   * recognising a person across the room, and that is spent the moment the
-   * person changes size when you look at a different channel. In the building
-   * view it also made the storeys ragged, and a building whose floors are
-   * different widths is not a building.
-   *
-   * `collapsed` is the building view: one row, and the rest of the floor scrolls
-   * past it.
-   */
-  function roomGeometry(n, collapsed, pillLines = 0, band = 0) {
-    const cols = COLS;
-    const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / cols));
-    // The band under the header, when the room has one: the selection
-    // toolbar's, or the line a finished action left (roomBand).
-    const top = band;
-    // The last row contributes only what it draws below the desk origin (the
-    // nameplate), not a whole cell — a full DESK_H there leaves every room
-    // ending in a band of empty carpet that reads as "somebody is missing".
-    // A storey with nothing drawn on it (every desk empty or put away, #20)
-    // ends at its header band for the same reason: the row's height is
-    // mostly the bubble above it, and there is nobody to speak.
-    const bottom = (n ? PAD + HEAD_H + (rows - 1) * (DESK_H + GAP) + DESK_BELOW : HEAD_BAND) + top;
-    // The hidden desks' pills, as a tray under the last desk; absent, no height.
-    const pillY = bottom + PILL_ROW_GAP;
-    return {
-      cols,
-      rows,
-      collapsed: !!collapsed,
-      w: ROOM_W,
-      top,
-      pillY,
-      h: (pillLines ? pillY + pillLines * (PILL_H + PILL_ROW_GAP) - PILL_ROW_GAP : bottom) + PAD,
-    };
-  }
+  /* Where a storey's desks stand, and how large the room is, is floorPlan's
+     ("a meeting on the floor: what the page decides"): a desk's place stopped
+     being a function of its index the day a meeting got a box of its own. */
 
   /* ---------- the service bell ---------- */
 
@@ -1842,7 +1809,7 @@
   /** One scroll arrow, sitting in the floor's own left or right margin. */
   function scrollArrow(dir, geo) {
     const cx = dir === 'left' ? 15 : geo.w - 15;
-    const cy = PAD + HEAD_H + (geo.top ?? 0) + DESK_BELOW / 2;
+    const cy = geo.rowY + DESK_BELOW / 2;
     const g = el('g', { class: `deskArrow ${dir}`, 'data-scroll': dir, role: 'button', tabindex: '0' });
     g.appendChild(el('title')).textContent = dir === 'left' ? 'Earlier desks' : 'More desks';
     g.appendChild(el('circle', { cx, cy, r: 13, class: 'arrowChip' }));
@@ -1850,17 +1817,6 @@
     const tail = dir === 'left' ? cx + 3 : cx - 3;
     g.appendChild(el('path', { d: `M ${tail} ${cy - 5} L ${tip} ${cy} L ${tail} ${cy + 5}`, class: 'arrowGlyph' }));
     return g;
-  }
-
-  function deskXY(i, geo) {
-    // A collapsed storey never wraps: the fourth desk runs off to the right and
-    // is reached with an arrow, which is the whole point of collapsing it.
-    const col = geo.collapsed ? i : i % geo.cols;
-    const row = geo.collapsed ? 0 : Math.floor(i / geo.cols);
-    return {
-      x: PAD + col * (DESK_W + GAP),
-      y: PAD + HEAD_H + (geo.top ?? 0) + row * (DESK_H + GAP),
-    };
   }
 
   /**
@@ -1927,8 +1883,7 @@
     return g;
   }
 
-  function desk(d, i, geo, channel) {
-    const { x, y } = deskXY(i, geo);
+  function desk(d, { x, y }, channel) {
     const state = deskState(d);
     const g = el('g', {
       class: `desk ${state}${d.reporting || d.hosted ? '' : ' not-reporting'}${d.hosted ? ' hosted' : ''}`,
@@ -2224,6 +2179,253 @@
      crash, but it is not a second definition of "put away". */
   const onFloor = () => window.onBoard?.(floor.channels) ?? (floor.channels ?? []).filter((c) => !c.archived);
   const shelved = () => window.putAway?.(floor.channels) ?? [];
+
+  /* ---------- a meeting on the floor: what the page decides ---------- */
+
+  /*
+   * Desks in a meeting room are drawn apart from the rest of their floor
+   * (costmo, 2026-11-16): in a box of their own, with "In a meeting" on its
+   * upper left corner and End meeting, a button, on its upper right.
+   *
+   *   one floor     the boxes stand at the top of the floor, one per
+   *                 meeting, stacked, each three desks to a row like the
+   *                 floor itself; the desks in no meeting follow under them.
+   *   the building  a storey stays one row (costmo's pick of three): a
+   *                 meeting's desks come first in the row with the box
+   *                 around them, and scroll with it. A meeting of four is
+   *                 four wide there, and two meetings stand side by side.
+   *
+   * Who is in which meeting is what the rooms' windows say (`ui.outs`, see
+   * "popouts: the windows"), the same record that takes a desk's composer
+   * off the floor's panel, so a desk is in a box exactly while its chat is
+   * in a room's window. The board's own record of a room is for Resume and
+   * for containing broadcasts, and lags the window by design.
+   *
+   * Everything here is plain arithmetic over the desks and the constants at
+   * the top of this file, lifted into test/floor.mjs by the two markers.
+   * roomGeometry and deskXY used to answer "where is desk i"; with a box
+   * that is no longer a function of i alone, so the plan answers it by
+   * agent (`at`), and a floor with no meeting on it is laid out to the
+   * same numbers as before, in the same order of arithmetic.
+   */
+
+  /* The box's edge to its desks' cells, left and right. Small enough that a
+     collapsed storey's first box stays inside the margin its arrows use. */
+  const MEET_PAD_X = 9;
+  /* A placard's height. It straddles the box's top edge, half above. */
+  const MEET_TAB_H = 18;
+  /* Clear air above a box's placards, and between a box and what follows. */
+  const MEET_AIR = 7;
+  /* The box's top edge to its first row's origin: the lower half of a
+     placard, a little air, then a two-line bubble, so a bubble never
+     touches a placard. */
+  const MEET_TOP = MEET_TAB_H / 2 + 5 + BUBBLE_ABOVE;
+  /* Below what a desk draws to the box's bottom edge. */
+  const MEET_BOTTOM = 8;
+  /* The last box's bottom edge to the bubbles of the desks under it. */
+  const MEET_UNDER = 11;
+  /* A placard's inset from the box's corner, and the least air between two. */
+  const MEET_TAB_INSET = 12;
+  const MEET_TAB_GAP = 8;
+  /* 10.5px mono advances about 6.3 units: what a placard is sized by, the
+     way MONO_W sizes the toolbar's chips. */
+  const MEET_CHAR_W = 6.3;
+  const meetTabW = (text) => text.length * MEET_CHAR_W + 16;
+  const MEET_LABEL = 'In a meeting';
+  const MEET_END = 'End meeting';
+  const MEET_END_SHORT = 'End';
+  /* After End meeting is pressed: how long the placard reads "Ending…"
+     before it gives up and is a button again, and how long the room's
+     window has to end itself before the floor closes it by its handle. */
+  const MEET_END_MS = 6000;
+  const MEET_END_CLOSE_MS = 1500;
+
+  /**
+   * The box a desk out in a window belongs to, from that window's word
+   * (`ui.outs`' entry), or null when it is in no meeting: a popout is a
+   * desk's own chat, not a meeting. A room is known by its number once its
+   * window has one. Before that (the moment between the click that opens
+   * the window and the window's first word) it is known by the click, so
+   * two rooms opened in one breath are two boxes.
+   */
+  function meetBoxKey(o) {
+    if (!o?.meeting) return null;
+    return o.meeting === 'new' ? `new:${o.batch ?? ''}` : String(o.meeting);
+  }
+
+  /**
+   * A storey's drawn desks, seated: one group per meeting, then the rest,
+   * every group in the floor's own order. Numbered rooms come first, oldest
+   * first, so a second meeting opens under the first and moves nothing
+   * above it; a room with no number yet follows them.
+   */
+  function meetingSeating(drawn, keyOf) {
+    const by = new Map();
+    const rest = [];
+    for (const d of drawn) {
+      const k = keyOf(d);
+      if (!k) { rest.push(d); continue; }
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push(d);
+    }
+    const boxes = [...by].map(([key, desks]) => ({ key, id: /^\d+$/.test(key) ? Number(key) : null, desks }));
+    boxes.sort((a, b) => (a.id == null) - (b.id == null) || (a.id ?? 0) - (b.id ?? 0));
+    return { boxes, rest };
+  }
+
+  /**
+   * Where everything on a storey stands: each drawn desk by agent (`at`),
+   * each meeting's box, and the room's own size.
+   *
+   * A floor is always the width of a *full* floor, whatever it happens to
+   * hold, and a short row is left-aligned inside it. It used to size itself
+   * to its own occupancy, which made the same desk a different size from
+   * one channel to the next — the floor trades on recognising a person
+   * across the room, and that is spent the moment the person changes size
+   * when you look at a different channel. In the building view it also made
+   * the storeys ragged, and a building whose floors are different widths is
+   * not a building. A meeting's box on one floor is that full width too,
+   * for the same reason, whatever it holds.
+   *
+   * `collapsed` is the building view: one row, and the rest of the floor
+   * scrolls past it. `band` is the band under the header, when the room has
+   * one: the selection toolbar's, or the line a finished action left
+   * (roomBand). `order` is the desks as they are drawn, left to right and
+   * top to bottom, which is what a collapsed storey scrolls through.
+   */
+  function floorPlan(drawn, keyOf, { collapsed = false, pillLines = 0, band = 0 } = {}) {
+    const { boxes: groups, rest } = meetingSeating(drawn, keyOf);
+    const order = [...groups.flatMap((g) => g.desks), ...rest];
+    const pitchX = DESK_W + GAP;
+    const pitchY = DESK_H + GAP;
+    const at = new Map();
+    const boxes = [];
+    const box = (g, x, y, w, h) => boxes.push({ key: g.key, id: g.id, agents: g.desks.map((d) => d.agent), x, y, w, h });
+    // The first box's top edge: under the header and its band, clear of the
+    // upper half of its own placards.
+    const boxTop = HEAD_BAND + band + MEET_TAB_H / 2 + MEET_AIR;
+    let bottom;
+    let rowY = null;
+    if (collapsed) {
+      // A collapsed storey never wraps: the fourth desk runs off to the
+      // right and is reached with an arrow, which is the whole point of
+      // collapsing it. With a meeting on it the row stands a little lower,
+      // to clear the box's top edge and placards.
+      rowY = groups.length ? boxTop + MEET_TOP : PAD + HEAD_H + band;
+      order.forEach((d, i) => at.set(d.agent, { x: PAD + i * pitchX, y: rowY }));
+      let i = 0;
+      for (const g of groups) {
+        box(g, PAD + i * pitchX - MEET_PAD_X, rowY - MEET_TOP, (g.desks.length - 1) * pitchX + DESK_W + MEET_PAD_X * 2, MEET_TOP + DESK_BELOW + MEET_BOTTOM);
+        i += g.desks.length;
+      }
+      // A storey with nothing drawn on it (every desk empty or put away,
+      // #20) ends at its header band: the row's height is mostly the bubble
+      // above it, and there is nobody to speak.
+      bottom = !order.length ? HEAD_BAND + band
+        : groups.length ? rowY + DESK_BELOW + MEET_BOTTOM
+          : PAD + HEAD_H + DESK_BELOW + band;
+    } else {
+      let y = HEAD_BAND + band;
+      for (const g of groups) {
+        const top = y + MEET_TAB_H / 2 + MEET_AIR;
+        const y0 = top + MEET_TOP;
+        g.desks.forEach((d, i) => at.set(d.agent, { x: PAD + (i % COLS) * pitchX, y: y0 + Math.floor(i / COLS) * pitchY }));
+        const rows = Math.ceil(g.desks.length / COLS);
+        y = y0 + (rows - 1) * pitchY + DESK_BELOW + MEET_BOTTOM;
+        box(g, PAD - MEET_PAD_X, top, ROOM_W - (PAD - MEET_PAD_X) * 2, y - top);
+      }
+      // The desks in no meeting: under the header as they always were, or
+      // under the last box, clear of it by a bubble.
+      const y0 = groups.length ? y + MEET_UNDER + BUBBLE_ABOVE : PAD + HEAD_H + band;
+      rest.forEach((d, i) => at.set(d.agent, { x: PAD + (i % COLS) * pitchX, y: y0 + Math.floor(i / COLS) * pitchY }));
+      const rows = Math.ceil(rest.length / COLS);
+      // The last row contributes only what it draws below the desk origin
+      // (the nameplate), not a whole cell — a full DESK_H there leaves every
+      // room ending in a band of empty carpet that reads as "somebody is
+      // missing". A floor whose every desk is in a meeting ends under its
+      // last box, and one with nothing drawn at its header band.
+      bottom = groups.length ? (rest.length ? y0 + (rows - 1) * pitchY + DESK_BELOW : y)
+        : (rest.length ? PAD + HEAD_H + (rows - 1) * pitchY + DESK_BELOW : HEAD_BAND) + band;
+    }
+    // The hidden desks' pills, as a tray under the last desk; absent, no height.
+    const pillY = bottom + PILL_ROW_GAP;
+    return {
+      cols: COLS,
+      collapsed: !!collapsed,
+      w: ROOM_W,
+      top: band,
+      rowY,
+      order,
+      at,
+      boxes,
+      pillY,
+      h: (pillLines ? pillY + pillLines * (PILL_H + PILL_ROW_GAP) - PILL_ROW_GAP : bottom) + PAD,
+    };
+  }
+
+  /** "Bo", "Bo and Cy", "Bo, Cy and Dee". */
+  function meetNames(names) {
+    return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  }
+
+  /**
+   * A box's two placards: the label on its upper left corner and the End
+   * meeting button on its upper right, each with where it stands along the
+   * box's top edge and what it says on hover.
+   *
+   * The button reads "End" where the box is too narrow for both in full,
+   * which is a box around one desk in the building; its hover says the
+   * rest. It cannot be pressed for a room with no number yet: that window
+   * has not said it is open, so there is nothing to tell to end. And once
+   * pressed it reads "Ending…" until the desks are back on the floor,
+   * which is what takes the box away.
+   */
+  function meetTabs(box, names, ending) {
+    const who = meetNames(names);
+    const labelW = meetTabW(MEET_LABEL);
+    const fits = box.w >= labelW + meetTabW(MEET_END) + MEET_TAB_INSET * 2 + MEET_TAB_GAP;
+    const text = ending ? 'Ending…' : fits ? MEET_END : MEET_END_SHORT;
+    const endW = meetTabW(text);
+    const opening = box.id == null;
+    return {
+      label: {
+        text: MEET_LABEL, x: MEET_TAB_INSET, w: labelW,
+        title: `${who} ${names.length === 1 ? 'is' : 'are'} in a meeting room. ${names.length === 1 ? 'Its' : 'Their'} chat is in the room's window; ${names.length === 1 ? 'the desk works' : 'the desks work'} as ${names.length === 1 ? 'it always does' : 'they always do'}.`,
+      },
+      end: {
+        text, x: box.w - MEET_TAB_INSET - endW, w: endW,
+        disabled: opening || !!ending,
+        title: ending ? 'Ending this meeting…'
+          : opening ? 'This meeting room’s window is still opening.'
+            : `End this meeting: ${who} ${names.length === 1 ? 'goes' : 'go'} back to the floor and the room's window closes. The room stays in Recent meeting rooms for Resume.`,
+      },
+    };
+  }
+
+  /* ---------- a meeting on the floor: the drawing ---------- */
+
+  /** One meeting's box: the frame behind its desks, and the two placards on its top edge. */
+  function meetBox(b, c, ending) {
+    const names = b.agents.map((a) => c.desks.find((d) => d.agent === a)?.persona ?? a);
+    const tabs = meetTabs(b, names, ending);
+    const g = el('g', { class: 'meetBox', transform: `translate(${b.x} ${b.y})`, 'data-meeting': b.key });
+    g.appendChild(el('rect', { x: 0, y: 0, width: b.w, height: b.h, rx: 10, class: 'meetFrame' }));
+    const tab = (t, attrs) => {
+      const tg = el('g', { transform: `translate(${t.x} ${-MEET_TAB_H / 2})`, ...attrs });
+      tg.appendChild(el('rect', { x: 0, y: 0, width: t.w, height: MEET_TAB_H, rx: 4, class: 'meetTabBox' }));
+      tg.appendChild(el('text', { x: t.w / 2, y: MEET_TAB_H / 2 + 3.6, 'text-anchor': 'middle', class: 'meetTabText' })).textContent = t.text;
+      tg.appendChild(el('title')).textContent = t.title;
+      return tg;
+    };
+    g.appendChild(tab(tabs.label, { class: 'meetTab meetLabel' }));
+    g.appendChild(tab(tabs.end, {
+      class: `meetTab meetEnd${tabs.end.disabled ? ' disabled' : ''}${ending ? ' ending' : ''}`,
+      'data-act': 'meet-end', 'data-channel': c.channel, 'data-meeting': b.id ?? '', 'data-fk': `${c.channel}|meet-end|${b.key}`,
+      role: 'button', tabindex: '0', 'aria-disabled': tabs.end.disabled ? 'true' : 'false',
+      'aria-label': tabs.end.title,
+    }));
+    return g;
+  }
 
   /* ---------- a desk's place on the floor: what the page decides ---------- */
 
@@ -2776,12 +2978,24 @@
     return g;
   }
 
-  function room(c) {
-    const collapsed = inBuilding();
+  /** The meeting a desk is boxed under on the floor, or null: read off what its room's window said. */
+  const meetBoxOf = (channel, agent) => (isOut(channel, agent) ? meetBoxKey(ui.outs.get(outKey(channel, agent))) : null);
+
+  /** How a storey is laid out right now: its drawn desks, its hidden desks' tray, and the plan for both. */
+  function planFor(c, collapsed) {
     const { drawn, pills } = deskRows(c);
     const tray = deskPillTray(pills);
+    const plan = floorPlan(drawn, (d) => meetBoxOf(c.channel, d.agent), { collapsed, pillLines: tray.lines, band: roomBand(c.channel) });
+    return { drawn, tray, plan };
+  }
+
+  /** Whether End meeting was pressed on the floor for this room a moment ago, and it has not ended yet. */
+  const meetEndingNow = (id) => id != null && Date.now() - (ui.meetEnding.get(String(id)) ?? -Infinity) < MEET_END_MS;
+
+  function room(c) {
+    const collapsed = inBuilding();
+    const { drawn, tray, plan: geo } = planFor(c, collapsed);
     const selecting = ui.select.has(c.channel);
-    const geo = roomGeometry(drawn.length, collapsed, tray.lines, roomBand(c.channel));
     const svg = el('svg', {
       class: `room${collapsed ? ' collapsed' : ''}${selecting ? ' selecting' : ''}`,
       viewBox: `0 0 ${geo.w} ${geo.h}`,
@@ -2852,10 +3066,13 @@
     const mail = el('g', { class: 'mailLayer' });
 
     // Desks and mail ride the same group, so a scrolled storey carries its
-    // envelopes with it. deskXY() coordinates are track-local either way; in the
-    // full-floor view the track simply never moves.
+    // envelopes with it. The plan's coordinates are track-local either way; in
+    // the full-floor view the track simply never moves. A meeting's box rides
+    // it too, under its desks: in the building it is part of the row, and
+    // scrolls with the desks it is around.
     const track = el('g', { class: 'deskTrack' });
-    drawn.forEach((d, i) => track.appendChild(desk(d, i, geo, c.channel)));
+    for (const b of geo.boxes) track.appendChild(meetBox(b, c, meetEndingNow(b.id)));
+    for (const d of geo.order) track.appendChild(desk(d, geo.at.get(d.agent), c.channel));
     track.appendChild(mail);
 
     // The desks put away by hand, as pills under the last desk. On the room
@@ -2877,7 +3094,11 @@
     const clipId = `deskclip-${++clipSeq}`;
     const defs = el('defs');
     const clip = el('clipPath', { id: clipId });
-    clip.appendChild(el('rect', { x: PAD - 2, y: 0, width: geo.w - (PAD - 2) * 2, height: geo.h }));
+    // A meeting's box stands MEET_PAD_X outside its first desk's cell, so a
+    // storey with one is clipped that much further out, or the box at the
+    // start of the row would lose its left edge to the wall.
+    const edge = PAD - 2 - (geo.boxes.length ? MEET_PAD_X : 0);
+    clip.appendChild(el('rect', { x: edge, y: 0, width: geo.w - edge * 2, height: geo.h }));
     defs.appendChild(clip);
     svg.appendChild(defs);
 
@@ -2917,10 +3138,11 @@
     // drawn: positions are among the desks on the storey, not the payload's
     // list, and a desk that is empty or put away is nowhere an envelope can
     // land, so it is skipped.
-    const { drawn } = deskRows(c);
-    // A band under the header moves the desks down by its height; ask the
-    // same way room() did, or the envelope lands a band above the desk.
-    const geo = roomGeometry(drawn.length, svg.classList.contains('collapsed'), 0, roomBand(channel));
+    // A band under the header moves the desks down by its height, and a
+    // meeting moves its desks into a box; ask the same way room() did, or
+    // the envelope lands a band above the desk, or where the desk stood
+    // before its meeting.
+    const { drawn, plan: geo } = planFor(c, svg.classList.contains('collapsed'));
     const idx = (a) => drawn.findIndex((d) => d.agent === a);
     const from = idx(fromAgent);
     if (from < 0) return;
@@ -2934,9 +3156,9 @@
     if (!targets.length) return;
 
     const layer = svg.querySelector('.mailLayer');
-    const a = deskXY(from, geo);
+    const a = geo.at.get(drawn[from].agent);
     for (const t of targets) {
-      const b = deskXY(t, geo);
+      const b = geo.at.get(drawn[t].agent);
       const path = `M ${a.x + 84} ${a.y + 20} Q ${(a.x + b.x) / 2 + 84} ${Math.min(a.y, b.y) - 24} ${b.x + 84} ${b.y + 20}`;
       const g = el('g', { class: 'envelope' });
       g.appendChild(el('rect', { x: -8, y: -6, width: 16, height: 12, rx: 2, class: 'envBody' }));
@@ -3379,15 +3601,13 @@
     const sig = JSON.stringify([channel, d]);
     if (slot.dataset.sig === sig) return;
     slot.dataset.sig = sig;
-    // deskXY puts desk 0 at (PAD, PAD + HEAD_H + top); this `top` makes that (PAD, 0).
-    const geo = { cols: 1, rows: 1, collapsed: false, w: DESK_W, top: -(PAD + HEAD_H) };
     const x0 = PAD - 8;
     const y0 = -BUBBLE_ABOVE - 6;
     const w = DESK_W + 16;
     const h = DESK_BELOW + BUBBLE_ABOVE + 12;
     const svg = el('svg', { class: 'room popdesk', viewBox: `${x0} ${y0} ${w} ${h}`, 'data-channel': channel, preserveAspectRatio: 'xMidYMin meet' });
     svg.appendChild(el('rect', { x: x0, y: y0, width: w, height: h, rx: 10, class: 'roomFloor' }));
-    svg.appendChild(desk(d, 0, geo, channel));
+    svg.appendChild(desk(d, { x: PAD, y: 0 }, channel));
     // The desk only: in a wide popout the panel's foot lives in this slot
     // too (popLayout, #43), and replacing the slot's children would take it.
     const old = slot.querySelector('svg.popdesk');
@@ -5179,9 +5399,20 @@
       // room's window, which is out under one key per participant.
       if (!msg.meeting) for (const [ok, o] of ui.outs) if (o.id === msg.id && ok !== k) ui.outs.delete(ok);
       const held = LOCKS && msg.held === true;
+      // The desks checked in one Meeting room click are out from that click
+      // under no room number (openMeetingRoom), and the window says `here`
+      // for them one at a time. The first word names the room for all of
+      // them, so the box on the floor is one box throughout and not two
+      // for the moment the window is half-way through its desks.
+      const boxed = meetBoxOf(msg.channel, msg.agent);
+      const batch = ui.outs.get(k)?.batch ?? null;
+      if (batch && msg.meeting) for (const o of ui.outs.values()) if (o.batch === batch && o.meeting === 'new') o.meeting = msg.meeting;
       ui.outs.set(k, { at: Date.now(), id: msg.id, held, meeting: msg.meeting ?? null });
       if (held) watchOut(msg.channel, msg.agent, msg.id);
-      if (!was && ui.open && outKey(ui.open.channel, ui.open.agent) === k) renderPanel();
+      // A desk going into a meeting, or from one to another, moves on the
+      // floor (its box), so the rooms are drawn now and not at the next poll.
+      if (boxed !== meetBoxOf(msg.channel, msg.agent)) render();
+      else if (!was && ui.open && outKey(ui.open.channel, ui.open.agent) === k) renderPanel();
     } else if (msg.t === 'gone') {
       takeGone(msg);
     } else if (msg.t === 'rang') {
@@ -5284,7 +5515,8 @@
     // back — a room going takes no panel.
     if (msg.rejoin) {
       ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: o.meeting ?? null });
-      setTimeout(() => { if (!isOut(msg.channel, msg.agent)) renderPanel(); }, REJOIN_MS + 50);
+      // The rooms too: the desk leaves its meeting's box as it comes back.
+      setTimeout(() => { if (!isOut(msg.channel, msg.agent)) render(); }, REJOIN_MS + 50);
       return;
     }
     // Its own Re-attach is the operator asking for it here now, and so is
@@ -5292,6 +5524,9 @@
     if (msg.now || !msg.open) {
       ui.outs.delete(k);
       if (msg.open) openDesk(msg.channel, msg.agent);
+      // A desk out of a meeting leaves its box on the floor, so the rooms
+      // are drawn as well as the panel.
+      else if (o.meeting) render();
       else renderPanel();
       return;
     }
@@ -5450,6 +5685,7 @@
    *   meeting → all : here  { channel, agent, id, held, meeting }  per participant
    *                   gone  { channel, agent, id, open: false, now: true }
    *   floor → meeting: back { channel, agent }   "Bring back" on the floor: remove it
+   *                   end  { channel, meeting } End meeting on the floor's box: end it
    *                   focus, nudged, who        as for a popout
    *
    * Each desk's turns are its own, read under its own conversation from the
@@ -5901,6 +6137,8 @@
     const part = msg.channel === m.channel ? m.parts.find((p) => p.agent === msg.agent) : null;
     if (msg.t === 'who') meetingAnnounce();
     else if (msg.t === 'back' && part) meetingRemove(part.agent, `${meetPersona(part.agent)} was brought back to the floor.`);
+    // End meeting on the floor's box for this room: the room's own End.
+    else if (msg.t === 'end' && m.id != null && String(msg.meeting) === String(m.id)) endMeeting();
     else if (msg.t === 'focus' && part) window.focus();
     else if (msg.t === 'nudged' && part) meetingNudged(part.agent, msg.text);
     else if (msg.t === 'here' && msg.id !== POP_ID) {
@@ -6284,12 +6522,48 @@
     meetSelNote.delete(channel);
     // Out from this click, as a detach is: the floor's composer for each
     // desk goes now. The window's own `here` replaces these within a moment.
+    // `batch` is this click: the desks stand in one box on the floor from
+    // now, and the window's first word gives that box its room (the floor's
+    // `here` handler).
     for (const a of chip.agents) {
-      ui.outs.set(outKey(channel, a), { at: Date.now(), id: null, meeting: 'new' });
+      ui.outs.set(outKey(channel, a), { at: Date.now(), id: null, meeting: 'new', batch: key });
       ui.popWins.set(outKey(channel, a), w);
     }
     // The window is open, so the selection is done with (doneActing).
     doneActing(channel, ui.select.get(channel));
+  }
+
+  /**
+   * End meeting, on a box's placard on the floor (costmo, 2026-11-16): at
+   * once, as the room's own End meeting button does it, and by the same
+   * code. The floor tells the room's window to end (`end`), and the window
+   * ends the record, says `gone` for each desk and closes: the desks
+   * leaving is what takes the box away, so nothing here calls the meeting
+   * over. The floor does not end the board's record itself: while the
+   * window stood, its next touch would open the record again.
+   *
+   * A window that has not ended MEET_END_CLOSE_MS later did not hear it. One
+   * loaded before this build knows no `end`. The floor then closes it by
+   * its handle, when it has one (it opened the window, or was handed it by
+   * `floorAdopt`), and a closed window ends its meeting as it always has.
+   * With neither, the placard is a button again after MEET_END_MS and the
+   * box still stands, which is the truth: the meeting is still on.
+   */
+  function endMeetingHere(channel, id) {
+    const key = String(id);
+    if (!key || meetEndingNow(key)) return;
+    ui.meetEnding.set(key, Date.now());
+    say({ t: 'end', channel, meeting: id });
+    render();
+    const still = () => [...ui.outs].filter(([k, o]) => String(o.meeting) === key && k.startsWith(`${channel}|`) && outsNow(new Map([[k, o]]), Date.now()).size).map(([k]) => k);
+    setTimeout(() => {
+      const wins = new Set(still().map((k) => ui.popWins.get(k)).filter((w) => w && !w.closed));
+      for (const w of wins) { try { w.close(); } catch { /* not ours to close */ } }
+    }, MEET_END_CLOSE_MS);
+    setTimeout(() => {
+      if (!meetEndingNow(key)) ui.meetEnding.delete(key);
+      render();
+    }, MEET_END_MS + 50);
   }
 
   /** The rooms open in a window now, by id: the Recent list leaves them out, and Resume of one brings it to the front. */
@@ -6500,7 +6774,17 @@
     const sel = shown.filter((c) => ui.select.has(c.channel) || ui.bulk.has(c.channel))
       .map((c) => [c.channel, ui.select.has(c.channel) ? [...ui.select.get(c.channel)] : null, ui.bulk.get(c.channel) ?? null,
         meetSelNote.get(c.channel) ?? null, outNow.filter((k) => k.startsWith(`${c.channel}|`))]);
-    const sig = JSON.stringify([ui.floorFilter, shown, sel]);
+    // And who is in which meeting, on every room: a meeting's desks stand
+    // in a box of their own, with a placard that says when it is ending.
+    // A room that has ended is not ending any more: its number is the same
+    // when it is resumed, and a box that came back reading "Ending…" from
+    // the press that closed it last time could not be pressed (seen in
+    // check-meeting-box.mjs, a Resume four seconds after an End).
+    const boxed = new Set([...outNow].map((k) => meetBoxKey(ui.outs.get(k))).filter(Boolean));
+    for (const k of [...ui.meetEnding.keys()]) if (!boxed.has(k)) ui.meetEnding.delete(k);
+    const meets = shown.map((c) => deskRows(c).drawn.map((d) => meetBoxOf(c.channel, d.agent)).filter(Boolean)
+      .map((k) => [k, meetEndingNow(/^\d+$/.test(k) ? k : null)]));
+    const sig = JSON.stringify([ui.floorFilter, shown, sel, meets]);
     if (sig !== ui.roomsSig) {
       ui.roomsSig = sig;
       // Keyboard focus on a bulk control survives the rebuild. Space on a
@@ -6518,6 +6802,14 @@
       } else {
         rooms.replaceChildren(...shown.map(room));
         if (fk) [...rooms.querySelectorAll('[data-fk]')].find((n) => n.dataset.fk === fk)?.focus();
+        // A desk whose card is open may have just moved, into a meeting's
+        // box or out of one, with nothing clicked: the card goes with it.
+        // It is anchored to where the desk was when it was clicked, which
+        // was the same thing for as long as desks only moved on a click.
+        if (ui.details) {
+          const cell = [...rooms.querySelectorAll('.desk')].find((n) => n.dataset.channel === ui.details.channel && n.dataset.agent === ui.details.agent);
+          if (cell) ui.detailsRect = cell.getBoundingClientRect();
+        }
       }
     }
     // The floors put away, under "all floors" and only there: a pill each, the
@@ -6806,6 +7098,17 @@
     const deskPillEl = e.target.closest?.('svg.room .deskPill');
     if (deskPillEl && ui.on) {
       setDeskHidden(deskPillEl.dataset.channel, deskPillEl.dataset.agent, false, deskPillEl);
+      return;
+    }
+
+    // End meeting, on a meeting's box: inside the storey too, and ahead of
+    // a selecting room's own handling, because it is a button that does one
+    // thing wherever the room stands. Dimmed (the window still opening, or
+    // already ending), it does nothing, and the click goes no further: a
+    // press on a button must not ride to the floor instead.
+    const endCtl = e.target.closest?.('svg.room [data-act="meet-end"]');
+    if (endCtl && ui.on) {
+      if (endCtl.getAttribute('aria-disabled') !== 'true') endMeetingHere(endCtl.dataset.channel, endCtl.dataset.meeting);
       return;
     }
 
@@ -7884,7 +8187,7 @@
     // different things about what a desk is.
     // Bulk selection's controls, and a desk in a selecting room, which the
     // pointer checks rather than opens.
-    const selEl = document.activeElement?.closest?.('svg.room [data-act="select-room"], svg.room [data-act="bulk-seen"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
+    const selEl = document.activeElement?.closest?.('svg.room [data-act="meet-end"], svg.room [data-act="select-room"], svg.room [data-act="bulk-seen"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
     if (selEl) {
       e.preventDefault();
       selEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));

@@ -125,7 +125,11 @@ lines from the change, at load 5.5 with nothing else on the ports. Run
 again beside a control, the control was 320 ✓ and the mutant had its one
 red. Report an unpredicted red with what the control read, not as "load".
 
-Keep the JSON file outside the repo. A mutant whose new text is the old
+Keep the JSON file outside the repo while it is scratch. A list that is
+still owed a run, or that a check's write-up points at, is kept beside
+that check instead (verify-ui-change's `mutants-meeting-box.*.json`,
+2026-11-16: thirteen page mutants were stopped unrun to save a turn's
+time, and their list was in a scratchpad). A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
 that way on 2026-11-02 and had to be discounted in the report; say so if
 it happens rather than counting it as a survivor.

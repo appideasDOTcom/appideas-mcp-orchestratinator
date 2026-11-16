@@ -1355,6 +1355,62 @@ Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it n
 sessions on disks that may not be this machine's. `check-meeting.mjs` in
 **verify-ui-change** drives all of it.
 
+**A meeting's desks stand in a box of their own on the floor** (costmo,
+2026-11-16; "a meeting on the floor" in `src/ui/floor.js`). A 2.5px light
+grey edge, "In a meeting" on its upper left corner, and **End meeting**,
+a button, on its upper right. On one floor the boxes are at the top, one
+per meeting, stacked, three desks to a row, the floor's full width, and the
+desks in no meeting follow under them. In the building a storey stays one
+row: costmo's pick of three (stack above the row; box inside the row; no
+box in the building). A meeting's desks come first in the row with the box
+around them and scroll with it, so a meeting of four is four wide there and
+the button reads "End" around a single desk. End acts at once, as the
+room's own button does; asking first was offered and not chosen. Do not
+re-propose the stacked building or a confirmation. Six things behind it:
+- **Where a desk stands is the plan's, by agent.** `roomGeometry` and
+  `deskXY(i)` are gone: a desk's place stopped being a function of its
+  index. `floorPlan` returns `at`, the boxes and the room's size, and
+  `room()`, the envelopes and the scroll arrows all read it. A floor with
+  no meeting is laid out to the old numbers in the old order of arithmetic;
+  `test/floor.mjs` keeps the two old functions as the reference and reads
+  the layout constants out of floor.js by name.
+- **Who is boxed is what the rooms' windows say** (`ui.outs`), the record
+  that already takes a desk's composer off the floor's panel. Not the
+  board's `meeting_rooms`: that row is for Resume and containment, and it
+  lags a window by up to `MEETING_LIVE_SECONDS`. So the box is drawn in
+  this browser's floor tabs only, which is where the window is.
+- **The box is one box from the click.** The desks are out from the
+  Meeting room click under no room number, tagged with that click
+  (`batch`). The window then says `here` a desk at a time, and its first
+  word names the room for the whole batch. Without that the floor drew two
+  boxes for a moment (page mutant, red).
+- **A `here` or `gone` that changes a box draws the rooms then**, not at
+  the next poll. Both handlers used to redraw the panel only, because
+  nothing on the floor moved when a desk went out.
+- **End meeting on the floor is a message to the room's window** (`end`),
+  which runs its own `endMeeting()`. The floor does not end the board's
+  record: while the window stood, its next touch would open it again. A
+  window that has not ended 1.5 s later did not hear it (one loaded before
+  this build knows no `end`), and the floor closes it by its handle
+  (`ui.popWins`), which ends a meeting as a closed window always has. A
+  floor tab that did not open the window has no handle: the placard reads
+  "Ending…" for 6 s and is a button again on a box that still stands.
+- **A room that ended is not "ending" when it is resumed.** Resume reuses
+  the room's number, and a box that came back four seconds after its End
+  still read "Ending…" and could not be pressed (the page check's first
+  run). `render()` drops the state for any room with no desk out.
+
+Riding along: a desk's open nameplate card now follows the desk when the
+rooms are redrawn, since desks move with nothing clicked. Two things not
+built, both deliberate for now: a box for a meeting whose every desk is
+hidden or empty is not drawn (nothing to put in it; its window still has
+End), and the board view shows nothing of a meeting. `check-meeting-box.mjs`
+in **verify-ui-change** is the page; seventeen page mutants were written
+for it and four were run, each red where predicted, before costmo asked
+for long runs to wait for the hand-off or release (2026-11-16). The other
+thirteen are untested claims until then; the list and the command are
+kept beside the check (`mutants-meeting-box.page.json`).
+
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
 2026-11-04). A click on the `<dialog>` element closes it only when it

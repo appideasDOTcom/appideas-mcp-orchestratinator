@@ -244,7 +244,11 @@ slash-command receipts are answered in the room, each in a box labelled with
 its desk. **Add a desk** offers the floor's other desks that are not in a
 window already; **✕** on a desk, or **Bring back from the meeting room** in
 its panel on the floor, puts it back on the floor. **End meeting**, or
-closing the window, ends it. Ended rooms are drawn nowhere and counted
+closing the window, ends it. While a meeting is on, its desks stand
+together on the floor in a box of their own, labelled **In a meeting**,
+with an **End meeting** button on the box's corner that does what the
+window's does. On one floor the boxes are at the top, one per meeting; in
+the building they are part of the storey's row. Ended rooms are drawn nowhere and counted
 nowhere: **Meeting rooms** in the floor's header lists the last twenty,
 newest first, and **Resume** opens one again with each desk back on the
 conversation it had — or says, desk by desk, why not (it left, it moved
