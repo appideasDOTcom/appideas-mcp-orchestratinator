@@ -1991,6 +1991,11 @@ same race was open on the live instance in any real move. `test:host`
 sets `ORCH_HOST_BIND_GAP_MS=700`, a seam that holds the moment after the
 rescan open for longer than a watch tick. The assertion now sees the race
 on every run instead of under load only. Unset, the seam is no pause.
+Measured in copies at load 6 to 26: the old order (the intent set after
+the rescan) was red on that one assertion 3 of 3, with the same two ids
+as every sighting. With no intent handed to the rescan it was red 1 of 1.
+The control was 327 ✓. The list is
+`.claude/skills/mutate-in-a-copy/mutants-move-race.suite.json`.
 
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches
