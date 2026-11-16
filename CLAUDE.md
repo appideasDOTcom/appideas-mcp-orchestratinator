@@ -2161,38 +2161,40 @@ operator's live floor.
 
 ## Conventions
 
-- **In a development turn, run the tests that cover what you touched;
-  the long runs wait for the hand-off, and you say which.** costmo,
-  2026-11-16, building the meeting box in his window: "limit tests you run
-  during turn-by-turn development to those that are about code you've
-  touched (and related)", because the time a task takes had grown. And,
-  the same hour: "I am in no way opposed to thorough testing. I'm just
-  wanting for us to be more picky about when we're running which tests,
-  being confident that no release will pass without a full run." So in a
-  turn: the suite the change is in (`npm run test:floor` is eight
-  seconds), the page checks that read the changed code, and a mutant or
-  two where a new test has never been seen red. Left for the QA hand-off
-  or the release: the full `npm test`, the page checks that only might be
-  affected, and any mutation batch longer than a few minutes. What was
-  left is written where the next agent will find it (a paragraph in the
-  skill beside the check, the mutant list kept there too), and said in
-  the report. It is a rule about when, not about how much: do not thin a
-  test to save a run.
+- **Run the suites a change reaches; the full `npm test` runs once, at the
+  release.** costmo, 2026-11-16, in two steps. While building the meeting
+  box: "limit tests you run during turn-by-turn development to those that
+  are about code you've touched (and related)", and "I am in no way
+  opposed to thorough testing … being confident that no release will pass
+  without a full run." After PR #56's two rounds: "defer full suite
+  testing until close to (or at) final release checks … running the full
+  suite during turn-by-turn work is now causing tasks to take a very long
+  time for little real benefit. If we test new + related code along the
+  way, our processes make sure the full suite is covered prior to
+  release." QA took the same ruling (their decisions/0015, msg 3242): the
+  full chain runs once, at the SHA that ships, when he calls the release.
+  So it is not run while building, while answering a QA review, while
+  validating a merge or before a deploy, by you or by QA. Every one of
+  those runs the suites the diff reaches, the page checks for the area,
+  and the mutants that prove a new row. Long mutation batches and page
+  checks that only *might* be affected wait for the release too. Write
+  down what was left (beside the check, with the mutant list), and say it
+  in the report. It is a rule about when, not about how much: do not thin
+  a test to save a run.
 
-  **Widened the same evening, after PR #56's two rounds:** the full suite
-  waits for the final release check, not only the end of a turn. His words:
-  "defer full suite testing until close to (or at) final release checks
-  … running the full suite during turn-by-turn work is now causing tasks
-  to take a very long time for little real benefit. If we test new +
-  related code along the way, our processes make sure the full suite is
-  covered prior to release." So the full `npm test` is not yours to run
-  while building, while answering a QA review, while validating a merge or
-  before a deploy. Two things cover it: QA's clean-clone run at each
-  review, and the release check. What you run is the suite of each file
-  you changed, the page checks that read it, and the mutants that prove a
-  new row. PR #56 was answered that way, and QA's full runs at both
-  closes were green (2,475 and 2,485 ✓). Run the whole chain only at
-  the release check, or when he asks.
+  Which suites a change reaches, read from the paths each `test/*.mjs`
+  names (QA's map, with two additions from that reading):
+
+  | Changed | Run |
+  |---|---|
+  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:window` and `test:markdown` also read `floor.js`, `test:update` reads `app.js` |
+  | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
+  | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`; `test:floor` and `test:update` also read `index.js` |
+  | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, and `test:host`, whose host runs it |
+  | `src/updates.js`, `host/update.js` | `test:update` |
+  | `plugin/` | `test:plugin` |
+  | a version bump | `smoke` |
+
 - **When the platform will not do all of it, ship the nearest thing that
   works and say what is unmeasured.** His words on the "In a meeting"
   click, where a browser decides what a page may do to a window: "I'll
