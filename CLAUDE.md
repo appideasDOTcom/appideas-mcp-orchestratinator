@@ -937,6 +937,20 @@ optional:
   for a session its host had refused). `unbound` for a seat ends its
   conversations.
 
+**How a new thing was asked of the host, for the next one.** Three parts,
+each of which has a failure behind it elsewhere in this file. A **work
+kind of its own** (`seat`), never a flag on an existing one: a host from
+before it ignores a kind it does not know ("work for a desk this host
+doesn't have"), where `bind` with `seat: true` would have been carried out
+as a move by every older host. A **word at registration** (`seats: true`),
+kept by the board per host (`live.seating`) and on the payload
+(`hosts[].seats`), so the page can dim the control with the reason and the
+route refuses in the same words (`noSeatsWords`), as `capabilities:
+["finish"]` does for an update. And **the refusal said on a desk that has
+a row**: a desk being made has none until `bound`, and an error for it is
+dropped, so `sit()` says it on the desk it was made beside, as a refused
+move is said where the agent still is.
+
 Left out on purpose, with why:
 
 - **A seat is not moved by the card** (`seat_no_move`). A move rebinds a
@@ -2002,6 +2016,22 @@ live container from launchd's environment) each for real.
 
 ## Tests
 
+**Every suite, check and scratch board on this machine needs a newer Node
+than its default first on `PATH`.** The default is 20.20.1, and costmo's
+ruling is that it stays. The `node_modules` here holds better-sqlite3
+13.0.3, and under Node 20 loading it ends the process with exit 139 and
+not a word (measured 2026-11-16: `node -e "require('better-sqlite3')…"`,
+139 under v20.20.1, `ok` under v24.22.2), which reads as a suite or a
+server that printed nothing. So a run names its own:
+`export PATH=$HOME/.nvm/versions/node/v24.22.2/bin:$PATH` at the top of the
+command. The host is the exception: it loads no database, and the live one
+runs on 20 under launchd. One thing seen and not touched: on
+`feature/agent-multi-session` `package.json` still reads `^11.8.0` and
+`engines: >=20`, while the module installed is the 13 that `develop` took
+in 0.12.6. The image builds from `package.json` with its own Node, so the
+live board is unaffected; which of the two this branch should say is
+costmo's.
+
 `npm test` runs twelve suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
 `claude` (a `.cjs`, because this package is `"type": "module"`). They use their
@@ -2327,6 +2357,15 @@ is up, and only if the pid is still this stand-in. The suite then counts
 is not counted), sweeps whatever is left, and does the same on SIGINT or
 SIGTERM. Anything new that keeps a pane's process alive past its hangup
 needs the same: its own event loop is not there to end it.
+
+**A chain put in the background with `( … ) &` reports done at once.** The
+agent's shell says "completed" for the command it ran, which was only the
+launch, so the notification arrives with nothing to read and the suites
+are still running (2026-11-16, three suites launched that way). Give the
+harness the chain itself as the background command, or wait on the
+process: `while kill -0 <pid> 2>/dev/null; do sleep 3; done`. And a suite
+run beside your own floor suite or mutant lanes is run under load of your
+making: the host suite read seven reds that way and 327 ✓ alone.
 
 **`test:seats` is the host suite for several windows in one folder**
 (0.12.9). The host suite's stand-in is one window at a time: it writes a

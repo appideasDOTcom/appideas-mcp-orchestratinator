@@ -649,18 +649,35 @@ the desk the board had just removed**. Read the `personas` row's
 same second. A stand-in has no plugin, so after any change to how a desk
 is closed, close a real one and read those two rows.
 
-**The whole of it in one run, from a browser:** [`two-rooms.mjs`](two-rooms.mjs).
-Three folders bound as `ms-a/qa`, `ms-a/dev` and `ms-a/ops`, each opened
-from the floor (`POST /api/floor/open`; a new folder's trust question is
-Down, Enter on the probe's socket), then a headless Chrome on the floor
-does what the operator does: QA and the developer into one meeting room,
-QA and the service agent into a second, a question asked in each room,
-Bring back on QA's desk.
+**The whole of it in one run, from a browser:**
+[`two-rooms-fixture.sh`](two-rooms-fixture.sh) and [`two-rooms.mjs`](two-rooms.mjs).
+The fixture is everything above done for you: a board from the tree, three
+folders bound as `ms-a/qa`, `ms-a/dev` and `ms-a/ops`, the tree's host on a
+tmux socket of its own, each desk's window opened from the floor and its
+trust question answered. Then a headless Chrome on the floor does what the
+operator does: QA and the developer into one meeting room, QA and the
+service agent into a second, a question asked in each room, Bring back on
+QA's desk.
 
 ```bash
-ORCH_CDP_PORT=9293 node --experimental-websocket .claude/skills/measure-a-real-window/two-rooms.mjs http://localhost:8931 "$SP/shots"
-# … PASS · 13 of 13        (about a minute; four short replies of tokens)
+F=.claude/skills/measure-a-real-window/two-rooms-fixture.sh; S="$SP/two-rooms"      # S outside the repo
+$F up "$S"                    # 10 s: three desks reading held=floor; no tokens
+ORCH_CDP_PORT=9293 node --experimental-websocket .claude/skills/measure-a-real-window/two-rooms.mjs http://localhost:8931 "$S/shots"
+# … PASS · 13 of 13        (about a minute; four short replies of tokens; Node 22.14+ first on PATH)
+$F rows "$S"                  # the desks, the windows and their tags, the seats, the board's desk.* rows in order
+$F down "$S"                  # leaves every desk, stops it all, says what is still bound (none) and claude's version
 ```
+
+`rows` is the reading to take after anything that makes or closes a second
+session: it prints, side by side, what the floor says of each desk, each
+window's tag on the socket, the host's own record of its seats, and the
+board's `personas`, `desk_twins`, conversations and `desk.*` audit rows
+with their times. The SessionEnd fault below is one line of it: a
+`personas` row for `qa-2` stamped the second its `desk.left` row was
+written. The fixture refuses a port that answers, a socket already up, a
+scratch directory inside the repo, and a Node older than the board needs
+(it finds the newest under `~/.nvm` itself; `NODE=` names another). All
+four refusals and the whole loop were run on 2026-11-16.
 
 Run twice on 2026-11-16, 13 of 13 both times: the second room held `ops`
 and `qa-2`, whose host started a real fourth window in QA's folder; asked
@@ -673,12 +690,15 @@ conversation it had. The second run made `qa-2` again: the name was free,
 which is the closing window's hooks not re-seating it, on real windows.
 It leaves both rooms ended; the three desks are left for you to leave.
 
-Teardown is the windows, the host, the server, **and the binding**: `POST
-/api/floor/desk/leave` for each desk does all three for a desk (its host
-closes the window and removes the binding), or `claude mcp remove -s local
-orchestratinator` in the probe folder. Left, the folder stays a desk of a
-board that is gone in `~/.claude.json`. Then the Chrome on the CDP port
-(`pkill -f "remote-debugging-port=9293( |$)"`) and `claude --version`.
+Teardown is the windows, the host, the server, **and the binding**, which
+is what `two-rooms-fixture.sh down` does: `POST /api/floor/desk/leave` for
+each desk (its host closes the window and removes the binding; seats
+first, since leaving a folder's own desk does not take its seats), then
+the host and the board by their environment (`ps eww`, matched on the
+probe's port and host id, so the live host is never a candidate), the
+socket, the Chrome on the CDP port, and a read of `~/.claude.json` for any
+probe folder still bound. By hand, a folder left bound stays a desk of a
+board that is gone.
 
 ## How long a closed window stays in the roster
 

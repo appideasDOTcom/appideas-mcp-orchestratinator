@@ -239,6 +239,28 @@ Identical (0.10.9 → 0.10.10, 2026-11-03) means running windows lose
 nothing by keeping what they loaded, and the note says so instead of asking
 anyone to restart a window.
 
+## What the 0.12.9 deploy added to the readings (2026-11-16)
+
+Three things, each read that day on a deploy of all three halves:
+
+- **A capability the host says at registration is a reading of its own.**
+  0.12.9's host says `seats: true`, and the board asks only a host that
+  says so. A host restart that did not take would leave the feature
+  refusing in words ("runs a build from before…") while every other
+  reading was green. Read it after the restart:
+  `curl -s localhost:8787/api/floor | python3 -c "import json,sys; print([(h['name'], h['live'], h.get('seats')) for h in json.load(sys.stdin)['hosts']])"`.
+  The same goes for any later flag a registration carries.
+- **`dirty files: 0` is read, never assumed.** The round's last change had
+  been reported as uncommitted an hour before, and the deploy was about to
+  be announced as a preview. `status.sh` read the tree clean at a new
+  HEAD: costmo had committed and pushed in between. The announcement said
+  what the reading said.
+- **A changed hook with a bumped version was copied**: `updated from
+  0.12.8 to 0.12.9 for scope user. Restart to apply changes.`, a new
+  cache directory, and its `report.mjs` equal to the tree's by sha256
+  (`shasum -a 256 "$P/hooks/report.mjs" plugin/hooks/report.mjs`). That
+  comparison is the plugin half's proof whenever the update copies.
+
 ## The server half alone
 
 When nothing under `host/` changed since the last deploy, the task says
