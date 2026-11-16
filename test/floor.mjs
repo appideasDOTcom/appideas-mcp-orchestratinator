@@ -1074,7 +1074,27 @@ try {
     eq(fm.agent, 'dev', 'and so is one typed before the home folder is listed, on a dialog opened with no folder');
     fm = form({ agent: 'dev', agentTyped: true });
     takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
-    eq([fm.agent, fm.channel], ['cy', 'elsewhere'], 'a bound folder\'s agent wins over anything typed, and proposes its floor');
+    eq([fm.agent, fm.channel], ['cy', CH], 'a bound folder\'s agent wins over anything typed, and the floor stays the one the dialog was opened from: bringing it here is what the operator came to do');
+    // The floor is the operator's when the dialog was opened from one
+    // (costmo, 2026-11-16): choosing a folder never changes it.
+    fm = form({ channel: 'picked', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, 'picked', 'a floor the operator picked in the dialog is kept when a bound folder is chosen after it');
+    fm = form({ channel: 'picked', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.channel, 'picked', 'and when an unbound one is');
+    fm = form({ channel: '__new__', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, '__new__', 'a new floor being named is not taken away either');
+    fm = form({ channel: null });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, CH, 'a form with no floor in it gets the one the dialog was opened from, not the folder\'s');
+    fm = form({ channel: null, wantChannel: null });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, 'elsewhere', 'opened from all floors, where no floor is being looked at, a bound folder still proposes its own');
+    fm = form({ channel: 'picked', wantChannel: null, path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.channel, 'picked', 'and an unbound one leaves the floor as it is there');
     fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'dev', agentTyped: false });
     takeListing(fm, listingOf('/repo/b'));
     eq(fm.agent, '', 'a new folder the operator moved to starts with no name: typed values survive a redraw, not a new folder');
@@ -2649,10 +2669,10 @@ try {
       const b = src.indexOf('  /* ---------- a desk\'s place on the floor: the drawing ---------- */');
       if (a < 0 || b < 0 || b < a) throw new Error('the desk-place section was not found in src/ui/floor.js between its two section comments');
       const tmp = `./data/desk-place-${process.pid}.mjs`;
-      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords };\n`);
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords, hideRefusal };\n`);
       try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     })();
-    const { deskEmpty, deskRows, moveBlockedWords } = lifted;
+    const { deskEmpty, deskRows, moveBlockedWords, hideRefusal } = lifted;
     // The card's Move to another floor (#18), drawn disabled with Take a
     // desk's no_host words while no live host runs the desk — the page's
     // copy of the sentence held to the server's.
@@ -2788,6 +2808,30 @@ try {
     eq(deskRows(channelOf(fl, CHW)), { drawn: [], pills: [] }, 'and the storey draws nothing — no desks, and no pills either');
     eq(await admin('channel/unarchive', { channel: CHW }), 200, 'restored');
     eq(deskRows(channelOf(await floor(), CHW)).pills.length, 2, 'and the pills are back under it, both still hidden');
+
+    // A desk in a meeting stands in its box, hidden or empty (QA, PR #56
+    // finding 1): the box says who is in the room's window. `boxed` is the
+    // page's reading of the rooms' windows; here it names the desks.
+    {
+      fl = await floor();
+      const c = channelOf(fl);
+      const inMeeting = (names) => (x) => names.includes(x.agent);
+      const empty = c.desks.find((x) => !x.hidden && deskEmpty(x))?.agent;
+      eq([d('waiter').hidden, d('boardonly').hidden, deskEmpty(d('boardonly')), !!empty], [true, true, true, true],
+        'the fixture: waiter hidden, boardonly hidden and empty, and an empty desk nobody hid');
+      assert(!deskRows(c).drawn.some((x) => x.agent === empty), 'which in no meeting is not drawn');
+      const met = deskRows(c, inMeeting(['waiter', 'boardonly', empty]));
+      eq(['waiter', 'boardonly', empty].map((a) => met.drawn.some((x) => x.agent === a)), [true, true, true],
+        'in a meeting, each is drawn: the hidden one, the hidden and empty one, and the empty one');
+      eq(met.pills.map((x) => x.agent), [], 'and none of them is a pill while it stands in the box');
+      const after = deskRows(c, inMeeting([]));
+      eq(after, deskRows(c), 'when the meeting ends the storey is as it was without one');
+      eq(after.pills.map((x) => x.agent).sort(), ['boardonly', 'waiter'], 'the two hidden desks back as pills: the flag was kept all along');
+      eq(deskRows({ ...c, archived: true }, inMeeting(['waiter'])), { drawn: [], pills: [] }, 'archive still wins: a put-away floor draws nobody, in a meeting or not');
+      eq(hideRefusal(d(empty), false), null, 'a desk in no meeting can be hidden');
+      assert(/^In a meeting: .*Hide it once the meeting has ended\.$/.test(hideRefusal(d(empty), true) ?? ''), 'one in a meeting cannot, and its card says why', hideRefusal(d(empty), true));
+      assert(/^In a meeting: .*its pill again when the meeting ends\.$/.test(hideRefusal(d('waiter'), true) ?? ''), 'and one hidden before it joined is told it goes back to its pill', hideRefusal(d('waiter'), true));
+    }
 
     // Restore is the pill, and only the pill.
     eq(await admin('desk/show', { channel: CH, agent: 'waiter' }), 200, 'the pill is clicked');
@@ -3689,6 +3733,160 @@ try {
     eq([T(null, 'cy'), T(new Set(['cy']), 'cy'), T(new Set(['cy']), 'dee'), T(new Set(['cy', 'dee']), 'dee'), T(new Set(['bo', 'cy', 'dee']), 'ed')],
       ['Only CY hears your messages', 'Everyone hears your messages', 'DEE hears your messages too', 'Leave DEE out of your messages', 'Everyone hears your messages'],
       'each chip says on hover what a click on it will do');
+
+    // A meeting on the floor (costmo, 2026-11-16): its desks in a box of
+    // their own. Where everything stands is one function over the drawn
+    // desks, lifted here with the file's own layout constants in front of
+    // it — the real numbers, read out of floor.js by name, so a constant
+    // changed there is a constant changed here.
+    console.log('\na meeting on the floor: its desks in a box of their own');
+    const NAMES = ['COLS', 'PAD', 'HEAD_BAND', 'DESK_W', 'GAP', 'ROOM_W', 'BUBBLE_LINES', 'BUBBLE_LINE', 'BUBBLE_PAD', 'BUBBLE_LIFT', 'BUBBLE_ASCENT', 'BUBBLE_DESCENT',
+      'SIGN_LINE', 'SIGN_LINES', 'FRAME', 'SIGN_PAD', 'FACE_Y', 'SIGN_H', 'FACE_H', 'PLATE_Y', 'PILL_H', 'PILL_Y', 'PILL_ROW_GAP', 'DESK_BELOW', 'BUBBLE_ABOVE', 'DESK_H', 'HEAD_AIR', 'HEAD_H'];
+    const decls = NAMES.map((n) => {
+      const m = new RegExp(`^  const ${n} = .*;.*$`, 'm').exec(src);
+      if (!m) throw new Error(`the layout constant ${n} was not found in src/ui/floor.js as a one-line const`);
+      return { at: m.index, text: m[0] };
+    });
+    const bh = /^  function bubbleHeight\(n\) \{[\s\S]*?\n  \}/m.exec(src);
+    if (!bh) throw new Error('bubbleHeight was not found in src/ui/floor.js');
+    const tmpBox = `./data/meeting-box-${process.pid}.mjs`;
+    writeFileSync(tmpBox, [
+      ...[...decls, { at: bh.index, text: bh[0] }].sort((a, b) => a.at - b.at).map((d) => d.text),
+      cut('  /* ---------- a meeting on the floor: what the page decides ---------- */', '  /* ---------- a meeting on the floor: the drawing ---------- */'),
+      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
+    ].join('\n'));
+    let fp;
+    try { fp = await import(new URL(tmpBox, `file://${process.cwd()}/`)); } finally { rmSync(tmpBox, { force: true }); }
+    const K = fp;
+
+    eq([fp.meetBoxKey(undefined), fp.meetBoxKey({ at: 1, id: 'w' }), fp.meetBoxKey({ meeting: null }), fp.meetBoxKey({ meeting: 7 }), fp.meetBoxKey({ meeting: 'new', batch: 'new-ab12' }), fp.meetBoxKey({ meeting: 'new' })],
+      [null, null, null, '7', 'new:new-ab12', 'new:'],
+      'a desk on the floor or out in its own popout is in no box; one in a room is boxed by the room\'s number, and before the window has one, by the click that opened it');
+
+    const desksOf = (...names) => names.map((agent) => ({ agent }));
+    const nine = desksOf('bo', 'cy', 'dee', 'ed', 'fay', 'gus', 'hal', 'ivy', 'jo');
+    const inRooms = (map) => (d) => map[d.agent] ?? null;
+    const seated = fp.meetingSeating(nine, inRooms({ gus: '12', hal: '12', bo: '7', dee: '7', fay: '7', jo: 'new:x' }));
+    eq(seated.boxes.map((b) => [b.key, b.id, b.desks.map((d) => d.agent)]), [['7', 7, ['bo', 'dee', 'fay']], ['12', 12, ['gus', 'hal']], ['new:x', null, ['jo']]],
+      'one group per meeting, each in the floor\'s own order: the rooms oldest first, so a second meeting opens under the first, and a room with no number yet after them');
+    eq(seated.rest.map((d) => d.agent), ['cy', 'ed', 'ivy'], 'and the desks in no meeting after them, in the floor\'s order');
+    eq(fp.meetingSeating(nine, inRooms({ bo: '10', cy: '9' })).boxes.map((b) => b.key), ['9', '10'], 'rooms are ordered by number, not as text');
+
+    // With no meeting on it a floor is laid out to the numbers it always
+    // was: the two functions the plan replaced, kept here as the reference.
+    const oldGeo = (n, collapsed, pillLines = 0, band = 0) => {
+      const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / K.COLS));
+      const bottom = (n ? K.PAD + K.HEAD_H + (rows - 1) * (K.DESK_H + K.GAP) + K.DESK_BELOW : K.HEAD_BAND) + band;
+      const pillY = bottom + K.PILL_ROW_GAP;
+      return { collapsed, top: band, pillY, h: (pillLines ? pillY + pillLines * (K.PILL_H + K.PILL_ROW_GAP) - K.PILL_ROW_GAP : bottom) + K.PAD };
+    };
+    const oldXY = (i, geo) => ({
+      x: K.PAD + (geo.collapsed ? i : i % K.COLS) * (K.DESK_W + K.GAP),
+      y: K.PAD + K.HEAD_H + geo.top + (geo.collapsed ? 0 : Math.floor(i / K.COLS)) * (K.DESK_H + K.GAP),
+    });
+    const same = [];
+    for (let n = 0; n <= 9; n++) for (const collapsed of [false, true]) for (const [pillLines, band] of [[0, 0], [2, 0], [0, 52], [1, 24]]) {
+      const drawn = nine.slice(0, n);
+      const plan = fp.floorPlan(drawn, () => null, { collapsed, pillLines, band });
+      const was = oldGeo(n, collapsed, pillLines, band);
+      const ok = plan.h === was.h && plan.pillY === was.pillY && plan.w === K.ROOM_W && plan.boxes.length === 0
+        && drawn.every((d, i) => plan.at.get(d.agent).x === oldXY(i, was).x && plan.at.get(d.agent).y === oldXY(i, was).y)
+        && plan.order.map((d) => d.agent).join() === drawn.map((d) => d.agent).join();
+      if (!ok) same.push({ n, collapsed, pillLines, band });
+    }
+    eq(same, [], 'a floor with no meeting on it is laid out exactly as it was — every desk, the pills\' tray and the room\'s height, on one floor and in the building, with a band and without');
+    eq(fp.floorPlan(nine, () => null, { collapsed: true }).rowY, K.PAD + K.HEAD_H, 'and a storey\'s arrows stand beside its one row, where they did');
+
+    // What a desk draws: its cell's width, from a two-line bubble above its
+    // origin to the pills under its nameplate.
+    const cell = (xy) => ({ l: xy.x, r: xy.x + K.DESK_W, t: xy.y - K.BUBBLE_ABOVE, b: xy.y + K.DESK_BELOW });
+    const within = (c, b) => c.l >= b.x && c.r <= b.x + b.w && c.t >= b.y && c.b <= b.y + b.h;
+    const apart = (c, b) => c.r <= b.x || c.l >= b.x + b.w || c.b <= b.y || c.t >= b.y + b.h;
+    const rooms2 = inRooms({ bo: '7', cy: '7', dee: '7', fay: '7', gus: '12', hal: '12' });
+    for (const band of [0, 52]) {
+      const plan = fp.floorPlan(nine, rooms2, { band });
+      const [a, b] = plan.boxes;
+      const at = (n) => plan.at.get(n);
+      const tag = band ? ' (under the selection toolbar\'s band)' : '';
+      eq(plan.boxes.map((x) => [x.key, x.id, x.agents]), [['7', 7, ['bo', 'cy', 'dee', 'fay']], ['12', 12, ['gus', 'hal']]], `on one floor: a box per meeting, naming its desks${tag}`);
+      eq([at('bo').y === at('cy').y && at('cy').y === at('dee').y, [at('bo').x, at('cy').x, at('dee').x], at('fay').x, at('fay').y - at('bo').y],
+        [true, [0, 1, 2].map((c) => K.PAD + c * (K.DESK_W + K.GAP)), K.PAD, K.DESK_H + K.GAP],
+        `the box keeps three to a row: the fourth desk starts its second row, on the floor's own columns and pitch${tag}`);
+      assert(a.agents.every((n) => within(cell(at(n)), a)) && b.agents.every((n) => within(cell(at(n)), b)), `every desk in a meeting is drawn inside its box, bubble and pills included${tag}`);
+      assert(['ed', 'ivy', 'jo'].every((n) => apart(cell(at(n)), a) && apart(cell(at(n)), b)) && a.agents.every((n) => apart(cell(at(n)), b)), `and no other desk is: not one from the floor, not one from the other meeting${tag}`);
+      assert(a.y - K.MEET_TAB_H / 2 > K.HEAD_BAND + band, `the first box, placards and all, stands under the header${band ? ' and its band' : ''}, at the top of the floor${tag}`);
+      assert(b.y - K.MEET_TAB_H / 2 > a.y + a.h && b.x === a.x && b.w === a.w, `a second meeting is stacked under the first, the same width, its placards clear of the box above${tag}`);
+      eq([a.x, a.x + a.w], [K.PAD - K.MEET_PAD_X, K.ROOM_W - K.PAD + K.MEET_PAD_X], `a box is the floor's full row wide whatever it holds, like the floor itself${tag}`);
+      assert(['ed', 'ivy', 'jo'].every((n) => cell(at(n)).t > b.y + b.h) && at('ed').y === at('ivy').y && at('ed').x === K.PAD, `the desks in no meeting follow under the last box, three to a row${tag}`);
+      eq(plan.order.map((d) => d.agent), ['bo', 'cy', 'dee', 'fay', 'gus', 'hal', 'ed', 'ivy', 'jo'], `drawn in that order${tag}`);
+      eq(plan.h, at('ed').y + K.DESK_BELOW + K.PAD, `and the room ends under its last row, as it always did${tag}`);
+    }
+    const all = fp.floorPlan(desksOf('bo', 'cy'), inRooms({ bo: '7', cy: '7' }), {});
+    eq(all.h, all.boxes[0].y + all.boxes[0].h + K.PAD, 'a floor whose every desk is in the meeting ends under the box');
+    const tray = fp.floorPlan(desksOf('bo', 'cy'), inRooms({ bo: '7', cy: '7' }), { pillLines: 1 });
+    assert(tray.pillY > tray.boxes[0].y + tray.boxes[0].h && tray.h === tray.pillY + K.PILL_H + K.PAD, 'and its hidden desks\' pills stand under the box, not in it');
+
+    // The building: a storey stays one row, and a meeting's desks come
+    // first in it with the box around them (costmo's pick).
+    const row = fp.floorPlan(nine, rooms2, { collapsed: true });
+    const rat = (n) => row.at.get(n);
+    eq(row.order.map((d) => d.agent), ['bo', 'cy', 'dee', 'fay', 'gus', 'hal', 'ed', 'ivy', 'jo'], 'in the building: the meetings\' desks first in the storey\'s one row, then the rest');
+    assert(row.order.every((d, i) => rat(d.agent).y === row.rowY && rat(d.agent).x === K.PAD + i * (K.DESK_W + K.GAP)), 'every desk on that one row, a cell apart, so the storey scrolls a desk at a time as before');
+    const [ra, rb] = row.boxes;
+    assert(ra.agents.every((n) => within(cell(rat(n)), ra)) && rb.agents.every((n) => within(cell(rat(n)), rb)), 'each meeting\'s desks inside its box');
+    assert(row.order.filter((d) => !ra.agents.includes(d.agent)).every((d) => apart(cell(rat(d.agent)), ra)) && ['ed', 'ivy', 'jo'].every((n) => apart(cell(rat(n)), rb)), 'and nobody else\'s');
+    assert(rb.x >= ra.x + ra.w + 6 && rb.y === ra.y && rb.h === ra.h, 'two meetings stand side by side, with air between their boxes');
+    eq(ra.w, 3 * (K.DESK_W + K.GAP) + K.DESK_W + 2 * K.MEET_PAD_X, 'a meeting of four is four desks wide there: the row is not wrapped');
+    assert(ra.y - K.MEET_TAB_H / 2 > K.HEAD_BAND, 'the box and its placards are under the header');
+    const plainRow = fp.floorPlan(nine, () => null, { collapsed: true });
+    assert(row.h > plainRow.h && row.h - plainRow.h < K.DESK_H / 4, `the storey is a little taller for the box, not a row taller (${(row.h - plainRow.h).toFixed(1)} of a ${K.DESK_H.toFixed(1)} row)`);
+    assert(ra.x >= K.PAD - K.MEET_PAD_X, 'and the first box\'s left edge is inside the margin the storey is clipped to');
+    const rowBand = fp.floorPlan(nine, rooms2, { collapsed: true, band: 52 });
+    eq([rowBand.rowY - row.rowY, rowBand.boxes[0].y - ra.y, rowBand.h - row.h].map((n) => Math.round(n * 1000) / 1000), [52, 52, 52], 'under the selection toolbar\'s band the row, its boxes and the storey\'s height all stand that much lower');
+    assert(rowBand.boxes[0].y - K.MEET_TAB_H / 2 > K.HEAD_BAND + 52, 'so a box\'s placards are clear of the toolbar, not under it');
+
+    // The two placards.
+    const wide = fp.meetTabs({ id: 7, w: K.ROOM_W - 2 * (K.PAD - K.MEET_PAD_X) }, ['Bo', 'Cy', 'Dee'], false);
+    eq([wide.label.text, wide.end.text, wide.end.disabled], ['In a meeting', 'End meeting', false], 'the placards: "In a meeting" and End meeting, which can be pressed');
+    assert(wide.label.x < 20 && wide.end.x + wide.end.w > K.ROOM_W - 2 * (K.PAD - K.MEET_PAD_X) - 20, 'the label at the box\'s upper left corner, the button at its upper right');
+    assert(/^Bo, Cy and Dee are in a meeting room\./.test(wide.label.title) && /Bo, Cy and Dee go back to the floor/.test(wide.end.title) && /Recent meeting rooms/.test(wide.end.title),
+      'each says on hover who is in it, and End meeting what it will do');
+    const boxW = (n) => (n - 1) * (K.DESK_W + K.GAP) + K.DESK_W + 2 * K.MEET_PAD_X;
+    const fits = [1, 2, 3, 4].map((n) => { const t = fp.meetTabs({ id: 7, w: boxW(n) }, ['Bo'], false); return [t.end.text, t.label.x >= 0 && t.end.x >= t.label.x + t.label.w + K.MEET_TAB_GAP && t.end.x + t.end.w <= boxW(n)]; });
+    eq(fits, [['End', true], ['End meeting', true], ['End meeting', true], ['End meeting', true]], 'around one desk in the building the button reads "End", and at every width both placards are on the box and clear of each other');
+    assert(/^Bo is in a meeting room\. Its chat/.test(fp.meetTabs({ id: 7, w: boxW(1) }, ['Bo'], false).label.title), 'a meeting of one is said in the singular');
+    const opening = fp.meetTabs({ id: null, w: boxW(3) }, ['Bo', 'Cy'], false);
+    eq([opening.end.disabled, opening.end.text, opening.end.title], [true, 'End meeting', 'This meeting room’s window is still opening.'], 'a room whose window has not said it is open cannot be ended yet, and says why');
+    const ending = fp.meetTabs({ id: 7, w: boxW(1) }, ['Bo'], true);
+    eq([ending.end.disabled, ending.end.text], [true, 'Ending…'], 'once pressed it reads "Ending…" and cannot be pressed again');
+    assert(ending.end.x >= ending.label.x + ending.label.w + K.MEET_TAB_GAP, 'which still fits beside the label on the narrowest box');
+    assert(/Click to bring that window here, to the front\.$/.test(wide.label.title), 'and the label says what a click on it does');
+
+    // "In a meeting", clicked: where the room's window goes (costmo,
+    // 2026-11-16). The pointer and the screen are in screen coordinates;
+    // the screen is the one the click was made on.
+    const main = { left: 0, top: 25, width: 1920, height: 1055 };
+    eq(fp.meetingRaisePlace({ x: 1000, y: 600 }, { width: 760, height: 600 }, main), { left: 620, top: 300, width: 760, height: 600 }, 'a room\'s window is brought to the pointer: centred on it');
+    eq(fp.meetingRaisePlace({ x: 1900, y: 40 }, { width: 760, height: 600 }, main), { left: 1160, top: 25, width: 760, height: 600 }, 'and kept wholly on that screen: a pointer in a corner puts the window against the corner, not over the edge');
+    eq(fp.meetingRaisePlace({ x: 10, y: 1070 }, { width: 760, height: 600 }, main), { left: 0, top: 480, width: 760, height: 600 }, 'at the other corner too');
+    const leftMon = { left: -2560, top: 0, width: 2560, height: 1415 };
+    const onLeft = fp.meetingRaisePlace({ x: -1300, y: 700 }, { width: 760, height: 1055 }, leftMon);
+    eq(onLeft, { left: -1680, top: 173, width: 760, height: 1055 }, 'a click on a monitor to the left of the main one puts it on that monitor, in that monitor\'s coordinates');
+    assert(onLeft.left >= leftMon.left && onLeft.left + onLeft.width <= leftMon.left + leftMon.width, 'inside it');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 760, height: 1415 }, { left: 0, top: 25, width: 1440, height: 875 }), { left: 120, top: 25, width: 760, height: 875 },
+      'a window taller than the screen it is brought to is made to fit it: one opened full height on a tall monitor does not hang off a short one');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 2000, height: 400 }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 100, width: 1440, height: 400 }, 'nor a wider one off its side');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 0, height: NaN }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 0, width: 1440, height: 900 }, 'and a size that is not a size is the screen\'s, never nothing');
+    // Whether the move has to cross to another screen, which is when the
+    // browser is asked for its leave to place windows on any of them.
+    const here = { left: 0, top: 25, width: 1920, height: 1055 };
+    eq([fp.meetingElsewhere({ left: 1100, top: 25, width: 760, height: 1055 }, here), fp.meetingElsewhere({ left: 1700, top: 400, width: 760, height: 600 }, here)], [false, true],
+      'a room\'s window on the screen that was clicked needs no leave to be moved; one whose centre is on the next screen does, though its edge is on this one');
+    eq([fp.meetingElsewhere({ left: -2000, top: 100, width: 760, height: 900 }, here), fp.meetingElsewhere({ left: 400, top: 1200, width: 760, height: 900 }, here), fp.meetingElsewhere({ left: 400, top: -1400, width: 760, height: 900 }, here)], [true, true, true],
+      'a monitor to the left, below or above is another screen');
+    eq([fp.meetingElsewhere({ left: undefined, top: undefined, width: 760, height: 600 }, here), fp.meetingElsewhere({ left: 10, top: 30, width: NaN, height: 600 }, here)], [true, true],
+      'and a window with no place to read is asked about, not assumed to be here');
+    eq([fp.meetNames([]), fp.meetNames(['Bo']), fp.meetNames(['Bo', 'Cy']), fp.meetNames(['Bo', 'Cy', 'Dee'])], ['', 'Bo', 'Bo and Cy', 'Bo, Cy and Dee'], 'names are joined the way a sentence joins them');
   }
 } catch (err) {
   failures++;

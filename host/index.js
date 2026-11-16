@@ -57,6 +57,8 @@ const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
 const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
+/* test:host's seam for the move race (bind): ms to hold after a bind's rescan. */
+const BIND_GAP_MS = Math.max(0, Number(process.env.ORCH_HOST_BIND_GAP_MS ?? 0) || 0);
 // How much of a conversation the board has never seen goes up when it is
 // reopened from the picker — see Desk.follow's 'tail'.
 const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
@@ -587,6 +589,8 @@ class Host {
   constructor(cfg) {
     this.cfg = cfg;
     this.desks = new Map();
+    // A move's reopen intent, keyed like `desks`, for the rescan to set on the desk it creates (bind).
+    this.intents = new Map();
     // A window moved to a fresh tmux server says so on its desk, in the host's
     // words — see "a tmux server that can no longer read a desk's folder" in
     // window.js. A window that is no desk of this board's is only logged.
@@ -771,7 +775,10 @@ class Host {
         }
         continue;
       }
-      this.desks.set(k, new Desk(this, d));
+      const made = new Desk(this, d);
+      // A move's intent, from bind(): on the desk from its first tick.
+      if (this.intents.has(k)) made.intent = this.intents.get(k);
+      this.desks.set(k, made);
       log(`${have ? 'moved' : 'found'} desk ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope, ${reason})`);
       changed = true;
     }
@@ -886,8 +893,31 @@ class Host {
     rebound = true;
     log(`${channel}/${agent}: bound ${dir} in local scope`);
     this.addRoot(dir);
-    await this.rescan(`bound from the floor — ${channel}/${agent}`);
-    const desk = this.desks.get(`${channel}|${agent}`);
+    // Whether the move closes the floor's window for a new conversation is
+    // asked before the rescan, and the intent is handed to the rescan to set
+    // as it creates the desk (`intents`). Set after it, as it was, it came
+    // one await too late: watchLoop() is a loop of its own, and a tick in
+    // that await found the new desk with no intent and the old window still
+    // running, adopted that conversation by newest-wins, and filed its
+    // session row on the new floor. That was test:host's move-section red,
+    // seven sightings, all under load, and read on the seventh (CLAUDE.md,
+    // Tests).
+    const fresh = !!p.from && p.open !== false && !!(await W.paneFor(dir));
+    const key = `${channel}|${agent}`;
+    if (fresh) {
+      const since = Date.now();
+      this.intents.set(key, { sessionId: null, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS });
+    }
+    try {
+      await this.rescan(`bound from the floor — ${channel}/${agent}`);
+    } finally {
+      this.intents.delete(key);
+    }
+    // A seam for test:host: the moment after the rescan held open, so a
+    // watch tick lands in it every run rather than under load only. Unset
+    // (the default) it is no pause at all.
+    if (BIND_GAP_MS) await sleep(BIND_GAP_MS);
+    const desk = this.desks.get(key);
     if (!desk) {
       return fail(`bound ${dir}, but the rescan did not find the desk — is ${this.cfg.url} the board its entry names?`);
     }
@@ -908,18 +938,15 @@ class Host {
     // no holder to ask about. Measured in task 253.
     //
     // So nothing here pins the old id on the new floor, and the reopen's
-    // intent is set before anything else can tick: between this rescan and
-    // the reopen the old window is still running in this folder, and
-    // newest-wins in watch() would adopt it. An editor's chat is left alone;
+    // intent is set before anything else can tick, by the rescan as it
+    // creates the desk (above): between the rescan and the reopen the old
+    // window is still running in this folder, and newest-wins in watch()
+    // would adopt it. An editor's chat is left alone;
     // it follows the new binding on its next tool call. A desk with no floor
     // window takes the open path below, as it always has, onto its last
     // conversation (#24 Decided 3, costmo 2026-11-03: "Last conversation") —
     // there is no closing window there for the reopen to meet.
-    const fresh = !!p.from && p.open !== false && !!(await W.paneFor(desk.cwd));
-    if (fresh) {
-      const since = Date.now();
-      desk.intent = { sessionId: null, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
-    } else if (oldLast) {
+    if (!fresh && oldLast) {
       await desk.follow(oldLast);
     }
     await this.register();

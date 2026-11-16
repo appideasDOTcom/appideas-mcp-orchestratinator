@@ -244,7 +244,14 @@ slash-command receipts are answered in the room, each in a box labelled with
 its desk. **Add a desk** offers the floor's other desks that are not in a
 window already; **✕** on a desk, or **Bring back from the meeting room** in
 its panel on the floor, puts it back on the floor. **End meeting**, or
-closing the window, ends it. Ended rooms are drawn nowhere and counted
+closing the window, ends it. While a meeting is on, its desks stand
+together on the floor in a box of their own, labelled **In a meeting**,
+with an **End meeting** button on the box's corner that does what the
+window's does. A click on **In a meeting** brings that room's window to
+the front, where your pointer is. On one floor the boxes are at the top, one per meeting; in
+the building they are part of the storey's row. Every desk in the meeting stands in its box,
+hidden or not, and **Hide desk** waits until the meeting ends; a desk hidden before it joined
+is its pill again then. Ended rooms are drawn nowhere and counted
 nowhere: **Meeting rooms** in the floor's header lists the last twenty,
 newest first, and **Resume** opens one again with each desk back on the
 conversation it had — or says, desk by desk, why not (it left, it moved
@@ -278,7 +285,9 @@ None of them should have to be discovered by accident:
   already knows its folder and its host, so you pick only the floor, and the
   page goes there with you. It is the same move Take a desk makes when you
   choose a folder that is bound elsewhere, with the same refusals in the
-  same words (not while a turn is running; not without its host). If the
+  same words (not while a turn is running; not without its host). Take a
+  desk opened while you are on a floor keeps that floor when you choose a
+  folder, so a folder bound elsewhere comes to the floor you are on. If the
   floor holds the agent's window, that window closes and **a new
   conversation** opens on the new floor — the one it was on stays in its
   folder, in the session picker and History. With no window open, it opens

@@ -378,6 +378,185 @@ which once they are running, read each one's environment:
 `ps eww -p <pid> | tr ' ' '\n' | grep -E '^(PORT|DB_PATH)='`. A QA page
 run or a `run-check-*.sh` may own one, so kill only yours.
 
+### check-meeting-box.mjs — a meeting's box on the floor (2026-11-16)
+
+The desks in a meeting room stand in a box of their own on the floor, with
+"In a meeting" and an End meeting button on its corners.
+[`run-check-meeting-box.sh`](run-check-meeting-box.sh) serves any directory
+with `seed-meeting.mjs --more` (five more live desks on `lab`, nine in all,
+so one floor holds two meetings and desks besides; without the flag the
+seed is as check-meeting.mjs expects), its own Chrome, and
+[`check-meeting-box.mjs`](check-meeting-box.mjs), reading the page through
+[`probe-meeting-box.js`](probe-meeting-box.js):
+
+```bash
+PORT=8945 CDP=9285 .claude/skills/verify-ui-change/run-check-meeting-box.sh "$PWD"
+# … PASS · 105 of 105      (about a minute and a half)
+```
+
+It opens real meeting windows from the selection toolbar and reads: the box
+from the click and one box throughout; three to a row, the box's edge and
+both placards with their words measured on their plates; an envelope
+leaving a boxed desk from where it is drawn; a second meeting stacked
+under the first; a desk brought back; End pressed in a selecting room; the
+building (boxes side by side in the one row, "End" around one desk, a real
+press that does not ride to the floor, a press on the box's carpet that
+does); End by keyboard with every desk back where it stood and an open
+card following its desk; Resume; a window that never hears `end`, closed
+by the floor; a second floor tab with no window to close; a reload of the
+room's window; and both themes. Pictures land in the run's `shots/`. What
+it taught:
+
+- **A state drawn for a moment is read from a MutationObserver's log**
+  (`watchBoxes`). Two boxes for one meeting half-way through its desks, a
+  placard reading "Ending…", a box emptying a desk at a time: each is gone
+  before a poll reads it. The log keeps each box's room, button text,
+  whether it can be pressed, and who its label names.
+- **A second press can be swallowed by the first one's state.** The first
+  run read two reds that were one bug: a room resumed four seconds after
+  its End came back still "Ending…", and the next step's press on it did
+  nothing. That step asserts the fixture too (`dropped === 1`), which is
+  what showed the press had not been taken.
+- **"The window did not hear it" is staged on the sender.** The floor's
+  `BroadcastChannel.prototype.postMessage` is wrapped to drop `end`
+  (`deaf()`), which is what a window loaded before the build is. The
+  receiver's handler is inside the page's closure and cannot be reached.
+- **A page that moves another window is read in two places.** A click on
+  "In a meeting" brings the room's window to the pointer. `watchCalls`
+  wraps the room window's own `moveTo`, `resizeTo` and `focus` (the floor
+  calls them through its handle, which finds the wrapped ones), so the
+  order and the arguments are read. `page.windowBounds()` in `drive.mjs`
+  is the browser's own word for where the window then is, and
+  `windowBounds({ left, top, width, height })` places it first: a headless
+  screen is 800x600 and a window that fills it cannot be told from one
+  that never moved.
+- **A desktop the browser does not have is told to the page, and the row
+  says so.** Moving a window to another screen needs Chrome's
+  window-management permission, asked with `getScreenDetails()`. A headless
+  Chrome has one screen and puts no question, so `leave(page, 'granted' |
+  'denied' | null)` sets `screen.isExtended` and the answer, and the
+  window is put past the screen's edge with `windowBounds`. The rows prove
+  that the page asks once, only for a window on another screen, and moves
+  again when the answer is yes. They do not prove the window crosses: that
+  is Chrome's, seen on costmo's three screens or not at all. The first
+  row of the step is the fixture's own (`far.left >= scr.width`).
+- **Headless is not the desktop for a raise.** Headless left a minimized
+  window minimized after `focus()` (measured 2026-11-16 with
+  `windowState('minimized')`, then `windowBounds()` reading `minimized`
+  after the click). That says nothing about Chrome on macOS, so the check
+  has no row for it, and the write-up says it is unmeasured.
+- **A control never seen to fail may never have run.** The suite's rows
+  for the new placement reused a name already declared in their block,
+  and `test:floor` died on a SyntaxError before its first row. A grep for
+  `✗|PASS|FAIL` printed nothing for it and the next command's PASS stood
+  alone on the screen. `run-mutants.mjs --control` said `0 ✓` and the
+  error. Read the suite's verdict line itself, not the absence of a ✗.
+- **Count the fixture before writing the expectation**, again: a row
+  expected Ed to move up 100px when a one-row box left; it moves 44.
+- **`page.scheme('light' | 'dark' | null)`** in `drive.mjs` sets the
+  colour scheme the page is told. A headless Chrome takes the machine's,
+  so a colour that only works in one theme is otherwise never looked at.
+- **What is clipped is asked with `elementFromPoint`.** A rect is the same
+  whether or not a clip path cuts it. The storey's clip is widened for a
+  box, and the row for it asks what is under a point on the box's edge.
+
+Mutants, as QA ran them in PR #56's review at `b8c0d73` (2026-11-16; the
+review is the record): the suite list, 17 of 17 red (fifteen of ours and
+two of QA's). The page list, 23 of 25 red. The two greens were rows that
+saw their fault only by chance, and each has a row of its own now: the
+reload row read a redraw only if a poll landed in the gap, and is now
+given one in the gap (Info 2); and no row reached the one-screen guard on
+the window-management question, which the tab with no handle now does
+(Info 3). QA's own page mutants QP3 (the storey lit under the label) and
+QP4 (the box leaving after its window closes only at the next poll) were
+green too. Both have rows now: the label is hovered, not pressed (`hover()`
+in drive.mjs), and the box must leave with the floor's poll held
+(`holdPolls`), inside five seconds of the press. A row that waited eight
+let the mutant through even with the poll held: End's own "Ending…" timer
+redraws the rooms at six seconds. And the reload's gap is drawn after
+*each* desk's going, not the first. With one desk still in, the box
+stood around it and the mutant's log read one box throughout. The fixes for the review, and one bug the new rows found
+(End's close timer closed a room resumed inside it), added eight page
+mutants and two suite mutants to the lists, marked `PR #56`.
+
+Both lists are kept beside the check, because a list in a scratchpad is
+gone with the session: [`mutants-meeting-box.page.json`](mutants-meeting-box.page.json)
+(thirty-three; the last eight are PR #56's) and
+[`mutants-meeting-box.suite.json`](mutants-meeting-box.suite.json):
+
+```bash
+node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs .claude/skills/verify-ui-change/mutants-meeting-box.page.json \
+  'PORT=8946 CDP=9286 .claude/skills/verify-ui-change/run-check-meeting-box.sh "$PWD"' --dest "$TMPDIR/orch-page-copy-box"
+node .claude/skills/mutate-in-a-copy/run-mutants.mjs .claude/skills/verify-ui-change/mutants-meeting-box.suite.json \
+  --dest "$TMPDIR/orch-suite-copy-box" --control
+```
+
+A kept list goes stale as the code moves. That fails safe: `mutate.py`
+wants each old text exactly once and says DID NOT APPLY otherwise, so a
+stale entry is re-pointed at the line's new wording, never counted as a
+survivor. Each entry's first field says what is wrong with the mutant,
+which is what to predict the red from.
+
+**The 0.12.8 round's owed page checks were run at the hand-off** (QA,
+PR #56): check-popout PASS, check-backdrop 71 of 71, check-redraw 19 of 19
+and check-card-move PASS at the head. check-hide and check-archive drew the
+same at the head as at the base.
+
+**A desk in a meeting stands in its box, hidden or not** (PR #56 finding
+1). The step "a desk in a meeting stays in its box" covers it. A bulk Hide
+of a boxed desk is refused on the room's line, and the board is asked
+nothing. Cy, hidden on the board, keeps an open card with Hide dimmed and
+the reason under it, and stays in the box and its sentences. With all
+three hidden the box stands with In a meeting and End, and there are no
+pills. Shown again, Hide is still refused while the meeting lasts. The flag is read
+off the card's words, because a hidden desk in a box draws nothing else
+that a poll changes.
+
+**A timer in an unfocused tab can fire hundreds of milliseconds late.** In
+this check a 30 ms `setTimeout` in the floor tab, set from a BroadcastChannel
+handler, fired after 400 ms, after the room's window was back. A row that
+has to act inside a gap acts in the handler itself, not on a timer.
+
+### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
+
+Opened while standing on a floor, Take a desk leaves the floor field alone
+when a folder is chosen, so a folder bound elsewhere is a move to this
+floor; from all floors a bound folder still proposes its own.
+
+```bash
+PORT=8947 CDP=9287 .claude/skills/verify-ui-change/run-check-take-floor.sh "$PWD"
+# … PASS · 8 of 8          (about fifteen seconds)
+```
+
+[`run-check-take-floor.sh`](run-check-take-floor.sh) serves any directory
+with `seed-desk.mjs`'s desk on `lab` and `answering-host.mjs`, whose
+answers file binds `/repo/deep/nest/bound-here` as `cy` on `elsewhere`.
+Its red was run on a copy holding the app.js from before the change
+(`copy-repo.sh`, then `git show 0f1ecb3:src/ui/app.js` into it): four of
+eight red, and the all-floors row green, since that behaviour did not
+change. Three things it taught in an afternoon:
+
+- **A fixture value equal to the old code's answer passes on the old
+  code.** "A floor picked by hand is kept" first picked the first floor
+  that was not `lab`, which was `elsewhere`, the bound folder's own floor
+  and exactly what the old rule wrote. The row was green on the old code.
+  It picks a floor that is neither now ("a fallback that happens to match
+  the fixture", above, from the other side).
+- **Choosing a folder before the dialog knows its host asks nobody.**
+  `browseTo()` returns at once while the form has no host, and the form
+  has none until `/api/floor/folders` answers. The first cut chose at
+  once. Its first section passed because two rows of reading came first,
+  and its second died on a ten-second wait with nothing sent. Wait for
+  the Choose folder button to be enabled, which is what a person waits
+  for.
+- **A wait that times out should say what the page held.** `choose()`
+  throws with the dialog's agent, floor and text. "waitFor timed out"
+  said nothing; the dialog's text showed a form still on `lab` with no
+  folder, and the host's work log showed no browse had been sent.
+- A folder is chosen with `browseTo()`, the function a row's click calls,
+  because this host has a folder dialog and the page draws no rows. Say
+  so when reporting from it.
+
 ### seed-select.mjs and check-select.mjs — bulk selection on a room (#23)
 
 Issue #23 (2026-11-04, 0.10.16): **select desks** on a room, check desks,
@@ -1137,7 +1316,17 @@ cost rounds here — worth knowing even if you hand-roll something else:
 - **`click()` dispatches a bubbling `MouseEvent`.** Floor pills are delegated and
   read the event target; a bare `.click()` on some of them does nothing.
 
-Beyond those four, a check has these (issues #13 and #19):
+Beyond those four, a check has these (issues #13 and #19, and the 0.12.8
+round for the last two):
+
+- **`page.windowBounds()`** is the page's window as the browser has it
+  (`left`, `top`, `width`, `height`, `windowState`), and
+  `windowBounds({ … })` places it first. Use it when a page moves or
+  raises another window: what the page's own `screenX` says is the page's
+  word.
+- **`page.scheme('light' | 'dark' | null)`** sets the colour scheme the
+  page is told. A headless Chrome takes the machine's, so one of the two
+  palettes is otherwise never looked at.
 
 - **`attach(match)` and `targets()`**, exported beside `open()`. A popup a
   page opens is a CDP target of its own: `attach` waits for one whose URL
@@ -1182,6 +1371,8 @@ whole question.
 | History | `#history`; `#dlg #hist-query` (type, then dispatch a `keydown` with `key: 'Enter'`), `#dlg #hist-deep`, rows `#dlg .hist-row`, the coverage line `#dlg .hist-cover` |
 | a conversation open to read | `#floor-panel` `dataset.reading` (the session id — wait on this), `.p-reading-state`, `[data-act="read-back"]`; `#p-text` must be absent |
 | a desk's Sessions rows | `#floor-panel [data-act="sessions"]`, then `#dlg .sess-row` (`.sess-title`, `.sess-meta`, `.sess-detail`) |
+| a meeting's box on the floor | `svg.room .meetBox[data-meeting="<room id>"]`: `.meetFrame` (the edge), `.meetLabel` ("In a meeting", `data-act="meet-raise"`), `.meetEnd` (`data-act="meet-end"`, `aria-disabled`). Read a placard's words from `.meetTabText`'s own text nodes: its `<title>` is a sibling in the same group |
+| Take a desk's floor and button | `#dlg #desk-channel` (its `value`), `#dlg [data-do="desk-take"]` (its words: Take desk / Move to <floor> / Bring onto the floor); wait for `#dlg [data-do="desk-pick"]` enabled before choosing a folder |
 
 Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true}))` — the
 handler is delegated and reads the event target.

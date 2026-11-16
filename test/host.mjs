@@ -408,6 +408,11 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
       ORCH_HOST_ID: id, ORCH_HOST_NAME: 'Test Mac',
       ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION,
       ORCH_HOST_WATCH_MS: '300', ORCH_HOST_CONFIG: '/nonexistent/host.json',
+      // Every bind holds 700 ms after its rescan: more than a watch tick, so
+      // a move's desk is always watched before bind() goes on. The move
+      // section's "no session row for the conversation it left" reads the
+      // race every run (CLAUDE.md, Tests, the seventh sighting).
+      ORCH_HOST_BIND_GAP_MS: '700',
       // send() waits for the message to show up in the transcript before it
       // calls it delivered. The stand-in writes one, so this is the real path;
       // the timeout is only shortened so a genuine failure fails fast.

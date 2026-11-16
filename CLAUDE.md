@@ -770,6 +770,23 @@ opposite of what ran before.
   move, stays behind undrawn (#20) — a new floor named in a refused move is
   an empty storey until removed, as with any take the host refuses.
 
+- **Take a desk opened from a floor keeps that floor when a folder is
+  chosen** (costmo, 2026-11-16, 0.12.8; `takeListing` in `src/ui/app.js`).
+  A bound folder used to put its own floor in the form, so an operator
+  standing on a floor who chose a folder to bring over got "bring it onto
+  the floor it is already on". Now the floor is the operator's: the one
+  the dialog opened on, or whatever they have picked in it since, and a
+  folder bound elsewhere is a move to it, said by the title, the note and
+  the button ("Move to lab") before anything is pressed. Opened from all
+  floors, where no floor is being looked at, a bound folder still proposes
+  its own. The reading taken of "should not change": a floor the operator
+  picked by hand in the dialog also survives the next folder, where an
+  unbound folder used to put it back to the floor the dialog opened on.
+  Read on a page with a folder bound on another floor: from `lab` the
+  form held `lab` and "Move to lab"; from all floors it held the folder's
+  floor and "Bring onto the floor". The folder was chosen through
+  `browseTo()`, which is what a row's click calls, not through a click.
+
 Two page facts behind the card. **"All floors" with two or more floors is
 the building, and a storey there is navigation** — a click on a desk rides
 to its floor, so no card is ever open in it; a card opens on one floor, or
@@ -1355,6 +1372,127 @@ Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it n
 sessions on disks that may not be this machine's. `check-meeting.mjs` in
 **verify-ui-change** drives all of it.
 
+**A meeting's desks stand in a box of their own on the floor** (costmo,
+2026-11-16; "a meeting on the floor" in `src/ui/floor.js`). A 2.5px light
+grey edge, "In a meeting" on its upper left corner, and **End meeting**,
+a button, on its upper right. On one floor the boxes are at the top, one
+per meeting, stacked, three desks to a row, the floor's full width, and the
+desks in no meeting follow under them. In the building a storey stays one
+row: costmo's pick of three (stack above the row; box inside the row; no
+box in the building). A meeting's desks come first in the row with the box
+around them and scroll with it, so a meeting of four is four wide there and
+the button reads "End" around a single desk. End acts at once, as the
+room's own button does; asking first was offered and not chosen. Do not
+re-propose the stacked building or a confirmation. Six things behind it:
+- **Where a desk stands is the plan's, by agent.** `roomGeometry` and
+  `deskXY(i)` are gone: a desk's place stopped being a function of its
+  index. `floorPlan` returns `at`, the boxes and the room's size, and
+  `room()`, the envelopes and the scroll arrows all read it. A floor with
+  no meeting is laid out to the old numbers in the old order of arithmetic;
+  `test/floor.mjs` keeps the two old functions as the reference and reads
+  the layout constants out of floor.js by name.
+- **Who is boxed is what the rooms' windows say** (`ui.outs`), the record
+  that already takes a desk's composer off the floor's panel. Not the
+  board's `meeting_rooms`: that row is for Resume and containment, and it
+  lags a window by up to `MEETING_LIVE_SECONDS`. So the box is drawn in
+  this browser's floor tabs only, which is where the window is.
+- **The box is one box from the click.** The desks are out from the
+  Meeting room click under no room number, tagged with that click
+  (`batch`). The window then says `here` a desk at a time, and its first
+  word names the room for the whole batch. Without that the floor drew two
+  boxes for a moment (page mutant, red).
+- **A `here` or `gone` that changes a box draws the rooms then**, not at
+  the next poll. Both handlers used to redraw the panel only, because
+  nothing on the floor moved when a desk went out.
+- **End meeting on the floor is a message to the room's window** (`end`),
+  which runs its own `endMeeting()`. The floor does not end the board's
+  record: while the window stood, its next touch would open it again. A
+  window that has not ended 1.5 s later did not hear it (one loaded before
+  this build knows no `end`), and the floor closes it by its handle
+  (`ui.popWins`), which ends a meeting as a closed window always has. A
+  floor tab that did not open the window has no handle: the placard reads
+  "Ending…" for 6 s and is a button again on a box that still stands.
+- **A room that ended is not "ending" when it is resumed.** Resume reuses
+  the room's number, and a box that came back four seconds after its End
+  still read "Ending…" and could not be pressed (the page check's first
+  run). `render()` drops the state for any room with no desk out.
+- **End's 1.5 s close closes only the windows it asked.** The timer used
+  to look up whatever window held the room's number when it fired, and
+  Resume reuses the number: a room ended from the floor and resumed inside
+  the 1.5 s had its new window closed by the old End. Not reported by
+  anyone. It was found while writing PR #56 finding 1's rows, which ran 0.6 s
+  after a Resume on the check's own fixture. `endMeetingHere` now keeps the
+  handles it held at the press, and the check has a row for a room resumed
+  inside the timer.
+- **A desk in a meeting stands in its box, hidden or empty** (QA, PR #56
+  finding 1; the developer's pick of QA's three, open to costmo's
+  reversal). The box says who is in the room's window. With hide applied
+  inside it, a hidden participant left the box and its sentences ("Bo and
+  Dee are in a meeting room" with Cy in the room), and a meeting whose
+  every desk was hidden had no box, no In a meeting and no End on the
+  floor, while its window held three. `deskRows(c, boxed)` draws a boxed
+  desk whatever its flag, and makes no pill of it. `floorRows` is the
+  page's reading, and every caller that means "what the floor draws" uses
+  it. The flag is kept, so the desk is a pill again when the meeting ends.
+  Hide is refused while a desk is boxed, said under the card's dimmed
+  button and on the room's line for a bulk Hide (`hideRefusal`): pressed,
+  it would write a flag that changes nothing until the meeting ends, a
+  button that seems to do nothing. The other two picks, counting a hidden
+  participant in the box's words only and leaving it as a pill, were not
+  chosen. The first leaves the all-hidden meeting with no box to put the
+  words on, and the second is a pill outside the box that speaks for it.
+
+**"In a meeting" is a button too: a click brings that room's window to the
+pointer** (costmo, the same day: three monitors, a dozen windows, rooms
+that look alike, some minimized, some covered). `raiseMeeting` focuses the
+window through its handle, fits it to the screen the click was made on if
+it is larger, moves it so it is centred on the pointer and wholly on that
+screen (`meetingRaisePlace`), and focuses it again. Focus comes first
+because a minimized window has no place to be moved to until it is back.
+A floor tab with no handle sends `focus` with the place, and the window
+moves itself; whether it may raise itself is the browser's call. What was
+measured, and where: on a headless Chrome the calls arrive in that order,
+the browser's own bounds show the window under the pointer, and an
+oversized window is resized first. Two things a headless browser cannot
+say, so they are costmo's to see on his screen, and neither was held for
+(his word: as close as reasonably possible, without delaying progress):
+- **A minimized window.** Headless left it minimized after `focus()`. That
+  is headless's stand-in window, not Cocoa's, and real Chrome on macOS
+  was not measured. If it does not come back there, the next step is
+  named and unbuilt: after about a second, a window still `hidden` is
+  closed and the room opened again at the pointer (a reload of the room,
+  which is End then Open). Not built ahead of the measurement, because a
+  wrong guess reloads rooms that were raised perfectly well.
+- **Another monitor.** Measured by costmo on two 4K monitors and a
+  laptop, the same day: without the browser's window-management
+  permission, a room on another monitor came to the front and stopped in
+  the corner of its own screen nearest the pointer. Chrome keeps a moved
+  window on the screen it is on. So when the room's window stands on
+  another screen than the click (`meetingElsewhere`: its centre is outside
+  that screen), `raiseMeeting` asks for the permission from inside the
+  click (`getScreenDetails()`), and makes the same move again once it is
+  given. Chrome puts the question to the operator once per site. It is
+  asked only then: never on a desktop of one screen (`screen.isExtended`),
+  never for a window already on this screen. Refused, the behaviour is
+  what he saw, which he called acceptable. That the grant makes the move
+  cross is Chrome's documented behaviour and was not seen by me: the page
+  check stages the desktop (`leave()`), so it proves the asking and the
+  second move, not the crossing. His to see.
+
+He reported only the monitor case after trying it, so the minimized path
+is as built; nothing was said either way about a minimized window.
+
+Riding along: a desk's open nameplate card now follows the desk when the
+rooms are redrawn, since desks move with nothing clicked. One thing not
+built, deliberate for now: the board view shows nothing of a meeting.
+(A box for a meeting whose every desk was hidden or empty was the other,
+and PR #56 finding 1 showed it was a meeting with no trace on the floor;
+see the bullet above.) `check-meeting-box.mjs` in **verify-ui-change** is
+the page. QA ran its twenty-five page mutants in PR #56's review: 23 red,
+and the two greens were rows that saw their fault only by chance (a redraw
+inside a reload's gap; the one-screen guard), both pinned since. The list
+and the command are kept beside the check (`mutants-meeting-box.page.json`).
+
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
 2026-11-04). A click on the `<dialog>` element closes it only when it
@@ -1669,12 +1807,23 @@ server half is [`src/updates.js`](src/updates.js), the host half
   board. Not in `BACKUP_TABLES`: a restore that turned checking back on
   would be a setting changed by a file nobody looked inside.
 
-Not measured: a real update end to end on the live board. It replaces the
-board's container and restarts the live host, which is costmo's to call;
-every step was run against real git and real processes with stand-ins for
-`docker` and `claude`, and the two Docker halves (the image recording its
-commit, and the host finding the live container from launchd's
-environment) were each run for real.
+A real update on the live board was read once, 2026-11-15, when costmo
+merged PR #55, put the clone on `main` at the merge by hand and pressed
+Update (run `mwi3pd86-ddfc8e0`, `e651798` → `ddfc8e0`). It took 8.6 s from
+the run's start to the host back as the commit: preflight, 0.7 s; the
+rebuild and `/health` answering as `ddfc8e0`, 6.5 s; the host's exit to
+its registration under launchd, 0.8 s. The run closed `done`. The host
+logged one failed work poll while the container was replaced, which is
+the relay riding out the restart. Read afterwards: `/health` at the
+commit, the served `floor.js`, `app.js` and `hub.js` byte for byte the
+tree's, and the host's process started after every `host/*.js` on disk.
+Two steps did nothing in that run, so they are still measured only on
+stand-ins: the fetch and fast-forward (the clone was already at the
+commit) and `claude plugin update` (`plugin/` was the same in both
+commits). Before that day every step had been run against real git and
+real processes with stand-ins for `docker` and `claude`, and the two
+Docker halves (the image recording its commit, and the host finding the
+live container from launchd's environment) each for real.
 
 ## Tests
 
@@ -1753,6 +1902,19 @@ straight after was green (2026-11-03, task 247). Read the channel for
 their announcement before a full run, and if you overlapped, rerun the
 red suite alone before reading the pane.
 
+**Load from other projects is expected, and nothing waits for it to
+pass** (costmo, 2026-11-16: "work around high system load as needed … work
+needs to continue on both fronts"). This machine also builds and tests a
+mobile app, and PR #56's round ran at load averages of 100 to 350 from its
+Xcode and Go builds. A wait-until-quiet loop was stopped by his word. Run
+anyway, and make the run readable instead: mutants always beside an
+unmutated control, a red rerun alone before it is called real, and fixture
+rows kept apart from behaviour rows, so a slow machine reads as one. An
+example is "the fixture held: Resume landed N ms after the End" in
+check-meeting-box. Give the load beside the result. Do not widen a timeout
+to make a load red go away: that is how a row stops seeing its fault, as
+Info 5's 8 s wait did.
+
 **One move-section red in `test:host` has now been seen twice with no other
 suite on its ports.** "the new floor holds no session row for the
 conversation it left" listed two ids: the stand-in's constant `1111…5555`
@@ -1804,6 +1966,36 @@ id still on the old floor. So that mutant is an event that writes no
 turn. A turn on the new floor in the print would instead be the relay
 still reading the old transcript after the rebind. Which one the six
 sightings were is not known. The next sighting is read, not rerun.
+
+**Seventh, 2026-11-16, read** (QA's chain run at `da67c91`, load about
+87; the printed block is in QA's evidence, `pr56/npm-test-da67c91.log`).
+The old id's row was on `host-test-2`, updated at 18:33:03, the second of
+the bind. All eight turns under that id were on `host-test`, the newest at
+18:32:39. So it is the event that writes no turn. The host's log names the
+gap: `found desk host-test-2/free` at .340, and `closed its window to
+reopen` at .570. In between, the folder's old window is still running the
+old conversation. `bind()` creates the new desk inside `rescan()` and sets
+the reopen's intent only after that, and after an `await W.paneFor()`.
+`watchLoop()` is a loop of its own and can tick in that await. A desk with
+no intent adopts the newest live session (`watch()`'s newest-wins). That is
+the old window's, and the desk emits `session` for it on the new floor,
+which the board files by id alone. The comment above `fresh` in `bind()`
+already says the intent must be set "before anything else can tick"; it is
+set one await too late. Under load the tick lands in the gap, and that is
+why every sighting was under load.
+
+**Fixed the same day, at costmo's word.** `bind()` asks `paneFor` before
+the rescan and hands the intent over in `intents`. The rescan sets it on
+the desk as it creates it, so the desk has it from its first tick. The
+same race was open on the live instance in any real move. `test:host`
+sets `ORCH_HOST_BIND_GAP_MS=700`, a seam that holds the moment after the
+rescan open for longer than a watch tick. The assertion now sees the race
+on every run instead of under load only. Unset, the seam is no pause.
+Measured in copies at load 6 to 26: the old order (the intent set after
+the rescan) was red on that one assertion 3 of 3, with the same two ids
+as every sighting. With no intent handed to the rescan it was red 1 of 1.
+The control was 327 ✓. The list is
+`.claude/skills/mutate-in-a-copy/mutants-move-race.suite.json`.
 
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches
@@ -1957,6 +2149,33 @@ operator's live floor.
 
 ## Conventions
 
+- **In a development turn, run the tests that cover what you touched;
+  the long runs wait for the hand-off, and you say which.** costmo,
+  2026-11-16, building the meeting box in his window: "limit tests you run
+  during turn-by-turn development to those that are about code you've
+  touched (and related)", because the time a task takes had grown. And,
+  the same hour: "I am in no way opposed to thorough testing. I'm just
+  wanting for us to be more picky about when we're running which tests,
+  being confident that no release will pass without a full run." So in a
+  turn: the suite the change is in (`npm run test:floor` is eight
+  seconds), the page checks that read the changed code, and a mutant or
+  two where a new test has never been seen red. Left for the QA hand-off
+  or the release: the full `npm test`, the page checks that only might be
+  affected, and any mutation batch longer than a few minutes. What was
+  left is written where the next agent will find it (a paragraph in the
+  skill beside the check, the mutant list kept there too), and said in
+  the report. It is a rule about when, not about how much: do not thin a
+  test to save a run.
+- **When the platform will not do all of it, ship the nearest thing that
+  works and say what is unmeasured.** His words on the "In a meeting"
+  click, where a browser decides what a page may do to a window: "I'll
+  take as much as we can reasonably do … get as close to the desired
+  features as possible without delaying progress." He then tried it on
+  his three monitors and reported the one case that fell short, which is
+  how the window-management permission was found in ten minutes. A
+  headless browser could not have said. Do not hold a change for a
+  measurement only his desktop can make, and do not build a fallback for
+  a failure nobody has seen.
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
 - **The tree is committed whenever costmo chooses, so an edit is not

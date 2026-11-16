@@ -125,7 +125,11 @@ lines from the change, at load 5.5 with nothing else on the ports. Run
 again beside a control, the control was 320 ✓ and the mutant had its one
 red. Report an unpredicted red with what the control read, not as "load".
 
-Keep the JSON file outside the repo. A mutant whose new text is the old
+Keep the JSON file outside the repo while it is scratch. A list that is
+still owed a run, or that a check's write-up points at, is kept beside
+that check instead (verify-ui-change's `mutants-meeting-box.*.json`,
+2026-11-16: thirteen page mutants were stopped unrun to save a turn's
+time, and their list was in a scratchpad). A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
 that way on 2026-11-02 and had to be discounted in the report; say so if
 it happens rather than counting it as a survivor.
@@ -134,6 +138,54 @@ The suites take their own ports (8896–8898) and tmux session names by pid,
 so the copy runs exactly like the repo — and collides with a run in the
 repo or in QA's clone for the same reason. One at a time, and say so on the
 channel first, as for any suite run.
+
+## A kept list, and a batch stopped half-way
+
+**Check a kept list before the batch, not during it.**
+[`validate-mutants.mjs`](validate-mutants.mjs) reads a page or suite list
+against a directory and names every entry whose old text is not there
+exactly once (mutate.py's rule), in under a second:
+
+```bash
+node .claude/skills/mutate-in-a-copy/validate-mutants.mjs .claude/skills/verify-ui-change/mutants-meeting-box.page.json
+# all 25 apply, each exactly once
+# 2 of 3 do not apply:                                    (exit 1; run on a list with a stale and a doubled entry)
+#   a stale entry: its old text is in src/ui/floor.js 0 times, not once
+```
+
+A list kept beside a check goes stale with every edit to the files it
+names. In the 0.12.8 round three later edits each broke an entry or two
+(a hover rule gained a selector, a move became a function), and each was
+found by counting by hand before the list was saved again. Run this after
+any such edit, and first thing at the hand-off.
+
+**Stopping a batch takes five kills, and then a look.** A page batch is
+`run-page-mutants.mjs`, the `run-page-mutant.sh` it started, the check's
+runner (`run-check-*.sh`), the check itself, and under those a seed, a
+server and a Chrome on the batch's ports. Killing the first leaves the
+rest running the current mutant to its end. On 2026-11-16 a 17-mutant
+batch was stopped after four when costmo asked for long runs to wait:
+
+```bash
+pgrep -f "run-page-mutants.mjs" | xargs kill; pgrep -f "run-page-mutant.sh" | xargs kill
+pgrep -f "run-check-meeting-box.sh" | xargs kill; pgrep -f "check-meeting-box.mjs" | xargs kill
+pgrep -f "seed-meeting.mjs http://localhost:8946" | xargs kill
+for pid in $(pgrep -f "node src/server.js"); do ps eww -o command= -p $pid | grep -q "PORT=8946" && kill $pid; done
+pkill -f "remote-debugging-port=9286( |$)"
+curl -s -m 1 -o /dev/null localhost:8946/health; echo "rc=$? (7 is down)"
+```
+
+What it had finished is still evidence: its log has one block per mutant.
+What it had not is written down as owed, with the list kept in the repo
+(verify-ui-change, `mutants-meeting-box.*.json`), never left in a
+scratchpad.
+
+**`--control` reading `0 ✓` is a suite that did not load.** The same
+round, new rows in `test/floor.mjs` declared a name twice. Every mutant
+read "SURVIVED (0 ✓)" with "the run threw: SyntaxError", and so did the
+control. A `grep -E "✗|PASS|FAIL"` over the suite's own output had printed
+nothing at all a minute earlier and was read as quiet success. No verdict
+line is a failure; look for the line, not for the absence of a ✗.
 
 ## Choosing the mutants
 

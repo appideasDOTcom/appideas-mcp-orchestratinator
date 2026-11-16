@@ -223,6 +223,21 @@ async function connect(target) {
       if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
       await cmd('Browser.setWindowBounds', { windowId, bounds: { windowState: state } });
     },
+    /**
+     * This page's window as the browser has it: `{ left, top, width, height,
+     * windowState }`. Given bounds, it places the window first. For a page
+     * that moves or raises another window (window.moveTo, window.focus),
+     * this is the reading the page cannot fake: what its own `screenX` says
+     * is the page's word, and this is the browser's.
+     */
+    windowBounds: async (bounds = null) => {
+      const got = await cmd('Browser.getWindowForTarget', { targetId: target.id });
+      const windowId = got.result?.windowId;
+      if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
+      if (!bounds) return got.result.bounds;
+      await cmd('Browser.setWindowBounds', { windowId, bounds });
+      return (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result.bounds;
+    },
     /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
     console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,
@@ -246,6 +261,13 @@ async function connect(target) {
       await cmd('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: dpr, mobile: false });
       return { width, height, dpr };
     },
+    /**
+     * Tell the page which colour scheme the reader prefers: 'light', 'dark',
+     * or null for the browser's own. The stylesheet has one palette per
+     * scheme and a headless Chrome takes the machine's, so a colour that
+     * only works on one of them is otherwise never looked at.
+     */
+    scheme: async (value) => cmd('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: value ?? '' }] }),
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
     /**
@@ -312,6 +334,25 @@ async function connect(target) {
       if (end !== b) await mouse('mouseMoved', end, 1);
       await mouse('mouseReleased', end, 0);
       return { from: a, to: end, during, moved: { x: end.x - b.x, y: end.y - b.y } };
+    },
+    /**
+     * The pointer moved onto `to` (a selector's centre, or `{ x, y }`) with
+     * no button down: real input, so `:hover` is what a person gets, and
+     * nothing is pressed. For a control whose press does something to read
+     * apart from its hover (PR #56 Info 4: "In a meeting" raises a window).
+     * `held` runs with the pointer there and its answer is returned.
+     */
+    hover: async (to, { held } = {}) => {
+      const p = typeof to === 'string'
+        ? JSON.parse(await evalJs(`(() => {
+            const el = document.querySelector(${JSON.stringify(to)});
+            if (!el) throw new Error('no element for ' + ${JSON.stringify(to)});
+            const r = el.getBoundingClientRect();
+            return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+          })()`))
+        : to;
+      await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'none', buttons: 0 });
+      return held ? held() : undefined;
     },
     /**
      * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').
