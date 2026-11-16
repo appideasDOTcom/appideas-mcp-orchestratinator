@@ -1,0 +1,68 @@
+[
+ [
+  "Open conversation stays live on a desk in a meeting room",
+  "src/ui/floor.js",
+  "    const off = meetWhy ? ' disabled' : '';",
+  "    const off = '';"
+ ],
+ [
+  "Leave room is dimmed only by its own reason, not by a meeting room",
+  "src/ui/floor.js",
+  "      (leaveWhy || meetWhy ? ' disabled' : '') +",
+  "      (leaveWhy ? ' disabled' : '') +"
+ ],
+ [
+  "Leave room opens nothing",
+  "src/ui/floor.js",
+  "        window.leaveDeskDialog(leaveBtn.dataset.channel, leaveBtn.dataset.agent, d ? plateName(d) : leaveBtn.dataset.agent, d?.hosted?.scope ?? null);\n",
+  ""
+ ],
+ [
+  "the Meeting room click does not say which desks need a second session",
+  "src/ui/floor.js",
+  "meetingQuery({ channel, agents: chip.agents, twins: chip.twins })",
+  "meetingQuery({ channel, agents: chip.agents })"
+ ],
+ [
+  "the room's window makes no second session",
+  "src/ui/floor.js",
+  "    for (const base of spec.id ? [] : spec.twins ?? []) await meetingTwin(base);",
+  "    for (const base of []) await meetingTwin(base);"
+ ],
+ [
+  "Bring back takes the agent out of this room only",
+  "src/ui/floor.js",
+  "        if (!meetBoxOf(ch, a)) continue;\n        say({ t: 'back', channel: ch, agent: a });",
+  "        if (!meetBoxOf(ch, a)) continue;"
+ ],
+ [
+  "Resume leaves a second session out",
+  "src/ui/floor.js",
+  "      else if (step.act === 'twin') await meetingTwin(step.base, { as: step.agent, sessionId: step.session_id, since: since.get(step.agent), keep: true });",
+  ""
+ ],
+ [
+  "a seat is offered Open in VS Code",
+  "src/ui/floor.js",
+  "    toVsc.classList.toggle('hidden', !h?.live || !!h.seat);",
+  "    toVsc.classList.toggle('hidden', !h?.live);"
+ ],
+ [
+  "Take a desk has no New desk here",
+  "src/ui/app.js",
+  "      ${seat ? `<button type=\"button\" class=\"btn\" data-do=\"desk-seat\"",
+  "      ${false ? `<button type=\"button\" class=\"btn\" data-do=\"desk-seat\""
+ ],
+ [
+  "New desk here does not wait for the desk",
+  "src/ui/app.js",
+  "        await waitForSeat({ channel: body.channel, agent: r.agent ?? body.agent, beside }, before, hostName);\n",
+  ""
+ ],
+ [
+  "a second session's refusal by its host is not said in the room",
+  "src/ui/floor.js",
+  "      if (err) { meetingRemove(p.agent, `${who}'s second session did not start: ${err.text}`); return; }",
+  ""
+ ]
+]

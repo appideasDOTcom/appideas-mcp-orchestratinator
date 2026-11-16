@@ -511,8 +511,10 @@ await floor.waitFor(`!document.querySelector('svg.room .missBar')`, { timeout: 3
 // the flag at its next poll, and Cy's card is what says it has.
 ok(await admin('desk/hide', { channel: 'lab', agent: 'cy' }) === 200, 'Cy is hidden on the board');
 await floor.click('svg.room[data-channel="lab"] .desk[data-agent="cy"] .plate[data-act="details"]');
-await waited(floor, `/its pill again when the meeting ends/.test(document.querySelector('#desk-pop .dp-hide-why')?.textContent ?? '') && document.querySelector('#desk-pop [data-act="hide-desk"]')?.disabled === true`,
-  'Cy\'s card stays open on the desk, with Hide desk dimmed and why under it: in a meeting, and its pill again when the meeting ends');
+// Since 0.12.9 the card has one reason in a meeting room, under all four
+// dimmed buttons (.dp-meet-why), and Hide desk's is part of it.
+await waited(floor, `/its pill again when the meeting ends/.test(document.querySelector('#desk-pop .dp-meet-why')?.textContent ?? '') && document.querySelector('#desk-pop [data-act="hide-desk"]')?.disabled === true`,
+  'Cy\'s card stays open on the desk, with Hide desk dimmed and why under the buttons: in a meeting room, and its pill again when the meeting ends');
 r = await read(floor);
 lab = roomOf(r);
 a = boxOf(lab, A.id);
@@ -521,7 +523,7 @@ ok(!!a && ['bo', 'cy', 'dee'].every((n) => !!deskOf(lab, n) && inside(deskOf(lab
 await floor.click('svg.room[data-channel="lab"] .desk[data-agent="cy"] .plate[data-act="details"]');
 ok((await admin('desk/hide', { channel: 'lab', agent: 'bo' })) === 200 && (await admin('desk/hide', { channel: 'lab', agent: 'dee' })) === 200, 'Bo and Dee are hidden too: all three');
 await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
-await floor.waitFor(`/its pill again/.test(document.querySelector('#desk-pop .dp-hide-why')?.textContent ?? '')`, { timeout: 8000 });
+await floor.waitFor(`/its pill again/.test(document.querySelector('#desk-pop .dp-meet-why')?.textContent ?? '')`, { timeout: 8000 });
 await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
 r = await read(floor);
 lab = roomOf(r);
@@ -531,7 +533,7 @@ ok(!!a && ['bo', 'cy', 'dee'].every((n) => !!deskOf(lab, n) && inside(deskOf(lab
   'with every desk in it hidden, the box stands with all three, In a meeting and End meeting, and none of them is a pill', JSON.stringify([a?.end, lab.desks.map((d) => d.agent)]));
 for (const agent of ['bo', 'cy', 'dee']) await admin('desk/show', { channel: 'lab', agent });
 await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
-await waited(floor, `/Hide it once the meeting has ended/.test(document.querySelector('#desk-pop .dp-hide-why')?.textContent ?? '')`, 'shown again, a desk in the meeting still cannot be hidden from its card, and says so');
+await waited(floor, `(() => { const why = document.querySelector('#desk-pop .dp-meet-why')?.textContent ?? ''; return /^In a meeting room: /.test(why) && !/its pill again/.test(why) && document.querySelector('#desk-pop [data-act="hide-desk"]')?.disabled === true; })()`, 'shown again, a desk in the meeting still cannot be hidden from its card, and says why');
 await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
 
 console.log('\na room\'s window that never hears the floor');

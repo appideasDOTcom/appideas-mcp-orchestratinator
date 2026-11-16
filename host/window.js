@@ -35,6 +35,7 @@ import { basename, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { readDesk } from './identity.js';
+import { configPath } from './seats.js';
 import { log, warn } from './log.js';
 
 const run = promisify(execFile);
@@ -192,7 +193,9 @@ async function tmux(args, { timeout = 5000 } = {}) {
     return { ok: true, out: stdout.trim() };
   } catch (err) {
     if (err?.code === 'ENOENT') return { ok: false, missing: true, error: 'tmux is not installed' };
-    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim() };
+    // What it printed before it failed is kept: two commands in one call can
+    // have the first succeed and say so (open(), a seat's tag).
+    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim(), out: String(err?.stdout ?? '').trim() };
   }
 }
 
@@ -218,6 +221,35 @@ export function canonical(p) {
   if (typeof p !== 'string' || !p) return p;
   try { return realpathSync.native(p); } catch { return p; }
 }
+
+/* ───────────────────────── which window ───────────────────────── */
+
+/**
+ * Where a window is: a folder, or a folder and a seat.
+ *
+ * For as long as a folder was one desk, the directory was a window's whole
+ * identity (paneIn, below), and every function here takes it as its first
+ * argument. One agent with several sessions at once (host/seats.js) puts
+ * several windows in one folder, each a different desk, and the directory
+ * no longer says which. So the first argument is either the folder, as it
+ * always was, for the folder's own desk, or `{ cwd, seat }` for a seat,
+ * where `seat` is the tag its tmux window carries (`@orch_seat`).
+ *
+ * The folder's own window is the one with no tag, and that is the rule that
+ * keeps every desk that existed before seats exactly as it was: nothing
+ * tags a window but open() for a seat, so a host with no seats finds every
+ * window as it always did.
+ */
+export const cwdOf = (where) => (typeof where === 'string' ? where : where?.cwd ?? null);
+export const seatOf = (where) => (typeof where === 'string' ? null : where?.seat || null);
+/** The same place with its folder resolved. */
+const placed = (where) => {
+  const seat = seatOf(where);
+  const cwd = canonical(cwdOf(where));
+  return seat ? { cwd, seat } : cwd;
+};
+/** The tmux option a seat's window is tagged with. */
+export const SEAT_OPTION = '@orch_seat';
 
 /* ───────────────────────── the roster ───────────────────────── */
 
@@ -328,13 +360,25 @@ async function rosterViaCli() {
   };
 }
 
-/** The live session for a repo, if one is open. Newest wins if a repo has two. */
-export async function sessionFor(cwd) {
+/**
+ * The roster's sessions that are this desk's: the ones in its folder, and of
+ * those, for a seat the ones running in a window tagged as it, and for the
+ * folder's own desk the ones that are in no seat's window (its own window,
+ * and anything an editor runs there). `all` is panes().
+ */
+export function sessionsAt(where, sessions, all) {
+  const here = canonical(cwdOf(where));
+  const seat = seatOf(where);
+  const seatByPid = new Map(all.filter((p) => p.seat && p.pid).map((p) => [p.pid, p.seat]));
+  return sessions.filter((s) => s.cwd === here && (seatByPid.get(s.pid) ?? null) === seat);
+}
+
+/** The live session for a desk, if one is open. Newest wins if it has two. */
+export async function sessionFor(where) {
   const r = await roster();
   if (!r.ok) return { ...r, session: null };
-  const here = canonical(cwd);
-  const mine = r.sessions
-    .filter((s) => s.cwd === here && s.kind === 'interactive')
+  const mine = sessionsAt(where, r.sessions, await panes())
+    .filter((s) => s.kind === 'interactive')
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   return { ok: true, session: mine[0] ?? null };
 }
@@ -616,7 +660,8 @@ async function answerKnown(target, done = new Set()) {
  * the window that is still booting and is lost. The pane's own process is the
  * only unambiguous way to ask about the window we actually opened.
  */
-export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
+export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
+  const cwd = cwdOf(where);
   const stop = Date.now() + timeoutMs;
   let seen = [];
   const answered = [];
@@ -675,7 +720,7 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
     seen = all.sessions;
     const session = pid
       ? all.sessions.find((s) => s.pid === pid) ?? null
-      : (await sessionFor(cwd)).session;
+      : (await sessionFor(where)).session;
     if (session) {
       // Up and running: let the window close normally from here on.
       if (target) await tmux(['set-option', '-w', '-t', target, 'remain-on-exit', 'off']);
@@ -722,6 +767,28 @@ export function windowName(cwd) {
   return basename(cwd).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) || 'desk';
 }
 
+/** A seat's window: its folder, then its floor and agent, read off the tag.
+ *  No dot, because open() names this window in a tmux target to tag it. */
+export function seatWindowName(cwd, seat) {
+  const who = String(seat).split('/').map((part) => { try { return decodeURIComponent(part); } catch { return part; } }).join('-');
+  return `${basename(cwd)}-${who}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 60) || 'seat';
+}
+
+/** The variable a seat's window carries: the path of its binding file. */
+export const SEAT_ENV = 'ORCH_DESK_CONFIG';
+
+/** tmux `-e` arguments for a seat's window: what the plugin's hook reads to
+ *  report as this desk and not as the folder's (plugin/hooks/report.mjs). */
+export function seatEnv(cwd, seat, file) {
+  const [channel, agent] = String(seat).split('/').map((part) => { try { return decodeURIComponent(part); } catch { return part; } });
+  return [
+    '-e', `${SEAT_ENV}=${file}`,
+    '-e', `ORCH_DESK_ROOT=${cwd}`,
+    '-e', `ORCH_CHANNEL=${channel}`,
+    '-e', `ORCH_AGENT=${agent}`,
+  ];
+}
+
 /**
  * How many terminals are attached to our session right now.
  *
@@ -743,20 +810,22 @@ export async function clientCount() {
 export async function panes() {
   // The directory goes last and takes everything after the third separator: it
   // is the one field whose contents are not ours, and a directory is allowed
-  // to contain a '|'. The three before it are tmux's own ids and a flag.
-  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', '#{pane_current_path}'];
+  // to contain a '|'. The four before it are tmux's own ids, a flag and a tag.
+  // The seat's tag is the host's own (seatTag in seats.js: percent-encoded,
+  // so it holds no separator) and empty on every window but a seat's.
+  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
   const r = await tmux(['list-panes', '-t', SESSION, '-a', '-F', fields.join(SEP)]);
   if (!r.ok || !r.out) return [];
   return r.out.split('\n')
     .map((line) => {
       const parts = line.split(SEP);
       if (parts.length < fields.length) return null;
-      const [target, dead, pid] = parts;
+      const [target, dead, pid, seat] = parts;
       // The window id is inside the target (session:@window.%pane). It is what
       // a person needs to be given to sit down at this desk, and pulling it
       // out of a string we already have beats another tmux call.
       const window = target.match(/@\d+/)?.[0] ?? null;
-      return { target, window, dead: dead === '1', pid: Number(pid) || null, cwd: parts.slice(3).join(SEP) };
+      return { target, window, dead: dead === '1', pid: Number(pid) || null, seat: seat || null, cwd: parts.slice(4).join(SEP) };
     })
     .filter((p) => p && p.target && p.cwd && !p.dead);
 }
@@ -784,13 +853,16 @@ async function windowNames() {
  * a second window — visible, and recoverable — rather than quietly typing into
  * the wrong one.
  */
-export function paneIn(all, cwd) {
-  const here = canonical(cwd);
-  return all.find((p) => canonical(p.cwd) === here) ?? null;
+export function paneIn(all, where) {
+  const here = canonical(cwdOf(where));
+  // And the seat, since a folder can hold several desks (see "which
+  // window"): a seat's window carries its tag, the folder's own carries none.
+  const seat = seatOf(where);
+  return all.find((p) => (p.seat ?? null) === seat && canonical(p.cwd) === here) ?? null;
 }
 
-export async function paneFor(cwd) {
-  return paneIn(await panes(), cwd);
+export async function paneFor(where) {
+  return paneIn(await panes(), where);
 }
 
 /**
@@ -803,7 +875,7 @@ export async function paneFor(cwd) {
  * the floor believing it held a desk because *some* pane existed, while the
  * conversation on screen was in an editor tab it could never reach.
  */
-export async function holderOf(cwd, sessionId) {
+export async function holderOf(where, sessionId) {
   const [r, all] = await Promise.all([roster(), panes()]);
   // A pane for this repo, found by *directory* rather than by pid.
   //
@@ -817,7 +889,7 @@ export async function holderOf(cwd, sessionId) {
   // "nothing here at all" the same answer, and the floor offered to open a
   // window that was already on screen waiting for a keypress. Measured on the
   // qa desk: pane alive, `held` null for 60s, the pane showing the MCP prompt.
-  const paneHere = paneIn(all, cwd);
+  const paneHere = paneIn(all, where);
   const nothing = { where: null, pid: null, window: null, paneWindow: paneHere?.window ?? null, holders: 0, kind: null, name: null, job: null };
   if (!sessionId || !r.ok) return nothing;
   // Every live process claiming this conversation, not the first one found.
@@ -829,8 +901,14 @@ export async function holderOf(cwd, sessionId) {
   if (!mine.length) return nothing;
   const live = mine[0];
   const pane = all.find((p) => p.pid === live.pid);
+  // A pane of ours, but another desk's: the folder holds several desks (see
+  // "which window") and this conversation is running in the window of one
+  // that is not the desk asked about. Not `floor`, which would have the
+  // caller type this desk's message into that desk's window, and not
+  // `editor`, which names a process nobody here started.
+  const theirs = pane && (pane.seat ?? null) !== seatOf(where);
   return {
-    where: pane ? 'floor' : 'editor',
+    where: pane ? (theirs ? 'other' : 'floor') : 'editor',
     pid: live.pid,
     window: pane ? pane.window : null,
     paneWindow: paneHere?.window ?? null,
@@ -1790,8 +1868,11 @@ async function renew(refused) {
     // rather than moved for — from inside this move, open() asking for one
     // more was this very promise waiting on itself (finding 2: B never
     // reopened, and checkServer, awaited on the host's line, never returned).
-    p.r = await open(p.cwd, { resume: p.sessionId, moving: true });
-    if (p.r.ok && p.r.created && p.sessionId) await waitReady(p.cwd, { pid: p.r.pid, target: p.r.target });
+    // As the desk it was: a seat's window comes back tagged and on its own
+    // binding, or it would come back as the folder's desk (see "which window").
+    p.at = p.seat ? { cwd: p.cwd, seat: p.seat } : p.cwd;
+    p.r = await open(p.at, { resume: p.sessionId, moving: true });
+    if (p.r.ok && p.r.created && p.sessionId) await waitReady(p.at, { pid: p.r.pid, target: p.r.target });
   }
   // Did the move clear what it was for? Read on the new server, before any
   // agent is told the folder is readable again.
@@ -1811,10 +1892,11 @@ async function renew(refused) {
           : p.unreadable ? 'The folder is readable again; if you stopped on a permission error (EPERM), carry on.'
             : null;
     if (r.ok && why) {
-      await send(p.cwd, `[Orchestratinator host, not the operator] This window was moved to a fresh terminal server because the old one had lost macOS permission to read this folder. ${why}`);
+      await send(p.at, `[Orchestratinator host, not the operator] This window was moved to a fresh terminal server because the old one had lost macOS permission to read this folder. ${why}`);
     }
     moved.push({
       cwd: p.cwd,
+      seat: p.seat ?? null,
       sessionId: r.resumed ?? p.sessionId,
       ok: r.ok && !p.stillRefused,
       stillRefused: p.stillRefused,
@@ -1827,12 +1909,25 @@ async function renew(refused) {
   return out;
 }
 
-export async function open(cwd, { resume = null, moving = false } = {}) {
+export async function open(where, { resume = null, moving = false } = {}) {
+  const cwd = cwdOf(where);
   if (!existsSync(cwd)) return { ok: false, error: `no such directory: ${cwd}` };
 
   const here = canonical(cwd);
-  const already = await paneFor(here);
+  // The desk this window is for: the folder's own, or one of its seats (see
+  // "which window"). `here` stays the folder, for everything that is about
+  // the folder: whether the server can read it, its transcripts, its model.
+  const seat = seatOf(where);
+  const at = seat ? { cwd: here, seat } : here;
+  const already = await paneFor(at);
   if (already) return { ok: true, target: already.target, created: false };
+  // A seat's window starts with the binding in its own file (host/seats.js),
+  // which the host writes whenever it looks at its desks. Without it the
+  // window would come up as the folder's desk, under the seat's name.
+  const seatFile = seat ? configPath(seat) : null;
+  if (seatFile && !existsSync(seatFile)) {
+    return { ok: false, code: 'no_seat_file', error: `this desk's binding file is missing (${seatFile}), so a window for it would start as the folder's own desk; nothing was opened` };
+  }
 
   // A window this server starts must be able to read its folder, or Claude
   // Code exits on its first line with EPERM — see "a tmux server that can no
@@ -1851,7 +1946,7 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
     if (fresh === true) {
       const r = await renewServer(here);
       if (!r.ok) return { ok: false, code: 'unreadable', error: r.error };
-      const now = await paneFor(here);
+      const now = await paneFor(at);
       if (now) return { ok: true, target: now.target, created: false };
       // A folder with no window of its own was not among the move's checks.
       if ((await serverReads(here)) === false) {
@@ -1872,8 +1967,17 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
   // conversation was found by holderOf and lost again, and the window opened
   // a second copy for Claude Code to refuse on its first line (2026-09-09).
   // holderOf already has the pid; use it.
-  const held = await holderOf(here, resume);
+  const held = await holderOf(at, resume);
   let released = null;
+  // Running in another desk's window in this folder: one process holds a
+  // conversation, and that window is not this desk's to type into.
+  if (held.where === 'other') {
+    return {
+      ok: false,
+      code: 'held_by_other_desk',
+      error: `That conversation is open in the window of another desk in this folder (${held.window}, pid ${held.pid}). One window holds a conversation at a time, so it was not opened here as well.`,
+    };
+  }
   if (held.where === 'editor') {
     if (held.kind !== 'background') {
       return {
@@ -1891,8 +1995,13 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
   // Keep the plain repo name when it is free, so `tmux attach` reads as a list
   // of desks. When another repo has already taken it, disambiguate rather than
   // create a second window with the same name — see paneFor.
-  const taken = (await windowNames()).includes(windowName(here));
-  const name = taken ? `${windowName(here)}-${(Math.abs(hash(here)) % 65536).toString(16).padStart(4, '0')}` : windowName(here);
+  // A seat's window is named for its folder and its floor, with no dot in
+  // it: its tag is set by naming the window in the same tmux command that
+  // makes it (below), and a dot in a tmux target is where the pane begins.
+  const names = await windowNames();
+  const plain = seat ? seatWindowName(here, seat) : windowName(here);
+  const taken = names.includes(plain);
+  const name = taken ? `${plain}-${(Math.abs(hash(seat ? `${here}|${seat}` : here)) % 65536).toString(16).padStart(4, '0')}` : plain;
   // `claude` is exec'd rather than run from a shell so the pane dies with the
   // session instead of dropping to a prompt that looks like a live window.
   //
@@ -1923,16 +2032,22 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
   // resumable(). A pin that never became a transcript makes `claude` print
   // "No conversation found with session ID" and exit, and the window dies on
   // its first line with the desk's own conversation sitting one file over.
-  const pick = await resumable(here, resume);
+  const pick = await resumable(at, resume);
   // And which model it comes up on: the operator's default, passed as
   // `--model`, because a resume on its own restores the conversation's last
   // model over the settings file — see defaultModel(). After `--resume <id>`
   // rather than before: claude does not care where the flag sits, and the
   // test stand-in reads the resumed id as `$2`.
   const model = defaultModel(here);
+  // A seat's binding goes last, as `--mcp-config <file>`: measured on
+  // 2.1.325, an entry there under the folder's own server name takes that
+  // entry's place in this window (host/seats.js). The file's path and not
+  // its contents, because tmux keeps and prints a pane's start command and
+  // the contents hold the board's key.
   const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE,
     ...(pick.id ? ['--resume', pick.id] : []),
-    ...(model ? ['--model', model] : [])]
+    ...(model ? ['--model', model] : []),
+    ...(seatFile ? ['--mcp-config', seatFile] : [])]
     .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
     .join(' ');
 
@@ -1956,10 +2071,36 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
   // The trailing colon is the session with no window part, which is the next
   // free index — what the bare name only appeared to mean.
   // The key a placeholder desk cannot get from the tmux server — see useKey.
-  const env = paneEnv(readDesk(here));
-  const made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`])
-    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`]);
+  // A seat's window is given the path of its binding file instead, for the
+  // plugin's hook: the hook finds a desk by its folder, and in a seat's
+  // window the folder names another desk (plugin/hooks/report.mjs).
+  // With it, the folder the window starts in (the hook's `cwd` for the
+  // desk, wherever the agent wanders) and the desk's two names, which the
+  // hook has let stand in for the folder's since its first commit — so a
+  // window on a machine whose plugin predates the file still reports as
+  // itself (seen on real windows with 0.12.8 installed, 2026-11-16).
+  const env = seat ? seatEnv(here, seat, seatFile) : paneEnv(readDesk(here));
+  // And its tag, in the same tmux command that makes the window, so that no
+  // reader of panes() ever sees a seat's window untagged: untagged, it is
+  // the folder's own (paneIn), and the watch loop is a loop of its own.
+  // `=name` is an exact window name. Measured on tmux 3.7c: `set-option -w`
+  // with no target after a detached new-window tags the *current* window,
+  // and a name with a dot in it is "no such window".
+  const tag = seat ? [';', 'set-option', '-w', '-t', `${SESSION}:=${name}`, SEAT_OPTION, seat] : [];
+  let made = has.ok
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag])
+    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag]);
+  // The window made and the tag refused: tmux printed the new pane and then
+  // failed. Tagged by the pane it named, or closed, never left untagged.
+  if (!made.ok && seat && made.out?.includes(SEP)) {
+    const target = made.out.split('\n')[0].split(SEP)[0].trim();
+    const set = await tmux(['set-option', '-w', '-t', target, SEAT_OPTION, seat]);
+    if (!set.ok) {
+      await tmux(['kill-window', '-t', target]);
+      return { ok: false, error: `opened a window for this desk but could not mark it as this desk's (${set.error}), so it was closed again` };
+    }
+    made = { ok: true, out: made.out };
+  }
   if (!made.ok) return { ok: false, error: made.error, missing: made.missing };
   // `new-session -e` is not `new-window -e`: it sets the variable in the
   // *session's* environment, so every later window in it inherited the key
@@ -1968,7 +2109,9 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
   // partner's 33 placeholder desks that is likely one of them. Unset at once:
   // the pane already has its copy, and a later window gets one only by its
   // own `-e`.
-  if (!has.ok && env.length) await tmux(['set-environment', '-t', `${SESSION}:`, '-u', env[1].split('=')[0]]);
+  if (!has.ok) {
+    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${SESSION}:`, '-u', env[i].split('=')[0]]);
+  }
   const [target, pid] = made.out.split('\n')[0].split(SEP);
   if (!target?.trim()) return { ok: false, error: 'tmux created the window but did not say where' };
 
@@ -2005,14 +2148,22 @@ export async function open(cwd, { resume = null, moving = false } = {}) {
  * path (null for a stand-in with no session, which is what the tests drive),
  * and what opening it had to say.
  */
-async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
-  const here = canonical(cwd);
+async function windowFor(where, { open: autoOpen = false, resume = null } = {}) {
+  const here = canonical(cwdOf(where));
+  const at = placed(where);
 
   // Which window, if any, is running this conversation — and whether it is one
   // we can type into. A folder can hold several conversations at once, so
   // "some pane exists here" is not the same question and answering it that way
   // typed into whichever window happened to be open.
-  const held = await holderOf(here, resume);
+  const held = await holderOf(at, resume);
+  if (held.where === 'other') {
+    return {
+      ok: false,
+      code: 'held_by_other_desk',
+      error: `That conversation is open in the window of another desk in this folder (${held.window}, pid ${held.pid}). One window holds a conversation at a time; this desk's message was not typed into it.`,
+    };
+  }
   // A background session holding it is released by open() below, when this
   // message may open a window — the same move as a click on the floor.
   // Without that leave it is a refusal, with the reason.
@@ -2027,16 +2178,16 @@ async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
   let pane = held.where === 'floor' ? (await panes()).find((p) => p.pid === held.pid) ?? null : null;
   // With no conversation named, the folder is all there is to go on — which
   // is right for a caller that just wants "this repo's window".
-  if (!pane && !resume) pane = await paneFor(here);
+  if (!pane && !resume) pane = await paneFor(at);
   let opened = null;
   if (!pane && autoOpen) {
-    opened = await open(here, { resume });
+    opened = await open(at, { resume });
     if (!opened.ok) return opened;
     // A pane is not a session. Claude Code takes a moment to start, and on a
     // repo it has not seen before it stops to ask whether the folder is
     // trusted and whether to use its MCP servers. Pasting during any of that
     // types the message into a dialog, where it is both lost and confusing.
-    const up = await waitReady(here, { pid: opened.pid, target: opened.target });
+    const up = await waitReady(at, { pid: opened.pid, target: opened.target });
     if (!up.ok) return up;
     pane = { target: opened.target, pid: opened.pid };
   }
@@ -2049,7 +2200,7 @@ async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
   // typed into.
   const known = await roster();
   const live = (pane.pid ? known.sessions.find((s) => s.pid === pane.pid) : null)
-    ?? (await sessionFor(here)).session
+    ?? (await sessionFor(at)).session
     ?? null;
   const path = live?.sessionId ? transcriptPath(here, live.sessionId) : null;
   return { ok: true, here, pane, path, note: opened?.note ?? null };
@@ -2366,8 +2517,8 @@ const COMPACT_WATCH_MS = Number(process.env.ORCH_COMPACT_WATCH_MS ?? 300_000);
  * own stdout line for the command — "Compacted (ctrl+o to see full
  * summary)…" or its error — or, with no such line, the boundary record.
  */
-export async function awaitCompaction(cwd, { path = null, before = 0 } = {}) {
-  const pane = await paneFor(canonical(cwd));
+export async function awaitCompaction(where, { path = null, before = 0 } = {}) {
+  const pane = await paneFor(where);
   if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
   const stop = Date.now() + COMPACT_WATCH_MS;
   let seen = false;
@@ -3599,14 +3750,24 @@ export function projectSlug(cwd) {
  * Nothing here decides silently. The note says what was asked for and what
  * was opened, and the caller puts it where the operator will read it.
  */
-export async function resumable(cwd, sessionId) {
+export async function resumable(where, sessionId) {
   if (!sessionId) return { id: null, note: null };
-  const here = canonical(cwd);
+  const here = canonical(cwdOf(where));
   const own = transcriptPath(here, sessionId);
   const exists = existsSync(own);
   if (exists && await lastTurnAt(own)) return { id: sessionId, note: null };
   const asked = `${sessionId} ${exists ? 'has no turns in it' : 'never wrote a transcript'}, so there is nothing to resume there`;
-  const newest = await newestConversation(here);
+  // A seat never falls back to "the newest in this folder". The folder is
+  // several desks' (see "which window"), and its newest conversation is most
+  // likely the one another desk's window is running: resumed here as well,
+  // two processes would append to one transcript. It starts a new one.
+  if (seatOf(where)) return { id: null, note: `${asked}; this desk shares its folder with another desk, so it starts a new conversation rather than take the folder's newest.` };
+  // And the folder's own desk never falls back onto a conversation one of
+  // its seats is running, for the same reason.
+  const [r, all] = await Promise.all([roster(), panes()]);
+  const seatPids = new Set(all.filter((p) => p.seat && p.pid).map((p) => p.pid));
+  const theirs = new Set((r.ok ? r.sessions : []).filter((x) => x.cwd === here && seatPids.has(x.pid)).map((x) => x.sessionId));
+  const newest = await newestConversation(here, theirs);
   // Said as a fact about the folder, not as something done: the caller may
   // still be refused — by a background session holding the conversation, for
   // one — and "opened X instead" above a refusal to open X is a false record.
@@ -3618,9 +3779,9 @@ export async function resumable(cwd, sessionId) {
 }
 
 /** The transcript in this folder whose last turn is latest, or null. */
-async function newestConversation(cwd) {
+async function newestConversation(cwd, skip = new Set()) {
   let names;
-  try { names = readdirSync(projectDir(cwd)).filter((f) => f.endsWith('.jsonl')); } catch { return null; }
+  try { names = readdirSync(projectDir(cwd)).filter((f) => f.endsWith('.jsonl') && !skip.has(f.slice(0, -'.jsonl'.length))); } catch { return null; }
   let best = null;
   for (const name of names) {
     const at = await lastTurnAt(join(projectDir(cwd), name));

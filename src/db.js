@@ -300,6 +300,37 @@ export function openDb(path) {
       ended_at     TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_meeting_rooms_updated ON meeting_rooms(updated_at);
+
+    -- ─── One agent, several sessions (costmo, 2026-11-16) ─────────────────────
+    -- A second session of an agent on a floor it already has a desk on. The
+    -- board files turns, unread mail, tasks and a meeting room's members by
+    -- (channel, agent), so a second session on the same floor needs a name
+    -- of its own there: the agent's with a number after it (qa-2, qa-3;
+    -- costmo's pick). This row is what says qa-2 is qa: the nameplate shows
+    -- qa's name and face with the number, a message to plain "qa" from
+    -- somebody in a meeting room with qa-2 goes to qa-2, and a rename of
+    -- either renames both. The link is this row and never the spelling: an
+    -- agent whose own name ends in a number is nobody's second session.
+    --
+    -- On another floor the agent keeps its own name and needs no row here;
+    -- that it shares a folder is the host's to know (hosted_desks.scope =
+    -- 'seat', host/seats.js).
+    --
+    -- for_meeting: made for a meeting room, and closed when it comes out of
+    -- one (costmo: "Close it"). One made by Take a desk's "New desk here"
+    -- stays until Leave room.
+    --
+    -- Not in BACKUP_TABLES, for meeting_rooms' reason: it names windows on a
+    -- machine, and a restored row would name one that is not there.
+    CREATE TABLE IF NOT EXISTS desk_twins (
+      channel     TEXT NOT NULL,
+      agent       TEXT NOT NULL,
+      base        TEXT NOT NULL,
+      n           INTEGER NOT NULL,
+      for_meeting INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
+    );
   `);
 
   // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
@@ -828,6 +859,45 @@ export function makeStore(db) {
     ),
     pruneMeetings: db.prepare(
       `DELETE FROM meeting_rooms WHERE id NOT IN (SELECT id FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?)`
+    ),
+    // Every room on a floor with when its window last spoke, for the sweep
+    // that closes a second session once it is in no room (src/floor.js).
+    meetingsOn: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
+              CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
+              (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
+         FROM meeting_rooms WHERE channel = ?`
+    ),
+    // One agent, several sessions: the link from a second session to its agent.
+    twinOf: db.prepare(`SELECT channel, agent, base, n, for_meeting, created_at,
+                               CAST((julianday('now') - julianday(created_at)) * 86400 AS INTEGER) AS age_s
+                          FROM desk_twins WHERE channel = ? AND agent = ?`),
+    listTwins: db.prepare(`SELECT channel, agent, base, n, for_meeting, created_at,
+                                  CAST((julianday('now') - julianday(created_at)) * 86400 AS INTEGER) AS age_s
+                             FROM desk_twins ORDER BY channel, base, n`),
+    insertTwin: db.prepare(
+      `INSERT INTO desk_twins (channel, agent, base, n, for_meeting) VALUES (@channel, @agent, @base, @n, @for_meeting)
+       ON CONFLICT(channel, agent) DO UPDATE SET base = excluded.base, n = excluded.n, for_meeting = excluded.for_meeting, created_at = datetime('now')`
+    ),
+    deleteTwin: db.prepare(`DELETE FROM desk_twins WHERE channel = ? AND agent = ?`),
+    agentRow: db.prepare(`SELECT agent, retired_at FROM agents WHERE channel = ? AND agent = ?`),
+    hostedRow: db.prepare(`SELECT state FROM hosted_desks WHERE channel = ? AND agent = ?`),
+    liveSession: db.prepare(`SELECT 1 FROM agent_sessions WHERE channel = ? AND agent = ? AND ended_at IS NULL LIMIT 1`),
+    profileOf: db.prepare(`SELECT persona, gender, shirt, hair, skin FROM agent_profile WHERE agent = ?`),
+    copyProfile: db.prepare(
+      `INSERT INTO agent_profile (agent, persona, gender, shirt, hair, skin)
+       VALUES (@agent, @persona, @gender, @shirt, @hair, @skin)
+       ON CONFLICT(agent) DO UPDATE SET
+         persona = excluded.persona, gender = excluded.gender, shirt = excluded.shirt,
+         hair = excluded.hair, skin = excluded.skin, updated_at = datetime('now')`
+    ),
+    twinsOfBase: db.prepare(`SELECT DISTINCT agent FROM desk_twins WHERE base = ?`),
+    // Every conversation still open on a desk, ended: for a seat that has
+    // been left, whose window its host closed (the `unbound` case in
+    // src/floor.js says why they cannot be left open).
+    endDeskSessions: db.prepare(
+      `UPDATE agent_sessions SET ended_at = datetime('now'), awaiting_kind = NULL, awaiting_message = NULL
+        WHERE channel = ? AND agent = ? AND ended_at IS NULL`
     ),
     getSetting: db.prepare(`SELECT value, updated_at FROM settings WHERE key = ?`),
     setSetting: db.prepare(
@@ -1440,7 +1510,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1569,6 +1639,84 @@ export function makeStore(db) {
       try { payload = JSON.parse(r.payload); } catch { /* a bad row is an empty job */ }
       return { id: r.id, channel: r.channel, agent: r.agent, kind: r.kind, payload, created_at: r.created_at };
     });
+  });
+
+  /**
+   * One agent, several sessions: the names that are one agent's. `agent`'s
+   * own, the agent it is a second session of, and every second session of
+   * that one, on any floor — a profile is the agent's, not a floor's.
+   */
+  function familyOf(agent) {
+    const bases = new Set([agent, ...db.prepare('SELECT DISTINCT base FROM desk_twins WHERE agent = ?').all(agent).map((r) => r.base)]);
+    const all = new Set(bases);
+    for (const b of bases) for (const r of q.twinsOfBase.all(b)) all.add(r.agent);
+    return [...all];
+  }
+
+  /**
+   * A second session's name on a floor: the agent's with the first free
+   * number from 2 (costmo's pick: agent-2, agent-3). Free is no seat, no
+   * live desk and no working agent under it there: a second session that
+   * closed gave its name back, and the next one takes it again, so a floor
+   * does not count upward for ever. `as` is a name asked for by number — a
+   * meeting room resumed, bringing its second session back as it was — and
+   * is taken when it is free and is this agent's with a number.
+   */
+  const NAME_MAX = 64;
+  const TWIN_PENDING_S = 120;
+  /**
+   * Whether nobody answers to `name` on `channel`: no agent on the board
+   * under it, no desk a host is running, no window reporting.
+   *
+   * Not "no seat". A seat is made the moment the board takes a desk, so it
+   * is drawn while the host works, and it stays behind when the host
+   * refuses (as a refused move's does, #20: undrawn, because nothing is
+   * live behind it). Read as taken, a New desk here that its host refused
+   * once came back on the retry under the name with a number, on a floor
+   * where nobody was using the name (seen in the browser check).
+   */
+  function nameFree(channel, name) {
+    if (name.length > NAME_MAX) return false;
+    const a = q.agentRow.get(channel, name);
+    if (a && !a.retired_at) return false;
+    const h = q.hostedRow.get(channel, name);
+    if (h && h.state !== 'offline') return false;
+    // A second session the board named a moment ago is on its way to its
+    // host: taken, or two asked for in one breath would share a name. One
+    // nobody has seated in TWIN_PENDING_S is not coming.
+    const t = q.twinOf.get(channel, name);
+    if (t && t.age_s < TWIN_PENDING_S) return false;
+    return !q.liveSession.get(channel, name);
+  }
+  function twinName(channel, base, as = null) {
+    const free = (name) => nameFree(channel, name);
+    const numbered = as && as.startsWith(`${base}-`) && /^[1-9][0-9]{0,3}$/.test(as.slice(base.length + 1)) ? Number(as.slice(base.length + 1)) : null;
+    if (numbered && numbered >= 2 && free(as)) return { agent: as, n: numbered };
+    for (let n = 2; n < 1000; n++) {
+      const name = `${base}-${n}`;
+      if (name.length > NAME_MAX) return null;
+      if (free(name)) return { agent: name, n };
+    }
+    return null;
+  }
+
+  const createTwin = db.transaction((channel, base, { forMeeting = false, as = null } = {}) => {
+    const pick = twinName(channel, base, as);
+    if (!pick) return null;
+    q.insertTwin.run({ channel, agent: pick.agent, base, n: pick.n, for_meeting: forMeeting ? 1 : 0 });
+    // The agent's name and face, copied to the second session's own row and
+    // kept the same from here by setProfile. Copied and not looked up
+    // through the link at every read: a profile is read by agent in a dozen
+    // places, on both surfaces, and the one that forgot the link would draw
+    // one agent with two faces.
+    const p = q.profileOf.get(base) ?? {};
+    q.copyProfile.run({
+      agent: pick.agent, persona: p.persona ?? humanName(base),
+      gender: p.gender ?? null, shirt: p.shirt ?? null, hair: p.hair ?? null, skin: p.skin ?? null,
+    });
+    q.unretireAgent.run({ channel, agent: pick.agent });
+    ensurePersona(channel, pick.agent);
+    return pick.agent;
   });
 
   function ensurePersona(channel, agent) {
@@ -1724,6 +1872,19 @@ export function makeStore(db) {
     openMeeting: (id) => q.openMeeting.run(id).changes,
     endMeeting: (id, participants) => q.endMeeting.run(JSON.stringify(participants), id).changes,
     recentMeetings: (limit) => q.recentMeetings.all(limit).map(meetingRow),
+    /** Every room on a floor, each with `live` (open and heard from lately) and `ended_s` (seconds since it ended). */
+    meetingsOn: (channel, liveSeconds = MEETING_LIVE_SECONDS) =>
+      q.meetingsOn.all(`-${liveSeconds} seconds`, channel).map((r) => ({ ...meetingRow(r), live: !!r.live })),
+    // --- one agent, several sessions -------------------------------------------
+    /** The link from a second session to its agent, or null: `{ base, n, for_meeting, age_s }`. */
+    twinOf: (channel, agent) => q.twinOf.get(channel, agent) ?? null,
+    listTwins: () => q.listTwins.all(),
+    /** A second session of `base` on `channel`: its name, or null when none is free. */
+    createTwin: (channel, base, opts) => createTwin(channel, base, opts),
+    dropTwin: (channel, agent) => q.deleteTwin.run(channel, agent).changes,
+    endDeskSessions: (channel, agent) => q.endDeskSessions.run(channel, agent).changes,
+    nameFree,
+    familyOf,
     /** The window says the room is still open; false when the board has it ended (a reload's end landed after its open). */
     touchMeeting: (id) => q.touchMeeting.run(id).changes > 0,
     /**
@@ -1864,8 +2025,10 @@ export function makeStore(db) {
      * accepted and ignored: every caller has one to hand, and the admin log
      * records which board the operator was looking at when they did it.
      */
+    // One agent's sessions are one agent (desk_twins): what is chosen for
+    // any of its names is chosen for all of them.
     setProfile: (_channel, agent, { persona = null, gender = null, shirt = null, hair = null, skin = null } = {}) =>
-      q.upsertProfile.run({ agent, persona, gender, shirt, hair, skin }).changes,
+      familyOf(agent).reduce((n, a) => n + q.upsertProfile.run({ agent: a, persona, gender, shirt, hair, skin }).changes, 0),
     ensurePersona,
     pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
 

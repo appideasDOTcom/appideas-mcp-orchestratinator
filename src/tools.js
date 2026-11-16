@@ -22,6 +22,31 @@ function resolve(args, context) {
 }
 
 /**
+ * Which of an agent's sessions a name means, when `sender` writes it.
+ *
+ * One agent can have two sessions on a floor (desk_twins in db.js): qa at
+ * its desk and qa-2 in a meeting room. An agent that writes to plain "qa"
+ * knows one QA agent, not which session it is speaking with. costmo's ruling
+ * (2026-11-16): the one in the sender's room. If the sender is in a live
+ * meeting room with one of that agent's sessions, that session is who it
+ * means; otherwise the name is the agent's first desk, as written. A name
+ * written out in full ("qa-2") always goes exactly there, and a name that
+ * is in the sender's room under itself is itself.
+ *
+ * Two readings were offered and not chosen: always the first desk (a review
+ * asked for in the room would land with the session outside it), and every
+ * session (each would have to decide whether a message was its own).
+ */
+export function addressed(store, channel, sender, name) {
+  if (!name || store.twinOf(channel, name)) return name;
+  const room = store.liveMeetingOf(channel, sender);
+  if (!room) return name;
+  const here = room.participants.filter((p) => !p.absent).map((p) => p.agent);
+  if (here.includes(name)) return name;
+  return here.find((a) => store.twinOf(channel, a)?.base === name) ?? name;
+}
+
+/**
  * Register every coordination tool on a per-session McpServer instance.
  * `context` carries the channel/agent this connection is bound to.
  */
@@ -42,10 +67,18 @@ export function registerTools(server, { store, context }) {
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent, 'whoami');
+      // A second session of an agent on this floor is told so: its folder's
+      // own instructions name the agent, and the name it carries here is
+      // that with a number after it.
+      const twin = store.twinOf(channel, agent);
       return ok({
         channel,
         agent,
         boundViaHeader: { channel: context.channel ?? null, agent: context.agent ?? null },
+        ...(twin ? {
+          session_of: twin.base,
+          note: `You are a second session of ${twin.base} on this channel, running beside its first. Other agents know you as ${agent}: sign and address yourself by that name here. Messages and tasks addressed to ${agent} are yours; ones addressed to ${twin.base} are yours only when their sender is in a meeting room with you.`,
+        } : {}),
         present: store.listAgents(channel),
       });
     }
@@ -91,13 +124,17 @@ export function registerTools(server, { store, context }) {
       // contained). A direct message goes where it is addressed. The reply
       // says who a contained broadcast reached, so the agent is not left
       // believing the whole channel heard it.
-      const room = args.to ? null : store.liveMeetingOf(channel, agent);
+      // And a name means the session of that agent the sender is in a room
+      // with, when the agent has two on this floor (addressed, above).
+      const to = args.to ? addressed(store, channel, agent, String(args.to)) : null;
+      const room = to ? null : store.liveMeetingOf(channel, agent);
       // The room's desks, not its absent ones: those are on the floor and
       // hear the floor's broadcasts, not the room's (QA, PR #49 finding 1).
       const audience = room ? room.participants.filter((p) => !p.absent).map((p) => p.agent) : null;
-      const id = store.insertMessage(channel, agent, args.to ?? null, JSON.stringify(args.body ?? null), audience);
+      const id = store.insertMessage(channel, agent, to, JSON.stringify(args.body ?? null), audience);
       return ok({
-        sent: true, id, channel, from: agent, to: args.to ?? null,
+        sent: true, id, channel, from: agent, to,
+        ...(to && to !== args.to ? { addressed_as: args.to, note: `${args.to} has more than one session on this channel; this went to ${to}, the one in your meeting room.` } : {}),
         ...(audience ? { meeting_room: { id: room.id, reached: audience.filter((a) => a !== agent) } } : {}),
       });
     }
@@ -175,8 +212,13 @@ export function registerTools(server, { store, context }) {
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent, 'open_task');
-      const id = store.openTask(channel, args.title, args.body ?? null, args.assignee ?? null, agent);
-      return ok({ opened: true, id, channel, title: args.title, assignee: args.assignee ?? null, created_by: agent });
+      // The session of the assignee the opener is in a room with (addressed).
+      const assignee = args.assignee ? addressed(store, channel, agent, String(args.assignee)) : null;
+      const id = store.openTask(channel, args.title, args.body ?? null, assignee, agent);
+      return ok({
+        opened: true, id, channel, title: args.title, assignee, created_by: agent,
+        ...(assignee && assignee !== args.assignee ? { addressed_as: args.assignee, note: `${args.assignee} has more than one session on this channel; this is assigned to ${assignee}, the one in your meeting room.` } : {}),
+      });
     }
   );
 

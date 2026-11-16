@@ -259,6 +259,26 @@ floors, its window is busy, its conversation is gone). A desk that missed a
 Resume for a reason that may pass, like a busy window, stays in the room
 and is tried again at the next Resume.
 
+**One agent in two rooms.** A desk that is already in a meeting room can be
+checked for another: the count on **Meeting room** includes it, and its
+hover says so. The new room gets a **new session** of that agent, a second
+desk in the same folder with a conversation of its own, and the session in
+the first room carries on untouched. On the floor the agent then stands in
+both boxes: its own desk in one, and a desk carrying its name with a number
+(**Quinn · 2**, agent id `quinn-2`) in the other. The second session has the
+agent's name and face; a rename of either renames both. Other agents see it
+under its numbered id. A message or task they address to the plain name
+goes to the session that is in a meeting room with the sender, and
+otherwise to the agent's first desk; the numbered id always goes exactly
+there. **Bring back from the meeting room** on any of the agent's desks
+takes the agent out of **every** room it is in, on every floor. A session
+made for a room closes when it is in none (End meeting, ✕, Bring back, or
+the room's window gone for good): its window closes and its desk leaves the
+floor, never in the middle of a turn. Its conversation stays in the folder,
+where History reads it, and **Resume** of that room makes the session again
+on it. A session its host cannot start is said in the room, in the host's
+words, and the room carries on with the desks that did arrive.
+
 <img src="images/meeting-room-700.png" width="700" alt="A meeting room with the Project Manager, API Developer and QA Engineer along the top, one message to everyone with a delivered line per desk and three replies, then a message to the QA Engineer alone and its reply, and the composer with its To chips">
 
 *One message to the room, delivered desk by desk, and the replies coloured
@@ -278,8 +298,31 @@ None of them should have to be discovered by accident:
 
 - **The nameplate card.** Click any desk's nameplate for who this desk is —
   the repo, branch and model behind it, and who holds the conversation — plus
-  an **Open conversation** button, **Move to another floor** and **Hide
-  desk** under it, and the door to editing the avatar.
+  an **Open conversation** button, **Move to another floor**, **Hide
+  desk** and **Leave room** under it, and the door to editing the avatar.
+  While the desk is in a meeting room all four are greyed, with the reason
+  under them: its conversation and controls are the room's window's until
+  it is brought back or the meeting ends. (A click on the desk itself still
+  opens its panel, which holds Bring back from the meeting room.)
+- **Leave room.** Takes the desk off its floor: its window closes and its
+  binding is removed, after the same confirmation the chat panel's **Leave
+  desk** asks. The folder and its conversations stay where they are, and
+  **Take a desk** brings the agent back. On one of several desks an agent
+  has in one folder (below) it removes only that desk: the others keep
+  running and nothing in the folder changes.
+- **New desk here.** Take a desk, standing on a floor, with a folder that is
+  already a desk somewhere: beside **Move to …** there is **New desk here**.
+  It seats the agent on this floor **as well**, with a new session in the
+  same folder, and leaves the session it has (and any others) running. So
+  one agent can work several floors at once, each conversation its own. On
+  a floor where nobody answers to its name it keeps the name; on its own
+  floor, or one where the name is taken, the new desk takes the name with a
+  number (`quinn-2`), and the dialog says which before you press. Such a
+  desk is the floor's window only: **Open in VS Code** is not offered on
+  it, because an editor opened in that folder is the folder's own desk, and
+  **Move to another floor** is greyed with the reason (use New desk here on
+  the floor you want, and Leave room on this one). **Leave room** removes
+  it.
 - **Move to another floor.** Seats the agent on another floor — one on the
   board, or a new one by name — without finding its folder first: the desk
   already knows its folder and its host, so you pick only the floor, and the

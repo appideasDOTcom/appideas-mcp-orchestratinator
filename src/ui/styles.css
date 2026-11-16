@@ -1491,6 +1491,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    desk: a reason is the useful part of a button that cannot be pressed. */
 .dp-move:disabled, .dp-move:disabled:hover { cursor: not-allowed; opacity: .55; border-color: var(--border); color: var(--muted); }
 .dp-move-why { margin: 4px 2px 0; font: 11px/1.35 var(--sans); color: var(--muted); }
+/* In a meeting room, everything from Open conversation down is dimmed
+   (costmo, 2026-11-16), Open conversation included, with the one reason
+   under the last button. */
+.dp-open:disabled, .dp-open:disabled:hover { cursor: not-allowed; opacity: .55; border-color: var(--border); color: var(--muted); background: var(--surface-2); }
 
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor,

@@ -50,6 +50,14 @@ const control = args.includes('--control');
 const destAt = args.indexOf('--dest');
 const dest = destAt >= 0 ? args[destAt + 1] : null;
 if (!spec) { console.error('usage: run-mutants.mjs <mutants.json> [--dest <dir>] [--control]'); process.exit(1); }
+// A red and a green, as the suites print them: ✗ and ✓ for most, and
+// `FAIL <name>` / `ok   <name>` at the start of a line for test:renew.
+// Counting ✗ alone read a renew mutant its suite had failed twice as
+// "0 failing — SURVIVED (0 ✓)" (2026-11-16; run-mutant.sh has counted both
+// since PR #54, and this runner had not been used on that suite). A count
+// of 0 ✓ beside 0 failing is a suite this cannot read, not a survivor.
+const isRed = (l) => l.includes('✗') || /^FAIL /.test(l);
+const isGreen = (l) => l.includes('✓') || /^ok {2,}/.test(l);
 const M = JSON.parse(readFileSync(spec, 'utf8'));
 const copy = execFileSync(`${D}/copy-repo.sh`, dest ? [dest] : [], { encoding: 'utf8' }).trim();
 console.log('copy:', copy);
@@ -62,8 +70,8 @@ for (const [name, suite, file, oldS, newS] of M) {
     const t0 = Date.now();
     const run = spawnSync('npm', ['run', `test:${suite}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
     const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
-    const red = out.split('\n').filter((l) => l.includes('✗'));
-    const green = out.split('\n').filter((l) => l.includes('✓')).length;
+    const red = out.split('\n').filter(isRed);
+    const green = out.split('\n').filter(isGreen).length;
     console.log(`MUTANT [${name}] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing${red.length ? '' : ` — SURVIVED (${green} ✓)`}`);
     for (const l of red.slice(0, 8)) console.log(`    ${l.trim().slice(0, 220)}`);
     const threw = !red.length && out.match(/(TypeError|ReferenceError|SyntaxError)[^\n]*/);
@@ -77,8 +85,8 @@ if (control) {
     const t0 = Date.now();
     const run = spawnSync('npm', ['run', `test:${suite}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
     const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
-    const red = out.split('\n').filter((l) => l.includes('✗'));
-    const green = out.split('\n').filter((l) => l.includes('✓')).length;
+    const red = out.split('\n').filter(isRed);
+    const green = out.split('\n').filter(isGreen).length;
     console.log(`CONTROL [nothing mutated] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing, ${green} ✓${red.length ? ' — THE COPY IS RED WITHOUT A MUTANT: these are not the mutants\' reds' : ''}`);
     for (const l of red.slice(0, 8)) console.log(`    ${l.trim().slice(0, 220)}`);
   }

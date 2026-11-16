@@ -520,6 +520,80 @@ this check a 30 ms `setTimeout` in the floor tab, set from a BroadcastChannel
 handler, fired after 400 ms, after the room's window was back. A row that
 has to act inside a gap acts in the handler itself, not on a timer.
 
+### check-sessions.mjs — one agent, several sessions (0.12.9)
+
+The nameplate card's **Leave room** and its controls going dim in a meeting
+room; a desk that is already in a room checked for a second one and joining
+it as a second session; each room typing to its own session; **Bring back**
+taking the agent out of every room; a room of second sessions ended from
+the floor and resumed; a second session its host refuses; and Take a desk's
+**New desk here** (refused, slow, made, then left from its card).
+
+```bash
+PORT=8949 CDP=9289 .claude/skills/verify-ui-change/run-check-sessions.sh "$PWD"
+# … PASS · 81 of 81          (about two minutes; Node 22.14+ first on PATH)
+```
+
+[`run-check-sessions.sh`](run-check-sessions.sh) serves any directory with
+[`seed-sessions.mjs`](seed-sessions.mjs), which is a host and not a seed: it
+registers through `/api/host/register` every two seconds with `seats:
+true`, names every desk it runs, and answers `seat`, `unbind`, `browse`,
+`chat`, `sessions` and `reopen` as events. Nothing is written into the
+database behind the board, because the board asks only a host that *says*
+it can seat a second desk, and reads which desks a host runs off its
+registration. Its control file takes `seatFail: ["qa-2"]` (the host's
+refusal, said on the desk the session was made beside, in `sit()`'s words)
+and `seatSlow: 3000`. Its mutants are kept:
+[`mutants-sessions.page.json`](mutants-sessions.page.json), eleven, all red,
+with the control green:
+
+```bash
+node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs .claude/skills/verify-ui-change/mutants-sessions.page.json \
+  'PORT=8951 CDP=9291 .claude/skills/verify-ui-change/run-check-sessions.sh "$PWD"' --dest "$TMPDIR/orch-page-sessions"
+```
+
+What writing it found, each a fault no suite had seen:
+
+- **A desk for a session nobody had seated.** A second session that closed
+  left its conversation row open, and the next one made under the same name
+  was drawn live the moment the board named it. The row that caught it was
+  about a session the fixture's host *refuses*: "nor is there a desk for it
+  on the floor". A refusal path is worth a row of its own for what it
+  leaves behind, not only for what it says.
+- **A retry under another name.** A New desk here the host refused left its
+  undrawn seat, and the second press took `qa-2` on a floor where nobody
+  used `qa`. Found by putting the refused case *before* the working one in
+  the same dialog, which is the order a person meets them in.
+- **A row that could not see a wait.** "The dialog closes when the desk is
+  there" is true whether or not the page waited for the host. The mutant
+  that took the wait out survived, so the fixture's host got `seatSlow` and
+  the row reads the dialog while the host is still working.
+
+One step is the fixture's and is said in its own row: a second session made
+for a meeting room is left alone for 30 s after it is made, so the check
+ages it in the database (`desk_twins.created_at`) before taking it out of
+its room, instead of sleeping half a minute three times.
+
+**What the 0.12.9 round ran, and what it left for the release** (costmo's
+rule: the suites and page checks a change reaches, the full chain once at
+the SHA that ships). Run, each alone, on the tree as it stood at the end:
+all twelve suites (`smoke`, `admin`, `auth`, `boardlog`, `capture`,
+`floor`, `markdown`, `plugin`, `update`, `host`, `window`, `renew`,
+`seats`); 55 suite mutants and 11 page mutants, every one red, controls
+green; check-sessions, and the page checks whose code it touched:
+check-take-floor, check-meeting-box, check-meeting, check-select and
+check-redraw (their results are in the round's report). **Not run, and
+owed at the release**: `npm test` as one chain; check-popout, check-chatbox,
+check-pop-foot, check-popout-session, check-card-move, check-hide,
+check-backdrop, check-chat-controls and check-update, none of whose code
+paths were changed except through `deskFate`/`boundTo` (a popout following
+a move), which `test:floor` pins. **Not measured at all**: a meeting room
+of real Claude Code windows driven from a real browser in one run (the page
+tier ran against seed-sessions' host, the host tier against the floor's
+routes, and three real windows in one folder against the tree's host — the
+three overlap, they were not one run); and a move to a fresh tmux server
+with a real seat in it (`test:renew` has it on stand-ins).
+
 ### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
 
 Opened while standing on a floor, Take a desk leaves the floor field alone

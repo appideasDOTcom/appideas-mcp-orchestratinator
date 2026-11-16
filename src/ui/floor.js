@@ -568,7 +568,20 @@
   function detailsHtml(d, channel) {
     const b = d.board;
     const bits = [];
-    const hideWhy = hideRefusal(d, !!meetBoxOf(channel, d.agent));
+    // In a meeting room, nothing from Open conversation down can be pressed
+    // (costmo, 2026-11-16): the desk's chat and its controls are the room's
+    // window's while it is there, and each of these would act on the desk
+    // from behind the room's back. One reason, said once under the buttons.
+    // Hide desk's own reason in a meeting (a desk in a meeting stands in its
+    // box, hideRefusal) is part of that one reason now, with what becomes
+    // of a desk that was hidden before it joined: two paragraphs that both
+    // begin "In a meeting" under four dimmed buttons said the same thing
+    // twice. hideRefusal is still what a bulk Hide is refused with.
+    const meetWhy = cardRefusal(!!meetBoxOf(channel, d.agent), !!d.hidden);
+    const hideWhy = null;
+    const moveWhy = meetWhy ? null : moveBlockedWords(d);
+    const leaveWhy = meetWhy ? null : leaveBlockedWords(d);
+    const off = meetWhy ? ' disabled' : '';
     const row = (k, v, cls = '') =>
       bits.push(`<div class="dp-row"><span class="dp-k">${esc(k)}</span><span class="dp-v ${cls}">${v}</span></div>`);
 
@@ -615,22 +628,22 @@
     // only by people who already knew it was there, and this card is the first
     // thing an operator opens when they want to know who a desk is.
     return `<div class="dp-head">` +
-      `<strong>${esc(d.persona)}</strong>` +
+      `<strong>${esc(plateName(d))}</strong>` +
       `<span class="dp-dim mono">${esc(channel)}/${esc(d.agent)}</span>` +
       `<button type="button" class="dp-open" data-act="rename"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Edit avatar</button>` +
       `</div>${bits.join('')}` +
-      `<div class="dp-foot"><button type="button" class="dp-open" data-act="open"` +
-      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}">Open conversation</button>` +
+      `<div class="dp-foot${meetWhy ? ' dp-meeting' : ''}"><button type="button" class="dp-open" data-act="open"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"${off}${meetWhy ? ` title="${esc(meetWhy)}"` : ''}>Open conversation</button>` +
       // Move to another floor (#18, Decided 1): Take a desk's move from the
       // agent's side — this desk's folder and host, only the floor to pick.
       // Disabled, with the reason under it, while no live host runs the
       // desk; see moveBlockedWords.
       `<button type="button" class="dp-open dp-hide dp-move" data-act="move-desk"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
-      (moveBlockedWords(d) ? ' disabled' : '') +
-      ` title="${esc(moveBlockedWords(d) ?? 'Seat this agent on another floor: its folder is rebound there. A window the floor holds closes and a new conversation opens on the new floor; with no window open, it opens on its last conversation.')}">Move to another floor</button>` +
-      (moveBlockedWords(d) ? `<p class="dp-move-why">${esc(moveBlockedWords(d))}</p>` : '') +
+      (moveWhy || meetWhy ? ' disabled' : '') +
+      ` title="${esc(meetWhy ?? moveWhy ?? 'Seat this agent on another floor: its folder is rebound there. A window the floor holds closes and a new conversation opens on the new floor; with no window open, it opens on its last conversation.')}">Move to another floor</button>` +
+      (moveWhy ? `<p class="dp-move-why">${esc(moveWhy)}</p>` : '') +
       // Put this desk away (#20, Decided 2): under "Open conversation", for
       // any desk this card is open on. It becomes a pill under the storey,
       // and stays one until that pill is clicked, whatever the agent does.
@@ -638,9 +651,20 @@
       // (hideRefusal), and the reason is under the button, as Move's is.
       `<button type="button" class="dp-open dp-hide" data-act="hide-desk"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
-      (hideWhy ? ' disabled' : '') +
-      ` title="${esc(hideWhy ?? 'Put this desk away: a pill under the storey, shared with everyone looking at this board; the agent keeps working and still counts. Click the pill to bring it back.')}">Hide desk</button>` +
-      (hideWhy ? `<p class="dp-move-why dp-hide-why">${esc(hideWhy)}</p>` : '') + '</div>';
+      (hideWhy || meetWhy ? ' disabled' : '') +
+      ` title="${esc(meetWhy ?? hideWhy ?? 'Put this desk away: a pill under the storey, shared with everyone looking at this board; the agent keeps working and still counts. Click the pill to bring it back.')}">Hide desk</button>` +
+      (hideWhy ? `<p class="dp-move-why dp-hide-why">${esc(hideWhy)}</p>` : '') +
+      // Leave room (costmo, 2026-11-16): under Hide desk, the desk and its
+      // agent off this floor. It opens the panel's own Leave desk dialog,
+      // which says what goes and what stays and asks first (his pick over
+      // acting at once). Take a desk brings the agent back, and its
+      // conversations stay in the folder, where History reads them.
+      `<button type="button" class="dp-open dp-hide dp-leave" data-act="leave-room"` +
+      ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
+      (leaveWhy || meetWhy ? ' disabled' : '') +
+      ` title="${esc(meetWhy ?? leaveWhy ?? 'Take this desk off the floor: its window closes and its binding is removed. Its conversations stay in its folder, and Take a desk brings the agent back.')}">Leave room</button>` +
+      (leaveWhy ? `<p class="dp-move-why dp-leave-why">${esc(leaveWhy)}</p>` : '') +
+      (meetWhy ? `<p class="dp-move-why dp-meet-why">${esc(meetWhy)}</p>` : '') + '</div>';
   }
 
   /** Draw, move or remove the popover to match `ui.details`. */
@@ -2035,7 +2059,7 @@
       tabindex: '0',
     });
     const name = el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' });
-    name.textContent = d.persona;
+    name.textContent = plateName(d);
     plate.appendChild(name);
     // A desk the board knows but no window has ever reported from says so on
     // its nameplate — it is the difference between "stepped away" and "never
@@ -2564,11 +2588,56 @@
    * desk can never be moved" — the reason is the useful part.
    */
   function moveBlockedWords(d) {
+    // One of several desks of an agent in one folder: a move rebinds a
+    // folder, and this desk is not its folder's (SEAT_NO_MOVE in
+    // src/floor.js, the route's words; test/floor.mjs holds the two copies).
+    if (d?.hosted?.live && d.hosted.seat) return SEAT_NO_MOVE;
     if (d?.hosted?.live) return null;
     const host = d?.hosted?.host ?? null;
     return host
       ? `The host ${host} is not on this board right now, so there is nobody to bind it.`
       : 'No host on this board is running this folder, so there is nobody to bind it.';
+  }
+
+  const SEAT_NO_MOVE = 'This is one of several desks of this agent in one folder, so there is no folder to rebind for it. For a session of it on another floor, use Take a desk there and choose New desk here; Leave room takes this one away.';
+
+  /**
+   * Why the card's Leave room cannot be pressed, or null when it can. Leaving
+   * is the host closing the desk's window and removing its binding, so it
+   * needs the desk's host here and running it — the same test as a move,
+   * and the same sentence when it fails. A desk with no host is on the floor
+   * only because its window reports or its agent is connected; there is no
+   * binding of the floor's to take away.
+   */
+  function leaveBlockedWords(d) {
+    if (d?.hosted?.live) return null;
+    const host = d?.hosted?.host ?? null;
+    return host
+      ? `The host ${host} is not on this board right now, so there is nobody to close its window.`
+      : 'No host on this board is running this folder, so the floor has no binding here to remove.';
+  }
+
+  /**
+   * Why nothing on the card from Open conversation down can be pressed, or
+   * null when it can: the desk is in a meeting room (costmo, 2026-11-16:
+   * "They are not all the way relevant while the agent is in a room, so
+   * let's make them unusable"). The way back is on the floor: a click on
+   * the desk opens its panel, which holds Bring back from the meeting room,
+   * and the meeting's box has End meeting.
+   */
+  function cardRefusal(inMeeting, hidden = false) {
+    if (!inMeeting) return null;
+    return 'In a meeting room: its conversation and controls are in the room’s window. Bring it back from the meeting room, or end the meeting, to use these.'
+      + (hidden ? ' It was hidden before it joined: it stands in the meeting’s box while the meeting lasts, and is its pill again when the meeting ends.' : '');
+  }
+
+  /**
+   * The name on a nameplate. A second session of an agent on its floor
+   * (`twin`: qa-2 beside qa) carries the agent's own name and face, so the
+   * two are told apart by the number after the name: "Quinn · 2".
+   */
+  function plateName(d) {
+    return d?.twin ? `${d.persona} · ${d.twin.n}` : (d?.persona ?? '');
   }
 
   /* ---------- a desk's place on the floor: the drawing ---------- */
@@ -3013,7 +3082,7 @@
     // Meeting room (issue #44), after the three. When the row is already
     // full — a long Nudge label, a big unread count — it stands at the
     // right end of the line under them, and the summary gives it room.
-    const meet = meetingChip(desks, outsNow(ui.outs, Date.now()), ch);
+    const meet = meetingChip(desks, outsNow(ui.outs, Date.now()), ch, (d) => (meetBoxOf(ch, d.agent) ? seatAgain(d, floor.hosts) : null));
     const meetW = meet.text.length * MONO_W + 16;
     const right = geo.w - PAD + 6;
     const wrapped = x + meetW > right;
@@ -4048,6 +4117,16 @@
       wrap.querySelector('.p-out-why').textContent = inMeeting
         ? `${d.persona} is in a meeting room. Its chat is there, in one transcript with the room\u2019s other desks; the desk on the floor works as it always does.`
         : `${d.persona}\u2019s chat is in a window of its own. Everything in the chat works there; the desk on the floor works as it always does.`;
+      // One agent can be in several rooms at once, each a session of its
+      // own, and Bring back takes it out of all of them.
+      const back = wrap.querySelector('[data-act="bring-back"]');
+      const rooms = inMeeting ? roomsOfAgent(channel, agent) : 0;
+      if (back && inMeeting) {
+        back.textContent = rooms > 1 ? `Bring back from all ${rooms} meeting rooms` : 'Bring back from the meeting room';
+        back.title = rooms > 1
+          ? 'Take this agent out of every meeting room it is in; each room carries on with the others, and a session made for a room closes'
+          : `Take this desk out of the meeting room; the room carries on with the others${d.twin?.meeting ? ', and this session, made for the room, closes' : ''}`;
+      }
       return;
     }
     // Back from a popout or a meeting room with this desk open: started the
@@ -4238,7 +4317,11 @@
     }
     const attaching = ui.attaching === attachPending ? attachPending : null;
     const move = ui.moving === pending ? pending : null;
-    toVsc.classList.toggle('hidden', !h?.live);
+    // Not for a seat (one of several desks of an agent in one folder): an
+    // editor opened in the folder connects as the folder's own desk, so the
+    // conversation would carry on there as another desk. Absent, not dimmed:
+    // there is no state of this desk in which it could be pressed.
+    toVsc.classList.toggle('hidden', !h?.live || !!h.seat);
     // Offered only when the desk has no window and no editor on it. With an
     // editor holding it this would open a second process on one transcript,
     // which is the thing handback closes its own window to avoid; with a floor
@@ -4954,7 +5037,7 @@
   /** The folder and host a desk is bound to, which is what a move keeps, or null when nothing binds it. */
   function boundTo(d) {
     const h = d?.hosted;
-    return h && h.state !== 'offline' && h.host && h.window ? { host: h.host, window: h.window } : null;
+    return h && h.state !== 'offline' && h.host && h.window ? { host: h.host, window: h.window, seat: !!h.seat } : null;
   }
 
   /**
@@ -4976,10 +5059,15 @@
     const all = channels ?? [];
     const d = all.find((c) => c.channel === here.channel)?.desks?.find((x) => x.agent === here.agent) ?? null;
     if (d && (boundTo(d) || !mem)) return { state: 'here', desk: d };
-    if (mem) {
+    // A seat is never a move, from either end: one agent can sit on several
+    // floors at once out of one folder (host/seats.js), so the same agent
+    // bound to the same folder on another floor is its other desk, which was
+    // there all along. Read as a move, a desk that left sent its popout to
+    // the agent's desk on another floor.
+    if (mem && !mem.seat) {
       for (const c of all) {
         if (c.channel === here.channel) continue;
-        const t = c.desks?.find((x) => x.agent === here.agent && boundTo(x)?.host === mem.host && boundTo(x)?.window === mem.window);
+        const t = c.desks?.find((x) => x.agent === here.agent && !boundTo(x)?.seat && boundTo(x)?.host === mem.host && boundTo(x)?.window === mem.window);
         if (t) return { state: 'moved', channel: c.channel, desk: t };
       }
     }
@@ -5014,13 +5102,16 @@
    * creates as it opens. `resume` asks the window to reopen each desk on the
    * conversation it had — Resume, and nothing else, sets it.
    */
-  function meetingQuery({ id = null, channel = null, agents = [], resume = false } = {}) {
+  function meetingQuery({ id = null, channel = null, agents = [], twins = [], resume = false } = {}) {
     const q = new URLSearchParams();
     if (id) q.set('meeting', String(id));
     else {
       q.set('meeting', 'new');
       q.set('channel', channel ?? '');
       q.set('agents', agents.join(','));
+      // Desks that are in another meeting room already: the window makes a
+      // second session of each as it opens, and those are who join.
+      if (twins.length) q.set('twins', twins.join(','));
     }
     if (resume) q.set('resume', '1');
     return `?${q}`;
@@ -5033,8 +5124,10 @@
     if (!m) return null;
     if (m === 'new') {
       const channel = q.get('channel');
-      const agents = [...new Set((q.get('agents') ?? '').split(',').map((a) => a.trim()).filter(Boolean))];
-      return channel && agents.length ? { id: null, channel, agents, resume: false } : null;
+      const list = (name) => [...new Set((q.get(name) ?? '').split(',').map((a) => a.trim()).filter(Boolean))];
+      const agents = list('agents');
+      const twins = list('twins').filter((a) => !agents.includes(a));
+      return channel && (agents.length || twins.length) ? { id: null, channel, agents, twins, resume: false } : null;
     }
     const id = Number(m);
     return Number.isInteger(id) && id > 0 ? { id, channel: null, agents: [], resume: q.get('resume') === '1' } : null;
@@ -5056,17 +5149,62 @@
    * and those are named on hover. Two or more: a meeting of one is the
    * desk's own popout, which the panel's detach already opens.
    */
-  function meetingChip(desks, outKeys, channel) {
+  function meetingChip(desks, outKeys, channel, again = () => null) {
     const free = desks.filter((d) => !outKeys.has(`${channel}|${d.agent}`));
-    const out = desks.filter((d) => outKeys.has(`${channel}|${d.agent}`));
-    const n = free.length;
+    // A desk that is in another meeting room can be in this one too
+    // (costmo, 2026-11-16): the new room gets a new session of the agent,
+    // and the one it has carries on where it is. `again(d)` says so — true
+    // when the desk is in a meeting room and its host can seat a second
+    // session, a sentence when it is in one and cannot be, null when it is
+    // out for another reason (its own popout: a desk's chat in a window of
+    // its own is still one place at a time).
+    const more = desks.filter((d) => outKeys.has(`${channel}|${d.agent}`) && again(d) === true);
+    const out = desks.filter((d) => outKeys.has(`${channel}|${d.agent}`) && again(d) !== true);
+    const n = free.length + more.length;
     const title = [
       n >= 2
-        ? `Opens one window with ${free.map((d) => `${d.persona} (${d.agent})`).join(', ')}: one transcript, one composer, and you choose who hears each message.`
+        ? `Opens one window with ${[...free, ...more].map((d) => `${d.persona} (${d.agent})`).join(', ')}: one transcript, one composer, and you choose who hears each message.`
         : 'Check two or more desks to put them in a meeting room.',
-      ...out.map((d) => `${d.persona} (${d.agent}) is in a window already — its own, or another meeting room.`),
+      ...more.map((d) => `${d.persona} (${d.agent}) is in another meeting room: this room gets a new session of it, and the one there carries on.`),
+      ...out.map((d) => (typeof again(d) === 'string' ? `${d.persona} (${d.agent}) is in another meeting room, and cannot be given a second session: ${again(d)}` : `${d.persona} (${d.agent}) is in a window already — its own, or another meeting room.`)),
     ].join('\n');
-    return { text: `Meeting room${n ? ` · ${n}` : ''}`, title, disabled: n < 2, agents: free.map((d) => d.agent) };
+    return { text: `Meeting room${n ? ` · ${n}` : ''}`, title, disabled: n < 2, agents: free.map((d) => d.agent), twins: more.map((d) => d.agent) };
+  }
+
+  /**
+   * Whether a desk that is in a meeting room can be given a second session
+   * for another one (meetingChip's `again`): true, or why not. Its host
+   * makes the session, so the host has to be here, running the desk, and a
+   * build that knows how (`seats` on the payload's host).
+   */
+  function seatAgain(d, hosts) {
+    if (!d?.hosted?.live) return d?.hosted ? `its host (${d.hosted.host}) is offline.` : 'no host on this board runs its folder.';
+    const host = (hosts ?? []).find((h) => h.name === d.hosted.host);
+    return host?.seats === true ? true : `its host (${d.hosted.host}) runs a build from before one agent could have several sessions.`;
+  }
+
+  /**
+   * The desks that are one agent's, for Bring back (costmo, 2026-11-16: it
+   * brings the agent back from all meeting rooms): this desk, and every desk
+   * of the same agent out of the same folder on the same host, on any
+   * floor. The same name alone is not the same agent — `developer` on two
+   * floors is two repos — and the payload carries no path, so the folder is
+   * the host's name and the folder's last segment, as for a move (deskFate).
+   * A desk with no host is only itself.
+   */
+  function agentDesks(channels, channel, agent) {
+    const all = channels ?? [];
+    const d = all.find((c) => c.channel === channel)?.desks?.find((x) => x.agent === agent) ?? null;
+    const baseOf = (x) => x?.twin?.of ?? x?.agent;
+    const mine = [[channel, agent]];
+    if (!d?.hosted?.host || !d.hosted.window) return mine;
+    for (const c of all) {
+      for (const x of c.desks ?? []) {
+        if (c.channel === channel && x.agent === agent) continue;
+        if (baseOf(x) === baseOf(d) && x.hosted?.host === d.hosted.host && x.hosted?.window === d.hosted.window) mine.push([c.channel, x.agent]);
+      }
+    }
+    return mine;
   }
 
   /**
@@ -5240,6 +5378,15 @@
       // `keep`: a reason that may pass, so the desk stays in the room's
       // record for the next Resume (see absentKept in src/floor.js).
       const skip = (why, keep = false) => ({ agent: p.agent, persona: who, act: 'skip', why, keep });
+      // A second session of an agent (`base`), closed when the room ended
+      // (costmo: "Close it"): Resume makes it again beside the agent's desk,
+      // under the name it had, on the conversation it was on.
+      if (p.base && (!d || !d.hosted)) {
+        const b = c?.desks?.find((x) => x.agent === p.base) ?? null;
+        if (!b?.hosted) return skip(`${who} was a second session of ${p.base}, which has no desk on ${room.channel} now.`);
+        if (!b.hosted.live) return skip(`${who} is a second session of ${p.base}, whose host (${b.hosted.host}) is offline.`, true);
+        return { agent: p.agent, persona: b.persona ?? who, act: 'twin', base: p.base, session_id: p.session_id ?? null };
+      }
       if (!d || !d.hosted) {
         const mem = p.host && p.window ? p : null;
         for (const o of mem ? all : []) {
@@ -5688,11 +5835,36 @@
   /** "Bring chat back here", on the floor: the popout closes and the floor's panel is the chat again. */
   function bringBack(channel, agent) {
     const k = outKey(channel, agent);
+    const inMeeting = !!meetBoxOf(channel, agent);
     say({ t: 'back', channel, agent });
     ui.outs.delete(k);
     ui.popWins.delete(k);
+    // From a meeting room, the agent comes back from every room it is in
+    // (costmo, 2026-11-16): each of its other desks that is in one is asked
+    // back too, on this floor and any other (agentDesks). A session made
+    // for a room closes once it is in none, which is the board's doing.
+    if (inMeeting) {
+      for (const [ch, a] of agentDesks(floor.channels, channel, agent)) {
+        if (ch === channel && a === agent) continue;
+        if (!meetBoxOf(ch, a)) continue;
+        say({ t: 'back', channel: ch, agent: a });
+        ui.outs.delete(outKey(ch, a));
+        ui.popWins.delete(outKey(ch, a));
+      }
+    }
+    // A second session made for a meeting room is about to close: the panel
+    // goes to the agent's own desk on this floor, when it has one.
+    const d = deskIn(channel, agent);
+    if (inMeeting && d?.twin?.meeting) {
+      if (deskIn(channel, d.twin.of)) openDesk(channel, d.twin.of);
+      else { ui.open = null; render(); }
+      return;
+    }
     openDesk(channel, agent);
   }
+
+  /** How many meeting rooms Bring back would take this desk's agent out of. */
+  const roomsOfAgent = (channel, agent) => agentDesks(floor.channels, channel, agent).filter(([ch, a]) => !!meetBoxOf(ch, a)).length;
 
   /**
    * A popout ending: by its own Re-attach (`open` — the floor takes the chat
@@ -5847,7 +6019,7 @@
   /** Put a desk in the room. `since` is where its part of the transcript starts; a new participant starts from now. */
   // `keep`: a desk from the room's record (a reload, a Resume) that is out
   // in another window stays in the record for the next Resume.
-  async function meetingJoin(agent, { since = null, reopen = null, quiet = false, keep = false } = {}) {
+  async function meetingJoin(agent, { since = null, reopen = null, quiet = false, keep = false, arriving = null } = {}) {
     const m = ui.meeting;
     if (!m || m.parts.some((p) => p.agent === agent)) return true;
     const release = await takeDeskLock(m.channel, agent);
@@ -5864,6 +6036,10 @@
       session: d?.hosted?.session_id ?? null,
       turns: before?.turns ?? [], partial: '', delivery: d?.delivery ?? null,
       release, mem: boundTo(d), fate: null, reopen,
+      // A second session the room asked for a moment ago (meetingTwin): its
+      // desk has no host yet. Until it does, or MOVE_MS has gone, it is
+      // neither "left" nor "gone" (meetingSettleArrival).
+      arriving,
     };
     part.cursor = part.since;
     m.left = m.left.filter((p) => p.agent !== agent);
@@ -5934,6 +6110,58 @@
       since, quiet: true, keep: true,
       reopen: { sessionId: step.session_id, from: step.from ?? null, since: Date.now(), base: d?.last_turn?.id ?? 0 },
     });
+  }
+
+  /**
+   * A second session of an agent, for this room: the agent is in another
+   * meeting room, or was a second session here when the room ended and is
+   * being resumed (`as` its name then, `session_id` its conversation). The
+   * board names it and asks the agent's host for it; it joins at once and
+   * is waited for (meetingSettleArrival). Returns the name it joined under,
+   * or null when the board refused, said in the room in the board's words.
+   */
+  async function meetingTwin(base, { as = null, sessionId = null, since = null, keep = false } = {}) {
+    const m = ui.meeting;
+    const who = meetPersona(base);
+    const before = deskIn(m.channel, base)?.last_turn?.id ?? 0;
+    let got;
+    try {
+      got = await post('./api/floor/desk/twin', { channel: m.channel, agent: base, meeting: true, ...(as ? { as } : {}), ...(sessionId ? { session_id: sessionId } : {}) });
+    } catch (err) {
+      const words = `${who} was not given a second session for this room: ${err.message ?? err}`;
+      if (as) meetingMissed(as, words, keep); else meetingNote(words, 'bad');
+      return null;
+    }
+    // The floor as it stands with the new desk on it, so the join finds it.
+    await tick();
+    const joined = await meetingJoin(got.agent, {
+      since, quiet: true, keep,
+      arriving: got.existing ? null : { since: Date.now(), of: base, base: before, sessionId },
+    });
+    if (joined && !sessionId) meetingNote(`${who} is in another meeting room, so this room has a new session of it (${got.agent}). The one there carries on.`);
+    return joined ? got.agent : null;
+  }
+
+  /** A second session on its way, against the payload: seated, refused by the host (said on the agent's own desk), or out of time. */
+  async function meetingSettleArrival(p, d) {
+    const a = p.arriving;
+    const who = d?.persona ?? meetPersona(a.of);
+    if (d?.hosted?.live) {
+      p.arriving = null;
+      p.mem = boundTo(d) ?? p.mem;
+      if (a.sessionId) meetingNote(`${who} is back, as ${p.agent}${d.hosted.session_id === a.sessionId ? ', on its conversation' : ''}.`);
+      return;
+    }
+    // The host's refusal is an error turn on the desk the session was made
+    // beside: the new desk has no row to say it on (sit(), host/index.js).
+    try {
+      const got = await fetch(`./api/floor/turns?channel=${encodeURIComponent(ui.meeting.channel)}&agent=${encodeURIComponent(a.of)}&since=${a.base}&limit=100`).then((x) => x.json());
+      const err = (got.rows ?? []).find((t) => t.role === 'error' && /no new desk/i.test(t.text ?? ''));
+      if (err) { meetingRemove(p.agent, `${who}'s second session did not start: ${err.text}`); return; }
+    } catch { /* asked again next poll */ }
+    if (Date.now() - a.since > MOVE_MS) {
+      meetingRemove(p.agent, `${who}'s second session (${p.agent}) had not started after ${MOVE_MS / 1000}s, so it is not in this meeting room.`);
+    }
   }
 
   /** A reopen in flight, against the payload: landed, refused by the host, the host opening another, or out of time. */
@@ -6014,6 +6242,9 @@
     if (m?.phase !== 'live') return;
     const now = Date.now();
     for (const p of [...m.parts]) {
+      // A second session still on its way has no host yet, and is waited for
+      // on its own terms rather than read as a desk that left.
+      if (p.arriving) { await meetingSettleArrival(p, deskIn(m.channel, p.agent)); continue; }
       const f = deskFate(floor.channels, { channel: m.channel, agent: p.agent }, p.mem);
       const who = f.desk?.persona ?? p.agent;
       // A host gone offline reads as "left" to deskFate (its binding is not
@@ -6064,9 +6295,12 @@
     };
     render();
     try {
+      // A new room of nothing but desks that are in other rooms has nobody
+      // to be made with: the board makes it empty, and each second session
+      // joins as it is made (below).
       const got = spec.id
         ? await post('./api/floor/meeting/open', { id: spec.id })
-        : await post('./api/floor/meeting', { channel: spec.channel, agents: spec.agents });
+        : await post('./api/floor/meeting', { channel: spec.channel, agents: spec.agents?.length ? spec.agents : [], empty: !spec.agents?.length });
       m.room = got.room;
       m.id = got.room.id;
       m.channel = got.room.channel;
@@ -6103,10 +6337,15 @@
     for (const step of steps) {
       if (step.act === 'skip') meetingMissed(step.agent, `${step.persona} was not reopened: ${step.why}`, !!step.keep);
       else if (step.act === 'reopen') await meetingReopen(step, since.get(step.agent));
+      // A second session the room had, closed when it ended: made again.
+      else if (step.act === 'twin') await meetingTwin(step.base, { as: step.agent, sessionId: step.session_id, since: since.get(step.agent), keep: true });
       // Kept absent when out elsewhere only for a room that existed before
       // this window (a reload); a new room has no record to keep it in.
       else await meetingJoin(step.agent, { since: since.get(step.agent), quiet: true, keep: !!spec.id });
     }
+    // The checked desks that were in another meeting room: a second session
+    // of each, made now and joined as it is made (meetingTwin).
+    for (const base of spec.id ? [] : spec.twins ?? []) await meetingTwin(base);
     if (spec.resume) meetingNote(`Resumed. ${m.parts.length ? `${m.parts.map((p) => meetPersona(p.agent)).join(', ')} ${m.parts.length === 1 ? 'is' : 'are'} here.` : 'Nobody could be reopened.'}`);
     m.phase = 'live';
     meetingSave();
@@ -6126,8 +6365,11 @@
     m.phase = 'ended';
     if (m.id) {
       try {
+        // `final`: End meeting, not a window going away. A window that is
+        // closing may be reloading, and the board waits a moment before it
+        // closes a second session made for the room; an End is an End.
         fetch('./api/floor/meeting/end', {
-          method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id }),
+          method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m.id, final: !closing }),
         }).catch(() => {});
       } catch { /* the page is going */ }
     }
@@ -6606,11 +6848,14 @@
   const meetSelNote = new Map();   // channel -> what the last Meeting room click came to, for the toolbar's line
   function openMeetingRoom(channel) {
     const outs = outsNow(ui.outs, Date.now());
-    const chip = meetingChip(checkedHere(channel), outs, channel);
+    const chip = meetingChip(checkedHere(channel), outs, channel, (d) => (meetBoxOf(channel, d.agent) ? seatAgain(d, floor.hosts) : null));
     if (chip.disabled) return;
     const key = `new-${Math.random().toString(36).slice(2, 8)}`;
     let w = null;
-    try { w = window.open(`${location.pathname}${meetingQuery({ channel, agents: chip.agents })}`, meetingName(key), popoutFeatures(meetingPlace(window.screen))); } catch { w = null; }
+    // `twins`: the checked desks that are in another meeting room. They are
+    // not taken out of it, and nothing here marks them: the window makes a
+    // second session of each, and that desk says `here` when it joins.
+    try { w = window.open(`${location.pathname}${meetingQuery({ channel, agents: chip.agents, twins: chip.twins })}`, meetingName(key), popoutFeatures(meetingPlace(window.screen))); } catch { w = null; }
     // A blocked window is an action that did nothing, so the room stays
     // selecting with its checks: the remedy is the same click again, and
     // closing would have the operator check every desk a second time.
@@ -7195,6 +7440,9 @@
     if (e.target.closest?.('#desk-pop')) {
       const openBtn = e.target.closest?.('[data-act="open"]');
       if (openBtn && ui.on) {
+        // Dimmed while the desk is in a meeting room (cardRefusal); read off
+        // the button, since a dispatched click arrives here regardless.
+        if (openBtn.disabled) return;
         ui.details = null;
         renderDetails();
         // In a popout the conversation is the one already open under the card.
@@ -7215,6 +7463,18 @@
         renderDetails();
         window.moveDeskDialog(moveBtn.dataset.channel, moveBtn.dataset.agent,
           { persona: d?.persona ?? null, host: d?.hosted?.host ?? null, folder: d?.hosted?.window ?? null });
+        return;
+      }
+      // "Leave room": the panel's Leave desk dialog, for the desk this card
+      // names. The card closes first, as for a move.
+      const leaveBtn = e.target.closest?.('[data-act="leave-room"]');
+      if (leaveBtn) {
+        if (leaveBtn.disabled || typeof window.leaveDeskDialog !== 'function') return;
+        const c = floor.channels.find((x) => x.channel === leaveBtn.dataset.channel);
+        const d = c?.desks.find((x) => x.agent === leaveBtn.dataset.agent);
+        ui.details = null;
+        renderDetails();
+        window.leaveDeskDialog(leaveBtn.dataset.channel, leaveBtn.dataset.agent, d ? plateName(d) : leaveBtn.dataset.agent, d?.hosted?.scope ?? null);
         return;
       }
       // "Hide desk" (#20). The card closes now rather than on the next poll:

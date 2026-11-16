@@ -100,6 +100,19 @@ counter-proposal against the reviewer's pin before sending it: "read the
 keys by order" was offered to QA untested in that round, and their pin
 passed it too.
 
+**`run-mutants.mjs` reads `test:renew`'s lines too** (2026-11-16). That
+suite prints `FAIL <name>` and `ok   <name>` where the others print ✗ and
+✓. `run-mutant.sh` has counted both since PR #54; the JSON runner counted
+✗ alone, and its first renew mutant read `0 failing — SURVIVED (0 ✓)`
+about a run with two reds. **0 ✓ beside 0 failing is a suite the runner
+cannot read, never a survivor**: run the mutant by hand in the copy before
+believing either number. The lists for one agent with several sessions are
+kept here and beside the page check: `mutants-sessions.suite.json` (55,
+across `floor`, `seats`, `plugin` and `renew`) and
+`../verify-ui-change/mutants-sessions.page.json`. Several suites at once is
+several copies: `--dest` each, and `FLOOR_TEST_PORT` for more than one
+floor lane (8911–8913 that day, three lanes, about four minutes for 34).
+
 **Give a hash with its algorithm, and keep the file you measured.** Bare
 `shasum` is SHA-1. A SHA-1 sent to QA as "the file I measured" was set
 against their sha256 of the same file, and their closing note said the

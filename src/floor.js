@@ -492,6 +492,88 @@ export const NAME_WHY = 'An agent or channel name is letters, digits, dots, dash
  * a minute away). The page has its own copy (`moveBlockedWords` in
  * src/ui/floor.js); test/floor.mjs holds the two to one sentence.
  */
+/* How long a seat that was left ignores its closed window's last hooks (ingestHookEvent). */
+const LEFT_HOLD_MS = 60_000;
+
+/** Why a seat is not moved to another floor by the card: the move rebinds a folder, and this desk is not its folder's. */
+export const SEAT_NO_MOVE = 'This is one of several desks of this agent in one folder, so there is no folder to rebind for it. For a session of it on another floor, use Take a desk there and choose New desk here; Leave room takes this one away.';
+
+/* How long a second session made for a meeting room is left alone: after it
+   is made (its room is recorded a moment later, by the room's window), and
+   after its room ends (a reload of the room's window ends the room and opens
+   it again within a second or two). */
+const TWIN_NEW_S = 30;
+const TWIN_ENDED_S = 15;
+/* How long one whose host never seated it is kept before its name is given
+   back, and how long a host is given to close one before it is asked again. */
+const TWIN_UNSEATED_S = 120;
+const TWIN_CLOSE_RETRY_MS = 30_000;
+
+/**
+ * Close the second sessions that are in no meeting room now (costmo,
+ * 2026-11-16: "Close it" — its window closes and the extra desk leaves the
+ * floor, so the agent is back to one desk; the conversation stays in the
+ * folder for History and for Resume).
+ *
+ * A second session made for a room (`for_meeting`) belongs to rooms: it is
+ * left while any room that names it as present is live or ended only a
+ * moment ago, and closed otherwise — End meeting, a Remove, Bring back, or
+ * the room's window gone without a word (not live after
+ * MEETING_LIVE_SECONDS). Closed is the desk's own Leave: the host closes
+ * its window and drops the seat, and its `unbound` takes the row away.
+ *
+ * Never mid-turn. Leave refuses a working desk, and so does this: the
+ * session is closed when its turn has ended, at a later look. Asked of a
+ * host once in TWIN_CLOSE_RETRY_MS, not at every look.
+ *
+ * Run from the routes a page polls and the ones a room's window calls, not
+ * on a timer of the board's own: with no page open nobody is looking at the
+ * floor, and the next page to open runs it.
+ */
+export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {}) {
+  const closed = [];
+  for (const t of store.listTwins()) {
+    if (!t.for_meeting) continue;
+    const k = deskKey(t.channel, t.agent);
+    const h = store.hostedDesk(t.channel, t.agent);
+    if (!h) {
+      // Never seated: the host refused it or was not there. Its name goes
+      // back, whatever room still lists it — a room cannot hold a desk that
+      // does not exist, and its window says so when the seat goes.
+      if (t.age_s >= TWIN_UNSEATED_S) {
+        store.unseat(t.channel, t.agent);
+        store.retireAgent(t.channel, t.agent);
+        store.dropTwin(t.channel, t.agent);
+      }
+      continue;
+    }
+    if (t.age_s < TWIN_NEW_S) continue;
+    // `ended`: a room ended by its End meeting button just now, which is
+    // final — the moment's grace is for a window that may be reloading.
+    const held = store.meetingsOn(t.channel)
+      .filter((r) => r.participants.some((p) => p.agent === t.agent && !p.absent))
+      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S));
+    if (held) continue;
+    const last = store.lastTurns().find((x) => x.channel === t.channel && x.agent === t.agent) ?? null;
+    if (switchable(h, last, nowMs, { editorOk: true }).error) continue;
+    if (nowMs - (live.closing.get(k) ?? 0) < TWIN_CLOSE_RETRY_MS) continue;
+    live.closing.set(k, nowMs);
+    store.logAdmin(t.channel, 'desk.leave', { actor: 'board', target: t.agent, detail: `${h.cwd} — a second session of ${t.base}, in no meeting room now` });
+    store.enqueueHostWork(h.host_id, t.channel, t.agent, 'unbind', { queued_at: new Date(nowMs).toISOString() });
+    live.wake(h.host_id);
+    closed.push(k);
+  }
+  return closed;
+}
+
+/** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
+export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor opened in that folder is the other desk, so this conversation stays in the floor\'s window; Open in tmux reaches it.';
+
+/** A host from before seats (host/seats.js) cannot be asked for one. */
+export function noSeatsWords(hostName) {
+  return `The host ${hostName ?? 'for this folder'} runs a build from before one agent could have several sessions. Update it (the board's Update does), and this will go through.`;
+}
+
 export function noHostWords(hostName) {
   return hostName
     ? `The host ${hostName} is not on this board right now, so there is nobody to bind it.`
@@ -536,10 +618,15 @@ const MEETING_DESKS_MAX = 24;
  *   since      — the turn its part of the transcript starts after: the
  *                desk's newest turn when it first joined, kept from then on
  */
-export function meetingSeat(agent, h, prev, lastTurnId) {
+export function meetingSeat(agent, h, prev, lastTurnId, base = null) {
   const sid = h?.sdk_session_id && !String(h.sdk_session_id).startsWith('host:') ? h.sdk_session_id : null;
   return {
     agent,
+    // Whose second session this is, when it is one (desk_twins). Kept in the
+    // record because the desk is closed when the room ends: Resume makes it
+    // again under this name, from this agent's desk, on the conversation
+    // below.
+    ...(base ?? prev?.base ? { base: base ?? prev.base } : {}),
     session_id: sid ?? prev?.session_id ?? null,
     host: h?.host_name ?? prev?.host ?? null,
     window: (h?.cwd ? h.cwd.split('/').filter(Boolean).pop() : null) ?? prev?.window ?? null,
@@ -1066,6 +1153,25 @@ export function ingestHookEvent(store, body, live = null) {
   const event = str(body.hook_event_name) ?? 'unknown';
   const pid = Number.isInteger(Number(body.pid)) && Number(body.pid) > 0 ? Number(body.pid) : null;
 
+  // A seat that was left a moment ago takes nothing from its dying window.
+  // The host closes the window and then says the desk is gone, and the
+  // window's last hooks (SessionEnd, a Stop for the turn the close cut off)
+  // arrive around that, in no order. Every event upserts its session, which
+  // clears `ended_at`, and seats its desk (below), so one that landed after
+  // the desk was taken away put it back: a seat with no host, its name taken
+  // for good — measured on real windows, 2026-11-16: a second session asked
+  // back as qa-2 came back as qa-3, because the plugin's SessionEnd had
+  // re-seated qa-2 in the second it was left. The stand-in in the suites
+  // has no plugin, which is why they did not see it. Ignored for
+  // LEFT_HOLD_MS; a desk seated again under the name inside that (`bound`)
+  // is heard from at once.
+  const leftKey = deskKey(channel, agent);
+  const leftAt = live?.left?.get(leftKey);
+  if (leftAt != null) {
+    if (Date.now() - leftAt < LEFT_HOLD_MS) return { ok: true, ignored: 'left' };
+    live.left.delete(leftKey);
+  }
+
   store.upsertSession({
     session_id: sessionId,
     channel,
@@ -1450,7 +1556,20 @@ export function createLive() {
    *  people can be searching for different things at once. */
   const recent = new Map();        // host_id -> { request_id, asked_ms, at, rows, error }
   const searches = new Map();      // search id -> { id, query, deep, asked_ms, hosts: Map(host_id -> { name, at, rows, files, ms, error }) }
+  /** Which hosts can put a second desk in a folder (host/seats.js), as each
+   *  said at its last registration. A host from before seats says nothing,
+   *  and is not asked: it would not know the work. */
+  const seating = new Map();       // host_id -> true
+  /** A second session being closed because it is in no meeting room now:
+   *  when the host was asked, so it is asked once and not at every poll. */
+  const closing = new Map();       // deskKey -> ms
+  /** Seats that were just left: when, so their closed windows' last hooks
+   *  do not seat them again (ingestHookEvent). */
+  const left = new Map();          // deskKey -> ms
   return {
+    seating,
+    closing,
+    left,
     recent,
     searches,
     partial,
@@ -1690,9 +1809,16 @@ function applyHostEvent(store, live, hostId, ev) {
       // 253). The move is the operator seating the agent here (#24 Decided 1).
       store.unretireAgent(channel, agent);
     }
+    // A seat (one agent, several sessions: host/seats.js) that closed was
+    // retired as it went, so that a second session's row does not stand on
+    // the board after it. One made again under the same name is the
+    // operator seating it, as a move is.
+    if (str(ev.scope) === 'seat') store.unretireAgent(channel, agent);
+    // And it is heard from again, if it was left a moment ago (ingestHookEvent).
+    live.left.delete(key);
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
-    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: cwd });
+    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: `${cwd}${str(ev.scope) === 'seat' ? ' — a desk beside the folder\'s own' : ''}` });
     // Something starting on an archived floor brings it back (Decided 6).
     store.wakeChannel(channel, `${ev.from ? 'a desk moved onto it' : 'a host bound a desk on it'}: ${agent}`, agent);
     const sid = str(ev.session_id);
@@ -1821,7 +1947,28 @@ function applyHostEvent(store, live, hostId, ev) {
       live.pending.delete(key);
       live.partial.delete(key);
       live.delivery.delete(key);
+      live.closing.delete(key);
       store.logAdmin(channel, 'desk.left', { target: agent, detail: desk.cwd });
+      // A seat that is left is gone, seat and row: it was one of several
+      // desks of an agent that is still on the board elsewhere, and what a
+      // folder's own desk leaves behind (the offline row, for a return to
+      // resume on) would here be a second row for one agent, on the board
+      // view and in every count, with nothing coming back to it. Its
+      // conversation stays in the folder, where History reads it.
+      if (desk.scope === 'seat') {
+        // Its conversations end with it: the host closed its window before
+        // it said this. Left open, they read as a live window for an hour
+        // (SESSION_STALE_MINUTES), and the next session made under the same
+        // name — a floor gives a closed second session's name to the next
+        // one — was drawn as live the moment the board named it, before any
+        // host had seated it (seen on the page: a desk for a session its
+        // host had refused).
+        store.endDeskSessions(channel, agent);
+        live.left.set(key, Date.now());
+        store.unseat(channel, agent);
+        store.retireAgent(channel, agent);
+        store.dropTwin(channel, agent);
+      }
       break;
     }
     case 'session': {
@@ -2316,6 +2463,9 @@ export function buildFloor(store, live = null, sessions = null) {
       scope: h.scope ?? null,
     });
   }
+  // One agent, several sessions: which desks are a second session of an
+  // agent on their floor (desk_twins in db.js).
+  const twins = new Map(store.listTwins().map((t) => [key(t.channel, t.agent), t]));
 
   // Every agent the board knows gets a desk, not only the ones whose windows
   // run the plugin. A floor is a channel, and a channel with four agents on the
@@ -2488,6 +2638,11 @@ export function buildFloor(store, live = null, sessions = null) {
           // Put away by hand. The page draws such a desk as a pill under its
           // storey and nothing else here changes — see hiddenDesks above.
           hidden: hiddenDesks.has(k),
+          // A second session of an agent on this floor: whose, which number,
+          // and whether it was made for a meeting room (and so closes when it
+          // is in none). The nameplate draws the number; the name and the
+          // face are the agent's own already (createTwin copies the profile).
+          twin: twins.has(k) ? { of: twins.get(k).base, n: twins.get(k).n, meeting: !!twins.get(k).for_meeting } : null,
           hosted: h
             ? {
                 host: h.host_name,
@@ -2512,6 +2667,12 @@ export function buildFloor(store, live = null, sessions = null) {
                 // repo's .mcp.json). Says which file to look in, and what
                 // leaving takes the entry out of.
                 scope: h.scope ?? null,
+                // An extra desk in a folder that is another desk's (one
+                // agent, several sessions: host/seats.js). Its window is
+                // the floor's only — an editor opened in the folder is the
+                // folder's own desk — and it is a desk of its own, never
+                // the other one moved (the page's deskFate).
+                seat: h.scope === 'seat',
                 // Whether a window is sitting in that repo at all. `held` says
                 // null all through Claude Code's startup — nothing can be typed
                 // into a window still asking whether it may use an MCP server —
@@ -2676,6 +2837,8 @@ export function buildFloor(store, live = null, sessions = null) {
     // GET /api/floor/folders, on demand. Enough for the page to tell "never
     // reported" from "reported empty" before it opens the dialog.
     folders_at: live?.folders?.get(h.host_id)?.at ?? null,
+    // Whether it can put a second desk in a folder (host/seats.js).
+    seats: live?.seating?.get(h.host_id) === true,
   }));
 
   return {
@@ -2752,6 +2915,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const name = str(req.body?.name) ?? hostId;
     store.registerHost(hostId, name, str(req.body?.tmux));
+    if (req.body?.seats === true) live.seating.set(hostId, true); else live.seating.delete(hostId);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -2785,7 +2949,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         // live board showed scope: null on every desk while the host suite was
         // green, because there the field had only ever arrived through the
         // `bound` event. A field crosses eight places; this was the missed one.
-        scope: str(d?.scope) === 'local' ? 'local' : str(d?.scope) === 'project' ? 'project' : null,
+        // 'seat': an extra desk in a folder that is another desk's — one
+        // agent with several sessions (host/seats.js).
+        scope: ['local', 'project', 'seat'].includes(str(d?.scope)) ? str(d.scope) : null,
       });
       store.ensurePersona(channel, agent);
       // The conversation the host is following, when it names one. The desk's
@@ -2933,6 +3099,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         roots: f?.roots ?? [],
         folders: f?.folders ?? [],
         dialog: f?.dialog === true,
+        // Whether it can put a second desk in a folder: Take a desk offers
+        // "New desk here" only on a host that can.
+        seats: live.seating.get(h.host_id) === true,
       };
     });
     // The names somebody has saved, by agent id — for the dialog to show the
@@ -2944,7 +3113,18 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     res.json({ now: new Date(nowMs).toISOString(), hosts, names });
   });
 
+  // The look that closes a second session once it is in no meeting room
+  // (sweepTwins): at most once in two seconds however many pages poll.
+  let sweptAt = 0;
+  const sweep = (force = false, opts = {}) => {
+    const now = Date.now();
+    if (!force && now - sweptAt < 2000) return;
+    sweptAt = now;
+    try { sweepTwins(store, live, now, opts); } catch { /* the floor is still served */ }
+  };
+
   router.get('/api/floor', (_req, res) => {
+    sweep();
     res.json(buildFloor(store, live, sessions));
   });
 
@@ -3172,6 +3352,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
     const h = store.hostedDesk(channel, agent);
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
+    // Not a seat's conversation (one agent, several sessions): an editor
+    // opened in the folder connects as the folder's own desk, so the
+    // conversation would carry on there under another desk's name.
+    if (h.scope === 'seat') return res.status(409).json({ error: SEAT_NO_EDITOR, code: 'seat_no_editor' });
     store.enqueueHostWork(h.host_id, channel, agent, 'handback', {});
     live.wake(h.host_id);
     res.json({ ok: true });
@@ -3256,7 +3440,52 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!folder) {
       return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
     }
-    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false });
+    // `seat`: "New desk here" — a second desk for the folder's agent, on this
+    // floor, with a session of its own; the folder's own desk is left as it is.
+    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false, seat: req.body?.seat === true });
+  });
+
+  /**
+   * Another session of an agent, on the floor it is already on: a second
+   * desk in the same folder, under the agent's name with a number (qa-2).
+   * What a meeting room asks for when it is given a desk that is already in
+   * another room (costmo, 2026-11-16), and what Resume asks for to bring
+   * such a session back (`as` its name then, `session_id` its conversation).
+   *
+   * No path in the request, as for the card's move: the folder and the host
+   * are the ones this board has the agent's desk at.
+   */
+  router.post('/api/floor/desk/twin', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const sessionId = str(req.body?.session_id) ?? null;
+    if (sessionId && !SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'That is not a session id.', code: 'bad_session' });
+    const as = str(req.body?.as) ?? null;
+    if (as && !NAME_RE.test(as)) return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
+    const nowMs = Date.now();
+    const h = store.hostedDesk(channel, agent);
+    const hostRow = h ? store.listHosts().find((x) => x.host_id === h.host_id) ?? null : null;
+    if (!h || h.state === 'offline' || !hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: noHostWords(hostRow?.name ?? h?.host_name ?? h?.host_id ?? null), code: 'no_host' });
+    }
+    if (!live.seating.get(hostRow.host_id)) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
+    const base = store.twinOf(channel, agent)?.base ?? agent;
+    // Asked for by name and there already, as this agent's: that is it.
+    const there = as ? store.twinOf(channel, as) : null;
+    if (there && there.base === base && store.hostedDesk(channel, as)?.state !== 'offline' && store.hostedDesk(channel, as)) {
+      return res.json({ ok: true, agent: as, base, existing: true });
+    }
+    const id = store.createTwin(channel, base, { forMeeting: req.body?.meeting === true, as });
+    if (!id) return res.status(409).json({ error: `No name is free on ${channel} for another session of ${base}.`, code: 'no_name' });
+    store.logAdmin(channel, 'desk.twin', { target: id, detail: `another session of ${base}, at ${h.cwd}${sessionId ? ` — on ${sessionId}` : ''}` });
+    store.enqueueHostWork(hostRow.host_id, channel, id, 'seat', {
+      path: h.cwd, channel, agent: id, beside: { channel, agent }, session_id: sessionId,
+      known: sessionId ? (store.turnsInSessions(channel, id, [sessionId])?.n ?? 0) > 0 : false,
+      open: true, queued_at: new Date(nowMs).toISOString(),
+    });
+    live.wake(hostRow.host_id);
+    res.json({ ok: true, agent: id, base, host: hostRow.name });
   });
 
   /**
@@ -3288,6 +3517,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!h || h.state === 'offline' || !hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
       return res.status(409).json({ error: noHostWords(hostRow?.name ?? h?.host_name ?? h?.host_id ?? null), code: 'no_host' });
     }
+    // A seat has no folder of its own to rebind: the move would rebind the
+    // folder's own desk instead, which is another desk.
+    if (h.scope === 'seat') return res.status(409).json({ error: SEAT_NO_MOVE, code: 'seat_no_move' });
     const folder = { path: h.cwd, bound: { channel, agent, scope: h.scope ?? null }, other_board: null };
     return seatDesk(res, { hostRow, folder, path: h.cwd, channel: to, agent, nowMs, open: true, via: 'from its nameplate card' });
   });
@@ -3307,7 +3539,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * `desk.take` row, the archived-floor wake and the host's bind work are
    * all here, so the card cannot drift from Take a desk (#18 Decided 2).
    */
-  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null }) {
+  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null, seat = false }) {
     if (folder.other_board) {
       return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, not this board. Change it there.`, code: 'other_board' });
     }
@@ -3316,6 +3548,35 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // the field; this is the same rule for anything else that posts here.
     if (folder.bound && folder.bound.agent !== agent) {
       return res.status(400).json({ error: `This folder already names its agent — ${folder.bound.agent}. Only the floor can change.`, code: 'agent_fixed' });
+    }
+    // "New desk here" (costmo, 2026-11-16): the folder's agent gets a desk
+    // on this floor as well, with a session of its own, and the desk it has
+    // — and every other one — is left running. Not a move: nothing is
+    // rebound, closed or retired. The agent keeps its name on a floor where
+    // nobody answers to it, and takes it with a number (qa-2) on one where
+    // somebody does, its own floor included.
+    if (seat) {
+      if (!folder.bound) {
+        return res.status(400).json({ error: 'That folder is not a desk yet, so there is no agent to seat a second time. Take the desk first.', code: 'not_bound' });
+      }
+      if (!live.seating.get(hostRow.host_id)) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
+      const base = folder.bound.agent;
+      let id = base;
+      if (!store.nameFree(channel, base)) {
+        id = store.createTwin(channel, base, { forMeeting: false });
+        if (!id) return res.status(409).json({ error: `No name is free on ${channel} for another session of ${base}.`, code: 'no_name' });
+      } else {
+        store.unretireAgent(channel, id);
+        store.ensurePersona(channel, id);
+      }
+      store.logAdmin(channel, 'desk.take', { target: id, detail: `a new desk at ${path}, beside ${folder.bound.channel}/${base}${via ? ` — ${via}` : ''}` });
+      store.wakeChannel(channel, `a desk was taken on it: ${id}`, 'operator');
+      store.enqueueHostWork(hostRow.host_id, channel, id, 'seat', {
+        path, channel, agent: id, beside: { channel: folder.bound.channel, agent: base },
+        open, queued_at: new Date(nowMs).toISOString(),
+      });
+      live.wake(hostRow.host_id);
+      return res.json({ ok: true, mode: 'seat', host: hostRow.name, channel, agent: id, base });
     }
     const mode = !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
     let from = null;
@@ -3702,7 +3963,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   // so a note about a desk that has gone from the floor still says "Bo".
   const roomOut = (r, personas = personasNow()) => r && ({
     ...r,
-    participants: r.participants.map((p) => ({ ...p, persona: personas.get(deskKey(r.channel, p.agent)) ?? p.agent })),
+    // A second session that closed with its room has no seat to be named
+    // from: it carries its agent's name (`base`).
+    participants: r.participants.map((p) => ({ ...p, persona: personas.get(deskKey(r.channel, p.agent)) ?? (p.base ? personas.get(deskKey(r.channel, p.base)) : null) ?? p.agent })),
     started_at: iso(r.started_at),
     updated_at: iso(r.updated_at),
     ended_at: r.ended_at ? iso(r.ended_at) : null,
@@ -3734,7 +3997,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   /** Each participant as it stands now, keeping what an earlier record knew. */
   const seatsNow = (channel, names, prev = []) => {
     const last = new Map(store.lastTurns().filter((t) => t.channel === channel).map((t) => [t.agent, t.id]));
-    return names.map((a) => meetingSeat(a, store.hostedDesk(channel, a), prev.find((p) => p.agent === a) ?? null, last.get(a) ?? 0));
+    return names.map((a) => meetingSeat(a, store.hostedDesk(channel, a), prev.find((p) => p.agent === a) ?? null, last.get(a) ?? 0, store.twinOf(channel, a)?.base ?? null));
   };
   const roomOr404 = (req, res) => {
     const id = Number(req.body?.id ?? req.query?.id);
@@ -3747,7 +4010,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   router.post('/api/floor/meeting', auth.adminGuard, (req, res) => {
     const channel = str(req.body?.channel);
     if (!channel) return res.status(400).json({ error: 'channel is required' });
-    const ok = seatedOn(channel, req.body?.agents);
+    // `empty`: a room whose every desk is in another room already — each
+    // joins as a second session the window makes a moment later.
+    const ok = req.body?.empty === true && Array.isArray(req.body?.agents) && !req.body.agents.length ? { names: [] } : seatedOn(channel, req.body?.agents);
     if (ok.error) return res.status(400).json(ok);
     const id = store.createMeeting(channel, seatsNow(channel, ok.names), MEETINGS_KEEP);
     res.json({ ok: true, room: roomOut(store.meeting(id)) });
@@ -3763,6 +4028,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const ok = Array.isArray(agents) && !agents.length ? { names: [] } : seatedOn(room.channel, agents);
     if (ok.error) return res.status(400).json(ok);
     store.setMeetingParticipants(room.id, [...seatsNow(room.channel, ok.names, room.participants), ...absentKept(room.participants, ok.names, req.body?.absent)]);
+    // A second session taken out of its room closes (sweepTwins), now.
+    sweep(true);
     res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
   });
 
@@ -3801,6 +4068,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // on now is not the conversation it had in this room.
     const here = room.participants.filter((p) => !p.absent);
     store.endMeeting(room.id, [...seatsNow(room.channel, here.map((p) => p.agent), here), ...room.participants.filter((p) => p.absent)]);
+    // A second session made for the room closes now that it has ended
+    // (sweepTwins) — at once for End meeting (`final`), after a moment for a
+    // window that went away and may be reloading.
+    if (req.body?.final === true) sweep(true, { ended: room.id });
     res.json({ ok: true });
   });
 

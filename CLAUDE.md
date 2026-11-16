@@ -808,6 +808,160 @@ found); the host suite's stand-in has `linger.flag`, which is the
 deterministic version. `seed-move.mjs` + `check-card-move.mjs` in
 **verify-ui-change** drive the card on both views.
 
+## One agent, several sessions
+
+0.12.9 (costmo, 2026-11-16). One agent can be in several places at once, each
+a session of its own: on several floors, and in several meeting rooms on one
+floor. His case is the QA agent reviewing three projects' PRs at once, and
+auditing with one agent while reviewing with another. It is built on one
+measurement and four of his rulings, and each part of it replaced a sentence
+that used to be true here.
+
+**"One agent per checkout" was Claude Code's limit, and it is not one.**
+[`docs/desk-from-the-floor.md`](docs/desk-from-the-floor.md) said so: local
+scope holds one `orchestratinator` entry a directory, so every window in a
+folder is that folder's desk. Measured 2026-11-16 on 2.1.325, on a throwaway
+board and a tmux socket of its own: a folder bound as `ms-a/qa`, one window
+started plain and one with `claude --mcp-config <file>` naming `ms-b/qa`
+**under the same server name**. The board counted one MCP session on each
+floor and two in all, so the file's entry takes the folder's place in that
+window; no approval dialog was drawn. Then, through the tree's host: both
+answered `I AM ms-a/qa` and `I AM ms-b/qa` to the same question, a third
+answered `I AM ms-a/qa-2`, and one closed and reopened with `--resume <id>
+--mcp-config <file>` answered with the word it had been told to remember
+before it closed. [`host/seats.js`](host/seats.js) is the record.
+
+The host calls such a desk a **seat**. Five things about it, each of which
+looks like it could be simpler:
+
+- **A seat is told from the folder's own desk by a tag on its tmux window**
+  (`@orch_seat`), never by directory. "The directory is the identity, and the
+  only one" (`paneIn`) is still true of the folder's own window, which is the
+  one with **no** tag; so a host with no seats finds every window exactly as
+  it did. Every function in `host/window.js` takes the folder, or
+  `{ cwd, seat }` ("which window" there), and a desk's roster sessions are
+  shared out the same way (`sessionsAt`): a seat's are the ones in its tagged
+  window, the folder's own desk has the rest, an editor's included.
+- **The tag is set in the tmux command that makes the window.** Set a moment
+  later, a watch tick between the two read the new window as the folder's
+  own. Measured on tmux 3.7c: `set-option -w` with no target after a
+  detached `new-window` tags the *current* window, not the new one, and a
+  window named with a dot in it cannot be named in a target (`p:=qa-desk.x`
+  is "no such window": the dot is where the pane begins). So a seat's window
+  name has no dot, and the tag is `; set-option -w -t <session>:=<name>`.
+- **A seat's window is the first window of all, sometimes, and then what it
+  was given must not stay in the session.** `new-session -e` writes the
+  session's environment (the PR #52 lesson). A seat is given four variables,
+  and left there the folder's own window, opened next, would inherit
+  `ORCH_CHANNEL` and report every hook as the seat. All four are unset after
+  the session is made. `test:seats` opens a seat first for exactly this.
+- **The hook is told which desk its window is.** It finds a desk by folder,
+  and in a seat's window the folder names another desk, so a permission
+  prompt raised there would be drawn on, and answered into, the wrong
+  window. The window carries `ORCH_DESK_CONFIG` (its binding file, read like
+  a `.mcp.json`), `ORCH_DESK_ROOT`, and `ORCH_CHANNEL` / `ORCH_AGENT`. The
+  last two are what the hook has let stand in for the folder's names since
+  its first commit (2026-08-27; every copy in this machine's plugin cache,
+  0.10.12 on, has it), which is why a seat reported correctly on real windows
+  with the plugin that was installed before this was written. The file is
+  what keeps it reporting when the folder's own desk has left.
+- **A seat never resumes "the folder's newest conversation".** That is
+  `resumable()`'s fallback for a pin with no transcript, and in a shared
+  folder the newest is most likely the one another desk's window is running:
+  two processes on one transcript. A seat starts a new one and says so on
+  its desk; the folder's own desk skips conversations its seats are running;
+  and a conversation live in another desk's window is refused
+  (`held_by_other_desk`) and never typed into.
+
+What the board adds, and costmo's four rulings (each an AskUserQuestion,
+2026-11-16; do not re-propose the alternatives):
+
+- **A second session on a floor the agent is already on is named with a
+  number: `qa-2`, `qa-3`.** The board files turns, mail, tasks and a room's
+  members by floor and agent, so it needs a name of its own there; on
+  another floor it keeps the agent's name. `desk_twins` is the link, and the
+  link is that row, never the spelling. It carries the agent's name and face
+  (copied to its own profile row and kept the same by `setProfile`, not
+  looked up through the link, because a profile is read by agent in a dozen
+  places) and the nameplate adds the number: "Quinn · 2". `agent.2` was the
+  other offer.
+- **A plain name means the session in the sender's room.** `addressed` in
+  [`src/tools.js`](src/tools.js): a message or task to `qa` from somebody in
+  a live meeting room with `qa-2` goes to `qa-2`; otherwise to the first
+  desk; `qa-2` written out goes exactly there. "Always the first desk" and
+  "every session" were the other offers.
+- **A session made for a meeting room closes when it is in none**
+  (`sweepTwins`): End meeting, a Remove, Bring back, or the room's window
+  gone without a word. Closed is the desk's own Leave, never mid-turn (it
+  waits for the turn), and the desk leaves the floor whole: seat, row, link,
+  and its conversations ended. The conversation stays in the folder, and
+  Resume makes the session again on it (`meetingResumePlan`'s `twin` step).
+  Keeping it as a desk was the other offer. Three timings, each for a
+  reason: 30 s after it is made (its room is recorded a moment later, by the
+  room's window), 15 s after a room ends by its window going away (a reload
+  ends a room and opens it again; End meeting says `final` and is not
+  waited for), and two minutes for one its host never seated. The sweep runs
+  from the routes a page polls, not on a timer of the board's own.
+- **Leave room asks first**, with the panel's own Leave desk dialog.
+
+And two of his from the same day, on the nameplate card: **Leave room**
+under Hide desk, and **nothing from Open conversation down can be pressed
+while the desk is in a meeting room** (`cardRefusal`), with the one reason
+under the buttons. One reason, not one a button: Hide desk had its own
+there since PR #56 ("In a meeting: it stands in the meeting's box…"), and
+two paragraphs beginning "In a meeting" under four dimmed buttons said one
+thing twice, so it is folded in, with what becomes of a desk hidden before
+it joined. check-meeting-box's three rows on that sentence read the one
+reason now (they went red on the first cut, which is how it was noticed). A click on the desk itself still opens its panel, which
+is where Bring back from the meeting room is, so the lock strands nobody.
+**Bring back takes the agent out of every room**, on every floor
+(`agentDesks`): an agent's desks are the ones of its name out of its folder
+on its host. The name alone is not the agent, because `developer` on two
+floors is two repos.
+
+Two things found only by running it, and both are why the last tier is not
+optional:
+
+- **A closing window's last hooks re-seated the desk the board had just
+  removed.** Every hook event upserts its session (which clears `ended_at`)
+  and seats its desk. The plugin's SessionEnd arrives around the host's
+  `unbound`, in no order, and one that landed after put the desk back: a
+  seat with no host, its name taken for good. Seen on real windows: a
+  session asked back as `qa-2` came back as `qa-3`. The suites' stand-in
+  has no plugin and could not see it. A seat that was just left ignores its
+  window's hooks for a minute (`live.left`), and is heard from at once if
+  it is seated again.
+- **A closed session's conversation read as a live window for an hour.**
+  The next session made under the same name was drawn the moment the board
+  named it, before any host had seated it (the browser check drew a desk
+  for a session its host had refused). `unbound` for a seat ends its
+  conversations.
+
+Left out on purpose, with why:
+
+- **A seat is not moved by the card** (`seat_no_move`). A move rebinds a
+  folder, and a seat is not its folder's desk; done as leave-and-seat it
+  would arrive under another name on a floor where the agent's name is
+  free, and the page follows a move by name. The card says what to use: New
+  desk here on the floor wanted, Leave room on this one. Open to costmo's
+  reversal; it is two existing controls, not a missing capability.
+- **A seat's conversation is not handed to an editor** (`seat_no_editor`;
+  the panel does not draw the link). An editor opened in the folder loads
+  the folder's binding, so the conversation would carry on as another desk.
+  Nothing can give a VS Code chat a binding of its own. Open in tmux and
+  Open in Claude reach it.
+- **A desk in its own popout is still one place at a time.** Only a desk
+  that is in a meeting room gets a second session for another room, which
+  is what he asked for. And a room's **Add** offers what it did.
+
+How it is tested: the decisions in `test:floor` ("one agent, several
+sessions"), the host's half in **`test:seats`**, the hook in `test:plugin`,
+a move to a fresh tmux server in `test:renew`, and the page in
+**check-sessions.mjs** (**verify-ui-change**). The mutant lists are kept:
+`mutants-sessions.suite.json` (**mutate-in-a-copy**) and
+`mutants-sessions.page.json`. What only a real Claude Code can say is in
+**measure-a-real-window** ("Two windows in one folder").
+
 ## History is read off the hosts, not the board
 
 **`turns` is a live tail, not an archive**: the newest 400 rows a desk
@@ -1435,7 +1589,9 @@ re-propose the stacked building or a confirmation. Six things behind it:
   page's reading, and every caller that means "what the floor draws" uses
   it. The flag is kept, so the desk is a pill again when the meeting ends.
   Hide is refused while a desk is boxed, said under the card's dimmed
-  button and on the room's line for a bulk Hide (`hideRefusal`): pressed,
+  buttons (since 0.12.9 in the card's one reason for a desk in a meeting
+  room, `cardRefusal`, which carries what becomes of a desk hidden before
+  it joined) and on the room's line for a bulk Hide (`hideRefusal`): pressed,
   it would write a flag that changes nothing until the meeting ends, a
   button that seems to do nothing. The other two picks, counting a hidden
   participant in the box's words only and leaving it as a pill, were not
@@ -1829,7 +1985,7 @@ live container from launchd's environment) each for real.
 
 ## Tests
 
-`npm test` runs eleven suites. `test:host` and `test:window` are not unit tests:
+`npm test` runs twelve suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
 `claude` (a `.cjs`, because this package is `"type": "module"`). They use their
 own tmux session names and ports, so they are safe to run beside a live host —
@@ -1962,6 +2118,14 @@ the move.
 **Sixth, the same day**, in QA's close of PR #55 at f5c2a92: their first
 chain run, load 16–27 with their own page lane beside it; 327 ✓ in the
 second.
+
+**The Take a desk seven again, 2026-11-16**, building 0.12.9: "and within
+seconds the host has bound it and registered the desk" and the six rows
+that read that binding, with this session's own floor suite and a mutant
+lane running beside the host suite at load 22 to 34. Alone straight after,
+at load 10 to 23: 327 ✓. Nothing in the bind had changed. It is the fifth
+sighting's shape, and the same reading: a bind that did not land inside
+its twenty seconds under load.
 
 **The red now reads the rows itself** (2026-11-15, after the sixth). They
 were never read because they are gone with the run's database before
@@ -2147,6 +2311,23 @@ is not counted), sweeps whatever is left, and does the same on SIGINT or
 SIGTERM. Anything new that keeps a pane's process alive past its hangup
 needs the same: its own event loop is not there to end it.
 
+**`test:seats` is the host suite for several windows in one folder**
+(0.12.9). The host suite's stand-in is one window at a time: it writes a
+roster of one entry and one transcript, both named for the fixture's single
+conversation, and a second window overwrites the first's. So seats have a
+suite of their own, whose stand-in is what Claude Code is when several run
+in a folder: each writes its own session file (the host's fast path) and
+its own transcript, connects as the desk its `--mcp-config` file names (or
+else the folder's), and answers every message "I AM <channel>/<agent> on
+<conversation>", which is what lets a row say *which desk* a window is. It
+runs on a tmux socket of its own, because it opens the session a seat's
+window creates. Port 8902. It has no plugin, so what a real window's hooks
+do at a close is not in it (see "One agent, several sessions": the fault it
+missed). And **a row that says something "stays" proves nothing while the
+thing is too young to be looked at**: "a session made by New desk here is
+not a room's to close" was green on the mutant that closed it, because the
+sweep leaves any session alone for its first 30 s. The row ages it first.
+
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the
@@ -2189,10 +2370,11 @@ operator's live floor.
   |---|---|
   | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:window` and `test:markdown` also read `floor.js`, `test:update` reads `app.js` |
   | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
-  | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`; `test:floor` and `test:update` also read `index.js` |
-  | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, and `test:host`, whose host runs it |
+  | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
+  | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
+  | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `src/updates.js`, `host/update.js` | `test:update` |
-  | `plugin/` | `test:plugin` |
+  | `plugin/` | `test:plugin`, and `test:seats`, which runs the hook |
   | a version bump | `smoke` |
 
 - **When the platform will not do all of it, ship the nearest thing that

@@ -65,9 +65,11 @@ inversions table says which of your assertions they already trust.
 - **The suites that cover it, not the full run.** That means each changed
   file's suite (`test:floor` for the page's lifted sections, `test:host`
   for `host/`), the page checks that read the changed code, and the
-  mutants. The full `npm test` waits for the release check, and QA runs it
-  at every review anyway (costmo, 2026-11-16, after PR #56; CLAUDE.md,
-  Conventions). PR #56's two rounds went that way and both closed green.
+  mutants. The full `npm test` runs once, at the SHA that ships, when
+  costmo calls the release, and not at a review, yours or QA's (costmo,
+  2026-11-16; QA's decisions/0015; CLAUDE.md, Conventions, has the map of
+  which suites a path reaches). PR #56's two rounds were answered that
+  way.
   Read the channel before anything long: their clean-clone runs share this
   machine's CPU, and a run of yours overlapping theirs went red in six
   `test:host` pane cases that were green alone (CLAUDE.md, Tests).

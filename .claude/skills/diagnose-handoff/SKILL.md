@@ -34,6 +34,27 @@ for c in json.load(sys.stdin).get('channels',[]):
         if h: print(c['channel'], k['agent'], h.get('held'), h.get('window_open'), h.get('holders'), h.get('clients'), h.get('session_id'))"
 ```
 
+**A folder can hold several desks since 0.12.9**, each with a window of its
+own (one agent with several sessions: `host/seats.js`), so "the pane in
+that folder" is no longer one pane. Read the tag and the folder beside the
+ids, and the host's own record of its seats:
+
+```bash
+tmux list-panes -a -F '#{window_name} seat=#{@orch_seat} pid=#{pane_pid} #{pane_current_path}'
+cat ~/.orchestratinator/seats/seats.json            # each extra desk: channel, agent, folder, board
+```
+
+The folder's own desk is the window with **no** tag; a seat is the window
+tagged `<channel>/<agent>` (percent-encoded), started with `--mcp-config
+~/.orchestratinator/seats/<name>.mcp.json`. Three readings that look like
+faults and are not: a seat's panel has no **Open in VS Code** (an editor in
+the folder is the folder's own desk); its card's **Move to another floor**
+is greyed with the reason; and a desk named `<agent>-2` that vanishes when
+a meeting room ends was made for that room, and the board closed it (an
+`admin.desk.leave` row with actor `board`). One that is a fault: a desk
+answering as another desk. Ask it `whoami` and read its window's start
+command (`#{pane_start_command}`) for the `--mcp-config` it was given.
+
 A session in the roster with **no matching pane** is read as an editor holding
 it, and the floor will refuse to send. That is correct when an editor really has
 it — and a trap in tests, where a killed stand-in leaves its roster entry behind.

@@ -355,6 +355,43 @@ async function main() {
     await settle();
     eq(received[0]?.body?.agent, 'cfg-agent', 'a binding under CLAUDE_CONFIG_DIR is found there');
 
+    // ---- one agent, several sessions: a window started as a desk of its own ----
+    // The host starts a second window in a folder that is already a desk with
+    // a binding file of its own, and gives the window that file's path
+    // (host/seats.js). Every event from it is that desk's, whatever the
+    // folder says.
+    received.length = 0;
+    mkdirSync(`${FIX}/seats`, { recursive: true });
+    const seatFile = `${FIX}/seats/other-floor_bo.mcp.json`;
+    writeFileSync(seatFile, JSON.stringify({ mcpServers: { orchestratinator: {
+      type: 'http', url: `http://127.0.0.1:${PORT}/mcp`,
+      headers: { 'X-Channel': 'other-floor', 'X-Agent': 'bo-2', 'X-Orchestratinator-Key': 'the-seat-key' },
+    } } }));
+    await fire({ session_id: 'seat-session', hook_event_name: 'SessionStart', cwd: `${FIX}/repo` }, { env: { ORCH_DESK_CONFIG: seatFile, ORCH_DESK_ROOT: `${FIX}/repo` } });
+    await settle();
+    eq(received.length, 1, 'a window started with a binding file of its own is reported');
+    eq([received[0]?.body?.channel, received[0]?.body?.agent], ['other-floor', 'bo-2'], 'as the desk that file names, not the desk its folder is bound as');
+    eq(received[0]?.headers['x-orchestratinator-key'], 'the-seat-key', 'with that file\'s key');
+    eq(received[0]?.body?.cwd, `${FIX}/repo`, 'filed under the folder the window was started in');
+    received.length = 0;
+    await fire({ session_id: 'seat-session', hook_event_name: 'Stop', cwd: `${FIX}/elsewhere/deep` }, { env: { ORCH_DESK_CONFIG: seatFile, ORCH_DESK_ROOT: `${FIX}/repo` } });
+    await settle();
+    eq([received.length, received[0]?.body?.agent, received[0]?.body?.cwd], [1, 'bo-2', `${FIX}/repo`], 'and still that desk when the agent is standing in a folder that is on no board at all');
+    received.length = 0;
+    await fire({ session_id: 'seat-session-2', hook_event_name: 'SessionStart', cwd: `${FIX}/repo` }, { env: { ORCH_DESK_CONFIG: `${FIX}/seats/gone.mcp.json`, ORCH_CHANNEL: 'other-floor', ORCH_AGENT: 'bo-2' } });
+    await settle();
+    eq([received[0]?.body?.channel, received[0]?.body?.agent, received[0]?.headers['x-orchestratinator-key']], ['other-floor', 'bo-2', KEY],
+      'a binding file that has gone is no answer: the folder\'s binding carries the event, under the two names the window was given');
+    received.length = 0;
+    writeFileSync(`${FIX}/seats/broken.mcp.json`, '{ not json');
+    await fire({ session_id: 'seat-session-3', hook_event_name: 'SessionStart', cwd: `${FIX}/repo` }, { env: { ORCH_DESK_CONFIG: `${FIX}/seats/broken.mcp.json` } });
+    await settle();
+    eq([received.length, received[0]?.body?.agent], [1, AGENT], 'and one that cannot be read leaves the folder\'s desk reporting as itself, in silence');
+    received.length = 0;
+    await fire({ session_id: 'plain-session', hook_event_name: 'SessionStart', cwd: `${FIX}/repo` });
+    await settle();
+    eq([received[0]?.body?.channel, received[0]?.body?.agent], [CH, AGENT], 'a window with no file of its own is the folder\'s desk, as before');
+
     // A torn or broken ~/.claude.json must not take the .mcp.json desks with it:
     // Claude Code rewrites the file constantly, and a read that lands mid-write
     // is an ordinary event, not a reason to go silent.

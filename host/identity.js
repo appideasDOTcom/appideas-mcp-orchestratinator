@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { listSeats } from './seats.js';
 import { projectDir } from './window.js';
 
 /**
@@ -274,7 +275,7 @@ const isUnder = (path, root) => path === root || path.startsWith(root.endsWith('
  * which is what sorts the list, newest first, so "recently opened" is the top
  * of it rather than a feature of its own.
  */
-export function discover(roots, { maxDepth = 4, local = readLocalScope() } = {}) {
+export function discover(roots, { maxDepth = 4, local = readLocalScope(), seats = listSeats() } = {}) {
   const desks = new Map();
   const folders = [];
   const offered = new Set();
@@ -326,6 +327,22 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope() } = {})
     if (!root) continue;
     desks.set(k, desk);
     offer(dir, here.slice(root.length).split('/').filter(Boolean).length, desk);
+  }
+  // And the seats: extra desks in a folder that is already a desk, which no
+  // file of Claude Code's can name (host/seats.js). The host's own record
+  // names them, so they are taken up wherever the folder is, roots or not —
+  // the record was written by a take from the floor, an explicit act like a
+  // local-scope binding. A name a real binding already carries is that
+  // binding's: the folder's own entry is what its windows connect with.
+  // `url` is the board's origin, which is all a seat's record keeps of it.
+  for (const s of seats) {
+    const k = `${s.channel}|${s.agent}`;
+    if (desks.has(k) || !existsSync(s.cwd)) continue;
+    desks.set(k, {
+      channel: s.channel, agent: s.agent, cwd: s.cwd, url: s.board, key: null,
+      scope: 'seat', seat: s.seat,
+      trusted: local.trusted.get(s.cwd) ?? local.trusted.get(real(s.cwd)) ?? false,
+    });
   }
   // Newest first, never-opened last, then by name — the order a person
   // looking for "the one I was just in" wants, and a stable one otherwise.

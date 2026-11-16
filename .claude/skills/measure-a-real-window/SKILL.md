@@ -598,6 +598,61 @@ Code at all, on a tmux socket of its own (`PROBE_SOCKET`): a pane that
 drew "Change effort level?" for a second read 8 frames of it and 0 of the
 other title, and with no pane on the socket it exits 2 and says so.
 
+## Two windows in one folder, each a different desk
+
+One agent with several sessions (0.12.9, `host/seats.js`) rests on what
+Claude Code does with `--mcp-config` beside a folder's own binding. It was
+measured on 2.1.325 (2026-11-16) and costs no tokens for the first half:
+an MCP server connects when a window starts, and the board counts sessions.
+
+```bash
+SP=<your scratchpad>/ms; mkdir -p $SP/root/qa-desk $SP/rec
+PORT=8931 DB_PATH=$SP/probe.db ORCH_AUTH_TOKEN=probe-ms ORCH_AUTH_MODE=enforce node src/server.js &   # Node 22.14+
+( cd $SP/root/qa-desk && claude mcp add -s local --transport http orchestratinator http://localhost:8931/mcp \
+    -H "X-Channel: ms-a" -H "X-Agent: qa" -H "X-Orchestratinator-Key: probe-ms" )
+echo '{"mcpServers":{"orchestratinator":{"type":"http","url":"http://localhost:8931/mcp","headers":{"X-Channel":"ms-b","X-Agent":"qa","X-Orchestratinator-Key":"probe-ms"}}}}' > $SP/seat-b.json
+tmux -L probems new-session -d -s p -n a -c $SP/root/qa-desk -x 200 -y 50 'claude; echo "[exited $?]"; sleep 900'
+# trust dialog: Down, Enter. Then the second window, with a binding of its own:
+tmux -L probems new-window -d -t p: -n b -c $SP/root/qa-desk "claude --mcp-config '$SP/seat-b.json'; echo \"[exited \$?]\"; sleep 900"
+curl -s localhost:8931/health          # "sessions": 2
+curl -s -H 'x-orchestratinator-key: probe-ms' localhost:8931/api/state   # ms-a/qa and ms-b/qa, one session each
+```
+
+| what | read |
+|---|---|
+| a window started plain in the bound folder | one MCP session, `ms-a/qa` |
+| a second started with `--mcp-config` naming `ms-b/qa` under the **same server name** | one session on `ms-b`, still one on `ms-a`, two in all: the file's entry replaces the folder's in that window, it is not added beside it |
+| an approval dialog for the file's server | none |
+| `-e ORCH_DESK_CHANNEL=…` on the window, read by a `SessionStart` hook | the hook's environment has it: a hook sees what its window was given |
+| `~/.claude/sessions/` | one file a window, the same `cwd` in each: nothing on disk says which desk a window is |
+
+The second half is the tree's own host on the same board, on its tmux
+socket (the "Tighter isolation" recipe above, with `ORCH_HOST_SEATS` naming
+a scratch directory), and the floor's routes:
+
+```bash
+post /api/floor/open  '{"channel":"ms-a","agent":"qa"}'
+post /api/floor/desk  '{"host_id":"probe-host","path":"<the folder>","channel":"ms-b","agent":"qa","seat":true}'
+post /api/floor/chat  '{"channel":"ms-b","agent":"qa","text":"… call whoami once and reply with exactly: I AM <channel>/<agent>"}'
+post /api/floor/desk/twin '{"channel":"ms-a","agent":"qa"}'        # → qa-2, a third window in the folder
+```
+
+Read that day: `I AM ms-a/qa`, `I AM ms-b/qa` and `I AM ms-a/qa-2` from
+three windows in one folder; each desk's hook sessions filed under itself
+by the plugin that was already installed (it honours `ORCH_CHANNEL` and
+`ORCH_AGENT`); a session told to remember a word, left, and asked back
+with `session_id` answered with the word under its own name (`--resume
+<id> --mcp-config <file>` together). And the fault only a real window
+shows: **the plugin's SessionEnd, fired as a closing window dies, re-seated
+the desk the board had just removed**. Read the `personas` row's
+`assigned_at` against the `desk.left` row's time in `admin_events`: the
+same second. A stand-in has no plugin, so after any change to how a desk
+is closed, close a real one and read those two rows.
+
+Teardown is the windows, the host, the server, **and the binding**: `claude
+mcp remove -s local orchestratinator` in the probe folder, or the folder
+stays a desk of a board that is gone in `~/.claude.json`.
+
 ## How long a closed window stays in the roster
 
 Issue #24 (task 253, 2026-11-03, 2.1.300): a move closed a desk's window

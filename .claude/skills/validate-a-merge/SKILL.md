@@ -65,9 +65,9 @@ touched the same page script (here `src/ui/app.js`: #23's
   async now and holds no text field, so #11's backdrop rule keeps
   closing it. Name the meeting point in the report.
 - **Each side's suites, not `npm test` in full.** Since 2026-11-16 the
-  full chain waits for the release check, and QA's review runs it
-  (CLAUDE.md, Conventions). Run the suite of every file either side
-  changed, announcing the ports first. A suite's count should be both
+  full chain runs once, at the SHA that ships (CLAUDE.md, Conventions, and
+  QA's decisions/0015). Run the suites every file either side changed
+  reaches (the map is in CLAUDE.md), announcing the ports first. A suite's count should be both
   sides' additions over the base's. On this merge the whole chain was
   still run, and read 1,899 + 9 = 1,908 ✓. Run the whole chain only when
   the merge is the release candidate, or when costmo asks.
