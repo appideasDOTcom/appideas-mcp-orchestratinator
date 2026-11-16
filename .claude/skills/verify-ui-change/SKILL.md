@@ -444,7 +444,10 @@ it taught:
   window minimized after `focus()` (measured 2026-11-16 with
   `windowState('minimized')`, then `windowBounds()` reading `minimized`
   after the click). That says nothing about Chrome on macOS, so the check
-  has no row for it, and the write-up says it is unmeasured.
+  has no row for it. On real Chrome on macOS costmo measured it the same
+  day: the window came back, to the front, under the pointer. A desktop
+  behaviour he has watched is measured. Record what he saw and where;
+  do not leave it written up as unmeasured.
 - **A control never seen to fail may never have run.** The suite's rows
   for the new placement reused a name already declared in their block,
   and `test:floor` died on a SyntaxError before its first row. A grep for
@@ -1327,6 +1330,40 @@ round for the last two):
 - **`page.scheme('light' | 'dark' | null)`** sets the colour scheme the
   page is told. A headless Chrome takes the machine's, so one of the two
   palettes is otherwise never looked at.
+- **`page.hover(to, { held })`** moves the pointer onto a selector or a
+  point with no button down: real input, so `:hover` is a person's. Use it
+  for a control whose press does something else to read. "In a meeting"
+  raises a window, so PR #56 Info 4's row hovers it to read the storey's
+  carpet. `press()` is for a click.
+
+Three patterns from PR #56, each in check-meeting-box.mjs, for a row that
+has to see something happen at a particular moment:
+
+- **Hold the floor's poll to prove what redrew** (`holdPolls`). Wrap
+  `window.fetch` so `/api/floor` waits until let go, then is made for
+  real: a pass-through, not a stub, so nothing this check awaits deadlocks
+  (see "A driver that produces nothing at all" below). Let a poll already on its way land
+  first. Then whatever changed on the page was drawn by something else.
+  Bound the wait below the next timer that redraws on its own. End's
+  "Ending…" timer at 6 s took the box away in an 8 s wait and let a
+  mutant through.
+- **Act inside a gap from the message that opens it**, not on a timer. A
+  check's own `BroadcastChannel('orch.popouts')` in the floor tab hears
+  what the floor hears, after the floor's handler, because the floor's
+  channel was made first. A `setTimeout(…, 30)` there fired 400 ms late,
+  after the gap had closed. Act on *every* message of the gap, not the
+  first: one desk still out kept the box standing.
+- **Find what closed a window by tracing into localStorage.** A floor tab
+  and its popups share an origin, so a popup can log into `localStorage`
+  (its `window.close` wrapped with a stack, its `pagehide`, the messages
+  it hears) and the floor reads the log after the popup is gone. In the
+  floor, wrap `BroadcastChannel.prototype.postMessage` and `setTimeout`
+  with the time each was armed. That is how a 1.5 s close timer armed by
+  one room's End was found closing the next room. **`evalJs` on a closed
+  popup does not fail, it waits 30 s.** Read anything you need from a
+  window (its `location.href`) before the step that may close it, and
+  never loop `evalJs` over a window that may be gone: sixteen such calls
+  held a run for eight minutes.
 
 - **`attach(match)` and `targets()`**, exported beside `open()`. A popup a
   page opens is a CDP target of its own: `attach` waits for one whose URL

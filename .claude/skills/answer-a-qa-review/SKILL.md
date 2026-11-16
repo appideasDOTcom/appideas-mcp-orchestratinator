@@ -62,10 +62,21 @@ inversions table says which of your assertions they already trust.
 - **One mutant per fault line**, in a copy (**mutate-in-a-copy**): the fix
   removed must turn exactly the new assertion red. Name the mutant and the
   assertion in the reply; QA predicts their own inversions from it.
-- **The suite that covers it, then the full run** — and read the channel
-  first: their clean-clone runs share this machine's CPU, and a full run
-  overlapping theirs went red in six `test:host` pane cases that were green
-  alone (CLAUDE.md, Tests).
+- **The suites that cover it, not the full run.** That means each changed
+  file's suite (`test:floor` for the page's lifted sections, `test:host`
+  for `host/`), the page checks that read the changed code, and the
+  mutants. The full `npm test` waits for the release check, and QA runs it
+  at every review anyway (costmo, 2026-11-16, after PR #56; CLAUDE.md,
+  Conventions). PR #56's two rounds went that way and both closed green.
+  Read the channel before anything long: their clean-clone runs share this
+  machine's CPU, and a run of yours overlapping theirs went red in six
+  `test:host` pane cases that were green alone (CLAUDE.md, Tests).
+- **When costmo commits mid-round, prove what was measured was the
+  commit.** He committed PR #56's fixes twice while mutants were still
+  running in copies. The copy was taken before the commit, so the reading
+  is the commit's only if the files are. Compare `shasum -a 256` of each
+  changed file in the copy with `git show <sha>:<file>` and put both hashes
+  in the account. QA compares by identity, and hashes say which algorithm.
 
 ## Replying in the thread
 

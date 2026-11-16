@@ -205,6 +205,21 @@ facts — and read which assertions went red, not the count:
 - A mutant that makes a helper return `null` usually ends the suite on a
   `TypeError` at the next line. That is a kill, but check the assertion
   before it was the one you meant.
+- **"The old code" is often two edits, and an entry is one replacement.**
+  The PR #56 move-race fix moved an intent from after the rescan to the
+  rescan itself. A mutant that only put the old line back still had the
+  new one, so it was not the old code and could not go red. Build the
+  entry from the file in a script: take `old` as the exact span from the
+  first edit to the last (comments between included), make `new` from it,
+  and run `validate-mutants.mjs` on it. `mutants-move-race.suite.json`
+  holds such an entry.
+- **Ask whether the test can see the fault every run, not only whether it
+  went red once.** A race that lands under load is red one run in many,
+  and that is not a test. The move race needed a seam,
+  `ORCH_HOST_BIND_GAP_MS`, so that a watch tick always lands in the gap.
+  Then the old order was red 3 of 3, and QA showed that the same mutant
+  without the seam is green at load 7. Repeat a mutant before calling a
+  timing row deterministic.
 
 ## Reading a survivor
 

@@ -1454,15 +1454,17 @@ moves itself; whether it may raise itself is the browser's call. What was
 measured, and where: on a headless Chrome the calls arrive in that order,
 the browser's own bounds show the window under the pointer, and an
 oversized window is resized first. Two things a headless browser cannot
-say, so they are costmo's to see on his screen, and neither was held for
+say, so they were costmo's to see on his screen, and neither was held for
 (his word: as close as reasonably possible, without delaying progress):
-- **A minimized window.** Headless left it minimized after `focus()`. That
-  is headless's stand-in window, not Cocoa's, and real Chrome on macOS
-  was not measured. If it does not come back there, the next step is
-  named and unbuilt: after about a second, a window still `hidden` is
-  closed and the room opened again at the pointer (a reload of the room,
-  which is End then Open). Not built ahead of the measurement, because a
-  wrong guess reloads rooms that were raised perfectly well.
+- **A minimized window. Measured by costmo on real Chrome on macOS**
+  (2026-11-16): a click on In a meeting for a room whose window was
+  minimized brought the window back, to the front, under the pointer, as
+  for a covered one. Headless had left it minimized after `focus()`, which
+  is headless's stand-in window and not Cocoa's: the check has no row for
+  it, and his reading is the measurement. The fallback that was named in
+  case it did not come back (close a window still `hidden` after a second
+  and open the room again at the pointer) is not needed and is not to be
+  built: it would reload rooms that are raised perfectly well.
 - **Another monitor.** Measured by costmo on two 4K monitors and a
   laptop, the same day: without the browser's window-management
   permission, a room on another monitor came to the front and stopped in
@@ -1479,8 +1481,8 @@ say, so they are costmo's to see on his screen, and neither was held for
   check stages the desktop (`leave()`), so it proves the asking and the
   second move, not the crossing. His to see.
 
-He reported only the monitor case after trying it, so the minimized path
-is as built; nothing was said either way about a minimized window.
+He reported the monitor case first, after trying it. He confirmed the
+minimized case later the same day, when asked what the window did.
 
 Riding along: a desk's open nameplate card now follows the desk when the
 rooms are redrawn, since desks move with nothing clicked. One thing not
@@ -1882,6 +1884,16 @@ scripts are not affected, because `sh` does not load the function. And
 strings and always equal. Use `shasum`, and say which: with no flag it is
 SHA-1, and one sent to QA unlabelled was set against their sha256 of the
 same file and read as two files (PR #55 round 4). `shasum -a 256`.
+Two more from 2026-11-16. **A heredoc whose delimiter is unquoted runs the
+backticks in its text.** A Python edit fed through `<<EOF` carried
+"\`npm test\`" in a sentence, so the shell started the whole chain. Smoke
+failed against the load and stopped it, and its output was written into
+the file in place of the two words. Quote the delimiter (`<<'EOF'`) for
+any heredoc that holds prose, and pass values in through the environment
+instead of `$VAR`. **`sysctl` is not on an agent shell's PATH.** A
+wait-until-load-drops loop built on `sysctl -n vm.loadavg` read an empty
+string, compared it as small, and reported "load ok" at 336. Use
+`/usr/sbin/sysctl`, and make such a loop refuse an empty reading.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
@@ -2166,6 +2178,21 @@ operator's live floor.
   skill beside the check, the mutant list kept there too), and said in
   the report. It is a rule about when, not about how much: do not thin a
   test to save a run.
+
+  **Widened the same evening, after PR #56's two rounds:** the full suite
+  waits for the final release check, not only the end of a turn. His words:
+  "defer full suite testing until close to (or at) final release checks
+  … running the full suite during turn-by-turn work is now causing tasks
+  to take a very long time for little real benefit. If we test new +
+  related code along the way, our processes make sure the full suite is
+  covered prior to release." So the full `npm test` is not yours to run
+  while building, while answering a QA review, while validating a merge or
+  before a deploy. Two things cover it: QA's clean-clone run at each
+  review, and the release check. What you run is the suite of each file
+  you changed, the page checks that read it, and the mutants that prove a
+  new row. PR #56 was answered that way, and QA's full runs at both
+  closes were green (2,475 and 2,485 ✓). Run the whole chain only at
+  the release check, or when he asks.
 - **When the platform will not do all of it, ship the nearest thing that
   works and say what is unmeasured.** His words on the "In a meeting"
   click, where a browser decides what a page may do to a window: "I'll
