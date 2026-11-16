@@ -5407,29 +5407,53 @@
   }
 
   /**
-   * The room's Nudge button: the word typed into whoever the To chips
-   * choose, in nudgePlan's order, the way a selecting room's Nudge does it.
-   * Its label carries the unread count, which is the whole of "a nudge is
-   * needed": messages waiting on the board for a desk that has not read
-   * them (`board.unread`, the number the floor's ✉ pill shows). Desks that
-   * cannot be nudged are named on hover with the board's reason.
+   * What is waiting on the board for a desk, which is what a nudge is for:
+   * its unread messages and the open tasks assigned to it that nobody has
+   * claimed (`board.unread` and `board.assigned_open`, the floor's ✉ and ☰
+   * pills). A task it has claimed is work it already knows about.
+   */
+  const nudgeWaiting = (d) => (d?.board?.unread ?? 0) + (d?.board?.assigned_open ?? 0);
+
+  /**
+   * The room's Nudge button: the word typed into the desks the To chips
+   * choose **that have something waiting**, in nudgePlan's order, the way a
+   * selecting room's Nudge does it (costmo, 2026-11-16). It used to nudge
+   * every desk chosen, so a room where one agent had mail sent all of them
+   * off to check in. The desks it will nudge are `agents`, which is what
+   * the click sends to.
+   *
+   * Its label is "Nudge all (x)", or the names when the chips narrow it,
+   * where x is everything waiting for those desks: unread messages plus
+   * unclaimed tasks (his pick, over unread alone: the number is then never
+   * missing while a nudge is needed). No count when nothing is waiting, and
+   * the button is then dimmed and says why (his pick, over nudging everyone
+   * anyway). The bell on a desk's box still nudges that one desk on
+   * purpose, waiting or not. Desks with something waiting that cannot be
+   * nudged are named on hover with the board's reason.
    */
   function meetingNudgeChip(desks, everyone) {
-    const plan = nudgePlan(desks);
-    const waiting = desks.filter((d) => (d.board?.unread ?? 0) > 0);
-    const n = waiting.reduce((sum, d) => sum + d.board.unread, 0);
-    const who = everyone && desks.length > 1 ? 'everyone' : desks.map((d) => d.persona).join(', ');
+    const waiting = desks.filter((d) => nudgeWaiting(d) > 0);
+    const plan = nudgePlan(waiting);
+    const n = waiting.reduce((sum, d) => sum + nudgeWaiting(d), 0);
+    const who = everyone && desks.length > 1 ? 'all' : desks.map((d) => d.persona).join(', ');
+    const what = (d) => [
+      d.board?.unread ? plural(d.board.unread, 'unread message') : null,
+      d.board?.assigned_open ? plural(d.board.assigned_open, 'unclaimed task') : null,
+    ].filter(Boolean).join(', ');
     return {
-      text: `Nudge ${who || 'nobody'}${n ? ` · ${n} unread` : ''}`,
+      text: `Nudge ${who || 'nobody'}${n ? ` (${n})` : ''}`,
       title: [
-        plan.send.length
-          ? `Types “nudge” into ${plural(plan.send.length, 'desk')}: each goes and reads what is waiting for it on the board.`
-          : 'Nobody chosen can be nudged.',
-        ...waiting.map((d) => `${d.persona}: ${plural(d.board.unread, 'unread message')}`),
+        !waiting.length
+          ? 'Nobody chosen has anything waiting on the board: no unread messages and no unclaimed tasks. The bell on a desk’s box nudges that one desk anyway.'
+          : plan.send.length
+            ? `Types “nudge” into ${plural(plan.send.length, 'desk')} with something waiting: each goes and reads it on the board.${waiting.length < desks.length ? ' The others have nothing waiting and are left alone.' : ''}`
+            : 'Nobody with something waiting can be nudged.',
+        ...waiting.map((d) => `${d.persona}: ${what(d)}`),
         ...plan.blocked.map((b) => `Can't nudge ${b.persona}: ${b.reason}`),
       ].join('\n'),
       disabled: !plan.send.length,
       waiting: n > 0,
+      agents: waiting.map((d) => d.agent),
     };
   }
 
@@ -6406,8 +6430,13 @@
       : meetingMentions(text, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
     if (named.unknown.length) { flash(btn, `nobody here is @${named.unknown[0]}`); return; }
     if (named.to && !named.text.trim()) { flash(btn, 'nothing to send after the names'); return; }
-    const to = named.to ?? meetingTo(inRoom, m.to);
-    if (!to.length) { flash(btn, 'nobody is chosen to hear it'); return; }
+    const chosen = named.to ?? meetingTo(inRoom, m.to);
+    if (!chosen.length) { flash(btn, 'nobody is chosen to hear it'); return; }
+    // The room's Nudge goes only to the chosen desks with something waiting
+    // on the board (meetingNudgeChip), so the others are not sent to check
+    // in for nothing. A message goes to everyone chosen, as it always did.
+    const to = nudge ? meetingNudgeChip(chosen.map((a) => deskIn(m.channel, a)).filter(Boolean), false).agents : chosen;
+    if (!to.length) { flash(btn, 'nobody chosen has anything waiting'); return; }
     const desks = to.map((a) => deskIn(m.channel, a)).filter(Boolean);
     const plan = nudgePlan(desks);
     const s = {

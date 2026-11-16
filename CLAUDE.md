@@ -1383,9 +1383,26 @@ dialog through `openPill`, so Mark all read, read to here, reassign and
 Nudge agent are the backlog dialog's. Then its bell, the floor's `strike()`,
 which now returns the board's refusal so the room can say it in the
 transcript, having no drawn bell to put it on. Then its stop sign.
-**Nudge** beside Send is "nudge all": it nudges whoever the To chips
-choose, with the unread count in its label (`meetingNudgeChip`), as one
-room message with each desk's delivery under it.
+**Nudge** beside Send is "nudge all": one room message with each desk's
+delivery under it (`meetingNudgeChip`).
+
+**The room's Nudge goes only to the desks with something waiting, and
+says how much** (costmo, 2026-11-16, 0.12.9). It used to nudge every desk
+the To chips chose and read "Nudge everyone · 3 unread", so a room where
+one agent had mail sent all of them off to check in. Now it reads
+"Nudge all (3)", or the names when the chips narrow it, and the click
+types the word into the chosen desks that have something waiting and no
+others; the message in the transcript names who it went to. Two of his
+picks: the count is unread messages **plus unclaimed tasks**
+(`board.unread + board.assigned_open`, the ✉ and ☰ badges added; unread
+alone was the other offer, and left the count missing while a task was
+waiting), and with nothing waiting the button has no count and is
+**dimmed, with why** (nudging everyone anyway was the other offer). A task
+a desk has *claimed* is not waiting: it already knows about it. The bell
+on a desk's box is the deliberate nudge, waiting or not, and is unchanged.
+A desk with something waiting that the board will not nudge is still
+counted, and is refused in the room in the board's words when the rest
+are sent. Do not bring back "nudge everyone chosen".
 
 **A room's conversation is contained, and that is the board's job, not
 the page's** (costmo, on the second preview: agents on the floor outside a

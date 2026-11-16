@@ -3665,15 +3665,29 @@ try {
     eq(pg.meetingResumePlan(roomOf([P('bo'), P('cy')]), chans([{ agent: 'bo', persona: 'Bo', hosted: H() }]), new Set()).map((s) => s.act), ['join', 'skip'],
       'one desk that cannot be reopened does not stop the rest');
 
-    const U = (agent, unread, nudge = { ok: true, host: 'h' }) => ({ ...D(agent, { nudge }), board: { unread } });
+    const U = (agent, unread, nudge = { ok: true, host: 'h' }, assigned = 0) => ({ ...D(agent, { nudge }), board: { unread, assigned_open: assigned } });
     let nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 1), U('dee', 0)], true);
-    eq([nc.text, nc.disabled, nc.waiting], ['Nudge everyone · 3 unread', false, true], 'the room\'s Nudge says a nudge is needed: the unread waiting for its recipients');
+    eq([nc.text, nc.disabled, nc.waiting], ['Nudge all (3)', false, true], 'the room\'s Nudge says a nudge is needed, and how much is waiting: "Nudge all (3)" (costmo, 2026-11-16)');
+    eq(nc.agents, ['bo', 'cy'], 'and it goes to the desks with something waiting, not to the one with nothing');
+    assert(/^Types “nudge” into 2 desks with something waiting.* The others have nothing waiting and are left alone\.$/m.test(nc.title), 'which its hover says', nc.title);
     assert(/Bo: 2 unread messages/.test(nc.title) && /Cy: 1 unread message$/m.test(nc.title), 'and whose, on hover');
+    nc = pg.meetingNudgeChip([U('bo', 1, undefined, 2), U('cy', 0, undefined, 1), U('dee', 0)], true);
+    eq([nc.text, nc.agents], ['Nudge all (4)', ['bo', 'cy']], 'an unclaimed task is something waiting too: the count is messages and tasks together, and a desk with a task alone is nudged');
+    assert(/Bo: 1 unread message, 2 unclaimed tasks/.test(nc.title) && /Cy: 1 unclaimed task$/m.test(nc.title), 'each named on hover');
+    nc = pg.meetingNudgeChip([{ ...U('bo', 0), board: { unread: 0, assigned_open: 0, claimed_tasks: [{ id: 1 }] } }, U('cy', 0)], true);
+    eq([nc.text, nc.disabled, nc.waiting, nc.agents], ['Nudge all', true, false, []], 'with nothing waiting there is no count and the button is dimmed: a task a desk has claimed is work it already knows about');
+    assert(/^Nobody chosen has anything waiting on the board/.test(nc.title) && /The bell on a desk’s box nudges that one desk anyway\.$/m.test(nc.title), 'saying why, and what still nudges one desk on purpose', nc.title);
     nc = pg.meetingNudgeChip([U('bo', 0)], false);
-    eq([nc.text, nc.waiting], ['Nudge Bo', false], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    eq([nc.text, nc.waiting, nc.disabled], ['Nudge Bo', false, true], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 0)], false);
+    eq([nc.text, nc.agents], ['Nudge Bo, Cy (2)', ['bo']], 'narrowed to some, the names with the same count, and still only the one with something waiting');
+    nc = pg.meetingNudgeChip([U('bo', 3)], true);
+    eq(nc.text, 'Nudge Bo (3)', 'a room of one names its desk');
     nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' })], false);
-    eq(nc.disabled, true, 'a desk the board will not nudge is not offered');
+    eq([nc.disabled, nc.text], [true, 'Nudge Ed (4)'], 'a desk the board will not nudge is not offered, though what waits for it is still counted');
     assert(/Can't nudge Ed: held by your editor/.test(nc.title), 'and says why');
+    nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' }), U('bo', 1)], true);
+    eq([nc.disabled, nc.agents], [false, ['ed', 'bo']], 'one that can be nudged keeps the button live, and the one that cannot is refused in the room in the board\'s words');
 
     const who = [{ agent: 'bo', persona: 'Bo' }, { agent: 'cy', persona: 'Cy' }, { agent: 'dee', persona: 'Dee' }];
     eq(pg.meetingMentions('@bo @CY, take a look', who), { to: ['bo', 'cy'], text: 'take a look', unknown: [] },

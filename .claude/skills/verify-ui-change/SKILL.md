@@ -346,6 +346,20 @@ PORT=8941 CDP=9281 .claude/skills/verify-ui-change/run-check-meeting.sh "$PWD"
 # … PASS
 ```
 
+Since 2026-11-16 (0.12.9) its nudge step reads the button as "Nudge all
+(3)" and then "Nudge all (1)", presses it with one desk's mail waiting and
+reads the host's work: one chat, to that desk, with the transcript's line
+naming it alone. Then, with nothing waiting for anybody, the button with no
+count, dimmed, a click sent to it nudging nobody, and a desk's own bell
+still nudging that desk. 143 rows. Its mutants are kept:
+[`mutants-room-nudge.page.json`](mutants-room-nudge.page.json) (the click
+typing into every desk chosen: two red) and, for the label and the choice
+of desks, `../mutate-in-a-copy/mutants-room-nudge.suite.json` (four, all
+red in `test:floor`). **The README's and the operating guide's meeting-room
+pictures still show the old label** ("Nudge everyone · 1 unread"); they are
+retaken with `readme-shot.mjs` at the next docs round, whose width note is
+about that label and wants re-measuring for the shorter one.
+
 Since 2026-11-14 it also drives a participant's box as a control: every
 box clicked off and on again, a real click on a name and on a state word,
 a dimmed button in the box (which must not toggle it), Enter on the

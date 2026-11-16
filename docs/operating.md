@@ -238,8 +238,11 @@ room's other desks and nobody else on the floor (a message addressed to one
 agent still goes to that agent). Under each desk's name are its badges: unread messages
 waiting for it on the board, its tasks (each opens the same dialog as on the
 floor, with Mark all read and Nudge agent), a bell to nudge that desk, and
-its stop sign. **Nudge** beside Send nudges whoever the chips choose,
-everyone by default, and says how many unread messages are waiting for them. A desk's question forms, permission prompts, Stop and
+its stop sign. **Nudge all (3)** beside Send nudges the desks the chips choose
+that have something waiting on the board, and only those: the number is
+their unread messages and unclaimed tasks together. With nothing waiting it
+has no number and cannot be pressed; a desk's own bell still nudges that
+desk on purpose. A desk's question forms, permission prompts, Stop and
 slash-command receipts are answered in the room, each in a box labelled with
 its desk. **Add a desk** offers the floor's other desks that are not in a
 window already; **✕** on a desk, or **Bring back from the meeting room** in
