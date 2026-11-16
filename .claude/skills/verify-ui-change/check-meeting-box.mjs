@@ -90,6 +90,26 @@ const watchBoxes = (page) => page.evalJs(`(() => {
   return true; })()`);
 const boxLog = (page) => page.evalJs('JSON.stringify(window.__boxLog)').then((s) => JSON.parse(s).map((x) => JSON.parse(x)));
 
+/* What a room's window is asked to do to itself, in order: its own
+   moveTo, resizeTo and focus, wrapped. The floor calls them through its
+   handle to the window, which finds these. */
+const watchCalls = (m) => m.evalJs(`(() => {
+  window.__calls = [];
+  if (!window.__wrapped) for (const n of ['moveTo', 'resizeTo', 'focus']) { const real = window[n]; window[n] = function (...a) { window.__calls.push([n, ...a]); return real.apply(window, a); }; }
+  window.__wrapped = true;
+  return true; })()`);
+const calls = (m) => m.evalJs('JSON.stringify(window.__calls)').then(JSON.parse);
+/* The page's own rule for where a raised window goes (meetingRaisePlace), restated: centred on the pointer, wholly on the screen. */
+const placeFor = (at, win, area) => {
+  const fit = (n, room) => Math.round(Math.min(n > 0 ? n : room, room));
+  const width = fit(win.width, area.width);
+  const height = fit(win.height, area.height);
+  const clamp = (v, lo, hi) => Math.round(Math.max(lo, Math.min(v, hi)));
+  return { left: clamp(at.x - width / 2, area.left, area.left + area.width - width), top: clamp(at.y - height / 2, area.top, area.top + area.height - height), width, height };
+};
+const screenOf = (page) => page.evalJs('JSON.stringify({ left: screen.availLeft ?? 0, top: screen.availTop ?? 0, width: screen.availWidth, height: screen.availHeight })').then(JSON.parse);
+const lastClick = (page) => page.evalJs('JSON.stringify(window.__click)').then(JSON.parse);
+
 const known = new Set();
 /** Open a meeting room from the selection toolbar, as the operator does, and return its window and number. */
 async function meet(page, agents) {
@@ -153,6 +173,45 @@ ok([a.label, a.end].every((t) => t.words.l >= t.plate.l + 2 && t.words.r <= t.pl
 ok(/^Bo, Cy, Dee and Fay are in a meeting room\./.test(a.label.title) && /^End this meeting: Bo, Cy, Dee and Fay go back to the floor/.test(a.end.title), 'each says on hover who is in the meeting, and the button what it will do', `${a.label.title} | ${a.end.title}`);
 ok(lab.meta === home.meta && r.totals === r0.totals, 'the floor\'s counts are as they were', `${home.meta} → ${lab.meta}`);
 ok(lab.viewBox[1] > home.viewBox[1], 'and the room is taller by the box\'s edges, not cut off', `${home.viewBox[1]} → ${lab.viewBox[1]}`);
+
+console.log('\n"In a meeting", clicked, brings the room\'s window to the pointer');
+ok(a.label.role === 'button' && a.label.tabindex === '0' && a.label.act === 'meet-raise' && a.label.cursor === 'pointer' && /Click to bring that window here, to the front\.$/.test(a.label.title),
+  'the label is a button too, and says on hover what a click does', JSON.stringify([a.label.role, a.label.act, a.label.cursor]));
+await floor.evalJs(`(() => { window.__click = null; document.addEventListener('click', (e) => { window.__click = { x: e.screenX, y: e.screenY, trusted: e.isTrusted }; }, true); return true; })()`);
+// A small window somewhere else, so "brought to the pointer" is a move
+// that can be told from staying put.
+const small = await A.m.windowBounds({ left: 12, top: 8, width: 420, height: 330, windowState: 'normal' });
+await watchCalls(A.m);
+await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetLabel`);
+await sleep(400);
+let click = await lastClick(floor);
+let want = placeFor(click, small, await screenOf(floor));
+let did = await calls(A.m);
+ok(click.trusted && JSON.stringify(did) === JSON.stringify([['focus'], ['moveTo', want.left, want.top], ['focus']]),
+  'a real press on it tells the room\'s window to come to the front and to the pointer: focus, the move, focus again', JSON.stringify({ click, want, did }));
+ok(want.left <= click.x && click.x <= want.left + want.width && want.top <= click.y && click.y <= want.top + want.height && (want.left !== small.left || want.top !== small.top),
+  'the place is under the pointer, and is not where the window was', JSON.stringify({ click, want, small }));
+let now = await A.m.windowBounds();
+ok(now.left === want.left && now.top === want.top && now.width === small.width && now.height === small.height, 'and the browser has the window there, the size it was', JSON.stringify(now));
+r = await read(floor);
+ok(roomOf(r).boxes.length === 1 && r.floor === 'lab' && await floor.evalJs(`document.querySelector('#floor-panel')?.classList.contains('hidden') !== false`) && (await openWindows()).includes(A.url),
+  'nothing else happened: no panel opened, no meeting ended, the floor is where it was');
+// Larger than the screen it is brought to: made to fit it.
+const scr = await screenOf(floor);
+await A.m.windowBounds({ left: 0, top: 0, width: scr.width + 200, height: scr.height + 150 });
+const big = await A.m.evalJs('JSON.stringify({ width: window.outerWidth, height: window.outerHeight })').then(JSON.parse);
+await watchCalls(A.m);
+await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetLabel`);
+await sleep(400);
+did = await calls(A.m);
+ok(big.width > scr.width && did.some((x) => x[0] === 'resizeTo' && x[1] === scr.width && x[2] === scr.height) && did.findIndex((x) => x[0] === 'resizeTo') < did.findIndex((x) => x[0] === 'moveTo'),
+  'a window larger than this screen is made to fit it before it is placed', JSON.stringify({ big, scr, did }));
+await watchCalls(A.m);
+ok(await floor.evalJs(`(() => { const e = document.querySelector('svg.room .meetBox[data-meeting="${A.id}"] .meetLabel'); e.focus(); return document.activeElement === e; })()`), 'the label takes focus');
+await floor.key('Enter');
+await sleep(400);
+did = await calls(A.m);
+ok(did.length >= 3 && did[0][0] === 'focus' && did.at(-1)[0] === 'focus' && did.some((x) => x[0] === 'moveTo' && Number.isFinite(x[1]) && Number.isFinite(x[2])), 'Enter on it does the same, to the middle of the label', JSON.stringify(did));
 
 console.log('\nan envelope from a desk in the box');
 await floor.evalJs(`(() => {
@@ -255,6 +314,12 @@ ok(c.frame.l > a.frame.r && Math.abs(c.frame.t - a.frame.t) < 0.5 && a.frame.t >
 ok(a.inTrack && c.inTrack && a.frame.l >= lab.rect.l && a.label.text === 'In a meeting' && a.end.text === 'End meeting', 'the first box starts inside the storey\'s left margin, with both placards');
 const edgeHit = await floor.evalJs(`document.elementFromPoint(${a.frame.l + 1.5}, ${(a.frame.t + a.frame.b) / 2})?.getAttribute('class') ?? null`);
 ok(edgeHit === 'meetFrame', 'and its left edge is drawn, not cut off by the margin the storey\'s desks are clipped to', String(edgeHit));
+await watchCalls(A.m);
+await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetLabel`);
+await sleep(400);
+did = await calls(A.m);
+ok(did.some((x) => x[0] === 'moveTo') && did.at(-1)?.[0] === 'focus' && await floor.evalJs(`document.getElementById('floor-rooms').classList.contains('building') && localStorage.getItem('orch.floor') !== 'lab'`),
+  'a press on "In a meeting" in the building brings the window and does not ride to the floor', JSON.stringify(did));
 const plain = roomOf(r, 'lab2');
 ok(lab.viewBox[1] > plain.viewBox[1] && lab.viewBox[1] - plain.viewBox[1] < 60, 'the storey is a little taller for the box, not a row taller', `${plain.viewBox[1]} → ${lab.viewBox[1]}`);
 await floor.shot(`${shots}/box-building.png`, '#floor-rooms', { scale: 1, beyond: true });
@@ -382,6 +447,17 @@ await waited(floor2, `!!document.querySelector('svg.room[data-channel="lab"] .me
 let r2 = await read(floor2);
 let d2 = boxOf(roomOf(r2), D.id);
 ok(['bo', 'cy'].every((n) => inside(deskOf(roomOf(r2), n).hit, d2.frame)) && d2.end.disabled === 'false' && d2.end.text === 'End meeting', 'with its desks in it and End meeting ready', JSON.stringify(d2?.end));
+await floor2.evalJs(`(() => { window.__click = null; document.addEventListener('click', (e) => { window.__click = { x: e.screenX, y: e.screenY, trusted: e.isTrusted }; }, true); return true; })()`);
+const smallD = await D.m.windowBounds({ left: 12, top: 8, width: 420, height: 330, windowState: 'normal' });
+await watchCalls(D.m);
+await floor2.press(`svg.room .meetBox[data-meeting="${D.id}"] .meetLabel`);
+await sleep(500);
+click = await lastClick(floor2);
+want = placeFor(click, smallD, await screenOf(floor2));
+did = await calls(D.m);
+ok(JSON.stringify(did) === JSON.stringify([['moveTo', want.left, want.top], ['focus']]), '"In a meeting" pressed on a tab that holds no window asks the room\'s window to take itself to the pointer, and it does', JSON.stringify({ want, did }));
+now = await D.m.windowBounds();
+ok(now.left === want.left && now.top === want.top, 'the browser has it there', JSON.stringify(now));
 await deaf(floor2, true);
 await floor2.press(`svg.room .meetBox[data-meeting="${D.id}"] .meetEnd`);
 await sleep(600);

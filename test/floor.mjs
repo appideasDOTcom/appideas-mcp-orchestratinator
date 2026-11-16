@@ -3709,7 +3709,7 @@ try {
     writeFileSync(tmpBox, [
       ...[...decls, { at: bh.index, text: bh[0] }].sort((a, b) => a.at - b.at).map((d) => d.text),
       cut('  /* ---------- a meeting on the floor: what the page decides ---------- */', '  /* ---------- a meeting on the floor: the drawing ---------- */'),
-      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
+      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
     ].join('\n'));
     let fp;
     try { fp = await import(new URL(tmpBox, `file://${process.cwd()}/`)); } finally { rmSync(tmpBox, { force: true }); }
@@ -3816,6 +3816,23 @@ try {
     const ending = fp.meetTabs({ id: 7, w: boxW(1) }, ['Bo'], true);
     eq([ending.end.disabled, ending.end.text], [true, 'Ending…'], 'once pressed it reads "Ending…" and cannot be pressed again');
     assert(ending.end.x >= ending.label.x + ending.label.w + K.MEET_TAB_GAP, 'which still fits beside the label on the narrowest box');
+    assert(/Click to bring that window here, to the front\.$/.test(wide.label.title), 'and the label says what a click on it does');
+
+    // "In a meeting", clicked: where the room's window goes (costmo,
+    // 2026-11-16). The pointer and the screen are in screen coordinates;
+    // the screen is the one the click was made on.
+    const main = { left: 0, top: 25, width: 1920, height: 1055 };
+    eq(fp.meetingRaisePlace({ x: 1000, y: 600 }, { width: 760, height: 600 }, main), { left: 620, top: 300, width: 760, height: 600 }, 'a room\'s window is brought to the pointer: centred on it');
+    eq(fp.meetingRaisePlace({ x: 1900, y: 40 }, { width: 760, height: 600 }, main), { left: 1160, top: 25, width: 760, height: 600 }, 'and kept wholly on that screen: a pointer in a corner puts the window against the corner, not over the edge');
+    eq(fp.meetingRaisePlace({ x: 10, y: 1070 }, { width: 760, height: 600 }, main), { left: 0, top: 480, width: 760, height: 600 }, 'at the other corner too');
+    const leftMon = { left: -2560, top: 0, width: 2560, height: 1415 };
+    const onLeft = fp.meetingRaisePlace({ x: -1300, y: 700 }, { width: 760, height: 1055 }, leftMon);
+    eq(onLeft, { left: -1680, top: 173, width: 760, height: 1055 }, 'a click on a monitor to the left of the main one puts it on that monitor, in that monitor\'s coordinates');
+    assert(onLeft.left >= leftMon.left && onLeft.left + onLeft.width <= leftMon.left + leftMon.width, 'inside it');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 760, height: 1415 }, { left: 0, top: 25, width: 1440, height: 875 }), { left: 120, top: 25, width: 760, height: 875 },
+      'a window taller than the screen it is brought to is made to fit it: one opened full height on a tall monitor does not hang off a short one');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 2000, height: 400 }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 100, width: 1440, height: 400 }, 'nor a wider one off its side');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 0, height: NaN }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 0, width: 1440, height: 900 }, 'and a size that is not a size is the screen\'s, never nothing');
     eq([fp.meetNames([]), fp.meetNames(['Bo']), fp.meetNames(['Bo', 'Cy']), fp.meetNames(['Bo', 'Cy', 'Dee'])], ['', 'Bo', 'Bo and Cy', 'Bo, Cy and Dee'], 'names are joined the way a sentence joins them');
   }
 } catch (err) {

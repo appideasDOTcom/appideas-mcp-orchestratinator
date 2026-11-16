@@ -732,8 +732,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -1578,6 +1578,12 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .meetTabText { font: 600 10.5px var(--mono); }
 .meetLabel .meetTabBox { fill: var(--meet-line); stroke: var(--meet-line); }
 .meetLabel .meetTabText { fill: var(--meet-ink); }
+/* The label is pressed to bring the room's window to the pointer: it lifts
+   to white under the pointer, and takes the accent's edge with focus. */
+.meetLabel { cursor: pointer; }
+.meetLabel:focus { outline: none; }
+.meetLabel:hover .meetTabBox { fill: #fff; stroke: #fff; }
+.meetLabel:focus-visible .meetTabBox { stroke: var(--accent); stroke-width: 2px; }
 .meetEnd { cursor: pointer; }
 .meetEnd:focus { outline: none; }
 .meetEnd .meetTabBox { fill: var(--surface); stroke: var(--meet-line); }

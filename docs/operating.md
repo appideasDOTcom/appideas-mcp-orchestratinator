@@ -247,7 +247,8 @@ its panel on the floor, puts it back on the floor. **End meeting**, or
 closing the window, ends it. While a meeting is on, its desks stand
 together on the floor in a box of their own, labelled **In a meeting**,
 with an **End meeting** button on the box's corner that does what the
-window's does. On one floor the boxes are at the top, one per meeting; in
+window's does. A click on **In a meeting** brings that room's window to
+the front, where your pointer is. On one floor the boxes are at the top, one per meeting; in
 the building they are part of the storey's row. Ended rooms are drawn nowhere and counted
 nowhere: **Meeting rooms** in the floor's header lists the last twenty,
 newest first, and **Resume** opens one again with each desk back on the

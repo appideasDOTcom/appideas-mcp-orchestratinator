@@ -2390,7 +2390,7 @@
     return {
       label: {
         text: MEET_LABEL, x: MEET_TAB_INSET, w: labelW,
-        title: `${who} ${names.length === 1 ? 'is' : 'are'} in a meeting room. ${names.length === 1 ? 'Its' : 'Their'} chat is in the room's window; ${names.length === 1 ? 'the desk works' : 'the desks work'} as ${names.length === 1 ? 'it always does' : 'they always do'}.`,
+        title: `${who} ${names.length === 1 ? 'is' : 'are'} in a meeting room. ${names.length === 1 ? 'Its' : 'Their'} chat is in the room's window; ${names.length === 1 ? 'the desk works' : 'the desks work'} as ${names.length === 1 ? 'it always does' : 'they always do'}. Click to bring that window here, to the front.`,
       },
       end: {
         text, x: box.w - MEET_TAB_INSET - endW, w: endW,
@@ -2399,6 +2399,31 @@
           : opening ? 'This meeting room’s window is still opening.'
             : `End this meeting: ${who} ${names.length === 1 ? 'goes' : 'go'} back to the floor and the room's window closes. The room stays in Recent meeting rooms for Resume.`,
       },
+    };
+  }
+
+  /**
+   * Where a meeting room's window goes when its "In a meeting" placard is
+   * clicked (costmo, 2026-11-16: three monitors, a dozen windows, several
+   * rooms that look alike, some minimized, some covered): centred on the
+   * pointer, and wholly on the screen the pointer is on. `at` is the
+   * pointer in screen coordinates, `win` the window's outer size, `area`
+   * the usable part of the screen the click was made on. A window larger
+   * than that screen is made to fit it: one opened full height on a tall
+   * monitor would otherwise hang off the bottom of a short one. A size
+   * that is not a size (a minimized window has reported none) is the
+   * screen's.
+   */
+  function meetingRaisePlace(at, win, area) {
+    const fit = (size, room) => Math.round(Math.min(size > 0 ? size : room, room));
+    const width = fit(win?.width, area.width);
+    const height = fit(win?.height, area.height);
+    const clamp = (v, lo, hi) => Math.round(Math.max(lo, Math.min(v, hi)));
+    return {
+      left: clamp(at.x - width / 2, area.left, area.left + area.width - width),
+      top: clamp(at.y - height / 2, area.top, area.top + area.height - height),
+      width,
+      height,
     };
   }
 
@@ -2417,7 +2442,13 @@
       tg.appendChild(el('title')).textContent = t.title;
       return tg;
     };
-    g.appendChild(tab(tabs.label, { class: 'meetTab meetLabel' }));
+    // The label is a control too (costmo, 2026-11-16): a click brings the
+    // room's window to the front, where the pointer is (raiseMeeting).
+    g.appendChild(tab(tabs.label, {
+      class: 'meetTab meetLabel',
+      'data-act': 'meet-raise', 'data-channel': c.channel, 'data-meeting': b.key, 'data-fk': `${c.channel}|meet-raise|${b.key}`,
+      role: 'button', tabindex: '0', 'aria-label': tabs.label.title,
+    }));
     g.appendChild(tab(tabs.end, {
       class: `meetTab meetEnd${tabs.end.disabled ? ' disabled' : ''}${ending ? ' ending' : ''}`,
       'data-act': 'meet-end', 'data-channel': c.channel, 'data-meeting': b.id ?? '', 'data-fk': `${c.channel}|meet-end|${b.key}`,
@@ -5686,7 +5717,8 @@
    *                   gone  { channel, agent, id, open: false, now: true }
    *   floor → meeting: back { channel, agent }   "Bring back" on the floor: remove it
    *                   end  { channel, meeting } End meeting on the floor's box: end it
-   *                   focus, nudged, who        as for a popout
+   *                   focus { channel, agent, at?, area? }  come to the front; with `at`, there
+   *                   nudged, who               as for a popout
    *
    * Each desk's turns are its own, read under its own conversation from the
    * turn it joined after, and every message the room sends is one
@@ -6139,7 +6171,19 @@
     else if (msg.t === 'back' && part) meetingRemove(part.agent, `${meetPersona(part.agent)} was brought back to the floor.`);
     // End meeting on the floor's box for this room: the room's own End.
     else if (msg.t === 'end' && m.id != null && String(msg.meeting) === String(m.id)) endMeeting();
-    else if (msg.t === 'focus' && part) window.focus();
+    else if (msg.t === 'focus' && part) {
+      // From a floor tab that holds no handle to this window
+      // (raiseMeeting): the place to come to, which a window may take
+      // itself to.
+      if (msg.at && msg.area) {
+        try {
+          const place = meetingRaisePlace(msg.at, { width: window.outerWidth, height: window.outerHeight }, msg.area);
+          if (place.width !== window.outerWidth || place.height !== window.outerHeight) window.resizeTo(place.width, place.height);
+          window.moveTo(place.left, place.top);
+        } catch { /* not a window the page may move */ }
+      }
+      window.focus();
+    }
     else if (msg.t === 'nudged' && part) meetingNudged(part.agent, msg.text);
     else if (msg.t === 'here' && msg.id !== POP_ID) {
       ui.outs.set(outKey(msg.channel, msg.agent), { at: Date.now(), id: msg.id, held: LOCKS && msg.held === true, meeting: msg.meeting ?? null });
@@ -6531,6 +6575,51 @@
     }
     // The window is open, so the selection is done with (doneActing).
     doneActing(channel, ui.select.get(channel));
+  }
+
+  /**
+   * "In a meeting", clicked: the room's window comes to the front, centred
+   * on the pointer and on the pointer's screen (meetingRaisePlace). `at` is
+   * the pointer in screen coordinates.
+   *
+   * The floor does it through the window's handle when it has one (it
+   * opened the room, or was handed it by `floorAdopt`): only the page that
+   * opened a window, acting on a click, is let to raise it. Focus first,
+   * because a minimized window has no place to be moved to until it is
+   * back; then the size, if the window is larger than this screen; then
+   * the place; then focus again, for a browser that orders by the last
+   * call. A floor tab with no handle asks the room's window to do the same
+   * to itself (`focus`, carrying the place). A window may move itself, and
+   * whether it may raise itself is the browser's to decide, so that path is
+   * the best this tab can do and not a promise.
+   */
+  function raiseMeeting(channel, key, at) {
+    const keys = [...ui.outs].filter(([k, o]) => k.startsWith(`${channel}|`) && meetBoxKey(o) === key && outsNow(new Map([[k, o]]), Date.now()).size).map(([k]) => k);
+    if (!keys.length) return;
+    const scr = window.screen;
+    const area = { left: scr.availLeft ?? 0, top: scr.availTop ?? 0, width: scr.availWidth, height: scr.availHeight };
+    const w = keys.map((k) => ui.popWins.get(k)).find((x) => x && !x.closed) ?? null;
+    if (w) {
+      try {
+        w.focus();
+        const place = meetingRaisePlace(at, { width: w.outerWidth || MEET_W, height: w.outerHeight }, area);
+        if (place.width !== w.outerWidth || place.height !== w.outerHeight) w.resizeTo(place.width, place.height);
+        w.moveTo(place.left, place.top);
+        w.focus();
+        return;
+      } catch { /* closed under the click, or no longer ours to move: ask it instead */ }
+    }
+    say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1), at, area });
+  }
+
+  /** The pointer of a click, in screen coordinates; for a key press or a click with no pointer behind it, the middle of the control it was made on. */
+  function pointerOf(e, node) {
+    if (e.isTrusted && (e.screenX || e.screenY)) return { x: e.screenX, y: e.screenY };
+    const r = node.getBoundingClientRect();
+    return {
+      x: window.screenX + (window.outerWidth - window.innerWidth) / 2 + r.left + r.width / 2,
+      y: window.screenY + (window.outerHeight - window.innerHeight) + r.top + r.height / 2,
+    };
   }
 
   /**
@@ -7106,6 +7195,13 @@
     // thing wherever the room stands. Dimmed (the window still opening, or
     // already ending), it does nothing, and the click goes no further: a
     // press on a button must not ride to the floor instead.
+    // And "In a meeting" beside it, which brings the room's window to the
+    // pointer: a button on the storey for the same reason.
+    const raiseCtl = e.target.closest?.('svg.room [data-act="meet-raise"]');
+    if (raiseCtl && ui.on) {
+      raiseMeeting(raiseCtl.dataset.channel, raiseCtl.dataset.meeting, pointerOf(e, raiseCtl));
+      return;
+    }
     const endCtl = e.target.closest?.('svg.room [data-act="meet-end"]');
     if (endCtl && ui.on) {
       if (endCtl.getAttribute('aria-disabled') !== 'true') endMeetingHere(endCtl.dataset.channel, endCtl.dataset.meeting);
@@ -8187,7 +8283,7 @@
     // different things about what a desk is.
     // Bulk selection's controls, and a desk in a selecting room, which the
     // pointer checks rather than opens.
-    const selEl = document.activeElement?.closest?.('svg.room [data-act="meet-end"], svg.room [data-act="select-room"], svg.room [data-act="bulk-seen"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
+    const selEl = document.activeElement?.closest?.('svg.room [data-act="meet-raise"], svg.room [data-act="meet-end"], svg.room [data-act="select-room"], svg.room [data-act="bulk-seen"], svg.room.selecting [data-act^="sel-"], svg.room.selecting .desk');
     if (selEl) {
       e.preventDefault();
       selEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));

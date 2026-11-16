@@ -391,7 +391,7 @@ seed is as check-meeting.mjs expects), its own Chrome, and
 
 ```bash
 PORT=8945 CDP=9285 .claude/skills/verify-ui-change/run-check-meeting-box.sh "$PWD"
-# … PASS · 90 of 90        (about a minute and a half)
+# … PASS · 101 of 101      (about a minute and a half)
 ```
 
 It opens real meeting windows from the selection toolbar and reads: the box
@@ -421,6 +421,26 @@ it taught:
   `BroadcastChannel.prototype.postMessage` is wrapped to drop `end`
   (`deaf()`), which is what a window loaded before the build is. The
   receiver's handler is inside the page's closure and cannot be reached.
+- **A page that moves another window is read in two places.** A click on
+  "In a meeting" brings the room's window to the pointer. `watchCalls`
+  wraps the room window's own `moveTo`, `resizeTo` and `focus` (the floor
+  calls them through its handle, which finds the wrapped ones), so the
+  order and the arguments are read. `page.windowBounds()` in `drive.mjs`
+  is the browser's own word for where the window then is, and
+  `windowBounds({ left, top, width, height })` places it first: a headless
+  screen is 800x600 and a window that fills it cannot be told from one
+  that never moved.
+- **Headless is not the desktop for a raise.** Headless left a minimized
+  window minimized after `focus()` (measured 2026-11-16 with
+  `windowState('minimized')`, then `windowBounds()` reading `minimized`
+  after the click). That says nothing about Chrome on macOS, so the check
+  has no row for it, and the write-up says it is unmeasured.
+- **A control never seen to fail may never have run.** The suite's rows
+  for the new placement reused a name already declared in their block,
+  and `test:floor` died on a SyntaxError before its first row. A grep for
+  `✗|PASS|FAIL` printed nothing for it and the next command's PASS stood
+  alone on the screen. `run-mutants.mjs --control` said `0 ✓` and the
+  error. Read the suite's verdict line itself, not the absence of a ✗.
 - **Count the fixture before writing the expectation**, again: a row
   expected Ed to move up 100px when a one-row box left; it moves 44.
 - **`page.scheme('light' | 'dark' | null)`** in `drive.mjs` sets the
@@ -438,12 +458,16 @@ of the room, a `here` and a `gone` drawing the rooms, the window acting on
 evidence yet: the handler ahead of the storey, Enter, the clip, the stale
 ending state, the signature, the draw order, the click's box, the reload,
 the card, "Ending…", the handle close, the edge's width and the hover
-rule. They are owed before this ships, at the hand-off or the release
-run, not in a development turn (about 25 minutes).
+rule. Five more were written for the "In a meeting" click and not run
+either (its handler ahead of the storey, the second focus, the fit, the
+place sent by a tab with no handle, Enter). All eighteen are owed before
+this ships, at the hand-off or the release run, not in a development turn
+(about 35 minutes). The three suite mutants for where a raised window goes
+were run, each red.
 
 Both lists are kept beside the check, because a list in a scratchpad is
 gone with the session: [`mutants-meeting-box.page.json`](mutants-meeting-box.page.json)
-(all seventeen; the first four are the ones already run) and
+(all twenty-two; the first four are the ones already run) and
 [`mutants-meeting-box.suite.json`](mutants-meeting-box.suite.json):
 
 ```bash

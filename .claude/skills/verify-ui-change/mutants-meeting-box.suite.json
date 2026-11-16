@@ -89,5 +89,26 @@
   "src/ui/floor.js",
   "bottom = groups.length ? (rest.length ? y0 + (rows - 1) * pitchY + DESK_BELOW : y)",
   "bottom = groups.length ? (y0 + Math.max(0, rows - 1) * pitchY + DESK_BELOW)"
+ ],
+ [
+  "a raised window is not kept on the pointer's screen",
+  "floor",
+  "src/ui/floor.js",
+  "left: clamp(at.x - width / 2, area.left, area.left + area.width - width),",
+  "left: Math.round(at.x - width / 2),"
+ ],
+ [
+  "a raised window keeps a size larger than the screen",
+  "floor",
+  "src/ui/floor.js",
+  "const fit = (size, room) => Math.round(Math.min(size > 0 ? size : room, room));",
+  "const fit = (size, room) => Math.round(size > 0 ? size : room);"
+ ],
+ [
+  "a raised window hangs by its corner from the pointer",
+  "floor",
+  "src/ui/floor.js",
+  "top: clamp(at.y - height / 2, area.top, area.top + area.height - height),",
+  "top: clamp(at.y, area.top, area.top + area.height - height),"
  ]
 ]

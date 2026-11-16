@@ -1400,15 +1400,40 @@ re-propose the stacked building or a confirmation. Six things behind it:
   still read "Ending…" and could not be pressed (the page check's first
   run). `render()` drops the state for any room with no desk out.
 
+**"In a meeting" is a button too: a click brings that room's window to the
+pointer** (costmo, the same day: three monitors, a dozen windows, rooms
+that look alike, some minimized, some covered). `raiseMeeting` focuses the
+window through its handle, fits it to the screen the click was made on if
+it is larger, moves it so it is centred on the pointer and wholly on that
+screen (`meetingRaisePlace`), and focuses it again. Focus comes first
+because a minimized window has no place to be moved to until it is back.
+A floor tab with no handle sends `focus` with the place, and the window
+moves itself; whether it may raise itself is the browser's call. What was
+measured, and where: on a headless Chrome the calls arrive in that order,
+the browser's own bounds show the window under the pointer, and an
+oversized window is resized first. Two things a headless browser cannot
+say, so they are costmo's to see on his screen, and neither was held for
+(his word: as close as reasonably possible, without delaying progress):
+- **A minimized window.** Headless left it minimized after `focus()`. That
+  is headless's stand-in window, not Cocoa's, and real Chrome on macOS
+  was not measured. If it does not come back there, the next step is
+  named and unbuilt: after about a second, a window still `hidden` is
+  closed and the room opened again at the pointer (a reload of the room,
+  which is End then Open). Not built ahead of the measurement, because a
+  wrong guess reloads rooms that were raised perfectly well.
+- **Another monitor.** The arithmetic is tested with a monitor at negative
+  coordinates. Whether Chrome lets `moveTo` cross screens without the
+  Window Management permission was not measured.
+
 Riding along: a desk's open nameplate card now follows the desk when the
 rooms are redrawn, since desks move with nothing clicked. Two things not
 built, both deliberate for now: a box for a meeting whose every desk is
 hidden or empty is not drawn (nothing to put in it; its window still has
 End), and the board view shows nothing of a meeting. `check-meeting-box.mjs`
-in **verify-ui-change** is the page; seventeen page mutants were written
+in **verify-ui-change** is the page; twenty-two page mutants are written
 for it and four were run, each red where predicted, before costmo asked
 for long runs to wait for the hand-off or release (2026-11-16). The other
-thirteen are untested claims until then; the list and the command are
+eighteen are untested claims until then; the list and the command are
 kept beside the check (`mutants-meeting-box.page.json`).
 
 **A dialog holding a text field closes only from its own buttons and on

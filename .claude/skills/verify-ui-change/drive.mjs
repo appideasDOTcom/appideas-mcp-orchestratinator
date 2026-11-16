@@ -223,6 +223,21 @@ async function connect(target) {
       if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
       await cmd('Browser.setWindowBounds', { windowId, bounds: { windowState: state } });
     },
+    /**
+     * This page's window as the browser has it: `{ left, top, width, height,
+     * windowState }`. Given bounds, it places the window first. For a page
+     * that moves or raises another window (window.moveTo, window.focus),
+     * this is the reading the page cannot fake: what its own `screenX` says
+     * is the page's word, and this is the browser's.
+     */
+    windowBounds: async (bounds = null) => {
+      const got = await cmd('Browser.getWindowForTarget', { targetId: target.id });
+      const windowId = got.result?.windowId;
+      if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
+      if (!bounds) return got.result.bounds;
+      await cmd('Browser.setWindowBounds', { windowId, bounds });
+      return (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result.bounds;
+    },
     /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
     console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,

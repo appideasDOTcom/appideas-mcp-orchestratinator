@@ -38,8 +38,8 @@
  [
   "Enter on a focused End meeting does nothing",
   "src/ui/floor.js",
-  "closest?.('svg.room [data-act=\"meet-end\"], svg.room [data-act=\"select-room\"]",
-  "closest?.('svg.room [data-act=\"select-room\"]"
+  "svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"meet-end\"], svg.room [data-act=\"select-room\"]",
+  "svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"select-room\"]"
  ],
  [
   "a storey with a box is clipped where one without is",
@@ -98,7 +98,37 @@
  [
   "the storey lights under the End button",
   "src/ui/styles.css",
-  ".deskPill:hover, .meetEnd:hover)) .roomFloor",
-  ".deskPill:hover)) .roomFloor"
+  ".deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomFloor",
+  ".deskPill:hover, .meetLabel:hover)) .roomFloor"
+ ],
+ [
+  "a press on In a meeting is not handled ahead of the storey",
+  "src/ui/floor.js",
+  "if (raiseCtl && ui.on) {",
+  "if (false) {"
+ ],
+ [
+  "the room's window is moved but not brought to the front",
+  "src/ui/floor.js",
+  "        w.moveTo(place.left, place.top);\n        w.focus();\n        return;",
+  "        w.moveTo(place.left, place.top);\n        return;"
+ ],
+ [
+  "a window larger than the screen is not made to fit it",
+  "src/ui/floor.js",
+  "if (place.width !== w.outerWidth || place.height !== w.outerHeight) w.resizeTo(place.width, place.height);",
+  ""
+ ],
+ [
+  "a tab with no handle sends no place with its focus",
+  "src/ui/floor.js",
+  "say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1), at, area });",
+  "say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1) });"
+ ],
+ [
+  "Enter on a focused In a meeting does nothing",
+  "src/ui/floor.js",
+  "closest?.('svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"meet-end\"],",
+  "closest?.('svg.room [data-act=\"meet-end\"],"
  ]
 ]
