@@ -649,9 +649,36 @@ the desk the board had just removed**. Read the `personas` row's
 same second. A stand-in has no plugin, so after any change to how a desk
 is closed, close a real one and read those two rows.
 
-Teardown is the windows, the host, the server, **and the binding**: `claude
-mcp remove -s local orchestratinator` in the probe folder, or the folder
-stays a desk of a board that is gone in `~/.claude.json`.
+**The whole of it in one run, from a browser:** [`two-rooms.mjs`](two-rooms.mjs).
+Three folders bound as `ms-a/qa`, `ms-a/dev` and `ms-a/ops`, each opened
+from the floor (`POST /api/floor/open`; a new folder's trust question is
+Down, Enter on the probe's socket), then a headless Chrome on the floor
+does what the operator does: QA and the developer into one meeting room,
+QA and the service agent into a second, a question asked in each room,
+Bring back on QA's desk.
+
+```bash
+ORCH_CDP_PORT=9293 node --experimental-websocket .claude/skills/measure-a-real-window/two-rooms.mjs http://localhost:8931 "$SP/shots"
+# … PASS · 13 of 13        (about a minute; four short replies of tokens)
+```
+
+Run twice on 2026-11-16, 13 of 13 both times: the second room held `ops`
+and `qa-2`, whose host started a real fourth window in QA's folder; asked
+in the second room it answered `I AM ms-a/qa-2` and `ops` answered `I AM
+ms-a/ops`; asked in the first, `I AM ms-a/qa` and `I AM ms-a/dev`; neither
+room held a word of the other's; the floor's panel read "Bring back from
+all 2 meeting rooms", and pressed, the board closed the second session
+(`desk.leave`, actor `board`) and its window went, with QA back on the
+conversation it had. The second run made `qa-2` again: the name was free,
+which is the closing window's hooks not re-seating it, on real windows.
+It leaves both rooms ended; the three desks are left for you to leave.
+
+Teardown is the windows, the host, the server, **and the binding**: `POST
+/api/floor/desk/leave` for each desk does all three for a desk (its host
+closes the window and removes the binding), or `claude mcp remove -s local
+orchestratinator` in the probe folder. Left, the folder stays a desk of a
+board that is gone in `~/.claude.json`. Then the Chrome on the CDP port
+(`pkill -f "remote-debugging-port=9293( |$)"`) and `claude --version`.
 
 ## How long a closed window stays in the roster
 

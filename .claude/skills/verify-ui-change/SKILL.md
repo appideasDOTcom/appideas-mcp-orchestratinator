@@ -587,12 +587,15 @@ owed at the release**: `npm test` as one chain; check-popout, check-chatbox,
 check-pop-foot, check-popout-session, check-card-move, check-hide,
 check-backdrop, check-chat-controls and check-update, none of whose code
 paths were changed except through `deskFate`/`boundTo` (a popout following
-a move), which `test:floor` pins. **Not measured at all**: a meeting room
-of real Claude Code windows driven from a real browser in one run (the page
-tier ran against seed-sessions' host, the host tier against the floor's
-routes, and three real windows in one folder against the tree's host — the
-three overlap, they were not one run); and a move to a fresh tmux server
-with a real seat in it (`test:renew` has it on stand-ins).
+a move), which `test:floor` pins. **Measured once on real windows, from a real browser, in one run**: one
+agent in two meeting rooms (`two-rooms.mjs` in **measure-a-real-window**,
+13 of 13, twice). **Not measured at all**: a move to a fresh tmux server
+with a real seat in it (`test:renew` has it on stand-ins); New desk here
+onto another floor from the real page (the browser check has it against
+seed-sessions' host, and real windows have it through the floor's route,
+`I AM ms-b/qa`); and Resume of a room with a real second session in it
+(the browser check has it; a real window has the `--resume` half, asked
+back through the route).
 
 ### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
 
