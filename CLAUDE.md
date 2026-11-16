@@ -1902,6 +1902,19 @@ straight after was green (2026-11-03, task 247). Read the channel for
 their announcement before a full run, and if you overlapped, rerun the
 red suite alone before reading the pane.
 
+**Load from other projects is expected, and nothing waits for it to
+pass** (costmo, 2026-11-16: "work around high system load as needed … work
+needs to continue on both fronts"). This machine also builds and tests a
+mobile app, and PR #56's round ran at load averages of 100 to 350 from its
+Xcode and Go builds. A wait-until-quiet loop was stopped by his word. Run
+anyway, and make the run readable instead: mutants always beside an
+unmutated control, a red rerun alone before it is called real, and fixture
+rows kept apart from behaviour rows, so a slow machine reads as one. An
+example is "the fixture held: Resume landed N ms after the End" in
+check-meeting-box. Give the load beside the result. Do not widen a timeout
+to make a load red go away: that is how a row stops seeing its fault, as
+Info 5's 8 s wait did.
+
 **One move-section red in `test:host` has now been seen twice with no other
 suite on its ports.** "the new floor holds no session row for the
 conversation it left" listed two ids: the stand-in's constant `1111…5555`
