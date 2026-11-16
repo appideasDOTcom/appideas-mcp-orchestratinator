@@ -1967,6 +1967,31 @@ turn. A turn on the new floor in the print would instead be the relay
 still reading the old transcript after the rebind. Which one the six
 sightings were is not known. The next sighting is read, not rerun.
 
+**Seventh, 2026-11-16, read** (QA's chain run at `da67c91`, load about
+87; the printed block is in QA's evidence, `pr56/npm-test-da67c91.log`).
+The old id's row was on `host-test-2`, updated at 18:33:03, the second of
+the bind. All eight turns under that id were on `host-test`, the newest at
+18:32:39. So it is the event that writes no turn. The host's log names the
+gap: `found desk host-test-2/free` at .340, and `closed its window to
+reopen` at .570. In between, the folder's old window is still running the
+old conversation. `bind()` creates the new desk inside `rescan()` and sets
+the reopen's intent only after that, and after an `await W.paneFor()`.
+`watchLoop()` is a loop of its own and can tick in that await. A desk with
+no intent adopts the newest live session (`watch()`'s newest-wins). That is
+the old window's, and the desk emits `session` for it on the new floor,
+which the board files by id alone. The comment above `fresh` in `bind()`
+already says the intent must be set "before anything else can tick"; it is
+set one await too late. Under load the tick lands in the gap, and that is
+why every sighting was under load.
+
+**Fixed the same day, at costmo's word.** `bind()` asks `paneFor` before
+the rescan and hands the intent over in `intents`. The rescan sets it on
+the desk as it creates it, so the desk has it from its first tick. The
+same race was open on the live instance in any real move. `test:host`
+sets `ORCH_HOST_BIND_GAP_MS=700`, a seam that holds the moment after the
+rescan open for longer than a watch tick. The assertion now sees the race
+on every run instead of under load only. Unset, the seam is no pause.
+
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches
 it, and `send()` returns when tmux has taken the key. "which the host
