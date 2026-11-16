@@ -1,8 +1,8 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `d5c391b`
-(branch `feature/ui-enhancements`, PR #55, 2026-11-14; first written at `0ce4f1e`, 2026-10-17;
+code. Every fact names the file and line that holds it, at commit `9448dc8`
+(branch `feature/ui-enhancements`, PR #56, 2026-11-16; first written at `0ce4f1e`, 2026-10-17;
 re-anchored at `c6f9474` on 2026-11-02 — sixteen references had moved, none
 had changed — at `8f4a703` on 2026-11-03 — six moved and one was placed by
 hand, the hook door's host check, which now sits under the Decided 6 wake;
@@ -50,13 +50,17 @@ Two are blocks that grew, the host's permission block and the hook's
 `reduceToolInput`. The third is the model and effort row, which cited
 `pick()`, the picker driver 0.12.7 removes; it now cites the two places the
 window's own line is read, `switchedTo` and the receipt for the two
-commands. The version changed; that row's wording was already 0.12.7's).
+commands. The version changed; that row's wording was already 0.12.7's
+— and at `9448dc8` for 0.12.8 and PR #56's first round: seven moved and
+one placed by hand, the page's `deskRows`, whose signature changed. Two
+facts changed in substance: the version, and the empty-desk line, because
+a desk in a meeting is drawn in its box whatever it reads).
 Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `d5c391b`. A later commit may move them; the file names
+Line numbers are for `9448dc8`. A later commit may move them; the file names
 will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
 reference whose line is found once at the new commit and lists the rest.
 
@@ -129,22 +133,22 @@ conversation open in an editor means nothing can be typed in.
 | Tray: unread, assigned, claimed counts; derived state when no status is set | nothing beyond the MCP tools | `src/agent-state.js:102-139, 221` |
 | Needs-you badge and the ranked "Needs you" queue | plugin (PermissionRequest / Notification hook sets `awaiting_kind`) | `src/floor.js:1258-1305`, `src/floor.js:2440-2465`, `src/db.js:134-139` |
 | Permission prompt text, the tool asking | plugin | `src/floor.js:1258-1270` |
-| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2458-2463`, `src/ui/floor.js:4252-4253`, `host/index.js:1324-1487` |
+| Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2458-2463`, `src/ui/floor.js:4555-4556`, `host/index.js:1324-1487` |
 | Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:1095-1106, 1227-1248` |
 | Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:3954, 3906-4092` |
 | The window compacting, from its start to its end, and a message sent meanwhile held rather than timed out; a compaction the hooks never finish ends on the window's next prompt, turn or tool, and a `/compact` from the floor is watched to its end and said in the window's closing words ("Compacted…", or "no compaction ran") | plugin (`PreCompact` / `PostCompact`) for the state; host for the held message, the summary (drawn as a system record) and the watched end | `src/floor.js:1194-1203`, `host/window.js:1299` |
 | The model and effort level, what was asked for beside what the window confirmed; a change from the floor is the window's own `/model` or `/effort`, so it is also saved as the default for new sessions on that machine | plugin (`PreModelSwitch` / `PostModelSwitch`, `effort_level`); host (the window's own line, the transcript's next reply) | `src/floor.js:1213-1225, 2022`, `host/window.js:1446, 1513` |
 | A slash command from the composer, confirmed on the command's own receipt and said in its terms as one line labelled `host` ("/model opus — Set model to Opus 5.5 and saved as your default for new sessions"); a `/clear` shows the new session at once with the model and effort the window keeps; a long message typed in so the window never wraps it | host | `src/floor.js:193, 1972`, `host/window.js:1479, 1256, 1569, 3876` |
 | Thinking, drawn as a thought bubble | host | `host/window.js:4076-4077` |
-| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:367`, `src/ui/floor.js:1527-1540` |
+| Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:367`, `src/ui/floor.js:1499-1512` |
 | Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:303`, `host/index.js:1321, 1506` |
 | Open in VS Code | host (macOS) | `host/index.js:1509`, `host/window.js:3381-3397` |
 | Open in Claude, Open in tmux | host (macOS) | `host/index.js:1564-1575`, `host/window.js:3477` |
 | Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:3214`, `host/dialog.js` |
-| Move an agent to another floor from its nameplate card — only the floor is picked, the desk's own folder and host do the rest; a move that closes its window opens a new conversation there, one with no window open resumes its last; it lands on the new floor drawn, even a floor it left before | host | `src/floor.js:3276, 1691`, `src/ui/floor.js:625`, `host/index.js:918` |
-| Several desks at once: select desks on a room, check them, and nudge, mark read or hide them together — desks with a window are nudged before those that must open one, a desk that cannot be nudged is named with the reason, the selection closes itself once the action is sent, and a desk it did not reach is named on the room with the reason | host for the nudge; mark read and hide need nothing beyond the board | `src/ui/floor.js:2838, 2395, 2438, 7352` |
-| A desk's chat in a window of its own (⧉): the whole panel, live, beside the floor, several at once on one shared stream; it follows its desk to another floor, survives a floor reload, and Re-attach brings it back with whatever was typed | host to type into it; reading needs only what the floor's panel needs | `src/ui/floor.js:5349`, `src/ui/floor.js:3308`, `src/ui/hub.js:1-20` |
-| A meeting room: several desks of one floor in one window, one composer, `@names` at the start narrowing a message to some of them, each desk's delivery under the message, and while the room is open its desks' broadcasts reach the room and nobody else on the floor (a direct message still goes where it is addressed) | host for each desk's delivery; the containment is the board's | `src/ui/floor.js:6273, 4996, 4799`, `src/floor.js:3770, 3797`, `src/db.js:582, 696, 918, 1736` |
+| Move an agent to another floor from its nameplate card — only the floor is picked, the desk's own folder and host do the rest; a move that closes its window opens a new conversation there, one with no window open resumes its last; it lands on the new floor drawn, even a floor it left before | host | `src/floor.js:3276, 1691`, `src/ui/floor.js:629`, `host/index.js:918` |
+| Several desks at once: select desks on a room, check them, and nudge, mark read or hide them together — desks with a window are nudged before those that must open one, a desk that cannot be nudged is named with the reason, the selection closes itself once the action is sent, and a desk it did not reach is named on the room with the reason | host for the nudge; mark read and hide need nothing beyond the board | `src/ui/floor.js:3135, 2677, 2720, 7835` |
+| A desk's chat in a window of its own (⧉): the whole panel, live, beside the floor, several at once on one shared stream; it follows its desk to another floor, survives a floor reload, and Re-attach brings it back with whatever was typed | host to type into it; reading needs only what the floor's panel needs | `src/ui/floor.js:5667`, `src/ui/floor.js:3613`, `src/ui/hub.js:1-20` |
+| A meeting room: several desks of one floor in one window, one composer, `@names` at the start narrowing a message to some of them, each desk's delivery under the message, and while the room is open its desks' broadcasts reach the room and nobody else on the floor (a direct message still goes where it is addressed) | host for each desk's delivery; the containment is the board's | `src/ui/floor.js:6607, 5299, 5102`, `src/floor.js:3770, 3797`, `src/db.js:582, 696, 918, 1736` |
 | Update from the page: the header says a newer build is on the followed branch (`main`, or `develop` in Settings); Update has the host beside the board fetch it, rebuild the server, update the plugin when its hooks changed and restart itself, and the page reloads onto it; refused in words for a dirty clone, another branch, local commits, or a host not under launchd | host on the board's own machine, **macOS** (launchd restarts it) | `src/updates.js:1-34, 103-116, 147`, `host/update.js:88` |
 | Recent conversations, search, read a conversation whole | host | `host/history.js:1-37`, `host/index.js:1546-1558` |
 | Tool calls on the plugin path carry only one descriptive field (command, path, pattern, description, prompt, url), clipped to 300 characters | plugin | `plugin/hooks/report.mjs:42, 288-316` |
@@ -157,7 +161,10 @@ Two honest limits worth not contradicting on the page:
   `src/agent-state.js:102-139`). Since 0.10.8 a desk with nothing live
   behind it — no session reporting, no host, or the host offline — is not
   drawn at all, and comes back on its own when something is; the storey
-  still counts it in `N/M here` (`src/ui/floor.js:2249, 2261-2268`, issue #20).
+  still counts it in `N/M here` (`src/ui/floor.js:2507, 2529-2536`, issue #20).
+  The one exception is a desk in a meeting room, which stands in the
+  meeting's box on the floor while the meeting lasts, empty or hidden
+  (PR #56).
   Do not say "a desk for every agent": say every agent with something
   running has one.
 - The floor is a live tail, not an archive: the newest 400 turns per desk
@@ -291,8 +298,8 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.12.7** at `d5c391b` (0.12.1 to 0.12.3 are docs releases on
-  top of 0.12.0; 0.12.4 to 0.12.7 follow them), in all three places that
+- **Version: 0.12.8** at `9448dc8` (0.12.1 to 0.12.3 are docs releases on
+  top of 0.12.0; 0.12.4 to 0.12.8 follow them), in all three places that
   carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
   They are kept equal by `npm run set-version` (`scripts/set-version.mjs`)
