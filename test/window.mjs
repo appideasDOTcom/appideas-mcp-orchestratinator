@@ -1099,6 +1099,23 @@ async function main() {
         'a window closed while it is being waited on is said to be gone, in words');
       assert(goneMs < 6000, `at the next look, not after the full ${20_000}ms — took ${goneMs}ms`);
 
+      // And when it was its session's only window (QA, PR #57 round 2).
+      // With other sessions left on the server, tmux answers exit 0 and
+      // nothing at all, no pane id to compare. The first cut wanted an id
+      // that differed, and waited this one out.
+      const loneSession = `${TMUX_SESSION}-lone`;
+      await run('tmux', ['new-session', '-d', '-s', loneSession, '-c', coldDir, 'sh', '-c', 'sleep 120']).catch(() => {});
+      const loneTarget = (await run('tmux', ['list-panes', '-t', `${loneSession}:`, '-F', '#{session_name}:#{window_id}.#{pane_id}']).catch(() => ({ stdout: '' }))).stdout.trim().split('\n')[0];
+      assert(/%\d+$/.test(loneTarget), 'a session of one window is standing', loneTarget);
+      const loneStarted = Date.now();
+      const waitingOnLone = W.waitReady(coldDir, { timeoutMs: 20_000, target: loneTarget });
+      await sleep(900);
+      await run('tmux', ['kill-pane', '-t', loneTarget]).catch(() => {});
+      const loneNow = await waitingOnLone;
+      const loneMs = Date.now() - loneStarted;
+      eq([loneNow.code, loneMs < 6000], ['window_gone', true], `a session's only window, closed while it is waited on, is gone too, at the next look — took ${loneMs}ms`);
+      await run('tmux', ['kill-session', '-t', loneSession]).catch(() => {});
+
       // A composer that keeps the message through every Enter: a raw-mode
       // pane drawing the box composerOf reads, which never submits.
       const boxDir = `${FIX}/keeps-it`;

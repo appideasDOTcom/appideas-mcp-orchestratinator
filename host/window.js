@@ -683,8 +683,20 @@ export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = nul
       // 10: 46 s of nothing in the host's log, then a bind that took 37 ms).
       // So the pane is asked for by its id, and an answer about another one
       // is the window being gone.
+      //
+      // Two more shapes of the same thing, each measured (QA, PR #57 round
+      // 2, who found the first cut waiting out its limit on them and then
+      // saying "Claude Code is open in that window", which was not so). The
+      // pane was its session's only one and other sessions remain: exit 0
+      // and an empty answer, no id at all. It was the last pane of all, so
+      // the server went with it: exit 1, "no server running on …", or
+      // "error connecting to …" for a socket that is gone. Both are the
+      // first window of a session closed while it starts. Any other failure
+      // of the call is not read as gone: a tmux that timed out under load
+      // says nothing about the window.
       const paneAsked = /%\d+$/.exec(target)?.[0] ?? null;
-      if (dead.ok && paneAsked && paneNow && paneNow !== paneAsked) {
+      const noServer = !dead.ok && /no server running|error connecting to/.test(dead.error ?? '');
+      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {
         return {
           ok: false,
           code: 'window_gone',

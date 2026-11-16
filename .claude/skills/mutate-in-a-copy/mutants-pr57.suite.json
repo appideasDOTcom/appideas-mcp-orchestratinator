@@ -110,5 +110,33 @@
   "host/window.js",
   "  const newest = await newestConversation(here, theirs);",
   "  const newest = await newestConversation(here);"
+ ],
+ [
+  "a window killed while it is waited on is waited out (PR #57 Info 10)",
+  "host",
+  "host/window.js",
+  "      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {",
+  "      if (false) {"
+ ],
+ [
+  "a window killed while it is waited on is waited out (PR #57 Info 10)",
+  "window",
+  "host/window.js",
+  "      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {",
+  "      if (false) {"
+ ],
+ [
+  "a session's only window, killed, is waited out: tmux answers with no pane id (QA, PR #57 round 2)",
+  "window",
+  "host/window.js",
+  "      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {",
+  "      if (noServer || (dead.ok && paneAsked && paneNow && paneNow !== paneAsked)) {"
+ ],
+ [
+  "the last window of all, killed, is waited out: tmux says no server running (QA, PR #57 round 2)",
+  "renew",
+  "host/window.js",
+  "      const noServer = !dead.ok && /no server running|error connecting to/.test(dead.error ?? '');",
+  "      const noServer = false;"
  ]
 ]

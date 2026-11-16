@@ -329,6 +329,25 @@ async function main() {
   ok((await W.checkServer()) === null && (await W.checkServer()) === null, 'checkServer does nothing, twice');
   ok(JSON.stringify(await panesNow()) === JSON.stringify(keptD), 'the windows are the same processes');
   ok(!(await inMode()), 'and no window is left in view-mode');
+
+  // The last window of all, closed while it is waited on (QA, PR #57 round
+  // 2). Its server goes with it, and tmux says "no server running", which
+  // is a failed call and not an answer about another pane. waitReady read
+  // that as nothing known and ran its whole limit, then said Claude Code
+  // was open in the window. Here because this suite has a server of its
+  // own to lose; test:window has the two shapes that leave a server.
+  await run('tmux', ['-L', SOCK, 'kill-server']).catch(() => {});
+  const L = W.canonical(`${FIX}/a`);
+  await run('tmux', ['-L', SOCK, 'new-session', '-d', '-s', 'orch', '-c', L, 'sleep 60']);
+  const lastTarget = (await tmuxT(['list-panes', '-a', '-F', '#{session_name}:#{window_id}.#{pane_id}'])).split('\n')[0];
+  const lastStarted = Date.now();
+  const waitingOnLast = W.waitReady(L, { timeoutMs: 12000, target: lastTarget });
+  await sleep(900);
+  await run('tmux', ['-L', SOCK, 'kill-pane', '-t', lastTarget]).catch(() => {});
+  const lastNow = await waitingOnLast;
+  const lastMs = Date.now() - lastStarted;
+  ok(/%\d+$/.test(lastTarget) && lastNow.code === 'window_gone' && lastMs < 6000,
+    'the last window of all, closed while it is waited on, is said to be gone at the next look', `${JSON.stringify(lastNow)} after ${lastMs}ms on ${lastTarget}`);
 }
 
 try {
