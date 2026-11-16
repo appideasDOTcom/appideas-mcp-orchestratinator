@@ -21,6 +21,15 @@
  * floor tab, which has no window to close; a room's window reloaded; and
  * the room's own End meeting. About a minute and a half.
  *
+ * PR #56's review added: a desk in a meeting staying in its box when it is
+ * hidden (Hide refused in bulk and on its card; every participant hidden
+ * leaves the box standing); a room resumed inside the 1.5 s of its End's
+ * close timer, which must not be closed by it; the storey not lit under
+ * "In a meeting" (hovered, not pressed); the one-screen guard on the
+ * window-management question; a redraw caused inside a reload's gap, not
+ * waited for; and the box leaving after its window closes with the
+ * floor's poll held, so the rejoin timer is what takes it away.
+ *
  * Every reading is the page's (probe-meeting-box.js), the windows open
  * (targets), the board's record (/api/floor/meetings) or what the host was
  * handed (work.jsonl). The layout's arithmetic is in test/floor.mjs ("a
@@ -89,6 +98,24 @@ const watchBoxes = (page) => page.evalJs(`(() => {
   snap();
   return true; })()`);
 const boxLog = (page) => page.evalJs('JSON.stringify(window.__boxLog)').then((s) => JSON.parse(s).map((x) => JSON.parse(x)));
+
+/* The board's own routes, as the card and the pill post them. */
+const admin = (path, body) => fetch(`${base}/api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.status);
+const hiddenOnBoard = async (agent) => (await (await fetch(`${base}/api/floor`)).json()).channels.find((c) => c.channel === 'lab').desks.find((d) => d.agent === agent)?.hidden;
+
+/* The floor's poll held (PR #56 Info 5): every /api/floor the page asks
+   while held waits until it is let go, and is then asked for real. So
+   whatever the rooms do meanwhile was drawn by something other than a
+   poll. A pass-through, not a stub: each held request is made once let go,
+   and nothing this check awaits in the page fetches. The floor's own tick
+   runs one poll at a time (pollRun), so they do not pile up. */
+const holdPolls = (page, on) => page.evalJs(on
+  ? `(() => { window.__realFetch ??= window.fetch; window.__held = []; window.__heldAsked = 0;
+      window.fetch = (u, o) => (window.__held && /\\/api\\/floor$/.test(String(u)))
+        ? new Promise((res, rej) => { window.__heldAsked++; window.__held.push(() => window.__realFetch(u, { ...o, signal: undefined }).then(res, rej)); })
+        : window.__realFetch(u, o);
+      return true; })()`
+  : `(() => { const h = window.__held ?? []; window.__held = null; window.fetch = window.__realFetch; h.forEach((go) => go()); return window.__heldAsked ?? 0; })()`);
 
 /* What a room's window is asked to do to itself, in order: its own
    moveTo, resizeTo and focus, wrapped. The floor calls them through its
@@ -379,6 +406,14 @@ lab = roomOf(r);
 c = boxOf(lab, C.id);
 ok(r.building && c.end.plate.r < lab.rect.r - 20 * lab.scale && c.frame.r < lab.rect.r && boxOf(lab, A.id).frame.l < home.rect.l + 28, 'the arrow scrolls the boxes with their desks: the second is in view, the first part-way out', JSON.stringify({ c: c.frame, room: lab.rect }));
 await floor.shot(`${shots}/box-building-scrolled.png`, 'svg.room[data-channel="lab"]', { scale: 1, beyond: true });
+// The label is a control too: a pointer on it lights the label and not
+// the storey (PR #56 Info 4). Hovered, not pressed, because a press raises
+// the room's window. The storey's name first, which does light it, so the
+// row below is not true of every hover.
+const storeyLit = () => floor.evalJs(`JSON.stringify({ carpet: getComputedStyle(document.querySelector('svg.room[data-channel="lab"] .roomFloor')).fill, other: getComputedStyle(document.querySelector('svg.room[data-channel="lab2"] .roomFloor')).fill })`).then(JSON.parse);
+const onName = await floor.hover('svg.room[data-channel="lab"] .roomName', { held: storeyLit });
+const onLabel = await floor.hover(`svg.room .meetBox[data-meeting="${C.id}"] .meetLabel`, { held: storeyLit });
+ok(onName.carpet !== onName.other && onLabel.carpet === onLabel.other, 'under the pointer, "In a meeting" does not light the storey either, though its name does: the label brings a window, it does not ride to this floor', JSON.stringify({ onName, onLabel }));
 const lit = await floor.press(`svg.room .meetBox[data-meeting="${C.id}"] .meetEnd`, undefined, {
   held: () => floor.evalJs(`JSON.stringify({ plate: getComputedStyle(document.querySelector('svg.room .meetBox[data-meeting="${C.id}"] .meetEnd .meetTabBox')).stroke,
     carpet: getComputedStyle(document.querySelector('svg.room[data-channel="lab"] .roomFloor')).fill, other: getComputedStyle(document.querySelector('svg.room[data-channel="lab2"] .roomFloor')).fill })`).then(JSON.parse),
@@ -412,6 +447,7 @@ const cardAt = () => floor.evalJs(`(() => { const p = document.getElementById('d
 const card0 = await cardAt();
 await watchBoxes(floor);
 ok(await floor.evalJs(`(() => { const e = document.querySelector('svg.room .meetBox[data-meeting="${A.id}"] .meetEnd'); e.focus(); return document.activeElement === e; })()`), 'the button takes focus');
+const tEnd = Date.now();
 await floor.key('Enter');
 await waited(floor, `!document.querySelector('svg.room[data-channel="lab"] .meetBox')`, 'Enter on it ends the meeting');
 log = await boxLog(floor);
@@ -440,6 +476,14 @@ const R1 = await attach((u) => isMeeting(u));
 await R1.waitFor(`document.querySelectorAll('.m-part').length === 3`, { timeout: 25000 });
 await floor.evalJs(`document.getElementById('dlg')?.close(); true`);
 await waited(floor, `!!document.querySelector('svg.room[data-channel="lab"] .meetBox[data-meeting="${A.id}"]')`, 'the resumed room is a box on the floor again, under its own number');
+// The End's own close timer (MEET_END_CLOSE_MS, 1.5 s) is still to fire
+// when Resume has reopened the room under the same number, and it closes
+// only the window it asked: the resumed one is a new window.
+const resumedIn = Date.now() - tEnd;
+const urlR1 = await R1.evalJs('location.href');
+ok(resumedIn < 1500, `the fixture held: Resume landed ${resumedIn} ms after the End, inside its 1.5 s close timer (a red here is a slow machine, not the fix)`);
+await sleep(Math.max(0, 2000 - resumedIn));
+ok((await openWindows()).includes(urlR1), 'a room resumed inside its End\'s close timer is not closed by that End: the floor closes only the window it asked', JSON.stringify(await openWindows()));
 await floor.waitFor(`document.querySelector('svg.room[data-channel="lab"] .desk[data-agent="dee"]')?.getAttribute('transform') === 'translate(${dee[0]} ${bo[1]})'`, { timeout: 8000 }).catch(() => {});
 r = await read(floor);
 lab = roomOf(r);
@@ -450,6 +494,46 @@ log = await boxLog(floor);
 ok(log.some((s) => s.length === 1 && s[0][3] === 'Bo') && log.every((s) => s.length <= 1), 'it filled a desk at a time, as each joined the room, and was one box throughout', JSON.stringify(log.map((s) => s.map((x) => x[3]))));
 const urlR = await R1.evalJs('location.href');
 
+console.log('\na desk in a meeting stays in its box, hidden or not (PR #56 finding 1)');
+// Hide in bulk first: Bo, checked in a selecting room, is not hidden, and
+// the room's line says why.
+await floor.click('svg.room[data-channel="lab"] [data-act="select-room"]');
+await floor.waitFor(`!!document.querySelector('svg.room[data-channel="lab"].selecting')`);
+await floor.click('svg.room.selecting .desk[data-agent="bo"] .deskHit');
+await floor.waitFor(`document.querySelector('svg.room.selecting [data-act="sel-hide"]')?.getAttribute('aria-disabled') === 'false'`);
+await floor.press('svg.room.selecting [data-act="sel-hide"]');
+await waited(floor, `!!document.querySelector('svg.room[data-channel="lab"] .missBar')`, 'Hide on a checked desk in a meeting leaves a line on the room');
+const miss = JSON.parse(await floor.evalJs(`JSON.stringify({ text: document.querySelector('svg.room[data-channel="lab"] .missBar')?.textContent ?? '', title: document.querySelector('svg.room[data-channel="lab"] .missBar title')?.textContent ?? '' })`));
+ok(/bo: In a meeting: it stands in the meeting’s box/.test(miss.title) && await hiddenOnBoard('bo') === false, 'naming Bo and why: it is in a meeting, and the board was asked nothing', JSON.stringify(miss));
+await floor.press('svg.room[data-channel="lab"] .missBar .missText');
+await floor.waitFor(`!document.querySelector('svg.room .missBar')`, { timeout: 3000 });
+// Cy hidden from another tab, or before the room took it: the page reads
+// the flag at its next poll, and Cy's card is what says it has.
+ok(await admin('desk/hide', { channel: 'lab', agent: 'cy' }) === 200, 'Cy is hidden on the board');
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="cy"] .plate[data-act="details"]');
+await waited(floor, `/its pill again when the meeting ends/.test(document.querySelector('#desk-pop .dp-hide-why')?.textContent ?? '') && document.querySelector('#desk-pop [data-act="hide-desk"]')?.disabled === true`,
+  'Cy\'s card stays open on the desk, with Hide desk dimmed and why under it: in a meeting, and its pill again when the meeting ends');
+r = await read(floor);
+lab = roomOf(r);
+a = boxOf(lab, A.id);
+ok(!!a && ['bo', 'cy', 'dee'].every((n) => !!deskOf(lab, n) && inside(deskOf(lab, n).hit, a.frame)) && /^Bo, Cy and Dee are in a meeting room\./.test(a.label.title) && /^End this meeting: Bo, Cy and Dee go back to the floor/.test(a.end.title),
+  'the box still holds Cy, and names Cy in both its sentences', JSON.stringify([a?.label.title, a?.end.title, lab.desks.map((d) => d.agent)]));
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="cy"] .plate[data-act="details"]');
+ok((await admin('desk/hide', { channel: 'lab', agent: 'bo' })) === 200 && (await admin('desk/hide', { channel: 'lab', agent: 'dee' })) === 200, 'Bo and Dee are hidden too: all three');
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
+await floor.waitFor(`/its pill again/.test(document.querySelector('#desk-pop .dp-hide-why')?.textContent ?? '')`, { timeout: 8000 });
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
+r = await read(floor);
+lab = roomOf(r);
+a = boxOf(lab, A.id);
+ok(!!a && ['bo', 'cy', 'dee'].every((n) => !!deskOf(lab, n) && inside(deskOf(lab, n).hit, a.frame)) && a.end.text === 'End meeting' && a.end.disabled === 'false'
+  && await floor.evalJs(`document.querySelectorAll('svg.room[data-channel="lab"] .deskPill').length === 0`),
+  'with every desk in it hidden, the box stands with all three, In a meeting and End meeting, and none of them is a pill', JSON.stringify([a?.end, lab.desks.map((d) => d.agent)]));
+for (const agent of ['bo', 'cy', 'dee']) await admin('desk/show', { channel: 'lab', agent });
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
+await waited(floor, `/Hide it once the meeting has ended/.test(document.querySelector('#desk-pop .dp-hide-why')?.textContent ?? '')`, 'shown again, a desk in the meeting still cannot be hidden from its card, and says so');
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="dee"] .plate[data-act="details"]');
+
 console.log('\na room\'s window that never hears the floor');
 // The floor's `end` is dropped on its way out, which is what a window
 // loaded before this build is: it knows no such message.
@@ -458,6 +542,11 @@ const deaf = (page, on) => page.evalJs(on
   : `(() => { if (window.__realPost) BroadcastChannel.prototype.postMessage = window.__realPost; return window.__dropped ?? 0; })()`);
 await deaf(floor, true);
 await watchBoxes(floor);
+// Polls held from here to the box going, and a poll already on its way
+// let land first: the box must go on the window's word (the rejoin timer),
+// not on the next poll (PR #56 Info 5).
+await holdPolls(floor, true);
+await sleep(2300);
 const t0 = Date.now();
 await floor.press(`svg.room .meetBox[data-meeting="${A.id}"] .meetEnd`);
 await sleep(500);
@@ -465,8 +554,13 @@ r = await read(floor);
 a = boxOf(roomOf(r), A.id);
 ok(!!a && a.end.text === 'Ending…' && a.end.disabled === 'true' && (await openWindows()).includes(urlR), 'half a second after the press the placard reads "Ending…", and the window, which heard nothing, is still open', JSON.stringify(a?.end));
 ok(await gone(urlR, 6000), 'the floor then closes that window itself, by the handle it holds: nothing is left for the operator to do', JSON.stringify(await openWindows()));
-await waited(floor, `!document.querySelector('svg.room[data-channel="lab"] .meetBox')`, 'and the box goes when the closed window lets its desks go');
+// Inside five seconds of the press: End's own "Ending…" timer redraws the
+// rooms at six, which took the box away with the rejoin's redraw removed.
+await waited(floor, `!document.querySelector('svg.room[data-channel="lab"] .meetBox')`, 'and the box goes when the closed window lets its desks go, with no poll answered meanwhile, before End\'s own redraw at six seconds',
+  { timeout: Math.max(500, 5000 - (Date.now() - t0)) });
 const took = Date.now() - t0;
+const heldAsked = await holdPolls(floor, false);
+ok(heldAsked >= 1, `the fixture held: the floor asked for its payload while held (${heldAsked}), and had no answer until the box had gone`);
 ok(took < 8000, `inside eight seconds of the press (${took} ms)`);
 const dropped = await deaf(floor, false);
 ok(dropped === 1, 'the fixture held: exactly one `end` was sent, and dropped', `dropped ${dropped}`);
@@ -484,6 +578,9 @@ ok(['bo', 'cy'].every((n) => inside(deskOf(roomOf(r2), n).hit, d2.frame)) && d2.
 await floor2.evalJs(`(() => { window.__click = null; document.addEventListener('click', (e) => { window.__click = { x: e.screenX, y: e.screenY, trusted: e.isTrusted }; }, true); return true; })()`);
 const smallD = await D.m.windowBounds({ left: 12, top: 8, width: 420, height: 330, windowState: 'normal' });
 await watchCalls(D.m);
+// A desktop of one screen (PR #56 Info 3): the tab with no handle cannot
+// read where the window is, so it would ask on every click but for this.
+await leave(floor2, null);
 await floor2.press(`svg.room .meetBox[data-meeting="${D.id}"] .meetLabel`);
 await sleep(500);
 click = await lastClick(floor2);
@@ -492,6 +589,7 @@ did = await calls(D.m);
 ok(JSON.stringify(did) === JSON.stringify([['moveTo', want.left, want.top], ['focus']]), '"In a meeting" pressed on a tab that holds no window asks the room\'s window to take itself to the pointer, and it does', JSON.stringify({ want, did }));
 now = await D.m.windowBounds();
 ok(now.left === want.left && now.top === want.top, 'the browser has it there', JSON.stringify(now));
+ok(await floor2.evalJs('window.__asked') === 0, 'and on a desktop of one screen the browser is not asked for its leave to place windows', `asked ${await floor2.evalJs('window.__asked')}`);
 await deaf(floor2, true);
 await floor2.press(`svg.room .meetBox[data-meeting="${D.id}"] .meetEnd`);
 await sleep(600);
@@ -509,6 +607,28 @@ ok(await gone(D.url), 'the window closed');
 console.log('\na room\'s window reloaded, and the room\'s own End meeting');
 const E = await meet(floor, ['dee', 'ed']);
 await watchBoxes(floor);
+// The rooms are drawn inside the reload's gap, between the window going
+// and its coming back (PR #56 Info 2): selection on and off, as the
+// window's first going is heard. Waiting for a poll to land there saw the
+// fault only by chance.
+await floor.evalJs(`(() => {
+  window.__gap = { gone: null, drawn: null, here: null };
+  window.__gapCh?.close();
+  const ch = window.__gapCh = new BroadcastChannel('orch.popouts');
+  const sel = () => document.querySelector('svg.room[data-channel="lab"] [data-act="select-room"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  ch.onmessage = (e) => {
+    const m = e.data ?? {};
+    if (m.t === 'gone' && m.rejoin && window.__gap.here == null) {
+      window.__gap.gone ??= performance.now();
+      // In the handler, not on a timer: a timer here fired 400 ms late,
+      // after the window was back. The floor's own channel was made first,
+      // so its handler has already taken this message. After every desk's
+      // going, not the first only: with one desk still in, the box stood
+      // around it, and the mutant's log read one box throughout.
+      sel(); sel(); window.__gap.drawn = performance.now(); window.__gap.n = (window.__gap.n ?? 0) + 1;
+    } else if (m.t === 'here' && window.__gap.gone != null && window.__gap.here == null) window.__gap.here = performance.now();
+  };
+  return true; })()`);
 await E.m.evalJs('location.reload(); 1');
 await sleep(600);
 await E.m.waitFor(`document.querySelectorAll('.m-part').length === 2`, { timeout: 15000 });
@@ -516,6 +636,8 @@ await sleep(2200);
 log = await boxLog(floor);
 ok(log.length >= 1 && log.every((s) => s.length === 1 && s[0][0] === String(E.id)), 'through a reload of the room\'s window the box stays where it is: the desks do not jump out and back', JSON.stringify(log));
 ok(await floor2.evalJs(`!!document.querySelector('svg.room[data-channel="lab"] .meetBox[data-meeting="${E.id}"]')`), 'on the other tab as well');
+const gap = JSON.parse(await floor.evalJs('(() => { window.__gapCh?.close(); return JSON.stringify(window.__gap); })()'));
+ok(gap.n === 2 && gap.drawn != null && gap.here != null && gap.drawn < gap.here && !(await read(floor)).rooms.some((x) => x.selecting), 'the fixture held: the floor drew its rooms after each desk\'s going and before the window came back, and is not left selecting', JSON.stringify(gap));
 await E.m.click('[data-act="m-end"]');
 await waited(floor, `!document.querySelector('svg.room[data-channel="lab"] .meetBox')`, 'End meeting in the room\'s own window takes the box off the floor');
 r = await read(floor);

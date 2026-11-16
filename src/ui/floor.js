@@ -568,6 +568,7 @@
   function detailsHtml(d, channel) {
     const b = d.board;
     const bits = [];
+    const hideWhy = hideRefusal(d, !!meetBoxOf(channel, d.agent));
     const row = (k, v, cls = '') =>
       bits.push(`<div class="dp-row"><span class="dp-k">${esc(k)}</span><span class="dp-v ${cls}">${v}</span></div>`);
 
@@ -633,9 +634,13 @@
       // Put this desk away (#20, Decided 2): under "Open conversation", for
       // any desk this card is open on. It becomes a pill under the storey,
       // and stays one until that pill is clicked, whatever the agent does.
+      // Not while the desk is in a meeting: it stands in its box then
+      // (hideRefusal), and the reason is under the button, as Move's is.
       `<button type="button" class="dp-open dp-hide" data-act="hide-desk"` +
       ` data-channel="${esc(channel)}" data-agent="${esc(d.agent)}"` +
-      ` title="Put this desk away: a pill under the storey, shared with everyone looking at this board; the agent keeps working and still counts. Click the pill to bring it back.">Hide desk</button></div>`;
+      (hideWhy ? ' disabled' : '') +
+      ` title="${esc(hideWhy ?? 'Put this desk away: a pill under the storey, shared with everyone looking at this board; the agent keeps working and still counts. Click the pill to bring it back.')}">Hide desk</button>` +
+      (hideWhy ? `<p class="dp-move-why dp-hide-why">${esc(hideWhy)}</p>` : '') + '</div>';
   }
 
   /** Draw, move or remove the popover to match `ui.details`. */
@@ -651,7 +656,7 @@
     // is no longer on the floor.
     // A popout draws its desk whatever the floor does with it — hidden (#20)
     // changes what the floor draws, not the popout (issue #19).
-    if (!d || !c || (!ui.popout && !deskRows(c).drawn.includes(d))) { ui.details = null; pop?.remove(); return; }
+    if (!d || !c || (!ui.popout && !floorRows(c).drawn.includes(d))) { ui.details = null; pop?.remove(); return; }
 
     if (!pop) {
       pop = document.createElement('div');
@@ -2510,14 +2515,38 @@
    * has no desk pills either. The page never asks for one (`onFloor` keeps
    * archived channels out of `room`), and this says so too rather than
    * leaving the rule to the caller.
+   *
+   * A desk in a meeting stands in its box, hidden or empty (`boxed`, which
+   * the page answers from the rooms' windows: floorRows). The box says who
+   * is in the room's window, so it holds every desk the window holds; with
+   * hide applied inside it, a hidden participant left the box's sentences,
+   * and a meeting whose every desk was hidden had no box, no In a meeting
+   * and no End on the floor while its window held them all (QA, PR #56
+   * finding 1). The flag is kept: a hidden desk is a pill again when the
+   * meeting ends. Hide is refused on a boxed desk, on its card and in
+   * bulk, for the same reason (hideRefusal).
    */
-  function deskRows(c) {
+  function deskRows(c, boxed = () => false) {
     if (c.archived) return { drawn: [], pills: [] };
     const desks = c.desks ?? [];
     return {
-      drawn: desks.filter((d) => !d.hidden && !deskEmpty(d)),
-      pills: desks.filter((d) => d.hidden),
+      drawn: desks.filter((d) => boxed(d) || (!d.hidden && !deskEmpty(d))),
+      pills: desks.filter((d) => d.hidden && !boxed(d)),
     };
+  }
+
+  /**
+   * Why a desk cannot be hidden right now, or null when it can: it is in a
+   * meeting, and a desk in a meeting stands in its box (deskRows). Pressed
+   * anyway, the flag would be written and nothing would change on the
+   * floor until the meeting ended, which reads as a button that did
+   * nothing. A desk hidden before it joined (Add, Resume) says so too.
+   */
+  function hideRefusal(d, inMeeting) {
+    if (!inMeeting) return null;
+    return d?.hidden
+      ? 'In a meeting: it stands in the meeting’s box while the meeting lasts, and is its pill again when the meeting ends.'
+      : 'In a meeting: it stands in the meeting’s box while the meeting lasts. Hide it once the meeting has ended.';
   }
 
   /**
@@ -3032,9 +3061,12 @@
   /** The meeting a desk is boxed under on the floor, or null: read off what its room's window said. */
   const meetBoxOf = (channel, agent) => (isOut(channel, agent) ? meetBoxKey(ui.outs.get(outKey(channel, agent))) : null);
 
+  /** A storey's desks as the page draws them: deskRows, with a desk in a meeting standing in its box. */
+  const floorRows = (c) => deskRows(c, (d) => !!meetBoxOf(c.channel, d.agent));
+
   /** How a storey is laid out right now: its drawn desks, its hidden desks' tray, and the plan for both. */
   function planFor(c, collapsed) {
-    const { drawn, pills } = deskRows(c);
+    const { drawn, pills } = floorRows(c);
     const tray = deskPillTray(pills);
     const plan = floorPlan(drawn, (d) => meetBoxOf(c.channel, d.agent), { collapsed, pillLines: tray.lines, band: roomBand(c.channel) });
     return { drawn, tray, plan };
@@ -6679,6 +6711,14 @@
    * `floorAdopt`), and a closed window ends its meeting as it always has.
    * With neither, the placard is a button again after MEET_END_MS and the
    * box still stands, which is the truth: the meeting is still on.
+   *
+   * Only a window that was asked is closed: the handles held at the press,
+   * and only while one still holds a desk of this room. A room is known by
+   * its number, and Resume reuses the number, so a room ended from the
+   * floor and resumed inside MEET_END_CLOSE_MS stood under the same key
+   * when the timer read it, and the floor closed the resumed room's new
+   * window. Seen on check-meeting-box's own fixture, where Resume landed
+   * 0.6 s after the End (PR #56, found writing finding 1's rows).
    */
   function endMeetingHere(channel, id) {
     const key = String(id);
@@ -6687,9 +6727,10 @@
     say({ t: 'end', channel, meeting: id });
     render();
     const still = () => [...ui.outs].filter(([k, o]) => String(o.meeting) === key && k.startsWith(`${channel}|`) && outsNow(new Map([[k, o]]), Date.now()).size).map(([k]) => k);
+    const asked = new Set(still().map((k) => ui.popWins.get(k)).filter((w) => w && !w.closed));
     setTimeout(() => {
-      const wins = new Set(still().map((k) => ui.popWins.get(k)).filter((w) => w && !w.closed));
-      for (const w of wins) { try { w.close(); } catch { /* not ours to close */ } }
+      const holding = new Set(still().map((k) => ui.popWins.get(k)));
+      for (const w of asked) if (!w.closed && holding.has(w)) { try { w.close(); } catch { /* not ours to close */ } }
     }, MEET_END_CLOSE_MS);
     setTimeout(() => {
       if (!meetEndingNow(key)) ui.meetEnding.delete(key);
@@ -6913,7 +6954,7 @@
     // check-meeting-box.mjs, a Resume four seconds after an End).
     const boxed = new Set([...outNow].map((k) => meetBoxKey(ui.outs.get(k))).filter(Boolean));
     for (const k of [...ui.meetEnding.keys()]) if (!boxed.has(k)) ui.meetEnding.delete(k);
-    const meets = shown.map((c) => deskRows(c).drawn.map((d) => meetBoxOf(c.channel, d.agent)).filter(Boolean)
+    const meets = shown.map((c) => floorRows(c).drawn.map((d) => meetBoxOf(c.channel, d.agent)).filter(Boolean)
       .map((k) => [k, meetEndingNow(/^\d+$/.test(k) ? k : null)]));
     const sig = JSON.stringify([ui.floorFilter, shown, sel, meets]);
     if (sig !== ui.roomsSig) {
@@ -7181,6 +7222,7 @@
       // should read as having worked.
       const hideBtn = e.target.closest?.('[data-act="hide-desk"]');
       if (hideBtn && ui.on) {
+        if (hideBtn.disabled) return;
         ui.details = null;
         renderDetails();
         setDeskHidden(hideBtn.dataset.channel, hideBtn.dataset.agent, true);
@@ -7212,7 +7254,7 @@
       const c = floor.channels.find((x) => x.channel === svg.dataset.channel);
       const ch = svg.dataset.channel;
       ui.scroll[ch] = (ui.scroll[ch] ?? 0) + (scroller.classList.contains('left') ? -1 : 1);
-      applyScroll(svg, c ? deskRows(c).drawn.length : 0);
+      applyScroll(svg, c ? floorRows(c).drawn.length : 0);
       return;
     }
 
@@ -7689,7 +7731,7 @@
   const roomOf = (channel) => floor.channels.find((x) => x.channel === channel) ?? null;
   const checkedHere = (channel) => {
     const c = roomOf(channel);
-    return c ? checkedDesks(deskRows(c).drawn, ui.select.get(channel)) : [];
+    return c ? checkedDesks(floorRows(c).drawn, ui.select.get(channel)) : [];
   };
   const post = async (path, body) => {
     const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -7763,7 +7805,7 @@
     const set = ui.select.get(channel);
     const c = roomOf(channel);
     if (!set || !c) return;
-    const drawn = deskRows(c).drawn;
+    const drawn = floorRows(c).drawn;
     if (drawn.length && drawn.every((d) => set.has(d.agent))) set.clear();
     else for (const d of drawn) set.add(d.agent);
     render();
@@ -7856,6 +7898,10 @@
       b.hide = rec;
       render();
       for (const e of rec.entries) {
+        // A desk in a meeting is not hidden, as its card's Hide desk is not
+        // (hideRefusal): it is said on the room's line, with nothing sent.
+        const why = hideRefusal(desks.find((d) => d.agent === e.agent), !!meetBoxOf(channel, e.agent));
+        if (why) { e.state = 'failed'; e.words = why; continue; }
         try {
           await post('./api/admin/desk/hide', { channel, agent: e.agent });
           e.state = 'done';

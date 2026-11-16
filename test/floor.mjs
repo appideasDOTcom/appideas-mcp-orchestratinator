@@ -2669,10 +2669,10 @@ try {
       const b = src.indexOf('  /* ---------- a desk\'s place on the floor: the drawing ---------- */');
       if (a < 0 || b < 0 || b < a) throw new Error('the desk-place section was not found in src/ui/floor.js between its two section comments');
       const tmp = `./data/desk-place-${process.pid}.mjs`;
-      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords };\n`);
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords, hideRefusal };\n`);
       try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     })();
-    const { deskEmpty, deskRows, moveBlockedWords } = lifted;
+    const { deskEmpty, deskRows, moveBlockedWords, hideRefusal } = lifted;
     // The card's Move to another floor (#18), drawn disabled with Take a
     // desk's no_host words while no live host runs the desk — the page's
     // copy of the sentence held to the server's.
@@ -2808,6 +2808,30 @@ try {
     eq(deskRows(channelOf(fl, CHW)), { drawn: [], pills: [] }, 'and the storey draws nothing — no desks, and no pills either');
     eq(await admin('channel/unarchive', { channel: CHW }), 200, 'restored');
     eq(deskRows(channelOf(await floor(), CHW)).pills.length, 2, 'and the pills are back under it, both still hidden');
+
+    // A desk in a meeting stands in its box, hidden or empty (QA, PR #56
+    // finding 1): the box says who is in the room's window. `boxed` is the
+    // page's reading of the rooms' windows; here it names the desks.
+    {
+      fl = await floor();
+      const c = channelOf(fl);
+      const inMeeting = (names) => (x) => names.includes(x.agent);
+      const empty = c.desks.find((x) => !x.hidden && deskEmpty(x))?.agent;
+      eq([d('waiter').hidden, d('boardonly').hidden, deskEmpty(d('boardonly')), !!empty], [true, true, true, true],
+        'the fixture: waiter hidden, boardonly hidden and empty, and an empty desk nobody hid');
+      assert(!deskRows(c).drawn.some((x) => x.agent === empty), 'which in no meeting is not drawn');
+      const met = deskRows(c, inMeeting(['waiter', 'boardonly', empty]));
+      eq(['waiter', 'boardonly', empty].map((a) => met.drawn.some((x) => x.agent === a)), [true, true, true],
+        'in a meeting, each is drawn: the hidden one, the hidden and empty one, and the empty one');
+      eq(met.pills.map((x) => x.agent), [], 'and none of them is a pill while it stands in the box');
+      const after = deskRows(c, inMeeting([]));
+      eq(after, deskRows(c), 'when the meeting ends the storey is as it was without one');
+      eq(after.pills.map((x) => x.agent).sort(), ['boardonly', 'waiter'], 'the two hidden desks back as pills: the flag was kept all along');
+      eq(deskRows({ ...c, archived: true }, inMeeting(['waiter'])), { drawn: [], pills: [] }, 'archive still wins: a put-away floor draws nobody, in a meeting or not');
+      eq(hideRefusal(d(empty), false), null, 'a desk in no meeting can be hidden');
+      assert(/^In a meeting: .*Hide it once the meeting has ended\.$/.test(hideRefusal(d(empty), true) ?? ''), 'one in a meeting cannot, and its card says why', hideRefusal(d(empty), true));
+      assert(/^In a meeting: .*its pill again when the meeting ends\.$/.test(hideRefusal(d('waiter'), true) ?? ''), 'and one hidden before it joined is told it goes back to its pill', hideRefusal(d('waiter'), true));
+    }
 
     // Restore is the pill, and only the pill.
     eq(await admin('desk/show', { channel: CH, agent: 'waiter' }), 200, 'the pill is clicked');

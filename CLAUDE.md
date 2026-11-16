@@ -1416,6 +1416,31 @@ re-propose the stacked building or a confirmation. Six things behind it:
   the room's number, and a box that came back four seconds after its End
   still read "Ending…" and could not be pressed (the page check's first
   run). `render()` drops the state for any room with no desk out.
+- **End's 1.5 s close closes only the windows it asked.** The timer used
+  to look up whatever window held the room's number when it fired, and
+  Resume reuses the number: a room ended from the floor and resumed inside
+  the 1.5 s had its new window closed by the old End. Not reported by
+  anyone. It was found while writing PR #56 finding 1's rows, which ran 0.6 s
+  after a Resume on the check's own fixture. `endMeetingHere` now keeps the
+  handles it held at the press, and the check has a row for a room resumed
+  inside the timer.
+- **A desk in a meeting stands in its box, hidden or empty** (QA, PR #56
+  finding 1; the developer's pick of QA's three, open to costmo's
+  reversal). The box says who is in the room's window. With hide applied
+  inside it, a hidden participant left the box and its sentences ("Bo and
+  Dee are in a meeting room" with Cy in the room), and a meeting whose
+  every desk was hidden had no box, no In a meeting and no End on the
+  floor, while its window held three. `deskRows(c, boxed)` draws a boxed
+  desk whatever its flag, and makes no pill of it. `floorRows` is the
+  page's reading, and every caller that means "what the floor draws" uses
+  it. The flag is kept, so the desk is a pill again when the meeting ends.
+  Hide is refused while a desk is boxed, said under the card's dimmed
+  button and on the room's line for a bulk Hide (`hideRefusal`): pressed,
+  it would write a flag that changes nothing until the meeting ends, a
+  button that seems to do nothing. The other two picks, counting a hidden
+  participant in the box's words only and leaving it as a pill, were not
+  chosen. The first leaves the all-hidden meeting with no box to put the
+  words on, and the second is a pill outside the box that speaks for it.
 
 **"In a meeting" is a button too: a click brings that room's window to the
 pointer** (costmo, the same day: three monitors, a dozen windows, rooms
@@ -1458,15 +1483,15 @@ He reported only the monitor case after trying it, so the minimized path
 is as built; nothing was said either way about a minimized window.
 
 Riding along: a desk's open nameplate card now follows the desk when the
-rooms are redrawn, since desks move with nothing clicked. Two things not
-built, both deliberate for now: a box for a meeting whose every desk is
-hidden or empty is not drawn (nothing to put in it; its window still has
-End), and the board view shows nothing of a meeting. `check-meeting-box.mjs`
-in **verify-ui-change** is the page; twenty-five page mutants are written
-for it and four were run, each red where predicted, before costmo asked
-for long runs to wait for the hand-off or release (2026-11-16). The other
-twenty-one are untested claims until then; the list and the command are
-kept beside the check (`mutants-meeting-box.page.json`).
+rooms are redrawn, since desks move with nothing clicked. One thing not
+built, deliberate for now: the board view shows nothing of a meeting.
+(A box for a meeting whose every desk was hidden or empty was the other,
+and PR #56 finding 1 showed it was a meeting with no trace on the floor;
+see the bullet above.) `check-meeting-box.mjs` in **verify-ui-change** is
+the page. QA ran its twenty-five page mutants in PR #56's review: 23 red,
+and the two greens were rows that saw their fault only by chance (a redraw
+inside a reload's gap; the one-screen guard), both pinned since. The list
+and the command are kept beside the check (`mutants-meeting-box.page.json`).
 
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,

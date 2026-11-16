@@ -336,6 +336,25 @@ async function connect(target) {
       return { from: a, to: end, during, moved: { x: end.x - b.x, y: end.y - b.y } };
     },
     /**
+     * The pointer moved onto `to` (a selector's centre, or `{ x, y }`) with
+     * no button down: real input, so `:hover` is what a person gets, and
+     * nothing is pressed. For a control whose press does something to read
+     * apart from its hover (PR #56 Info 4: "In a meeting" raises a window).
+     * `held` runs with the pointer there and its answer is returned.
+     */
+    hover: async (to, { held } = {}) => {
+      const p = typeof to === 'string'
+        ? JSON.parse(await evalJs(`(() => {
+            const el = document.querySelector(${JSON.stringify(to)});
+            if (!el) throw new Error('no element for ' + ${JSON.stringify(to)});
+            const r = el.getBoundingClientRect();
+            return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+          })()`))
+        : to;
+      await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'none', buttons: 0 });
+      return held ? held() : undefined;
+    },
+    /**
      * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').
      *
      * `shift` holds Shift for it. `text` is what the key types if nothing

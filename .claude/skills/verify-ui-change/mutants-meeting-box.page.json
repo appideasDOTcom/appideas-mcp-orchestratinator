@@ -26,7 +26,7 @@
  [
   "the floor does not close a window that did not hear it",
   "src/ui/floor.js",
-  "for (const w of wins) { try { w.close(); } catch { /* not ours to close */ } }",
+  "for (const w of asked) if (!w.closed && holding.has(w)) { try { w.close(); } catch { /* not ours to close */ } }",
   ""
  ],
  [
@@ -148,5 +148,53 @@
   "src/ui/floor.js",
   "if (!scr.isExtended || typeof window.getScreenDetails !== 'function') return Promise.resolve(false);",
   "if (typeof window.getScreenDetails !== 'function') return Promise.resolve(false);"
+ ],
+ [
+  "PR #56 F1: a hidden desk in a meeting leaves its box (the box reads the floor's drawn desks alone)",
+  "src/ui/floor.js",
+  "drawn: desks.filter((d) => boxed(d) || (!d.hidden && !deskEmpty(d))),",
+  "drawn: desks.filter((d) => !d.hidden && !deskEmpty(d)),"
+ ],
+ [
+  "PR #56 F1: the card offers Hide desk on a desk in a meeting",
+  "src/ui/floor.js",
+  "const hideWhy = hideRefusal(d, !!meetBoxOf(channel, d.agent));",
+  "const hideWhy = null;"
+ ],
+ [
+  "PR #56 F1: bulk Hide hides a desk in a meeting",
+  "src/ui/floor.js",
+  "if (why) { e.state = 'failed'; e.words = why; continue; }",
+  ""
+ ],
+ [
+  "PR #56: End's close timer closes whatever window holds the room's number when it fires (a resumed room's)",
+  "src/ui/floor.js",
+  "for (const w of asked) if (!w.closed && holding.has(w)) { try { w.close(); } catch { /* not ours to close */ } }",
+  "for (const w of new Set(still().map((k) => ui.popWins.get(k)).filter((w) => w && !w.closed))) { try { w.close(); } catch { /* not ours to close */ } }"
+ ],
+ [
+  "PR #56 Info 2 (QA's): a reloading room's desks are out of their meeting for the reload",
+  "src/ui/floor.js",
+  "ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: o.meeting ?? null });",
+  "ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: null });"
+ ],
+ [
+  "PR #56 Info 3 (QA's): the leave is asked on a desktop of one screen",
+  "src/ui/floor.js",
+  "if (!scr.isExtended || typeof window.getScreenDetails !== 'function') return Promise.resolve(false);",
+  "if (typeof window.getScreenDetails !== 'function') return Promise.resolve(false);"
+ ],
+ [
+  "PR #56 Info 4 (QA's QP3): the storey lights under In a meeting",
+  "src/ui/styles.css",
+  ".rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomFloor",
+  ".rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover)) .roomFloor"
+ ],
+ [
+  "PR #56 Info 5 (QA's QP4): a desk whose room's window closed leaves its box only at the next poll",
+  "src/ui/floor.js",
+  "setTimeout(() => { if (!isOut(msg.channel, msg.agent)) render(); }, REJOIN_MS + 50);",
+  "setTimeout(() => { if (!isOut(msg.channel, msg.agent)) renderPanel(); }, REJOIN_MS + 50);"
  ]
 ]

@@ -249,7 +249,9 @@ together on the floor in a box of their own, labelled **In a meeting**,
 with an **End meeting** button on the box's corner that does what the
 window's does. A click on **In a meeting** brings that room's window to
 the front, where your pointer is. On one floor the boxes are at the top, one per meeting; in
-the building they are part of the storey's row. Ended rooms are drawn nowhere and counted
+the building they are part of the storey's row. Every desk in the meeting stands in its box,
+hidden or not, and **Hide desk** waits until the meeting ends; a desk hidden before it joined
+is its pill again then. Ended rooms are drawn nowhere and counted
 nowhere: **Meeting rooms** in the floor's header lists the last twenty,
 newest first, and **Resume** opens one again with each desk back on the
 conversation it had — or says, desk by desk, why not (it left, it moved

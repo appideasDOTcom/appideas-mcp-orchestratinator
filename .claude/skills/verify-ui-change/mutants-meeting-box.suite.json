@@ -117,5 +117,19 @@
   "src/ui/floor.js",
   "return cx < area.left || cx >= area.left + area.width || cy < area.top || cy >= area.top + area.height;",
   "return cx + win.width / 2 < area.left || cx - win.width / 2 >= area.left + area.width || cy < area.top || cy >= area.top + area.height;"
+ ],
+ [
+  "PR #56 F1: deskRows ignores the meeting: a hidden desk in one is a pill",
+  "floor",
+  "src/ui/floor.js",
+  "drawn: desks.filter((d) => boxed(d) || (!d.hidden && !deskEmpty(d))),\n      pills: desks.filter((d) => d.hidden && !boxed(d)),",
+  "drawn: desks.filter((d) => !d.hidden && !deskEmpty(d)),\n      pills: desks.filter((d) => d.hidden),"
+ ],
+ [
+  "PR #56 F1: hideRefusal lets a desk in a meeting be hidden",
+  "floor",
+  "src/ui/floor.js",
+  "    if (!inMeeting) return null;\n    return d?.hidden",
+  "    if (true) return null;\n    return d?.hidden"
  ]
 ]

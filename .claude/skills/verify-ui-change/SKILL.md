@@ -460,26 +460,28 @@ it taught:
   whether or not a clip path cuts it. The storey's clip is widened for a
   box, and the row for it asks what is under a point on the box's edge.
 
-Mutants: thirteen suite mutants (`test:floor`, "a meeting on the floor"),
-all red, one only after a missing assertion was added. Of seventeen page
-mutants, four were run and were red where predicted (the batch's naming
-of the room, a `here` and a `gone` drawing the rooms, the window acting on
-`end`); the other thirteen were stopped unrun on 2026-11-16 and are not
-evidence yet: the handler ahead of the storey, Enter, the clip, the stale
-ending state, the signature, the draw order, the click's box, the reload,
-the card, "Ending…", the handle close, the edge's width and the hover
-rule. Eight more were written for the "In a meeting" click and not run
-either (its handler ahead of the storey, the second focus, the fit, the
-place sent by a tab with no handle, Enter, and three for the leave to
-cross screens: asked for a window on this screen, the move not made
-again, asked on a desktop of one screen). All twenty-one are owed before
-this ships, at the hand-off or the release run, not in a development turn
-(about 40 minutes). The three suite mutants for where a raised window goes
-were run, each red; the one for `meetingElsewhere` is written and owed.
+Mutants, as QA ran them in PR #56's review at `b8c0d73` (2026-11-16; the
+review is the record): the suite list, 17 of 17 red (fifteen of ours and
+two of QA's). The page list, 23 of 25 red. The two greens were rows that
+saw their fault only by chance, and each has a row of its own now: the
+reload row read a redraw only if a poll landed in the gap, and is now
+given one in the gap (Info 2); and no row reached the one-screen guard on
+the window-management question, which the tab with no handle now does
+(Info 3). QA's own page mutants QP3 (the storey lit under the label) and
+QP4 (the box leaving after its window closes only at the next poll) were
+green too. Both have rows now: the label is hovered, not pressed (`hover()`
+in drive.mjs), and the box must leave with the floor's poll held
+(`holdPolls`), inside five seconds of the press. A row that waited eight
+let the mutant through even with the poll held: End's own "Ending…" timer
+redraws the rooms at six seconds. And the reload's gap is drawn after
+*each* desk's going, not the first. With one desk still in, the box
+stood around it and the mutant's log read one box throughout. The fixes for the review, and one bug the new rows found
+(End's close timer closed a room resumed inside it), added eight page
+mutants and two suite mutants to the lists, marked `PR #56`.
 
 Both lists are kept beside the check, because a list in a scratchpad is
 gone with the session: [`mutants-meeting-box.page.json`](mutants-meeting-box.page.json)
-(all twenty-five; the first four are the ones already run) and
+(thirty-three; the last eight are PR #56's) and
 [`mutants-meeting-box.suite.json`](mutants-meeting-box.suite.json):
 
 ```bash
@@ -495,15 +497,25 @@ stale entry is re-pointed at the line's new wording, never counted as a
 survivor. Each entry's first field says what is wrong with the mutant,
 which is what to predict the red from.
 
-**Page checks not run in the 0.12.8 round, owed at its hand-off**
-(2026-11-16; costmo asked for only the covering checks per turn). Run in
-that round: check-meeting-box, check-meeting, check-select, check-pop-foot
-and check-take-floor. Not run, though the round touched what they read:
-check-popout (the popout's desk is drawn through the same `desk()`, whose
-arguments changed), check-hide, check-archive and check-card-move (rooms
-are laid out by `floorPlan` now), and check-redraw and check-backdrop
-(Take a desk's `takeListing` changed). Strike this paragraph when they
-have been run.
+**The 0.12.8 round's owed page checks were run at the hand-off** (QA,
+PR #56): check-popout PASS, check-backdrop 71 of 71, check-redraw 19 of 19
+and check-card-move PASS at the head. check-hide and check-archive drew the
+same at the head as at the base.
+
+**A desk in a meeting stands in its box, hidden or not** (PR #56 finding
+1). The step "a desk in a meeting stays in its box" covers it. A bulk Hide
+of a boxed desk is refused on the room's line, and the board is asked
+nothing. Cy, hidden on the board, keeps an open card with Hide dimmed and
+the reason under it, and stays in the box and its sentences. With all
+three hidden the box stands with In a meeting and End, and there are no
+pills. Shown again, Hide is still refused while the meeting lasts. The flag is read
+off the card's words, because a hidden desk in a box draws nothing else
+that a poll changes.
+
+**A timer in an unfocused tab can fire hundreds of milliseconds late.** In
+this check a 30 ms `setTimeout` in the floor tab, set from a BroadcastChannel
+handler, fired after 400 ms, after the room's window was back. A row that
+has to act inside a gap acts in the handler itself, not on a timer.
 
 ### check-take-floor.mjs — Take a desk keeps the floor it was opened from (0.12.8)
 
