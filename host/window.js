@@ -1775,6 +1775,27 @@ async function commandReceipt(cmd, { path, before, projectDir: dir, since, scree
 const TYPE_CHUNK = Number(process.env.ORCH_TYPE_CHUNK ?? 100);
 const TYPE_CHUNK_MS = Number(process.env.ORCH_TYPE_CHUNK_MS ?? 60);
 
+/**
+ * Whether a line typed into the composer has arrived, from the box before
+ * the line went in and the box now (both whitespace-free, as compact()
+ * gives them).
+ *
+ * - The box is what it was plus the line: arrived.
+ * - On the first line, the box is the line alone: arrived. What was there
+ *   was a prompt suggestion, which composerOf reads as text and the first
+ *   key typed replaces (issue #31's first live test).
+ * - A scrolled box shows only its end (scrolledOf), so the whole can never
+ *   be compared: arrived when the box changed and now ends with the line.
+ *   "Changed" is not decoration. A line that repeats the one before it (two
+ *   identical lines) is what the box already ends with before a key of it
+ *   lands (QA, PR #58 Info 4).
+ */
+export function lineArrived({ now, before, line, first = false, scrolled = false }) {
+  if (now === before + line) return true;
+  if (first && before && now === line) return true;
+  return !!(scrolled && now !== before && now.endsWith(line));
+}
+
 async function typeInto(target, text) {
   const lines = String(text).split('\n');
   const stop = Date.now() + PASTE_TIMEOUT_MS;
@@ -1787,28 +1808,17 @@ async function typeInto(target, text) {
         if (!typed.ok) return { ok: false, error: typed.error };
         if (at + TYPE_CHUNK < line.length) await sleep(TYPE_CHUNK_MS);
       }
-      const want = before + compact(line);
-      // On the first line, what was in the box may have been a prompt
-      // suggestion: the dim line Claude Code draws in an empty composer
-      // after a turn, which composerOf reads as text, and which the first
-      // key typed replaces. So the line alone is the box after it too.
-      // Without this, "suggestion + line" never appeared, the line read as
-      // lost, and the message was pasted after all, into <pasted_content>
-      // (issue #31's first live test, 2026-11-17, 2.1.326: reproduced on a
-      // probe, wrapped, 10.1 s). A draft a person really typed is not
+      // When the line counts as arrived is lineArrived's (above): a prompt
+      // suggestion the first key replaced (measured on 2.1.326: unhandled,
+      // the message was pasted after all, wrapped, 10.1 s), and a box
+      // scrolled past its start. A draft a person really typed is not
       // replaced by typing, so it still reads as before + line.
-      const alone = i === 0 && before ? compact(line) : null;
       const by = Date.now() + PASTE_CONFIRM_MS;
       let seen = !line;
       while (!seen && Date.now() < by) {
         await sleep(150);
         const screen = await screenOf(target);
-        const now = compact(composerOf(screen) ?? '');
-        if (now === want || now === alone) seen = true;
-        // A scrolled box shows only the end of what is in it (scrolledOf), so
-        // the whole can never be compared. The line has arrived when the box
-        // changed and now ends with it.
-        else if (scrolledOf(screen) && now !== before && now.endsWith(compact(line))) seen = true;
+        seen = lineArrived({ now: compact(composerOf(screen) ?? ''), before, line: compact(line), first: i === 0, scrolled: scrolledOf(screen) });
       }
       if (seen) break;
       if (attempt === 1 || Date.now() > stop) return { ok: false, code: 'typed_lost', error: `line ${i + 1} of ${lines.length} did not appear in the composer` };

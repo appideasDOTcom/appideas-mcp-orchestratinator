@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
+import http from 'node:http';
 import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
@@ -3463,6 +3464,20 @@ try {
 
     r = await up(new Uint8Array(UPLOAD_CAP + 1));
     eq([r.status, r.body.code], [413, 'too_large'], 'a file over the cap is refused on its declared length');
+    // Told apart from the streaming cap (QA, PR #58 Info 2): a request that
+    // declares more than the cap and then sends a body that never ends is
+    // answered by the declared-length refusal alone, while it is still
+    // sending. The streaming cap would wait for bytes past the cap that
+    // never come.
+    const declared = await new Promise((done) => {
+      const req = http.request(`${HOST}/api/floor/upload?name=never.bin`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'content-length': String(UPLOAD_CAP * 4) } }, (res) => {
+        let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { req.destroy(); done({ status: res.statusCode, code: (() => { try { return JSON.parse(b).code; } catch { return null; } })() }); });
+      });
+      req.on('error', () => {});
+      req.write(Buffer.alloc(16));
+      setTimeout(() => { req.destroy(); done({ status: 'no answer in 4 s', code: null }); }, 4000);
+    });
+    eq(declared, { status: 413, code: 'too_large' }, 'and refused on that length while its body is still coming, before a byte past the cap could be counted');
     const before = staged();
     const chunks = new ReadableStream({ start(c) { for (let i = 0; i < 5; i++) c.enqueue(new Uint8Array(UPLOAD_CAP / 2)); c.close(); } });
     r = await fetch(`${HOST}/api/floor/upload?name=big.bin`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: chunks, duplex: 'half' })
@@ -3537,7 +3552,7 @@ try {
     const b31 = src31.indexOf('  /* ---------- attachments: the drawing ---------- */');
     if (a31 < 0 || b31 < 0 || b31 < a31) throw new Error('the attachments section was not found in src/ui/floor.js between its two section comments');
     const tmp31 = `./data/attach-${process.pid}.mjs`;
-    writeFileSync(tmp31, `${src31.slice(a31, b31)}\nexport { ATTACHED_HEADER, ATTACH_MAX_BYTES, ATTACH_MAX_FILES, splitAttached, attachMatch, fileKind, sizeLabel, attachAdmit, pasteTakes, attachSendable, attachRefusal };\n`);
+    writeFileSync(tmp31, `${src31.slice(a31, b31)}\nexport { ATTACHED_HEADER, ATTACH_MAX_BYTES, ATTACH_MAX_FILES, splitAttached, attachMatch, fileKind, sizeLabel, attachAdmit, pasteTakes, attachSendable, attachRefusal, commandLike };\n`);
     let pg;
     try { pg = await import(new URL(tmp31, `file://${process.cwd()}/`)); } finally { rmSync(tmp31, { force: true }); }
     const hostUp = await import('../host/uploads.js');
@@ -3577,6 +3592,18 @@ try {
     eq([pg.attachSendable('hi', []), pg.attachSendable('', [chip('ready')]), pg.attachSendable('hi', [chip('uploading')]).why, pg.attachSendable('hi', [chip('failed')]).why, pg.attachSendable('/compact', [chip('ready')]).why, pg.attachSendable('  ', [])],
       [{ ok: true, ids: [] }, { ok: true, ids: ['x1'] }, 'still uploading', 'remove the file that failed', 'a command cannot carry files', { ok: false, why: null }],
       'Send takes words, files or both; waits for an upload; says what stops it');
+    // One rule on both sides (QA, PR #58 finding 1): the page reads a
+    // command as the board's commandOf does, so a message that opens with a
+    // path is not refused its files as a command.
+    const asCommand = ['/compact', '/model sonnet', '/Users/costmo/build.log keeps failing, see the shot', '/tmp/out.txt is empty after this run', '/review\nplease look at the attached screenshot', 'see /Users/costmo/build.log', '  /btw what is 6*7?  ', '/', '/9lives'];
+    eq(asCommand.map((t) => pg.commandLike(t)), asCommand.map((t) => !!commandOf(t)), 'the page reads a command exactly where the board does');
+    eq(asCommand.map((t) => pg.attachSendable(t, [chip('ready')]).why ?? 'sendable'),
+      ['a command cannot carry files', 'a command cannot carry files', 'sendable', 'sendable', 'sendable', 'sendable', 'a command cannot carry files', 'sendable', 'sendable'],
+      'so a message opening with a path, or a /word followed by more lines, carries its files');
+    // Info 7: more than twenty is said at Send, never cut away.
+    const many21 = Array.from({ length: 21 }, (_, i) => chip('ready', `f${i}`));
+    eq([pg.attachSendable('hi', many21).why, pg.attachSendable('hi', many21.slice(1)).ok], ['20 files a message: take 1 out', true],
+      'a box holding more than twenty says so at Send, and how many to take out');
     eq([pg.attachRefusal({ name: 'box', uploads: true }), pg.attachRefusal(null), /^old runs a build from before attachments/.test(pg.attachRefusal({ name: 'old', uploads: false }))],
       [null, null, true], 'the paperclip is dimmed, with why, for a desk whose host does not fetch files');
   }

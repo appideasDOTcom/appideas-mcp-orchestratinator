@@ -187,6 +187,17 @@ async function main() {
     assert(/2026-11-05 at 10\.10\.25\.png$/.test(W.composerOf(SCROLLED) ?? '') && /^\s*Attached by the operator:/.test((W.composerOf(SCROLLED) ?? '').trim()),
       'a scrolled composer reads as the rows it shows, not as no box');
     eq([W.scrolledOf(SCROLLED), W.scrolledOf(box('❯ hello'))], [true, false], 'and says it is scrolled, so a caller knows it holds only the end');
+    // When a typed line counts as arrived (lineArrived), on whitespace-free
+    // boxes as typeInto compares them.
+    const LA = W.lineArrived;
+    eq([LA({ now: 'ab', before: 'a', line: 'b' }), LA({ now: 'a', before: 'a', line: 'b' })], [true, false], 'the box as it was plus the line has it; the box as it was does not');
+    eq([LA({ now: 'hi', before: 'Describethescreenshot.', line: 'hi', first: true }), LA({ now: 'hi', before: 'draft', line: 'hi' })], [true, false],
+      'on the first line the line alone has it (a suggestion it replaced); on a later one it does not');
+    eq(LA({ now: 'rowsofthemessageb', before: 'oldtopofthemessagerowsofthemessage', line: 'b', scrolled: true }), true, 'a scrolled box that changed and ends with the line has it');
+    // QA, PR #58 Info 4: the same line twice. Before the second goes in, a
+    // scrolled box already ends with it; unchanged, it has not arrived.
+    eq([LA({ now: '-/a.png-/a.png', before: '-/a.png', line: '-/a.png', scrolled: true }), LA({ now: '-/a.png', before: '-/a.png', line: '-/a.png', scrolled: true })], [true, false],
+      'a line that repeats the one before it is not confirmed by the box that already ends with it, only once the box has changed');
     const echoAbove = ['❯ an earlier message, echoed in the transcript', '', '⏺ its answer', SCROLLED].join('\n');
     assert(!/an earlier message/.test(W.composerOf(echoAbove) ?? ''), 'an earlier message’s ❯ in the transcript above it is not read as the box’s start');
 

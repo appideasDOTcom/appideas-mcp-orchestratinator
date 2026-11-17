@@ -104,7 +104,9 @@ export async function fetchUpload({ url, token, hostId, file, dir = uploadsDir()
     try { utimesSync(home, now, now); } catch { /* still there; kept by its old time */ }
     return path;
   }
-  mkdirSync(home, { recursive: true });
+  // Named, as every other failure here is: the desk is told which file, and
+  // a bare "EEXIST: … mkdir '<path>'" named none.
+  try { mkdirSync(home, { recursive: true }); } catch (err) { throw new Error(`${name} could not be written on this machine (${err.code ?? err.message})`); }
   const part = `${path}.part`;
   let res;
   try {
@@ -126,6 +128,11 @@ export async function fetchUpload({ url, token, hostId, file, dir = uploadsDir()
     throw new Error(`${name} did not arrive whole (${err.message})`);
   }
   const want = Number(res.headers.get('content-length'));
+  // A second guard. Measured on Node 24 (QA, PR #58 Info 3): a body that
+  // ends short of its content-length makes fetch itself throw
+  // ("terminated"), whether the board closes or drops the socket, so the
+  // pipeline above fails first. Kept for a body whose length was not
+  // declared or that a proxy rewrote.
   const got = statSync(part).size;
   if (Number.isFinite(want) && got !== want) {
     rmSync(part, { force: true });

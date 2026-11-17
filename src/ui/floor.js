@@ -1348,6 +1348,21 @@
   }
 
   /**
+   * Whether the board will read this message as a slash command: the same
+   * rule as commandOf in src/floor.js (and host/window.js), a single line,
+   * `/name` and whatever follows. The page cannot import it, so this is a
+   * copy, and test:floor runs the two over the same messages. A looser rule
+   * here ("starts with / and a letter") refused files on a message that
+   * opens with a path, "/Users/me/build.log keeps failing", which the board
+   * takes, and said it was a command (QA, PR #58 finding 1).
+   */
+  function commandLike(text) {
+    const t = String(text ?? '').trim();
+    if (!t || t.includes('\n')) return false;
+    return /^\/([A-Za-z][\w:-]*)(?:\s+(.*))?$/.test(t);
+  }
+
+  /**
    * Can the box send what it holds, and if not, why: said on Send rather
    * than sent and refused. `chips` are the box's attachments, each
    * `{ state: 'uploading' | 'ready' | 'failed' }`.
@@ -1357,7 +1372,11 @@
     if (list.some((c) => c.state === 'uploading')) return { ok: false, why: 'still uploading' };
     if (list.some((c) => c.state === 'failed')) return { ok: false, why: 'remove the file that failed' };
     const ready = list.filter((c) => c.state === 'ready');
-    if (ready.length && /^\/[A-Za-z]/.test(String(text ?? '').trim())) return { ok: false, why: 'a command cannot carry files' };
+    if (ready.length && commandLike(text)) return { ok: false, why: 'a command cannot carry files' };
+    // More than twenty only when a failed send's files came back to a box
+    // that held new ones (giveChipsBack puts every one back): said here,
+    // where the operator chooses which to take out, never dropped.
+    if (ready.length > ATTACH_MAX_FILES) return { ok: false, why: `${ATTACH_MAX_FILES} files a message: take ${ready.length - ATTACH_MAX_FILES} out` };
     if (!String(text ?? '').trim() && !ready.length) return { ok: false, why: null };
     return { ok: true, ids: ready.map((c) => c.id) };
   }
@@ -1509,7 +1528,9 @@
       ...f, key: `a${++attachSeq}`, state: 'ready', error: null,
       url: f.kind === 'image' && f.file ? URL.createObjectURL(f.file) : null,
     }));
-    ui.attach.set(key, back.concat(attachList(key)).slice(0, ATTACH_MAX_FILES));
+    // Every one, past twenty included: attachSendable says so at Send
+    // (QA, PR #58 Info 7: a slice here dropped them without a word).
+    ui.attach.set(key, back.concat(attachList(key)));
     drawAttach();
   }
 

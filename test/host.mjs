@@ -20,11 +20,12 @@
 //   npm run test:host
 import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale } from '../host/dialog.js';
-import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads } from '../host/uploads.js';
+import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads, fetchUpload } from '../host/uploads.js';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -608,9 +609,13 @@ try {
   eq(failing.status, 200, 'the board takes a message whose file the host will fail to write');
   const failRows = await until(async () => {
     const rows = (await turns('free')).rows ?? [];
-    return rows.some((r) => r.role === 'error' && /^not sent — /.test(r.text ?? '')) ? rows : null;
+    return rows.some((r) => r.role === 'error' && /blocked\.txt.*; nothing was typed$/.test(r.text ?? '')) ? rows : null;
   }, 15000);
-  assert(!!failRows, `the desk is told it was not sent, in an error turn — ${failRows?.filter((r) => r.role === 'error').at(-1)?.text}`);
+  const failText = failRows?.filter((r) => r.role === 'error').at(-1)?.text ?? '';
+  assert(!!failRows, `the desk is told why, then that nothing was typed, in an error turn — ${failText}`);
+  // Not "not sent — …": a meeting room puts "not delivered — " before a
+  // desk's error, and the two read as one stutter (QA, PR #58 Info 6).
+  assert(!/^not (sent|delivered)\b/.test(failText), 'in words that read whole under a meeting room\'s own "not delivered — "');
   await sleep(500);
   assert(!clean(received()).slice(before31b).includes('about the blocked one'), 'and none of its words reach the window');
 
@@ -1855,6 +1860,36 @@ try {
     eq([existsSync(`${udir}/${old}`), existsSync(`${udir}/${fresh}`), existsSync(`${udir}/Not-an-upload`)], [false, true, true],
       'and leaves what is younger, and anything in the folder that is not an upload of its own');
     eq(withAttachments('', ['/u/a b.png']), `${ATTACHED_HEADER}\n- /u/a b.png`, 'a message of files alone is the list alone');
+
+    // QA, PR #58 Info 3: two of fetchUpload's claims, against a board of a
+    // few lines. A body that ends short of its length is never put where the
+    // agent is told to look. (Node's fetch throws on it before fetchUpload's
+    // own size check runs, measured: that check is a second guard, so this
+    // row is about the outcome, whichever guard takes it.) And a file sent
+    // again is kept from that send: its folder's time moves, so a sweep at
+    // the retention leaves it.
+    const fdir = `${FIX}/fetch-unit`;
+    let served = 0;
+    const tiny = http.createServer((req, res) => { served++; res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '5' }); res.end('hello'); });
+    await new Promise((r) => tiny.listen(0, '127.0.0.1', r));
+    const short = net.createServer((sock) => sock.once('data', () => sock.end('HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: 10\r\nconnection: close\r\n\r\nabcd')));
+    await new Promise((r) => short.listen(0, '127.0.0.1', r));
+    try {
+      const sid = 'shortaaaa1111';
+      const why = await fetchUpload({ url: `http://127.0.0.1:${short.address().port}`, token: KEY, hostId: 'h', file: { id: sid, name: 'cut.bin' }, dir: fdir }).then(() => null, (e) => e.message);
+      assert(/^cut\.bin did not arrive whole/.test(why ?? ''), `a file that arrives short is refused — ${why}`);
+      eq([existsSync(`${fdir}/${sid}/cut.bin`), existsSync(`${fdir}/${sid}/cut.bin.part`)], [false, false], 'and nothing of it is left where the agent would be told to look');
+      const rid = 'resendbbbb2222';
+      const url = `http://127.0.0.1:${tiny.address().port}`;
+      const first = await fetchUpload({ url, token: KEY, hostId: 'h', file: { id: rid, name: 'again.txt' }, dir: fdir });
+      const old = (Date.now() - 8 * 86400_000) / 1000;
+      utimesSync(`${fdir}/${rid}`, old, old);
+      const second = await fetchUpload({ url, token: KEY, hostId: 'h', file: { id: rid, name: 'again.txt' }, dir: fdir });
+      eq([first === second, served], [true, 1], 'a file sent again is the same file, not fetched twice');
+      eq([sweepUploads({ dir: fdir, days: 7 }), existsSync(second)], [0, true], 'and it is kept from that send: a sweep at the retention leaves it');
+    } finally {
+      tiny.close(); short.close();
+    }
   }
 
   console.log('\n  what the host log says');

@@ -1505,7 +1505,10 @@ class Host {
             for (const f of files) paths.push(await UP.fetchUpload({ url: this.cfg.url, token: this.cfg.token, hostId: this.cfg.hostId, file: f }));
           } catch (err) {
             warn(`${desk.label}: an attachment did not arrive — ${err.message}; the message was not sent`);
-            this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `not sent — ${err.message}` }, true);
+            // The why, then what became of the message. Not "not sent — …":
+            // a meeting room puts "not delivered — " before a desk's error, and
+            // the two read as "not delivered — not sent — …" (QA, PR #58 Info 6).
+            this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `${err.message}; nothing was typed` }, true);
             break;
           }
           text = UP.withAttachments(text, paths);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Attach files to a message on a seeded desk (seed-desk.mjs) and read what
- * the page drew at each step — issue #31, 0.13.0.
+ * the page drew at each step — issue #31, 0.12.10.
  *
  *   node --experimental-websocket .claude/skills/verify-ui-change/check-attach.mjs http://localhost:8905 [out-dir] [channel] [agent] [key] [seed-host-id] [db]
  *
