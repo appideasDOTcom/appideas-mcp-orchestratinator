@@ -5,5 +5,26 @@
   "host/window.js",
   "        if (now === want || now === alone) seen = true;",
   "        if (now === want) seen = true;"
+ ],
+ [
+  "composerOf does not read a scrolled box",
+  "window",
+  "host/window.js",
+  "  const scrolled = scrolledComposerOf(screen);\n  if (scrolled != null) return scrolled;\n",
+  ""
+ ],
+ [
+  "typeInto does not confirm a line in a scrolled box",
+  "window",
+  "host/window.js",
+  "        else if (scrolledOf(screen) && now !== before && now.endsWith(compact(line))) seen = true;\n",
+  ""
+ ],
+ [
+  "the finished message must read whole in a scrolled box",
+  "window",
+  "host/window.js",
+  "  const whole = final === compact(text) || (scrolledOf(finalScreen) && final.length > 0 && compact(text).endsWith(final));",
+  "  const whole = final === compact(text);"
  ]
 ]

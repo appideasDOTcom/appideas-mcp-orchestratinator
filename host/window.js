@@ -1168,6 +1168,8 @@ async function settled(target, { quiet = 2, tries = 20 } = {}) {
  * takes a paste.
  */
 export function composerOf(screen) {
+  const scrolled = scrolledComposerOf(screen);
+  if (scrolled != null) return scrolled;
   const lines = screen.split('\n');
   const rule = /^[\s│|]*[─━—-]{20,}/;
   let at = -1;
@@ -1201,6 +1203,38 @@ export function composerOf(screen) {
   // in the composer" about a message that had been queued and answered.
   return QUEUE_PLACEHOLDER.test(text) ? '' : text;
 }
+
+/**
+ * The composer when Claude Code has scrolled it: the visible rows of a box
+ * whose top border reads `─── ↑ 3 more ───`, or null for any other screen.
+ *
+ * The composer is at most so many rows tall (7 on an 80x24 pane, measured
+ * on 2.1.326, 2026-11-17), and a longer message scrolls inside it with that
+ * header in place of the top rule. Its `❯` row is then off the top, so
+ * composerOf found no box (null), or, with an earlier message's `❯` echoed
+ * in the transcript above, read from there down. That is how a five-line
+ * message with two attachments, typed into an unattached 80x24 window, read
+ * as "line 5 did not appear" and was pasted after all, into
+ * <pasted_content> (issue #31's second live test). What this returns is
+ * only the END of what is in the box; scrolledOf says when that is so.
+ */
+const MORE_HEADER = /^\s*[─━]{2,}\s*↑\s*\d+\s+more\b/;
+function scrolledComposerOf(screen) {
+  const lines = String(screen ?? '').split('\n');
+  const rule = /^[\s│|]*[─━—-]{20,}/;
+  let bottom = -1;
+  for (let n = lines.length - 1; n >= 0; n--) {
+    if (rule.test(lines[n]) && !MORE_HEADER.test(lines[n])) { bottom = n; break; }
+  }
+  if (bottom < 1) return null;
+  for (let n = bottom - 1; n >= 0; n--) {
+    if (MORE_HEADER.test(lines[n])) return lines.slice(n + 1, bottom).join('\n').replace(/\s+$/, '');
+    if (rule.test(lines[n]) || /^\s*[❯>]/.test(lines[n])) return null;
+  }
+  return null;
+}
+/** Whether the composer on this screen is scrolled, so composerOf gave only its end. */
+export const scrolledOf = (screen) => scrolledComposerOf(screen) != null;
 
 /** The composer's own prompt once something is queued behind a running turn. */
 const QUEUE_PLACEHOLDER = /press up to edit queued messages/i;
@@ -1768,8 +1802,13 @@ async function typeInto(target, text) {
       let seen = !line;
       while (!seen && Date.now() < by) {
         await sleep(150);
-        const now = compact(composerOf(await screenOf(target)) ?? '');
+        const screen = await screenOf(target);
+        const now = compact(composerOf(screen) ?? '');
         if (now === want || now === alone) seen = true;
+        // A scrolled box shows only the end of what is in it (scrolledOf), so
+        // the whole can never be compared. The line has arrived when the box
+        // changed and now ends with it.
+        else if (scrolledOf(screen) && now !== before && now.endsWith(compact(line))) seen = true;
       }
       if (seen) break;
       if (attempt === 1 || Date.now() > stop) return { ok: false, code: 'typed_lost', error: `line ${i + 1} of ${lines.length} did not appear in the composer` };
@@ -1782,8 +1821,12 @@ async function typeInto(target, text) {
       await sleep(120);
     }
   }
-  const final = compact(composerOf(await screenOf(target)) ?? '');
-  if (final !== compact(text)) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
+  const finalScreen = await screenOf(target);
+  const final = compact(composerOf(finalScreen) ?? '');
+  // Scrolled, the box holds the message's end: every line was confirmed as
+  // it went in, so what shows must be the end of the message.
+  const whole = final === compact(text) || (scrolledOf(finalScreen) && final.length > 0 && compact(text).endsWith(final));
+  if (!whole) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
   return { ok: true, typed: true };
 }
 

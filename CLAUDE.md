@@ -394,6 +394,20 @@ Three consequences worth knowing before touching `host/window.js`:
   such a window would accept it. Before chasing a phantom keystroke source,
   read the row with `capture-pane -e` and the cursor with `#{cursor_x}`.
 
+- **A composer taller than its box scrolls, and its `❯` row goes out of
+  sight.** Measured on 2.1.326, 2026-11-17, in an unattached 80x24 window:
+  at most 7 rows show, and the top rule becomes `─── ↑ 3 more ───`.
+  `composerOf` found a box by its `❯` row, so it read null there (or, with
+  an earlier message's `❯` echoed above, from that line down), and
+  `typeInto`, comparing the whole box with the whole text, read the last
+  line of a five-line message as lost and pasted it into
+  `<pasted_content>`. A message with attachments at 80 columns is that
+  tall. `composerOf` now reads a scrolled box by its header
+  (`scrolledComposerOf`), and `scrolledOf` says when what it gives is only
+  the end: a line is confirmed when the box changed and ends with it, and
+  the finished message when the box shows its end. Re-measured on the same
+  pane: the same message typed and recorded verbatim, 2 runs of 2.
+
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
 

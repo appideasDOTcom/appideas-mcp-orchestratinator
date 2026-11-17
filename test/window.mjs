@@ -165,6 +165,30 @@ async function main() {
     eq(W.composerOf(menu('New MCP server found in this project', '  \u276f 1. Use this MCP server', '    2. Continue without it')), null,
        'nor the MCP approval');
     eq(W.composerOf('nothing on screen at all'), null, 'and a screen with no box at all is null, so the caller falls back to it');
+    // A composer Claude Code has scrolled (2.1.326, an unattached 80x24
+    // pane, captured 2026-11-17): at most 7 rows, a `↑ N more` header for
+    // its top rule, its `❯` row out of sight. Read as null, typing a long
+    // message read as lost and it was pasted into <pasted_content>.
+    const R80 = '─'.repeat(80);
+    const SCROLLED = [
+      '✻ Baked for 10s · done 9:29 AM',
+      '                                                         ctrl+g to edit in Vim',
+      `─── ↑ 3 more ${'─'.repeat(67)}`,
+      '',
+      '  Attached from the floor:',
+      '  - /Users/costmo/.orchestratinator/uploads/159205afe5520f41b66cdd7b/Custom',
+      '  PCBs on a CNC Router _ 10 Steps (with Pictures) - Instructables.pdf',
+      '  -',
+      '  /Users/costmo/.orchestratinator/uploads/74e8831c119c531b140d8b93/Screenshot',
+      '  2026-11-05 at 10.10.25.png',
+      R80,
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n');
+    assert(/2026-11-05 at 10\.10\.25\.png$/.test(W.composerOf(SCROLLED) ?? '') && /^\s*Attached from the floor:/.test((W.composerOf(SCROLLED) ?? '').trim()),
+      'a scrolled composer reads as the rows it shows, not as no box');
+    eq([W.scrolledOf(SCROLLED), W.scrolledOf(box('❯ hello'))], [true, false], 'and says it is scrolled, so a caller knows it holds only the end');
+    const echoAbove = ['❯ an earlier message, echoed in the transcript', '', '⏺ its answer', SCROLLED].join('\n');
+    assert(!/an earlier message/.test(W.composerOf(echoAbove) ?? ''), 'an earlier message’s ❯ in the transcript above it is not read as the box’s start');
 
     // The words above the choices, from a single-select AskUserQuestion as
     // 2.1.258 draws it (captured on a probe window, 2026-09-11). The floor
@@ -1418,7 +1442,15 @@ async function main() {
       // in an empty composer after a turn, gone at the first key or paste
       // (CLAUDE.md, "a line in the composer that nobody typed").
       `    const ghost = !composer && fs.existsSync(${JSON.stringify(`${CP_DIR}/suggest.flag`)}) ? '\\x1b[2m' + fs.readFileSync(${JSON.stringify(`${CP_DIR}/suggest.flag`)}, 'utf8').trim() + '\\x1b[22m' : '';`,
-      `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + rule + '\\r\\n\\u276f ' + (ghost || lines[0]) + lines.slice(1).map((l) => '\\r\\n  ' + l).join('') + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
+      // scroll.flag (a number of rows): the composer as Claude Code draws
+      // one taller than it allows, scrolled, with a `↑ N more` header for its
+      // top rule and its `❯` row out of sight (2.1.326, 80x24, 7 rows).
+      `    const cap = fs.existsSync(${JSON.stringify(`${CP_DIR}/scroll.flag`)}) ? Number(fs.readFileSync(${JSON.stringify(`${CP_DIR}/scroll.flag`)}, 'utf8')) : 0;`,
+      // Rows, not lines: a line longer than the box wraps onto more rows, so
+      // typing one pushes rows off the top as it goes, as on the real pane.
+      `    const rows = lines.flatMap((l) => l.length ? l.match(/.{1,70}/g) : ['']);`,
+      `    const top = cap && rows.length > cap ? '\\u2500\\u2500\\u2500 \\u2191 ' + (rows.length - cap) + ' more ' + '\\u2500'.repeat(60) + '\\r\\n' + rows.slice(-cap).map((l) => '  ' + l).join('\\r\\n') : rule + '\\r\\n\\u276f ' + (ghost || lines[0]) + lines.slice(1).map((l) => '\\r\\n  ' + l).join('');`,
+      `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + top + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
       `  }`,
       `  process.stdout.write(out);`,
       `}`,
@@ -1538,6 +1570,24 @@ async function main() {
     assert(ghostSent.ok && ghostSent.confirmed, `a message typed over a prompt suggestion is delivered${ghostSent.ok ? '' : ` — ${ghostSent.error}`}`);
     eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, overGhost, 'as itself, the suggestion not in it');
     assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'and typed, not pasted after all: a suggestion is not text somebody left in the box');
+
+    // And into a composer Claude Code has scrolled (issue #31's second live
+    // test, 2026-11-17): a five-line message with two attachments, typed
+    // into an unattached 80x24 window, read "line 5 did not appear" because
+    // the box's `❯` row was out of sight, and was pasted after all.
+    writeFileSync(`${CP_DIR}/scroll.flag`, '3');
+    mark = cpKeyLog().length;
+    // The last line is longer than a row, so typing it scrolls a row of
+    // text off the top of the box while it goes in: the box can then never
+    // equal "before + line". (A blank row scrolled off would not show it:
+    // whitespace is not compared.)
+    const tall = 'look at both\n\nAttached from the floor:\n- /Users/x/.orchestratinator/uploads/def456def/b.png\n- /Users/x/.orchestratinator/uploads/abc123abc/Custom PCBs on a CNC Router _ 10 Steps (with Pictures) - Instructables.pdf';
+    const tallSent = await W.send(CP_DIR, tall);
+    const scrolledSeen = keysSince(mark).length > 0;
+    rmSync(`${CP_DIR}/scroll.flag`, { force: true });
+    assert(tallSent.ok && tallSent.confirmed, `a message taller than the composer is delivered${tallSent.ok ? '' : ` — ${tallSent.error}`}`);
+    eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, tall, 'as itself');
+    assert(scrolledSeen && !keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'and typed, not pasted after all: a scrolled box is read by its end');
 
     // /btw: the overlay is the receipt, the answer is read off it, and no
     // Enter is pressed while it stands — the host used to close it with one.
