@@ -1,8 +1,8 @@
 # Marketing facts
 
 What the landing page may say about the orchestratinator, checked against the
-code. Every fact names the file and line that holds it, at commit `9a344f5`
-(branch `feature/agent-multi-session`, PR #57, 2026-11-16; first written at `0ce4f1e`, 2026-10-17;
+code. Every fact names the file and line that holds it, at commit `c26d3db`
+(branch `feature/agent-multi-session`, PR #57, 2026-11-17; first written at `0ce4f1e`, 2026-10-17;
 re-anchored at `c6f9474` on 2026-11-02 — sixteen references had moved, none
 had changed — at `8f4a703` on 2026-11-03 — six moved and one was placed by
 hand, the hook door's host check, which now sits under the Decided 6 wake;
@@ -64,13 +64,17 @@ the same; the schema block, which grew by `desk_twins`; and the four
 when one of its lines repeats. Three facts changed in substance: the
 version, what the server stores (`desk_twins`), and one row added, an
 agent with several sessions. No network call was added: a second desk's
-binding file is written by the host on its own disk).
+binding file is written by the host on its own disk — and at `c26d3db`
+for the rounds after QA's close of PR #57, which changed `host/window.js`
+alone: eleven moved, none placed by hand. One fact gained a sentence, the
+host's: it types into, and closes, only the windows of its own tmux
+session, which it names exactly. The version is unchanged).
 Cite
 this file; do not restate a fact from memory or from the README. Where a
 claim did not hold, it is narrowed here or marked **not claimed**. Where the
 answer is not this repo's to give, it says whose it is.
 
-Line numbers are for `9a344f5`. A later commit may move them; the file names
+Line numbers are for `c26d3db`. A later commit may move them; the file names
 will not. `npm run reanchor-facts <old-sha> <new-sha> -- --write` moves every
 reference whose line is found once at the new commit and lists the rest.
 
@@ -114,7 +118,14 @@ windows in one tmux session, tails their transcripts to the server, and does
 what the floor asks: deliver a message, answer a prompt, stop a turn, open a
 window, open the editor or a terminal. It has no npm dependencies. It only
 ever reaches out; the server never connects to a workstation and nothing on
-the workstation listens.
+the workstation listens. The windows it reads, types into and closes are
+the ones in its own tmux session and no other: it asks tmux for that
+session by its exact name and lists that session's panes only
+(`host/window.js:130, 907`), so a terminal of the operator's own in a
+desk's folder, in another tmux session, is never taken for the desk's
+window. A Claude Code started by hand in another tmux session is not
+typed into from the floor; the desk reads as held outside it, as an
+editor's is.
 
 - Purpose and the reach-out rule: `host/index.js:1-36`.
 - Zero dependencies: `host/package.json` (`"dependencies": {}`),
@@ -122,9 +133,9 @@ the workstation listens.
 - Requirements enforced by the installer: `tmux` (`host/install.sh:32-41`),
   `node` and a `claude` on PATH (`host/install.sh:83-85`).
 - **OS: macOS.** The installer writes a LaunchAgent (`host/install.sh:6, 25`).
-  "Open in VS Code" uses macOS `open -a` (`host/window.js:3544`); "Open in
+  "Open in VS Code" uses macOS `open -a` (`host/window.js:3641`); "Open in
   Claude" and "Open in tmux" drive Terminal.app or iTerm through `osascript`
-  (`host/window.js:3565-3589, 3656`); the folder dialog has a macOS backend
+  (`host/window.js:3662-3686, 3753`); the folder dialog has a macOS backend
   and no other, by ruling (`host/dialog.js:1-50, 99-101`). The host's core
   loop is portable Node, but no other platform is installed, measured or
   claimed. Say "macOS" for the host.
@@ -145,15 +156,15 @@ conversation open in an editor means nothing can be typed in.
 | Permission prompt text, the tool asking | plugin | `src/floor.js:1400-1412` |
 | Approve / Deny / the question's own choices | host, and only when the floor holds the window; editor-held prompts say "answer this in your editor" | `src/floor.js:2643-2648`, `src/ui/floor.js:4638-4639`, `host/index.js:1491-1654` |
 | Live conversation, partial: the typed prompt, the final reply, each tool call as it starts | plugin alone, used only when no host is tailing that desk | `src/floor.js:1237-1248, 1369-1390` |
-| Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:4115, 4067-4253` |
-| The window compacting, from its start to its end, and a message sent meanwhile held rather than timed out; a compaction the hooks never finish ends on the window's next prompt, turn or tool, and a `/compact` from the floor is watched to its end and said in the window's closing words ("Compacted…", or "no compaction ran") | plugin (`PreCompact` / `PostCompact`) for the state; host for the held message, the summary (drawn as a system record) and the watched end | `src/floor.js:1336-1345`, `host/window.js:1377` |
-| The model and effort level, what was asked for beside what the window confirmed; a change from the floor is the window's own `/model` or `/effort`, so it is also saved as the default for new sessions on that machine | plugin (`PreModelSwitch` / `PostModelSwitch`, `effort_level`); host (the window's own line, the transcript's next reply) | `src/floor.js:1355-1367, 2204`, `host/window.js:1524, 1591` |
-| A slash command from the composer, confirmed on the command's own receipt and said in its terms as one line labelled `host` ("/model opus — Set model to Opus 5.5 and saved as your default for new sessions"); a `/clear` shows the new session at once with the model and effort the window keeps; a long message typed in so the window never wraps it | host | `src/floor.js:193, 2154`, `host/window.js:1557, 1334, 1647, 4037` |
-| Thinking, drawn as a thought bubble | host | `host/window.js:4237-4238` |
+| Live conversation, complete: every reply, every tool call, subagent turns labelled by description, injected context as labelled lines | host (reads Claude Code's transcript) | `host/window.js:4212, 4164-4350` |
+| The window compacting, from its start to its end, and a message sent meanwhile held rather than timed out; a compaction the hooks never finish ends on the window's next prompt, turn or tool, and a `/compact` from the floor is watched to its end and said in the window's closing words ("Compacted…", or "no compaction ran") | plugin (`PreCompact` / `PostCompact`) for the state; host for the held message, the summary (drawn as a system record) and the watched end | `src/floor.js:1336-1345`, `host/window.js:1474` |
+| The model and effort level, what was asked for beside what the window confirmed; a change from the floor is the window's own `/model` or `/effort`, so it is also saved as the default for new sessions on that machine | plugin (`PreModelSwitch` / `PostModelSwitch`, `effort_level`); host (the window's own line, the transcript's next reply) | `src/floor.js:1355-1367, 2204`, `host/window.js:1621, 1688` |
+| A slash command from the composer, confirmed on the command's own receipt and said in its terms as one line labelled `host` ("/model opus — Set model to Opus 5.5 and saved as your default for new sessions"); a `/clear` shows the new session at once with the model and effort the window keeps; a long message typed in so the window never wraps it | host | `src/floor.js:193, 2154`, `host/window.js:1654, 1431, 1744, 4134` |
+| Thinking, drawn as a thought bubble | host | `host/window.js:4334-4335` |
 | Service bell (nudge) | host; a desk with no window gets its window opened first | `src/floor.js:367`, `src/ui/floor.js:1523-1536` |
 | Typing to a desk, Enter sends, stop interrupts | host, floor-held | `src/floor.js:303`, `host/index.js:1488, 1673` |
-| Open in VS Code | host (macOS) | `host/index.js:1676`, `host/window.js:3532-3548` |
-| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1740-1751`, `host/window.js:3628` |
+| Open in VS Code | host (macOS) | `host/index.js:1676`, `host/window.js:3629-3645` |
+| Open in Claude, Open in tmux | host (macOS) | `host/index.js:1740-1751`, `host/window.js:3725` |
 | Take a desk (bind a folder from the floor, no `.mcp.json` by hand) | host | `src/floor.js:3437`, `host/dialog.js` |
 | Move an agent to another floor from its nameplate card — only the floor is picked, the desk's own folder and host do the rest; a move that closes its window opens a new conversation there, one with no window open resumes its last; it lands on the new floor drawn, even a floor it left before | host | `src/floor.js:3544, 1845`, `src/ui/floor.js:642`, `host/index.js:952` |
 | Several desks at once: select desks on a room, check them, and nudge, mark read or hide them together — desks with a window are nudged before those that must open one, a desk that cannot be nudged is named with the reason, the selection closes itself once the action is sent, and a desk it did not reach is named on the room with the reason | host for the nudge; mark read and hide need nothing beyond the board | `src/ui/floor.js:3204, 2746, 2789, 8124` |
@@ -245,7 +256,7 @@ file on the wire (`report.mjs:15-17`).
 
 **What the host sends.** The conversation itself, read from Claude Code's
 transcript: user, assistant, tool, thinking, context and subagent turns
-(`host/window.js:4067-4253`), plus who holds each desk and what its pane
+(`host/window.js:4164-4350`), plus who holds each desk and what its pane
 shows when a prompt is open. The server clips each turn to 20,000 characters
 (`src/floor.js:50, 215`).
 
@@ -298,7 +309,7 @@ Do not mention it.
 
 **VS Code alone, without the `claude` CLI.** Nothing in the *plugin* path
 needs the CLI: the hook runs inside whichever Claude Code raised it, and the
-host's roster recognises VS Code sessions as editor-held (`host/window.js:312, 435, 466`). The *host* refuses to install without `claude` on PATH
+host's roster recognises VS Code sessions as editor-held (`host/window.js:339, 462, 493`). The *host* refuses to install without `claude` on PATH
 (`host/install.sh:85`), because it opens desks with it; without a host the
 floor shows what section 2 lists under "plugin". Whether the VS Code
 extension itself runs with no CLI installed is Claude Code's fact, not this
@@ -311,7 +322,7 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.12.9** at `9a344f5` (0.12.1 to 0.12.3 are docs releases on
+- **Version: 0.12.9** at `c26d3db` (0.12.1 to 0.12.3 are docs releases on
   top of 0.12.0; 0.12.4 to 0.12.9 follow them), in all three places that
   carry it:
   `package.json`, `host/package.json`, `plugin/.claude-plugin/plugin.json`.
