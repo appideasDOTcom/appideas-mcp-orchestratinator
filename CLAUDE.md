@@ -138,7 +138,13 @@ two lines are the server half and reach the live board only with a rebuild.
 What issue #5 turned out to be, once caught: the board shares Docker
 Desktop's VM with everything else in Docker, and at 4 GiB a site e2e matrix
 ran it out of memory. The board's loop was held 59.5 s until the VM's kernel
-killed a MySQL, and Docker Desktop at 8 GiB fixed it (2026-11-03). A capture
+killed a MySQL, and Docker Desktop at 8 GiB fixed it (2026-11-03). The board
+itself is small, measured 2026-11-17 with `docker stats`: 130 MiB, of about
+420 MiB for everything in the VM that day. So the 8 GiB is the site e2e
+matrices' (Syncinator Pro calls it the floor for its own), not the board's.
+With only the board and light services in Docker, 4 GB is about ten times
+what is used; with a matrix running in the same VM, 4 GB is the setting
+that failed. A capture
 summary's `OOM kills in the VM` line is that reading.
 
 **The server is the other half, and it goes stale independently.** The
@@ -867,6 +873,49 @@ second; the chip's spinner is the receipt); **a slash command with files**
 refused on the page and the route). `check-attach.mjs` in
 **verify-ui-change** is the page; the host's half is "a message with files
 attached" in `test:host`.
+
+What PR #58's review added (QA, 2026-11-17, 1 Low + 8 Info), each a rule
+now:
+
+- **A command is the board's `commandOf`, on the page too** (`commandLike`
+  in the attachments section, a copy, and `test:floor` runs the two over
+  the same messages). The page's first rule, "starts with / and a letter",
+  refused files on "/Users/me/build.log keeps failing", which the board
+  takes, and called it a command.
+- **The host's error is the why, then "; nothing was typed"**, never "not
+  sent — …": a meeting room puts "not delivered — " before a desk's error,
+  and the two read as a stutter. A folder the host cannot write names its
+  file ("x.png could not be written on this machine (EEXIST)").
+- **Nothing in the box is cut.** Files a failed send hands back go back
+  every one, and Send says when the box holds more than twenty and how
+  many to take out. A `slice` there dropped them without a word.
+- **A body shorter than its content-length never reaches the agent, and
+  Node's fetch is what stops it**, measured on Node 24: it throws
+  "terminated" before `fetchUpload`'s own size check runs, whether the
+  board closes or drops the socket. That check is a second guard, so QA's
+  mutant removing it survives by design; the row asserts the outcome.
+- **When a typed line counts as arrived is one function**, `lineArrived`,
+  so a row can name each case on its own, the same line typed twice
+  included.
+
+Two items were left for a later branch, and the reasons are what stop them
+being re-proposed as gaps:
+
+- **A visible row starting with `>` is read as the prompt** (Info 5,
+  older than #31). A quoted line in a message with attachments can then
+  fail the scrolled check and be pasted after all, and the host log says
+  so. The fix is a new reading of what marks a composer's first row, in
+  both the scrolled and the unscrolled reader, and it wants a real window
+  measured with a quoted line first (`typing.mjs --text-file` in
+  **measure-a-real-window**). Not a release check's change.
+- **A fetch may outlast the board's 90 s host-live window** (Info 8). It
+  takes a board on another machine at about 9 Mbit/s or less to fetch
+  100 MB that slowly; locally it is a second. The two fixes behave
+  differently (the host touches the board while a fetch runs, or the fetch
+  times out under 90 s and refuses large files on slow links), so it is a
+  choice to make with a slow link measured, not a guess. Meanwhile the
+  floor draws that host's desks unreachable until the fetch ends, then
+  live again, and the message is typed then.
 
 ## Moving a desk to another floor
 

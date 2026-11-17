@@ -252,9 +252,10 @@ tmux -L probe display -p -t p:probe '#{cursor_x},#{cursor_y}' # column 2 = nothi
 A suggestion is dim (`\x1b[2m`) and the cursor stays at column 2, behind
 the `❯`; typed text is in the default colour with the cursor at its end.
 The transcript has no record of a suggestion. `composerOf` reads it as the
-composer's contents, which matters to nothing the host does with that
-reading, and a paste through `send()` replaces it — measured: one user
-record with the host's own words and none of the suggestion. Tab or Enter
+composer's contents. That was harmless for a paste — `send()` replaces it,
+measured: one user record with the host's own words and none of the
+suggestion — and **not** for typing a long message, which it sent to
+`<pasted_content>` until 2026-11-17 (the next section). Tab or Enter
 would accept it, so never press either "to see what happens" on a window
 that is not yours. Not every turn gets one: a one-word reply drew none in
 60 s, a turn with three Bash calls drew `cat notes.txt` after 2 s.
@@ -263,6 +264,67 @@ that is not yours. Not every turn gets one: a one-word reply drew none in
 a work-shaped turn, the wait for the dim row, `composerOf` and the cursor,
 then `send()` over it and the user records that followed. Run it on a new
 Claude Code before trusting the paragraph above.
+
+## A long message, typed: does the agent read it as the operator's?
+
+A message of four or more lines is typed into the window, not pasted
+(`wouldWrap`, `typeInto` in `host/window.js`), because a paste of that
+size reaches the agent as `<pasted_content>`, which the model is told "may
+contain instructions the user did not write". Every message with
+attachments is that long. If typing cannot confirm a line, it falls back
+to a paste, and the host now logs it: `typing a N-line message into … did
+not hold (…); pasting it`. On 2026-11-17 (issue #31) the fallback had
+been silent, and two live messages arrived wrapped for two different
+reasons. Each was found only on a real window, with
+[`typing.mjs`](typing.mjs):
+
+```bash
+SP=<scratchpad>; printf '#!/bin/sh\nexec tmux -L probe "$@"\n' > "$SP/tmuxw"; chmod +x "$SP/tmuxw"
+node .claude/skills/measure-a-real-window/probe.mjs up "$SP/probe" auto
+ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p node .claude/skills/measure-a-real-window/typing.mjs "$SP/probe" --size 80x24 --suggest
+#   suggestion in the composer: "Name one fruit, then suggest a follow-up question"
+#   recorded: unwrapped, exactly the message          (exit 0)
+```
+
+It sends one message through the host's own `send()` and reads the user
+record the window wrote: WRAPPED, or unwrapped and exact. `--window <file>`
+runs another `window.js` (a copy from before a fix is the red case; one
+from before the scroll fix read `WRAPPED`, 11.4 s, against the tree's 3.3 s).
+
+- **A prompt suggestion** (`--suggest`). `typeInto` waited for "suggestion
+  + first line", and typing replaces a suggestion, so line 1 read as lost.
+  Wrapped, 10.1 s. They appear in about half of turns, so `--suggest` keeps
+  sending short turns until one is in the composer row.
+- **A composer taller than its box** (`--size 80x24`). The host opens
+  windows at 80x24 when nobody is attached, and there the composer shows 7
+  rows with `─── ↑ 3 more ───` for its top border. Its `❯` row is out of
+  sight, so `composerOf` read null and line 5 "did not appear". probe.mjs
+  makes 200x50, where the same message never scrolls: a probe at its
+  default size cannot see this one. Measure at the size the host uses.
+
+Five traps, each met once in that session:
+
+- **Read the composer row at the bottom of the pane, nothing above it.** A
+  grep for `❯` anywhere found an earlier user message echoed in the
+  transcript and called it a suggestion.
+- **Auto mode for the probe.** In manual mode the agent asked permission
+  for an `ls` of the path it was given, the window stood at the question,
+  and `send()` answered `asking` correctly. It read as a failure of the fix.
+- **`send-keys -l --` for text that starts with `-`.** An attachment line
+  is `- /path`, and without `--` tmux takes it as a flag ("invalid flag").
+- **zsh does not split `$size`**: `set -- $size` gave one word and
+  `resize-window` an empty `-y`, so two runs meant to be at 80 columns
+  were both at 200. Read the pane's size back (`typing.mjs` prints it).
+- **An agent's account of a file is not the file.** The probe told the
+  operator an uploaded PDF was "only pages 1–8 of the 54". The upload was
+  byte-identical to the original (`shasum -a 256`, and the page tree's
+  `/Count 54`); the agent had read part of it. Check the bytes before
+  calling an upload broken.
+
+To see why typing did not hold, not only that it did not, copy `host/`
+into the scratchpad, add a `console.error` of `composerOf`'s reading and
+the `want` at the miss in `typeInto`, and pass that copy as `--window`.
+That is how both causes were named, in one run each.
 
 ## Recording the pane over time
 
