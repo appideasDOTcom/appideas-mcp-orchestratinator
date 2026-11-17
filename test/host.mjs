@@ -2048,8 +2048,10 @@ try {
     'a refusal by status names the board as well as the path, and how long it took');
 
   const polled = await against({ work: 500 }, /retrying in 2s/);
-  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1 → 500 after \\d+ms; retrying in 1s`).test(polled.out),
-    'the work poll is told apart from the register that shares its warning');
+  // The poll names its run (`boot`, takeHostWork's guarantee; milestone
+  // audit 2026-11-17, finding 4), so the line ends on it.
+  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1&boot=[0-9a-f-]{36} → 500 after \\d+ms; retrying in 1s`).test(polled.out),
+    'the work poll is told apart from the register that shares its warning, and names the run of the host it is');
   eq(stand.seen.map((s) => s.route).slice(0, 4), ['register', 'work', 'register', 'work'],
     'and a failed poll still re-registers before the next, as it did');
 
