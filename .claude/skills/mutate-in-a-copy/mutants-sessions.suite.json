@@ -255,7 +255,7 @@
   "a seat's window is not tagged",
   "seats",
   "host/window.js",
-  "  const tag = seat ? [';', 'set-option', '-w', '-t', `${SESSION}:=${name}`, SEAT_OPTION, seat] : [];",
+  "  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];",
   "  const tag = [];"
  ],
  [
@@ -269,7 +269,7 @@
   "what a seat's window was given stays in the session's environment",
   "seats",
   "host/window.js",
-  "    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${SESSION}:`, '-u', env[i].split('=')[0]]);\n",
+  "    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${EXACT}:`, '-u', env[i].split('=')[0]]);\n",
   ""
  ],
  [

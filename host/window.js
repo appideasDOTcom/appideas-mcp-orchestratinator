@@ -891,7 +891,19 @@ export async function clientCount() {
   return r.out.split('\n').filter(Boolean).length;
 }
 
-/** Every live pane in our tmux session. */
+/**
+ * Every live pane in our tmux session, and in no other.
+ *
+ * `-s`, the session's panes. It was `-a` under this same comment, and `-a`
+ * is every session on the server: measured 2026-11-16 on a socket of its
+ * own, with `orch` standing and a session `mine` holding a pane in a desk's
+ * folder, this listed both and `paneFor` gave `mine:@1.%1` as that desk's
+ * window. A message from the floor would have been typed into it, a shell
+ * as readily as Claude Code. costmo's ruling the same day: only the floor's
+ * own session. A Claude Code somebody started in a tmux session of their
+ * own is then a process in no pane of the floor's, which is what
+ * `holderOf` already calls held outside it, as an editor's is.
+ */
 export async function panes() {
   // The directory goes last and takes everything after the third separator: it
   // is the one field whose contents are not ours, and a directory is allowed
@@ -899,7 +911,7 @@ export async function panes() {
   // The seat's tag is the host's own (seatTag in seats.js: percent-encoded,
   // so it holds no separator) and empty on every window but a seat's.
   const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
-  const r = await tmux(['list-panes', '-t', `${EXACT}:`, '-a', '-F', fields.join(SEP)]);
+  const r = await tmux(['list-panes', '-t', `${EXACT}:`, '-s', '-F', fields.join(SEP)]);
   if (!r.ok || !r.out) return [];
   return r.out.split('\n')
     .map((line) => {

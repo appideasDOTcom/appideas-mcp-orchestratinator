@@ -1131,6 +1131,21 @@ async function main() {
         'a call that failed any other way says nothing about the window');
       eq(W.paneGone({ ok: true, out: '%9 0' }, 'orch:@4'), null, 'and a target that names no pane has no pane to compare');
 
+      // A pane in somebody else's session, in a folder (costmo, 2026-11-16:
+      // only the floor's own session). The host listed every session on the
+      // server and took such a pane for that folder's window: what it types
+      // for a desk there would have gone into it.
+      const theirsDir = `${FIX}/in-another-session`;
+      mkdirSync(theirsDir, { recursive: true });
+      const theirs = `somebody-${process.pid}`;
+      await run('tmux', ['new-session', '-d', '-s', theirs, '-c', theirsDir, 'sh', '-c', 'sleep 120']).catch(() => {});
+      const theirPane = (await run('tmux', ['list-panes', '-t', `=${theirs}:`, '-F', '#{pane_current_path}']).catch(() => ({ stdout: '' }))).stdout.trim();
+      eq(theirPane, W.canonical(theirsDir), 'a pane of another tmux session is sitting in a folder');
+      eq(await W.paneFor(theirsDir), null, 'it is not that folder\'s window: the host has no window there');
+      const sessionsSeen = [...new Set((await W.panes()).map((p) => p.target.split(':')[0]))];
+      eq(sessionsSeen, [TMUX_SESSION], 'and the host\'s panes are its own session\'s, whatever else is on the server');
+      await run('tmux', ['kill-session', '-t', `=${theirs}`]).catch(() => {});
+
       // A composer that keeps the message through every Enter: a raw-mode
       // pane drawing the box composerOf reads, which never submits.
       const boxDir = `${FIX}/keeps-it`;

@@ -323,14 +323,24 @@ Three consequences worth knowing before touching `host/window.js`:
   beside it. A tmux command written by hand against the floor, in a test
   or a skill, takes `=name` the same way: the window suite's own cleanup
   `kill-session -t orch-test-<pid>` would take a look-alike with it.
-  **One thing found beside it and not changed**: `panes()` asks
-  `list-panes -a`, and `-a` is every session on the server, not the
-  floor's (measured: with `orch` and `orchid` standing it listed both).
-  Its comment says "our tmux session". So a pane in another session whose
-  folder is a desk's is a candidate for that desk's window, as long as an
-  `orch` session exists. Whether that is wanted (a Claude Code the
-  operator started in their own tmux being typed into from the floor) is
-  costmo's to say; it was put to him and is not to be changed on a guess.
+- **The host's panes are its own session's, and no other's** (costmo,
+  2026-11-16, by AskUserQuestion to me and to QA the same hour: fixed in
+  PR #57). `panes()` asked `list-panes -t <session> -a` under a comment
+  that said "every live pane in our tmux session", and `-a` is every pane
+  on the server whatever the target. Measured on a socket of its own, with
+  `orch` standing and a session `mine` holding one pane in a desk's
+  folder: `panes()` listed both sessions, `paneFor` gave `mine:@1.%1` as
+  that desk's window, and `open()` answered ok, created false, with no
+  window made (QA's reading of the same). So a message to that desk went
+  into a pane the floor never opened, a plain shell as readily as Claude
+  Code, and a Leave, a move or a reopen would have closed it
+  (`closeWindow` kills what `paneFor` finds). It is `-s` now. A Claude
+  Code somebody started in a tmux session of their own is then a process
+  in no pane of the floor's, which `holderOf` already reads as held
+  outside it, as an editor's is. "Keep it, any session counts" was the
+  other offer; do not re-propose it. `windowNames()` still asks `-a`, on
+  purpose: it is only the names a new window avoids, and avoiding more
+  than it must costs nothing.
 - **Pane width is set by whoever is attached.** A footer that fits on one line at
   160 columns wraps at 80, which broke `askingOf` and made a real fault look
   intermittent. Read footers as the last few lines rejoined.

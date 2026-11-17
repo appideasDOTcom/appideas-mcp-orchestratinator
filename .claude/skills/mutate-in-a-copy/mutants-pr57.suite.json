@@ -185,8 +185,8 @@
   "the host's panes are listed from a session whose name begins with its own",
   "window",
   "host/window.js",
-  "['list-panes', '-t', `${EXACT}:`, '-a',",
-  "['list-panes', '-t', SESSION, '-a',"
+  "['list-panes', '-t', `${EXACT}:`, '-s',",
+  "['list-panes', '-t', SESSION, '-s',"
  ],
  [
   "whether the server reads a folder is asked of a session whose name begins with the floor's",
@@ -194,5 +194,12 @@
   "host/window.js",
   "  if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;",
   "  if (!(await tmux(['has-session', '-t', SESSION])).ok) return null;"
+ ],
+ [
+  "the host lists every session's panes, and takes one in a desk's folder for its window (costmo, 2026-11-16)",
+  "window",
+  "host/window.js",
+  "['list-panes', '-t', `${EXACT}:`, '-s',",
+  "['list-panes', '-t', `${EXACT}:`, '-a',"
  ]
 ]
