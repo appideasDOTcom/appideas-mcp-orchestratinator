@@ -2366,6 +2366,36 @@ as every sighting. With no intent handed to the rescan it was red 1 of 1.
 The control was 327 ✓. The list is
 `.claude/skills/mutate-in-a-copy/mutants-move-race.suite.json`.
 
+**Three more reds seen under other suites' load, none explained, written
+down so the next one is recognised and read** (2026-11-16/17, PR #57's
+rounds after the close; QA's logs are in the QA repo, `evidence/pr57/r3/`
+and `r4/`).
+- `test:host`, issue #5's section: "a failed poll still re-registers
+  before the next" (got `["register","work","register"]`, wanted four),
+  "the work poll is told apart from the register that shares its warning",
+  and once "a refusal by status names the board as well as the path". Red
+  in 5 of QA's runs across two commits, green in the next six on the same
+  trees. Load average did not separate the two groups (12–36 red, 15–41
+  green). What the red runs had was window suites, QA's and mine, on the
+  default tmux server beside them. The rows share `runHost`, which ends
+  the host after 8000 ms and wants four requests seen in that time.
+- `test:host`, "a run leaves no stand-in claude running": one process
+  alive 8 s after `kill-session`, once, at load 28 with five lanes going;
+  328 ✓ twice alone straight after. Whether it was slow to die or outside
+  the suite's session was not caught.
+- `test:renew`, what an agent is told after a move: "the agent whose
+  question was closed is told to ask it again" got the unreadable-folder
+  sentence once in QA's lane, and "the agent that met the refusal is told
+  it can carry on" failed once in mine. The first is not a wait running
+  out: `renew()` read that window's screen as not asking
+  (`p.asking = !!askingOf(screen)`, taken after the wait and before
+  `kill-server`), while the test's `asking` file was still there. So the
+  stand-in had not drawn the question or `askingOf` did not read what it
+  drew. Neither repeated in three runs alone.
+None is in code PR #57 touched. A fourth sighting of any of them is read
+with its log kept (`run-mutants.mjs --logs`, or the suite's own output),
+not rerun.
+
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches
 it, and `send()` returns when tmux has taken the key. "which the host
