@@ -129,6 +129,15 @@ posts a closing note. What those rounds taught:
 - **The candidate test is run from outside the tree** (`run-batches.mjs
   --overlay`, **mutate-in-a-copy**), and copied in when its control is
   green. This is the rule above, with the tool that makes it the easy way.
+  Not done in PR #57's round after the close, and it cost twice in twenty
+  minutes: costmo pushed `e5cce3c` with a fix whose suites were still
+  running (QA found the case it missed), then `5e0774e` with a new
+  `test:renew` row that redeclared a name, so the suite did not load at a
+  pushed SHA. Both were edits resting in the tree while a chain ran. If an
+  edit must go into the tree first, `node --check` every test file touched
+  in the same command as the edit, and run the changed suite alone and
+  first, in the foreground, so its result is read in a minute and not at
+  the end of a ten-minute chain.
 - **Take QA's pin as a mutant and run it** before answering, and before
   offering a different fix. Their pin is usually a change to a stand-in.
   Four runs settle it: control, fault, fault with the pin, pin alone.

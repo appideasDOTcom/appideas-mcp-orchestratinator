@@ -313,6 +313,21 @@ Three consequences worth knowing before touching `host/window.js`:
   "esc to interrupt" read as busy for ever. Status is positional: `footOf` reads
   the bottom line, and nothing quoted above it can fake one.
 
+- **tmux answers for another pane when the one named is gone.** Measured
+  on 3.7c (2026-11-16, QA's PR #57 Info 10 and its second round). After
+  `kill-pane` of `p:@1.%1`, `display-message -p -t 'p:@1.%1' '#{pane_dead}'`
+  exits 0 and prints `0`: tmux resolved what it could of the target, the
+  session, and answered for that session's current pane. When the pane was
+  its session's only one and other sessions remain, it exits 0 and prints
+  nothing. When it was the last pane of all, the server is gone: exit 1,
+  "no server running on …" ("error connecting to …" for a socket that no
+  longer exists). So a read through `-t <target>` proves nothing about
+  *that* pane unless the answer carries the pane's own id: ask for
+  `#{pane_id}` beside whatever is wanted and compare. `waitReady`'s exit
+  check did not, took a killed window for a live one, and held the host's
+  line for 45 s. A pane that exited is different: `remain-on-exit` keeps
+  it, and `pane_dead` is 1.
+
 - **A line in the composer that nobody typed is a prompt suggestion.**
   Claude Code 2.1.300 draws a suggested next prompt as ghost text after a
   turn ends — dim (SGR `2m`), after the cursor, which stays at column 2
@@ -2238,6 +2253,31 @@ lane running beside the host suite at load 22 to 34. Alone straight after,
 at load 10 to 23: 327 ✓. Nothing in the bind had changed. It is the fifth
 sighting's shape, and the same reading: a bind that did not land inside
 its twenty seconds under load.
+
+**That reading was wrong, and the seven are read now** (QA, PR #57 Info
+10, the same day). QA printed the suite's own host log beside the reds:
+the bind took 37 ms, and before it the host had logged nothing for 46 s.
+The twenty seconds were gone before the bind began. What held the host's
+line was the section above it, the placeholder-key desk: the floor opens
+its window, the suite reads what the pane was given and kills the pane at
+once. The host's `open` was still in `waitReady`, and whether it had seen
+the window in the roster by then was a race, lost more often under load,
+which is why it read as load. `waitReady` then waited out
+`READY_TIMEOUT_MS`, 45 s, on a window that was not there, because its
+"did it exit?" read could not see a killed pane (the bullet in *Driving a
+window*, below "a prompt suggestion"). Everything behind it in `run()`
+waited: the rescan the suite had asked for, then the bind.
+
+Fixed in `waitReady`, which now says `window_gone` at its next look, and
+pinned on every run: the suite arms `ready-delay.flag` for that window,
+so the host is always still waiting when the pane goes, and a row reads
+the host doing the next thing asked of it at once. With the fix out it is
+that row and the seven, 8 red, every run. Two things to take from it. A
+red that goes green on a rerun is not thereby load: four sightings of
+this one were written down as load, each with a load average beside it.
+And **the host's log beside the reds is what named it**: a gap in the log
+is work held on the host's line, and the line before the gap is where to
+look.
 
 **The red now reads the rows itself** (2026-11-15, after the sixth). They
 were never read because they are gone with the run's database before

@@ -337,11 +337,11 @@ async function main() {
   // was open in the window. Here because this suite has a server of its
   // own to lose; test:window has the two shapes that leave a server.
   await run('tmux', ['-L', SOCK, 'kill-server']).catch(() => {});
-  const L = W.canonical(`${FIX}/a`);
-  await run('tmux', ['-L', SOCK, 'new-session', '-d', '-s', 'orch', '-c', L, 'sleep 60']);
+  const lastDir = W.canonical(`${FIX}/a`);
+  await run('tmux', ['-L', SOCK, 'new-session', '-d', '-s', 'orch', '-c', lastDir, 'sleep 60']);
   const lastTarget = (await tmuxT(['list-panes', '-a', '-F', '#{session_name}:#{window_id}.#{pane_id}'])).split('\n')[0];
   const lastStarted = Date.now();
-  const waitingOnLast = W.waitReady(L, { timeoutMs: 12000, target: lastTarget });
+  const waitingOnLast = W.waitReady(lastDir, { timeoutMs: 12000, target: lastTarget });
   await sleep(900);
   await run('tmux', ['-L', SOCK, 'kill-pane', '-t', lastTarget]).catch(() => {});
   const lastNow = await waitingOnLast;
