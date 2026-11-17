@@ -1414,7 +1414,11 @@ async function main() {
       `  else {`,
       `    const lines = composer.split('\\n');`,
       `    const busy = Date.now() < compactUntil;`,
-      `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + rule + '\\r\\n\\u276f ' + lines[0] + lines.slice(1).map((l) => '\\r\\n  ' + l).join('') + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
+      // suggest.flag: Claude Code's prompt suggestion, the dim line it draws
+      // in an empty composer after a turn, gone at the first key or paste
+      // (CLAUDE.md, "a line in the composer that nobody typed").
+      `    const ghost = !composer && fs.existsSync(${JSON.stringify(`${CP_DIR}/suggest.flag`)}) ? '\\x1b[2m' + fs.readFileSync(${JSON.stringify(`${CP_DIR}/suggest.flag`)}, 'utf8').trim() + '\\x1b[22m' : '';`,
+      `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + rule + '\\r\\n\\u276f ' + (ghost || lines[0]) + lines.slice(1).map((l) => '\\r\\n  ' + l).join('') + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
       `  }`,
       `  process.stdout.write(out);`,
       `}`,
@@ -1515,6 +1519,25 @@ async function main() {
     eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, fourLines, 'as itself: every line, no <pasted_content>');
     assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'typed in, not pasted');
     eq(keysSince(mark).filter((k) => k[1] === '"M-Enter"').length, 3, 'with the composer\'s own newline between lines');
+
+    // The same, onto a prompt suggestion (issue #31's first live test,
+    // 2026-11-17). The composer read the suggestion as text already there,
+    // so typeInto waited for "suggestion + line", which typing (that
+    // replaces a suggestion) never makes; the line read as lost, the message
+    // was pasted after all and reached the agent in <pasted_content>.
+    // Measured on 2.1.326: "Describe the screenshot in two sentences." under
+    // a floor message with two files, wrapped, 10.1 s.
+    writeFileSync(`${CP_DIR}/suggest.flag`, 'Describe the screenshot in two sentences.');
+    await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+    assert(await until(async () => (await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout.includes('Describe the screenshot'), 4000),
+      'the fixture: the composer shows a suggestion nobody typed');
+    mark = cpKeyLog().length;
+    const overGhost = 'what is in these?\n\nAttached from the floor:\n- /Users/x/.orchestratinator/uploads/abc123abc/shot.png';
+    const ghostSent = await W.send(CP_DIR, overGhost);
+    rmSync(`${CP_DIR}/suggest.flag`, { force: true });
+    assert(ghostSent.ok && ghostSent.confirmed, `a message typed over a prompt suggestion is delivered${ghostSent.ok ? '' : ` — ${ghostSent.error}`}`);
+    eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, overGhost, 'as itself, the suggestion not in it');
+    assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'and typed, not pasted after all: a suggestion is not text somebody left in the box');
 
     // /btw: the overlay is the receipt, the answer is read off it, and no
     // Enter is pressed while it stands — the host used to close it with one.

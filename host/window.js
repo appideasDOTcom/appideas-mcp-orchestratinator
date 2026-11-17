@@ -1754,12 +1754,22 @@ async function typeInto(target, text) {
         if (at + TYPE_CHUNK < line.length) await sleep(TYPE_CHUNK_MS);
       }
       const want = before + compact(line);
+      // On the first line, what was in the box may have been a prompt
+      // suggestion: the dim line Claude Code draws in an empty composer
+      // after a turn, which composerOf reads as text, and which the first
+      // key typed replaces. So the line alone is the box after it too.
+      // Without this, "suggestion + line" never appeared, the line read as
+      // lost, and the message was pasted after all, into <pasted_content>
+      // (issue #31's first live test, 2026-11-17, 2.1.326: reproduced on a
+      // probe, wrapped, 10.1 s). A draft a person really typed is not
+      // replaced by typing, so it still reads as before + line.
+      const alone = i === 0 && before ? compact(line) : null;
       const by = Date.now() + PASTE_CONFIRM_MS;
       let seen = !line;
       while (!seen && Date.now() < by) {
         await sleep(150);
         const now = compact(composerOf(await screenOf(target)) ?? '');
-        if (now === want) seen = true;
+        if (now === want || now === alone) seen = true;
       }
       if (seen) break;
       if (attempt === 1 || Date.now() > stop) return { ok: false, code: 'typed_lost', error: `line ${i + 1} of ${lines.length} did not appear in the composer` };
@@ -2406,7 +2416,13 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   let typed = null;
   if (wouldWrap(text)) {
     typed = await typeInto(pane.target, text);
-    if (!typed.ok) await clearComposer(pane.target);
+    if (!typed.ok) {
+      await clearComposer(pane.target);
+      // Said, because the paste that follows reaches the agent wrapped in
+      // <pasted_content>, and nothing else records why. Silent, this hid a
+      // prompt suggestion defeating long messages until a live test (issue #31).
+      warn(`typing a ${text.split('\n').length}-line message into ${pane.target} did not hold (${typed.error}); pasting it, so the agent reads it as pasted content`);
+    }
   }
   if (!typed?.ok) {
     typed = await pasteInto(pane.target, text);

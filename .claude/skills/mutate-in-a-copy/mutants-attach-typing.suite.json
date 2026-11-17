@@ -1,0 +1,9 @@
+[
+ [
+  "typing over a prompt suggestion waits for suggestion + line",
+  "window",
+  "host/window.js",
+  "        if (now === want || now === alone) seen = true;",
+  "        if (now === want) seen = true;"
+ ]
+]

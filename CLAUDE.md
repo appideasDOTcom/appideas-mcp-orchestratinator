@@ -376,11 +376,21 @@ Three consequences worth knowing before touching `host/window.js`:
   at its end. Ten of twenty-one idle windows on this machine held one on
   2026-11-02, and three of them were reported as "typed into the composer
   and never sent" with no record anywhere, because nothing had entered
-  them. `composerOf` reads a suggestion as the composer's contents, and that
-  is harmless where the host uses it — the paste check wants the composer to
-  *change*, the stuck check looks for the *sent* text — and measured on a
-  probe, a paste through `send()` replaces the suggestion: one user record,
-  the host's own words, nothing of the suggestion in it. Tab or Enter in
+  them. `composerOf` reads a suggestion as the composer's contents. That is
+  harmless for the paste check (it wants the composer to *change*) and the
+  stuck check (it looks for the *sent* text), and measured on a probe, a
+  paste through `send()` replaces the suggestion: one user record, the
+  host's own words, nothing of it. It was **not** harmless for typing
+  (2026-11-17, issue #31's first live test): `typeInto` waited for
+  "suggestion + first line", typing replaces a suggestion, so the line read
+  as lost and the message was pasted after all, reaching the agent in
+  `<pasted_content>`. Every message of four lines or more was exposed, and
+  every message with attachments is one. Reproduced on a probe on 2.1.326
+  (wrapped, 10.1 s, against 3.3 s unwrapped), fixed by accepting the first
+  line alone, and re-measured over two real suggestions (typed, unwrapped).
+  A draft a person really typed is not replaced, so it still reads as
+  draft + line. The fallback to a paste now says so in the host log; it
+  used to be silent, which is why this went unseen. Tab or Enter in
   such a window would accept it. Before chasing a phantom keystroke source,
   read the row with `capture-pane -e` and the cursor with `#{cursor_x}`.
 
