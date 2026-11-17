@@ -57,7 +57,7 @@ const msg = await m.evalJs(`(() => { const n = [...document.querySelectorAll('#p
 console.log('== the room message:', JSON.stringify(msg));
 ok(msg && msg.files.length === 1 && msg.files[0].endsWith('room shot.png'), 'the room\'s message shows the file under its words', msg);
 ok(msg && !msg.pending && msg.delivs.length === 2 && msg.delivs.every((d) => !/sending|not recorded/.test(d)), 'and each desk reads as having recorded it, off its own turn that carries the list', msg);
-ok(await m.evalJs(`!document.querySelector('#floor-panel .att-chip') && !/Attached from the floor/.test(document.querySelector('#p-turns').innerText)`), 'the box is empty of it, and no list of paths is drawn as anybody\'s words');
+ok(await m.evalJs(`!document.querySelector('#floor-panel .att-chip') && !/Attached by the operator/.test(document.querySelector('#p-turns').innerText)`), 'the box is empty of it, and no list of paths is drawn as anybody\'s words');
 
 // Files alone, while Bo's window takes something else first: its recording
 // of the room's message is held 4 s (the seed's `slow`), and in that time a

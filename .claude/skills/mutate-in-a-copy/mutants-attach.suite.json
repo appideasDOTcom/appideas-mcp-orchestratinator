@@ -66,7 +66,7 @@
   "the host spells the header its own way",
   "floor",
   "host/uploads.js",
-  "export const ATTACHED_HEADER = 'Attached from the floor:';",
+  "export const ATTACHED_HEADER = 'Attached by the operator:';",
   "export const ATTACHED_HEADER = 'Attached files:';"
  ],
  [
@@ -75,5 +75,12 @@
   "src/ui/floor.js",
   "    return f.id ? `${f.id}/${f.name}` : f.name;",
   "    return f.name;"
+ ],
+ [
+  "the page no longer reads the old spelling",
+  "floor",
+  "src/ui/floor.js",
+  "  const ATTACHED_HEADERS = [ATTACHED_HEADER, 'Attached from the floor:'];",
+  "  const ATTACHED_HEADERS = [ATTACHED_HEADER];"
  ]
 ]

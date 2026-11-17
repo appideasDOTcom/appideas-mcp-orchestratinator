@@ -175,7 +175,7 @@ async function main() {
       '                                                         ctrl+g to edit in Vim',
       `─── ↑ 3 more ${'─'.repeat(67)}`,
       '',
-      '  Attached from the floor:',
+      '  Attached by the operator:',
       '  - /Users/costmo/.orchestratinator/uploads/159205afe5520f41b66cdd7b/Custom',
       '  PCBs on a CNC Router _ 10 Steps (with Pictures) - Instructables.pdf',
       '  -',
@@ -184,7 +184,7 @@ async function main() {
       R80,
       '  ⏵⏵ auto mode on (shift+tab to cycle)',
     ].join('\n');
-    assert(/2026-11-05 at 10\.10\.25\.png$/.test(W.composerOf(SCROLLED) ?? '') && /^\s*Attached from the floor:/.test((W.composerOf(SCROLLED) ?? '').trim()),
+    assert(/2026-11-05 at 10\.10\.25\.png$/.test(W.composerOf(SCROLLED) ?? '') && /^\s*Attached by the operator:/.test((W.composerOf(SCROLLED) ?? '').trim()),
       'a scrolled composer reads as the rows it shows, not as no box');
     eq([W.scrolledOf(SCROLLED), W.scrolledOf(box('❯ hello'))], [true, false], 'and says it is scrolled, so a caller knows it holds only the end');
     const echoAbove = ['❯ an earlier message, echoed in the transcript', '', '⏺ its answer', SCROLLED].join('\n');
@@ -1564,7 +1564,7 @@ async function main() {
     assert(await until(async () => (await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout.includes('Describe the screenshot'), 4000),
       'the fixture: the composer shows a suggestion nobody typed');
     mark = cpKeyLog().length;
-    const overGhost = 'what is in these?\n\nAttached from the floor:\n- /Users/x/.orchestratinator/uploads/abc123abc/shot.png';
+    const overGhost = 'what is in these?\n\nAttached by the operator:\n- /Users/x/.orchestratinator/uploads/abc123abc/shot.png';
     const ghostSent = await W.send(CP_DIR, overGhost);
     rmSync(`${CP_DIR}/suggest.flag`, { force: true });
     assert(ghostSent.ok && ghostSent.confirmed, `a message typed over a prompt suggestion is delivered${ghostSent.ok ? '' : ` — ${ghostSent.error}`}`);
@@ -1581,7 +1581,7 @@ async function main() {
     // text off the top of the box while it goes in: the box can then never
     // equal "before + line". (A blank row scrolled off would not show it:
     // whitespace is not compared.)
-    const tall = 'look at both\n\nAttached from the floor:\n- /Users/x/.orchestratinator/uploads/def456def/b.png\n- /Users/x/.orchestratinator/uploads/abc123abc/Custom PCBs on a CNC Router _ 10 Steps (with Pictures) - Instructables.pdf';
+    const tall = 'look at both\n\nAttached by the operator:\n- /Users/x/.orchestratinator/uploads/def456def/b.png\n- /Users/x/.orchestratinator/uploads/abc123abc/Custom PCBs on a CNC Router _ 10 Steps (with Pictures) - Instructables.pdf';
     const tallSent = await W.send(CP_DIR, tall);
     const scrolledSeen = keysSince(mark).length > 0;
     rmSync(`${CP_DIR}/scroll.flag`, { force: true });

@@ -140,7 +140,7 @@ just means a client opens a session per turn, which is normal and handled.
   type}] }`. The host fetches each with `GET /api/host/upload?host_id=&id=`
   (host key; only a host a message named it to), writes it under
   `~/.orchestratinator/uploads/<id>/<name>` and types the message with the
-  list `Attached from the floor:` / `- <path>` under the words. Staged files
+  list `Attached by the operator:` / `- <path>` under the words. Staged files
   live in `$ORCH_UPLOAD_DIR` (default: beside the database) for an hour from
   attach or last send; the host keeps its copies for Claude Code's
   `cleanupPeriodDays` (30 when unset, never under one). See

@@ -847,7 +847,8 @@ things behind it, each of which looks simpler than it is:
   asked, not a widening of that comment.
 
 What the page does with the result: the host writes the list as `Attached
-from the floor:` and one `- <path>` a line, after a blank line, and
+by the operator:` (`Attached from the floor:` until costmo renamed it the
+same day, still read) and one `- <path>` a line, after a blank line, and
 `splitAttached` draws a user turn ending in exactly that as its words plus
 file chips, the path on hover. Anything else that only looks like a list is
 the operator's words, left as typed. The page and the host spell the header

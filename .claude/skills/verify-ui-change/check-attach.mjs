@@ -139,12 +139,12 @@ ok((await chips()).length === 0 && (await page.evalJs(`document.querySelector('#
 // 8. The window records it: the host's list under the words.
 const paths = pay.files.map((f) => `/Users/someone/.orchestratinator/uploads/${f.id}/${f.name}`);
 await hostEvents([{ type: 'turn', channel: CH, agent: AG, session_id: SID, role: 'user', at: new Date().toISOString(), uuid: 'att-u1',
-  text: `look at these\n\nAttached from the floor:\n${paths.map((p) => `- ${p}`).join('\n')}` }]);
+  text: `look at these\n\nAttached by the operator:\n${paths.map((p) => `- ${p}`).join('\n')}` }]);
 await page.waitFor(`document.querySelectorAll('#p-turns .t-pending').length === 0`, { timeout: 8000 }).catch(() => {});
 const rec = await page.evalJs(`(() => { const t = [...document.querySelectorAll('#p-turns .t-user')].pop(); return t ? { pending: t.classList.contains('t-pending'), body: t.querySelector('.t-body')?.textContent, files: [...t.querySelectorAll('.t-file')].map((f) => ({ name: f.textContent.trim(), title: f.title })), text: t.textContent } : null; })()`);
 console.log('== the recorded turn:', JSON.stringify(rec));
 ok(rec && !rec.pending && rec.body === 'look at these', 'the recorded message retires the pending one and reads as the words', rec);
-ok(rec?.files.length === 2 && rec.files[1].title === paths[1] && !/Attached from the floor/.test(rec.text), 'with the files drawn as files, the path on hover, and no list of paths in the words', rec);
+ok(rec?.files.length === 2 && rec.files[1].title === paths[1] && !/Attached by the operator/.test(rec.text), 'with the files drawn as files, the path on hover, and no list of paths in the words', rec);
 await page.shot(`${out}/attach-recorded.png`, '#floor-panel');
 
 // 9. Files alone, and the window losing them: an error turn hands them back.

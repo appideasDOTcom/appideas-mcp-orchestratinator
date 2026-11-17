@@ -44,7 +44,10 @@ const FETCH_TIMEOUT_MS = Number(process.env.ORCH_UPLOAD_FETCH_MS ?? 120_000);
  * the two to one spelling). Words an operator would not type as the last
  * paragraph of a message, and that tell the agent what the paths are.
  */
-export const ATTACHED_HEADER = 'Attached from the floor:';
+// "Attached by the operator:" since 2026-11-17 (costmo, on QA's note that
+// "from the floor" read as a place, wrong for a meeting room). The page
+// still reads the old spelling, so messages sent before draw as files.
+export const ATTACHED_HEADER = 'Attached by the operator:';
 
 /** Where attachments are kept: beside host.json, or where a suite says. */
 export function uploadsDir() {

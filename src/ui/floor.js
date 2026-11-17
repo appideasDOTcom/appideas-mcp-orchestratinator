@@ -1244,7 +1244,11 @@
 
   /* The line the host opens the list with (ATTACHED_HEADER in
      host/uploads.js; test/floor.mjs holds the two to one spelling). */
-  const ATTACHED_HEADER = 'Attached from the floor:';
+  const ATTACHED_HEADER = 'Attached by the operator:';
+  /* What the host wrote before 2026-11-17 (costmo: "from the floor" read as
+     a place, and a meeting room is not one). Still read, so a conversation
+     from before draws its files as files. */
+  const ATTACHED_HEADERS = [ATTACHED_HEADER, 'Attached from the floor:'];
   /* costmo, 2026-11-17: 100 MB a file, twenty a message. The board refuses
      the same (src/uploads.js); the page says it before a byte is sent. */
   const ATTACH_MAX_BYTES = 100 * 1024 * 1024;
@@ -1259,10 +1263,16 @@
    */
   function splitAttached(text) {
     const s = String(text ?? '').replace(/\r\n?/g, '\n');
-    const at = s.startsWith(`${ATTACHED_HEADER}\n`) ? 0 : s.lastIndexOf(`\n\n${ATTACHED_HEADER}\n`);
+    // The last list under either spelling: the later of the two in the text.
+    let at = -1;
+    let header = ATTACHED_HEADER;
+    for (const h of ATTACHED_HEADERS) {
+      const i = s.startsWith(`${h}\n`) ? 0 : s.lastIndexOf(`\n\n${h}\n`);
+      if (i > at) { at = i; header = h; }
+    }
     if (at < 0) return { text: s, files: [] };
     const listAt = at === 0 ? 0 : at + 2;
-    const lines = s.slice(listAt + ATTACHED_HEADER.length + 1).replace(/\n+$/, '').split('\n');
+    const lines = s.slice(listAt + header.length + 1).replace(/\n+$/, '').split('\n');
     if (!lines.length || !lines.every((l) => /^- \/\S/.test(l))) return { text: s, files: [] };
     const files = lines.map((l) => {
       const path = l.slice(2);
