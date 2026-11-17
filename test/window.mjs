@@ -1084,6 +1084,68 @@ async function main() {
         `and sends the operator to ${pageLabel}, not to a command to type — ${cold.error}`);
       assert(/The window is showing: .*Starting \(waited for \S*never-ready for \d+s; the roster had /.test(cold.error ?? ''), 'still quoting the window, what it waited for and the roster');
 
+      // The same window, closed while it is being waited on (QA, PR #57 Info
+      // 10). Killed, not exited, so there is no dead pane left to read; tmux
+      // answers a question about it for another pane of the session, and the
+      // wait used to run its whole length on a window that was not there.
+      const coldPane = await W.paneFor(coldDir);
+      const goneStarted = Date.now();
+      const waitingOnIt = W.waitReady(coldDir, { timeoutMs: 20_000, target: coldPane?.target });
+      await sleep(900);
+      await run('tmux', ['kill-pane', '-t', coldPane?.target]).catch(() => {});
+      const goneNow = await waitingOnIt;
+      const goneMs = Date.now() - goneStarted;
+      eq([goneNow.ok, goneNow.code, goneNow.gone, goneNow.error], [false, 'window_gone', 'other_pane', 'the window was closed before Claude Code had finished starting in it'],
+        'a window closed while it is being waited on is said to be gone, in words: tmux answered for another pane');
+      assert(goneMs < 6000, `at the next look, not after the full ${20_000}ms — took ${goneMs}ms`);
+
+      // And when it was its session's only window (QA, PR #57 round 2).
+      // With other sessions left on the server, tmux answers exit 0 and
+      // nothing at all, no pane id to compare. The first cut wanted an id
+      // that differed, and waited this one out.
+      const loneSession = `${TMUX_SESSION}-lone`;
+      await run('tmux', ['new-session', '-d', '-s', loneSession, '-c', coldDir, 'sh', '-c', 'sleep 120']).catch(() => {});
+      const loneTarget = (await run('tmux', ['list-panes', '-t', `${loneSession}:`, '-F', '#{session_name}:#{window_id}.#{pane_id}']).catch(() => ({ stdout: '' }))).stdout.trim().split('\n')[0];
+      assert(/%\d+$/.test(loneTarget), 'a session of one window is standing', loneTarget);
+      const loneStarted = Date.now();
+      const waitingOnLone = W.waitReady(coldDir, { timeoutMs: 20_000, target: loneTarget });
+      await sleep(900);
+      await run('tmux', ['kill-pane', '-t', loneTarget]).catch(() => {});
+      const loneNow = await waitingOnLone;
+      const loneMs = Date.now() - loneStarted;
+      eq([loneNow.code, loneNow.gone, loneMs < 6000], ['window_gone', 'no_pane', true], `a session's only window, closed while it is waited on, is gone too, at the next look: tmux answered with no pane at all — took ${loneMs}ms`);
+      await run('tmux', ['kill-session', '-t', loneSession]).catch(() => {});
+
+      // Every answer tmux gives about a pane that is gone, in its own words,
+      // and the two that say nothing (QA, PR #57 Info 11). Which of these a
+      // live look gets depends on the moment it lands; these do not.
+      const T = 'orch:@4.%7';
+      eq(W.paneGone({ ok: true, out: '%7 0' }, T), null, 'an answer about the pane that was asked for is not a pane gone');
+      eq(W.paneGone({ ok: true, out: '%7 1' }, T), null, 'nor is one that says it exited: that pane is still there to be read');
+      eq(W.paneGone({ ok: true, out: '%9 0' }, T), 'other_pane', 'an answer about another pane is: tmux answered for the session');
+      eq([W.paneGone({ ok: true, out: '' }, T), W.paneGone({ ok: true, out: ' ' }, T)], ['no_pane', 'no_pane'], 'so is an answer with no pane in it: the session went, or the server is going');
+      eq(W.paneGone({ ok: false, error: 'no server running on /private/tmp/tmux-501/default' }, T), 'no_server', 'and "no server running": it was the last pane of all');
+      eq(W.paneGone({ ok: false, error: 'error connecting to /private/tmp/tmux-501/gone (No such file or directory)' }, T), 'no_server', 'and "error connecting to": the socket is gone');
+      eq(W.paneGone({ ok: false, error: 'server exited unexpectedly' }, T), 'no_server', 'and "server exited unexpectedly": the call met the server as it went');
+      eq([W.paneGone({ ok: false, error: 'Command failed: tmux display-message … (timed out)' }, T), W.paneGone({ ok: false, missing: true, error: 'tmux is not installed' }, T)], [null, null],
+        'a call that failed any other way says nothing about the window');
+      eq(W.paneGone({ ok: true, out: '%9 0' }, 'orch:@4'), null, 'and a target that names no pane has no pane to compare');
+
+      // A pane in somebody else's session, in a folder (costmo, 2026-11-16:
+      // only the floor's own session). The host listed every session on the
+      // server and took such a pane for that folder's window: what it types
+      // for a desk there would have gone into it.
+      const theirsDir = `${FIX}/in-another-session`;
+      mkdirSync(theirsDir, { recursive: true });
+      const theirs = `somebody-${process.pid}`;
+      await run('tmux', ['new-session', '-d', '-s', theirs, '-c', theirsDir, 'sh', '-c', 'sleep 120']).catch(() => {});
+      const theirPane = (await run('tmux', ['list-panes', '-t', `=${theirs}:`, '-F', '#{pane_current_path}']).catch(() => ({ stdout: '' }))).stdout.trim();
+      eq(theirPane, W.canonical(theirsDir), 'a pane of another tmux session is sitting in a folder');
+      eq(await W.paneFor(theirsDir), null, 'it is not that folder\'s window: the host has no window there');
+      const sessionsSeen = [...new Set((await W.panes()).map((p) => p.target.split(':')[0]))];
+      eq(sessionsSeen, [TMUX_SESSION], 'and the host\'s panes are its own session\'s, whatever else is on the server');
+      await run('tmux', ['kill-session', '-t', `=${theirs}`]).catch(() => {});
+
       // A composer that keeps the message through every Enter: a raw-mode
       // pane drawing the box composerOf reads, which never submits.
       const boxDir = `${FIX}/keeps-it`;
@@ -2320,11 +2382,24 @@ async function main() {
     // key to every later window and to `show-environment`.
     console.log('\n  a placeholder desk that opens the session');
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
+    // And a session whose name only begins with the floor's (QA, PR #57
+    // round 2; costmo: fixed in that PR). With none of the exact name, tmux
+    // gives a session target to any session whose name starts with it, so
+    // the host took this one for its own and made the first window in it.
+    // Every target the host writes from the name is exact now (`=name`).
+    const lookAlike = `${TMUX_SESSION}-of-somebody-else`;
+    await run('tmux', ['new-session', '-d', '-s', lookAlike, '-c', FIX, 'sh', '-c', 'sleep 120']).catch(() => {});
+    const windowsIn = async (s) => (await run('tmux', ['list-windows', '-t', `=${s}:`, '-F', '#{window_id}']).catch(() => ({ stdout: '' }))).stdout.split('\n').filter(Boolean).length;
+    eq(await windowsIn(lookAlike), 1, 'a session whose name begins with the floor\'s is standing, and the floor\'s own is not');
+    eq([(await W.panes()).length, await W.serverReads(FIX)], [0, null], 'the host reads none of it as its own: no panes, and no server of its to ask about a folder');
     W.useKey('board-key-value');
     const firstDir = keyDesk('ph-first', '${ORCH_TEST_PANE_KEY}');
     const opener = await W.open(firstDir);
     W.useKey(null);
     assert(opener.ok && opener.created, `a placeholder desk opens the session${opener.ok ? '' : ` — ${opener.error}`}`);
+    eq([String(opener.target ?? '').split(':')[0], await windowsIn(lookAlike), await windowsIn(TMUX_SESSION)], [TMUX_SESSION, 1, 1],
+      'and it is a session of the floor\'s own name: the look-alike has the one window it had');
+    await run('tmux', ['kill-session', '-t', `=${lookAlike}`]).catch(() => {});
     assert(/^ORCH_TEST_PANE_KEY=board-key-value$/m.test(await paneEnvOf(firstDir)), 'its own pane has the key');
     const sessionEnv = (await run('tmux', ['show-environment', '-t', `${TMUX_SESSION}:`]).catch(() => ({ stdout: '' }))).stdout;
     assert(!sessionEnv.includes('board-key-value'), "the session's environment does not");

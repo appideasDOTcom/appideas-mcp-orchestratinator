@@ -12,7 +12,8 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords } from '../src/floor.js';
+import { addressed } from '../src/tools.js';
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -63,15 +64,21 @@ const deskOf = (f, agent, channel = CH) =>
   f.channels.find((c) => c.channel === channel)?.desks.find((d) => d.agent === agent);
 
 rmDb(DB_PATH);
-const server = spawn('node', ['src/server.js'], {
+// How long this suite's board watches a silent meeting room before it reads
+// its window as gone (TWIN_UNHEARD_MS in src/floor.js; 90 s on a real board).
+const UNHEARD_MS = 3000;
+// A function, because one section restarts the board on the same database.
+const startServer = () => spawn('node', ['src/server.js'], {
   // FLOOR_SESSION_TTL_MINUTES at its 1-minute floor, so the staleness assertions
   // can age a session out with a direct SQL touch instead of a real hour.
   env: {
     ...process.env, PORT: String(PORT), DB_PATH,
     ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
+    ORCH_TWIN_UNHEARD_MS: String(UNHEARD_MS),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
+let server = startServer();
 
 try {
   if (!(await waitHealthy())) throw new Error('server never became healthy');
@@ -3584,7 +3591,7 @@ try {
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
 
     const fresh = pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: ['bo', 'cy', 'bo'] }));
-    eq(fresh, { id: null, channel: 'lab', agents: ['bo', 'cy'], resume: false }, 'a new room\'s address names its floor and desks, each once');
+    eq(fresh, { id: null, channel: 'lab', agents: ['bo', 'cy'], twins: [], resume: false }, 'a new room\'s address names its floor and desks, each once');
     eq(pg.meetingOf(pg.meetingQuery({ id: 7, resume: true })), { id: 7, channel: null, agents: [], resume: true }, 'a Resume names the room and asks for the reopen');
     eq(pg.meetingOf(pg.meetingQuery({ id: 7 })).resume, false, 'and the address it settles on does not, so a reload reopens nothing');
     eq([pg.meetingOf(''), pg.meetingOf('?popout=1&channel=a&agent=b'), pg.meetingOf('?meeting=new&channel=lab'), pg.meetingOf('?meeting=0')], [null, null, null, null],
@@ -3664,15 +3671,29 @@ try {
     eq(pg.meetingResumePlan(roomOf([P('bo'), P('cy')]), chans([{ agent: 'bo', persona: 'Bo', hosted: H() }]), new Set()).map((s) => s.act), ['join', 'skip'],
       'one desk that cannot be reopened does not stop the rest');
 
-    const U = (agent, unread, nudge = { ok: true, host: 'h' }) => ({ ...D(agent, { nudge }), board: { unread } });
+    const U = (agent, unread, nudge = { ok: true, host: 'h' }, assigned = 0) => ({ ...D(agent, { nudge }), board: { unread, assigned_open: assigned } });
     let nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 1), U('dee', 0)], true);
-    eq([nc.text, nc.disabled, nc.waiting], ['Nudge everyone · 3 unread', false, true], 'the room\'s Nudge says a nudge is needed: the unread waiting for its recipients');
+    eq([nc.text, nc.disabled, nc.waiting], ['Nudge all (3)', false, true], 'the room\'s Nudge says a nudge is needed, and how much is waiting: "Nudge all (3)" (costmo, 2026-11-16)');
+    eq(nc.agents, ['bo', 'cy'], 'and it goes to the desks with something waiting, not to the one with nothing');
+    assert(/^Types “nudge” into 2 desks with something waiting.* The others have nothing waiting and are left alone\.$/m.test(nc.title), 'which its hover says', nc.title);
     assert(/Bo: 2 unread messages/.test(nc.title) && /Cy: 1 unread message$/m.test(nc.title), 'and whose, on hover');
+    nc = pg.meetingNudgeChip([U('bo', 1, undefined, 2), U('cy', 0, undefined, 1), U('dee', 0)], true);
+    eq([nc.text, nc.agents], ['Nudge all (4)', ['bo', 'cy']], 'an unclaimed task is something waiting too: the count is messages and tasks together, and a desk with a task alone is nudged');
+    assert(/Bo: 1 unread message, 2 unclaimed tasks/.test(nc.title) && /Cy: 1 unclaimed task$/m.test(nc.title), 'each named on hover');
+    nc = pg.meetingNudgeChip([{ ...U('bo', 0), board: { unread: 0, assigned_open: 0, claimed_tasks: [{ id: 1 }] } }, U('cy', 0)], true);
+    eq([nc.text, nc.disabled, nc.waiting, nc.agents], ['Nudge all', true, false, []], 'with nothing waiting there is no count and the button is dimmed: a task a desk has claimed is work it already knows about');
+    assert(/^Nobody chosen has anything waiting on the board/.test(nc.title) && /The bell on a desk’s box nudges that one desk anyway\.$/m.test(nc.title), 'saying why, and what still nudges one desk on purpose', nc.title);
     nc = pg.meetingNudgeChip([U('bo', 0)], false);
-    eq([nc.text, nc.waiting], ['Nudge Bo', false], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    eq([nc.text, nc.waiting, nc.disabled], ['Nudge Bo', false, true], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 0)], false);
+    eq([nc.text, nc.agents], ['Nudge Bo, Cy (2)', ['bo']], 'narrowed to some, the names with the same count, and still only the one with something waiting');
+    nc = pg.meetingNudgeChip([U('bo', 3)], true);
+    eq(nc.text, 'Nudge Bo (3)', 'a room of one names its desk');
     nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' })], false);
-    eq(nc.disabled, true, 'a desk the board will not nudge is not offered');
+    eq([nc.disabled, nc.text], [true, 'Nudge Ed (4)'], 'a desk the board will not nudge is not offered, though what waits for it is still counted');
     assert(/Can't nudge Ed: held by your editor/.test(nc.title), 'and says why');
+    nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' }), U('bo', 1)], true);
+    eq([nc.disabled, nc.agents], [false, ['ed', 'bo']], 'one that can be nudged keeps the button live, and the one that cannot is refused in the room in the board\'s words');
 
     const who = [{ agent: 'bo', persona: 'Bo' }, { agent: 'cy', persona: 'Cy' }, { agent: 'dee', persona: 'Dee' }];
     eq(pg.meetingMentions('@bo @CY, take a look', who), { to: ['bo', 'cy'], text: 'take a look', unknown: [] },
@@ -3887,6 +3908,512 @@ try {
     eq([fp.meetingElsewhere({ left: undefined, top: undefined, width: 760, height: 600 }, here), fp.meetingElsewhere({ left: 10, top: 30, width: NaN, height: 600 }, here)], [true, true],
       'and a window with no place to read is asked about, not assumed to be here');
     eq([fp.meetNames([]), fp.meetNames(['Bo']), fp.meetNames(['Bo', 'Cy']), fp.meetNames(['Bo', 'Cy', 'Dee'])], ['', 'Bo', 'Bo and Cy', 'Bo, Cy and Dee'], 'names are joined the way a sentence joins them');
+  }
+  /* ── one agent, several sessions (costmo, 2026-11-16) ───────────────────────
+   * The board's half and the page's decisions. What a host does with a `seat`
+   * is the host suite's; what two real windows in one folder do is measured
+   * on a probe (host/seats.js). Every refusal must queue nothing. */
+  console.log('\none agent, several sessions');
+  {
+    const SA = 'seat-a';
+    const SB = 'seat-b';
+    const sHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const sFolders = [
+      { path: '/repo/quinn', name: 'quinn', depth: 1, bound: { channel: SA, agent: 'quinn', scope: 'local', board: HOST }, has_mcp_json: false, other_board: null, trusted: true, last_active: '2026-11-16T01:02:03.000Z', sessions: 3 },
+      { path: '/repo/unbound', name: 'unbound', depth: 1, bound: null, has_mcp_json: false, other_board: null, trusted: true, last_active: null, sessions: 0 },
+    ];
+    const sDesks = new Map();
+    const reg = (seats = true) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: sHK,
+      body: JSON.stringify({ host_id: 'h-seat', name: 'seatbox', tmux: 'orch', roots: ['/repo'], folders: sFolders, desks: [...sDesks.values()], ...(seats ? { seats: true } : {}) }),
+    }).then((r) => r.json());
+    const work = () => fetch(`${HOST}/api/host/work?host_id=h-seat&wait=0`, { headers: sHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    const hev = (events) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: sHK, body: JSON.stringify({ host_id: 'h-seat', events }) }).then((r) => r.json());
+    const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const sql = async (fn) => {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH);
+      try { return fn(db); } finally { db.close(); }
+    };
+    /** The host seating a desk it was asked for: it registers it and says `bound`. */
+    const seated = async (channel, agent, session = null) => {
+      sDesks.set(`${channel}|${agent}`, { channel, agent, cwd: '/repo/quinn', scope: 'seat', session_id: session, window: '@9' });
+      const r = await hev([{ type: 'bound', channel, agent, cwd: '/repo/quinn', scope: 'seat', session_id: null, from: null }]);
+      await reg();
+      return r;
+    };
+    const gone = async (channel, agent) => {
+      sDesks.delete(`${channel}|${agent}`);
+      const r = await hev([{ type: 'unbound', channel, agent, cwd: '/repo/quinn', seat: true }]);
+      await reg();
+      return r;
+    };
+    const desk = async (channel, agent) => deskOf(await floor(), agent, channel) ?? null;
+
+    sDesks.set(`${SA}|quinn`, { channel: SA, agent: 'quinn', cwd: '/repo/quinn', scope: 'local', session_id: 'sdk-q1', window: '@1' });
+    sDesks.set(`${SA}|rae`, { channel: SA, agent: 'rae', cwd: '/repo/rae', scope: 'local', session_id: 'sdk-r1', window: '@2' });
+    await reg(false);
+    await work();
+
+    // A host from before seats is not asked for one.
+    let r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    eq([r.status, r.body.code, r.body.error], [409, 'no_seats', noSeatsWords('seatbox')], 'New desk here is refused on a host that does not say it can seat a second desk, in words');
+    eq((await floor()).hosts.find((h) => h.host_id === 'h-seat')?.seats, false, 'and the payload says which hosts can');
+    await reg(true);
+    eq((await floor()).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'a host that says so is one that can');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says it too');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/unbound', channel: SB, agent: 'newbie', seat: true });
+    eq([r.status, r.body.code], [400, 'not_bound'], 'a folder that is not a desk yet has no agent to seat a second time');
+    eq((await work()).map((w) => w.kind), [], 'and neither refusal queued anything');
+
+    // A new desk its host refuses leaves a seat behind, undrawn, as a
+    // refused move does. That seat is nobody: asked for again, the agent
+    // still gets its own name there.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: 'seat-refused', agent: 'quinn', seat: true });
+    eq([r.body.agent, (await work()).map((w) => w.kind)], ['quinn', ['seat']], 'the board takes a new desk on a third floor, under the agent\'s name');
+    eq([(await desk('seat-refused', 'quinn'))?.hosted ?? null, (await desk('seat-refused', 'quinn'))?.live], [null, false], 'which its host never seats: a seat with nothing behind it');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: 'seat-refused', agent: 'quinn', seat: true });
+    eq(r.body.agent, 'quinn', 'asked for again, it is the agent\'s own name again: a seat nobody sat at does not make the name taken');
+    await work();
+    await sql((db) => db.prepare(`DELETE FROM personas WHERE channel = 'seat-refused'`).run());
+    // A window reporting under the name through its hooks, with no host and
+    // no MCP call yet, is somebody: the name is taken there.
+    await post({ channel: 'seat-hooked', agent: 'quinn', session_id: 'hooked-1', hook_event_name: 'SessionStart', cwd: '/elsewhere/quinn' });
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: 'seat-hooked', agent: 'quinn', seat: true });
+    eq(r.body.agent, 'quinn-2', 'on a floor where a window is reporting under the agent\'s name, the new desk takes the name with a number');
+    await work();
+    await post({ channel: 'seat-hooked', agent: 'quinn', session_id: 'hooked-1', hook_event_name: 'SessionEnd', cwd: '/elsewhere/quinn' });
+    await sql((db) => { db.prepare(`DELETE FROM personas WHERE channel = 'seat-hooked'`).run(); db.prepare(`DELETE FROM desk_twins WHERE channel = 'seat-hooked'`).run(); });
+
+    // New desk here, on another floor: the agent keeps its name there.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    eq([r.status, r.body.mode, r.body.agent, r.body.channel], [200, 'seat', 'quinn', SB], 'New desk here on another floor seats the agent there under its own name');
+    let w = await work();
+    eq(w.map((x) => ({ kind: x.kind, channel: x.channel, agent: x.agent, path: x.payload.path, beside: x.payload.beside, open: x.payload.open, from: x.payload.from ?? null })),
+      [{ kind: 'seat', channel: SB, agent: 'quinn', path: '/repo/quinn', beside: { channel: SA, agent: 'quinn' }, open: true, from: null }],
+      'its host is handed one `seat`: the folder, the new desk\'s names, the desk it is beside — and no `from`, because nothing is moved');
+    eq((await desk(SA, 'quinn'))?.hosted?.live, true, 'the desk it has is left as it is: still hosted');
+    eq((await desk(SB, 'quinn'))?.hosted ?? null, null, 'and the new one is drawn at once, as not hosted, until the host says otherwise');
+    eq((await seated(SB, 'quinn')).applied, 1, 'the host answers with `bound`, scope seat');
+    const onB = await desk(SB, 'quinn');
+    eq([onB?.hosted?.seat, onB?.hosted?.scope, onB?.twin], [true, 'seat', null], 'the new desk is hosted as a seat: a desk of its own in a folder that is another desk\'s, and nobody\'s second session on that floor');
+    eq([(await desk(SA, 'quinn'))?.hosted?.seat, (await desk(SA, 'quinn'))?.hosted?.live], [false, true], 'and the folder\'s own desk is not one, and is still there');
+    const actB = (await fetch(`${HOST}/api/activity?limit=50&channel=${SB}`).then((x) => x.json())).rows;
+    assert(actB.some((x) => x.kind === 'admin.desk.take' && /^a new desk at \/repo\/quinn, beside seat-a\/quinn/.test(x.detail ?? '')), 'logged as a take, saying it is a new desk and beside which');
+    assert(!actB.some((x) => x.kind === 'admin.desk.moved'), 'and never as a move');
+
+    // New desk here, on the floor the agent is already on: its name with a number.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SA, agent: 'quinn', seat: true });
+    eq([r.status, r.body.mode, r.body.agent, r.body.base], [200, 'seat', 'quinn-2', 'quinn'], 'on the floor the agent is already on, the new desk takes its name with a number (costmo: agent-2, agent-3)');
+    w = await work();
+    eq(w.map((x) => [x.kind, x.agent, x.payload.agent, x.payload.beside]), [['seat', 'quinn-2', 'quinn-2', { channel: SA, agent: 'quinn' }]], 'and the host is asked for that name');
+    await seated(SA, 'quinn-2', 'sdk-q2');
+    const two = await desk(SA, 'quinn-2');
+    eq(two?.twin, { of: 'quinn', n: 2, meeting: false }, 'the board says whose second session it is, and which number');
+    eq([two?.persona, two?.shirt, two?.hair], [(await desk(SA, 'quinn')).persona, (await desk(SA, 'quinn')).shirt, (await desk(SA, 'quinn')).hair], 'and it carries the agent\'s own name and colours');
+    await op('/api/floor/persona', { channel: SA, agent: 'quinn', persona: 'Quinn Q' });
+    eq([(await desk(SA, 'quinn-2')).persona, (await desk(SB, 'quinn')).persona], ['Quinn Q', 'Quinn Q'], 'a rename of the agent renames its second session with it');
+    await op('/api/floor/persona', { channel: SA, agent: 'quinn-2', persona: 'Quinn' });
+    eq((await desk(SA, 'quinn')).persona, 'Quinn', 'and a rename of the second session renames the agent: they are one');
+
+    // Another session, asked for by the desk (what a meeting room asks).
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'nobody-here' });
+    eq([r.status, r.body.code], [409, 'no_host'], 'another session of a desk no host runs is refused');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', session_id: 'not a session' });
+    eq([r.status, r.body.code], [400, 'bad_session'], 'and a conversation that is not an id');
+    eq((await work()).length, 0, 'with nothing queued');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn-2', meeting: true });
+    eq([r.status, r.body.agent, r.body.base], [200, 'quinn-3', 'quinn'], 'another session of a second session is another session of the agent: the next free number');
+    w = await work();
+    eq([w[0]?.kind, w[0]?.payload.path, w[0]?.payload.beside, w[0]?.payload.session_id], ['seat', '/repo/quinn', { channel: SA, agent: 'quinn-2' }, null],
+      'its host is asked for a seat in the folder the board has the desk at — no path was sent — on a new conversation');
+    eq((await desk(SA, 'quinn-3'))?.twin, { of: 'quinn', n: 3, meeting: true }, 'made for a meeting room, which is what closes it later');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'quinn-7', session_id: 'sess-old-7', meeting: true });
+    eq([r.body.agent, (await work())[0]?.payload.session_id], ['quinn-7', 'sess-old-7'], 'a name asked for by number is taken when it is free, with the conversation to open it on (a resumed room)');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'rae', meeting: true });
+    eq(r.body.agent, 'quinn-4', 'a name that is not this agent\'s with a number is not taken: the next free one is');
+    await work();
+    await seated(SA, 'quinn-7');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'quinn-7', meeting: true });
+    eq([r.body.agent, r.body.existing, (await work()).length], ['quinn-7', true, 0], 'and one asked for by name that is there already is that one: nothing is made twice');
+
+    // What a seat cannot do, in words.
+    r = await op('/api/floor/handback', { channel: SA, agent: 'quinn-2' });
+    eq([r.status, r.body.code, r.body.error], [409, 'seat_no_editor', SEAT_NO_EDITOR], 'a seat\'s conversation is not handed to an editor: an editor in that folder is the folder\'s own desk');
+    r = await op('/api/floor/desk/move', { channel: SB, agent: 'quinn', to: 'elsewhere' });
+    eq([r.status, r.body.code, r.body.error], [409, 'seat_no_move', SEAT_NO_MOVE], 'and a seat is not moved from its card: a move rebinds a folder, and this desk is not its folder\'s');
+    eq((await work()).length, 0, 'neither queued anything');
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: 'elsewhere' });
+    eq([r.status, r.body.mode], [200, 'move'], 'the folder\'s own desk still moves, as it always did');
+    await work();
+    await sql((db) => db.prepare(`DELETE FROM personas WHERE channel = 'elsewhere'`).run());
+
+    // Leaving a seat takes the desk away and nothing else.
+    r = await op('/api/floor/desk/leave', { channel: SB, agent: 'quinn' });
+    eq([r.status, (await work()).map((x) => `${x.kind}:${x.channel}/${x.agent}`)], [200, [`unbind:${SB}/quinn`]], 'a seat is left like any desk: its host is handed the unbind');
+    eq((await gone(SB, 'quinn')).applied, 1, 'the host answers with unbound');
+    eq(await desk(SB, 'quinn'), null, 'and the desk is gone from that floor, seat and row: it was one of several desks of an agent that is still on the board');
+    eq((await desk(SA, 'quinn'))?.hosted?.live, true, 'the agent\'s own desk is untouched');
+    await op('/api/floor/desk/leave', { channel: SA, agent: 'quinn-2' });
+    await work();
+    await gone(SA, 'quinn-2');
+    eq([await desk(SA, 'quinn-2'), await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ? AND agent = 'quinn-2'`).get(SA).n)], [null, 0], 'a second session that is left gives up its desk and its link');
+    // Its window's last hooks arrive around the leave, in no order (the
+    // plugin's SessionEnd, a Stop for a turn the close cut off). Neither may
+    // put the desk back: measured on real windows, the SessionEnd did, and
+    // the name stayed taken.
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2', hook_event_name: 'Stop', cwd: '/repo/quinn', last_assistant_message: 'cut off' });
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2', hook_event_name: 'SessionEnd', cwd: '/repo/quinn' });
+    eq(await desk(SA, 'quinn-2'), null, 'and the last hooks of its closed window do not seat it again');
+    eq(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM personas WHERE channel = ? AND agent = 'quinn-2'`).get(SA).n), 0, 'nor leave a seat behind for its name to be stuck on');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SA, agent: 'quinn', seat: true });
+    eq(r.body.agent, 'quinn-2', 'and its name: the next one made takes it again, so a floor does not count upward for ever');
+    eq([(await desk(SA, 'quinn-2'))?.live, (await desk(SA, 'quinn-2'))?.hosted ?? null], [false, null],
+      'and not its conversation: the new one is not live until a host seats it, though the one that left was on a conversation an hour has not yet aged out');
+    await work();
+    await seated(SA, 'quinn-2', 'sdk-q2b');
+    eq((await desk(SA, 'quinn-2'))?.hosted?.live, true, 'seated again under it');
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2b', hook_event_name: 'Notification', cwd: '/repo/quinn', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    eq((await floor()).queue.filter((x) => x.channel === SA).map((x) => x.agent), ['quinn-2'], 'and heard from at once: a desk seated again under a name that was just left is not the one that left');
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2b', hook_event_name: 'Stop', cwd: '/repo/quinn', last_assistant_message: 'ok' });
+
+    // Closing a second session made for a meeting room once it is in none.
+    const room = async (agents) => (await op('/api/floor/meeting', { channel: SA, agents })).body.room;
+    const age = (agent, s) => sql((db) => db.prepare(`UPDATE desk_twins SET created_at = datetime('now', ?) WHERE channel = ? AND agent = ?`).run(`-${s} seconds`, SA, agent));
+    const closes = async () => (await work()).filter((x) => x.kind === 'unbind').map((x) => x.agent);
+    await seated(SA, 'quinn-3', 'sdk-q3');
+    await age('quinn-3', 5);
+    let rm = await room(['rae', 'quinn-3']);
+    eq(meetingSeat('quinn-3', { sdk_session_id: 'sdk-q3', host_name: 'seatbox', cwd: '/repo/quinn' }, null, 4, 'quinn').base, 'quinn', 'a room\'s record keeps whose second session a participant is, for Resume to make it again');
+    eq(rm.participants.find((p) => p.agent === 'quinn-3')?.base, 'quinn', 'as the board writes it');
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'a second session in a live room is left alone');
+    await op('/api/floor/meeting/participants', { id: rm.id, agents: ['rae'] });
+    eq(await closes(), [], 'taken out of its room a moment after it was made, it is still left: its room may not have recorded it yet');
+    await age('quinn-3', 60);
+    // And the one New desk here made, which is in no room either and as old:
+    // a row that it "stays" proves nothing while it is too young to be looked at.
+    await age('quinn-2', 60);
+    await op('/api/floor/meeting/participants', { id: rm.id, agents: ['rae'] });
+    eq(await closes(), ['quinn-3'], 'out of every room, it is closed: its host is handed the unbind (costmo: "Close it") — it, and not the second session New desk here made, which is no room\'s to close');
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'once, not at every poll');
+    const actA = (await fetch(`${HOST}/api/activity?limit=80&channel=${SA}`).then((x) => x.json())).rows;
+    assert(actA.some((x) => x.kind === 'admin.desk.leave' && x.actor === 'board' && /a second session of quinn, in no meeting room now/.test(x.detail ?? '')), 'with a row saying the board did it and why');
+    await gone(SA, 'quinn-3');
+    eq(await desk(SA, 'quinn-3'), null, 'and it leaves the floor when its host has closed it');
+    eq((await desk(SA, 'quinn-2'))?.hosted?.live, true, 'a second session made by New desk here is not a room\'s to close, and stays');
+
+    // Never mid-turn, and not on a reload's End.
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    eq(r.body.agent, 'quinn-3', 'the name is free again');
+    await work();
+    await seated(SA, 'quinn-3', 'sdk-q3b');
+    await age('quinn-3', 60);
+    rm = await room(['rae', 'quinn-3']);
+    await hev([{ type: 'turn', channel: SA, agent: 'quinn-3', session_id: 'sdk-q3b', role: 'tool', text: 'Bash: make' }]);
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    eq(await closes(), [], 'a second session that is working is not closed mid-turn when its room ends');
+    await hev([{ type: 'turn', channel: SA, agent: 'quinn-3', session_id: 'sdk-q3b', role: 'assistant', text: 'done' }]);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'and when it has finished, an End that was a window going away is given a moment: a reload ends a room and opens it again');
+    await op('/api/floor/meeting/open', { id: rm.id });
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'reopened inside that moment, the room has its session still');
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    eq(await closes(), ['quinn-3'], 'End meeting is final: it is closed at once');
+    await gone(SA, 'quinn-3');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    await work();
+    await sql((db) => db.prepare(`UPDATE desk_twins SET created_at = datetime('now', '-200 seconds') WHERE channel = ? AND agent = ?`).run(SA, r.body.agent));
+    await sleep(2100);
+    await floor();
+    eq([await desk(SA, r.body.agent), await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ? AND agent = ?`).get(SA, r.body.agent).n)], [null, 0],
+      'one its host never seated gives its name back after two minutes, room or no room');
+
+    // A room that is open and merely silent (QA, PR #57 finding 1). Every
+    // window stopped for longer than a room stays live — a laptop asleep —
+    // and the first page poll afterwards reached the board before the room's
+    // touch: the session was closed in a meeting nobody had ended. `hush`
+    // is that silence: the room's last touch, 200 s ago.
+    const hush = (id) => sql((db) => db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-200 seconds') WHERE id = ?`).run(id));
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    const quiet = r.body.agent;
+    await work();
+    await seated(SA, quiet, 'sdk-quiet');
+    await age(quiet, 60);
+    rm = await room(['rae', quiet]);
+    // The name is one a room above held until it ended a few seconds ago,
+    // and a room ended that lately still holds its sessions (a reload). Aged,
+    // so the only room these rows read is the silent one.
+    await sql((db) => db.prepare(`UPDATE meeting_rooms SET ended_at = datetime('now', '-60 seconds') WHERE channel = ? AND ended_at IS NOT NULL`).run(SA));
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'a room that is open and has not been heard from keeps its second session at the look that finds it so: the board was not watching while it was silent');
+    eq((await op('/api/floor/meeting/touch', { id: rm.id })).body.live, true, 'its window, awake again, says the room is open');
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [], 'heard from inside the watch, the room has its session still, however long ago the silence was found');
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'silent again later, it is watched afresh from that look, not from the first one');
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [quiet], 'watched for the whole of it and still silent, its window is gone without a word: the session is closed');
+    await gone(SA, quiet);
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+
+    // A second session's mail (QA, PR #57 finding 2), through the agents'
+    // own MCP tools: it starts where it is made, not at the floor's first
+    // message, and a name taken again starts where it stopped.
+    const mcp = async (agent, tool, args = {}) => {
+      const h = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': SA, 'X-Agent': agent, 'x-orchestratinator-key': KEY };
+      const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: h, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'floor-test', version: '0' } } }) });
+      await init.text();
+      const sid = init.headers.get('mcp-session-id');
+      await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }).then((x) => x.text());
+      const x = await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } }) });
+      const text = await x.text();
+      const data = text.includes('data:') ? text.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5)).join('') : text;
+      return JSON.parse(JSON.parse(data).result.content[0].text);
+    };
+    const unreadOf = async (agent) => (await desk(SA, agent))?.board?.unread ?? null;
+    const leave = async (agent) => { await op('/api/floor/desk/leave', { channel: SA, agent }); await work(); await gone(SA, agent); };
+    // Sent by quinn-2, which is in no room: rae is in one, and a broadcast
+    // from inside a room reaches only that room.
+    await mcp('quinn-2', 'send_message', { body: 'before the second session, one' });
+    await mcp('quinn-2', 'send_message', { body: 'before the second session, two' });
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    const mail = r.body.agent;
+    await work();
+    await seated(SA, mail, 'sdk-mail');
+    const who = await mcp(mail, 'whoami');
+    eq([who.agent, who.session_of, /^You are a second session of quinn on this channel/.test(who.note ?? '')], [mail, 'quinn', true], 'whoami tells a second session that it is one, and whose (through the tool)');
+    eq((await mcp('quinn', 'whoami')).session_of ?? null, null, 'and tells the agent\'s first desk nothing of the kind');
+    eq(await unreadOf(mail), 0, 'a second session starts with nothing unread: what the floor carried before it was made is in its first desk\'s mail');
+    eq((await mcp(mail, 'poll_messages')).count, 0, 'and its first poll, with no `since`, is handed none of it');
+    await mcp('quinn-2', 'send_message', { body: 'after it was made' });
+    eq(await unreadOf(mail), 1, 'what is sent after it was made is its to read');
+    eq((await mcp(mail, 'poll_messages')).messages.map((m) => m.body), ['after it was made'], 'and its poll returns that, and only that');
+    await leave(mail);
+    await mcp('quinn-2', 'send_message', { body: 'while it was away', to: mail });
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: mail, meeting: true });
+    eq(r.body.agent, mail, 'the name is taken again');
+    await work();
+    await seated(SA, mail, 'sdk-mail-2');
+    eq([await unreadOf(mail), (await mcp(mail, 'poll_messages')).messages.map((m) => m.body)], [1, ['while it was away']], 'a name taken again starts where it stopped: what was addressed to it while it was away is not lost');
+    await leave(mail);
+    await sql((db) => db.prepare(`UPDATE agents SET poll_cursor = 0 WHERE channel = ? AND agent = ?`).run(SA, mail));
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: mail, meeting: true });
+    await work();
+    await seated(SA, mail, 'sdk-mail-3');
+    eq(await unreadOf(mail), 0, 'and one whose row never read anything (a session made before this) starts at the newest, as a new name does');
+
+    // Which session a name means, at the two tools that ask (QA, PR #57
+    // finding 4): the rule was pinned as a function and at neither call.
+    await age(mail, 60);
+    rm = await room(['rae', mail]);
+    let sent = await mcp('rae', 'send_message', { body: 'to the one in my room', to: 'quinn' });
+    eq([sent.to, sent.addressed_as], [mail, 'quinn'], 'send_message: a name written from inside a meeting room with one of that agent\'s sessions goes to that session, and the reply says so');
+    eq((await mcp(mail, 'poll_messages')).messages.map((m) => m.body), ['to the one in my room'], 'which is the one that reads it');
+    let task = await mcp('rae', 'open_task', { title: 'for the one in my room', assignee: 'quinn' });
+    eq([task.assignee, task.addressed_as], [mail, 'quinn'], 'open_task: the same name is assigned to the same session');
+    eq((await mcp(mail, 'list_tasks', { status: 'open', mine: true })).tasks.map((t) => t.title), ['for the one in my room'], 'which is the one that lists it as its own');
+    sent = await mcp('quinn-2', 'send_message', { body: 'from outside the room', to: 'quinn' });
+    eq([sent.to, sent.addressed_as ?? null], ['quinn', null], 'written from outside the room, the name is the agent\'s first desk');
+    task = await mcp('quinn-2', 'open_task', { title: 'for the first desk', assignee: 'quinn' });
+    eq([task.assignee, task.addressed_as ?? null], ['quinn', null], 'and so is a task\'s');
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    await closes();
+    await gone(SA, mail);
+
+    // A bind onto a name one of the folder's extra desks carries (QA, PR
+    // #57 finding 3). The host gives the name to the folder's own binding
+    // and closes that desk's window, so it is Leave's rule: never mid-turn.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    await work();
+    await seated(SB, 'quinn', 'sdk-qb2');
+    await hev([{ type: 'turn', channel: SB, agent: 'quinn', session_id: 'sdk-qb2', role: 'tool', text: 'Bash: make' }]);
+    r = await op('/api/floor/desk/leave', { channel: SB, agent: 'quinn' });
+    eq([r.status, r.body.code], [409, 'working'], 'a working seat is not left');
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: SB });
+    eq([r.status, r.body.code, r.body.error], [409, 'working', seatWorkingWords(SB, 'quinn')], 'and the folder\'s own desk is not moved onto its name either: the move would close the working seat\'s window');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn' });
+    eq([r.status, r.body.code], [409, 'working'], 'nor is the folder taken there from Take a desk');
+    eq((await work()).length, 0, 'with nothing queued by any of the three');
+    await hev([{ type: 'turn', channel: SB, agent: 'quinn', session_id: 'sdk-qb2', role: 'assistant', text: 'done' }]);
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: SB });
+    eq([r.status, r.body.mode, (await work()).map((x) => `${x.kind}:${x.channel}/${x.agent}`)], [200, 'move', [`bind:${SB}/quinn`]], 'once its turn has ended, the move is taken and handed to the host');
+
+    // What a host said about seats outlives the board (QA, PR #57 finding
+    // 5). It was the board's memory, a host registers once a minute, and
+    // the board calls a host live from its row for 90 s: after every
+    // restart the operator was told a current host "runs a build from
+    // before…". The board is restarted here on the same database, and the
+    // host does not register again.
+    server.kill();
+    await sleep(300);
+    server = startServer();
+    if (!(await waitHealthy())) throw new Error('the board did not come back');
+    const hostNow = (await floor()).hosts.find((h) => h.host_id === 'h-seat');
+    eq([hostNow?.live, hostNow?.seats], [true, true], 'a board that restarted still knows a live host can seat a second desk, before that host has registered again');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says so');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn-2', meeting: true });
+    eq([r.status, r.body.code ?? null], [200, null], 'so another session is not refused as "a build from before"');
+    await work();
+
+    // Deleting the floor takes the links with it, like its meeting rooms.
+    assert(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ?`).get(SA).n) > 0, 'the floor has a second session on it');
+    eq((await op('/api/admin/channel/delete', { channel: SA, confirm: SA })).status, 200, 'deleting the floor');
+    eq(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ?`).get(SA).n), 0, 'takes its second sessions\' links with it (purgeChannel sweeps them)');
+
+    // Which session a name means (costmo: the one in the sender's room).
+    const rooms = { dev: { participants: [{ agent: 'dev' }, { agent: 'qa-2' }, { agent: 'gone-3', absent: true }] } };
+    const fake = {
+      twinOf: (_c, a) => ({ 'qa-2': { base: 'qa' }, 'gone-3': { base: 'ops' } }[a] ?? null),
+      liveMeetingOf: (_c, a) => rooms[a] ?? null,
+    };
+    eq(addressed(fake, 'c', 'dev', 'qa'), 'qa-2', 'a name written by somebody in a meeting room with one of that agent\'s sessions means that session');
+    eq(addressed(fake, 'c', 'outsider', 'qa'), 'qa', 'written from outside any room, it is the agent\'s first desk');
+    eq(addressed(fake, 'c', 'dev', 'qa-2'), 'qa-2', 'a second session\'s own name always goes exactly there');
+    eq(addressed(fake, 'c', 'dev', 'ops'), 'ops', 'a session the room only keeps for Resume is not in it: the name stays the first desk');
+    eq(addressed(fake, 'c', 'dev', 'dev'), 'dev', 'and a name in the room under itself is itself');
+    eq(addressed(fake, 'c', 'dev', null), null, 'a broadcast names nobody');
+
+    // The page's half.
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const cut = (from, to) => {
+      const a = src.indexOf(from);
+      const b = src.indexOf(to);
+      if (a < 0 || b < 0 || b < a) throw new Error(`a section was not found in src/ui/floor.js between ${JSON.stringify(from)} and ${JSON.stringify(to)}`);
+      return src.slice(a, b);
+    };
+    const tmp = `./data/sessions-${process.pid}.mjs`;
+    writeFileSync(tmp, [
+      'const SENDING_GRACE_MS = 30000;',
+      cut('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */', '  /* ---------- a desk\'s place on the floor: the drawing ---------- */'),
+      cut('  /* ---------- chat controls: what the page decides ---------- */', '  /* ---------- chat controls: the drawing ---------- */'),
+      cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
+      cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
+      cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
+      'export { moveBlockedWords, leaveBlockedWords, cardRefusal, plateName, meetingQuery, meetingOf, meetingChip, seatAgain, agentDesks, meetingResumePlan, deskFate, boundTo };',
+    ].join('\n'));
+    let pg;
+    try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    eq(pg.moveBlockedWords({ hosted: { host: 'seatbox', live: true, seat: true } }), SEAT_NO_MOVE, 'the card\'s Move is dimmed on a seat with the route\'s own words');
+    eq(pg.moveBlockedWords({ hosted: { host: 'seatbox', live: true, seat: false } }), null, 'and not on the folder\'s own desk');
+    eq(pg.leaveBlockedWords({ hosted: { host: 'seatbox', live: true } }), null, 'Leave room can be pressed on a desk its host is running');
+    assert(/^The host seatbox is not on this board right now/.test(pg.leaveBlockedWords({ hosted: { host: 'seatbox', live: false } }) ?? ''), 'not on one whose host is away, which is said');
+    assert(/no binding here to remove/.test(pg.leaveBlockedWords({ live: true, hosted: null }) ?? ''), 'nor on a desk no host runs: the floor has no binding there to take away');
+    eq(pg.cardRefusal(false), null, 'a desk in no meeting room has its card\'s controls');
+    assert(/^In a meeting room: .*Bring it back from the meeting room, or end the meeting, to use these\.$/.test(pg.cardRefusal(true) ?? ''), 'one in a meeting room has none of them, and the card says why and what gives them back');
+    assert(/to use these\. It was hidden before it joined: .*is its pill again when the meeting ends\.$/.test(pg.cardRefusal(true, true) ?? ''), 'a desk hidden before it joined is told, in the same reason, that it is its pill again when the meeting ends');
+    eq(pg.cardRefusal(false, true), null, 'and a hidden desk in no meeting room has nothing to be told');
+    eq([pg.plateName({ persona: 'Quinn', twin: null }), pg.plateName({ persona: 'Quinn', twin: { of: 'quinn', n: 2 } })], ['Quinn', 'Quinn · 2'], 'a second session\'s nameplate is the agent\'s name with its number');
+
+    const D = (agent, extra = {}) => ({ agent, persona: agent[0].toUpperCase() + agent.slice(1), nudge: { ok: true, host: 'h' }, last_turn: { id: 10 }, hosted: { host: 'seatbox', window: agent, live: true }, ...extra });
+    const hostsCan = [{ name: 'seatbox', seats: true }];
+    eq(pg.seatAgain(D('bo'), hostsCan), true, 'a desk whose host is here and can seat may be given a second session');
+    assert(/runs a build from before/.test(pg.seatAgain(D('bo'), [{ name: 'seatbox', seats: false }])), 'one whose host cannot may not, and why');
+    assert(/is offline\.$/.test(pg.seatAgain(D('bo', { hosted: { host: 'seatbox', window: 'bo', live: false } }), hostsCan)), 'nor one whose host is away');
+    assert(/no host on this board/.test(pg.seatAgain(D('bo', { hosted: null }), hostsCan)), 'nor one no host runs');
+    const inRoom = new Set(['lab|cy', 'lab|dee']);
+    const again = (d) => (d.agent === 'cy' ? true : d.agent === 'dee' ? null : null);
+    let chip = pg.meetingChip([D('bo'), D('cy'), D('dee')], inRoom, 'lab', again);
+    eq([chip.disabled, chip.text, chip.agents, chip.twins], [false, 'Meeting room · 2', ['bo'], ['cy']],
+      'a checked desk that is in another meeting room is in the new one too, as a second session; one out in its own popout is still left out');
+    assert(/Cy \(cy\) is in another meeting room: this room gets a new session of it, and the one there carries on\./.test(chip.title), 'said on hover');
+    assert(/Dee \(dee\) is in a window already/.test(chip.title), 'beside the one that is left out');
+    chip = pg.meetingChip([D('cy'), D('dee')], inRoom, 'lab', () => true);
+    eq([chip.disabled, chip.agents, chip.twins], [false, [], ['cy', 'dee']], 'a room of nothing but desks that are in other rooms is a room: each gets a second session');
+    chip = pg.meetingChip([D('bo'), D('cy')], inRoom, 'lab', () => 'its host (seatbox) is offline.');
+    eq([chip.disabled, chip.twins], [true, []], 'a desk that cannot be given one is not counted');
+    assert(/cannot be given a second session: its host \(seatbox\) is offline\./.test(chip.title), 'with the reason');
+    chip = pg.meetingChip([D('bo'), D('cy')], new Set(['lab|cy']), 'lab');
+    eq([chip.disabled, chip.agents, chip.twins], [true, ['bo'], []], 'and with nothing said about it, a desk out in a window is left out as before');
+    eq(pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: ['bo'], twins: ['cy', 'bo', 'cy'] })), { id: null, channel: 'lab', agents: ['bo'], twins: ['cy'], resume: false },
+      'the new room\'s address names the desks to make a second session of, each once, and none that joins as itself');
+    eq(pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: [], twins: ['cy', 'dee'] }))?.twins, ['cy', 'dee'], 'a room of second sessions alone is still a room');
+
+    const floors = [
+      { channel: 'lab', desks: [
+        { agent: 'qa', hosted: { host: 'box', window: 'qa-repo', live: true } },
+        { agent: 'qa-2', twin: { of: 'qa', n: 2 }, hosted: { host: 'box', window: 'qa-repo', live: true, seat: true } },
+        { agent: 'dev', hosted: { host: 'box', window: 'dev-repo', live: true } },
+      ] },
+      { channel: 'lab2', desks: [
+        { agent: 'qa', hosted: { host: 'box', window: 'qa-repo', live: true, seat: true } },
+        { agent: 'dev', hosted: { host: 'box', window: 'other-repo', live: true } },
+      ] },
+      { channel: 'lab3', desks: [{ agent: 'qa', hosted: { host: 'otherbox', window: 'qa-repo', live: true } }] },
+    ];
+    eq(pg.agentDesks(floors, 'lab', 'qa'), [['lab', 'qa'], ['lab', 'qa-2'], ['lab2', 'qa']], 'one agent\'s desks are every desk of its name out of its folder on its host, on any floor — its second sessions with it');
+    eq(pg.agentDesks(floors, 'lab', 'qa-2'), [['lab', 'qa-2'], ['lab', 'qa'], ['lab2', 'qa']], 'asked from a second session, the same desks');
+    eq(pg.agentDesks(floors, 'lab', 'dev'), [['lab', 'dev']], 'the same name in another folder is another agent: developer on two floors is two repos');
+    eq(pg.agentDesks(floors, 'lab3', 'qa'), [['lab3', 'qa']], 'and so is the same folder name on another host');
+    eq(pg.agentDesks(floors, 'lab', 'nobody'), [['lab', 'nobody']], 'a desk nothing is known about is only itself');
+
+    const bound = (host, window, extra = {}) => ({ host, window, state: 'idle', ...extra });
+    const fl = (...cs) => cs.map(([channel, desks]) => ({ channel, desks }));
+    eq(pg.deskFate(fl(['lab', [{ agent: 'qa', hosted: bound('box', 'qa-repo', { state: 'offline' }) }]], ['lab2', [{ agent: 'qa', hosted: bound('box', 'qa-repo', { seat: true }) }]]), { channel: 'lab', agent: 'qa' }, { host: 'box', window: 'qa-repo', seat: false }).state, 'left',
+      'a desk that left while the agent has a seat on another floor has left, not moved there: that seat was there all along');
+    eq(pg.deskFate(fl(['lab', []], ['lab2', [{ agent: 'qa', hosted: bound('box', 'qa-repo') }]]), { channel: 'lab', agent: 'qa' }, { host: 'box', window: 'qa-repo', seat: true }).state, 'gone',
+      'and a seat that is gone has not moved to the folder\'s own desk');
+    eq(pg.deskFate(fl(['lab', []], ['lab2', [{ agent: 'qa', hosted: bound('box', 'qa-repo') }]]), { channel: 'lab', agent: 'qa' }, { host: 'box', window: 'qa-repo', seat: false }).state, 'moved',
+      'a folder\'s own desk found on another floor is still a move');
+    eq(pg.boundTo({ hosted: bound('box', 'qa-repo', { seat: true }) }), { host: 'box', window: 'qa-repo', seat: true }, 'what a desk is bound to says whether it is a seat');
+
+    const plan = pg.meetingResumePlan(
+      { channel: 'lab', participants: [{ agent: 'dev', session_id: 's-dev' }, { agent: 'qa-3', base: 'qa', session_id: 's-q3' }, { agent: 'ops-2', base: 'ops', session_id: 's-o2' }] },
+      [{ channel: 'lab', desks: [
+        { agent: 'dev', persona: 'Dev', hosted: { host: 'box', window: 'dev-repo', live: true, session_id: 's-dev' } },
+        { agent: 'qa', persona: 'Quinn', hosted: { host: 'box', window: 'qa-repo', live: true, session_id: 's-q1' } },
+      ] }], new Set());
+    eq(plan.map((x) => x.act), ['join', 'twin', 'skip'], 'Resume makes a second session again when its agent has a desk, and says so when it has none');
+    eq(plan[1], { agent: 'qa-3', persona: 'Quinn', act: 'twin', base: 'qa', session_id: 's-q3' }, 'under the name it had, beside its agent, on the conversation it was on');
+    assert(/was a second session of ops, which has no desk on lab now/.test(plan[2].why), 'in words');
+    const offline = pg.meetingResumePlan({ channel: 'lab', participants: [{ agent: 'qa-3', base: 'qa', session_id: 's-q3' }] },
+      [{ channel: 'lab', desks: [{ agent: 'qa', persona: 'Quinn', hosted: { host: 'box', window: 'qa-repo', live: false } }] }], new Set())[0];
+    eq([offline.act, offline.keep], ['skip', true], 'one whose agent\'s host is away is kept for the next Resume');
+
+    // Take a desk's third button.
+    const dsrc = readFileSync('src/ui/app.js', 'utf8');
+    const da = dsrc.indexOf('/* ---------- take a desk: what the dialog reads ---------- */');
+    const db_ = dsrc.indexOf('/* ---------- take a desk: the dialog ---------- */');
+    const dtmp = `./data/desk-seat-${process.pid}.mjs`;
+    writeFileSync(dtmp, `${dsrc.slice(da, db_)}\nexport { takeBody, seatOffer, seatOutcome };\n`);
+    let dlg;
+    try { dlg = await import(new URL(dtmp, `file://${process.cwd()}/`)); } finally { rmSync(dtmp, { force: true }); }
+    const fm = { hostId: 'h', path: '/repo/quinn', channel: 'lab2', newChannel: '', agent: 'quinn' };
+    eq(dlg.takeBody(fm, { seat: true }), { host_id: 'h', path: '/repo/quinn', channel: 'lab2', agent: 'quinn', open: true, seat: true }, 'New desk here sends what a take sends, and says it is a new desk');
+    eq(Object.hasOwn(dlg.takeBody(fm), 'seat'), false, 'which a take and a move never say');
+    const b = { channel: 'lab', agent: 'quinn', scope: 'local' };
+    eq(dlg.seatOffer(null, 'lab2', { name: 'box', seats: true }), null, 'a folder that is not a desk is not offered a second one');
+    eq(dlg.seatOffer(b, '', { name: 'box', seats: true }), null, 'nor is one with no floor chosen');
+    const off = dlg.seatOffer(b, 'lab2', { name: 'box', seats: true });
+    eq([off.label, off.why], ['New desk here', null], 'a folder bound elsewhere is offered New desk here, beside Move');
+    assert(/starts a new session of quinn on lab2, in the same folder\. The session it has on lab is left running, and so is every other one\.$/.test(off.note), 'and the note says what it does to the session it has: nothing', off.note);
+    assert(/under its name with a number \(quinn-2\)/.test(dlg.seatOffer(b, 'lab', { name: 'box', seats: true }).note), 'on its own floor the note says the name it will take');
+    assert(/under its name with a number \(quinn-2\)/.test(dlg.seatOffer(b, 'lab2', { name: 'box', seats: true }, true).note), 'and on a floor where somebody already answers to its name');
+    assert(/^box runs a build from before/.test(dlg.seatOffer(b, 'lab2', { name: 'box', seats: false }).why ?? ''), 'on a host that cannot, it is dimmed and says why');
+    const seatFloor = (here, beside) => ({ channels: [
+      { channel: 'lab2', desks: here ? [{ agent: 'quinn-2', ...here }] : [] },
+      { channel: 'lab', desks: [{ agent: 'quinn', ...beside }] },
+    ] });
+    const ask = { channel: 'lab2', agent: 'quinn-2', beside: { channel: 'lab', agent: 'quinn' } };
+    eq(dlg.seatOutcome(seatFloor(null, { last_turn: { id: 5, role: 'assistant' } }), ask, 5), null, 'a new desk the board accepted is not there yet');
+    eq(dlg.seatOutcome(seatFloor({ hosted: null }, {}), ask, 5), null, 'nor while it is drawn as not hosted');
+    eq(dlg.seatOutcome(seatFloor({ hosted: { live: true } }, {}), ask, 5), 'seated', 'it is there once its host is running it');
+    eq(dlg.seatOutcome(seatFloor(null, { last_turn: { id: 9, role: 'error', text: 'no new desk on lab2: refused' } }), ask, 5), { refused: 'no new desk on lab2: refused' }, 'a refusal is read off the desk it was made beside, where the host says it');
+    eq(dlg.seatOutcome(seatFloor(null, { last_turn: { id: 5, role: 'error', text: 'an old one' } }), ask, 5), null, 'and an error that was there before is not this one');
   }
 } catch (err) {
   failures++;

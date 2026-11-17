@@ -142,7 +142,7 @@ const tops = await m.evalJs(`JSON.stringify(['bo', 'cy', 'dee'].map((a) => [
 ok(JSON.stringify(tops) === JSON.stringify([['rgb(217, 164, 65)', 'rgb(217, 164, 65)'], ['rgb(177, 88, 58)', 'rgb(177, 88, 58)'], ['rgb(90, 65, 48)', 'rgb(90, 65, 48)']]),
   "each participant's box and To chip carry its hair across the top; one with none set carries the default", JSON.stringify(tops));
 const nudgeLabel = () => m.evalJs(`document.querySelector('[data-act="m-nudge-all"]').textContent`);
-ok(await nudgeLabel() === 'Nudge everyone · 3 unread', 'the Nudge button says a nudge is needed', await nudgeLabel());
+ok(await nudgeLabel() === 'Nudge all (3)', 'the Nudge button says a nudge is needed, and how much is waiting', await nudgeLabel());
 w0 = work().length;
 await m.click('.m-part[data-for-agent="cy"] [data-act="m-nudge"]');
 await sleep(1500);
@@ -157,13 +157,32 @@ ok(await m.evalJs(`!!document.querySelector('#dlg [data-do="nudge"]') && !!docum
 await m.click('#dlg [data-do="advance"]');
 await m.waitFor(`!document.querySelector('.m-part[data-for-agent="bo"] .m-pill')`, { timeout: 8000 }).catch(() => {});
 ok(JSON.stringify(await pills('bo')) === '[]', "Mark all read clears Bo's count in the room");
-ok(await nudgeLabel() === 'Nudge everyone · 1 unread', 'and the Nudge button follows', await nudgeLabel());
+ok(await nudgeLabel() === 'Nudge all (1)', 'and the Nudge button follows', await nudgeLabel());
+// Nudge all goes to the desks with something waiting, and to no others
+// (costmo, 2026-11-16): Cy has one unread message, Bo and Dee have none.
 w0 = work().length;
 await m.click('[data-act="m-nudge-all"]');
 await sleep(2000);
-ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => x.agent).sort()) === '["bo","cy","dee"]', 'Nudge everyone types the word into every desk in the room');
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => [x.agent, x.payload.text])) === '[["cy","nudge"]]', 'Nudge all types the word into the one desk with something waiting, and leaves the other two alone', JSON.stringify(workSince(w0).map((x) => [x.kind, x.agent])));
 const nudges = await m.evalJs(`[...document.querySelectorAll('#p-turns .m-msg')].filter((x) => x.querySelector('.t-body')?.textContent === 'nudge').length`);
-ok(nudges === 2, 'as one message in the transcript, not one per desk', String(nudges));
+ok(nudges === 2, 'as one message in the transcript', String(nudges));
+msg = await m.evalJs(`JSON.stringify((() => { const all = [...document.querySelectorAll('#p-turns .m-msg')].filter((x) => x.querySelector('.t-body')?.textContent === 'nudge'); const n = all.at(-1); return n ? { who: n.querySelector('.t-who')?.textContent ?? '', delivs: [...n.querySelectorAll('.m-deliv')].map((d) => d.textContent.trim()) } : null; })())`).then(JSON.parse);
+ok(msg && /you → Cy$/.test(msg.who.trim()) && msg.delivs.length === 1 && /^Cy /.test(msg.delivs[0]), 'which names who it went to: Cy alone', JSON.stringify(msg));
+// With nothing waiting for anybody it cannot be pressed, and says why.
+await m.click('.m-part[data-for-agent="cy"] [data-act="m-pill"]');
+await m.waitFor(`document.querySelector('#dlg')?.open && !!document.querySelector('#dlg [data-do="advance"]')`, { timeout: 6000 }).catch(() => {});
+await m.click('#dlg [data-do="advance"]');
+await m.waitFor(`!document.querySelector('.m-part[data-for-agent="cy"] .m-pill')`, { timeout: 8000 }).catch(() => {});
+const idle = await m.evalJs(`JSON.stringify((() => { const b = document.querySelector('[data-act="m-nudge-all"]'); return { text: b.textContent, disabled: b.disabled, title: b.title, lit: b.classList.contains('waiting') }; })())`).then(JSON.parse);
+ok(idle.text === 'Nudge all' && idle.disabled === true && idle.lit === false && /^Nobody chosen has anything waiting on the board/.test(idle.title), 'with nothing waiting for anybody the button reads Nudge all, with no count, and is dimmed with the reason', JSON.stringify(idle));
+w0 = work().length;
+await m.click('[data-act="m-nudge-all"]');
+await sleep(1200);
+ok(workSince(w0).length === 0, 'and a click sent to it nudges nobody');
+w0 = work().length;
+await m.click('.m-part[data-for-agent="dee"] [data-act="m-nudge"]');
+await sleep(1500);
+ok(JSON.stringify(workSince(w0).filter((x) => x.kind === 'chat').map((x) => [x.agent, x.payload.text])) === '[["dee","nudge"]]', "a desk's own bell still nudges that desk on purpose, with nothing waiting for it");
 
 console.log('\na click on a name in the To row');
 // costmo, 2026-11-14: with everyone lit a name is a solo; the only lit name

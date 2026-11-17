@@ -30,6 +30,8 @@ process.env.ORCH_TMUX = `${FIX}/tmux.sh`;
 process.env.ORCH_TMUX_SESSION = 'orch';
 process.env.ORCH_HOST_CLAUDE = `${FIX}/stand-in.sh`;
 process.env.ORCH_CLAUDE_HOME = CLAUDE_HOME;
+// Where a seat's binding file is kept (host/seats.js), for the seat below.
+process.env.ORCH_HOST_SEATS = `${FIX}/seats`;
 // Long enough for §2's two-second hold, short enough that §3 waits it out.
 process.env.ORCH_RENEW_WAIT_MS = '6000';
 process.env.ORCH_LAND_TIMEOUT_MS = '2000';
@@ -101,7 +103,7 @@ function setup() {
     `else printf '%s\\033[K\\n' '❯ '; fi; printf '\\033[J'; sleep 0.3; done ) &\n` +
     `exec cat >> "$PWD/received.txt"\n`);
   chmodSync(`${FIX}/stand-in.sh`, 0o755);
-  for (const d of ['a', 'b', 'c', 'd', 'locked']) mkdirSync(`${FIX}/${d}`, { recursive: true });
+  for (const d of ['a', 'b', 'c', 'd', 'e', 'locked']) mkdirSync(`${FIX}/${d}`, { recursive: true });
 }
 
 async function main() {
@@ -166,6 +168,29 @@ async function main() {
   const C = W.canonical(`${FIX}/c`);
   r = await W.open(C, {});
   ok(r.ok && r.created, 'a window with no conversation is open', JSON.stringify(r));
+  // And a seat's window: one agent with several sessions (host/seats.js). A
+  // seat is a desk by the tag on its window and the binding it was started
+  // with, and a move that reopened it by folder alone would bring it back as
+  // the folder's own desk, connected to another floor. In a folder of its
+  // own here, because this suite reads panes by folder.
+  const S = await import('../host/seats.js');
+  const E = W.canonical(`${FIX}/e`);
+  const seat = S.seatTag('lab', 'qa');
+  const seatFile = S.writeConfig({ channel: 'lab', agent: 'qa', seat }, { url: 'http://localhost:1/mcp', key: 'k' });
+  {
+    const t = W.transcriptPath(E, 'sess-e');
+    mkdirSync(resolve(t, '..'), { recursive: true });
+    const at = new Date().toISOString();
+    writeFileSync(t, [
+      { type: 'user', sessionId: 'sess-e', uuid: 'e-u', timestamp: at, message: { role: 'user', content: 'hello' } },
+      { type: 'assistant', sessionId: 'sess-e', uuid: 'e-a', timestamp: at, message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } },
+    ].map((x) => JSON.stringify(x)).join('\n') + '\n');
+  }
+  const seatAt = { cwd: E, seat };
+  r = await W.open(seatAt, { resume: 'sess-e' });
+  await W.waitReady(seatAt, { pid: r.pid, target: r.target, timeoutMs: 8000 });
+  const tagOf = async (dir) => (await tmuxT(['list-panes', '-a', '-F', '#{pane_current_path}\t#{@orch_seat}'])).split('\n').map((l) => l.split('\t')).find(([d]) => d === dir)?.[1] ?? null;
+  ok(r.ok && r.created && (await tagOf(E)) === seat, 'a seat\'s window is open, tagged as its desk', JSON.stringify([r, await tagOf(E)]));
   const pre = await panesNow();
   writeFileSync(`${B}/busy`, String(pre[B]));
   writeFileSync(`${A}/asking`, String(pre[A]));
@@ -193,6 +218,12 @@ async function main() {
   ok(post[C] && post[C] !== pre[C], 'the window with no conversation is open again, in a new process', `${pre[C]} → ${post[C]}`);
   ok(!readFileSync(`${C}/argv.txt`, 'utf8').includes('--resume'), 'starting a conversation, not resuming one', readFileSync(`${C}/argv.txt`, 'utf8'));
   ok(readOr(`${C}/received.txt`) === '', 'and nothing is typed into it');
+  // The seat came back as the seat.
+  ok(post[E] && post[E] !== pre[E], 'the seat\'s window is open again, in a new process', `${pre[E]} → ${post[E]}`);
+  ok((await tagOf(E)) === seat, 'still tagged as its desk, so it is not the folder\'s own window now', String(await tagOf(E)));
+  ok(readFileSync(`${E}/argv.txt`, 'utf8').trim().split('\n').slice(-4).join(' ') === `--resume sess-e --mcp-config ${seatFile}`, 'resumed on its conversation with its own binding', readFileSync(`${E}/argv.txt`, 'utf8'));
+  ok(cut?.moved?.find((m) => m.cwd === E)?.seat === seat, 'and the move names it as the seat, for the line on its desk', JSON.stringify(cut?.moved?.find((m) => m.cwd === E)));
+  await tmuxT(['kill-window', '-t', await paneOf(E)]);
   const mc = cut?.moved?.find((m) => m.cwd === C);
   ok(mc?.ok === true && mc.sessionId === null && /starts one there/.test(W.renewNote(A, mc)), 'its desk is told it starts one', JSON.stringify(mc));
   await tmuxT(['kill-window', '-t', await paneOf(C)]);
@@ -298,6 +329,42 @@ async function main() {
   ok((await W.checkServer()) === null && (await W.checkServer()) === null, 'checkServer does nothing, twice');
   ok(JSON.stringify(await panesNow()) === JSON.stringify(keptD), 'the windows are the same processes');
   ok(!(await inMode()), 'and no window is left in view-mode');
+
+  // The last window of all, closed while it is waited on (QA, PR #57 round
+  // 2). Its server goes with it, and tmux says "no server running", which
+  // is a failed call and not an answer about another pane. waitReady read
+  // that as nothing known and ran its whole limit, then said Claude Code
+  // was open in the window. Here because this suite has a server of its
+  // own to lose; test:window has the two shapes that leave a server.
+  await run('tmux', ['-L', SOCK, 'kill-server']).catch(() => {});
+  const lastDir = W.canonical(`${FIX}/a`);
+  await run('tmux', ['-L', SOCK, 'new-session', '-d', '-s', 'orch', '-c', lastDir, 'sleep 60']);
+  const lastTarget = (await tmuxT(['list-panes', '-a', '-F', '#{session_name}:#{window_id}.#{pane_id}'])).split('\n')[0];
+  const lastStarted = Date.now();
+  const waitingOnLast = W.waitReady(lastDir, { timeoutMs: 12000, target: lastTarget });
+  await sleep(900);
+  await run('tmux', ['-L', SOCK, 'kill-pane', '-t', lastTarget]).catch(() => {});
+  const lastNow = await waitingOnLast;
+  const lastMs = Date.now() - lastStarted;
+  ok(/%\d+$/.test(lastTarget) && lastNow.code === 'window_gone' && lastMs < 6000,
+    'the last window of all, closed while it is waited on, is said to be gone at the next look', `${JSON.stringify(lastNow)} after ${lastMs}ms on ${lastTarget}`);
+
+  // The same, looked at once the server has gone (QA, PR #57 Info 11). The
+  // row above kills the pane and lets the next look land where it lands,
+  // and a look that meets the server as it goes is answered with nothing,
+  // by another arm: with "no server running" not read at all it passed one
+  // run in eight. Here the server is gone before the first look, so the
+  // only answer there is to get is tmux's failed call.
+  await run('tmux', ['-L', SOCK, 'new-session', '-d', '-s', 'orch', '-c', lastDir, 'sleep 60']);
+  const goneTarget = (await tmuxT(['list-panes', '-a', '-F', '#{session_name}:#{window_id}.#{pane_id}'])).split('\n')[0];
+  await run('tmux', ['-L', SOCK, 'kill-pane', '-t', goneTarget]).catch(() => {});
+  const serverGone = await until(() => run('tmux', ['-L', SOCK, 'has-session']).then(() => false, (e) => /no server running|error connecting to/.test(String(e.stderr ?? e.message))), 8000);
+  ok(serverGone, 'with its last window closed, the server is gone');
+  const afterStarted = Date.now();
+  const afterNow = await W.waitReady(lastDir, { timeoutMs: 12000, target: goneTarget });
+  const afterMs = Date.now() - afterStarted;
+  ok(afterNow.code === 'window_gone' && afterNow.gone === 'no_server' && afterMs < 3000,
+    'a window whose server has gone is said to be gone at the first look, from tmux saying there is no server', `${JSON.stringify(afterNow)} after ${afterMs}ms on ${goneTarget}`);
 }
 
 try {

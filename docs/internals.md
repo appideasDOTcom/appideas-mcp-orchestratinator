@@ -125,7 +125,8 @@ just means a client opens a session per turn, which is normal and handled.
   keyed by `channel` — plus the floor's tables: `agent_sessions` and `turns`
   (what each window reported), `agent_profile` and `personas` (who each agent
   is and where it sits), `hosts`, `hosted_desks`, `host_outbox`,
-  `saved_prompts` and `meeting_rooms`. See [`src/db.js`](../src/db.js). A channel is never a row of
+  `saved_prompts`, `meeting_rooms` and `desk_twins` (a second session of an
+  agent on a floor it already has a desk on). See [`src/db.js`](../src/db.js). A channel is never a row of
   its own; it's a key shared across those tables, which is why archiving needs
   a flag table and deleting has to sweep all of them in one transaction.
 - **The floor's chat controls (0.10.9):** `agent_sessions` carries `effort`,
@@ -273,6 +274,33 @@ just means a client opens a session per turn, which is normal and handled.
   `MEETING_LIVE_SECONDS`, 150 s) stores the room's participants in
   `messages.audience`, which `pollMessages`, `unreadCounts` and
   `unreadMessages` honour. Direct messages are unaffected.
+- **One agent, several sessions (0.12.9):** a folder's binding names one
+  desk, so a second session in the same folder is a window started with a
+  binding of its own, `claude --mcp-config <file>`, whose entry takes the
+  folder's place in that window ([`host/seats.js`](../host/seats.js) has
+  what was measured). The host calls such a desk a **seat**: a record of
+  its own beside `host.json` (`seats/seats.json`), a binding file per seat
+  (mode 600; it holds the key, as `~/.claude.json` does), and a tag on its
+  tmux window (`@orch_seat`), which is how [`host/window.js`](../host/window.js)
+  tells several windows in one folder apart: every window function takes
+  the folder, or `{ cwd, seat }`. The plugin's hook reads the window's own
+  binding file (`ORCH_DESK_CONFIG`), so a prompt raised in a seat's window
+  is the seat's. On the board a seat is `hosted_desks.scope = 'seat'`
+  (`hosted.seat` on the payload). On another floor it carries the agent's
+  own name; on a floor where the name is taken it carries the name with a
+  number (`qa-2`), linked to the agent by `desk_twins` (`twin` on the
+  payload: whose, which number, and whether it was made for a meeting
+  room). Three routes: `POST /api/floor/desk` with `seat: true` (Take a
+  desk's **New desk here**; work kind `seat`, never a move's `bind`),
+  `POST /api/floor/desk/twin` `{channel, agent}` (another session on the
+  agent's own floor: what a meeting room asks for, with `as` and
+  `session_id` when Resume brings one back), and the existing
+  `/desk/leave`, which for a seat takes the desk away whole (seat, row,
+  link, and its conversations ended). `sweepTwins` closes a session made
+  for a meeting room once it is in no live room, run from the routes a
+  page polls. `addressed` in [`src/tools.js`](../src/tools.js) is which
+  session a plain name means. Refused for a seat, in words: the editor
+  handoff (`seat_no_editor`) and the card's move (`seat_no_move`).
 
 ```
 src/
@@ -287,10 +315,11 @@ src/
   backup.js   Export and restore the whole board as one JSON document
   ui/         The dashboard page (no build step, no external assets)
 host/         The workstation service that runs desks in tmux windows
+              (seats.js: a second desk in a folder that is already one)
 plugin/       The Claude Code plugin (orchestratinator-floor) — the floor's hooks
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 scripts/
   set-version.mjs   Writes the version into all three files that carry one
-test/         Eight suites; test:host and test:window drive real tmux panes
-              against a real server
+test/         Thirteen suites; test:host, test:window, test:renew and test:seats
+              drive real tmux panes, the first and last against a real server
 ```

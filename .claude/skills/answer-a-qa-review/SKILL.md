@@ -62,10 +62,31 @@ inversions table says which of your assertions they already trust.
 - **One mutant per fault line**, in a copy (**mutate-in-a-copy**): the fix
   removed must turn exactly the new assertion red. Name the mutant and the
   assertion in the reply; QA predicts their own inversions from it.
-- **The suite that covers it, then the full run** — and read the channel
-  first: their clean-clone runs share this machine's CPU, and a full run
-  overlapping theirs went red in six `test:host` pane cases that were green
-  alone (CLAUDE.md, Tests).
+- **The suites that cover it, not the full run.** That means each changed
+  file's suite (`test:floor` for the page's lifted sections, `test:host`
+  for `host/`), the page checks that read the changed code, and the
+  mutants. The full `npm test` runs once, at the SHA that ships, when
+  costmo calls the release, and not at a review, yours or QA's (costmo,
+  2026-11-16; QA's decisions/0015; CLAUDE.md, Conventions, has the map of
+  which suites a path reaches). PR #56's two rounds were answered that
+  way.
+  Read the channel before anything long: their clean-clone runs share this
+  machine's CPU, and a run of yours overlapping theirs went red in six
+  `test:host` pane cases that were green alone (CLAUDE.md, Tests).
+- **Look for a commit before every long run and before every message to
+  QA** (`git log -1 --format='%h %ci'`). On PR #57 (2026-11-16) he pushed
+  `94eb28d` and `bd557e7` while the round was being written, and it was
+  noticed eight minutes later, by chance, when `git status` listed fewer
+  files than had been edited. The first of the two held a test row that
+  was red for its fixture's reason, and QA could have started on it.
+  Nothing announces a commit; the tree looking cleaner than it should is
+  the only sign.
+- **When costmo commits mid-round, prove what was measured was the
+  commit.** He committed PR #56's fixes twice while mutants were still
+  running in copies. The copy was taken before the commit, so the reading
+  is the commit's only if the files are. Compare `shasum -a 256` of each
+  changed file in the copy with `git show <sha>:<file>` and put both hashes
+  in the account. QA compares by identity, and hashes say which algorithm.
 
 ## Replying in the thread
 
@@ -108,6 +129,15 @@ posts a closing note. What those rounds taught:
 - **The candidate test is run from outside the tree** (`run-batches.mjs
   --overlay`, **mutate-in-a-copy**), and copied in when its control is
   green. This is the rule above, with the tool that makes it the easy way.
+  Not done in PR #57's round after the close, and it cost twice in twenty
+  minutes: costmo pushed `e5cce3c` with a fix whose suites were still
+  running (QA found the case it missed), then `5e0774e` with a new
+  `test:renew` row that redeclared a name, so the suite did not load at a
+  pushed SHA. Both were edits resting in the tree while a chain ran. If an
+  edit must go into the tree first, `node --check` every test file touched
+  in the same command as the edit, and run the changed suite alone and
+  first, in the foreground, so its result is read in a minute and not at
+  the end of a ten-minute chain.
 - **Take QA's pin as a mutant and run it** before answering, and before
   offering a different fix. Their pin is usually a change to a stand-in.
   Four runs settle it: control, fault, fault with the pin, pin alone.

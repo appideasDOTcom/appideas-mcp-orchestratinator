@@ -300,6 +300,38 @@ export function openDb(path) {
       ended_at     TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_meeting_rooms_updated ON meeting_rooms(updated_at);
+
+    -- ─── One agent, several sessions (costmo, 2026-11-16) ─────────────────────
+    -- A second session of an agent on a floor it already has a desk on. The
+    -- board files turns, unread mail, tasks and a meeting room's members by
+    -- (channel, agent), so a second session on the same floor needs a name
+    -- of its own there: the agent's with a number after it (qa-2, qa-3;
+    -- costmo's pick). This row is what says qa-2 is qa: the nameplate shows
+    -- qa's name and face with the number, a message to plain "qa" from
+    -- somebody in a meeting room with qa-2 goes to qa-2, and a rename of
+    -- either renames both. The link is this row and never the spelling: an
+    -- agent whose own name ends in a number is nobody's second session.
+    --
+    -- On another floor the agent keeps its own name and needs no row here;
+    -- that it shares a folder is the host's to know (hosted_desks.scope =
+    -- 'seat', host/seats.js).
+    --
+    -- for_meeting: made for a meeting room, and closed when it comes out of
+    -- one (costmo: "Close it"). One made by Take a desk's "New desk here"
+    -- stays until Leave room.
+    --
+    -- Not in BACKUP_TABLES, for meeting_rooms' reason: it names windows on a
+    -- machine, and a restored row would name one that is not there.
+    CREATE TABLE IF NOT EXISTS desk_twins (
+      channel     TEXT NOT NULL,
+      agent       TEXT NOT NULL,
+      base        TEXT NOT NULL,
+      n           INTEGER NOT NULL,
+      for_meeting INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      start_cursor INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (channel, agent)
+    );
   `);
 
   // An earlier cut of the floor queued "nudges" for a desk's own hook to hand
@@ -349,6 +381,18 @@ export function openDb(path) {
   // (MEETING_LIVE_SECONDS): a window that crashed or was killed never sends
   // its end, and must not keep a floor's agents talking past each other.
   addColumn(db, 'meeting_rooms', 'live_at', 'TEXT');
+  // Where a second session's mail starts (QA, PR #57 finding 2). Its
+  // `agents` row is made when its window connects, and was made at cursor 0:
+  // every broadcast the floor ever carried read as unread for it (7 of 7
+  // measured; 222 on the live floor that day), and the room's Nudge counted
+  // them. A second session is not a new agent. What was sent before it was
+  // made is in its first desk's mail, read or waiting, so it starts at the
+  // floor's newest message; a name taken again starts where it stopped, so
+  // nothing addressed to it while it was away is lost. Written when the
+  // link is (insertTwin), used for the row touchAgent makes and as the
+  // floor under its polls (src/tools.js). Added by migration: the table
+  // shipped to the live instance without it.
+  addColumn(db, 'desk_twins', 'start_cursor', 'INTEGER NOT NULL DEFAULT 0');
 
   // Retired = the operator has taken this agent off the board. Deliberately a
   // flag and not a DELETE: the row is recreated by `touchAgent` the moment the
@@ -397,6 +441,15 @@ export function openDb(path) {
   // way to join. These carry the address: which tmux session the host runs, and
   // which window in it belongs to this desk.
   addColumn(db, 'hosts', 'tmux_session', 'TEXT');
+  // Whether the host can put a second desk in a folder (host/seats.js), as
+  // it said at its last registration. A column and not the server's memory
+  // (QA, PR #57 finding 5): the board calls a host live from `last_seen`
+  // here for 90 s, a host registers once a minute, and for the time between
+  // a board restart and the next registration memory had nothing, so the
+  // board told the operator that a live, current host "runs a build from
+  // before…" — after every deploy. What a host last said is as durable as
+  // when it was last seen.
+  addColumn(db, 'hosts', 'seats', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'hosted_desks', 'window_id', 'TEXT');
   // And when a repo's Claude Code is running somewhere the floor cannot reach —
   // an editor's own panel, with no stdin to type into — this is the pid of it,
@@ -740,8 +793,11 @@ export function makeStore(db) {
        WHERE channel = @channel AND id = @id AND status != 'done'`
     ),
     touchAgent: db.prepare(
-      `INSERT INTO agents (channel, agent, last_seen, last_action, last_action_at)
-       VALUES (@channel, @agent, datetime('now'), @action, datetime('now'))
+      // A second session's row starts at its link's start_cursor (see the
+      // column); anybody else's at 0, as it always did.
+      `INSERT INTO agents (channel, agent, last_seen, last_action, last_action_at, poll_cursor)
+       VALUES (@channel, @agent, datetime('now'), @action, datetime('now'),
+               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen      = datetime('now'),
          last_action    = COALESCE(@action, last_action),
@@ -750,8 +806,9 @@ export function makeStore(db) {
          retired_at     = NULL`
     ),
     setAgentStatus: db.prepare(
-      `INSERT INTO agents (channel, agent, last_seen, status, status_detail, status_at, status_expires_at)
-       VALUES (@channel, @agent, datetime('now'), @status, @detail, datetime('now'), datetime('now', @ttl))
+      `INSERT INTO agents (channel, agent, last_seen, status, status_detail, status_at, status_expires_at, poll_cursor)
+       VALUES (@channel, @agent, datetime('now'), @status, @detail, datetime('now'), datetime('now', @ttl),
+               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen         = datetime('now'),
          status            = @status,
@@ -828,6 +885,53 @@ export function makeStore(db) {
     ),
     pruneMeetings: db.prepare(
       `DELETE FROM meeting_rooms WHERE id NOT IN (SELECT id FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?)`
+    ),
+    // Every room on a floor with when its window last spoke, for the sweep
+    // that closes a second session once it is in no room (src/floor.js).
+    meetingsOn: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
+              CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
+              (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
+         FROM meeting_rooms WHERE channel = ?`
+    ),
+    // One agent, several sessions: the link from a second session to its agent.
+    twinOf: db.prepare(`SELECT channel, agent, base, n, for_meeting, created_at, start_cursor,
+                               CAST((julianday('now') - julianday(created_at)) * 86400 AS INTEGER) AS age_s
+                          FROM desk_twins WHERE channel = ? AND agent = ?`),
+    listTwins: db.prepare(`SELECT channel, agent, base, n, for_meeting, created_at,
+                                  CAST((julianday('now') - julianday(created_at)) * 86400 AS INTEGER) AS age_s
+                             FROM desk_twins ORDER BY channel, base, n`),
+    insertTwin: db.prepare(
+      // start_cursor: where the name stopped when it has been on the board
+      // before, else the floor's newest message. A row at 0 is one that
+      // never read (or was made before this column), and starts at the
+      // newest too.
+      `INSERT INTO desk_twins (channel, agent, base, n, for_meeting, start_cursor)
+       VALUES (@channel, @agent, @base, @n, @for_meeting,
+               COALESCE(NULLIF((SELECT poll_cursor FROM agents WHERE channel = @channel AND agent = @agent), 0),
+                        (SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = @channel)))
+       ON CONFLICT(channel, agent) DO UPDATE SET base = excluded.base, n = excluded.n, for_meeting = excluded.for_meeting,
+         start_cursor = excluded.start_cursor, created_at = datetime('now')`
+    ),
+    deleteTwin: db.prepare(`DELETE FROM desk_twins WHERE channel = ? AND agent = ?`),
+    agentRow: db.prepare(`SELECT agent, retired_at FROM agents WHERE channel = ? AND agent = ?`),
+    hostedRow: db.prepare(`SELECT state FROM hosted_desks WHERE channel = ? AND agent = ?`),
+    liveSession: db.prepare(`SELECT 1 FROM agent_sessions WHERE channel = ? AND agent = ? AND ended_at IS NULL LIMIT 1`),
+    profileOf: db.prepare(`SELECT persona, gender, shirt, hair, skin FROM agent_profile WHERE agent = ?`),
+    copyProfile: db.prepare(
+      `INSERT INTO agent_profile (agent, persona, gender, shirt, hair, skin)
+       VALUES (@agent, @persona, @gender, @shirt, @hair, @skin)
+       ON CONFLICT(agent) DO UPDATE SET
+         persona = excluded.persona, gender = excluded.gender, shirt = excluded.shirt,
+         hair = excluded.hair, skin = excluded.skin, updated_at = datetime('now')`
+    ),
+    twinsOfBase: db.prepare(`SELECT DISTINCT agent FROM desk_twins WHERE base = ?`),
+    // Every conversation still open on a desk, ended: for a seat that has
+    // been left, whose window its host closed (the `unbound` case in
+    // src/floor.js says why they cannot be left open).
+    endDeskSessions: db.prepare(
+      `UPDATE agent_sessions SET ended_at = datetime('now'), awaiting_kind = NULL, awaiting_message = NULL
+        WHERE channel = ? AND agent = ? AND ended_at IS NULL`
     ),
     getSetting: db.prepare(`SELECT value, updated_at FROM settings WHERE key = ?`),
     setSetting: db.prepare(
@@ -1336,13 +1440,13 @@ export function makeStore(db) {
 
     // ─── Hosting ────────────────────────────────────────────────────────────
     upsertHost: db.prepare(
-      `INSERT INTO hosts (host_id, name, tmux_session, last_seen)
-       VALUES (@host_id, @name, @tmux_session, datetime('now'))
+      `INSERT INTO hosts (host_id, name, tmux_session, seats, last_seen)
+       VALUES (@host_id, @name, @tmux_session, @seats, datetime('now'))
        ON CONFLICT(host_id) DO UPDATE SET
-         name = excluded.name, tmux_session = excluded.tmux_session, last_seen = datetime('now')`
+         name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats, last_seen = datetime('now')`
     ),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, registered_at, last_seen FROM hosts ORDER BY name`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, registered_at, last_seen FROM hosts ORDER BY name`),
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
@@ -1440,7 +1544,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1569,6 +1673,87 @@ export function makeStore(db) {
       try { payload = JSON.parse(r.payload); } catch { /* a bad row is an empty job */ }
       return { id: r.id, channel: r.channel, agent: r.agent, kind: r.kind, payload, created_at: r.created_at };
     });
+  });
+
+  /**
+   * One agent, several sessions: the names that are one agent's. `agent`'s
+   * own, the agent it is a second session of, and every second session of
+   * that one, on any floor — a profile is the agent's, not a floor's.
+   */
+  function familyOf(agent) {
+    const bases = new Set([agent, ...db.prepare('SELECT DISTINCT base FROM desk_twins WHERE agent = ?').all(agent).map((r) => r.base)]);
+    const all = new Set(bases);
+    for (const b of bases) for (const r of q.twinsOfBase.all(b)) all.add(r.agent);
+    return [...all];
+  }
+
+  /**
+   * A second session's name on a floor: the agent's with the first free
+   * number from 2 (costmo's pick: agent-2, agent-3). Free is no seat, no
+   * live desk and no working agent under it there: a second session that
+   * closed gave its name back, and the next one takes it again, so a floor
+   * does not count upward for ever. `as` is a name asked for by number — a
+   * meeting room resumed, bringing its second session back as it was — and
+   * is taken when it is free and is this agent's with a number.
+   */
+  const NAME_MAX = 64;
+  const TWIN_PENDING_S = 120;
+  /**
+   * Whether nobody answers to `name` on `channel`: no agent on the board
+   * under it, no desk a host is running, no window reporting.
+   *
+   * Not "no seat". A seat is made the moment the board takes a desk, so it
+   * is drawn while the host works, and it stays behind when the host
+   * refuses (as a refused move's does, #20: undrawn, because nothing is
+   * live behind it). Read as taken, a New desk here that its host refused
+   * once came back on the retry under the name with a number, on a floor
+   * where nobody was using the name (seen in the browser check).
+   */
+  function nameFree(channel, name) {
+    if (name.length > NAME_MAX) return false;
+    const a = q.agentRow.get(channel, name);
+    if (a && !a.retired_at) return false;
+    const h = q.hostedRow.get(channel, name);
+    if (h && h.state !== 'offline') return false;
+    // A second session the board named a moment ago is on its way to its
+    // host: taken, or two asked for in one breath would share a name. One
+    // nobody has seated in TWIN_PENDING_S is not coming.
+    const t = q.twinOf.get(channel, name);
+    if (t && t.age_s < TWIN_PENDING_S) return false;
+    return !q.liveSession.get(channel, name);
+  }
+  function twinName(channel, base, as = null) {
+    const free = (name) => nameFree(channel, name);
+    const numbered = as && as.startsWith(`${base}-`) && /^[1-9][0-9]{0,3}$/.test(as.slice(base.length + 1)) ? Number(as.slice(base.length + 1)) : null;
+    if (numbered && numbered >= 2 && free(as)) return { agent: as, n: numbered };
+    for (let n = 2; n < 1000; n++) {
+      const name = `${base}-${n}`;
+      if (name.length > NAME_MAX) return null;
+      if (free(name)) return { agent: name, n };
+    }
+    return null;
+  }
+
+  const createTwin = db.transaction((channel, base, { forMeeting = false, as = null } = {}) => {
+    const pick = twinName(channel, base, as);
+    if (!pick) return null;
+    q.insertTwin.run({ channel, agent: pick.agent, base, n: pick.n, for_meeting: forMeeting ? 1 : 0 });
+    // A row the name already has is brought up to where it starts: one that
+    // never read is at 0, and the unread count is taken from the row.
+    q.advancePollCursor.run({ channel, agent: pick.agent, cursor: q.twinOf.get(channel, pick.agent)?.start_cursor ?? 0 });
+    // The agent's name and face, copied to the second session's own row and
+    // kept the same from here by setProfile. Copied and not looked up
+    // through the link at every read: a profile is read by agent in a dozen
+    // places, on both surfaces, and the one that forgot the link would draw
+    // one agent with two faces.
+    const p = q.profileOf.get(base) ?? {};
+    q.copyProfile.run({
+      agent: pick.agent, persona: p.persona ?? humanName(base),
+      gender: p.gender ?? null, shirt: p.shirt ?? null, hair: p.hair ?? null, skin: p.skin ?? null,
+    });
+    q.unretireAgent.run({ channel, agent: pick.agent });
+    ensurePersona(channel, pick.agent);
+    return pick.agent;
   });
 
   function ensurePersona(channel, agent) {
@@ -1724,6 +1909,19 @@ export function makeStore(db) {
     openMeeting: (id) => q.openMeeting.run(id).changes,
     endMeeting: (id, participants) => q.endMeeting.run(JSON.stringify(participants), id).changes,
     recentMeetings: (limit) => q.recentMeetings.all(limit).map(meetingRow),
+    /** Every room on a floor, each with `live` (open and heard from lately) and `ended_s` (seconds since it ended). */
+    meetingsOn: (channel, liveSeconds = MEETING_LIVE_SECONDS) =>
+      q.meetingsOn.all(`-${liveSeconds} seconds`, channel).map((r) => ({ ...meetingRow(r), live: !!r.live })),
+    // --- one agent, several sessions -------------------------------------------
+    /** The link from a second session to its agent, or null: `{ base, n, for_meeting, age_s }`. */
+    twinOf: (channel, agent) => q.twinOf.get(channel, agent) ?? null,
+    listTwins: () => q.listTwins.all(),
+    /** A second session of `base` on `channel`: its name, or null when none is free. */
+    createTwin: (channel, base, opts) => createTwin(channel, base, opts),
+    dropTwin: (channel, agent) => q.deleteTwin.run(channel, agent).changes,
+    endDeskSessions: (channel, agent) => q.endDeskSessions.run(channel, agent).changes,
+    nameFree,
+    familyOf,
     /** The window says the room is still open; false when the board has it ended (a reload's end landed after its open). */
     touchMeeting: (id) => q.touchMeeting.run(id).changes > 0,
     /**
@@ -1864,14 +2062,18 @@ export function makeStore(db) {
      * accepted and ignored: every caller has one to hand, and the admin log
      * records which board the operator was looking at when they did it.
      */
+    // One agent's sessions are one agent (desk_twins): what is chosen for
+    // any of its names is chosen for all of them.
     setProfile: (_channel, agent, { persona = null, gender = null, shirt = null, hair = null, skin = null } = {}) =>
-      q.upsertProfile.run({ agent, persona, gender, shirt, hair, skin }).changes,
+      familyOf(agent).reduce((n, a) => n + q.upsertProfile.run({ agent: a, persona, gender, shirt, hair, skin }).changes, 0),
     ensurePersona,
     pruneTurns: (keep = TURN_RETENTION) => q.pruneTurns.run({ keep }).changes,
 
     // ─── Hosting ────────────────────────────────────────────────────────────
-    registerHost: (hostId, name, tmuxSession = null) =>
-      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession }).changes,
+    // `seats`: whether it said it can put a second desk in a folder; a host
+    // from before seats says nothing, and is not asked for one.
+    registerHost: (hostId, name, tmuxSession = null, seats = false) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0 }).changes,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>

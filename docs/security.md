@@ -31,6 +31,16 @@ Clients send it as `X-Orchestratinator-Key: <token>` (or
 healthcheck keeps working. Compose refuses to start without `ORCH_AUTH_TOKEN`,
 rather than quietly bringing up an unlocked server.
 
+On a workstation the key is in three kinds of file, each readable by its
+owner only: a desk's binding (`~/.claude.json` for one taken from the
+floor, or the repo's `.mcp.json`), the host's `~/.orchestratinator/host.json`
+when it was installed with `--token`, and, since 0.12.9, one small file per
+extra desk an agent has in a folder that is already a desk
+(`~/.orchestratinator/seats/*.mcp.json`, mode 600; the binding that desk's
+window is started with). The host writes those itself, with the key it
+already holds, and removes each when its desk is left. The board never
+sends a key to a host.
+
 ### Turning it on without interrupting anyone
 
 Restarting straight into `enforce` cuts off every agent whose `.mcp.json`

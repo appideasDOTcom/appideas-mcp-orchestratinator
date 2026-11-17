@@ -598,6 +598,108 @@ Code at all, on a tmux socket of its own (`PROBE_SOCKET`): a pane that
 drew "Change effort level?" for a second read 8 frames of it and 0 of the
 other title, and with no pane on the socket it exits 2 and says so.
 
+## Two windows in one folder, each a different desk
+
+One agent with several sessions (0.12.9, `host/seats.js`) rests on what
+Claude Code does with `--mcp-config` beside a folder's own binding. It was
+measured on 2.1.325 (2026-11-16) and costs no tokens for the first half:
+an MCP server connects when a window starts, and the board counts sessions.
+
+```bash
+SP=<your scratchpad>/ms; mkdir -p $SP/root/qa-desk $SP/rec
+PORT=8931 DB_PATH=$SP/probe.db ORCH_AUTH_TOKEN=probe-ms ORCH_AUTH_MODE=enforce node src/server.js &   # Node 22.14+
+( cd $SP/root/qa-desk && claude mcp add -s local --transport http orchestratinator http://localhost:8931/mcp \
+    -H "X-Channel: ms-a" -H "X-Agent: qa" -H "X-Orchestratinator-Key: probe-ms" )
+echo '{"mcpServers":{"orchestratinator":{"type":"http","url":"http://localhost:8931/mcp","headers":{"X-Channel":"ms-b","X-Agent":"qa","X-Orchestratinator-Key":"probe-ms"}}}}' > $SP/seat-b.json
+tmux -L probems new-session -d -s p -n a -c $SP/root/qa-desk -x 200 -y 50 'claude; echo "[exited $?]"; sleep 900'
+# trust dialog: Down, Enter. Then the second window, with a binding of its own:
+tmux -L probems new-window -d -t p: -n b -c $SP/root/qa-desk "claude --mcp-config '$SP/seat-b.json'; echo \"[exited \$?]\"; sleep 900"
+curl -s localhost:8931/health          # "sessions": 2
+curl -s -H 'x-orchestratinator-key: probe-ms' localhost:8931/api/state   # ms-a/qa and ms-b/qa, one session each
+```
+
+| what | read |
+|---|---|
+| a window started plain in the bound folder | one MCP session, `ms-a/qa` |
+| a second started with `--mcp-config` naming `ms-b/qa` under the **same server name** | one session on `ms-b`, still one on `ms-a`, two in all: the file's entry replaces the folder's in that window, it is not added beside it |
+| an approval dialog for the file's server | none |
+| `-e ORCH_DESK_CHANNEL=…` on the window, read by a `SessionStart` hook | the hook's environment has it: a hook sees what its window was given |
+| `~/.claude/sessions/` | one file a window, the same `cwd` in each: nothing on disk says which desk a window is |
+
+The second half is the tree's own host on the same board, on its tmux
+socket (the "Tighter isolation" recipe above, with `ORCH_HOST_SEATS` naming
+a scratch directory), and the floor's routes:
+
+```bash
+post /api/floor/open  '{"channel":"ms-a","agent":"qa"}'
+post /api/floor/desk  '{"host_id":"probe-host","path":"<the folder>","channel":"ms-b","agent":"qa","seat":true}'
+post /api/floor/chat  '{"channel":"ms-b","agent":"qa","text":"… call whoami once and reply with exactly: I AM <channel>/<agent>"}'
+post /api/floor/desk/twin '{"channel":"ms-a","agent":"qa"}'        # → qa-2, a third window in the folder
+```
+
+Read that day: `I AM ms-a/qa`, `I AM ms-b/qa` and `I AM ms-a/qa-2` from
+three windows in one folder; each desk's hook sessions filed under itself
+by the plugin that was already installed (it honours `ORCH_CHANNEL` and
+`ORCH_AGENT`); a session told to remember a word, left, and asked back
+with `session_id` answered with the word under its own name (`--resume
+<id> --mcp-config <file>` together). And the fault only a real window
+shows: **the plugin's SessionEnd, fired as a closing window dies, re-seated
+the desk the board had just removed**. Read the `personas` row's
+`assigned_at` against the `desk.left` row's time in `admin_events`: the
+same second. A stand-in has no plugin, so after any change to how a desk
+is closed, close a real one and read those two rows.
+
+**The whole of it in one run, from a browser:**
+[`two-rooms-fixture.sh`](two-rooms-fixture.sh) and [`two-rooms.mjs`](two-rooms.mjs).
+The fixture is everything above done for you: a board from the tree, three
+folders bound as `ms-a/qa`, `ms-a/dev` and `ms-a/ops`, the tree's host on a
+tmux socket of its own, each desk's window opened from the floor and its
+trust question answered. Then a headless Chrome on the floor does what the
+operator does: QA and the developer into one meeting room, QA and the
+service agent into a second, a question asked in each room, Bring back on
+QA's desk.
+
+```bash
+F=.claude/skills/measure-a-real-window/two-rooms-fixture.sh; S="$SP/two-rooms"      # S outside the repo
+$F up "$S"                    # 10 s: three desks reading held=floor; no tokens
+ORCH_CDP_PORT=9293 node --experimental-websocket .claude/skills/measure-a-real-window/two-rooms.mjs http://localhost:8931 "$S/shots"
+# … PASS · 13 of 13        (about a minute; four short replies of tokens; Node 22.14+ first on PATH)
+$F rows "$S"                  # the desks, the windows and their tags, the seats, the board's desk.* rows in order
+$F down "$S"                  # leaves every desk, stops it all, says what is still bound (none) and claude's version
+```
+
+`rows` is the reading to take after anything that makes or closes a second
+session: it prints, side by side, what the floor says of each desk, each
+window's tag on the socket, the host's own record of its seats, and the
+board's `personas`, `desk_twins`, conversations and `desk.*` audit rows
+with their times. The SessionEnd fault below is one line of it: a
+`personas` row for `qa-2` stamped the second its `desk.left` row was
+written. The fixture refuses a port that answers, a socket already up, a
+scratch directory inside the repo, and a Node older than the board needs
+(it finds the newest under `~/.nvm` itself; `NODE=` names another). All
+four refusals and the whole loop were run on 2026-11-16.
+
+Run twice on 2026-11-16, 13 of 13 both times: the second room held `ops`
+and `qa-2`, whose host started a real fourth window in QA's folder; asked
+in the second room it answered `I AM ms-a/qa-2` and `ops` answered `I AM
+ms-a/ops`; asked in the first, `I AM ms-a/qa` and `I AM ms-a/dev`; neither
+room held a word of the other's; the floor's panel read "Bring back from
+all 2 meeting rooms", and pressed, the board closed the second session
+(`desk.leave`, actor `board`) and its window went, with QA back on the
+conversation it had. The second run made `qa-2` again: the name was free,
+which is the closing window's hooks not re-seating it, on real windows.
+It leaves both rooms ended; the three desks are left for you to leave.
+
+Teardown is the windows, the host, the server, **and the binding**, which
+is what `two-rooms-fixture.sh down` does: `POST /api/floor/desk/leave` for
+each desk (its host closes the window and removes the binding; seats
+first, since leaving a folder's own desk does not take its seats), then
+the host and the board by their environment (`ps eww`, matched on the
+probe's port and host id, so the live host is never a candidate), the
+socket, the Chrome on the CDP port, and a read of `~/.claude.json` for any
+probe folder still bound. By hand, a folder left bound stays a desk of a
+board that is gone.
+
 ## How long a closed window stays in the roster
 
 Issue #24 (task 253, 2026-11-03, 2.1.300): a move closed a desk's window

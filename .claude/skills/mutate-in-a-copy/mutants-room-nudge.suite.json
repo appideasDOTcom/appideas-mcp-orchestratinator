@@ -1,0 +1,30 @@
+[
+ [
+  "the room's Nudge counts unread messages alone",
+  "floor",
+  "src/ui/floor.js",
+  "  const nudgeWaiting = (d) => (d?.board?.unread ?? 0) + (d?.board?.assigned_open ?? 0);",
+  "  const nudgeWaiting = (d) => (d?.board?.unread ?? 0);"
+ ],
+ [
+  "the room's Nudge goes to every desk chosen",
+  "floor",
+  "src/ui/floor.js",
+  "      agents: waiting.map((d) => d.agent),",
+  "      agents: desks.map((d) => d.agent),"
+ ],
+ [
+  "the room's Nudge stays live with nothing waiting",
+  "floor",
+  "src/ui/floor.js",
+  "    const plan = nudgePlan(waiting);\n    const n = waiting.reduce",
+  "    const plan = nudgePlan(desks);\n    const n = waiting.reduce"
+ ],
+ [
+  "a claimed task counts as waiting",
+  "floor",
+  "src/ui/floor.js",
+  "  const nudgeWaiting = (d) => (d?.board?.unread ?? 0) + (d?.board?.assigned_open ?? 0);",
+  "  const nudgeWaiting = (d) => (d?.board?.unread ?? 0) + (d?.board?.assigned_open ?? 0) + (d?.board?.claimed_tasks?.length ?? 0);"
+ ]
+]

@@ -1,0 +1,380 @@
+[
+ [
+  "a host that cannot seat is asked anyway",
+  "floor",
+  "src/floor.js",
+  "      if (!hostRow.seats) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });\n      const base = folder.bound.agent;",
+  "      const base = folder.bound.agent;"
+ ],
+ [
+  "New desk here on the agent's own floor keeps its plain name",
+  "floor",
+  "src/floor.js",
+  "      if (!store.nameFree(channel, base)) {",
+  "      if (false) {"
+ ],
+ [
+  "New desk here is sent to the host as a move's bind",
+  "floor",
+  "src/floor.js",
+  "      store.enqueueHostWork(hostRow.host_id, channel, id, 'seat', {\n        path, channel, agent: id, beside: { channel: folder.bound.channel, agent: base },",
+  "      store.enqueueHostWork(hostRow.host_id, channel, id, 'bind', {\n        path, channel, agent: id, beside: { channel: folder.bound.channel, agent: base },"
+ ],
+ [
+  "another session of a second session is named after the second session",
+  "floor",
+  "src/floor.js",
+  "    const base = store.twinOf(channel, agent)?.base ?? agent;\n    // Asked for by name",
+  "    const base = agent;\n    // Asked for by name"
+ ],
+ [
+  "a name asked for is not taken",
+  "floor",
+  "src/floor.js",
+  "{ forMeeting: req.body?.meeting === true, as }",
+  "{ forMeeting: req.body?.meeting === true, as: null }"
+ ],
+ [
+  "a seat's conversation is handed to an editor",
+  "floor",
+  "src/floor.js",
+  "    if (h.scope === 'seat') return res.status(409).json({ error: SEAT_NO_EDITOR, code: 'seat_no_editor' });\n",
+  ""
+ ],
+ [
+  "a seat is moved by rebinding its folder",
+  "floor",
+  "src/floor.js",
+  "    if (h.scope === 'seat') return res.status(409).json({ error: SEAT_NO_MOVE, code: 'seat_no_move' });\n",
+  ""
+ ],
+ [
+  "a seat that is left keeps its row",
+  "floor",
+  "src/floor.js",
+  "      if (desk.scope === 'seat') {",
+  "      if (false) {"
+ ],
+ [
+  "a seat that is left keeps its conversations open",
+  "floor",
+  "src/floor.js",
+  "        store.endDeskSessions(channel, agent);\n",
+  ""
+ ],
+ [
+  "a second session in a live room is closed",
+  "floor",
+  "src/floor.js",
+  "      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || stillWatched(r));",
+  "      .some(() => false);"
+ ],
+ [
+  "a second session just made is closed",
+  "floor",
+  "src/floor.js",
+  "    if (t.age_s < TWIN_NEW_S) continue;\n",
+  ""
+ ],
+ [
+  "a second session is closed mid-turn",
+  "floor",
+  "src/floor.js",
+  "    if (switchable(h, last, nowMs, { editorOk: true }).error) continue;\n",
+  ""
+ ],
+ [
+  "the host is asked to close it at every look",
+  "floor",
+  "src/floor.js",
+  "    if (nowMs - (live.closing.get(k) ?? 0) < TWIN_CLOSE_RETRY_MS) continue;\n",
+  ""
+ ],
+ [
+  "End meeting is not final",
+  "floor",
+  "src/floor.js",
+  "    if (req.body?.final === true) sweep(true, { ended: room.id });",
+  "    if (req.body?.final === true) sweep(true);"
+ ],
+ [
+  "a second session made by New desk here is closed like a room's",
+  "floor",
+  "src/floor.js",
+  "    if (!t.for_meeting) continue;\n",
+  ""
+ ],
+ [
+  "a second session nobody seated keeps its name for ever",
+  "floor",
+  "src/floor.js",
+  "      if (t.age_s >= TWIN_UNSEATED_S) {",
+  "      if (false) {"
+ ],
+ [
+  "a rename is not shared by an agent's sessions",
+  "floor",
+  "src/db.js",
+  "      familyOf(agent).reduce((n, a) => n + q.upsertProfile.run({ agent: a, persona, gender, shirt, hair, skin }).changes, 0),",
+  "      q.upsertProfile.run({ agent, persona, gender, shirt, hair, skin }).changes,"
+ ],
+ [
+  "a second session is given a face of its own",
+  "floor",
+  "src/db.js",
+  "      agent: pick.agent, persona: p.persona ?? humanName(base),",
+  "      agent: 'nobody-at-all', persona: p.persona ?? humanName(base),"
+ ],
+ [
+  "a name always means the first desk",
+  "floor",
+  "src/tools.js",
+  "  return here.find((a) => store.twinOf(channel, a)?.base === name) ?? name;",
+  "  return name;"
+ ],
+ [
+  "a session the room only keeps for Resume is counted as in it",
+  "floor",
+  "src/tools.js",
+  "  const here = room.participants.filter((p) => !p.absent).map((p) => p.agent);\n  if (here.includes(name)) return name;",
+  "  const here = room.participants.map((p) => p.agent);\n  if (here.includes(name)) return name;"
+ ],
+ [
+  "a room's record forgets whose second session it was",
+  "floor",
+  "src/floor.js",
+  "    ...(base ?? prev?.base ? { base: base ?? prev.base } : {}),\n",
+  ""
+ ],
+ [
+  "the payload does not say a desk is a seat",
+  "floor",
+  "src/floor.js",
+  "                seat: h.scope === 'seat',",
+  "                seat: false,"
+ ],
+ [
+  "the payload does not say whose second session a desk is",
+  "floor",
+  "src/floor.js",
+  "          twin: twins.has(k) ? {",
+  "          twin: false && twins.has(k) ? {"
+ ],
+ [
+  "a desk in a meeting room is left out of a new one again",
+  "floor",
+  "src/ui/floor.js",
+  "    const more = desks.filter((d) => outKeys.has(`${channel}|${d.agent}`) && again(d) === true);",
+  "    const more = [];"
+ ],
+ [
+  "one agent's desks are every desk of its name",
+  "floor",
+  "src/ui/floor.js",
+  "        if (baseOf(x) === baseOf(d) && x.hosted?.host === d.hosted.host && x.hosted?.window === d.hosted.window) mine.push([c.channel, x.agent]);",
+  "        if (baseOf(x) === baseOf(d)) mine.push([c.channel, x.agent]);"
+ ],
+ [
+  "a seat that left is read as moved",
+  "floor",
+  "src/ui/floor.js",
+  "    if (mem && !mem.seat) {",
+  "    if (mem) {"
+ ],
+ [
+  "a desk that left is read as moved to the agent's seat",
+  "floor",
+  "src/ui/floor.js",
+  "x.agent === here.agent && !boundTo(x)?.seat && boundTo(x)?.host",
+  "x.agent === here.agent && boundTo(x)?.host"
+ ],
+ [
+  "Resume does not make a second session again",
+  "floor",
+  "src/ui/floor.js",
+  "      if (p.base && (!d || !d.hosted)) {",
+  "      if (false) {"
+ ],
+ [
+  "the card's controls stay live in a meeting room",
+  "floor",
+  "src/ui/floor.js",
+  "    if (!inMeeting) return null;\n    return 'In a meeting room: its conversation",
+  "    return null;\n    return 'In a meeting room: its conversation"
+ ],
+ [
+  "a second session's nameplate has no number",
+  "floor",
+  "src/ui/floor.js",
+  "    return d?.twin ? `${d.persona} · ${d.twin.n}` : (d?.persona ?? '');",
+  "    return d?.persona ?? '';"
+ ],
+ [
+  "the card's Move is live on a seat",
+  "floor",
+  "src/ui/floor.js",
+  "    if (d?.hosted?.live && d.hosted.seat) return SEAT_NO_MOVE;\n",
+  ""
+ ],
+ [
+  "a refusal of a new desk is not read",
+  "floor",
+  "src/ui/app.js",
+  "  const t = beside ? deskOn(beside.channel, beside.agent)?.last_turn : null;",
+  "  const t = null;"
+ ],
+ [
+  "New desk here sends a plain take",
+  "floor",
+  "src/ui/app.js",
+  ", ...(seat ? { seat: true } : {}) };",
+  " };"
+ ],
+ [
+  "New desk here is offered whatever the host",
+  "floor",
+  "src/ui/app.js",
+  "  if (host && host.seats !== true) offer.why =",
+  "  if (false) offer.why ="
+ ],
+ [
+  "a just-left seat is seated again by its window's last hooks",
+  "floor",
+  "src/floor.js",
+  "    if (Date.now() - leftAt < LEFT_HOLD_MS) return { ok: true, ignored: 'left' };",
+  "    if (false) return { ok: true, ignored: 'left' };"
+ ],
+ [
+  "a seat seated again under a name just left is still ignored",
+  "floor",
+  "src/floor.js",
+  "    // And it is heard from again, if it was left a moment ago (ingestHookEvent).\n    live.left.delete(key);\n",
+  ""
+ ],
+ [
+  "a seat's window is not tagged",
+  "seats",
+  "host/window.js",
+  "  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];",
+  "  const tag = [];"
+ ],
+ [
+  "a seat's window is started without its binding",
+  "seats",
+  "host/window.js",
+  "    ...(seatFile ? ['--mcp-config', seatFile] : [])]",
+  "    ]"
+ ],
+ [
+  "what a seat's window was given stays in the session's environment",
+  "seats",
+  "host/window.js",
+  "    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${EXACT}:`, '-u', env[i].split('=')[0]]);\n",
+  ""
+ ],
+ [
+  "a window is found by its folder alone",
+  "seats",
+  "host/window.js",
+  "  return all.find((p) => (p.seat ?? null) === seat && canonical(p.cwd) === here) ?? null;",
+  "  return all.find((p) => canonical(p.cwd) === here) ?? null;"
+ ],
+ [
+  "a folder's sessions are every desk's",
+  "seats",
+  "host/window.js",
+  "  return sessions.filter((s) => s.cwd === here && (seatByPid.get(s.pid) ?? null) === seat);",
+  "  return sessions.filter((s) => s.cwd === here);"
+ ],
+ [
+  "a conversation in another desk's window is this desk's to type into",
+  "seats",
+  "host/window.js",
+  "    where: pane ? (theirs ? 'other' : 'floor') : 'editor',",
+  "    where: pane ? 'floor' : 'editor',"
+ ],
+ [
+  "a restarted host does not read its seats",
+  "seats",
+  "host/identity.js",
+  "  for (const s of seats) {",
+  "  for (const s of []) {"
+ ],
+ [
+  "leaving a seat goes after the folder's binding",
+  "seats",
+  "host/index.js",
+  "    if (desk.seat) {\n      S.removeSeat(channel, agent, originOf(this.cfg.url));",
+  "    if (false) {\n      S.removeSeat(channel, agent, originOf(this.cfg.url));"
+ ],
+ [
+  "a seat falls back to the folder's newest conversation",
+  "seats",
+  "host/window.js",
+  "  if (seatOf(where)) return { id: null, note: `${asked}; this desk shares",
+  "  if (false) return { id: null, note: `${asked}; this desk shares"
+ ],
+ [
+  "the hook does not read a window's own binding",
+  "seats",
+  "plugin/hooks/report.mjs",
+  "  if (own) {\n    id = { ...own, root: own.root ?? start ?? cwd };\n  } else if (start) {",
+  "  if (false) {\n    id = { ...own, root: own.root ?? start ?? cwd };\n  } else if (start) {"
+ ],
+ [
+  "a seat's window is not given its names",
+  "seats",
+  "host/window.js",
+  "    '-e', `ORCH_CHANNEL=${channel}`,\n    '-e', `ORCH_AGENT=${agent}`,\n",
+  ""
+ ],
+ [
+  "the hook does not read a window's own binding",
+  "plugin",
+  "plugin/hooks/report.mjs",
+  "  if (own) {\n    id = { ...own, root: own.root ?? start ?? cwd };\n  } else if (start) {",
+  "  if (false) {\n    id = { ...own, root: own.root ?? start ?? cwd };\n  } else if (start) {"
+ ],
+ [
+  "a window's desk is filed under wherever it stands",
+  "plugin",
+  "plugin/hooks/report.mjs",
+  "    id = { ...own, root: own.root ?? start ?? cwd };",
+  "    id = { ...own, root: cwd };"
+ ],
+ [
+  "a broken binding file silences the folder's desk",
+  "plugin",
+  "plugin/hooks/report.mjs",
+  "  try { id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers); } catch { return null; }\n  if (!id) return null;",
+  "  id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers);\n  if (!id) return null;"
+ ],
+ [
+  "a move reopens a seat's window by its folder alone",
+  "renew",
+  "host/window.js",
+  "    p.at = p.seat ? { cwd: p.cwd, seat: p.seat } : p.cwd;",
+  "    p.at = p.cwd;"
+ ],
+ [
+  "a seat nobody sat at makes its name taken",
+  "floor",
+  "src/db.js",
+  "    return !q.liveSession.get(channel, name);\n  }",
+  "    return !q.liveSession.get(channel, name) && !q.getPersona.get(channel, name);\n  }"
+ ],
+ [
+  "a second session on its way to its host does not hold its name",
+  "floor",
+  "src/db.js",
+  "    if (t && t.age_s < TWIN_PENDING_S) return false;\n",
+  ""
+ ],
+ [
+  "a name with a window still reporting under it is free",
+  "floor",
+  "src/db.js",
+  "    return !q.liveSession.get(channel, name);\n  }",
+  "    return true;\n  }"
+ ]
+]

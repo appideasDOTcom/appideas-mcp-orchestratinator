@@ -158,8 +158,8 @@
  [
   "PR #56 F1: the card offers Hide desk on a desk in a meeting",
   "src/ui/floor.js",
-  "const hideWhy = hideRefusal(d, !!meetBoxOf(channel, d.agent));",
-  "const hideWhy = null;"
+  "      (hideWhy || meetWhy ? ' disabled' : '') +",
+  "      (hideWhy ? ' disabled' : '') +"
  ],
  [
   "PR #56 F1: bulk Hide hides a desk in a meeting",

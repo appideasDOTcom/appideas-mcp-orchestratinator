@@ -30,6 +30,10 @@ that, running the team happens on the page:
 - **Talk to several agents in one conversation.** Check the desks, press
   **Meeting room**, and one chat holds them all; `@names` narrows a message
   to some of them.
+- **Put one agent in several places at once.** **New desk here** seats an
+  agent on another floor with a session of its own while the one it has
+  carries on, and an agent already in a meeting room can join a second:
+  each is its own conversation, in the same folder.
 - **Hand out work without typing.** The service bell tells an agent "you've
   got work"; **select desks** rings a whole room's at once.
 - **Drive each session from its desk.** Slash commands, model, effort and Stop,
@@ -343,7 +347,9 @@ read when the compaction ends.
 **8. Pop a chat out, or bring several desks into one.** **⧉** on a desk's
 panel detaches its chat into a window of its own; open as many as you like
 beside the floor. To talk to several agents together, **select desks**, check
-them, and press **Meeting room**. Both are in
+them, and press **Meeting room**. An agent that is already in a room can be
+checked for another, and gets a second session there; **Take a desk → New
+desk here** does the same across floors. All of it is in
 [Operating the board](docs/operating.md#chatting-with-a-desk).
 
 **9. Take a conversation back whenever you want** — for any feature the floor
