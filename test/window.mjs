@@ -1095,8 +1095,8 @@ async function main() {
       await run('tmux', ['kill-pane', '-t', coldPane?.target]).catch(() => {});
       const goneNow = await waitingOnIt;
       const goneMs = Date.now() - goneStarted;
-      eq([goneNow.ok, goneNow.code, goneNow.error], [false, 'window_gone', 'the window was closed before Claude Code had finished starting in it'],
-        'a window closed while it is being waited on is said to be gone, in words');
+      eq([goneNow.ok, goneNow.code, goneNow.gone, goneNow.error], [false, 'window_gone', 'other_pane', 'the window was closed before Claude Code had finished starting in it'],
+        'a window closed while it is being waited on is said to be gone, in words: tmux answered for another pane');
       assert(goneMs < 6000, `at the next look, not after the full ${20_000}ms — took ${goneMs}ms`);
 
       // And when it was its session's only window (QA, PR #57 round 2).
@@ -1113,8 +1113,23 @@ async function main() {
       await run('tmux', ['kill-pane', '-t', loneTarget]).catch(() => {});
       const loneNow = await waitingOnLone;
       const loneMs = Date.now() - loneStarted;
-      eq([loneNow.code, loneMs < 6000], ['window_gone', true], `a session's only window, closed while it is waited on, is gone too, at the next look — took ${loneMs}ms`);
+      eq([loneNow.code, loneNow.gone, loneMs < 6000], ['window_gone', 'no_pane', true], `a session's only window, closed while it is waited on, is gone too, at the next look: tmux answered with no pane at all — took ${loneMs}ms`);
       await run('tmux', ['kill-session', '-t', loneSession]).catch(() => {});
+
+      // Every answer tmux gives about a pane that is gone, in its own words,
+      // and the two that say nothing (QA, PR #57 Info 11). Which of these a
+      // live look gets depends on the moment it lands; these do not.
+      const T = 'orch:@4.%7';
+      eq(W.paneGone({ ok: true, out: '%7 0' }, T), null, 'an answer about the pane that was asked for is not a pane gone');
+      eq(W.paneGone({ ok: true, out: '%7 1' }, T), null, 'nor is one that says it exited: that pane is still there to be read');
+      eq(W.paneGone({ ok: true, out: '%9 0' }, T), 'other_pane', 'an answer about another pane is: tmux answered for the session');
+      eq([W.paneGone({ ok: true, out: '' }, T), W.paneGone({ ok: true, out: ' ' }, T)], ['no_pane', 'no_pane'], 'so is an answer with no pane in it: the session went, or the server is going');
+      eq(W.paneGone({ ok: false, error: 'no server running on /private/tmp/tmux-501/default' }, T), 'no_server', 'and "no server running": it was the last pane of all');
+      eq(W.paneGone({ ok: false, error: 'error connecting to /private/tmp/tmux-501/gone (No such file or directory)' }, T), 'no_server', 'and "error connecting to": the socket is gone');
+      eq(W.paneGone({ ok: false, error: 'server exited unexpectedly' }, T), 'no_server', 'and "server exited unexpectedly": the call met the server as it went');
+      eq([W.paneGone({ ok: false, error: 'Command failed: tmux display-message … (timed out)' }, T), W.paneGone({ ok: false, missing: true, error: 'tmux is not installed' }, T)], [null, null],
+        'a call that failed any other way says nothing about the window');
+      eq(W.paneGone({ ok: true, out: '%9 0' }, 'orch:@4'), null, 'and a target that names no pane has no pane to compare');
 
       // A composer that keeps the message through every Enter: a raw-mode
       // pane drawing the box composerOf reads, which never submits.

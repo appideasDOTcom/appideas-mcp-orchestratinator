@@ -66,7 +66,10 @@ if (!spec) { console.error('usage: run-mutants.mjs <mutants.json> [--dest <dir>]
 // "0 failing — SURVIVED (0 ✓)" (2026-11-16; run-mutant.sh has counted both
 // since PR #54, and this runner had not been used on that suite). A count
 // of 0 ✓ beside 0 failing is a suite this cannot read, not a survivor.
-const isRed = (l) => l.includes('✗') || /^FAIL /.test(l);
+// Not `FAIL ❌ — N failure(s)`, which is how floor, admin and the rest
+// close a red run: counted, it read "3 failing" beside 2 ✗ (QA, PR #57
+// round 2).
+const isRed = (l) => l.includes('✗') || (/^FAIL /.test(l) && !/^FAIL ❌/.test(l));
 const isGreen = (l) => l.includes('✓') || /^ok {2,}/.test(l);
 const M = JSON.parse(readFileSync(spec, 'utf8'));
 const copy = execFileSync(`${D}/copy-repo.sh`, dest ? [dest] : [], { encoding: 'utf8' }).trim();

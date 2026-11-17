@@ -348,6 +348,23 @@ async function main() {
   const lastMs = Date.now() - lastStarted;
   ok(/%\d+$/.test(lastTarget) && lastNow.code === 'window_gone' && lastMs < 6000,
     'the last window of all, closed while it is waited on, is said to be gone at the next look', `${JSON.stringify(lastNow)} after ${lastMs}ms on ${lastTarget}`);
+
+  // The same, looked at once the server has gone (QA, PR #57 Info 11). The
+  // row above kills the pane and lets the next look land where it lands,
+  // and a look that meets the server as it goes is answered with nothing,
+  // by another arm: with "no server running" not read at all it passed one
+  // run in eight. Here the server is gone before the first look, so the
+  // only answer there is to get is tmux's failed call.
+  await run('tmux', ['-L', SOCK, 'new-session', '-d', '-s', 'orch', '-c', lastDir, 'sleep 60']);
+  const goneTarget = (await tmuxT(['list-panes', '-a', '-F', '#{session_name}:#{window_id}.#{pane_id}'])).split('\n')[0];
+  await run('tmux', ['-L', SOCK, 'kill-pane', '-t', goneTarget]).catch(() => {});
+  const serverGone = await until(() => run('tmux', ['-L', SOCK, 'has-session']).then(() => false, (e) => /no server running|error connecting to/.test(String(e.stderr ?? e.message))), 8000);
+  ok(serverGone, 'with its last window closed, the server is gone');
+  const afterStarted = Date.now();
+  const afterNow = await W.waitReady(lastDir, { timeoutMs: 12000, target: goneTarget });
+  const afterMs = Date.now() - afterStarted;
+  ok(afterNow.code === 'window_gone' && afterNow.gone === 'no_server' && afterMs < 3000,
+    'a window whose server has gone is said to be gone at the first look, from tmux saying there is no server', `${JSON.stringify(afterNow)} after ${afterMs}ms on ${goneTarget}`);
 }
 
 try {

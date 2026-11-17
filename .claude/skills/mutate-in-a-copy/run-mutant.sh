@@ -17,7 +17,7 @@ cp "$FILE" "$FILE.unmutated"
 if python3 "$HERE/mutate.py" "$FILE" "$4" "$5"; then
   OUT="$(npm run "test:$SUITE" 2>&1)"
   # ✗ for most suites; test:renew prints `FAIL <name>` instead (PR #54).
-  echo "MUTANT [$NAME] ($SUITE): $(echo "$OUT" | grep -cE '✗|^FAIL ') failing — $(echo "$OUT" | grep -E '✗|^FAIL ' | head -1 | cut -c1-200)"
+  echo "MUTANT [$NAME] ($SUITE): $(echo "$OUT" | grep -E '✗|^FAIL ' | grep -cv '^FAIL ❌') failing — $(echo "$OUT" | grep -E '✗|^FAIL ' | grep -v '^FAIL ❌' | head -1 | cut -c1-200)"
 else
   echo "MUTANT [$NAME]: DID NOT APPLY"
 fi

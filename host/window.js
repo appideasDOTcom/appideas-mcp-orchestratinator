@@ -660,6 +660,40 @@ async function answerKnown(target, done = new Set()) {
  * the window that is still booting and is lost. The pane's own process is the
  * only unambiguous way to ask about the window we actually opened.
  */
+/**
+ * Whether tmux's answer to a question asked of `target` says that pane is
+ * gone, and which answer said so; null when it does not.
+ *
+ * `answer` is what `display-message -p -t <target> '#{pane_id} …'` gave.
+ * tmux does not refuse a target whose pane has been killed. Each shape was
+ * measured on 3.7c (2026-11-16, QA's PR #57 Info 10 and the rounds after):
+ *
+ *   other_pane  another pane of the session is left: exit 0, and the answer
+ *               is that pane's (`%1 0` for `%0`)
+ *   no_pane     it was its session's only pane and other sessions remain,
+ *               or the server is in the act of going: exit 0 and nothing
+ *   no_server   it was the last pane of all: exit 1, "no server running on
+ *               …"; "error connecting to …" for a socket that is gone; and
+ *               "server exited unexpectedly" for a call that met the
+ *               server as it went (7 of QA's 40 trials)
+ *
+ * Any other failed call is null: a tmux that timed out under load says
+ * nothing about the window. A function of its own so each answer has a row
+ * that does not depend on which one tmux happens to give: asked in the
+ * 400 ms after the last pane is killed, its first answer was the empty one
+ * in 27 of QA's 40 trials and "no server running" in 6, and a row that
+ * killed a pane and then looked passed with the no_server arm taken out,
+ * one run in eight.
+ */
+export function paneGone(answer, target) {
+  if (!answer?.ok) return /no server running|error connecting to|server exited unexpectedly/.test(answer?.error ?? '') ? 'no_server' : null;
+  const asked = /%\d+$/.exec(String(target ?? ''))?.[0] ?? null;
+  if (!asked) return null;
+  const now = String(answer.out ?? '').trim().split(' ')[0];
+  if (!now) return 'no_pane';
+  return now !== asked ? 'other_pane' : null;
+}
+
 export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
   const cwd = cwdOf(where);
   const stop = Date.now() + timeoutMs;
@@ -671,7 +705,7 @@ export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = nul
     // waiting the full timeout to say nothing useful about it helps nobody.
     if (target) {
       const dead = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{pane_dead}']);
-      const [paneNow, deadNow] = dead.ok ? dead.out.trim().split(' ') : [];
+      const deadNow = dead.ok ? dead.out.trim().split(' ')[1] : null;
       // Gone altogether, not exited: killed with its window, by hand or by
       // whatever closed it. tmux does not say so. Asked about a pane that no
       // longer exists it answers for another pane of the session, exit 0
@@ -681,25 +715,17 @@ export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = nul
       // 45 s with the host's line held, every piece of work behind it
       // waiting. That was test:host's "Take a desk seven" (QA, PR #57 Info
       // 10: 46 s of nothing in the host's log, then a bind that took 37 ms).
-      // So the pane is asked for by its id, and an answer about another one
-      // is the window being gone.
-      //
-      // Two more shapes of the same thing, each measured (QA, PR #57 round
-      // 2, who found the first cut waiting out its limit on them and then
-      // saying "Claude Code is open in that window", which was not so). The
-      // pane was its session's only one and other sessions remain: exit 0
-      // and an empty answer, no id at all. It was the last pane of all, so
-      // the server went with it: exit 1, "no server running on …", or
-      // "error connecting to …" for a socket that is gone. Both are the
-      // first window of a session closed while it starts. Any other failure
-      // of the call is not read as gone: a tmux that timed out under load
-      // says nothing about the window.
-      const paneAsked = /%\d+$/.exec(target)?.[0] ?? null;
-      const noServer = !dead.ok && /no server running|error connecting to/.test(dead.error ?? '');
-      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {
+      // So the pane is asked for by its id, and an answer that is not about
+      // it is the window being gone (paneGone, above, has every shape tmux
+      // gives; the first cut knew one of them, and QA found it waiting out
+      // its limit on the others and then saying "Claude Code is open in
+      // that window", which was not so). `gone` is which answer said it.
+      const gone = paneGone(dead, target);
+      if (gone) {
         return {
           ok: false,
           code: 'window_gone',
+          gone,
           error: 'the window was closed before Claude Code had finished starting in it',
         };
       }

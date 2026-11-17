@@ -115,28 +115,56 @@
   "a window killed while it is waited on is waited out (PR #57 Info 10)",
   "host",
   "host/window.js",
-  "      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {",
-  "      if (false) {"
+  "      const gone = paneGone(dead, target);\n      if (gone) {",
+  "      const gone = paneGone(dead, target);\n      if (false) {"
  ],
  [
   "a window killed while it is waited on is waited out (PR #57 Info 10)",
   "window",
   "host/window.js",
-  "      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {",
-  "      if (false) {"
+  "      const gone = paneGone(dead, target);\n      if (gone) {",
+  "      const gone = paneGone(dead, target);\n      if (false) {"
  ],
  [
-  "a session's only window, killed, is waited out: tmux answers with no pane id (QA, PR #57 round 2)",
+  "an answer with no pane in it is not read as gone: the first cut (QA, PR #57 round 2)",
   "window",
   "host/window.js",
-  "      if (noServer || (dead.ok && paneAsked && paneNow !== paneAsked)) {",
-  "      if (noServer || (dead.ok && paneAsked && paneNow && paneNow !== paneAsked)) {"
+  "  if (!now) return 'no_pane';",
+  "  if (!now) return null;"
  ],
  [
-  "the last window of all, killed, is waited out: tmux says no server running (QA, PR #57 round 2)",
+  "an answer about another pane is not read as gone",
+  "window",
+  "host/window.js",
+  "  return now !== asked ? 'other_pane' : null;",
+  "  return null;"
+ ],
+ [
+  "tmux saying there is no server is not read as gone (QA, PR #57 round 2 and Info 11)",
+  "window",
+  "host/window.js",
+  "  if (!answer?.ok) return /no server running|error connecting to|server exited unexpectedly/.test(answer?.error ?? '') ? 'no_server' : null;",
+  "  if (!answer?.ok) return null;"
+ ],
+ [
+  "tmux saying there is no server is not read as gone (QA, PR #57 round 2 and Info 11)",
   "renew",
   "host/window.js",
-  "      const noServer = !dead.ok && /no server running|error connecting to/.test(dead.error ?? '');",
-  "      const noServer = false;"
+  "  if (!answer?.ok) return /no server running|error connecting to|server exited unexpectedly/.test(answer?.error ?? '') ? 'no_server' : null;",
+  "  if (!answer?.ok) return null;"
+ ],
+ [
+  "\"server exited unexpectedly\" is not read as the server gone (QA, PR #57 Info 11)",
+  "window",
+  "host/window.js",
+  "/no server running|error connecting to|server exited unexpectedly/",
+  "/no server running|error connecting to/"
+ ],
+ [
+  "any failed tmux call is read as the window gone",
+  "window",
+  "host/window.js",
+  ".test(answer?.error ?? '') ? 'no_server' : null;",
+  ".test(answer?.error ?? '') ? 'no_server' : 'no_server';"
  ]
 ]
