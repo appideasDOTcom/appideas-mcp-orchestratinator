@@ -60,6 +60,7 @@ for c in $LIST; do
       PORT=$PORT CDP=$CDP .claude/skills/verify-ui-change/run-check-$c.sh "$COPY" > "$LOG" 2>&1; rc=$? ;;
   esac
   verdict="$(grep -E '^(PASS|FAIL)|PASS ·|FAIL ·|✗ · FAIL' "$LOG" | tail -1 | cut -c1-80)"
+  [ "$c" = hide ] && [ $rc -eq 0 ] && verdict="PASS · ran to its last step (it asserts nothing; read its steps in the log)"
   reds="$(grep -c '✗' "$LOG")"
   [ $rc -eq 0 ] && [ "$reds" -eq 0 ] || red=$((red + 1))
   echo "check-$c · exit $rc · ✓ $(grep -c '✓' "$LOG") ✗ $reds · ${verdict:-no verdict line} · load $(/usr/sbin/sysctl -n vm.loadavg)"
