@@ -603,7 +603,19 @@ owed at the release**: `npm test` as one chain; check-popout, check-chatbox,
 check-pop-foot, check-popout-session, check-card-move, check-hide,
 check-backdrop, check-chat-controls and check-update, none of whose code
 paths were changed except through `deskFate`/`boundTo` (a popout following
-a move), which `test:floor` pins. **Measured once on real windows, from a real browser, in one run**: one
+a move), which `test:floor` pins. That last was wrong for check-card-move:
+0.12.9 added Leave room to the nameplate card, and the check's row on the
+card's buttons went red at the release run (PR #57, 2026-11-17), on a page
+that was right. The row is brought along. Before writing "none of whose
+code paths changed", run the check.
+
+**The release's page checks are one command**: `run-release-pages.sh`
+(all nine, or the ones named), in a copy outside the repo, one at a time,
+a verdict line each. At PR #57's release run, 185b4a5: eight PASS (backdrop
+71 of 71, chatbox 69 of 69, popout-session 12 of 12, update 42 of 42, and
+chat-controls, pop-foot, popout, hide), card-move 27 ✓ 1 ✗ on the stale
+row above. check-hide asserts nothing of its own and is PASS when it runs
+to its last step. **Measured once on real windows, from a real browser, in one run**: one
 agent in two meeting rooms (`two-rooms.mjs` in **measure-a-real-window**,
 13 of 13, twice). **Not measured at all**: a move to a fresh tmux server
 with a real seat in it (`test:renew` has it on stand-ins); New desk here

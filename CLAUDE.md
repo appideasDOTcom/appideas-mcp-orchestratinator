@@ -2639,6 +2639,35 @@ operator's live floor.
   in the report. It is a rule about when, not about how much: do not thin
   a test to save a run.
 
+  **And the full chain runs before any merge to main, unasked** (costmo,
+  2026-11-17, at the end of PR #57: "When there are documentation-only
+  changes, the full test suite does not need to be re-run, but it does
+  need to be re-run prior to any main to merge"). QA and the developer
+  both wrote "full chain not run, waits for the release" through five
+  rounds, then called the PR approvable and told him the merge was his
+  with the chain still unrun, and he had to ask what was stopping it.
+  "Approvable" from a review of related suites is not the release check.
+  So when a PR into main is approvable, the next thing done is the one
+  `npm test` at the head, then the release page checks
+  (`run-release-pages.sh`, **verify-ui-change**), and "approvable" reaches
+  him with their results beside it, or with "the full chain is running" in
+  the same sentence. A commit after that run that changes documentation
+  only does not need it again; any other change does. Run the two one
+  after the other, never beside QA's: QA runs its own chain too, queued
+  behind yours (their decisions/0007).
+
+- **Once a PR into main is approvable, nothing goes into the tree until he
+  has merged** (costmo, the same evening: "I need for you to stop updating
+  files if it is interrupting with and/or interfering with our PR
+  progress"). PR #57 went from `a9fa870` to `185b4a5` over a dozen
+  commits after its first close, most of them notes, skills, mutant lists
+  and a facts re-anchor written into the tree as each round ended: he
+  commits the tree when he sees it, and QA measures every push. A finding
+  QA marks as not blocking is named to him as "after the merge", not
+  started. Lessons for the repo are held and written once, after the
+  merge, in one batch. The updater refuses a dirty clone too
+  (`host/update.js`), so an uncommitted note also blocks his update.
+
   Which suites a change reaches, read from the paths each `test/*.mjs`
   names (QA's map, with two additions from that reading):
 
