@@ -150,6 +150,32 @@ posts a closing note. What those rounds taught:
 - **A hash is given with its algorithm.** Bare `shasum` is SHA-1, QA
   reads sha256, and the two were taken for two files.
 
+## Closing a PR into main
+
+Learned at the end of PR #57 (2026-11-17), which ran five rounds past its
+first close and ended with costmo asking what was stopping the merge. The
+rules are in CLAUDE.md, Conventions; this is the order.
+
+1. **QA calls it approvable.** From here nothing goes into the tree
+   (notes, skills, lists, facts included) until he has merged. Hold every
+   lesson for one batch after. A non-blocking Info from QA is named to him
+   as "after the merge".
+2. **Run the full chain at the head, unasked**: `npm test`, Node 24
+   first on PATH, alone on the machine. Tell QA first: they run their own
+   behind yours.
+3. **Then the release page checks**: `run-release-pages.sh` in
+   **verify-ui-change**. It works in a copy, so the tree does not move.
+4. **Report once**: the head SHA, both exits and counts, each page check's
+   verdict, and what is red and why. Never "merge is yours" without those
+   numbers in the same message.
+5. **After he merges**: the held lessons, in one batch, on whatever branch
+   he is on next, and the marketing facts re-anchor if code moved.
+
+**Say "whole" after every push in a round.** QA asks whether a pushed SHA
+is the whole round and holds its write-up until told. At 775672c the
+answer was owed and not sent, and QA wrote "I have no word from you". The
+moment a push lands, say whether it is whole, file by file if not.
+
 ## What the channel gets
 
 Announce ports before every run and release them after; QA stays off your

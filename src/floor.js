@@ -2681,6 +2681,9 @@ export function buildFloor(store, live = null, sessions = null) {
           hosted: h
             ? {
                 host: h.host_name,
+                // Which of `hosts` runs it: the box reads that row's
+                // `uploads` to offer a paperclip or say why not (issue #31).
+                host_id: h.host_id,
                 live: h.live,
                 state: h.state,
                 window: h.cwd ? h.cwd.split('/').filter(Boolean).pop() : null,
@@ -2876,6 +2879,9 @@ export function buildFloor(store, live = null, sessions = null) {
     // Its own word at its last registration, kept on its row: a board that
     // restarted still knows it (hosts.seats in src/db.js).
     seats: !!h.seats,
+    // Whether it fetches attachments (issue #31; hosts.uploads): the box
+    // dims its paperclip, with why, for a desk whose host does not.
+    uploads: !!h.uploads,
   }));
 
   return {
@@ -2905,7 +2911,7 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null, updates = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null, uploads = null }) {
   const router = express.Router();
   const live = createLive();
   // An update's steps arrive as host events (src/updates.js).
@@ -2954,7 +2960,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // `seats`: it can put a second desk in a folder (host/seats.js). A host
     // from before seats says nothing, and is not asked: it would not know
     // the work.
-    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true);
+    // `uploads`: it fetches a message's attachments (issue #31); a host from
+    // before them is refused files rather than handed ids it would ignore.
+    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3094,6 +3102,25 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // while its laptop sleeps.
     const handedAt = Date.now();
     res.json({ work: items.map((w) => ({ ...w, waited_ms: Math.max(0, handedAt - Date.parse(iso(w.created_at))) })) });
+  });
+
+  /**
+   * One staged attachment, for the host whose desk a message named it to
+   * (issue #31). Streamed, never read whole into memory; the host writes it
+   * to its own disk and owns it from there (host/uploads.js).
+   */
+  router.get('/api/host/upload', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.query.host_id);
+    const id = str(req.query.id);
+    if (!hostId || !id) return res.status(400).json({ error: 'host_id and id are required' });
+    if (!uploads) return res.status(404).json({ error: 'this board takes no attachments' });
+    store.touchHost(hostId);
+    const f = uploads.forHost(id, hostId);
+    if (f.error) return res.status(f.status).json({ error: f.error });
+    res.set({ 'content-type': 'application/octet-stream', 'content-length': String(f.size), 'cache-control': 'no-store' });
+    res.sendFile(f.path, { dotfiles: 'allow' }, (err) => {
+      if (err && !res.headersSent) res.status(500).json({ error: 'could not read the upload' });
+    });
   });
 
   /** What a host's desks are doing. A batch, because a streaming reply would
@@ -3325,8 +3352,22 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
-    if (!channel || !agent || !text) return res.status(400).json({ error: 'channel, agent and text are required' });
+    // Files attached in the box (issue #31): ids the upload route staged. A
+    // message may be files alone, as in every other chat client.
+    const ids = req.body?.files ?? null;
+    const hasFiles = Array.isArray(ids) && ids.length > 0;
+    if (!channel || !agent || (!text && !hasFiles)) return res.status(400).json({ error: 'channel, agent and text are required' });
     if (text.length > CHAT_MAX) return res.status(400).json({ error: `text must be ${CHAT_MAX} characters or fewer` });
+    let files = [];
+    if (hasFiles) {
+      if (!uploads) return res.status(409).json({ error: 'This board takes no attachments.', code: 'no_uploads' });
+      // A command is typed into the window as a command, and the window reads
+      // the line it is on as one: there is nowhere to put a file.
+      if (commandOf(text)) return res.status(400).json({ error: 'A command cannot carry files. Send the files as a message of their own.', code: 'command_files' });
+      const r = uploads.resolve(ids);
+      if (r.error) return res.status(r.code === 'upload_gone' ? 410 : 400).json(r);
+      files = r.files;
+    }
     // A slash command goes to the window as typed, and the host confirms it
     // on the command's own receipt (FLOOR_COMMANDS). Two are checked here,
     // because their failure would otherwise be a dialog left standing in
@@ -3346,6 +3387,17 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (asking) return res.status(409).json(asking);
 
     const h = check.hosted;
+    // The files go as ids with their names: the host fetches each one, writes
+    // it on its own disk and names the path in what it types (host/uploads.js).
+    // A host from before attachments ignores `files` and types the words
+    // alone, so a desk whose host has not said it takes them is refused here
+    // rather than sent a message missing what it was about.
+    if (files.length) {
+      if (!store.hostTakesUploads?.(h.host_id)) {
+        return res.status(409).json({ error: `${h.host_name ?? 'This desk’s host'} runs a build from before attachments. Update it to send files.`, code: 'host_no_uploads' });
+      }
+      uploads.grant(files.map((f) => f.id), h.host_id);
+    }
     // What the floor asked for, shown apart from what the window confirms —
     // the window's own line or the hook clears it.
     // On the window's session — the roster's, which the host reports on the
@@ -3373,9 +3425,46 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // Mark where the conversation stood, so the delivery report can tell this
     // message's turn from an older one that says the same words — see sentAfter.
     live.sentAfter.set(deskKey(channel, agent), store.deskLastUserTurn(channel, agent)?.id ?? 0);
-    store.enqueueHostWork(h.host_id, channel, agent, 'chat', { text });
+    store.enqueueHostWork(h.host_id, channel, agent, 'chat', files.length ? { text, files } : { text });
     live.wake(h.host_id);
-    res.json({ ok: true, host: h.host_name ?? h.host_id });
+    res.json({ ok: true, host: h.host_name ?? h.host_id, ...(files.length ? { files: files.length } : {}) });
+  });
+
+  /**
+   * Stage one file for a message (issue #31). The body is the file's bytes,
+   * as-is; its name and media type ride in the query string. Answered with
+   * the id the message will name. Why this route is a different thing from
+   * every other one on the operator surface is written beside adminGuard's
+   * routes in src/web.js ("A route that takes bytes").
+   *
+   * adminGuard runs before a byte is read, and server.js keeps the JSON
+   * parser off this path, so the stream reaches uploads.stage untouched.
+   */
+  router.post('/api/floor/upload', auth.adminGuard, async (req, res) => {
+    if (!uploads) return res.status(409).json({ error: 'This board takes no attachments.', code: 'no_uploads' });
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > uploads.maxBytes) {
+      // Said before the body is read; the connection is closed rather than
+      // drained, so a browser sending 2 GB stops sending.
+      res.set('connection', 'close');
+      return res.status(413).json({ error: `larger than ${Math.round(uploads.maxBytes / 1048576)} MB`, code: 'too_large' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name : '';
+    const type = typeof req.query.type === 'string' ? req.query.type : req.headers['content-type'];
+    const r = await uploads.stage(req, { name, type });
+    if (r.error) {
+      if (r.status === 413) res.set('connection', 'close');
+      return res.status(r.status).json({ error: r.error, code: r.code });
+    }
+    uploads.sweep();
+    res.json({ ok: true, ...r.file });
+  });
+
+  /** Files taken out of the box before Send: gone from the board at once. */
+  router.post('/api/floor/upload/discard', auth.adminGuard, (req, res) => {
+    if (!uploads) return res.json({ ok: true, removed: 0 });
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 100) : [];
+    res.json({ ok: true, removed: uploads.discard(ids) });
   });
 
   /**

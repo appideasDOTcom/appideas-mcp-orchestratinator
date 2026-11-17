@@ -129,6 +129,22 @@ just means a client opens a session per turn, which is normal and handled.
   agent on a floor it already has a desk on). See [`src/db.js`](../src/db.js). A channel is never a row of
   its own; it's a key shared across those tables, which is why archiving needs
   a flag table and deleting has to sweep all of them in one transaction.
+- **Attachments (issue #31):** `POST /api/floor/upload?name=&type=` takes one
+  file's bytes as the body (adminGuard first, no body parser on that path,
+  streamed to disk, 100 MB) and answers its id; `POST /api/floor/upload/discard
+  {ids}` drops files taken out of the box. `POST /api/floor/chat` takes
+  `files: [id…]` beside `text` (text may be empty), refuses a command with
+  files, more than twenty, an id no longer staged (410 `upload_gone`) and a
+  desk whose host has not registered `uploads: true` (`hosts.uploads`;
+  `host_no_uploads`), and hands the host `{ text, files: [{id, name, size,
+  type}] }`. The host fetches each with `GET /api/host/upload?host_id=&id=`
+  (host key; only a host a message named it to), writes it under
+  `~/.orchestratinator/uploads/<id>/<name>` and types the message with the
+  list `Attached by the operator:` / `- <path>` under the words. Staged files
+  live in `$ORCH_UPLOAD_DIR` (default: beside the database) for an hour from
+  attach or last send; the host keeps its copies for Claude Code's
+  `cleanupPeriodDays` (30 when unset, never under one). See
+  [`src/uploads.js`](../src/uploads.js) and [`host/uploads.js`](../host/uploads.js).
 - **The floor's chat controls (0.10.9):** `agent_sessions` carries `effort`,
   `model_requested`, `effort_requested`, `compacting_since` and
   `compacting_trigger`. The hooks write the confirmed side (PreCompact /

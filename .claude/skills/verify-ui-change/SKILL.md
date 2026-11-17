@@ -603,7 +603,19 @@ owed at the release**: `npm test` as one chain; check-popout, check-chatbox,
 check-pop-foot, check-popout-session, check-card-move, check-hide,
 check-backdrop, check-chat-controls and check-update, none of whose code
 paths were changed except through `deskFate`/`boundTo` (a popout following
-a move), which `test:floor` pins. **Measured once on real windows, from a real browser, in one run**: one
+a move), which `test:floor` pins. That last was wrong for check-card-move:
+0.12.9 added Leave room to the nameplate card, and the check's row on the
+card's buttons went red at the release run (PR #57, 2026-11-17), on a page
+that was right. The row is brought along. Before writing "none of whose
+code paths changed", run the check.
+
+**The release's page checks are one command**: `run-release-pages.sh`
+(all nine, or the ones named), in a copy outside the repo, one at a time,
+a verdict line each. At PR #57's release run, 185b4a5: eight PASS (backdrop
+71 of 71, chatbox 69 of 69, popout-session 12 of 12, update 42 of 42, and
+chat-controls, pop-foot, popout, hide), card-move 27 ✓ 1 ✗ on the stale
+row above. check-hide asserts nothing of its own and is PASS when it runs
+to its last step. **Measured once on real windows, from a real browser, in one run**: one
 agent in two meeting rooms (`two-rooms.mjs` in **measure-a-real-window**,
 13 of 13, twice). **Not measured at all**: a move to a fresh tmux server
 with a real seat in it (`test:renew` has it on stand-ins); New desk here
@@ -882,6 +894,45 @@ commit, a plugin step failing after that (the header keeping an
 dialog saying what is on which build, and **Finish the update** queueing a
 finish from where the update started), and the run closing when the host
 registers as the commit. Shots of each dialog land in the shots directory.
+
+### check-attach.mjs — files attached to a message (issue #31, 2026-11-17)
+
+```bash
+PORT=8924 CDP=9264 .claude/skills/verify-ui-change/run-check-attach.sh "$PWD"
+```
+
+Against `seed-desk.mjs`'s desk, whose host the seed now marks as fetching
+attachments (`hosts.uploads = 1`; a check that wants an older host sets it
+back). Every row carries a verdict. The three ways in go through the page's
+own handlers with files made in the page (a real PNG from a canvas): a
+`ClipboardEvent('paste')` into the box, a `DragEvent('drop')` on the
+transcript, and the picker's hidden input given `DataTransfer.files` and a
+`change`. The native file dialog is the browser's and is not driven. Then
+the preview on a real hover (`page.hover`, so `mouseover` is what a person
+sends), the ✕ by a real press, Send with the ids read off the host's own
+work queue (`/api/host/work` as the seed host), the recorded turn posted
+as the host would write it, an error turn handing the files back, eight
+chips at 900x640, and the paperclip dimmed once the DB says the host
+cannot take files.
+
+Two things it found that the suites could not. The desk's `hosted` in
+`/api/floor` carried no `host_id`, so the box could not find its host's
+row and the paperclip read "no reason to dim" by fallback: the first row
+reads the fixture before anything is believed. And two rows of chips
+pushed the panel's foot off a 640px window: the strip is one row, scrolled
+sideways, and the last two rows hold the panel's bottom to where it was
+with no chips (it overruns 640px by 29px with none, before this change
+too).
+
+The meeting room's half is `check-attach-meeting.mjs`
+(`PORT=8925 CDP=9265 run-check-attach-meeting.sh "$PWD"`), on
+`seed-meeting.mjs`, whose host now types a message's files under its
+words with the host's own `withAttachments`: a pasted screenshot sent to
+Bo and Cy, both handed the same file id, the room's message drawn with the
+file and read as recorded on each desk off its own turn, then files alone,
+matched by the file's id and name. Its row for a line typed into Bo's own
+window while the room's files wait (the seed's `slow`) found that a
+match by name alone took the earlier message carrying the same screenshot.
 
 ### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
 

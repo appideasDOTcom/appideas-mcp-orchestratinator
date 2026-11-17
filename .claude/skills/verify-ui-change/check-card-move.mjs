@@ -86,7 +86,10 @@ check(!r.rooms[0].desks.includes('cy'), 'cy, hosted on a host gone two days, is 
 // 2 — the button that can, and its dialog
 await cardOn(page, 'ann');
 r = await look(page, 'the card on ann — hosted on testbox');
-check(r.card?.buttons.join(' | ') === 'Open conversation | Move to another floor | Hide desk', `beside Open conversation and Hide desk (Edit avatar is in the card's head) — ${r.card?.buttons.join(' | ')}`);
+// Leave room is 0.12.9's (costmo, 2026-11-16: under Hide desk). This row
+// read three buttons until PR #57's release run found it red on the page
+// that was right.
+check(r.card?.buttons.join(' | ') === 'Open conversation | Move to another floor | Hide desk | Leave room', `beside Open conversation and Hide desk, with Leave room under it (Edit avatar is in the card's head) — ${r.card?.buttons.join(' | ')}`);
 check(!r.card?.why, 'enabled, no reason drawn');
 check(/a new conversation opens on the new floor/.test(r.card?.moveTitle ?? '') && /with no window open, it opens on its last conversation/.test(r.card?.moveTitle ?? ''),
   `its title says what happens to the conversation both ways, as the dialog does (#24 Decided 2–3) — ${r.card?.moveTitle}`);

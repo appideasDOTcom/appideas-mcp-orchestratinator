@@ -1,0 +1,30 @@
+[
+ [
+  "the host types the words and not the list",
+  "host",
+  "host/index.js",
+  "          text = UP.withAttachments(text, paths);\n",
+  ""
+ ],
+ [
+  "a file that did not arrive does not stop the message",
+  "host",
+  "host/index.js",
+  "            this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `not sent \u2014 ${err.message}` }, true);\n            break;\n",
+  ""
+ ],
+ [
+  "retention under a day",
+  "host",
+  "host/uploads.js",
+  "  return Math.max(1, n);",
+  "  return n;"
+ ],
+ [
+  "the sweep takes anything in the folder",
+  "host",
+  "host/uploads.js",
+  "    if (!ID_RE.test(f)) continue;\n",
+  ""
+ ]
+]

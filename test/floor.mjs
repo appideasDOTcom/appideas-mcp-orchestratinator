@@ -11,7 +11,9 @@
 //   npm run test:floor
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import http from 'node:http';
 import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
@@ -67,6 +69,8 @@ rmDb(DB_PATH);
 // How long this suite's board watches a silent meeting room before it reads
 // its window as gone (TWIN_UNHEARD_MS in src/floor.js; 90 s on a real board).
 const UNHEARD_MS = 3000;
+const UPLOAD_DIR = `./data/floor-${process.pid}-uploads`;
+const UPLOAD_CAP = 4096;
 // A function, because one section restarts the board on the same database.
 const startServer = () => spawn('node', ['src/server.js'], {
   // FLOOR_SESSION_TTL_MINUTES at its 1-minute floor, so the staleness assertions
@@ -75,6 +79,9 @@ const startServer = () => spawn('node', ['src/server.js'], {
     ...process.env, PORT: String(PORT), DB_PATH,
     ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
     ORCH_TWIN_UNHEARD_MS: String(UNHEARD_MS),
+    // Attachments (issue #31): staged in a folder of this run's, and a cap
+    // small enough to meet without sending 100 MB.
+    ORCH_UPLOAD_DIR: UPLOAD_DIR, ORCH_UPLOAD_MAX_BYTES: String(UPLOAD_CAP),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -3413,6 +3420,194 @@ try {
       'in a window too short for it the desk gives way, to half the floor\'s size and no further; with room it is the floor\'s');
   }
 
+
+  // Issue #31: a file attached to a message. The board stages it until a
+  // host fetches it (src/uploads.js); these rows are the board's half —
+  // what is taken, what is refused, what a host may fetch — driven against a
+  // desk a host registered. The host's half (fetch, write outside the repo,
+  // the message as typed) is test:host's; the page's is below and
+  // check-attach.mjs.
+  console.log('\nattachments');
+  {
+    const ACH = 'att-ch';
+    const aHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const reg = (hostId, name, desks, uploads = true) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: aHK, body: JSON.stringify({ host_id: hostId, name, tmux: 'orch', desks, ...(uploads ? { uploads: true } : {}) }),
+    }).then((r) => r.json());
+    const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const up = (bytes, { name = 'f.bin', type = 'application/octet-stream', headers = {} } = {}) =>
+      fetch(`${HOST}/api/floor/upload?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`, {
+        method: 'POST', headers: { 'content-type': type, ...headers }, body: bytes,
+      }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const work = (hostId) => fetch(`${HOST}/api/host/work?host_id=${hostId}`, { headers: aHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    const fetchAs = (hostId, id, key = KEY) => fetch(`${HOST}/api/host/upload?host_id=${hostId}&id=${id}`, { headers: key ? { 'x-orchestratinator-key': key } : {} });
+    const staged = () => { try { return readdirSync(UPLOAD_DIR).length; } catch { return 0; } };
+
+    await reg('h-att', 'attbox', [{ channel: ACH, agent: 'ada', cwd: '/repo/ada', session_id: 'sdk-ada' }]);
+    await reg('h-old', 'oldbox', [{ channel: ACH, agent: 'ole', cwd: '/repo/ole', session_id: 'sdk-ole' }], false);
+    for (const a of ['ada', 'ole']) await post({ channel: ACH, agent: a, session_id: `sdk-${a}`, hook_event_name: 'SessionStart', cwd: `/repo/${a}` });
+    const hostsNow = (await floor()).hosts ?? [];
+    eq([hostsNow.find((h) => h.host_id === 'h-att')?.uploads, hostsNow.find((h) => h.host_id === 'h-old')?.uploads], [true, false],
+      'the payload says which hosts fetch attachments, from what each said at registration');
+    eq(deskOf(await floor(), 'ada', ACH)?.hosted?.host_id, 'h-att', 'and a desk names its host by id, which is how the box finds that row');
+
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5]);
+    let r = await up(png, { name: 'shot one.png', type: 'image/png' });
+    eq([r.status, r.body.name, r.body.type, r.body.size], [200, 'shot one.png', 'image/png', png.length], 'a file is staged, and answered with its id, its name, its type and its size');
+    const shot = r.body.id;
+    r = await up(new TextEncoder().encode('{"not":"parsed"'), { name: 'broken.json', type: 'application/json' });
+    eq([r.status, r.body.size], [200, 15], 'a .json file sent as application/json is the file\'s bytes, not a body to parse (and broken JSON is still a file)');
+    const json = r.body.id;
+    r = await up(new Uint8Array([1]), { name: '../../.ssh/id_rsa\nrm -rf' });
+    eq(r.body.name, 'id_rsa rm -rf', 'a name loses its directories, its leading dot and its newline: it is written on a host\'s disk and typed into a window');
+
+    r = await up(new Uint8Array(UPLOAD_CAP + 1));
+    eq([r.status, r.body.code], [413, 'too_large'], 'a file over the cap is refused on its declared length');
+    // Told apart from the streaming cap (QA, PR #58 Info 2): a request that
+    // declares more than the cap and then sends a body that never ends is
+    // answered by the declared-length refusal alone, while it is still
+    // sending. The streaming cap would wait for bytes past the cap that
+    // never come.
+    const declared = await new Promise((done) => {
+      const req = http.request(`${HOST}/api/floor/upload?name=never.bin`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'content-length': String(UPLOAD_CAP * 4) } }, (res) => {
+        let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { req.destroy(); done({ status: res.statusCode, code: (() => { try { return JSON.parse(b).code; } catch { return null; } })() }); });
+      });
+      req.on('error', () => {});
+      req.write(Buffer.alloc(16));
+      setTimeout(() => { req.destroy(); done({ status: 'no answer in 4 s', code: null }); }, 4000);
+    });
+    eq(declared, { status: 413, code: 'too_large' }, 'and refused on that length while its body is still coming, before a byte past the cap could be counted');
+    const before = staged();
+    const chunks = new ReadableStream({ start(c) { for (let i = 0; i < 5; i++) c.enqueue(new Uint8Array(UPLOAD_CAP / 2)); c.close(); } });
+    r = await fetch(`${HOST}/api/floor/upload?name=big.bin`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: chunks, duplex: 'half' })
+      .then(async (x) => ({ status: x.status, body: await x.json().catch(() => ({})) }))
+      .catch((e) => ({ status: 'reset', body: { error: e.message } }));
+    eq([r.status === 413 || r.status === 'reset', staged()], [true, before], 'and one with no length is cut off at the cap while it streams, leaving nothing behind');
+    r = await up(png, { headers: { origin: 'http://evil.example' } });
+    eq([r.status, staged()], [403, before], 'a page on another origin cannot stage a file, and nothing is written for it');
+
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'look at these', files: [shot, json] });
+    eq(r.status, 200, 'a message carries the files staged for it');
+    let w = await work('h-att');
+    eq(w.map((x) => [x.kind, x.payload.text, x.payload.files.map((f) => [f.id, f.name])]),
+      [['chat', 'look at these', [[shot, 'shot one.png'], [json, 'broken.json']]]], 'and the host is handed the words and each file by id and name, in order');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: '', files: [shot] });
+    w = await work('h-att');
+    eq([r.status, w[0]?.payload.text, w[0]?.payload.files.length], [200, '', 1], 'files alone are a message');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: '' });
+    eq(r.status, 400, 'nothing at all still is not');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: '/compact', files: [shot] });
+    eq([r.status, r.body.code], [400, 'command_files'], 'a command cannot carry files');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'x', files: Array.from({ length: 21 }, (_, i) => `aaaaaaaa${i}`) });
+    eq([r.status, r.body.code], [400, 'too_many_files'], 'twenty files a message, and no more');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'x', files: ['deadbeefdeadbeef'] });
+    eq([r.status, r.body.code], [410, 'upload_gone'], 'a file that is not on the board is said, not dropped from the message');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ole', text: 'see attached', files: [shot] });
+    eq([r.status, r.body.code], [409, 'host_no_uploads'], 'a desk whose host does not fetch attachments is refused files');
+    assert(/^oldbox runs a build from before attachments/.test(r.body.error ?? ''), `in words naming the host — ${r.body.error}`);
+    eq((await work('h-old')).length, 0, 'and nothing is queued for it');
+
+    let f = await fetchAs('h-att', shot);
+    const gotBytes = [...new Uint8Array(await f.arrayBuffer())];
+    eq([f.status, gotBytes.length <= 64 ? gotBytes : `${gotBytes.length} bytes`], [200, [...png]], 'the host a message named it to fetches the file, byte for byte');
+    f = await fetchAs('h-old', shot);
+    eq(f.status, 403, 'another host may not');
+    f = await fetchAs('h-att', shot, null);
+    eq(f.status, 401, 'nor anything without the host key');
+    f = await fetchAs('h-att', 'cafebabecafebabe');
+    eq(f.status, 404, 'and a file that is not there is not found');
+    eq((await fetch(`${HOST}/api/floor/upload?id=${shot}`)).status === 200, false, 'the board never hands an upload to a page');
+
+    r = await op('/api/floor/upload/discard', { ids: [json] });
+    eq(r.body.removed, 1, 'a file taken out of the box is discarded');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'again', files: [json] });
+    eq([r.status, r.body.code], [410, 'upload_gone'], 'and a message naming it afterwards is refused');
+
+    // The staging store's clock and names, in-process: an hour is not waited.
+    const { createUploads, safeName } = await import('../src/uploads.js');
+    const tdir = `./data/floor-${process.pid}-stage-unit`;
+    const u = createUploads({ dir: tdir, ttlMs: 1000 });
+    const fakeReq = (buf) => Readable.from([buf]);
+    const a = (await u.stage(fakeReq(Buffer.from('aaa')), { name: 'a.txt', type: 'text/plain' })).file;
+    const b2 = (await u.stage(fakeReq(Buffer.from('bbb')), { name: 'b.txt', type: 'nonsense type' })).file;
+    eq(b2.type, 'application/octet-stream', 'a type that is not a media type is stored as the neutral one');
+    u.grant([a.id], 'h1');
+    const t0 = Date.now();
+    eq(u.sweep(t0 + 500), 0, 'nothing is swept inside its hour');
+    eq(u.sweep(t0 + 1500), 2, 'both are swept once it passes');
+    eq(u.resolve([a.id]).code, 'upload_gone', 'and a message naming one is told it is gone');
+    const c = (await u.stage(fakeReq(Buffer.from('ccc')), { name: 'c.txt' })).file;
+    const tc = Date.now();
+    u.grant([c.id], 'h1');
+    eq(u.sweep(tc + 900), 0, 'a send keeps a file another hour from that send');
+    eq([safeName(''), safeName('...'), safeName('a/b\\c.png'), safeName(`${'x'.repeat(200)}.tar.gz`).length, safeName(`${'x'.repeat(200)}.png`).slice(-4)],
+      ['file', 'file', 'c.png', 120, '.png'], 'safeName: never empty, never a directory, never longer than 120, keeping a short extension');
+    rmSync(tdir, { recursive: true, force: true });
+
+    // The page's half (issue #31): one lifted section of floor.js. What is
+    // drawn, hovered and dropped is check-attach.mjs (verify-ui-change).
+    const src31 = readFileSync('src/ui/floor.js', 'utf8');
+    const a31 = src31.indexOf('  /* ---------- attachments: what the page decides ---------- */');
+    const b31 = src31.indexOf('  /* ---------- attachments: the drawing ---------- */');
+    if (a31 < 0 || b31 < 0 || b31 < a31) throw new Error('the attachments section was not found in src/ui/floor.js between its two section comments');
+    const tmp31 = `./data/attach-${process.pid}.mjs`;
+    writeFileSync(tmp31, `${src31.slice(a31, b31)}\nexport { ATTACHED_HEADER, ATTACH_MAX_BYTES, ATTACH_MAX_FILES, splitAttached, attachMatch, fileKind, sizeLabel, attachAdmit, pasteTakes, attachSendable, attachRefusal, commandLike };\n`);
+    let pg;
+    try { pg = await import(new URL(tmp31, `file://${process.cwd()}/`)); } finally { rmSync(tmp31, { force: true }); }
+    const hostUp = await import('../host/uploads.js');
+    eq(pg.ATTACHED_HEADER, hostUp.ATTACHED_HEADER, 'the page reads the list by the header the host writes it under');
+    const { createUploads: cu, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } = await import('../src/uploads.js');
+    void cu;
+    eq([pg.ATTACH_MAX_BYTES, pg.ATTACH_MAX_FILES], [UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES], 'and refuses at the board\'s own caps');
+    const composed = hostUp.withAttachments('what broke?\n- not a file', ['/Users/x/.orchestratinator/uploads/abc123abc/shot one.png', '/Users/x/.orchestratinator/uploads/def456def/build.log']);
+    eq(pg.splitAttached(composed), { text: 'what broke?\n- not a file', files: [
+      { path: '/Users/x/.orchestratinator/uploads/abc123abc/shot one.png', name: 'shot one.png' },
+      { path: '/Users/x/.orchestratinator/uploads/def456def/build.log', name: 'build.log' },
+    ] }, 'a message the host composed splits into the words and the files, a name with a space in it included');
+    eq(pg.splitAttached(hostUp.withAttachments('', ['/u/abcdefgh/a.png'])), { text: '', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] }, 'files alone are files and no words');
+    eq(pg.splitAttached(composed.replace(/\n/g, '\r\n')).files.length, 2, 'and a window that records CRLF reads the same');
+    eq(pg.ATTACHED_HEADER, 'Attached by the operator:', 'the list is the operator\'s, wherever it was attached from: the panel, a popout or a meeting room (costmo, 2026-11-17)');
+    eq(pg.splitAttached('see this\n\nAttached from the floor:\n- /u/abcdefgh/a.png'), { text: 'see this', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] },
+      'and a message sent under the old spelling still draws its files as files');
+    for (const typedByHand of [
+      `see below\n\n${pg.ATTACHED_HEADER}\n- /a/b.png\nand then I said more`,
+      `${pg.ATTACHED_HEADER} my notes\n- /a/b.png`,
+      `see below\n\n${pg.ATTACHED_HEADER}\n- relative/path.png`,
+      `see below\n${pg.ATTACHED_HEADER}\n- /a/b.png`,
+    ]) eq(pg.splitAttached(typedByHand), { text: typedByHand, files: [] }, `words that only look like a list are left as typed: ${JSON.stringify(typedByHand.slice(-28))}`);
+    eq([pg.attachMatch('  hi ', [{ id: 'abc123abc', name: 'a.png' }]), pg.attachMatch('', [{ id: 'abc123abc', name: 'a.png' }]), pg.attachMatch('', [])], ['hi', 'abc123abc/a.png', ''],
+      'a pending message is matched by its words, or by its first file\'s id and name when it has none: a name alone is any file of that name');
+    assert(hostUp.withAttachments('', ['/u/abc123abc/a.png']).includes(pg.attachMatch('', [{ id: 'abc123abc', name: 'a.png' }])), 'and that is in the list the host writes');
+    eq([pg.fileKind('x.PNG', '').kind, pg.fileKind('x', 'image/jpeg').kind, pg.fileKind('r.pdf', '').kind, pg.fileKind('a.tar.gz', 'application/gzip')],
+      ['image', 'image', 'pdf', { kind: 'file', ext: 'gz' }], 'a thumbnail for what the browser can draw, the extension for the rest');
+    eq([pg.sizeLabel(900), pg.sizeLabel(2048), pg.sizeLabel(5.5 * 1048576), pg.sizeLabel(42 * 1048576)], ['900 B', '2 KB', '5.5 MB', '42 MB'], 'sizes read as people read them');
+    const many = Array.from({ length: 19 }, (_, i) => ({ name: `h${i}` }));
+    const adm = pg.attachAdmit(many, [{ name: 'ok', size: 10 }, { name: 'big', size: pg.ATTACH_MAX_BYTES + 1 }, { name: 'late', size: 1 }]);
+    eq([adm.take.map((f) => f.name), adm.refused.map((f) => [f.name, f.why])], [['ok'], [['big', 'larger than 100 MB'], ['late', '20 files a message']]],
+      'a file over the size is refused before it is sent, and past twenty the rest are said, not dropped');
+    eq([pg.pasteTakes([{ name: 'shot.png' }], ''), pg.pasteTakes([{ name: 'r.pdf' }], 'r.pdf'), pg.pasteTakes([{ name: 'image.png' }], 'Q3 total\t4,210'), pg.pasteTakes([], '')],
+      [true, true, false, false], 'a paste attaches a screenshot, and a file copied in Finder, but not the picture a spreadsheet puts beside its words');
+    const chip = (state, id = 'x1') => ({ state, id });
+    eq([pg.attachSendable('hi', []), pg.attachSendable('', [chip('ready')]), pg.attachSendable('hi', [chip('uploading')]).why, pg.attachSendable('hi', [chip('failed')]).why, pg.attachSendable('/compact', [chip('ready')]).why, pg.attachSendable('  ', [])],
+      [{ ok: true, ids: [] }, { ok: true, ids: ['x1'] }, 'still uploading', 'remove the file that failed', 'a command cannot carry files', { ok: false, why: null }],
+      'Send takes words, files or both; waits for an upload; says what stops it');
+    // One rule on both sides (QA, PR #58 finding 1): the page reads a
+    // command as the board's commandOf does, so a message that opens with a
+    // path is not refused its files as a command.
+    const asCommand = ['/compact', '/model sonnet', '/Users/costmo/build.log keeps failing, see the shot', '/tmp/out.txt is empty after this run', '/review\nplease look at the attached screenshot', 'see /Users/costmo/build.log', '  /btw what is 6*7?  ', '/', '/9lives'];
+    eq(asCommand.map((t) => pg.commandLike(t)), asCommand.map((t) => !!commandOf(t)), 'the page reads a command exactly where the board does');
+    eq(asCommand.map((t) => pg.attachSendable(t, [chip('ready')]).why ?? 'sendable'),
+      ['a command cannot carry files', 'a command cannot carry files', 'sendable', 'sendable', 'sendable', 'sendable', 'a command cannot carry files', 'sendable', 'sendable'],
+      'so a message opening with a path, or a /word followed by more lines, carries its files');
+    // Info 7: more than twenty is said at Send, never cut away.
+    const many21 = Array.from({ length: 21 }, (_, i) => chip('ready', `f${i}`));
+    eq([pg.attachSendable('hi', many21).why, pg.attachSendable('hi', many21.slice(1)).ok], ['20 files a message: take 1 out', true],
+      'a box holding more than twenty says so at Send, and how many to take out');
+    eq([pg.attachRefusal({ name: 'box', uploads: true }), pg.attachRefusal(null), /^old runs a build from before attachments/.test(pg.attachRefusal({ name: 'old', uploads: false }))],
+      [null, null, true], 'the paperclip is dimmed, with why, for a desk whose host does not fetch files');
+  }
+
   // Issue #44: meeting rooms. The board half is a bounded record Resume
   // reads — the routes are driven here against desks a host registered —
   // and the page half is one lifted section of floor.js, run with the
@@ -4422,6 +4617,7 @@ try {
   server.kill();
   await sleep(150);
   rmDb(DB_PATH);
+  rmSync(UPLOAD_DIR, { recursive: true, force: true });
 }
 
 console.log(failures ? `\nFAIL ❌ — ${failures} failure(s)` : '\nPASS ✅ — 0 failure(s)');

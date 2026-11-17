@@ -26,9 +26,9 @@
  * bug — that is the reason for `probe(file)` rather than `probe(string)`.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const DEBUG_PORT = Number(process.env.ORCH_CDP_PORT ?? 9222);
@@ -375,6 +375,10 @@ async function connect(target) {
     type: async (text) => cmd('Input.insertText', { text }),
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
     shot: async (path, selector = null, { pad = 8, scale = 3, full = false, beyond = false } = {}) => {
+      // The folder is made here. check-hide given an out-dir that did not
+      // exist yet died on its first shot with ENOENT, after drawing its first
+      // step, and read as a check that failed (PR #57's release run).
+      mkdirSync(dirname(path), { recursive: true });
       // `beyond` crops an element that runs past the window: the clip is
       // taken in page coordinates (the rect plus the scroll) and painted with
       // captureBeyondViewport. Without it, rows below the window come out as

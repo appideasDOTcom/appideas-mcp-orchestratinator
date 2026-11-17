@@ -1168,6 +1168,8 @@ async function settled(target, { quiet = 2, tries = 20 } = {}) {
  * takes a paste.
  */
 export function composerOf(screen) {
+  const scrolled = scrolledComposerOf(screen);
+  if (scrolled != null) return scrolled;
   const lines = screen.split('\n');
   const rule = /^[\s│|]*[─━—-]{20,}/;
   let at = -1;
@@ -1201,6 +1203,38 @@ export function composerOf(screen) {
   // in the composer" about a message that had been queued and answered.
   return QUEUE_PLACEHOLDER.test(text) ? '' : text;
 }
+
+/**
+ * The composer when Claude Code has scrolled it: the visible rows of a box
+ * whose top border reads `─── ↑ 3 more ───`, or null for any other screen.
+ *
+ * The composer is at most so many rows tall (7 on an 80x24 pane, measured
+ * on 2.1.326, 2026-11-17), and a longer message scrolls inside it with that
+ * header in place of the top rule. Its `❯` row is then off the top, so
+ * composerOf found no box (null), or, with an earlier message's `❯` echoed
+ * in the transcript above, read from there down. That is how a five-line
+ * message with two attachments, typed into an unattached 80x24 window, read
+ * as "line 5 did not appear" and was pasted after all, into
+ * <pasted_content> (issue #31's second live test). What this returns is
+ * only the END of what is in the box; scrolledOf says when that is so.
+ */
+const MORE_HEADER = /^\s*[─━]{2,}\s*↑\s*\d+\s+more\b/;
+function scrolledComposerOf(screen) {
+  const lines = String(screen ?? '').split('\n');
+  const rule = /^[\s│|]*[─━—-]{20,}/;
+  let bottom = -1;
+  for (let n = lines.length - 1; n >= 0; n--) {
+    if (rule.test(lines[n]) && !MORE_HEADER.test(lines[n])) { bottom = n; break; }
+  }
+  if (bottom < 1) return null;
+  for (let n = bottom - 1; n >= 0; n--) {
+    if (MORE_HEADER.test(lines[n])) return lines.slice(n + 1, bottom).join('\n').replace(/\s+$/, '');
+    if (rule.test(lines[n]) || /^\s*[❯>]/.test(lines[n])) return null;
+  }
+  return null;
+}
+/** Whether the composer on this screen is scrolled, so composerOf gave only its end. */
+export const scrolledOf = (screen) => scrolledComposerOf(screen) != null;
 
 /** The composer's own prompt once something is queued behind a running turn. */
 const QUEUE_PLACEHOLDER = /press up to edit queued messages/i;
@@ -1741,6 +1775,27 @@ async function commandReceipt(cmd, { path, before, projectDir: dir, since, scree
 const TYPE_CHUNK = Number(process.env.ORCH_TYPE_CHUNK ?? 100);
 const TYPE_CHUNK_MS = Number(process.env.ORCH_TYPE_CHUNK_MS ?? 60);
 
+/**
+ * Whether a line typed into the composer has arrived, from the box before
+ * the line went in and the box now (both whitespace-free, as compact()
+ * gives them).
+ *
+ * - The box is what it was plus the line: arrived.
+ * - On the first line, the box is the line alone: arrived. What was there
+ *   was a prompt suggestion, which composerOf reads as text and the first
+ *   key typed replaces (issue #31's first live test).
+ * - A scrolled box shows only its end (scrolledOf), so the whole can never
+ *   be compared: arrived when the box changed and now ends with the line.
+ *   "Changed" is not decoration. A line that repeats the one before it (two
+ *   identical lines) is what the box already ends with before a key of it
+ *   lands (QA, PR #58 Info 4).
+ */
+export function lineArrived({ now, before, line, first = false, scrolled = false }) {
+  if (now === before + line) return true;
+  if (first && before && now === line) return true;
+  return !!(scrolled && now !== before && now.endsWith(line));
+}
+
 async function typeInto(target, text) {
   const lines = String(text).split('\n');
   const stop = Date.now() + PASTE_TIMEOUT_MS;
@@ -1753,13 +1808,17 @@ async function typeInto(target, text) {
         if (!typed.ok) return { ok: false, error: typed.error };
         if (at + TYPE_CHUNK < line.length) await sleep(TYPE_CHUNK_MS);
       }
-      const want = before + compact(line);
+      // When the line counts as arrived is lineArrived's (above): a prompt
+      // suggestion the first key replaced (measured on 2.1.326: unhandled,
+      // the message was pasted after all, wrapped, 10.1 s), and a box
+      // scrolled past its start. A draft a person really typed is not
+      // replaced by typing, so it still reads as before + line.
       const by = Date.now() + PASTE_CONFIRM_MS;
       let seen = !line;
       while (!seen && Date.now() < by) {
         await sleep(150);
-        const now = compact(composerOf(await screenOf(target)) ?? '');
-        if (now === want) seen = true;
+        const screen = await screenOf(target);
+        seen = lineArrived({ now: compact(composerOf(screen) ?? ''), before, line: compact(line), first: i === 0, scrolled: scrolledOf(screen) });
       }
       if (seen) break;
       if (attempt === 1 || Date.now() > stop) return { ok: false, code: 'typed_lost', error: `line ${i + 1} of ${lines.length} did not appear in the composer` };
@@ -1772,8 +1831,12 @@ async function typeInto(target, text) {
       await sleep(120);
     }
   }
-  const final = compact(composerOf(await screenOf(target)) ?? '');
-  if (final !== compact(text)) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
+  const finalScreen = await screenOf(target);
+  const final = compact(composerOf(finalScreen) ?? '');
+  // Scrolled, the box holds the message's end: every line was confirmed as
+  // it went in, so what shows must be the end of the message.
+  const whole = final === compact(text) || (scrolledOf(finalScreen) && final.length > 0 && compact(text).endsWith(final));
+  if (!whole) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
   return { ok: true, typed: true };
 }
 
@@ -2406,7 +2469,13 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   let typed = null;
   if (wouldWrap(text)) {
     typed = await typeInto(pane.target, text);
-    if (!typed.ok) await clearComposer(pane.target);
+    if (!typed.ok) {
+      await clearComposer(pane.target);
+      // Said, because the paste that follows reaches the agent wrapped in
+      // <pasted_content>, and nothing else records why. Silent, this hid a
+      // prompt suggestion defeating long messages until a live test (issue #31).
+      warn(`typing a ${text.split('\n').length}-line message into ${pane.target} did not hold (${typed.error}); pasting it, so the agent reads it as pasted content`);
+    }
   }
   if (!typed?.ok) {
     typed = await pasteInto(pane.target, text);

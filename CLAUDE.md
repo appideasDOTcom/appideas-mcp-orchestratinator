@@ -376,13 +376,37 @@ Three consequences worth knowing before touching `host/window.js`:
   at its end. Ten of twenty-one idle windows on this machine held one on
   2026-11-02, and three of them were reported as "typed into the composer
   and never sent" with no record anywhere, because nothing had entered
-  them. `composerOf` reads a suggestion as the composer's contents, and that
-  is harmless where the host uses it — the paste check wants the composer to
-  *change*, the stuck check looks for the *sent* text — and measured on a
-  probe, a paste through `send()` replaces the suggestion: one user record,
-  the host's own words, nothing of the suggestion in it. Tab or Enter in
+  them. `composerOf` reads a suggestion as the composer's contents. That is
+  harmless for the paste check (it wants the composer to *change*) and the
+  stuck check (it looks for the *sent* text), and measured on a probe, a
+  paste through `send()` replaces the suggestion: one user record, the
+  host's own words, nothing of it. It was **not** harmless for typing
+  (2026-11-17, issue #31's first live test): `typeInto` waited for
+  "suggestion + first line", typing replaces a suggestion, so the line read
+  as lost and the message was pasted after all, reaching the agent in
+  `<pasted_content>`. Every message of four lines or more was exposed, and
+  every message with attachments is one. Reproduced on a probe on 2.1.326
+  (wrapped, 10.1 s, against 3.3 s unwrapped), fixed by accepting the first
+  line alone, and re-measured over two real suggestions (typed, unwrapped).
+  A draft a person really typed is not replaced, so it still reads as
+  draft + line. The fallback to a paste now says so in the host log; it
+  used to be silent, which is why this went unseen. Tab or Enter in
   such a window would accept it. Before chasing a phantom keystroke source,
   read the row with `capture-pane -e` and the cursor with `#{cursor_x}`.
+
+- **A composer taller than its box scrolls, and its `❯` row goes out of
+  sight.** Measured on 2.1.326, 2026-11-17, in an unattached 80x24 window:
+  at most 7 rows show, and the top rule becomes `─── ↑ 3 more ───`.
+  `composerOf` found a box by its `❯` row, so it read null there (or, with
+  an earlier message's `❯` echoed above, from that line down), and
+  `typeInto`, comparing the whole box with the whole text, read the last
+  line of a five-line message as lost and pasted it into
+  `<pasted_content>`. A message with attachments at 80 columns is that
+  tall. `composerOf` now reads a scrolled box by its header
+  (`scrolledComposerOf`), and `scrolledOf` says when what it gives is only
+  the end: a line is confirmed when the box changed and ends with it, and
+  the finished message when the box shows its end. Re-measured on the same
+  pane: the same message typed and recorded verbatim, 2 runs of 2.
 
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
@@ -768,6 +792,81 @@ on the operator's machine with the live board untouched. The plugin cache
 installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
+
+## A file attached to a message
+
+Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file
+dropped, pasted or picked in a desk's box, or a meeting room's, stands above
+the box as a chip (a thumbnail for an image, larger on hover; its extension
+for anything else) with its own ✕, and goes with the next Send. It is three
+hops, because a window reads its own machine's disk and the board may be a
+container on another one: the page uploads each file **on attach**
+(`POST /api/floor/upload`, so the chip can say "ready" before Send), the
+message names the staged ids, and the desk's host fetches each one, writes
+it under `~/.orchestratinator/uploads/<id>/<name>` and types the path under
+the words (`withAttachments` in [`host/uploads.js`](host/uploads.js)). Six
+things behind it, each of which looks simpler than it is:
+
+- **Outside every repo, and a window may read it there.** Inside the desk's
+  folder an attachment is a change in somebody's working tree (costmo: not
+  git-visible). Outside it, measured on 2.1.326 with a probe in **manual**
+  mode: a Read of a text file and a PNG under `~/.orchestratinator` raised
+  no permission prompt, and a message the host's own `send()` typed with
+  two paths (one with a space) was recorded exactly and both were read. On
+  a machine whose settings do ask, it is an ordinary prompt on the floor.
+- **The path is typed, not pasted as an image.** An image path inside a
+  typed or pasted message stays text: the files-only message is two lines,
+  so `send()` pastes it rather than types it, and it was still recorded as
+  text and read (same probe). The agent reads a file when it wants it,
+  which is also what lets a 100 MB log go without filling the context.
+- **Lifetime is Claude Code's own** (costmo: "the operator should not have
+  to think about it"). The host keeps a file for `cleanupPeriodDays` from
+  Claude Code's `settings.json`, 30 when unset, read at every heartbeat's
+  sweep, never under a day (Claude Code reads 0 as "keep nothing"). That is
+  how long the transcript naming the file lives. A file sent again is kept
+  from that send. The board keeps its staged copy an hour from attach or
+  last send, and does **not** delete it when a host fetches it: a meeting
+  room sends one file to desks on several hosts, and an error turn hands
+  the files back to the box to be sent again.
+- **100 MB a file, twenty a message** (costmo). Refused on the page before a
+  byte is sent, on the declared length before the board reads one, and cut
+  off at the cap while streaming. The body is never parsed (server.js skips
+  the path, so a `.json` file is not read as a request) and never held
+  whole in memory: the board shares Docker's VM (issue #5).
+- **A host says it takes files, as it says it takes seats.** `uploads: true`
+  at registration, kept on `hosts.uploads`. A host from before ignores
+  `files` and would type the words alone, so the board refuses files to it
+  in words (`host_no_uploads`) and the paperclip is dimmed with the same
+  sentence. The desk's `hosted.host_id` in `/api/floor` is how the page
+  finds that row; it was not in the projection, and the page check's first
+  row is there because the paperclip read live by fallback without it.
+- **The board never serves an upload to a page.** Thumbnails are drawn from
+  the File the page holds, so nothing from the operator's clipboard becomes
+  a document on this origin. The route's reasoning is beside adminGuard's
+  in [`src/web.js`](src/web.js) ("A route that takes bytes"), as the issue
+  asked, not a widening of that comment.
+
+What the page does with the result: the host writes the list as `Attached
+by the operator:` (`Attached from the floor:` until costmo renamed it the
+same day, still read) and one `- <path>` a line, after a blank line, and
+`splitAttached` draws a user turn ending in exactly that as its words plus
+file chips, the path on hover. Anything else that only looks like a list is
+the operator's words, left as typed. The page and the host spell the header
+once each and `test:floor` holds them to one. A pending message of files
+alone is matched to its turn by the first file's id and name, which only
+its own path holds (`attachMatch`): an empty match took the next user turn
+of any kind, and the name alone took an earlier message carrying a file of
+the same name (the room check sends one screenshot twice for that). The chips are one row,
+scrolled sideways: two rows pushed the panel's foot off a 640px window.
+
+Left out, with why: **thumbnails in the history** (the board keeps no bytes
+after its hour, and a recorded turn is drawn from the transcript, which
+holds a path); **a progress bar** (a local board takes 100 MB in about a
+second; the chip's spinner is the receipt); **a slash command with files**
+(the window reads the line as a command, so there is nowhere to put them;
+refused on the page and the route). `check-attach.mjs` in
+**verify-ui-change** is the page; the host's half is "a message with files
+attached" in `test:host`.
 
 ## Moving a desk to another floor
 
@@ -2639,6 +2738,35 @@ operator's live floor.
   in the report. It is a rule about when, not about how much: do not thin
   a test to save a run.
 
+  **And the full chain runs before any merge to main, unasked** (costmo,
+  2026-11-17, at the end of PR #57: "When there are documentation-only
+  changes, the full test suite does not need to be re-run, but it does
+  need to be re-run prior to any main to merge"). QA and the developer
+  both wrote "full chain not run, waits for the release" through five
+  rounds, then called the PR approvable and told him the merge was his
+  with the chain still unrun, and he had to ask what was stopping it.
+  "Approvable" from a review of related suites is not the release check.
+  So when a PR into main is approvable, the next thing done is the one
+  `npm test` at the head, then the release page checks
+  (`run-release-pages.sh`, **verify-ui-change**), and "approvable" reaches
+  him with their results beside it, or with "the full chain is running" in
+  the same sentence. A commit after that run that changes documentation
+  only does not need it again; any other change does. Run the two one
+  after the other, never beside QA's: QA runs its own chain too, queued
+  behind yours (their decisions/0007).
+
+- **Once a PR into main is approvable, nothing goes into the tree until he
+  has merged** (costmo, the same evening: "I need for you to stop updating
+  files if it is interrupting with and/or interfering with our PR
+  progress"). PR #57 went from `a9fa870` to `185b4a5` over a dozen
+  commits after its first close, most of them notes, skills, mutant lists
+  and a facts re-anchor written into the tree as each round ended: he
+  commits the tree when he sees it, and QA measures every push. A finding
+  QA marks as not blocking is named to him as "after the merge", not
+  started. Lessons for the repo are held and written once, after the
+  merge, in one batch. The updater refuses a dirty clone too
+  (`host/update.js`), so an uncommitted note also blocks his update.
+
   Which suites a change reaches, read from the paths each `test/*.mjs`
   names (QA's map, with two additions from that reading):
 
@@ -2650,6 +2778,8 @@ operator's live floor.
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `src/updates.js`, `host/update.js` | `test:update` |
+  | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
+  | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
   | `plugin/` | `test:plugin`, and `test:seats`, which runs the hook |
   | a version bump | `smoke` |
 

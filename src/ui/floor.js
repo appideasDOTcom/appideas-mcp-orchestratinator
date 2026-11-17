@@ -357,6 +357,7 @@
     open: null,          // { channel, agent } whose chat panel is showing
     turns: [],
     sending: [],         // messages accepted but not yet seen in the conversation
+    attach: new Map(),   // the box's attachments (issue #31): attachKey() -> chips
     delivery: null,      // { state, text, held } — a message the window has but has not read
     // The chat box's height (issue #13): what fitBox last drew it from, a
     // press on it in progress, and heights for desks with no session.
@@ -1234,6 +1235,342 @@
   document.addEventListener('pointercancel', endBoxPress, true);
   // The panel's max-height is in vh, so the room changes with the window.
   window.addEventListener('resize', () => fitBox());
+
+  /* ---------- attachments: what the page decides ---------- */
+  // Issue #31. Files attached to a message: shown above the box before Send,
+  // each removable, sent with the message, and drawn as files (not as a list
+  // of paths) once the window has recorded it. Pure, and lifted into
+  // test/floor.mjs by the two markers around this section.
+
+  /* The line the host opens the list with (ATTACHED_HEADER in
+     host/uploads.js; test/floor.mjs holds the two to one spelling). */
+  const ATTACHED_HEADER = 'Attached by the operator:';
+  /* What the host wrote before 2026-11-17 (costmo: "from the floor" read as
+     a place, and a meeting room is not one). Still read, so a conversation
+     from before draws its files as files. */
+  const ATTACHED_HEADERS = [ATTACHED_HEADER, 'Attached from the floor:'];
+  /* costmo, 2026-11-17: 100 MB a file, twenty a message. The board refuses
+     the same (src/uploads.js); the page says it before a byte is sent. */
+  const ATTACH_MAX_BYTES = 100 * 1024 * 1024;
+  const ATTACH_MAX_FILES = 20;
+
+  /**
+   * A message as the window recorded it, split into the operator's words and
+   * the files the host listed under them. Only a list that is the message's
+   * last paragraph, opens on the header and holds nothing but `- <path>`
+   * lines is read as one; anything else is the operator's own words and is
+   * left exactly as typed.
+   */
+  function splitAttached(text) {
+    const s = String(text ?? '').replace(/\r\n?/g, '\n');
+    // The last list under either spelling: the later of the two in the text.
+    let at = -1;
+    let header = ATTACHED_HEADER;
+    for (const h of ATTACHED_HEADERS) {
+      const i = s.startsWith(`${h}\n`) ? 0 : s.lastIndexOf(`\n\n${h}\n`);
+      if (i > at) { at = i; header = h; }
+    }
+    if (at < 0) return { text: s, files: [] };
+    const listAt = at === 0 ? 0 : at + 2;
+    const lines = s.slice(listAt + header.length + 1).replace(/\n+$/, '').split('\n');
+    if (!lines.length || !lines.every((l) => /^- \/\S/.test(l))) return { text: s, files: [] };
+    const files = lines.map((l) => {
+      const path = l.slice(2);
+      return { path, name: path.split('/').pop() || path };
+    });
+    return { text: s.slice(0, at).replace(/\s+$/, ''), files };
+  }
+
+  /**
+   * What a pending message is matched against its recorded turn by. The
+   * words, when there are any (the recorded turn holds them, the list after
+   * them). A message of files alone has none, and an empty match took the
+   * next user turn of any kind for it; the file's name alone took an
+   * earlier message that carried a file of the same name
+   * (check-attach-meeting.mjs, the same screenshot sent twice). So it is
+   * the first file's id and name, which only its own path holds
+   * (`…/uploads/<id>/<name>`).
+   */
+  function attachMatch(text, files) {
+    const words = String(text ?? '').trim();
+    if (words) return words;
+    const f = files?.[0];
+    if (!f) return '';
+    return f.id ? `${f.id}/${f.name}` : f.name;
+  }
+
+  /** What kind of chip a file gets: a thumbnail only for an image the browser can draw. */
+  function fileKind(name, type) {
+    const ext = (String(name ?? '').match(/\.([A-Za-z0-9]{1,8})$/)?.[1] ?? '').toLowerCase();
+    if (/^image\/(png|jpe?g|gif|webp|bmp|avif|svg\+xml)$/.test(String(type ?? '')) || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'svg'].includes(ext)) return { kind: 'image', ext };
+    if (type === 'application/pdf' || ext === 'pdf') return { kind: 'pdf', ext: 'pdf' };
+    return { kind: 'file', ext };
+  }
+
+  function sizeLabel(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    return `${(n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0)} MB`;
+  }
+
+  /**
+   * Files offered to the box (picked, dropped or pasted), against what it
+   * already holds: which are taken, and which are not and why. A file over
+   * the size is not uploaded only to be refused, and past twenty the rest
+   * are said, never silently dropped.
+   */
+  function attachAdmit(held, offered, { maxFiles = ATTACH_MAX_FILES, maxBytes = ATTACH_MAX_BYTES } = {}) {
+    const take = [];
+    const refused = [];
+    let room = Math.max(0, maxFiles - (held?.length ?? 0));
+    for (const f of offered ?? []) {
+      if (f.size > maxBytes) refused.push({ name: f.name, why: `larger than ${Math.round(maxBytes / 1048576)} MB` });
+      else if (room <= 0) refused.push({ name: f.name, why: `${maxFiles} files a message` });
+      else { take.push(f); room--; }
+    }
+    return { take, refused };
+  }
+
+  /**
+   * Does a paste attach its files? When it carries files and no words of
+   * its own: a screenshot is files alone, and a file copied in Finder comes
+   * with its own name as the text. A paste from a document or a spreadsheet
+   * carries a picture of what was copied beside the words, and the words
+   * are what was meant.
+   */
+  function pasteTakes(files, text) {
+    if (!files?.length) return false;
+    const t = String(text ?? '').trim();
+    if (!t) return true;
+    const names = new Set(files.map((f) => f.name));
+    return t.split(/\r?\n/).every((l) => names.has(l.trim()) || names.has(l.trim().split('/').pop()));
+  }
+
+  /**
+   * Whether the board will read this message as a slash command: the same
+   * rule as commandOf in src/floor.js (and host/window.js), a single line,
+   * `/name` and whatever follows. The page cannot import it, so this is a
+   * copy, and test:floor runs the two over the same messages. A looser rule
+   * here ("starts with / and a letter") refused files on a message that
+   * opens with a path, "/Users/me/build.log keeps failing", which the board
+   * takes, and said it was a command (QA, PR #58 finding 1).
+   */
+  function commandLike(text) {
+    const t = String(text ?? '').trim();
+    if (!t || t.includes('\n')) return false;
+    return /^\/([A-Za-z][\w:-]*)(?:\s+(.*))?$/.test(t);
+  }
+
+  /**
+   * Can the box send what it holds, and if not, why: said on Send rather
+   * than sent and refused. `chips` are the box's attachments, each
+   * `{ state: 'uploading' | 'ready' | 'failed' }`.
+   */
+  function attachSendable(text, chips) {
+    const list = chips ?? [];
+    if (list.some((c) => c.state === 'uploading')) return { ok: false, why: 'still uploading' };
+    if (list.some((c) => c.state === 'failed')) return { ok: false, why: 'remove the file that failed' };
+    const ready = list.filter((c) => c.state === 'ready');
+    if (ready.length && commandLike(text)) return { ok: false, why: 'a command cannot carry files' };
+    // More than twenty only when a failed send's files came back to a box
+    // that held new ones (giveChipsBack puts every one back): said here,
+    // where the operator chooses which to take out, never dropped.
+    if (ready.length > ATTACH_MAX_FILES) return { ok: false, why: `${ATTACH_MAX_FILES} files a message: take ${ready.length - ATTACH_MAX_FILES} out` };
+    if (!String(text ?? '').trim() && !ready.length) return { ok: false, why: null };
+    return { ok: true, ids: ready.map((c) => c.id) };
+  }
+
+  /**
+   * Why a desk's box takes no files, or null when it does: its host runs a
+   * build from before attachments (`hosts[].uploads` in the payload), which
+   * would type the words and drop the files. The board refuses it too.
+   */
+  function attachRefusal(hostRow) {
+    if (!hostRow) return null;
+    return hostRow.uploads ? null : `${hostRow.name ?? 'This desk’s host'} runs a build from before attachments. Update it to send files.`;
+  }
+  /* ---------- attachments: the drawing ---------- */
+
+  /* Above the box, under the question slot, and the paperclip beside the
+     saved prompts: the same two pieces in the panel and in a meeting room. */
+  const ATTACH_SLOT = '<div class="p-attach hidden" aria-label="Attached files"></div>';
+  const ATTACH_BUTTON = '<button class="btn attachbtn" data-act="attach-file" aria-label="Attach files"><svg class="attachGlyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg></button><input type="file" class="p-file" multiple hidden>';
+
+  /** The box's attachments: per desk on the floor, per room in a meeting, like a draft. */
+  const attachKey = () => (ui.meeting ? `meeting:${ui.meeting.id ?? ''}` : ui.open ? `${ui.open.channel}|${ui.open.agent}` : null);
+  const attachList = (key = attachKey()) => (key ? ui.attach.get(key) ?? [] : []);
+  let attachSeq = 0;
+
+  /** The payload's row for the host running the open desk, or null. */
+  function openHostRow() {
+    if (ui.meeting || !ui.open) return null;
+    const c = floor.channels.find((x) => x.channel === ui.open.channel);
+    const d = c?.desks.find((x) => x.agent === ui.open.agent);
+    const hid = d?.hosted?.host_id;
+    return hid ? (floor.hosts ?? []).find((h) => h.host_id === hid) ?? null : null;
+  }
+
+  function chipHtml(c) {
+    const thumb = c.kind === 'image' && c.url
+      ? `<img class="att-thumb" src="${esc(c.url)}" alt="">`
+      : `<span class="att-thumb att-generic" aria-hidden="true">${esc((c.ext || c.kind || 'file').slice(0, 4).toUpperCase())}</span>`;
+    const state = c.state === 'uploading' ? '<span class="pspin att-spin" aria-hidden="true"></span>' : '';
+    const title = c.state === 'failed' ? `${c.name} — not attached: ${c.error}` : `${c.name} · ${sizeLabel(c.size)}`;
+    return `<div class="att-chip ${esc(c.state)}" data-key="${esc(c.key)}" data-kind="${esc(c.kind)}" title="${esc(title)}" tabindex="0">
+      ${thumb}${state}
+      <span class="att-meta"><span class="att-name">${esc(c.name)}</span><span class="att-size mono">${esc(c.state === 'failed' ? c.error : sizeLabel(c.size))}</span></span>
+      <button class="att-x" data-act="attach-remove" data-key="${esc(c.key)}" aria-label="Remove ${esc(c.name)}" title="Remove">✕</button>
+    </div>`;
+  }
+
+  /** Draw the box's chips, only when they changed: the panel is drawn again on every poll. */
+  function drawAttach() {
+    const slot = document.querySelector('#floor-panel .p-attach');
+    if (!slot) return;
+    const list = attachList();
+    const sig = JSON.stringify(list.map((c) => [c.key, c.state, c.error ?? null]));
+    if (slot.dataset.sig === sig) return;
+    slot.dataset.sig = sig;
+    slot.innerHTML = list.map(chipHtml).join('');
+    slot.classList.toggle('hidden', !list.length);
+    hidePreview();
+    // The chips stand between the transcript and the box, so the room the
+    // box may grow into changed.
+    fitBox();
+  }
+
+  /** The paperclip, gated with Send and on whether the desk's host takes files. */
+  function gateAttach(canChat) {
+    const btn = document.querySelector('#floor-panel [data-act="attach-file"]');
+    if (!btn) return;
+    const why = canChat ? attachRefusal(openHostRow()) : 'Nothing typed here can be delivered right now.';
+    btn.disabled = !!why;
+    btn.title = why ?? `Attach files — or drop them here, or paste a screenshot (up to ${ATTACH_MAX_FILES}, ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB each)`;
+  }
+
+  /** Take files into the box and start each one on its way to the board. */
+  function addFiles(fileList) {
+    const key = attachKey();
+    if (!key) return;
+    const btn = document.querySelector('#floor-panel [data-act="attach-file"]');
+    if (btn?.disabled) { flash(btn, btn.title.slice(0, 60)); return; }
+    const files = [...(fileList ?? [])];
+    const { take, refused } = attachAdmit(attachList(key), files);
+    const chips = take.map((file) => {
+      const { kind, ext } = fileKind(file.name, file.type);
+      return {
+        key: `a${++attachSeq}`, file, name: file.name || 'pasted', size: file.size, type: file.type, kind, ext,
+        url: kind === 'image' ? URL.createObjectURL(file) : null, id: null, state: 'uploading', error: null,
+      };
+    });
+    ui.attach.set(key, attachList(key).concat(chips));
+    drawAttach();
+    if (refused.length && btn) flash(btn, `${refused[0].name}: ${refused[0].why}`.slice(0, 60));
+    for (const c of chips) uploadChip(key, c);
+  }
+
+  async function uploadChip(key, c) {
+    try {
+      const r = await fetch(`./api/floor/upload?name=${encodeURIComponent(c.name)}&type=${encodeURIComponent(c.type || '')}`, {
+        method: 'POST', headers: { 'content-type': c.type || 'application/octet-stream' }, body: c.file,
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error ?? `upload failed (${r.status})`);
+      c.id = body.id;
+      c.state = 'ready';
+      // Taken out of the box while it was on its way: gone from the board too.
+      if (!attachList(key).includes(c)) discardIds([c.id]);
+    } catch (err) {
+      c.state = 'failed';
+      c.error = String(err.message ?? err).slice(0, 80);
+    }
+    drawAttach();
+  }
+
+  function discardIds(ids) {
+    if (!ids.length) return;
+    fetch('./api/floor/upload/discard', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) }).catch(() => { /* it expires within the hour */ });
+  }
+
+  function removeChip(chipKey) {
+    const key = attachKey();
+    const list = attachList(key);
+    const c = list.find((x) => x.key === chipKey);
+    if (!c) return;
+    ui.attach.set(key, list.filter((x) => x !== c));
+    if (c.url) URL.revokeObjectURL(c.url);
+    if (c.id) discardIds([c.id]);
+    drawAttach();
+    $('p-text')?.focus();
+  }
+
+  /**
+   * The chips a send carried (`ids`, in the order sent), out of the box and
+   * kept by the pending message. Only those: a file attached while the
+   * request was on its way stays in the box for the next message.
+   */
+  function takeChips(ids, key = attachKey()) {
+    const sent = new Set(ids);
+    const list = attachList(key);
+    const taken = ids.map((id) => list.find((c) => c.id === id)).filter(Boolean);
+    const left = list.filter((c) => !sent.has(c.id));
+    if (left.length) ui.attach.set(key, left); else ui.attach.delete(key);
+    for (const c of taken) if (c.url) { URL.revokeObjectURL(c.url); c.url = null; }
+    drawAttach();
+    return taken.map((c) => ({ id: c.id, name: c.name, size: c.size, type: c.type, kind: c.kind, ext: c.ext, file: c.file }));
+  }
+
+  /** A send the window lost: its files back in the box, beside whatever is there now. */
+  function giveChipsBack(key, files) {
+    if (!key || !files?.length) return;
+    const back = files.map((f) => ({
+      ...f, key: `a${++attachSeq}`, state: 'ready', error: null,
+      url: f.kind === 'image' && f.file ? URL.createObjectURL(f.file) : null,
+    }));
+    // Every one, past twenty included: attachSendable says so at Send
+    // (QA, PR #58 Info 7: a slice here dropped them without a word).
+    ui.attach.set(key, back.concat(attachList(key)));
+    drawAttach();
+  }
+
+  /* One preview, on the page and not in the panel: the panel clips what
+     overflows it, and a chip sits at its bottom edge. */
+  function showPreview(chip) {
+    const c = attachList().find((x) => x.key === chip?.dataset.key);
+    if (!c || c.kind !== 'image' || !c.url) return;
+    let p = document.getElementById('att-preview');
+    if (!p) {
+      p = document.createElement('div');
+      p.id = 'att-preview';
+      p.setAttribute('aria-hidden', 'true');
+      p.innerHTML = '<img alt=""><div class="att-pcap mono"></div>';
+      document.body.appendChild(p);
+    }
+    p.querySelector('img').src = c.url;
+    p.querySelector('.att-pcap').textContent = `${c.name} · ${sizeLabel(c.size)}`;
+    p.classList.add('on');
+    const r = chip.getBoundingClientRect();
+    const w = Math.min(320, window.innerWidth - 16);
+    const left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left + r.width / 2 - w / 2));
+    p.style.width = `${w}px`;
+    p.style.left = `${left}px`;
+    // Above the chip when there is room, below it otherwise.
+    p.style.top = '';
+    p.style.bottom = '';
+    if (r.top > 220) p.style.bottom = `${window.innerHeight - r.top + 6}px`;
+    else p.style.top = `${r.bottom + 6}px`;
+  }
+  function hidePreview() { document.getElementById('att-preview')?.classList.remove('on'); }
+
+  /** A file chip in a recorded message or a pending one: its name, and the path on hover. */
+  function filesHtml(files) {
+    if (!files?.length) return '';
+    return `<div class="t-files">${files.map((f) => {
+      const { kind, ext } = fileKind(f.name, f.type);
+      return `<span class="t-file" data-kind="${esc(kind)}" title="${esc(f.path ?? f.name)}"><span class="att-generic" aria-hidden="true">${esc((ext || kind).slice(0, 4).toUpperCase())}</span>${esc(f.name)}</span>`;
+    }).join('')}</div>`;
+  }
 
   /* ---------- drafts ----------
      What is in the compose box belongs to the desk, not to the panel.
@@ -3656,9 +3993,15 @@
     // typed comes back exactly as typed — the compose box is a plain textarea,
     // and a line that starts with a dash should not become a bullet on its way
     // back to the person who wrote it.
+    // A user turn's attachments, listed by the host under the words (issue
+    // #31), are drawn as files: the paths are the agent's to read, not the
+    // operator's words.
+    const att = t.role === 'user' ? splitAttached(t.text) : null;
     const body = t.role === 'assistant'
       ? `<div class="t-body t-md">${md(t.text)}</div>`
-      : `<div class="t-body">${esc(t.text ?? '')}</div>`;
+      : att?.files.length
+        ? `${att.text ? `<div class="t-body">${esc(att.text)}</div>` : ''}${filesHtml(att.files)}`
+        : `<div class="t-body">${esc(t.text ?? '')}</div>`;
     div.innerHTML = `
       <div class="t-who">${esc(who)}<span class="t-when mono" data-at="${esc(t.created_at)}">${esc(ago(t.created_at))}</span></div>
       ${body}`;
@@ -3805,6 +4148,7 @@
              the top while your eyes were at the bottom, in the box you type in.
              It belongs against the box. -->
         <div class="p-alert-slot"></div>
+        ${ATTACH_SLOT}
         <textarea id="p-text" class="input" rows="3"></textarea>
         <!-- The commands the floor offers, drawn while the box holds the
              start of one. Tab or a click completes; Enter sends what is
@@ -3813,6 +4157,7 @@
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
+          ${ATTACH_BUTTON}
           <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="${PROMPT_BOX}" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
@@ -4221,6 +4566,8 @@
       ? `${d.persona}’s conversation is open in your editor…`
       : `${d.persona}’s machine isn’t reachable right now…`;
     wrap.querySelector('[data-act="send"]').disabled = !canChat || asking;
+    gateAttach(canChat && !asking);
+    drawAttach();
     // Gated with Send, not with the stop sign: a prompt is something to send, so
     // offering the library for a box that cannot deliver is the same drift the
     // composer's own gating exists to prevent.
@@ -4472,13 +4819,13 @@
     // than as a turn: it is not one until the window says so.
     for (const stale of box.querySelectorAll('.t-pending')) stale.remove();
     for (const p of ui.sending) {
-      const queued = deliveredNow(p.text);
+      const queued = deliveredNow(p.match ?? p.text);
       // A nudge sent in bulk waits on the line in front of it before its
       // clock may run, and says what it is waiting on (bulkWait).
       const wait = !queued && p.bulk ? bulkWaitFor(ui.open.channel, ui.open.agent) : null;
       const held = wait?.hold ? { state: 'line', note: wait.note } : null;
       const stale = !queued && !held && Date.now() - Math.max(p.at ?? 0, wait?.since ?? 0) > SENDING_GRACE_MS;
-      box.insertBefore(pendingNode(p.text, queued ?? held, stale), partialNode);
+      box.insertBefore(pendingNode(p.text, queued ?? held, stale, p.files), partialNode);
     }
     // A queued message this browser did not send — the bell struck with the
     // panel shut, the board's Nudge button, another tab, a reload — is still
@@ -4491,8 +4838,9 @@
     // (costmo, 2026-11-03: "an artifact outlined in white saying /model
     // opus"). What was typed and what happened are one line labeled `host`
     // in the conversation already; the bubble has nothing left to say.
-    if (ui.delivery && ui.delivery.state !== 'done' && !ui.sending.some((p) => deliveredNow(p.text))) {
-      box.insertBefore(pendingNode(ui.delivery.text, ui.delivery, false), partialNode);
+    if (ui.delivery && ui.delivery.state !== 'done' && !ui.sending.some((p) => deliveredNow(p.match ?? p.text))) {
+      const split = splitAttached(ui.delivery.text);
+      box.insertBefore(pendingNode(split.text, ui.delivery, false, split.files), partialNode);
     }
 
     if (ui.partial) {
@@ -4886,7 +5234,7 @@
    * Everything the operator does next depends on telling that apart from
    * silence, which is what the third state is.
    */
-  function pendingNode(text, queued, stale) {
+  function pendingNode(text, queued, stale, files = null) {
     const node = document.createElement('div');
     node.className = 't t-user t-pending';
     node.classList.toggle('stale', stale);
@@ -4894,8 +5242,9 @@
     const said = deliveryNote(queued, stale);
     node.classList.toggle('done', queued?.state === 'done');
     node.innerHTML = `<div class="t-who">you<span class="t-when mono">${esc(said)}</span></div>` +
-      ' <div class="t-body"></div>';
+      ' <div class="t-body"></div>' + filesHtml(files);
     node.querySelector('.t-body').textContent = text;
+    if (!text) node.querySelector('.t-body').remove();
     return node;
   }
 
@@ -4912,8 +5261,10 @@
     // the other direction.
     if (rows.some((r) => r.role === 'error')) {
       // What was typed, that is. A select's pick is pending here too, and is
-      // not the box's to be given (handedBack).
+      // not the box's to be given (handedBack). And the files it carried go
+      // back above the box, still on the board for their hour (issue #31).
       const lost = handedBack(ui.sending);
+      for (const p of ui.sending) if (p.files?.length) giveChipsBack(p.key, p.files);
       ui.sending = [];
       const box = $('p-text');
       if (lost && box) {
@@ -4924,7 +5275,7 @@
       return;
     }
     if (!arrived.length) return;
-    ui.sending = ui.sending.filter((p) => !arrived.some((a) => a.includes(squash(p.text))));
+    ui.sending = ui.sending.filter((p) => !arrived.some((a) => a.includes(squash(p.match ?? p.text))));
   }
 
   /** The session the open desk's panel is scoped to, or null for all of them. */
@@ -6244,7 +6595,7 @@
         const p = meetEveryone().find((x) => x.agent === e.agent);
         const d = deskIn(m.channel, e.agent);
         if (e.opens && e.readyAt == null && d?.nudge?.ok && !d.nudge.opens) e.readyAt = Date.now();
-        Object.assign(e, meetingEntry(e, s.text, p?.turns, p?.delivery));
+        Object.assign(e, meetingEntry(e, s.match ?? s.text, p?.turns, p?.delivery));
       }
       stampFronts(s);
       // Nothing the page does may cost somebody their own writing: a message
@@ -6422,14 +6773,18 @@
     const box = $('p-text');
     const btn = document.querySelector('#floor-panel [data-act="send"]');
     const text = typeof given === 'string' ? given : (box?.value ?? '');
-    if (m?.phase !== 'live' || !text.trim() || !btn || btn.disabled) return;
+    const fromBox = typeof given !== 'string';
+    // The box's files (issue #31) go with what is typed in it, never with a nudge.
+    const att = fromBox && !nudge ? attachSendable(text, attachList()) : { ok: !!text.trim(), ids: [] };
+    if (!att.ok && att.why && btn) { flash(btn, att.why); return; }
+    if (m?.phase !== 'live' || !att.ok || !btn || btn.disabled) return;
     const inRoom = m.parts.map((p) => p.agent);
     // Names at the start of the box narrow this one message, and are not
     // part of it (meetingMentions); the chips decide otherwise.
     const named = typeof given === 'string' ? { to: null, text, unknown: [] }
       : meetingMentions(text, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
     if (named.unknown.length) { flash(btn, `nobody here is @${named.unknown[0]}`); return; }
-    if (named.to && !named.text.trim()) { flash(btn, 'nothing to send after the names'); return; }
+    if (named.to && !named.text.trim() && !att.ids.length) { flash(btn, 'nothing to send after the names'); return; }
     const chosen = named.to ?? meetingTo(inRoom, m.to);
     if (!chosen.length) { flash(btn, 'nobody is chosen to hear it'); return; }
     // The room's Nudge goes only to the chosen desks with something waiting
@@ -6440,12 +6795,17 @@
     const desks = to.map((a) => deskIn(m.channel, a)).filter(Boolean);
     const plan = nudgePlan(desks);
     const s = {
-      seq: ++m.seq, text: named.text, typed: text, at: Date.now(), to, everyone: to.length === inRoom.length, fromBox: typeof given !== 'string',
+      seq: ++m.seq, text: named.text, typed: text, at: Date.now(), to, everyone: to.length === inRoom.length, fromBox,
       entries: [
         ...plan.send.map((e) => ({ ...e, state: 'line' })),
         ...plan.blocked.map((e) => ({ agent: e.agent, persona: e.persona, host: null, state: 'refused', words: e.reason })),
       ],
     };
+    // Out of the box as the send starts: one set of files, every desk it goes to.
+    if (att.ids.length) {
+      s.files = takeChips(att.ids);
+      s.match = attachMatch(s.text, s.files);
+    }
     m.sends.push(s);
     btn.disabled = true;
     ui.stick = true;
@@ -6453,7 +6813,7 @@
     let taken = 0;
     for (const e of s.entries.filter((x) => x.state === 'line')) {
       try {
-        await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text: s.text });
+        await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text: s.text, ...(att.ids.length ? { files: att.ids } : {}) });
         taken++;
         // A nudge rings the desk, here and on the floor, as the bell does.
         if (nudge) { ring(m.channel, e.agent); say({ t: 'rang', channel: m.channel, agent: e.agent }); }
@@ -6463,6 +6823,8 @@
       }
     }
     stampFronts(s);
+    // No desk took it: the files go back above the box, as the words stay in it.
+    if (!taken && s.files?.length) giveChipsBack(attachKey(), s.files);
     if (taken && s.fromBox) {
       box.value = '';
       stashDraft();
@@ -6587,11 +6949,13 @@
       <div class="p-compose">
         <div class="m-alerts"></div>
         <div class="m-to" role="group" aria-label="Who hears this message"></div>
+        ${ATTACH_SLOT}
         <textarea id="p-text" class="input" rows="3"></textarea>
         <div class="p-slash hidden" role="listbox"></div>
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn m-nudge-all" data-act="m-nudge-all"></button>
+          ${ATTACH_BUTTON}
           <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="${PROMPT_BOX}" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
         </div>
@@ -6630,8 +6994,10 @@
     const div = document.createElement('div');
     if (it.kind === 'user') {
       div.className = 't t-user m-msg';
-      div.innerHTML = `<div class="t-who">you → ${esc(meetingToLine(it.agents, false, meetPersona))}<span class="t-when mono" data-at="${esc(it.turn.created_at)}">${esc(ago(it.turn.created_at))}</span></div><div class="t-body"></div>`;
-      div.querySelector('.t-body').textContent = it.turn.text ?? '';
+      const att = splitAttached(it.turn.text);
+      div.innerHTML = `<div class="t-who">you → ${esc(meetingToLine(it.agents, false, meetPersona))}<span class="t-when mono" data-at="${esc(it.turn.created_at)}">${esc(ago(it.turn.created_at))}</span></div><div class="t-body"></div>${filesHtml(att.files)}`;
+      div.querySelector('.t-body').textContent = att.text;
+      if (!att.text) div.querySelector('.t-body').remove();
       return div;
     }
     // A message this room sent: who it went to, its words, and under them
@@ -6646,8 +7012,9 @@
       const w = meetingEntryWord(e, s.entries, !!d?.nudge?.opens, s.at, now, SENDING_GRACE_MS);
       return `<span class="m-deliv ${w.kind}" style="--m-c:${esc(meetColour(e.agent))}" title="${esc(w.text)}"><b>${esc(meetPersona(e.agent))}</b> ${esc(w.text)}</span>`;
     }).join('');
-    div.innerHTML = `<div class="t-who">you → ${esc(meetingToLine(s.to, s.everyone, meetPersona))}</div><div class="t-body"></div><div class="m-delivs">${rows}</div>`;
+    div.innerHTML = `<div class="t-who">you → ${esc(meetingToLine(s.to, s.everyone, meetPersona))}</div><div class="t-body"></div>${filesHtml(s.files)}<div class="m-delivs">${rows}</div>`;
     div.querySelector('.t-body').textContent = s.text;
+    if (!s.text && s.files?.length) div.querySelector('.t-body').remove();
     return div;
   }
 
@@ -6805,6 +7172,10 @@
     ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room… (start with @name for some)' : `Message ${to.map(meetPersona).join(', ')}…`;
     const named = meetingMentions(ta.value, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
     wrap.querySelector('[data-act="send"]').disabled = !(named.to?.length || to.length) || m.phase !== 'live';
+    // Files go to every desk the message does (costmo, 2026-11-17); a desk
+    // whose host takes none is refused by the board, said under the message.
+    gateAttach(m.phase === 'live');
+    drawAttach();
     const nudgeBtn = wrap.querySelector('[data-act="m-nudge-all"]');
     const nudgeChip = meetingNudgeChip(to.map((a) => deskIn(m.channel, a)).filter(Boolean), everyone);
     nudgeBtn.textContent = nudgeChip.text;
@@ -7142,7 +7513,7 @@
       // coming to retire the bubble, and the bubble is not kept — the
       // host's line in the conversation says what was typed and what
       // happened — so the grace clock never runs on it.
-      if (ui.delivery?.state === 'done') ui.sending = ui.sending.filter((p) => !squash(ui.delivery.text).includes(squash(p.text)));
+      if (ui.delivery?.state === 'done') ui.sending = ui.sending.filter((p) => !squash(ui.delivery.text).includes(squash(p.match ?? p.text)));
       renderPanel();
     } else if (ev.type === 'sessions') {
       // A host listed this desk's conversations: the picker, if open, reads
@@ -7766,6 +8137,12 @@
       window.historyDialog?.();
     } else if (act.dataset.act === 'send') {
       await sendChat();
+    } else if (act.dataset.act === 'attach-file') {
+      // The picker is the hidden input beside the button; its change event
+      // takes the files (below).
+      act.closest('.p-compose')?.querySelector('.p-file')?.click();
+    } else if (act.dataset.act === 'attach-remove') {
+      removeChip(act.dataset.key);
     } else if (act.dataset.act === 'ask-tab') {
       askShow(act.closest('.p-ask'), act.dataset.q);
     } else if (act.dataset.act === 'ask-submit') {
@@ -8369,14 +8746,21 @@
     if (ui.meeting) return sendMeeting(given);
     const text = typeof given === 'string' ? given : ($('p-text')?.value ?? '');
     const btn = document.querySelector('#floor-panel [data-act="send"]');
-    if (!text.trim() || !btn || !ui.open || btn.disabled) return;
     const fromBox = typeof given !== 'string';
+    // The box's files go with what is typed in it, never with a pick or a
+    // nudge (issue #31). Said on Send when they cannot go yet.
+    const att = fromBox ? attachSendable(text, attachList()) : { ok: !!text.trim(), ids: [] };
+    if (!att.ok) { if (att.why && btn) flash(btn, att.why); return; }
+    if (!btn || !ui.open || btn.disabled) return;
+    // Whose box the files are in, before the await: the panel may be on
+    // another desk by the time the board answers.
+    const akey = attachKey();
     btn.disabled = true;
     try {
       const r = await fetch('./api/floor/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...ui.open, text }),
+        body: JSON.stringify({ ...ui.open, text, ...(att.ids.length ? { files: att.ids } : {}) }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error ?? `send failed (${r.status})`);
@@ -8384,7 +8768,9 @@
       // shows as sending until the window itself reports it.
       // A select's choice is marked: an error turn hands typed words back to
       // the box, and this was never in it.
-      ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(pick ? { pick: true } : {}) }]);
+      const files = att.ids.length ? takeChips(att.ids, akey) : [];
+      ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(pick ? { pick: true } : {}),
+        ...(files.length ? { files, match: attachMatch(text, files), key: akey } : {}) }]);
       if (fromBox) {
         $('p-text').value = '';
         stashDraft();   // handed over: no longer a draft
@@ -8620,6 +9006,49 @@
     if (!v) return;
     sendChat(act === 'set-model' ? `/model ${v}` : `/effort ${v}`, { pick: true });
   });
+
+  /* Attachments (issue #31): the picker, a paste, a drop anywhere on the
+     panel, and the preview on a chip's hover or focus. */
+  document.addEventListener('change', (e) => {
+    if (!e.target?.classList?.contains('p-file')) return;
+    addFiles(e.target.files);
+    e.target.value = '';
+  });
+  document.addEventListener('paste', (e) => {
+    if (e.target?.id !== 'p-text') return;
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (!pasteTakes(files, e.clipboardData?.getData('text/plain'))) return;
+    e.preventDefault();
+    addFiles(files);
+  });
+  const dropPanel = (e) => e.target?.closest?.('#floor-panel') && e.target.closest('#floor-panel').querySelector('.p-compose [data-act="attach-file"]');
+  const carriesFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+  document.addEventListener('dragover', (e) => {
+    if (!carriesFiles(e)) return;
+    const pick = dropPanel(e);
+    // Anywhere else on the page a dropped file would be opened by the
+    // browser in place of the floor, so the drop is refused there.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = pick && !pick.disabled ? 'copy' : 'none';
+    document.querySelector('#floor-panel .p-compose')?.classList.toggle('dropping', !!pick && !pick.disabled);
+  });
+  document.addEventListener('dragleave', (e) => {
+    if (!e.relatedTarget || !e.relatedTarget.closest?.('#floor-panel')) document.querySelector('#floor-panel .p-compose')?.classList.remove('dropping');
+  });
+  document.addEventListener('drop', (e) => {
+    if (!carriesFiles(e)) return;
+    e.preventDefault();
+    document.querySelector('#floor-panel .p-compose')?.classList.remove('dropping');
+    if (dropPanel(e)) addFiles(e.dataTransfer.files);
+  });
+  for (const [type, on] of [['mouseover', true], ['focusin', true], ['mouseout', false], ['focusout', false]]) {
+    document.addEventListener(type, (e) => {
+      const chip = e.target?.closest?.('.att-chip');
+      if (!chip) return;
+      if (on) showPreview(chip);
+      else if (!chip.contains(e.relatedTarget)) hidePreview();
+    });
+  }
 
   document.addEventListener('input', (e) => {
     if (e.target?.id === 'p-text') { stashDraft(); drawSlash(); if (ui.meeting?.phase === 'live') render(); }
