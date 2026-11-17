@@ -110,8 +110,9 @@ believing either number. The lists for one agent with several sessions are
 kept here and beside the page check: `mutants-sessions.suite.json` (54,
 across `floor`, `seats`, `plugin` and `renew`) and
 `../verify-ui-change/mutants-sessions.page.json`. `mutants-pr57.suite.json`
-(16: 13 `floor`, 3 `seats`) is the round that answered QA's review of
-PR #57: the silent room, a second session's mail, a bind onto a working
+(20: 13 `floor`, 3 `seats`, then one `host`, two `window` and one `renew`
+for the killed-window wait, Info 10 and its second round) is the round
+that answered QA's review of PR #57: the silent room, a second session's mail, a bind onto a working
 seat's name, the two tools that ask which session a name means, and what
 a host said about seats across a board restart.
 
@@ -166,6 +167,19 @@ plus 8 in sections nobody touched (the thought, the subagent's words, the
 folder dialog). Read the channel for a QA announcement before believing
 those, and rerun once the ports are quiet. Rerun at 20:53Z with nothing
 else on them, it read the predicted 11 and 268 ✓.
+
+**`run-mutants.mjs --logs <dir>` keeps every run's whole output**
+(2026-11-16). The runner prints eight reds and kept nothing else. In the
+round after PR #57's close a host mutant read "9 failing" beside eight
+printed rows where QA and I had both predicted eight, and a renew mutant
+read a second FAIL in an older section ("the agent that met the refusal
+is told it can carry on"). Neither could be named or dismissed without
+running again. Run again with the output kept, at load 15: the host
+mutant read its eight and the renew mutant its one, control 58 ✓. So
+both extras were seen once, in lanes run at load 13 to 56 beside other
+lanes, and their text for the host one is not known. Pass `--logs` on
+any lane whose reds will be quoted to somebody; the files are
+`<n>-<suite>.log` and `control-<suite>.log`.
 
 **`run-mutants.mjs --control` settles it in the same run** (2026-11-14).
 It runs each suite in the list once more at the end with nothing mutated:
