@@ -450,6 +450,12 @@ export function openDb(path) {
   // before…" — after every deploy. What a host last said is as durable as
   // when it was last seen.
   addColumn(db, 'hosts', 'seats', 'INTEGER NOT NULL DEFAULT 0');
+  // Whether the host fetches a message's attachments (issue #31,
+  // host/uploads.js). Kept on the row for the reason `seats` is: a host from
+  // before them types the words and drops the files without a word, so the
+  // board refuses files to it, and a restarted board must still know which
+  // hosts can take them.
+  addColumn(db, 'hosts', 'uploads', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'hosted_desks', 'window_id', 'TEXT');
   // And when a repo's Claude Code is running somewhere the floor cannot reach —
   // an editor's own panel, with no stdin to type into — this is the pid of it,
@@ -1440,13 +1446,15 @@ export function makeStore(db) {
 
     // ─── Hosting ────────────────────────────────────────────────────────────
     upsertHost: db.prepare(
-      `INSERT INTO hosts (host_id, name, tmux_session, seats, last_seen)
-       VALUES (@host_id, @name, @tmux_session, @seats, datetime('now'))
+      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, last_seen)
+       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, datetime('now'))
        ON CONFLICT(host_id) DO UPDATE SET
-         name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats, last_seen = datetime('now')`
+         name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats,
+         uploads = excluded.uploads, last_seen = datetime('now')`
     ),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, registered_at, last_seen FROM hosts ORDER BY name`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, registered_at, last_seen FROM hosts ORDER BY name`),
+    hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
@@ -2072,8 +2080,10 @@ export function makeStore(db) {
     // ─── Hosting ────────────────────────────────────────────────────────────
     // `seats`: whether it said it can put a second desk in a folder; a host
     // from before seats says nothing, and is not asked for one.
-    registerHost: (hostId, name, tmuxSession = null, seats = false) =>
-      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0 }).changes,
+    // `uploads`: whether it fetches a message's attachments (issue #31).
+    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0 }).changes,
+    hostTakesUploads: (hostId) => !!q.hostUploads.get(hostId)?.uploads,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>

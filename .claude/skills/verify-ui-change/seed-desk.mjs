@@ -56,6 +56,11 @@ const db = new Database(DB);
 db.prepare(`INSERT OR REPLACE INTO agents (channel, agent, last_seen) VALUES (?, ?, datetime('now'))`).run(CH, AG);
 db.prepare(`INSERT OR REPLACE INTO personas (channel, agent, seat, assigned_at) VALUES (?, ?, 0, datetime('now'))`).run(CH, AG);
 db.prepare(`INSERT OR REPLACE INTO hosts (host_id, name, last_seen) VALUES (?, ?, datetime('now'))`).run(HOST, 'testbox');
+/* A seeded host is as current as the tree: it fetches attachments (issue
+   #31, hosts.uploads), so the box's paperclip is live. A check that wants a
+   host from before them sets the column back to 0. Skipped on a schema from
+   before the column, which a mutant's copy may have. */
+try { db.prepare(`UPDATE hosts SET uploads = 1 WHERE host_id = ?`).run(HOST); } catch { /* no column */ }
 db.prepare(
   `INSERT OR REPLACE INTO hosted_desks (channel, agent, host_id, cwd, window_id, outside_pid, sdk_session_id, state, updated_at)
    VALUES (?, ?, ?, ?, ?, NULL, ?, 'working', datetime('now'))`

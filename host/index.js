@@ -47,6 +47,7 @@ import * as S from './seats.js';
 import * as D from './dialog.js';
 import * as H from './history.js';
 import * as U from './update.js';
+import * as UP from './uploads.js';
 import { log, warn, error, failureOf, requestFailed } from './log.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
@@ -716,7 +717,9 @@ class Host {
     const reply = await this.request('/api/host/register', {
       // `seats`: this host can put a second desk in a folder (sit()). A board
       // asks only a host that says so; an older one would ignore the work.
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), seats: true, ...me },
+      // `uploads`: it fetches a message's attachments (host/uploads.js); a
+      // board refuses files to a host that does not say so.
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), seats: true, uploads: true, ...me },
     });
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
@@ -1485,9 +1488,32 @@ class Host {
     const desk = this.desks.get(`${item.channel}|${item.agent}`);
     if (!desk) return warn(`work for a desk this host doesn't have: ${item.channel}/${item.agent}`);
     switch (item.kind) {
-      case 'chat':
-        if (typeof item.payload?.text === 'string' && item.payload.text.trim()) await desk.say(item.payload.text);
+      case 'chat': {
+        let text = typeof item.payload?.text === 'string' ? item.payload.text : '';
+        // Attachments (issue #31): each fetched from the board onto this
+        // machine, outside the repo, and named in the message by its path
+        // (host/uploads.js). Awaited, on this line, because the message must
+        // be typed in its place among the others; a file is a local copy
+        // from the board, seconds at most. One that does not arrive stops
+        // the message: words about a file the agent cannot open are worse
+        // than the error turn, which hands the words and the files back to
+        // the box.
+        const files = Array.isArray(item.payload?.files) ? item.payload.files : [];
+        if (files.length) {
+          const paths = [];
+          try {
+            for (const f of files) paths.push(await UP.fetchUpload({ url: this.cfg.url, token: this.cfg.token, hostId: this.cfg.hostId, file: f }));
+          } catch (err) {
+            warn(`${desk.label}: an attachment did not arrive — ${err.message}; the message was not sent`);
+            this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `not sent — ${err.message}` }, true);
+            break;
+          }
+          text = UP.withAttachments(text, paths);
+          log(`${desk.label}: ${paths.length} attachment${paths.length === 1 ? '' : 's'} in ${UP.uploadsDir()}`);
+        }
+        if (text.trim()) await desk.say(text);
         break;
+      }
       case 'permission': {
         // An answer is only worth giving while the question is still on screen.
         //
@@ -1848,6 +1874,11 @@ class Host {
           await this.rescan('heartbeat');
           await this.register();
           lastRegister = Date.now();
+          // Attachments past Claude Code's own cleanupPeriodDays (host/uploads.js).
+          try {
+            const gone = UP.sweepUploads();
+            if (gone) log(`removed ${gone} attachment${gone === 1 ? '' : 's'} older than ${UP.retentionDays()} days`);
+          } catch (err) { warn(`attachment sweep: ${err.message}`); }
           // On the line, so no window is being typed into while its server
           // is replaced. Quiet unless a window's folder has become unreadable.
           const renewed = await W.checkServer().catch((err) => ({ ok: false, error: err.message }));

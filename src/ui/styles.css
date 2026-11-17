@@ -1941,3 +1941,65 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .m-part, .m-to .m-to-one { border-top: 3px solid var(--m-h, var(--border)); }
 /* The unread and needs-you outlines colour every side; the hair stays on top. */
 .m-part.has-unread, .m-part.s-needs-you { border-top-color: var(--m-h, var(--border)); }
+
+/* Attachments (issue #31): files above the box before Send, each with its
+   own remove, a thumbnail for an image and its extension for anything else,
+   and one larger preview on hover or focus, drawn on the page rather than
+   inside the panel because the panel clips what overflows it. */
+.btn.attachbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: auto; height: var(--p-ctl-h); padding: 0 2px; border-color: transparent; background: none;
+}
+.attachGlyph { height: calc(var(--p-ctl-h) - 2px); width: auto; display: block; }
+.attachGlyph path { fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.btn.attachbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.attachbtn:hover:not(:disabled) .attachGlyph path { stroke: var(--busy); }
+.btn.attachbtn:focus { outline: none; }
+.btn.attachbtn:focus-visible .attachGlyph path { stroke: var(--accent); stroke-width: 2.2; }
+.btn.attachbtn:disabled { opacity: .32; }
+/* One row, scrolled sideways past what fits: two rows of chips pushed the
+   panel's foot off a 640px window (check-attach.mjs, before this). */
+.p-attach { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; flex: none; }
+.p-attach > .att-chip { flex: none; }
+.p-attach.hidden { display: none; }
+.att-chip {
+  position: relative; display: flex; align-items: center; gap: 6px; max-width: 200px;
+  padding: 3px 22px 3px 3px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+}
+.att-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.att-chip.failed { border-color: color-mix(in srgb, var(--block) 60%, var(--border)); }
+.att-chip.uploading .att-thumb { opacity: .45; }
+.att-thumb { width: 34px; height: 34px; flex: none; border-radius: 4px; object-fit: cover; background: var(--bg); }
+.att-generic {
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 600 9px var(--mono); letter-spacing: .02em; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg);
+}
+.att-thumb.att-generic { width: 34px; height: 34px; }
+.att-spin { position: absolute; left: 12px; top: 50%; margin-top: -7px; }
+.att-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.att-name { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-size { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-chip.failed .att-size { color: var(--block); }
+.att-x {
+  position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; padding: 0; line-height: 14px;
+  font-size: 10px; border: none; border-radius: 50%; background: none; color: var(--muted); cursor: pointer;
+}
+.att-x:hover, .att-x:focus-visible { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--text); outline: none; }
+.p-compose.dropping { outline: 2px dashed color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: -4px; }
+#att-preview {
+  position: fixed; z-index: 1000; display: none; padding: 6px; pointer-events: none;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  box-shadow: 0 6px 24px rgb(0 0 0 / .22);
+}
+#att-preview.on { display: block; }
+#att-preview img { display: block; max-width: 100%; max-height: 300px; margin: 0 auto; border-radius: 4px; }
+.att-pcap { margin-top: 4px; font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The same files once sent: in a pending bubble and in the recorded turn. */
+.t-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.t-file {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 6px 2px 2px;
+  font-size: 11.5px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.t-file .att-generic { width: 22px; height: 18px; font-size: 8px; flex: none; }

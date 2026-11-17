@@ -24,6 +24,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale } from '../host/dialog.js';
+import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads } from '../host/uploads.js';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -408,6 +409,9 @@ function startHost(id = 'host-test-1', extraEnv = {}) {
       ORCH_HOST_ID: id, ORCH_HOST_NAME: 'Test Mac',
       ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION,
       ORCH_HOST_WATCH_MS: '300', ORCH_HOST_CONFIG: '/nonexistent/host.json',
+      // A message's attachments are written here (host/uploads.js), not
+      // beside a host.json that does not exist.
+      ORCH_HOST_UPLOADS: `${FIX}/uploads`,
       // Every bind holds 700 ms after its rescan: more than a watch tick, so
       // a move's desk is always watched before bind() goes on. The move
       // section's "no session row for the conversation it left" reads the
@@ -489,7 +493,7 @@ try {
   rmDb(DB_PATH);
   fixture();
   server = spawn('node', ['src/server.js'], {
-    env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce' },
+    env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (!(await waitHealthy())) throw new Error('server never became healthy');
@@ -564,6 +568,51 @@ try {
   eq(btwRows?.find((r) => r.via === '/btw')?.text, '42', "the answer is read off the window's overlay and is the agent's, labeled by the command");
   assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/btw what is 6*7? — answered in the window'), 'the desk says what was typed and where the answer went, as one line labeled host');
   assert(!(btwRows ?? []).some((r) => r.role === 'error'), 'and no error turn says it did not confirm');
+
+
+  /* Issue #31: a file attached on the floor. The board stages it, the host
+   * fetches it to its own disk, outside every repo, and types its path into
+   * the message. What the window is sent is read off the pane's sink; what
+   * is on the disk is read off the disk. */
+  console.log('\n  a message with files attached');
+  const stage = (bytes, name, type = 'application/octet-stream') =>
+    fetch(`${HOST}/api/floor/upload?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`, { method: 'POST', headers: { 'content-type': type }, body: bytes })
+      .then((r) => r.json());
+  const shotBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 8, 7, 6]);
+  const shotUp = await stage(shotBytes, 'shot one.png', 'image/png');
+  const logUp = await stage(Buffer.from('line 1\nline 2\n'), 'build.log', 'text/plain');
+  const withFiles = await json('/api/floor/chat', { channel: CH, agent: 'free', text: 'what broke here?', files: [shotUp.id, logUp.id] });
+  eq(withFiles.status, 200, 'a message with two files is accepted');
+  const shotPath = `${FIX}/uploads/${shotUp.id}/shot one.png`;
+  const logPath = `${FIX}/uploads/${logUp.id}/build.log`;
+  const typed = await until(() => (clean(received()).includes(logPath) ? clean(received()) : null), 15000);
+  assert((typed ?? '').replace(/\r\n?/g, '\n').includes(`what broke here?\n\n${ATTACHED_HEADER}\n- ${shotPath}\n- ${logPath}`),
+    'the window is sent the words, then the list: one path a line, in the order attached');
+  eq([existsSync(shotPath) && [...readFileSync(shotPath)], existsSync(logPath) && readFileSync(logPath, 'utf8')], [[...shotBytes], 'line 1\nline 2\n'],
+    'and each file is on the host\'s disk under its own name, byte for byte');
+  assert(!shotPath.startsWith(REPO) && !existsSync(`${REPO}/shot one.png`), 'outside the desk\'s folder: nothing lands in the repo');
+  const before31 = clean(received()).length;
+  const alone = await json('/api/floor/chat', { channel: CH, agent: 'free', files: [shotUp.id] });
+  eq(alone.status, 200, 'files alone are a message');
+  const aloneTyped = await until(() => {
+    const now = clean(received()).slice(before31);
+    return now.includes(shotPath) ? now : null;
+  }, 15000);
+  assert(aloneTyped != null && aloneTyped.trim().startsWith(ATTACHED_HEADER), 'and it is the list alone, opening on its header');
+  // A file the host cannot write: its folder is taken by a plain file, so
+  // the fetch fails before a byte is written. Nothing of the message is typed.
+  const blocked = await stage(Buffer.from('x'), 'blocked.txt', 'text/plain');
+  writeFileSync(`${FIX}/uploads/${blocked.id}`, 'in the way');
+  const before31b = clean(received()).length;
+  const failing = await json('/api/floor/chat', { channel: CH, agent: 'free', text: 'about the blocked one', files: [blocked.id] });
+  eq(failing.status, 200, 'the board takes a message whose file the host will fail to write');
+  const failRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.role === 'error' && /^not sent — /.test(r.text ?? '')) ? rows : null;
+  }, 15000);
+  assert(!!failRows, `the desk is told it was not sent, in an error turn — ${failRows?.filter((r) => r.role === 'error').at(-1)?.text}`);
+  await sleep(500);
+  assert(!clean(received()).slice(before31b).includes('about the blocked one'), 'and none of its words reach the window');
 
   console.log('\nreading the conversation back');
   // What Claude Code writes is what the floor shows — including a turn nobody
@@ -1785,6 +1834,29 @@ try {
    * waited. Run against a stand-in board in this process, so each way a
    * request fails is one the case chose, and the backoff and the events
    * requeue are asserted beside it: this round adds evidence, not behaviour. */
+
+  /* Issue #31, in-process: how long an attachment is kept. Claude Code's own
+   * cleanupPeriodDays, 30 when unset or unreadable, never under a day. */
+  console.log('\n  how long an attachment is kept');
+  {
+    const sdir = `${FIX}/retention`;
+    mkdirSync(sdir, { recursive: true });
+    const settings = (v) => { writeFileSync(`${sdir}/settings.json`, v === undefined ? '{}' : JSON.stringify({ cleanupPeriodDays: v })); return `${sdir}/settings.json`; };
+    eq([retentionDays(settings(undefined)), retentionDays(settings(7)), retentionDays(settings(0)), retentionDays(settings('x')), retentionDays(`${sdir}/none.json`)],
+      [30, 7, 1, 30, 30], 'Claude Code\'s cleanupPeriodDays when set, 30 when it is not, and never less than a day');
+    const udir = `${FIX}/sweep`;
+    const old = 'aaaaaaaaaaaa1111', fresh = 'bbbbbbbbbbbb2222';
+    for (const id of [old, fresh]) { mkdirSync(`${udir}/${id}`, { recursive: true }); writeFileSync(`${udir}/${id}/f.txt`, id); }
+    mkdirSync(`${udir}/Not-an-upload`, { recursive: true });
+    const t = (Date.now() - 8 * 86400_000) / 1000;
+    utimesSync(`${udir}/${old}`, t, t);
+    utimesSync(`${udir}/Not-an-upload`, t, t);
+    eq(sweepUploads({ dir: udir, days: 7 }), 1, 'a sweep removes what is older than the retention');
+    eq([existsSync(`${udir}/${old}`), existsSync(`${udir}/${fresh}`), existsSync(`${udir}/Not-an-upload`)], [false, true, true],
+      'and leaves what is younger, and anything in the folder that is not an upload of its own');
+    eq(withAttachments('', ['/u/a b.png']), `${ATTACHED_HEADER}\n- /u/a b.png`, 'a message of files alone is the list alone');
+  }
+
   console.log('\n  what the host log says');
   const STAMP = /^\[host\] (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z) /;
   const timedLines = (out, from, to) => {

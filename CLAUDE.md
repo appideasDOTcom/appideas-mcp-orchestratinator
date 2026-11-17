@@ -769,6 +769,80 @@ installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
 
+## A file attached to a message
+
+Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file
+dropped, pasted or picked in a desk's box, or a meeting room's, stands above
+the box as a chip (a thumbnail for an image, larger on hover; its extension
+for anything else) with its own ✕, and goes with the next Send. It is three
+hops, because a window reads its own machine's disk and the board may be a
+container on another one: the page uploads each file **on attach**
+(`POST /api/floor/upload`, so the chip can say "ready" before Send), the
+message names the staged ids, and the desk's host fetches each one, writes
+it under `~/.orchestratinator/uploads/<id>/<name>` and types the path under
+the words (`withAttachments` in [`host/uploads.js`](host/uploads.js)). Six
+things behind it, each of which looks simpler than it is:
+
+- **Outside every repo, and a window may read it there.** Inside the desk's
+  folder an attachment is a change in somebody's working tree (costmo: not
+  git-visible). Outside it, measured on 2.1.326 with a probe in **manual**
+  mode: a Read of a text file and a PNG under `~/.orchestratinator` raised
+  no permission prompt, and a message the host's own `send()` typed with
+  two paths (one with a space) was recorded exactly and both were read. On
+  a machine whose settings do ask, it is an ordinary prompt on the floor.
+- **The path is typed, not pasted as an image.** An image path inside a
+  typed or pasted message stays text: the files-only message is two lines,
+  so `send()` pastes it rather than types it, and it was still recorded as
+  text and read (same probe). The agent reads a file when it wants it,
+  which is also what lets a 100 MB log go without filling the context.
+- **Lifetime is Claude Code's own** (costmo: "the operator should not have
+  to think about it"). The host keeps a file for `cleanupPeriodDays` from
+  Claude Code's `settings.json`, 30 when unset, read at every heartbeat's
+  sweep, never under a day (Claude Code reads 0 as "keep nothing"). That is
+  how long the transcript naming the file lives. A file sent again is kept
+  from that send. The board keeps its staged copy an hour from attach or
+  last send, and does **not** delete it when a host fetches it: a meeting
+  room sends one file to desks on several hosts, and an error turn hands
+  the files back to the box to be sent again.
+- **100 MB a file, twenty a message** (costmo). Refused on the page before a
+  byte is sent, on the declared length before the board reads one, and cut
+  off at the cap while streaming. The body is never parsed (server.js skips
+  the path, so a `.json` file is not read as a request) and never held
+  whole in memory: the board shares Docker's VM (issue #5).
+- **A host says it takes files, as it says it takes seats.** `uploads: true`
+  at registration, kept on `hosts.uploads`. A host from before ignores
+  `files` and would type the words alone, so the board refuses files to it
+  in words (`host_no_uploads`) and the paperclip is dimmed with the same
+  sentence. The desk's `hosted.host_id` in `/api/floor` is how the page
+  finds that row; it was not in the projection, and the page check's first
+  row is there because the paperclip read live by fallback without it.
+- **The board never serves an upload to a page.** Thumbnails are drawn from
+  the File the page holds, so nothing from the operator's clipboard becomes
+  a document on this origin. The route's reasoning is beside adminGuard's
+  in [`src/web.js`](src/web.js) ("A route that takes bytes"), as the issue
+  asked, not a widening of that comment.
+
+What the page does with the result: the host writes the list as `Attached
+from the floor:` and one `- <path>` a line, after a blank line, and
+`splitAttached` draws a user turn ending in exactly that as its words plus
+file chips, the path on hover. Anything else that only looks like a list is
+the operator's words, left as typed. The page and the host spell the header
+once each and `test:floor` holds them to one. A pending message of files
+alone is matched to its turn by the first file's id and name, which only
+its own path holds (`attachMatch`): an empty match took the next user turn
+of any kind, and the name alone took an earlier message carrying a file of
+the same name (the room check sends one screenshot twice for that). The chips are one row,
+scrolled sideways: two rows pushed the panel's foot off a 640px window.
+
+Left out, with why: **thumbnails in the history** (the board keeps no bytes
+after its hour, and a recorded turn is drawn from the transcript, which
+holds a path); **a progress bar** (a local board takes 100 MB in about a
+second; the chip's spinner is the receipt); **a slash command with files**
+(the window reads the line as a command, so there is nowhere to put them;
+refused on the page and the route). `check-attach.mjs` in
+**verify-ui-change** is the page; the host's half is "a message with files
+attached" in `test:host`.
+
 ## Moving a desk to another floor
 
 Issues #24 and #18, 0.10.10 (2026-11-03, task 253; measured on 2.1.300).
@@ -2679,6 +2753,8 @@ operator's live floor.
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `src/updates.js`, `host/update.js` | `test:update` |
+  | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
+  | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
   | `plugin/` | `test:plugin`, and `test:seats`, which runs the hook |
   | a version bump | `smoke` |
 

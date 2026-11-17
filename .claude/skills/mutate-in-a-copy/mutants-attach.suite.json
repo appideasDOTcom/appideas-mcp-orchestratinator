@@ -1,0 +1,79 @@
+[
+ [
+  "no grant: a message names a file to its host and the host is still refused it",
+  "floor",
+  "src/floor.js",
+  "      uploads.grant(files.map((f) => f.id), h.host_id);\n",
+  ""
+ ],
+ [
+  "forHost reads no grant: any host fetches any upload",
+  "floor",
+  "src/uploads.js",
+  "    if (!m.hosts.includes(hostId)) return { error: 'that upload was not sent to a desk on this host', status: 403 };\n",
+  ""
+ ],
+ [
+  "safeName keeps the directories of a name",
+  "floor",
+  "src/uploads.js",
+  "  s = s.split(/[\\\\/]/).pop() ?? '';\n",
+  ""
+ ],
+ [
+  "the JSON parser reads an upload's body",
+  "floor",
+  "src/server.js",
+  "  if (req.path === UPLOAD_PATH) return next();\n",
+  ""
+ ],
+ [
+  "a command may carry files",
+  "floor",
+  "src/floor.js",
+  "      if (commandOf(text)) return res.status(400).json({ error: 'A command cannot carry files. Send the files as a message of their own.', code: 'command_files' });\n",
+  ""
+ ],
+ [
+  "files sent to a host from before attachments",
+  "floor",
+  "src/floor.js",
+  "      if (!store.hostTakesUploads?.(h.host_id)) {",
+  "      if (false) {"
+ ],
+ [
+  "no cap while streaming",
+  "floor",
+  "src/uploads.js",
+  "        if (size > maxBytes) return cb(Object.assign(new Error('too large'), { code: 'too_large' }));\n",
+  ""
+ ],
+ [
+  "the page reads a relative path as an attachment",
+  "floor",
+  "src/ui/floor.js",
+  "    if (!lines.length || !lines.every((l) => /^- \\/\\S/.test(l))) return { text: s, files: [] };",
+  "    if (!lines.length || !lines.every((l) => /^- \\S/.test(l))) return { text: s, files: [] };"
+ ],
+ [
+  "a paste attaches its picture whatever words come with it",
+  "floor",
+  "src/ui/floor.js",
+  "    if (!t) return true;\n    const names",
+  "    return true;\n    const names"
+ ],
+ [
+  "the host spells the header its own way",
+  "floor",
+  "host/uploads.js",
+  "export const ATTACHED_HEADER = 'Attached from the floor:';",
+  "export const ATTACHED_HEADER = 'Attached files:';"
+ ],
+ [
+  "a files-only pending message matches by the file's name alone",
+  "floor",
+  "src/ui/floor.js",
+  "    return f.id ? `${f.id}/${f.name}` : f.name;",
+  "    return f.name;"
+ ]
+]

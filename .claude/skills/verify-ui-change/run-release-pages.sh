@@ -2,7 +2,7 @@
 # The page checks owed at a release, one at a time, in a copy of the tree
 # outside the repo, with a verdict line each and one at the end.
 #
-#   .claude/skills/verify-ui-change/run-release-pages.sh                # all nine
+#   .claude/skills/verify-ui-change/run-release-pages.sh                # all eleven
 #   .claude/skills/verify-ui-change/run-release-pages.sh card-move hide # some of them
 #
 # Written after PR #57 (2026-11-17), whose release run did this by hand:
@@ -25,7 +25,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
-ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update"
+ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting"
 LIST="${*:-$ALL}"
 COPY="$("$REPO/.claude/skills/mutate-in-a-copy/copy-repo.sh" "${TMPDIR:-/tmp}/orch-release-pages")" || exit 2
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/release-pages-out.XXXXXX")"

@@ -1,0 +1,20 @@
+[
+ [
+  "a room's files are matched by the file's name alone",
+  "src/ui/floor.js",
+  "    return f.id ? `${f.id}/${f.name}` : f.name;",
+  "    return f.name;"
+ ],
+ [
+  "a room's files are matched by empty words",
+  "src/ui/floor.js",
+  "        Object.assign(e, meetingEntry(e, s.match ?? s.text, p?.turns, p?.delivery));",
+  "        Object.assign(e, meetingEntry(e, s.text, p?.turns, p?.delivery));"
+ ],
+ [
+  "a room sends the words without the files",
+  "src/ui/floor.js",
+  "        await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text: s.text, ...(att.ids.length ? { files: att.ids } : {}) });",
+  "        await post('./api/floor/chat', { channel: m.channel, agent: e.agent, text: s.text });"
+ ]
+]
