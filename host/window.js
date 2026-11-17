@@ -3141,6 +3141,24 @@ export function askedStill(screen, asks) {
   return options.length > 0 && options.every((o) => s.includes(o));
 }
 
+/**
+ * What the desk's own window is asking, read off its bottom line, or null:
+ * `{ asking }`, the status line it ends on. For the heartbeat's `pending`
+ * (host/index.js register), which is how the board re-raises a question it
+ * lost at a restart or to another session's work (milestone audit
+ * 2026-11-17, finding 1). Positional, as askingOf is: a conversation quoting
+ * a prompt is not one. A question before Claude Code starts is not this
+ * one's: the host says those itself (STARTUP_RESAY_MS).
+ */
+export async function askingIn(where) {
+  const pane = await paneFor(where);
+  if (!pane) return null;
+  const screen = await screenOf(pane.target, 0);
+  if (startupQuestionOf(screen)) return null;
+  const foot = askingOf(screen);
+  return foot ? { asking: foot } : null;
+}
+
 /** askedStill, against the desk's own window now. */
 export async function stillAsking(cwd, asks) {
   const pane = await paneFor(cwd);

@@ -917,6 +917,58 @@ being re-proposed as gaps:
   floor draws that host's desks unreachable until the fetch ends, then
   live again, and the message is typed then.
 
+## The milestone audit's foundation (0.12.11)
+
+QA's coverage and testing audit (2026-11-17, at 0771ea8) was the gate to a
+milestone, and costmo's word for the round was "solidify our product and
+provide the foundational proof before we pivot into some new features".
+It ruled in findings 1–5 and two foundation items. The report is in the QA
+repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
+
+- **An open question never leaves the floor while the window asks it**
+  (finding 1, High). docs/backlog.md has the whole account. A prompt is
+  closed only by the work of the session that raised it, and every
+  heartbeat says which floor windows are asking (`pending`), which is
+  how a board restart, every deploy, no longer forgets them.
+- **Work a host takes is done once, handed out again, or said lost**
+  (finding 4; the guarantee is written above `takeHostWork` in
+  `src/db.js`). It used to be marked taken as it was handed out, and a
+  host stopped mid-line lost the rest of its batch without a word. A host
+  says what it finished on its next poll, a host stopping finishes the
+  item in hand (`ORCH_STOP_DRAIN_MS`, 15 s) and hands back what it never
+  started, and each run of a host has a `boot`, so the next run's
+  registration sorts what an earlier one left: reads are handed out again
+  (`REHANDED_WORK`), and anything that acts on a window is closed and
+  said on its desk in an error turn (`lostWorkWords`). A chat's turn
+  quotes the words, and an error turn is what hands them back to the box.
+  At most once for window work, on purpose: a host can die after typing
+  and before saying so, and a message typed twice is the worse failure.
+- **The stop sign and Press yes / no are tested at the window** (findings
+  2 and 3): Escape and no Enter for a stop; 1 for yes and Escape for no;
+  nothing pressed into a window back at its composer. Rows in
+  `test:window`, `test:host` and the press route's in `test:floor`.
+- **One stack** (finding 5): Tests, above.
+- **The release gate is one command: `npm run release-gate`** (item A).
+  Every suite and the eleven release page checks, on the Node and the
+  packages that ship, with one log whose first line names the head, the
+  tree and `node -v`, and whose last is `EXIT=`. Both halves run even
+  when the first is red. Measured with a red seeded in a copy, one in
+  smoke and one in check-attach: `EXIT=1`, both named. It replaces
+  running `npm test` and `run-release-pages.sh` by hand at a release.
+- **The project owns a coverage reading: `npm run coverage`** (item B).
+  The instrument is QA's from the audit, kept as measured
+  (`scripts/coverage/`: the preload, `report.mjs`, `run.sh`; and
+  drive.mjs records page coverage when `PAGECOV` is set). Over the
+  audit's own snapshots, `report.mjs` gives QA's per-file table exactly:
+  88.4 % code lines, 94.1 % functions, 77.8 % branches at 0771ea8, the
+  baseline. Three things it needs, each found the hard way: a process ended
+  by a signal writes no coverage, so the preload snapshots before every
+  SIGKILL and on SIGTERM; each snapshot resets V8's counters, so every file
+  is kept and summed; and page logic is tested from lifted copies in
+  `data/`, which the preload keeps and the report credits back to
+  `src/ui`. Not seen by it: the hub SharedWorker and windows a page opens
+  itself.
+
 ## Moving a desk to another floor
 
 Issues #24 and #18, 0.10.10 (2026-11-03, task 253; measured on 2.1.300).
@@ -2293,13 +2345,31 @@ not a word (measured 2026-11-16: `node -e "require('better-sqlite3')…"`,
 139 under v20.20.1, `ok` under v24.22.2), which reads as a suite or a
 server that printed nothing. So a run names its own:
 `export PATH=$HOME/.nvm/versions/node/v24.22.2/bin:$PATH` at the top of the
-command. The host is the exception: it loads no database, and the live one
-runs on 20 under launchd. One thing seen and not touched: on
-`feature/agent-multi-session` `package.json` still reads `^11.8.0` and
-`engines: >=20`, while the module installed is the 13 that `develop` took
-in 0.12.6. The image builds from `package.json` with its own Node, so the
-live board is unaffected; which of the two this branch should say is
-costmo's.
+command.
+
+**What ships is what is tested: one Node major and one lockfile**
+(costmo's ruling on the milestone audit's finding 5, 2026-11-17, in
+0.12.11). Before it the suites ran Node 24 with better-sqlite3 13.0.3 and
+SDK 1.29.0, while the image ran Node 22 and `npm install` resolved the
+caret ranges fresh at every deploy (better-sqlite3 11.10.0, SDK 1.32.2 that
+day), and the host ran under launchd on the shell's Node 20. Now:
+- **Node 24 for all three.** The Dockerfile's `FROM` names the major, the
+  release gate refuses any other (`scripts/release-gate.sh` reads the
+  `FROM`), and `host/install.sh` gives the LaunchAgent a Node 24 (PATH,
+  nvm's newest v24, Homebrew's node@24, or `ORCH_NODE`), never "whatever
+  node is first". The shell's default stays 20.
+- **`package-lock.json` is committed** (it was gitignored) and the image
+  installs it with `npm ci`, copying the lock beside `package.json` so a
+  lock-only change rebuilds that layer and a lock out of step fails the
+  build. The versions locked are the ones the suites had run on all along.
+  `npm run set-version` writes the lock's two version fields too, and
+  smoke holds all four files to one number.
+- **c8 10.1.3 is the one dev dependency**, pinned exactly, for
+  `npm run coverage`. The image installs `--omit=dev` and ships none of it.
+- npm 11 warns that better-sqlite3's install script is "not yet covered by
+  allowScripts". It is advice about a future default, not a failure:
+  measured, a real `docker build` of the round's tree loads it (SQLite
+  3.53.4) on Node 24.22.2 / npm 11.19.1.
 
 `npm test` runs thirteen suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
@@ -2829,6 +2899,10 @@ operator's live floor.
   | `src/updates.js`, `host/update.js` | `test:update` |
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
+  | `host/install.sh` | `test:host` (its install rows, on stand-ins) |
+  | `scripts/set-version.mjs` | `smoke` |
+  | `Dockerfile`, `package.json`'s dependencies, `package-lock.json` | no suite: a real `docker build` in a scratch tag, `npm ls` inside it against the lock, and `node -v` against the gate's |
+  | `scripts/release-gate.sh`, `scripts/coverage/` | themselves: a seeded red in a copy for the gate; for coverage, `report.mjs` over a known set of snapshots |
   | `plugin/` | `test:plugin`, and `test:seats`, which runs the hook |
   | a version bump | `smoke` |
 

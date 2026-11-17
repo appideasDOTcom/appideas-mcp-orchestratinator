@@ -493,10 +493,13 @@ try {
 
   rmDb(DB_PATH);
   fixture();
-  server = spawn('node', ['src/server.js'], {
+  // A function, because one row restarts the board on the same database,
+  // as a deploy does (the milestone audit's finding 1).
+  const startServer = () => spawn('node', ['src/server.js'], {
     env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  server = startServer();
   if (!(await waitHealthy())) throw new Error('server never became healthy');
 
   console.log('host');
@@ -1254,6 +1257,24 @@ try {
       return until(async () => { const p = deskOf(await floor(), 'free')?.permission; return p && (p.summary ?? '').includes(command) && (p.options?.length ?? 0) >= 3 ? p : null; }, 25000);
     };
     await reopenAsking('bash');
+
+    // Press yes / no (milestone audit 2026-11-17, finding 3): the floor's
+    // answer for a prompt it could not read. Route, host and window: the
+    // desk is waiting (a Notification with nothing parsed), the operator
+    // presses, and the window is sent the key the host maps it to. Yes is
+    // the menu's first row; no is Escape, which cancels.
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    let pressAt = sinkAt();
+    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'yes' })).status, 200, 'Press yes is taken for a desk that is waiting');
+    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
+    eq(readFileSync(SINK, 'utf8').slice(pressAt), '1', 'and the key for yes is the first row, 1');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    pressAt = sinkAt();
+    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'no' })).status, 200, 'Press no is taken');
+    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
+    eq(readFileSync(SINK, 'utf8').slice(pressAt), '\u001b', 'and the key for no is Escape, which cancels; never a row that could approve');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
+
     let p = await askBash('rm -rf build-cache');
     assert(!!p, 'the host reads the menu\'s choices off the window');
     let sink0 = sinkAt();
@@ -1304,6 +1325,24 @@ try {
     const unplaced = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && !errsBefore.has(r.id)) ?? null, 20000);
     assert(/^the form was not submitted — this question takes a number as a move and Enter as the choice, and the cursor was not seen on row 2/.test(unplaced?.text ?? ''),
       `a preview question whose cursor never reached the row is said as a form not submitted — ${unplaced?.text ?? 'no error turn'}`);
+
+    // A board restart (every deploy) while the window is still asking
+    // (milestone audit 2026-11-17, finding 1, probe P3). The board keeps open
+    // prompts in memory only, and a window standing on a question sends no
+    // further hook, so the floor lost the question for good. The host's work
+    // poll fails at the restart, it re-registers at once, and that heartbeat
+    // says which of its windows are asking (`pending`): the board raises the
+    // question again and asks the host to read it off the pane.
+    const restarted = server;
+    await new Promise((done) => { restarted.once('exit', done); restarted.kill('SIGTERM'); });
+    server = startServer();
+    assert(await waitHealthy(), 'the board restarts on the same database');
+    const back = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 30000);
+    assert(!!back, 'and the question the window is still asking is back on the floor, read off the pane, with no hook to say it');
+    // Closed by the window's own work, as any prompt is: the session the
+    // host named is the window's.
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
+    assert(await until(async () => (deskOf(await floor(), 'free')?.permission ? null : true), 8000), 'and closed by the window\'s own next tool call, so nothing is left standing for the sections after');
 
     rmSync(`${FIX}/prompt.flag`, { force: true });
     assert(await closeByHand(), 'the asking window is closed by hand');
@@ -1532,6 +1571,38 @@ try {
   eq(readAnswer({ code: null, signal: 'SIGKILL', stdout: '', stderr: 'line one\nexecution error: no screen\n' }).error, 'the folder dialog ended on SIGKILL: execution error: no screen', 'said with how it ended and its last line');
   eq([pickIsStale({ waited_ms: 7000 }, 6000), pickIsStale({ waited_ms: 1000 }, 6000), pickIsStale({}, 6000), pickIsStale({ waited_ms: null }, 6000)], [true, false, false, false],
     'a request the board held for longer than the page waits is stale; a fresh one, and one from a board that does not say, are not');
+
+  // The host's half of takeHostWork's guarantee (milestone audit
+  // 2026-11-17, finding 4): it says what it finished, and a host told to
+  // stop finishes the item in hand and hands back what it never started, so
+  // nothing it took is left unfinished and unsaid. Read off the board's own
+  // table: what the host reported is the fact, not what the page shows.
+  console.log('\n  work in hand when the host stops');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
+    const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    eq((await chat('free', 'reported finished')).status, 200, 'a message is sent');
+    assert(await until(() => (clean(received()).includes('reported finished') ? true : null), 20000), 'and typed');
+    assert(await until(() => (rows(`SELECT done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)[0]?.done_at ? true : null), 15000),
+      'and the host reports it finished, on its next poll');
+    const mark2 = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    for (const t of ['in line one', 'in line two', 'in line three']) await chat('free', t);
+    await until(() => (rows(`SELECT taken_at FROM host_outbox WHERE id > ?`, mark2).some((r) => r.taken_at) ? true : null), 10000);
+    const exited = new Promise((done) => host.once('exit', done));
+    host.kill('SIGTERM');
+    await Promise.race([exited, sleep(25000)]);
+    const after = rows(`SELECT id, taken_at, done_at FROM host_outbox WHERE id > ?`, mark2);
+    eq(after.filter((r) => r.taken_at && !r.done_at).length, 0, `a host stopped with messages in its line leaves none taken and unfinished: each is done or handed back (${after.filter((r) => r.done_at).length} done, ${after.filter((r) => !r.taken_at).length} back in line)`);
+    // Back in line is for the next run of this host; none comes in this
+    // suite, so they are taken out of the line rather than left to be typed
+    // by a host a later section starts.
+    const db = new Database(DB_PATH);
+    try { db.prepare(`DELETE FROM host_outbox WHERE id > ? AND taken_at IS NULL`).run(mark2); } finally { db.close(); }
+    host = startHost();
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and a new run of the host is up again for what follows');
+    await sleep(WATCH_SETTLE_MS);
+  }
 
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
@@ -1828,6 +1899,18 @@ try {
     'and says where it came from, without printing it');
   eq(install(['--token', 'flag-key-value'], { ORCH_AUTH_TOKEN: 'shell-key-value' }).conf.token, 'flag-key-value', '--token still wins over the shell');
   eq(install([]).conf.token, 'flag-key-value', "and with neither, host.json's token is kept");
+  // One Node major for what ships and what is tested (milestone audit
+  // 2026-11-17, finding 5): the LaunchAgent runs the host on Node 24, the
+  // major the board's image ships and these suites run on, not whatever
+  // node is first on PATH (the shell's default here is 20).
+  const plist = readFileSync(`${inst}/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`, 'utf8');
+  const runsOn = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/.exec(plist)?.[1];
+  eq([runsOn, execFileSync(runsOn, ['-p', 'process.versions.node.split(".")[0]']).toString().trim()], [process.execPath, '24'], 'the LaunchAgent runs the host on a Node 24');
+  writeFileSync(`${instBin}/node20`, '#!/bin/sh\necho 20\n');
+  chmodSync(`${instBin}/node20`, 0o755);
+  let refusal = '';
+  try { install([], { ORCH_NODE: `${instBin}/node20` }); } catch (err) { refusal = String(err.stderr ?? ''); }
+  assert(/^ORCH_NODE is .*node20, which is not Node 24/.test(refusal), `and a Node of another major is refused, in words, before anything is written — ${refusal.trim()}`);
 
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
