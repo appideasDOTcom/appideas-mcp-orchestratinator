@@ -166,5 +166,33 @@
   "host/window.js",
   ".test(answer?.error ?? '') ? 'no_server' : null;",
   ".test(answer?.error ?? '') ? 'no_server' : 'no_server';"
+ ],
+ [
+  "the session's name is given to tmux as a prefix again (QA, PR #57 round 2 item 3)",
+  "window",
+  "host/window.js",
+  "const EXACT = `=${SESSION}`;",
+  "const EXACT = SESSION;"
+ ],
+ [
+  "the first window asks for the session by a name another session begins with",
+  "window",
+  "host/window.js",
+  "  const has = await tmux(['has-session', '-t', EXACT]);\n  // `-t 'orch:'`, with the colon, and not `-t orch`.",
+  "  const has = await tmux(['has-session', '-t', SESSION]);\n  // `-t 'orch:'`, with the colon, and not `-t orch`."
+ ],
+ [
+  "the host's panes are listed from a session whose name begins with its own",
+  "window",
+  "host/window.js",
+  "['list-panes', '-t', `${EXACT}:`, '-a',",
+  "['list-panes', '-t', SESSION, '-a',"
+ ],
+ [
+  "whether the server reads a folder is asked of a session whose name begins with the floor's",
+  "window",
+  "host/window.js",
+  "  if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;",
+  "  if (!(await tmux(['has-session', '-t', SESSION])).ok) return null;"
  ]
 ]

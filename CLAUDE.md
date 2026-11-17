@@ -300,6 +300,37 @@ Three consequences worth knowing before touching `host/window.js`:
   window's index and every open on the board failed with `create window
   failed: index 1 in use` (3.7c, 2026-09-09). A session target carries the
   trailing colon: `orch:`.
+- **And `orch:` is not only that session: the name is written `=orch`.**
+  With no session of the exact name, tmux gives a session target to any
+  session whose name *begins* with it. Measured on 3.7c (2026-11-16; QA,
+  PR #57 round 2, read plus one measurement; repeated here on a socket
+  with only a session called `orchid`): `has-session -t orch` exits 0,
+  `list-panes -t orch` lists orchid's panes, `new-window -t orch:` makes
+  its window in orchid, `send-keys -t orch:` types into it. So the first
+  desk window after a reboot, or after the floor's last window closed, was
+  made inside whatever session of the operator's own started with "orch":
+  a suite's `orch-test-<pid>` on this machine, anybody's `orchestra` on
+  theirs. costmo's ruling, by AskUserQuestion, the same day: fixed in
+  PR #57 and not after it. Every target `host/window.js` writes from the
+  name is `EXACT` (`=orch`) for a session and `${EXACT}:` for a window in
+  it. Three things about `=`, each measured: it needs the colon wherever
+  the target is a window's (`list-panes -t =orch` still listed orchid's
+  pane, `-t =orch:` did not); the targets tmux hands back (`orch:@4.%7`)
+  are left alone, because a window id is the server's own and `send-keys
+  -t orch:@9.%9` is refused whatever else begins with "orch"; and `attach
+  -t orch` is left too, since it is a line for a shell, where `=orch` is a
+  command lookup in zsh, and it runs only after the exact `has-session`
+  beside it. A tmux command written by hand against the floor, in a test
+  or a skill, takes `=name` the same way: the window suite's own cleanup
+  `kill-session -t orch-test-<pid>` would take a look-alike with it.
+  **One thing found beside it and not changed**: `panes()` asks
+  `list-panes -a`, and `-a` is every session on the server, not the
+  floor's (measured: with `orch` and `orchid` standing it listed both).
+  Its comment says "our tmux session". So a pane in another session whose
+  folder is a desk's is a candidate for that desk's window, as long as an
+  `orch` session exists. Whether that is wanted (a Claude Code the
+  operator started in their own tmux being typed into from the floor) is
+  costmo's to say; it was put to him and is not to be changed on a guess.
 - **Pane width is set by whoever is attached.** A footer that fits on one line at
   160 columns wraps at 80, which broke `askingOf` and made a real fault look
   intermittent. Read footers as the last few lines rejoined.
@@ -2344,6 +2375,24 @@ section, after a dozen sends that each waited on their own receipts: every
 Escape the pane took, by mode, is `btw` then `cost` and none in a
 composer. When the thing to prove is that a key did not arrive, read the
 whole log after later work has been observed, not after a sleep.
+
+**A row that does something and then looks is answered by whatever tmux
+says at that moment** (QA, PR #57 Info 11). "The last window of all,
+closed while it is waited on" killed a pane and let `waitReady`'s next
+look land where it landed. Asked about a server's last pane in the 400 ms
+after the kill, tmux's first answer was empty in 27 of QA's 40 trials, a
+failed call in the rest, and the two are read by different arms of the
+code. So with the "no server running" arm taken out, the row still passed
+one run in eight. Two things replaced the hope that it would not. The
+decision is a function of tmux's answer (`paneGone`), with a row for each
+answer in tmux's own words, which no timing can move. And the live row
+for that arm waits until the server is gone before the look that counts.
+When a mutant survives once in several runs, the row is being answered
+by another path some of the time: find the second path before adding a
+wait. **And count reds by what the suite printed**: `run-mutants.mjs`
+read `FAIL ❌ — 2 failure(s)`, the closing line of most suites, as a
+third red, from the day it learned to read `test:renew`'s `FAIL <name>`.
+`--logs` keeps each run's output, so a count can be checked against it.
 
 **Two more `test:host` reds seen once, in a mutant's run in a copy**
 (2026-11-14, load 5.5, nothing else on the ports): "a turn written while

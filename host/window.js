@@ -101,6 +101,33 @@ const TMUX = process.env.ORCH_TMUX ?? 'tmux';
  */
 const SEP = '|';
 const SESSION = (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._-]/g, '-') || 'orch';
+/**
+ * The session, named so that tmux cannot give the name to another one.
+ *
+ * tmux hands a session target to any session whose name BEGINS with it when
+ * none has the name exactly. Measured on 3.7c (2026-11-16; QA, PR #57 round
+ * 2, item 3; costmo: fix it in that PR): with no `orch` standing and a
+ * session called `orchid`, `has-session -t orch` exits 0, `list-panes -t
+ * orch` lists orchid's panes, `new-window -t orch:` makes its window in
+ * orchid, and `send-keys -t orch:` types into it. So the first desk window
+ * after a reboot, or after the floor's last window closed, was opened inside
+ * whatever session of the operator's own had a name starting with "orch" —
+ * a suite's `orch-test-<pid>` on this machine, anybody's `orchestra` on
+ * theirs. A leading `=` makes the match exact: `has-session -t =orch` exits
+ * 1 with "can't find session: orch". It needs the colon wherever the target
+ * is a window's and not a session's: `list-panes -t =orch` (no colon) still
+ * listed orchid's pane, `-t =orch:` did not.
+ *
+ * So every target this file writes from the name is EXACT for a session
+ * (has-session, list-clients) and `${EXACT}:` for a window in it. The
+ * targets tmux gives back (`orch:@4.%7`) are left as they are: a window id
+ * is the server's own, and with the session gone `send-keys -t orch:@9.%9`
+ * is refused ("can't find window: @9") whatever else begins with "orch".
+ * `attach -t orch` is left too: it is a line for a shell, where `=orch` is
+ * a command lookup in zsh, and it runs only after the exact has-session
+ * beside it has passed, when the exact name is what tmux prefers.
+ */
+const EXACT = `=${SESSION}`;
 const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
 /** Long enough for a cold `claude agents --json`, short enough not to stall a poll. */
 const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
@@ -859,7 +886,7 @@ export function seatEnv(cwd, seat, file) {
  * Zero when tmux has no server or no such session: both mean nobody is looking.
  */
 export async function clientCount() {
-  const r = await tmux(['list-clients', '-t', SESSION, '-F', '#{client_name}']);
+  const r = await tmux(['list-clients', '-t', EXACT, '-F', '#{client_name}']);
   if (!r.ok || !r.out) return 0;
   return r.out.split('\n').filter(Boolean).length;
 }
@@ -872,7 +899,7 @@ export async function panes() {
   // The seat's tag is the host's own (seatTag in seats.js: percent-encoded,
   // so it holds no separator) and empty on every window but a seat's.
   const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
-  const r = await tmux(['list-panes', '-t', SESSION, '-a', '-F', fields.join(SEP)]);
+  const r = await tmux(['list-panes', '-t', `${EXACT}:`, '-a', '-F', fields.join(SEP)]);
   if (!r.ok || !r.out) return [];
   return r.out.split('\n')
     .map((line) => {
@@ -1812,7 +1839,7 @@ const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
  *  the pane's path. The `has-session` stays: with no server at all,
  *  `run-shell` fails too, and that is not a refusal. */
 export async function serverReads(dir) {
-  if (!(await tmux(['has-session', '-t', SESSION])).ok) return null;
+  if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;
   return (await tmux(['run-shell', readsCmd(dir)])).ok;
 }
 
@@ -2117,7 +2144,7 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // message that opened it would be lost. `-P -F` prints the new pane's target
   // as part of creating it, which is exact and cannot race.
   const FORMAT = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_pid}'].join(SEP);
-  const has = await tmux(['has-session', '-t', SESSION]);
+  const has = await tmux(['has-session', '-t', EXACT]);
   // `-t 'orch:'`, with the colon, and not `-t orch`. new-window's target is a
   // *window index*, and tmux resolves a bare name against window names before
   // session names — by prefix. The day a desk whose folder was called
@@ -2144,9 +2171,9 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // `=name` is an exact window name. Measured on tmux 3.7c: `set-option -w`
   // with no target after a detached new-window tags the *current* window,
   // and a name with a dot in it is "no such window".
-  const tag = seat ? [';', 'set-option', '-w', '-t', `${SESSION}:=${name}`, SEAT_OPTION, seat] : [];
+  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
   let made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag])
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag])
     : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag]);
   // The window made and the tag refused: tmux printed the new pane and then
   // failed. Tagged by the pane it named, or closed, never left untagged.
@@ -2168,7 +2195,7 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // the pane already has its copy, and a later window gets one only by its
   // own `-e`.
   if (!has.ok) {
-    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${SESSION}:`, '-u', env[i].split('=')[0]]);
+    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${EXACT}:`, '-u', env[i].split('=')[0]]);
   }
   const [target, pid] = made.out.split('\n')[0].split(SEP);
   if (!target?.trim()) return { ok: false, error: 'tmux created the window but did not say where' };
@@ -3700,7 +3727,7 @@ export async function attachTerminal({ target = null } = {}) {
   // Checked here as well as on the server, because the two know different
   // things: the board knows a window was reported, this knows whether tmux on
   // this machine will actually answer to that name right now.
-  const has = await tmux(['has-session', '-t', SESSION]);
+  const has = await tmux(['has-session', '-t', EXACT]);
   if (!has.ok) {
     return {
       ok: false,

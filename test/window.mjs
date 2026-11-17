@@ -2367,11 +2367,24 @@ async function main() {
     // key to every later window and to `show-environment`.
     console.log('\n  a placeholder desk that opens the session');
     await run('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {});
+    // And a session whose name only begins with the floor's (QA, PR #57
+    // round 2; costmo: fixed in that PR). With none of the exact name, tmux
+    // gives a session target to any session whose name starts with it, so
+    // the host took this one for its own and made the first window in it.
+    // Every target the host writes from the name is exact now (`=name`).
+    const lookAlike = `${TMUX_SESSION}-of-somebody-else`;
+    await run('tmux', ['new-session', '-d', '-s', lookAlike, '-c', FIX, 'sh', '-c', 'sleep 120']).catch(() => {});
+    const windowsIn = async (s) => (await run('tmux', ['list-windows', '-t', `=${s}:`, '-F', '#{window_id}']).catch(() => ({ stdout: '' }))).stdout.split('\n').filter(Boolean).length;
+    eq(await windowsIn(lookAlike), 1, 'a session whose name begins with the floor\'s is standing, and the floor\'s own is not');
+    eq([(await W.panes()).length, await W.serverReads(FIX)], [0, null], 'the host reads none of it as its own: no panes, and no server of its to ask about a folder');
     W.useKey('board-key-value');
     const firstDir = keyDesk('ph-first', '${ORCH_TEST_PANE_KEY}');
     const opener = await W.open(firstDir);
     W.useKey(null);
     assert(opener.ok && opener.created, `a placeholder desk opens the session${opener.ok ? '' : ` — ${opener.error}`}`);
+    eq([String(opener.target ?? '').split(':')[0], await windowsIn(lookAlike), await windowsIn(TMUX_SESSION)], [TMUX_SESSION, 1, 1],
+      'and it is a session of the floor\'s own name: the look-alike has the one window it had');
+    await run('tmux', ['kill-session', '-t', `=${lookAlike}`]).catch(() => {});
     assert(/^ORCH_TEST_PANE_KEY=board-key-value$/m.test(await paneEnvOf(firstDir)), 'its own pane has the key');
     const sessionEnv = (await run('tmux', ['show-environment', '-t', `${TMUX_SESSION}:`]).catch(() => ({ stdout: '' }))).stdout;
     assert(!sessionEnv.includes('board-key-value'), "the session's environment does not");
