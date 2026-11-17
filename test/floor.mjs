@@ -3552,6 +3552,9 @@ try {
     ] }, 'a message the host composed splits into the words and the files, a name with a space in it included');
     eq(pg.splitAttached(hostUp.withAttachments('', ['/u/abcdefgh/a.png'])), { text: '', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] }, 'files alone are files and no words');
     eq(pg.splitAttached(composed.replace(/\n/g, '\r\n')).files.length, 2, 'and a window that records CRLF reads the same');
+    eq(pg.ATTACHED_HEADER, 'Attached by the operator:', 'the list is the operator\'s, wherever it was attached from: the panel, a popout or a meeting room (costmo, 2026-11-17)');
+    eq(pg.splitAttached('see this\n\nAttached from the floor:\n- /u/abcdefgh/a.png'), { text: 'see this', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] },
+      'and a message sent under the old spelling still draws its files as files');
     for (const typedByHand of [
       `see below\n\n${pg.ATTACHED_HEADER}\n- /a/b.png\nand then I said more`,
       `${pg.ATTACHED_HEADER} my notes\n- /a/b.png`,
