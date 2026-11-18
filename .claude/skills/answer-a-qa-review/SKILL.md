@@ -88,6 +88,22 @@ inversions table says which of your assertions they already trust.
   changed file in the copy with `git show <sha>:<file>` and put both hashes
   in the account. QA compares by identity, and hashes say which algorithm.
 
+- **A mutant QA predicts will survive may be guarded a layer down. Measure
+  that layer before writing a row for it.** PR #58's Q1 removed
+  `fetchUpload`'s size check, and survived. Measured on Node 24, `fetch`
+  itself throws "terminated" on a body shorter than its content-length,
+  so the check is a second guard. The row asserts the outcome (refused,
+  nothing left) whichever guard takes it; the reply says why the mutant
+  must survive, and the check is commented as what it is.
+- **A stand-in has to have the real thing's geometry, or the mutant it is
+  for survives.** PR #58's I4 (a scrolled composer's line confirmed only
+  once the box changed) survived twice. The stand-in first scrolled by
+  whole lines, then by wrapped rows but with the long line where the row it
+  pushed off the top was blank, and `compact` ignores whitespace. It went
+  red once the long line came last, after a row of text, which is the
+  shape of the live message that failed. When a mutant survives a
+  stand-in, ask what the real window does that the stand-in does not.
+
 ## Replying in the thread
 
 A review-comment thread is answered through the replies endpoint — the

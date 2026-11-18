@@ -934,6 +934,13 @@ matched by the file's id and name. Its row for a line typed into Bo's own
 window while the room's files wait (the seed's `slow`) found that a
 match by name alone took the earlier message carrying the same screenshot.
 
+**An escape inside a check's `evalJs` template is read twice.** A regex
+written `/^Bo\b/` in a check's backtick string reached the page as
+`/^Bo<backspace>/`: `\b` in a template literal is a backspace before
+the page sees it. The row read null, which looked like the feature
+failing. Write `\\b`, or a pattern with no escape (`/^Bo /`), and print
+what a row matched before believing a null.
+
 ### check-chat-controls.mjs and probe-chat-panel.js — the chat panel's controls (0.10.9)
 
 ```bash

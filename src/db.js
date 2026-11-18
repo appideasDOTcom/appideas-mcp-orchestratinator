@@ -456,6 +456,13 @@ export function openDb(path) {
   // board refuses files to it, and a restarted board must still know which
   // hosts can take them.
   addColumn(db, 'hosts', 'uploads', 'INTEGER NOT NULL DEFAULT 0');
+  // A host's work, past being handed out (milestone audit 2026-11-17,
+  // finding 4). `boot`: which run of the host took it, so the next run can
+  // tell work it never finished from work it is doing. `done_at`: the host
+  // said it was carried out, or the board closed it as lost. See
+  // takeHostWork for the guarantee these two make possible.
+  addColumn(db, 'host_outbox', 'boot', 'TEXT');
+  addColumn(db, 'host_outbox', 'done_at', 'TEXT');
   addColumn(db, 'hosted_desks', 'window_id', 'TEXT');
   // And when a repo's Claude Code is running somewhere the floor cannot reach —
   // an editor's own panel, with no stdin to type into — this is the pid of it,
@@ -1514,7 +1521,13 @@ export function makeStore(db) {
       `SELECT id, channel, agent, kind, payload, created_at FROM host_outbox
         WHERE host_id = ? AND taken_at IS NULL ORDER BY id`
     ),
-    markWorkTaken: db.prepare(`UPDATE host_outbox SET taken_at = datetime('now') WHERE id = ?`),
+    markWorkTaken: db.prepare(`UPDATE host_outbox SET taken_at = datetime('now'), boot = ? WHERE id = ?`),
+    markWorkDone: db.prepare(`UPDATE host_outbox SET done_at = datetime('now') WHERE id = ? AND host_id = ? AND done_at IS NULL`),
+    releaseWork: db.prepare(`UPDATE host_outbox SET taken_at = NULL, boot = NULL WHERE id = ? AND host_id = ? AND boot = ? AND done_at IS NULL`),
+    unfinishedWork: db.prepare(
+      `SELECT id, channel, agent, kind, payload, created_at FROM host_outbox
+        WHERE host_id = ? AND taken_at IS NOT NULL AND done_at IS NULL AND boot IS NOT NULL AND boot <> ? ORDER BY id`
+    ),
     pruneHostWork: db.prepare(
       `DELETE FROM host_outbox WHERE taken_at IS NOT NULL AND taken_at < datetime('now', '-1 day')`
     ),
@@ -1672,16 +1685,45 @@ export function makeStore(db) {
    * Hand a host everything waiting for it, and mark it taken, in one
    * transaction — so a host that asks twice (a retried request, say) cannot be
    * handed the same message twice and deliver it twice.
+   *
+   * The guarantee, since the milestone audit (2026-11-17, finding 4): every
+   * item a host takes is carried out once, handed out again because it was
+   * never started, or said lost on its desk. Never silently gone, which is
+   * what a host stopping mid-line did before.
+   *   - The host says what it finished (`doneHostWork`, on its next poll).
+   *   - A host stopping gracefully finishes the item in hand and hands back
+   *     the ones it never started (`releaseHostWork`).
+   *   - Each run of a host has a `boot`, and the next run's registration
+   *     closes what an earlier run took and never finished
+   *     (`unfinishedHostWork`; what happens to each kind is LOST_WORK in
+   *     src/floor.js).
+   * At most once for anything that acts on a window: the host can die
+   * after typing and before saying so, and typing a message twice into a
+   * conversation is the worse failure. A host from before `boot` takes as
+   * it always did, and nothing it takes is ever closed as lost.
    */
-  const takeHostWork = db.transaction((hostId) => {
+  const takeHostWork = db.transaction((hostId, boot = null) => {
     const rows = q.pendingHostWork.all(hostId);
-    for (const r of rows) q.markWorkTaken.run(r.id);
-    return rows.map((r) => {
-      let payload = {};
-      try { payload = JSON.parse(r.payload); } catch { /* a bad row is an empty job */ }
-      return { id: r.id, channel: r.channel, agent: r.agent, kind: r.kind, payload, created_at: r.created_at };
-    });
+    for (const r of rows) q.markWorkTaken.run(boot, r.id);
+    return rows.map(workOf);
   });
+  const workOf = (r) => {
+    let payload = {};
+    try { payload = JSON.parse(r.payload); } catch { /* a bad row is an empty job */ }
+    return { id: r.id, channel: r.channel, agent: r.agent, kind: r.kind, payload, created_at: r.created_at };
+  };
+  const doneHostWork = db.transaction((hostId, ids) => {
+    let n = 0;
+    for (const id of ids) n += q.markWorkDone.run(id, hostId).changes;
+    return n;
+  });
+  const releaseHostWork = db.transaction((hostId, boot, ids) => {
+    let n = 0;
+    for (const id of ids) n += q.releaseWork.run(id, hostId, boot).changes;
+    return n;
+  });
+  /** What earlier runs of this host took and never finished. Closes nothing: see closeHostWork. */
+  const unfinishedHostWork = (hostId, boot) => q.unfinishedWork.all(hostId, boot).map(workOf);
 
   /**
    * One agent, several sessions: the names that are one agent's. `agent`'s
@@ -2102,6 +2144,11 @@ export function makeStore(db) {
     enqueueHostWork: (hostId, channel, agent, kind, payload) =>
       n(q.enqueueHostWork.run({ host_id: hostId, channel, agent, kind, payload: JSON.stringify(payload ?? {}) }).lastInsertRowid),
     takeHostWork,
+    doneHostWork,
+    releaseHostWork,
+    unfinishedHostWork,
+    /** Hand a taken item out again: it was never started, or it is safe to do twice. */
+    rehandHostWork: (id) => db.prepare(`UPDATE host_outbox SET taken_at = NULL, boot = NULL WHERE id = ? AND done_at IS NULL`).run(id).changes,
     pruneHostWork: () => q.pruneHostWork.run().changes,
     /**
      * A hosted session only learns its own id on its first turn, so the message

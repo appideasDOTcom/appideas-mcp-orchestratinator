@@ -10,7 +10,7 @@
   "a file that did not arrive does not stop the message",
   "host",
   "host/index.js",
-  "            this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `not sent \u2014 ${err.message}` }, true);\n            break;\n",
+  "            this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `${err.message}; nothing was typed` }, true);\n            break;\n",
   ""
  ],
  [
@@ -25,6 +25,20 @@
   "host",
   "host/uploads.js",
   "    if (!ID_RE.test(f)) continue;\n",
+  ""
+ ],
+ [
+  "PR #58: I6 the host says \"not sent — \" first again",
+  "host",
+  "host/index.js",
+  "message: `${err.message}; nothing was typed` }",
+  "message: `not sent — ${err.message}` }"
+ ],
+ [
+  "PR #58: I3 a file sent again keeps its old time (QA Q2)",
+  "host",
+  "host/uploads.js",
+  "    try { utimesSync(home, now, now); } catch { /* still there; kept by its old time */ }\n",
   ""
  ]
 ]

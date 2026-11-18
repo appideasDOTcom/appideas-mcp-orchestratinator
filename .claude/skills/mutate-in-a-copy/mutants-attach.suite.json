@@ -82,5 +82,26 @@
   "src/ui/floor.js",
   "  const ATTACHED_HEADERS = [ATTACHED_HEADER, 'Attached from the floor:'];",
   "  const ATTACHED_HEADERS = [ATTACHED_HEADER];"
+ ],
+ [
+  "PR #58: F1 the page reads a command as \"starts with / and a letter\"",
+  "floor",
+  "src/ui/floor.js",
+  "    return /^\\/([A-Za-z][\\w:-]*)(?:\\s+(.*))?$/.test(t);",
+  "    return /^\\/[A-Za-z]/.test(t);"
+ ],
+ [
+  "PR #58: I2 no refusal on the declared length",
+  "floor",
+  "src/floor.js",
+  "    if (Number.isFinite(declared) && declared > uploads.maxBytes) {",
+  "    if (false) {"
+ ],
+ [
+  "PR #58: I7 a box over twenty is not said at Send",
+  "floor",
+  "src/ui/floor.js",
+  "    if (ready.length > ATTACH_MAX_FILES) return",
+  "    if (false) return"
  ]
 ]

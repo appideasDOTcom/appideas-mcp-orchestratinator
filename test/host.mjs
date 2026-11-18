@@ -493,10 +493,13 @@ try {
 
   rmDb(DB_PATH);
   fixture();
-  server = spawn('node', ['src/server.js'], {
+  // A function, because one row restarts the board on the same database,
+  // as a deploy does (the milestone audit's finding 1).
+  const startServer = () => spawn('node', ['src/server.js'], {
     env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  server = startServer();
   if (!(await waitHealthy())) throw new Error('server never became healthy');
 
   console.log('host');
@@ -1168,6 +1171,7 @@ try {
   };
   assert(await closeByHand(), 'with its window closed by hand, the desk is held by nobody');
   const argvAtClosed = argvLog().length;
+  const logAtMove = hostLog.length;
   eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose window is closed is a move');
   assert(await until(async () => { const d = onNewFloor(await floor()); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000),
     'it opens on the new floor with a window, on its last conversation (#24 Decided 3)');
@@ -1179,7 +1183,19 @@ try {
   // path does, and an editor holding it is a copy nobody is watching, so
   // the open says so rather than starting a second one. The editor is a
   // process outside tmux claiming the conversation — what holderOf reads.
-  assert(await closeByHand(onNewFloor), 'its window closed by hand again');
+  // Red twice on 2026-11-18 (the round's first host run, and a mutant run
+  // whose mutant was in host/node.sh), green alone after; the rows after it
+  // pass, so the floor did see the window go, only not inside 8 s. On a red
+  // the host's log since the move and what the floor last showed are
+  // printed, so the next sighting is read rather than rerun.
+  const logAtClose = hostLog.length;
+  const closedAgain = await closeByHand(onNewFloor);
+  assert(closedAgain, 'its window closed by hand again');
+  if (!closedAgain) {
+    console.log(`    the floor still shows: ${JSON.stringify(onNewFloor(await floor())?.hosted ?? null)}`);
+    console.log(`    the host's log since the move:\n${hostLog.slice(logAtMove).split('\n').map((l) => `      ${l}`).join('\n')}`);
+    console.log(`    (of which after the close: ${hostLog.length - logAtClose} chars)`);
+  }
   const editor = spawn('sleep', ['120'], { stdio: 'ignore' });
   writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: editor.pid, cwd: REPO, kind: 'interactive', startedAt: 2, sessionId: SESSION_ID, name: 'an editor' }]));
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'editor' ? true : null), 8000), 'and the conversation is open in an editor');
@@ -1254,6 +1270,24 @@ try {
       return until(async () => { const p = deskOf(await floor(), 'free')?.permission; return p && (p.summary ?? '').includes(command) && (p.options?.length ?? 0) >= 3 ? p : null; }, 25000);
     };
     await reopenAsking('bash');
+
+    // Press yes / no (milestone audit 2026-11-17, finding 3): the floor's
+    // answer for a prompt it could not read. Route, host and window: the
+    // desk is waiting (a Notification with nothing parsed), the operator
+    // presses, and the window is sent the key the host maps it to. Yes is
+    // the menu's first row; no is Escape, which cancels.
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    let pressAt = sinkAt();
+    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'yes' })).status, 200, 'Press yes is taken for a desk that is waiting');
+    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
+    eq(readFileSync(SINK, 'utf8').slice(pressAt), '1', 'and the key for yes is the first row, 1');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    pressAt = sinkAt();
+    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'no' })).status, 200, 'Press no is taken');
+    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
+    eq(readFileSync(SINK, 'utf8').slice(pressAt), '\u001b', 'and the key for no is Escape, which cancels; never a row that could approve');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
+
     let p = await askBash('rm -rf build-cache');
     assert(!!p, 'the host reads the menu\'s choices off the window');
     let sink0 = sinkAt();
@@ -1304,6 +1338,24 @@ try {
     const unplaced = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && !errsBefore.has(r.id)) ?? null, 20000);
     assert(/^the form was not submitted — this question takes a number as a move and Enter as the choice, and the cursor was not seen on row 2/.test(unplaced?.text ?? ''),
       `a preview question whose cursor never reached the row is said as a form not submitted — ${unplaced?.text ?? 'no error turn'}`);
+
+    // A board restart (every deploy) while the window is still asking
+    // (milestone audit 2026-11-17, finding 1, probe P3). The board keeps open
+    // prompts in memory only, and a window standing on a question sends no
+    // further hook, so the floor lost the question for good. The host's work
+    // poll fails at the restart, it re-registers at once, and that heartbeat
+    // says which of its windows are asking (`pending`): the board raises the
+    // question again and asks the host to read it off the pane.
+    const restarted = server;
+    await new Promise((done) => { restarted.once('exit', done); restarted.kill('SIGTERM'); });
+    server = startServer();
+    assert(await waitHealthy(), 'the board restarts on the same database');
+    const back = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 30000);
+    assert(!!back, 'and the question the window is still asking is back on the floor, read off the pane, with no hook to say it');
+    // Closed by the window's own work, as any prompt is: the session the
+    // host named is the window's.
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
+    assert(await until(async () => (deskOf(await floor(), 'free')?.permission ? null : true), 8000), 'and closed by the window\'s own next tool call, so nothing is left standing for the sections after');
 
     rmSync(`${FIX}/prompt.flag`, { force: true });
     assert(await closeByHand(), 'the asking window is closed by hand');
@@ -1533,6 +1585,81 @@ try {
   eq([pickIsStale({ waited_ms: 7000 }, 6000), pickIsStale({ waited_ms: 1000 }, 6000), pickIsStale({}, 6000), pickIsStale({ waited_ms: null }, 6000)], [true, false, false, false],
     'a request the board held for longer than the page waits is stale; a fresh one, and one from a board that does not say, are not');
 
+  // The host's half of takeHostWork's guarantee (milestone audit
+  // 2026-11-17, finding 4): it says what it finished, and a host told to
+  // stop finishes the item in hand and hands back what it never started, so
+  // nothing it took is left unfinished and unsaid. Read off the board's own
+  // table: what the host reported is the fact, not what the page shows.
+  console.log('\n  work in hand when the host stops');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
+    const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    eq((await chat('free', 'reported finished')).status, 200, 'a message is sent');
+    assert(await until(() => (clean(received()).includes('reported finished') ? true : null), 20000), 'and typed');
+    assert(await until(() => (rows(`SELECT done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)[0]?.done_at ? true : null), 15000),
+      'and the host reports it finished, on its next poll');
+    const mark2 = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    // Four, so the host is holding a batch it has not started when it is
+    // told to stop: it types the first, and takes the other three in one
+    // poll once that is done. The stop waits until at least two are taken
+    // and unfinished. With fewer, the later ones were never taken at all,
+    // and "back in line" said nothing about the release (the first cut of
+    // this row: its mutant, the release emptied, stayed green).
+    for (const t of ['in line one', 'in line two', 'in line three', 'in line four']) await chat('free', t);
+    const held = await until(() => (rows(`SELECT id FROM host_outbox WHERE id > ? AND taken_at IS NOT NULL AND done_at IS NULL`, mark2).length >= 2 ? true : null), 30000);
+    assert(held, 'the fixture: the host is holding more than the one it is typing when it is told to stop');
+    const exited = new Promise((done) => host.once('exit', done));
+    host.kill('SIGTERM');
+    await Promise.race([exited, sleep(25000)]);
+    const after = rows(`SELECT id, taken_at, done_at FROM host_outbox WHERE id > ?`, mark2);
+    eq(after.filter((r) => r.taken_at && !r.done_at).length, 0, `a host stopped with messages in its line leaves none taken and unfinished: each is done or handed back (${after.filter((r) => r.done_at).length} done, ${after.filter((r) => !r.taken_at).length} back in line)`);
+    assert(after.filter((r) => !r.taken_at).length >= 1, 'and what it held and never started was handed back, not only never taken');
+    // Back in line is for the next run of this host; none comes in this
+    // suite, so they are taken out of the line rather than left to be typed
+    // by a host a later section starts.
+    const db = new Database(DB_PATH);
+    try { db.prepare(`DELETE FROM host_outbox WHERE id > ? AND taken_at IS NULL`).run(mark2); } finally { db.close(); }
+    host = startHost();
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and a new run of the host is up again for what follows');
+    await sleep(WATCH_SETTLE_MS);
+  }
+
+  // A host killed outright says nothing at the end, so what it finished has
+  // to have been said already (QA, the re-measure's L1). It used to ride the
+  // next poll, after the whole batch, and every message of a batch the host
+  // had typed before it was killed was said lost on its desk: "send it
+  // again" about words the window had. The fixture makes the batch: one
+  // message is taken alone, and three more are queued while it is typed, so
+  // the next poll takes them together.
+  console.log('\n  work finished in the middle of a batch, and then the host is killed');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
+    const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    const byText = () => Object.fromEntries(rows(`SELECT payload, taken_at, done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)
+      .map((r) => [JSON.parse(r.payload).text, r]));
+    await chat('free', 'batch one');
+    assert(await until(() => (byText()['batch one']?.taken_at ? true : null), 15000), 'the fixture: the first message is taken alone');
+    for (const t of ['batch two', 'batch three', 'batch four']) await chat('free', t);
+    assert(await until(() => (clean(received()).includes('batch two') ? true : null), 30000), 'the fixture: the first of the batch of three is typed');
+    const saidAt = await until(() => (byText()['batch two']?.done_at ? { fourTyped: clean(received()).includes('batch four') } : null), 15000);
+    assert(saidAt && !saidAt.fourTyped, `a message finished in the middle of a batch is said done before the batch ends${!saidAt ? ' (never said)' : saidAt.fourTyped ? ' (said only once "batch four" was typed)' : ''}`);
+    const open = Object.entries(byText()).filter(([, r]) => r.taken_at && !r.done_at).map(([t]) => t);
+    host.kill('SIGKILL');
+    assert(open.length >= 1, `the fixture: the host is killed with work of the batch still unfinished (${open.join(', ') || 'none'})`);
+    const errorsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+    host = startHost();
+    const lost = await until(async () => {
+      const said = ((await turns('free')).rows ?? []).filter((r) => r.role === 'error' && !errorsBefore.has(r.id)).map((r) => r.text ?? '');
+      return said.length >= open.length ? said : null;
+    }, 20000);
+    assert(lost && open.every((t) => lost.some((s) => s.includes(`"${t}"`))), `the next run says what the killed one left unfinished, with its words (${open.join(', ')}) — ${(lost ?? []).join(' | ')}`);
+    assert(lost && !lost.some((s) => s.includes('"batch two"')), 'and not the message it had finished and said');
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and the new run is up for what follows');
+    await sleep(WATCH_SETTLE_MS);
+  }
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
@@ -1564,6 +1691,27 @@ try {
   host = startHost('host-test-1');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
+  // A host just started joins the desk's transcript where it stands, at its
+  // first watch tick (follow(id, 'end')), and a turn written before that
+  // tick is behind it for good. "Live" is the registration, which comes
+  // first, so the marker below was written ahead of the join whenever the
+  // tick came late: both rows after it red, the marker never on the floor
+  // (seen 2026-11-14, and on 2026-11-18 read in the log: SPOKEN-WHILE-BUSY
+  // nowhere in the run). So a turn is written first and waited for, and the
+  // relay is known to be reading before anything is timed against it.
+  const primer = `RELAY-JOINED-${Date.now()}`;
+  appendTurn({
+    type: 'assistant', uuid: `primer-${Date.now()}`, timestamp: new Date().toISOString(),
+    message: { role: 'assistant', content: [{ type: 'text', text: primer }] },
+  });
+  let joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(primer)) ? true : null), 3000);
+  for (let i = 0; !joined && i < 5; i++) {
+    // Written before the join, so never relayed: another, until one is.
+    const again = `${primer}-${i}`;
+    appendTurn({ type: 'assistant', uuid: `primer-${i}-${Date.now()}`, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: again }] } });
+    joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(again)) ? true : null), 3000);
+  }
+  assert(joined, 'the fixture: the restarted host is reading the desk\'s transcript before the timed part starts');
 
   const turnsBefore = ((await turns('free')).rows ?? []).length;
   const marker = `SPOKEN-WHILE-BUSY-${Date.now()}`;
@@ -1814,7 +1962,8 @@ try {
   writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
   for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
   for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
-  for (const t of ['cat', 'mkdir', 'sleep']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
+  // ls for node.sh's nvm lookup: launchd's PATH has /bin, this one may not.
+  for (const t of ['cat', 'mkdir', 'sleep', 'ls']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
   const instPath = `${instBin}:/usr/bin:${resolve(process.execPath, '..')}`;
   const install = (args, env = {}) => {
     const which = execFileSync('/bin/sh', ['-c', 'command -v launchctl'], { env: { PATH: instPath } }).toString().trim();
@@ -1822,12 +1971,57 @@ try {
     const out = execFileSync('/bin/bash', ['host/install.sh', ...args, `${inst}/projects`], { env: { PATH: instPath, HOME: inst, ...env } }).toString();
     return { out, conf: JSON.parse(readFileSync(`${inst}/.orchestratinator/host.json`, 'utf8')) };
   };
+  // First, because a drifted major makes every install below refuse, and a
+  // refusal throws out of the suite (the L4b mutant read "red by its exit").
+  const dockerMajor = /^FROM node:(\d+)/m.exec(readFileSync('Dockerfile', 'utf8'))?.[1];
+  const pickMajor = /^ORCH_NODE_MAJOR=(\d+)/m.exec(readFileSync('host/node.sh', 'utf8'))?.[1];
+  eq([pickMajor, dockerMajor], ['24', '24'], "the major the host is given is the board image's (node.sh against the Dockerfile's FROM)");
   const fromShell = install([], { ORCH_AUTH_TOKEN: 'shell-key-value' });
   eq(fromShell.conf.token, 'shell-key-value', 'install.sh with no --token writes an exported ORCH_AUTH_TOKEN to host.json');
   assert(/shared secret from ORCH_AUTH_TOKEN in this shell/.test(fromShell.out) && !/shell-key-value/.test(fromShell.out),
     'and says where it came from, without printing it');
   eq(install(['--token', 'flag-key-value'], { ORCH_AUTH_TOKEN: 'shell-key-value' }).conf.token, 'flag-key-value', '--token still wins over the shell');
   eq(install([]).conf.token, 'flag-key-value', "and with neither, host.json's token is kept");
+  // One Node major for what ships and what is tested (milestone audit
+  // 2026-11-17, finding 5): the host runs on Node 24, the major the board's
+  // image ships and these suites run on, not whatever node is first on PATH
+  // (the shell's default here is 20). The pick is host/node.sh's, and the
+  // LaunchAgent starts host/run.sh, which picks at every start, so an update
+  // that moves the major needs only the restart it already does (QA, the
+  // re-measure's L3). Each half has a row of its own (L4: the row before
+  // this passed with "first node on PATH", whose PATH held only a 24).
+  const plist = readFileSync(`${inst}/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`, 'utf8');
+  const progArgs = [.../<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1].matchAll(/<string>([^<]+)<\/string>/g) ?? []].map((m) => m[1]);
+  eq(progArgs, ['/bin/sh', resolve('host/run.sh')], 'the LaunchAgent starts run.sh, which picks the Node at each start, not a Node named at install');
+  // A Node 20 first on PATH, as on this machine, and a Node 24 under nvm.
+  const old = `${inst}/old`;
+  mkdirSync(old, { recursive: true });
+  writeFileSync(`${old}/node`, '#!/bin/sh\necho 20\n');
+  chmodSync(`${old}/node`, 0o755);
+  const nvm24 = `${inst}/.nvm/versions/node/v24.99.0/bin`;
+  mkdirSync(nvm24, { recursive: true });
+  try { execFileSync('ln', ['-sf', process.execPath, `${nvm24}/node`]); } catch { /* there */ }
+  const withOld = execFileSync('/bin/bash', ['host/install.sh', `${inst}/projects`], { env: { PATH: `${old}:${instPath}`, HOME: inst } }).toString();
+  assert(withOld.includes(`host runs on ${nvm24}/node (${process.version})`), `with a Node 20 first on PATH, install picks the Node 24 after it, not the first node — ${withOld.split('\n').find((l) => l.startsWith('host runs on')) ?? withOld.trim()}`);
+  // run.sh, as launchd starts it: a stand-in Node 24 that says what it was
+  // asked to run, so the row reads the pick and the exec without a host.
+  const runHome = `${inst}/run-home`;
+  const runNvm = `${runHome}/.nvm/versions/node/v24.98.0/bin`;
+  mkdirSync(runNvm, { recursive: true });
+  writeFileSync(`${runNvm}/node`, '#!/bin/sh\nif [ "$1" = -p ]; then echo 24; else echo "RAN $*"; fi\n');
+  chmodSync(`${runNvm}/node`, 0o755);
+  const ran = execFileSync('/bin/sh', ['host/run.sh'], { env: { PATH: `${old}:/usr/bin:/bin`, HOME: runHome } }).toString().trim();
+  eq(ran, `RAN ${resolve('host/index.js')}`, 'run.sh picks the Node 24 at start, past a Node 20 first on PATH, and runs the host on it');
+  let noNode = '';
+  try { execFileSync('/bin/sh', ['host/run.sh'], { env: { PATH: `${old}:/usr/bin:/bin`, HOME: `${inst}/nowhere` }, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (err) { noNode = `exit ${err.status}: ${String(err.stderr)}`; }
+  // Homebrew's node@24 is found wherever HOME points, so on a machine that has one this row has nothing to say.
+  if (['/opt/homebrew/opt/node@24/bin/node', '/usr/local/opt/node@24/bin/node'].some((f) => existsSync(f))) console.log('  - (a Homebrew node@24 is installed here: "no Node 24" cannot be staged)');
+  else assert(/^exit 1: no Node 24 found/.test(noNode) && /not started/.test(noNode), `and with no Node 24 it starts nothing and says why in the log — ${noNode.trim().split('\n')[0]}`);
+  writeFileSync(`${instBin}/node20`, '#!/bin/sh\necho 20\n');
+  chmodSync(`${instBin}/node20`, 0o755);
+  let refusal = '';
+  try { install([], { ORCH_NODE: `${instBin}/node20` }); } catch (err) { refusal = String(err.stderr ?? ''); }
+  assert(/^ORCH_NODE is .*node20, which is not Node 24/.test(refusal), `and a Node of another major is refused, in words, before anything is written — ${refusal.trim()}`);
 
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
@@ -1965,8 +2159,10 @@ try {
     'a refusal by status names the board as well as the path, and how long it took');
 
   const polled = await against({ work: 500 }, /retrying in 2s/);
-  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1 → 500 after \\d+ms; retrying in 1s`).test(polled.out),
-    'the work poll is told apart from the register that shares its warning');
+  // The poll names its run (`boot`, takeHostWork's guarantee; milestone
+  // audit 2026-11-17, finding 4), so the line ends on it.
+  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1&boot=[0-9a-f-]{36} → 500 after \\d+ms; retrying in 1s`).test(polled.out),
+    'the work poll is told apart from the register that shares its warning, and names the run of the host it is');
   eq(stand.seen.map((s) => s.route).slice(0, 4), ['register', 'work', 'register', 'work'],
     'and a failed poll still re-registers before the next, as it did');
 

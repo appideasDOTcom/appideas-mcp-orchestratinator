@@ -83,6 +83,13 @@ changed, so both halves went). Deploy the dirty
   send it again with `to: "appideas-qa"`: a direct message goes where it
   is addressed, in or out of a room.
 
+**A commit named on the channel is pasted from git, never typed.** On
+2026-11-17 a host restart was announced "at 32a6ab4", a hash that exists
+nowhere; HEAD was `b2c2c10`. It was caught only because the readings
+afterwards came from `git log`, and it took a correction message. Put
+`$(git log -1 --format=%h)` into the announcement, or read it in the same
+command that writes it.
+
 ## The restart
 
 ```bash

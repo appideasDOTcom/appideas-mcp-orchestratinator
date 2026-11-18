@@ -3608,6 +3608,146 @@ try {
       [null, null, true], 'the paperclip is dimmed, with why, for a desk whose host does not fetch files');
   }
 
+
+  // Milestone audit 2026-11-17, finding 1: an open question must not
+  // disappear from the floor. Two ways it did: another session on the desk
+  // (an editor in the repo) working closed it, and a board restart forgot
+  // it, with nothing to raise it again because a window standing on a
+  // question sends no further hook. The host now says, at every heartbeat,
+  // which of its floor windows are asking (`pending`), and the board raises
+  // those. The restart itself is driven where this suite restarts its board
+  // (below, "an open question across a board restart"); the host's half,
+  // read off a real pane, is test:host's.
+  console.log('\nan open question stays on the floor');
+  {
+    const QCH = 'ask-ch';
+    const qHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const qDesks = [{ channel: QCH, agent: 'asa', cwd: '/repo/asa', session_id: 'sdk-asa' }, { channel: QCH, agent: 'bea', cwd: '/repo/bea', session_id: 'sdk-bea' }];
+    const beat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', desks: qDesks, ...(pending ? { pending } : {}) }) }).then((r) => r.status);
+    const asked = async (agent) => deskOf(await floor(), agent, QCH)?.permission ?? null;
+    const queued = () => fetch(`${HOST}/api/host/work?host_id=h-ask`, { headers: qHK }).then((r) => r.json()).then((b) => (b.work ?? []).map((w) => w.kind));
+    await beat();
+    for (const d of qDesks) await post({ channel: QCH, agent: d.agent, session_id: d.session_id, hook_event_name: 'SessionStart', cwd: d.cwd });
+    await queued();
+
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PermissionRequest', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'git push' } });
+    assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'the window asks, and the floor shows it');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa-editor', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Read', tool_input: { file_path: '/repo/asa/x' } });
+    assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'another session on the desk working (an editor in the repo) does not close the window\'s question (probe P1)');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'git push' } });
+    eq(await asked('asa'), null, 'the window\'s own work does: it was answered');
+    await queued();
+    await beat([{ channel: QCH, agent: 'asa', session_id: 'sdk-asa', summary: 'the window is waiting for a decision' }]);
+    eq(await asked('asa'), null, 'and a heartbeat that read the pane just before the answer does not raise it again (RESAY_QUIET_MS)');
+
+    // bea's window is asking, and the board has heard nothing of it: the
+    // shape after a board restart. The heartbeat says it.
+    await beat([{ channel: QCH, agent: 'bea', session_id: 'sdk-bea', summary: 'the window is waiting for a decision' }]);
+    const raised = await asked('bea');
+    eq([raised?.summary, raised?.standing], ['the window is waiting for a decision', true], 'a question a heartbeat says the window is asking is raised on the floor');
+    eq((await queued()).filter((k) => k === 'prompt').length, 1, 'and the host is asked to read its choices off the pane, once');
+    eq(deskOf(await floor(), 'bea', QCH)?.nudge?.code, 'asking', 'and the desk takes no message while it stands, as for any question');
+    await beat([{ channel: QCH, agent: 'bea', session_id: 'sdk-bea', summary: 'the window is waiting for a decision' }]);
+    eq([(await asked('bea'))?.request_id, (await queued()).length], [raised?.request_id, 0], 'said again at the next heartbeat, it is the same question, and nothing more is asked of the host');
+    await beat([]);
+    eq(await asked('bea'), null, 'a heartbeat that no longer names it closes it: answered in the window');
+
+    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea', hook_event_name: 'PermissionRequest', cwd: '/repo/bea', tool_name: 'Bash', tool_input: { command: 'npm publish' } });
+    await beat([]);
+    assert(/npm publish/.test((await asked('bea'))?.summary ?? ''), 'but a question a hook raised is not closed by a heartbeat: the hook can be newer than the screen the host read');
+    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea', hook_event_name: 'PreToolUse', cwd: '/repo/bea', tool_name: 'Bash', tool_input: { command: 'npm publish' } });
+    await queued();
+
+    // The startup half (docs/backlog.md, open since PR #2): a question the
+    // window asks before Claude Code starts, said by the host, is not closed
+    // by another session's work on the desk either; the host's `gone` is
+    // what closes it.
+    const hostEv = (events) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', events }) });
+    await hostEv([{ type: 'startup', channel: QCH, agent: 'bea', session_id: 'sdk-bea', request_id: 'startup:trust', kind: 'trust', asks: 'Do you trust the files in this folder?', options: [{ n: 1, text: 'Yes, proceed' }, { n: 2, text: 'No, exit' }] }]);
+    eq((await asked('bea'))?.startup, true, 'a startup question is on the floor');
+    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea-editor', hook_event_name: 'PreToolUse', cwd: '/repo/bea', tool_name: 'Read', tool_input: { file_path: '/repo/bea/y' } });
+    eq((await asked('bea'))?.startup, true, 'and an editor\'s tool call on the same desk leaves it there');
+    await hostEv([{ type: 'startup', channel: QCH, agent: 'bea', session_id: 'sdk-bea', request_id: 'startup:trust', gone: true }]);
+    eq(await asked('bea'), null, 'the host saying it is gone closes it');
+    await queued();
+
+    // Press yes / no's route (finding 3): the floor's answer for a prompt
+    // nothing could read. The keys are the host's (test:host); the route
+    // decides whether to queue them at all.
+    const press = (choice) => fetch(`${HOST}/api/floor/press`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: QCH, agent: 'asa', choice }) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    let pr = await press('yes');
+    eq([pr.status, pr.body.code], [409, 'not_waiting'], 'Press is refused for a desk that is not waiting on anything');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'Notification', cwd: '/repo/asa', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    await queued();
+    pr = await press('maybe');
+    eq([pr.status, pr.body.code], [400, 'bad_choice'], 'a choice that is not yes or no is refused');
+    pr = await press('yes');
+    const pressWork = await fetch(`${HOST}/api/host/work?host_id=h-ask`, { headers: qHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    eq([pr.status, pressWork.map((w) => [w.kind, w.payload?.choice])], [200, [['press', 'yes']]], 'and for a waiting desk it queues one press, carrying the choice, for the host to turn into a key');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'true' } });
+    await queued();
+  }
+
+
+  // Milestone audit 2026-11-17, finding 4: work a host took and never
+  // finished. It used to be gone: marked taken as it was handed out, and a
+  // host stopped mid-line (every restart) took the rest of its batch with
+  // it. The guarantee is takeHostWork's (src/db.js): carried out once,
+  // handed out again because it was never started, or said lost on its desk.
+  // This drives the board as a host would, a boot at a time; what a real
+  // host sends at a stop is test:host's.
+  console.log('\nwork a host took and never finished');
+  {
+    const WCH = 'boot-ch';
+    const wHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const wDesks = [{ channel: WCH, agent: 'kip', cwd: '/repo/kip', session_id: 'sdk-kip' }];
+    const beat = (boot) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: wHK, body: JSON.stringify({ host_id: 'h-boot', name: 'bootbox', tmux: 'orch', desks: wDesks, ...(boot ? { boot } : {}) }) }).then((r) => r.status);
+    const poll = (boot, done = []) => fetch(`${HOST}/api/host/work?host_id=h-boot${boot ? `&boot=${boot}` : ''}${done.length ? `&done=${done.join(',')}` : ''}`, { headers: wHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    const { default: Database } = await import('better-sqlite3');
+    const put = (kind, payload) => { const db = new Database(DB_PATH); try { return Number(db.prepare(`INSERT INTO host_outbox (host_id, channel, agent, kind, payload) VALUES ('h-boot', ?, 'kip', ?, ?)`).run(WCH, kind, JSON.stringify(payload)).lastInsertRowid); } finally { db.close(); } };
+    const errorsNow = async () => ((await turns('kip', WCH)).rows ?? []).filter((r) => r.role === 'error').map((r) => r.text);
+    await beat('boot-a');
+    await post({ channel: WCH, agent: 'kip', session_id: 'sdk-kip', hook_event_name: 'SessionStart', cwd: '/repo/kip' });
+    await poll('boot-a');
+
+    const chatId = put('chat', { text: 'ship the release notes' });
+    const readId = put('sessions', { request_id: 'r1' });
+    const stopId = put('interrupt', {});
+    const doneId = put('open', {});
+    eq((await poll('boot-a')).map((w) => w.id), [chatId, readId, stopId, doneId], 'run A of the host takes four items');
+    await poll('boot-a', [doneId]);
+    const before = await errorsNow();
+    await beat('boot-a');
+    eq(await errorsNow(), before, 'its own heartbeat, the same run, sorts nothing: the work is in hand');
+
+    await beat('boot-b');
+    const said = (await errorsNow()).filter((t) => !before.includes(t));
+    assert(said.some((t) => t.startsWith('may not have been sent: the host restarted while this message was in line. If it is not in the conversation, send it again — "ship the release notes"')),
+      `run B registering: a message run A never finished is said on its desk, with its words, never typed twice — ${said.join(' | ')}`);
+    assert(said.some((t) => /^the stop may not have reached the window/.test(t)), 'a stop is said too, with what to do');
+    eq(said.length, 2, 'and nothing else is said: the item run A finished is not, and a read is not');
+    eq((await poll('boot-b')).map((w) => [w.id, w.kind]), [[readId, 'sessions']], 'a read run A never finished is handed to run B, harmless to do twice');
+    await poll('boot-b', [readId]);
+    await beat('boot-c');
+    eq((await errorsNow()).length, before.length + 2, 'and nothing is said twice when a later run registers');
+
+    const r1 = put('chat', { text: 'one' });
+    const r2 = put('chat', { text: 'two' });
+    eq((await poll('boot-c')).map((w) => w.id), [r1, r2], 'run C takes two messages');
+    const rel = (body) => fetch(`${HOST}/api/host/work/release`, { method: 'POST', headers: wHK, body: JSON.stringify({ host_id: 'h-boot', ...body }) }).then((r) => r.json());
+    eq((await rel({ boot: 'boot-other', release: [r2] })).released, 0, 'another run cannot hand back what this one took');
+    eq(await rel({ boot: 'boot-c', done: [r1], release: [r2] }), { ok: true, done: 1, released: 1 }, 'stopping, run C says what it finished and hands back what it never started');
+    eq((await poll('boot-d')).map((w) => w.id), [r2], 'and the next run is handed it, to type once');
+    await poll('boot-d', [r2]);
+
+    const old = put('chat', { text: 'from an old host' });
+    await poll(null);
+    await beat(null);
+    eq((await errorsNow()).length, before.length + 2, 'a host from before boots says none and is said none of: its work is taken as it always was');
+    void old;
+  }
+
   // Issue #44: meeting rooms. The board half is a bounded record Resume
   // reads — the routes are driven here against desks a host registered —
   // and the page half is one lifted section of floor.js, run with the
@@ -4453,10 +4593,23 @@ try {
     // restart the operator was told a current host "runs a build from
     // before…". The board is restarted here on the same database, and the
     // host does not register again.
+    // An open question across a board restart (milestone audit 2026-11-17,
+    // finding 1, probe P3): raised by its hook before, forgotten with the
+    // board's memory, and raised again by the host's next heartbeat.
+    const rHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const rDesks = [{ channel: 'ask-ch', agent: 'asa', cwd: '/repo/asa', session_id: 'sdk-asa' }, { channel: 'ask-ch', agent: 'bea', cwd: '/repo/bea', session_id: 'sdk-bea' }];
+    const rBeat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', desks: rDesks, ...(pending ? { pending } : {}) }) });
+    await rBeat();
+    await post({ channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PermissionRequest', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'make deploy' } });
+    assert(/make deploy/.test(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary ?? ''), 'before the restart, the question is on the floor');
+
     server.kill();
     await sleep(300);
     server = startServer();
     if (!(await waitHealthy())) throw new Error('the board did not come back');
+    eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission ?? null, null, 'a restarted board has forgotten it: open questions are memory');
+    await rBeat([{ channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', summary: 'the window is waiting for a decision' }]);
+    eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary, 'the window is waiting for a decision', 'and the host\'s first heartbeat after it raises the question again (probe P3)');
     const hostNow = (await floor()).hosts.find((h) => h.host_id === 'h-seat');
     eq([hostNow?.live, hostNow?.seats], [true, true], 'a board that restarted still knows a live host can seat a second desk, before that host has registered again');
     eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says so');

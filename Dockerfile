@@ -1,4 +1,8 @@
-FROM node:22-bookworm-slim
+# One Node major for what ships and what is tested (costmo's ruling on the
+# milestone audit's finding 5, 2026-11-17): the release gate runs the suites
+# on Node 24 (CLAUDE.md, Tests), and the host's LaunchAgent runs 24
+# (host/install.sh). A change here is a change in all three places.
+FROM node:24-bookworm-slim
 
 # better-sqlite3 ships prebuilt binaries for common platforms; the toolchain
 # below is only a fallback for when a prebuild isn't available for this arch.
@@ -8,8 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+# The lockfile is what the suites ran on, so the image installs exactly it:
+# `npm ci` fails the build when package.json and the lock disagree, and
+# copying the lock here is what makes a lock-only change rebuild this layer.
+# Before this, `npm install` resolved the caret ranges fresh at every deploy,
+# and the board shipped an SDK and a better-sqlite3 no suite had run.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY src ./src
 

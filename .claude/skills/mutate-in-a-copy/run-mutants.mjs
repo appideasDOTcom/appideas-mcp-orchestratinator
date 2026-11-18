@@ -86,6 +86,16 @@ for (const [n, [name, suite, file, oldS, newS]] of M.entries()) {
     keep(`${n + 1}-${suite}.log`, out);
     const red = out.split('\n').filter(isRed);
     const green = out.split('\n').filter(isGreen).length;
+    // A suite that stops on a throw prints a stack, not a ✗, and its own
+    // catch still fails the run: its exit is the verdict then. Read by ✗
+    // lines alone, such a run was reported SURVIVED (milestone round,
+    // 2026-11-17: install.sh refusing under a mutant threw out of the host
+    // suite, which said "host: 1 failed" and exited 1, with 28 rows unrun).
+    if (!red.length && run.status !== 0) {
+      const stop = out.split('\n').find((l) => /^(\w*Error|Error)[:\s]/.test(l.trim())) ?? out.trim().split('\n').pop() ?? '';
+      console.log(`MUTANT [${name}] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): RED by its exit (${run.status}), no ✗ printed: the suite stopped (${green} ✓ before it) — ${stop.trim().slice(0, 200)}`);
+      continue;
+    }
     console.log(`MUTANT [${name}] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing${red.length ? '' : ` — SURVIVED (${green} ✓)`}`);
     for (const l of red.slice(0, 8)) console.log(`    ${l.trim().slice(0, 220)}`);
     const threw = !red.length && out.match(/(TypeError|ReferenceError|SyntaxError)[^\n]*/);
@@ -102,7 +112,8 @@ if (control) {
     keep(`control-${suite}.log`, out);
     const red = out.split('\n').filter(isRed);
     const green = out.split('\n').filter(isGreen).length;
-    console.log(`CONTROL [nothing mutated] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing, ${green} ✓${red.length ? ' — THE COPY IS RED WITHOUT A MUTANT: these are not the mutants\' reds' : ''}`);
+    const stopped = !red.length && run.status !== 0;
+    console.log(`CONTROL [nothing mutated] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing, ${green} ✓${red.length || stopped ? ` — THE COPY IS RED WITHOUT A MUTANT${stopped ? ` (exit ${run.status}, no ✗: it stopped)` : ''}: these are not the mutants' reds` : ''}`);
     for (const l of red.slice(0, 8)) console.log(`    ${l.trim().slice(0, 220)}`);
   }
 }

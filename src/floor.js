@@ -148,6 +148,50 @@ const AWAITING_NOTIFICATIONS = new Set(['permission_prompt']);
  * never mistaken for an echo — only the notification-only path is affected.
  */
 const ANSWER_ECHO_MS = 15_000;
+/**
+ * How long after a prompt was answered or worked past a heartbeat's
+ * "still asking" is not believed. The host reads the pane and then
+ * registers, so its reading can be older than the answer that closed the
+ * prompt; a heartbeat a minute later says it again if the window really
+ * still asks.
+ */
+const RESAY_QUIET_MS = 10_000;
+
+/**
+ * What becomes of work an earlier run of a host took and never finished
+ * (takeHostWork in src/db.js has the guarantee; milestone audit 2026-11-17,
+ * finding 4). Handed out again: work that only reads, which is harmless to
+ * do twice (no keystroke, no window opened or closed). Everything else acts
+ * on a window or a seat and may have half happened, so it is closed and said
+ * on its desk as an error turn, in words that say what to do. A chat's turn
+ * quotes the message, and an error turn is what hands a pending message's
+ * words back to the box on the page. A lost answer to a question needs no
+ * more: if the window still asks, the host's heartbeat raises it again
+ * (the permission_request case). An update has its own record and timeout
+ * (src/updates.js), so it is closed and nothing is said on a desk.
+ */
+export const REHANDED_WORK = new Set(['prompt', 'sessions', 'read', 'recent', 'search', 'browse', 'rescan']);
+export function lostWorkWords(item) {
+  const text = typeof item?.payload?.text === 'string' ? item.payload.text.trim() : '';
+  const quoted = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  switch (item?.kind) {
+    // "May not have", because the board cannot know: a host says an item
+    // finished as soon as it is (sayDone), but one killed between typing a
+    // message and saying so has typed it (QA, the re-measure's L1).
+    case 'chat':
+      return quoted
+        ? `may not have been sent: the host restarted while this message was in line. If it is not in the conversation, send it again — "${quoted}"`
+        : 'may not have been sent: the host restarted while the message (its files only) was in line. If it is not in the conversation, send it again';
+    case 'permission': case 'answer': case 'press':
+      return 'your answer may not have reached the window: the host restarted while it was in line. If the window still asks, the question is on the floor again; answer it there';
+    case 'interrupt':
+      return 'the stop may not have reached the window: the host restarted while it was in line. If the desk is still working, press stop again';
+    case 'update':
+      return null;
+    default:
+      return `"${item?.kind}" may not have happened: the host restarted before it was done. Check the desk and do it again if it is needed`;
+  }
+}
 
 /**
  * Events that prove a human is no longer the blocker, because work happened.
@@ -1284,10 +1328,18 @@ export function ingestHookEvent(store, body, live = null) {
     // qa-probe/scratch, 2026-11-03: a flag that stood for six minutes).
     if (event !== 'SessionStart' && store.clearCompacting(sessionId)) live?.publish(key, { type: 'compacting', compacting: null });
     // A prompt that was open is closed by work happening, whether it was
-    // answered from the floor or by the person sitting at the window.
-    if (live?.pending.has(key)) {
+    // answered from the floor or by the person sitting at the window. Work
+    // in THAT window: another session on the same desk (an editor in the
+    // repo) working is not an answer, and its PreToolUse used to close the
+    // floor's prompt while the window still stood on the question, which
+    // then sent no hook to raise it again (milestone audit 2026-11-17,
+    // finding 1, probe P1). A prompt with no session recorded (the
+    // notification's, from before this) closes as it always did.
+    const open = live?.pending.get(key);
+    if (open && (!open.session_id || open.session_id === sessionId)) {
       live.pending.delete(key);
       live.publish(key, { type: 'permission', request: null });
+      live.clearedAt?.set(key, Date.now());
     }
     // Work happening is the proof an answer landed, so there is nothing left to
     // put back. Without this an old answered prompt could be resurrected by a
@@ -1406,6 +1458,8 @@ export function ingestHookEvent(store, body, live = null) {
       // that has since closed — the window itself is answered with a keystroke.
       live?.pending.set(key, {
         request_id: `${sessionId}:${body.tool_name ?? 'tool'}:${Date.parse(new Date().toISOString())}`,
+        // The window asking, so only its own work closes the prompt (above).
+        session_id: sessionId,
         tool: str(body.tool_name) ?? 'tool',
         // A question is a form, and the host goes and reads it off the pane —
         // a walk of the tabs, a second or two. Until it comes back the panel
@@ -1472,6 +1526,7 @@ export function ingestHookEvent(store, body, live = null) {
       if (kind === 'permission_prompt' && live && !open) {
         live.pending.set(key, {
           request_id: `${sessionId}:notification:${Date.now()}`,
+          session_id: sessionId,
           tool: null,
           // Never empty. "permission prompt —" with nothing after it tells the
           // operator less than the desk already told them.
@@ -1531,6 +1586,9 @@ export function createLive() {
   // back — unless it was kept here. See the answer_failed case in
   // applyHostEvent, which is what puts it back.
   const answered = new Map(); // deskKey -> { request_id, tool, summary, message, at }
+  // When a desk's prompt was last closed by its window's work, so a
+  // heartbeat that read the pane just before is not believed (RESAY_QUIET_MS).
+  const clearedAt = new Map(); // deskKey -> ms
   /**
    * Messages a window has taken but not yet turned into a turn.
    *
@@ -1616,6 +1674,7 @@ export function createLive() {
     reads,
     pending,
     answered,
+    clearedAt,
     delivery,
     sentAfter,
     rescanAsked,
@@ -2354,6 +2413,11 @@ function applyHostEvent(store, live, hostId, ev) {
       // question (a different request_id) starts the clock over.
       const at = open?.request_id === rid ? open.at : now;
       live.pending.set(key, {
+        // The window's session, so another session's hooks on the desk (an
+        // editor's tool call) do not close it: closing a startup question is
+        // the host's `gone` (above). docs/backlog.md carried this as open
+        // from PR #2 until the milestone audit's finding 1 (2026-11-17).
+        session_id: sessionId,
         request_id: rid, tool: 'startup', startup: true, kind: str(ev.kind) ?? null,
         summary: asks, options, read: true, reading: false, at,
       });
@@ -2430,6 +2494,49 @@ function applyHostEvent(store, live, hostId, ev) {
         store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
         state(again ? 'awaiting' : 'idle');
       }
+      break;
+    }
+
+    /**
+     * A question the window is still holding, said again by the host at
+     * every heartbeat (`pending` on /api/host/register): read off the pane's
+     * bottom line, so it is said for as long as the window asks, whatever
+     * the board has forgotten. `live.pending` is memory, so a board restart
+     * (every deploy) lost every open prompt, and a window standing on a
+     * question sends no further hook to raise it again. This case did not
+     * exist: the register route had applied `pending` since 2026-08-28
+     * (ddbfc42) into the default below, and the host never sent it
+     * (milestone audit 2026-11-17, finding 1, probe P3).
+     *
+     * Only when nothing stands on the desk: a prompt a hook raised carries
+     * the tool, the summary and the asked form, and is never replaced by
+     * this one. Not within a moment of the prompt being answered or worked
+     * past: the heartbeat read the pane a little before it arrived here, and
+     * the screen it read may be the one the answer has since cleared.
+     * Raised, the host is asked to read its choices (the prompt case), and
+     * one it finds no question for is closed there as gone.
+     */
+    case 'permission_request': {
+      if (live.pending.has(key)) break;
+      const cleared = live.clearedAt?.get(key) ?? 0;
+      const answered = live.answered.get(key)?.answered_at ?? 0;
+      if (Date.now() - Math.max(cleared, answered) < RESAY_QUIET_MS) break;
+      const summary = clip(str(ev.summary) ?? 'the window is waiting for a decision', 500);
+      live.pending.set(key, {
+        request_id: `${sessionId}:standing:${Date.now()}`,
+        session_id: sessionId,
+        tool: null,
+        summary,
+        message: null,
+        // Said by the host, not by a hook: cleared when the host's next
+        // heartbeat no longer names it (the register route).
+        standing: true,
+        at: now,
+      });
+      store.setAwaiting(sessionId, 'permission_request', summary);
+      state('awaiting');
+      live.publish(key, { type: 'permission', request: live.pending.get(key) });
+      askForOptions(store, live, channel, agent, live.pending.get(key).request_id);
       break;
     }
 
@@ -2946,9 +3053,13 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
 
   /**
    * A host announces itself and the desks it can run. Called at startup and
-   * then once a minute as a heartbeat, carrying any permission prompt it is
-   * still holding open — which is how `live.pending` survives a server restart
-   * without ever being written down.
+   * then once a minute as a heartbeat, carrying `pending`: every floor
+   * window of its whose bottom line says it is asking a question. That is
+   * how an open prompt survives a board restart, and another session's work
+   * on the desk, without `live.pending` ever being written down (the
+   * permission_request case in applyHostEvent). A host also re-registers at
+   * once after a failed poll, so a restarted board hears it within seconds.
+   * Until 2026-11-17 neither end did this (milestone audit, finding 1).
    *
    * The reply tells the host which SDK session each desk last had, so a host
    * that restarted can resume the conversation rather than start a new one.
@@ -3052,8 +3163,42 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       live.publish(k, { type: 'state', state: 'offline' });
     }
 
+    // A new run of this host (`boot` changed): what an earlier run took
+    // and never finished is handed out again or said lost (LOST_WORK above).
+    // Before the pending prompts below, so a question whose answer was lost
+    // is raised again by this same heartbeat.
+    const boot = str(req.body?.boot);
+    if (boot) {
+      for (const item of store.unfinishedHostWork(hostId, boot)) {
+        if (REHANDED_WORK.has(item.kind)) { store.rehandHostWork(item.id); continue; }
+        store.doneHostWork(hostId, [item.id]);
+        const words = lostWorkWords(item);
+        if (words) applyHostEvent(store, live, hostId, { type: 'error', channel: item.channel, agent: item.agent, code: 'work_lost', message: words });
+      }
+      live.wake(hostId);
+    }
+    const asking = new Set();
     for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
-      applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' });
+      if (applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' }) || live.pending.has(deskKey(str(p?.channel), str(p?.agent)))) {
+        asking.add(deskKey(str(p?.channel), str(p?.agent)));
+      }
+    }
+    // A prompt this host said, that its window no longer shows: answered in
+    // the window, or worked past by a session the hook could not tie to it.
+    // Only the host's own (`standing`): a hook's prompt can be newer than
+    // the screen the heartbeat read, and is closed by the window's own work.
+    // A host from before `pending` sends none and said none.
+    if (Array.isArray(req.body?.pending)) {
+      for (const d of store.listHostedDesks()) {
+        if (d.host_id !== hostId) continue;
+        const k = deskKey(d.channel, d.agent);
+        const open = live.pending.get(k);
+        if (!open?.standing || asking.has(k)) continue;
+        live.pending.delete(k);
+        store.clearAwaiting(open.session_id);
+        store.clearDeskAwaiting(d.channel, d.agent);
+        live.publish(k, { type: 'permission', request_id: open.request_id, decision: 'gone', resolved: true });
+      }
     }
 
     res.json({ ok: true, host_id: hostId, desks: accepted, work_wait_max_ms: WORK_WAIT_MAX_MS });
@@ -3085,14 +3230,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     store.touchHost(hostId);
     const waitMs = Math.min(WORK_WAIT_MAX_MS, Math.max(0, Number(req.query.wait) || 0) * 1000);
+    // What it finished since its last poll, said before it is handed more
+    // (takeHostWork's guarantee). `boot` names this run of the host.
+    const boot = str(req.query.boot);
+    const done = String(req.query.done ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (done.length) store.doneHostWork(hostId, done);
 
-    let items = store.takeHostWork(hostId);
+    let items = store.takeHostWork(hostId, boot);
     if (!items.length && waitMs > 0) {
       let gone = false;
       req.on('close', () => { gone = true; live.wake(hostId); });
       await live.wait(hostId, waitMs);
       if (gone) return;
-      items = store.takeHostWork(hostId);
+      items = store.takeHostWork(hostId, boot);
       store.touchHost(hostId);
     }
     // How long each item sat here, by this server's clock alone. A host that
@@ -3102,6 +3252,24 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // while its laptop sleeps.
     const handedAt = Date.now();
     res.json({ work: items.map((w) => ({ ...w, waited_ms: Math.max(0, handedAt - Date.parse(iso(w.created_at))) })) });
+  });
+
+  /**
+   * A host stopping on purpose: what it finished, and what it took and
+   * never started, which goes back in line for its next run (takeHostWork's
+   * guarantee; milestone audit 2026-11-17, finding 4). Only items this run
+   * took are released: `boot` must match. A working host uses it too, with
+   * nothing to release, to say an item is finished while the rest of its
+   * batch is still going (sayDone in host/index.js).
+   */
+  router.post('/api/host/work/release', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    const boot = str(req.body?.boot);
+    if (!hostId || !boot) return res.status(400).json({ error: 'host_id and boot are required' });
+    const ids = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []);
+    const done = store.doneHostWork(hostId, ids(req.body?.done));
+    const released = store.releaseHostWork(hostId, boot, ids(req.body?.release));
+    res.json({ ok: true, done, released });
   });
 
   /**

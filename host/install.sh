@@ -80,8 +80,15 @@ if [ -z "$TOKEN" ] && [ -n "${ORCH_AUTH_TOKEN:-}" ]; then
   TOKEN_FROM="ORCH_AUTH_TOKEN in this shell"
 fi
 
-NODE="$(command -v node || true)"
-if [ -z "$NODE" ]; then echo "node is not on PATH" >&2; exit 1; fi
+# The host's Node: the major the board ships and the gate tests, picked by
+# node.sh (the rule and its reasons are there). The LaunchAgent starts
+# run.sh, which picks again at every start, so an update that moves the
+# major takes effect at the restart the update already does (QA, the
+# milestone audit's re-measure, L3). Picked here too, to refuse before
+# anything is written when there is none, and to say which it will be.
+. "$HERE/node.sh"
+pick_node || exit 1
+echo "host runs on $NODE ($("$NODE" -v))"
 if ! command -v claude >/dev/null; then echo "claude is not on PATH — install Claude Code and sign in first" >&2; exit 1; fi
 
 mkdir -p "$CONF_DIR" "$LOG_DIR"
@@ -122,11 +129,12 @@ cat > "$PLIST" <<PLIST
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE</string>
-    <string>$HERE/index.js</string>
+    <string>/bin/sh</string>
+    <string>$HERE/run.sh</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict>
+  <dict>${ORCH_NODE:+
+    <key>ORCH_NODE</key><string>$ORCH_NODE</string>}
     <key>PATH</key><string>$(dirname "$NODE"):$(dirname "$(command -v claude)"):/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     <key>HOME</key><string>$HOME</string>
   </dict>

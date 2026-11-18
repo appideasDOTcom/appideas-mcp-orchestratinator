@@ -1,0 +1,121 @@
+[
+ [
+  "F1a another session's work closes the window's question (P1)",
+  "floor",
+  "src/floor.js",
+  "    if (open && (!open.session_id || open.session_id === sessionId)) {",
+  "    if (open) {"
+ ],
+ [
+  "F1b the heartbeat's pending has no case again (P3)",
+  "floor",
+  "src/floor.js",
+  "      if (live.pending.has(key)) break;\n      const cleared = live.clearedAt?.get(key) ?? 0;",
+  "      break;\n      const cleared = live.clearedAt?.get(key) ?? 0;"
+ ],
+ [
+  "F1c a heartbeat just after an answer raises it again",
+  "floor",
+  "src/floor.js",
+  "      if (Date.now() - Math.max(cleared, answered) < RESAY_QUIET_MS) break;\n",
+  ""
+ ],
+ [
+  "F1d a question the host stops naming stays on the floor",
+  "floor",
+  "src/floor.js",
+  "        if (!open?.standing || asking.has(k)) continue;",
+  "        continue;"
+ ],
+ [
+  "F1e a startup question records no session, so an editor closes it",
+  "floor",
+  "src/floor.js",
+  "        session_id: sessionId,\n        request_id: rid, tool: 'startup', startup: true,",
+  "        request_id: rid, tool: 'startup', startup: true,"
+ ],
+ [
+  "F1f the host never sends pending",
+  "host",
+  "host/index.js",
+  "dialog: D.hasDialog(), seats: true, uploads: true, pending, boot: this.boot, ...me },",
+  "dialog: D.hasDialog(), seats: true, uploads: true, boot: this.boot, ...me },"
+ ],
+ [
+  "F2 the stop sign sends Enter (QA A2)",
+  "window",
+  "host/window.js",
+  "  return sendKeys(cwd, 'Escape');",
+  "  return sendKeys(cwd, 'Enter');"
+ ],
+ [
+  "F3a pressBlind types into a composer (QA A3)",
+  "window",
+  "host/window.js",
+  "  if (composerOf(before) !== null) {\n    return {\n      ok: false,\n      code: 'no_prompt',",
+  "  if (false) {\n    return {\n      ok: false,\n      code: 'no_prompt',"
+ ],
+ [
+  "F3b yes and no swapped (QA A4)",
+  "host",
+  "host/index.js",
+  "const PRESS_KEY = { yes: '1', no: 'Escape' };",
+  "const PRESS_KEY = { yes: 'Escape', no: '1' };"
+ ],
+ [
+  "F3c the press route queues for a desk that is not waiting",
+  "floor",
+  "src/floor.js",
+  "    if (!waiting) {\n      return res.status(409).json({ error: 'That desk is not waiting on anything.', code: 'not_waiting' });",
+  "    if (false) {\n      return res.status(409).json({ error: 'That desk is not waiting on anything.', code: 'not_waiting' });"
+ ],
+ [
+  "F4a a new run sorts nothing an earlier run left",
+  "floor",
+  "src/floor.js",
+  "    if (boot) {\n      for (const item of store.unfinishedHostWork(hostId, boot)) {",
+  "    if (false) {\n      for (const item of store.unfinishedHostWork(hostId, boot)) {"
+ ],
+ [
+  "F4b reads are said lost instead of handed out again",
+  "floor",
+  "src/floor.js",
+  "        if (REHANDED_WORK.has(item.kind)) { store.rehandHostWork(item.id); continue; }\n",
+  ""
+ ],
+ [
+  "F4c finished work is never marked done",
+  "floor",
+  "src/floor.js",
+  "    if (done.length) store.doneHostWork(hostId, done);\n",
+  ""
+ ],
+ [
+  "F4d a release hands nothing back",
+  "floor",
+  "src/db.js",
+  "    for (const id of ids) n += q.releaseWork.run(id, hostId, boot).changes;",
+  "    void ids;"
+ ],
+ [
+  "F4e the host does not say what it finished",
+  "host",
+  "host/index.js",
+  "          this.acks.push(item.id);\n",
+  ""
+ ],
+ [
+  "F4f a stopping host hands nothing back",
+  "host",
+  "host/index.js",
+  "    const release = this.inHand.map((i) => i.id);",
+  "    const release = [];"
+ ],
+ [
+  "F5 the LaunchAgent takes whatever node is first",
+  "host",
+  "host/install.sh",
+  "NODE_MAJOR=24\n",
+  "NODE_MAJOR=20\n"
+ ]
+]

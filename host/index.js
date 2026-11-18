@@ -35,6 +35,7 @@
  *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
  */
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -56,6 +57,8 @@ const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
 /** How often a startup question still on screen is said to the board again. */
 const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
+/** How long a host told to stop waits for the item in hand to finish (stop()). */
+const STOP_DRAIN_MS = Number(process.env.ORCH_STOP_DRAIN_MS ?? 15_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
 /** How often the roster and the transcripts are re-read. */
 const WATCH_MS = Math.max(250, Number(process.env.ORCH_HOST_WATCH_MS ?? 700));
@@ -599,6 +602,15 @@ class Host {
   constructor(cfg) {
     this.cfg = cfg;
     this.desks = new Map();
+    // Which run of this host it is, so the board can tell work an earlier run
+    // took and never finished from work this one is doing (takeHostWork in
+    // src/db.js; milestone audit 2026-11-17, finding 4). With what is
+    // finished and not yet said (`acks`, sent on the next work poll), what
+    // was taken and not started (`inHand`), and the item being carried out.
+    this.boot = randomUUID();
+    this.acks = [];
+    this.inHand = [];
+    this.current = null;
     // A move's reopen intent, keyed like `desks`, for the rescan to set on the desk it creates (bind).
     this.intents = new Map();
     // A window moved to a fresh tmux server says so on its desk, in the host's
@@ -681,8 +693,21 @@ class Host {
     // Where each desk can be sat at, reported every time rather than once: a
     // window opens, closes and moves, and a stale address is worse than none.
     const desks = [];
+    // Every floor window that is asking a question, said again at every
+    // heartbeat so the board can raise it after a restart or after another
+    // session's work closed it (askingIn; the board's permission_request
+    // case). A window outside the floor (an editor) cannot be read here,
+    // and its prompt reaches the board by its hooks alone.
+    const pending = [];
     for (const d of this.desks.values()) {
       const held = await W.holderOf(d.where, d.lastSessionId).catch(() => null);
+      if (held?.where === 'floor') {
+        const asks = await W.askingIn(d.where).catch(() => null);
+        // The summary is a sentence, not the status line it was read by
+        // ("Enter to select · …" tells the operator nothing); the choices
+        // come from the host's own read of the prompt, which the board asks for.
+        if (asks) pending.push({ channel: d.channel, agent: d.agent, session_id: d.lastSessionId ?? null, summary: 'the window is waiting for a decision' });
+      }
       desks.push({
         // `scope` is 'seat' for an extra desk in a folder that is another
         // desk's, and that is what the board reads to offer no editor
@@ -719,7 +744,7 @@ class Host {
       // asks only a host that says so; an older one would ignore the work.
       // `uploads`: it fetches a message's attachments (host/uploads.js); a
       // board refuses files to a host that does not say so.
-      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), seats: true, uploads: true, ...me },
+      method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), seats: true, uploads: true, pending, boot: this.boot, ...me },
     });
     // Take back the conversation ids the board is holding. A restarted host
     // has none of its own, and without them the next message from the floor
@@ -1900,11 +1925,32 @@ class Host {
         watching ??= this.watchLoop();
         // The long poll is the pacing for *work*. The transcripts are read by
         // watchLoop() beside this, not between these lines.
+        // What was finished since the last poll rides on this one; kept
+        // until a poll carrying it has been answered.
+        const saying = this.acks.slice();
         const reply = await this.request(
-          `/api/host/work?host_id=${encodeURIComponent(this.cfg.hostId)}&wait=${Math.ceil(WATCH_MS / 1000)}`,
+          `/api/host/work?host_id=${encodeURIComponent(this.cfg.hostId)}&wait=${Math.ceil(WATCH_MS / 1000)}&boot=${this.boot}${saying.length ? `&done=${saying.join(',')}` : ''}`,
           { timeout: WATCH_MS + 10_000 },
         );
-        for (const item of reply.work ?? []) await this.handle(item);
+        this.acks = this.acks.filter((id) => !saying.includes(id));
+        // One at a time, and none started once a stop has begun: those go
+        // back in line for the next run (stop()).
+        this.inHand = (reply.work ?? []).slice();
+        while (this.inHand.length && !this.stopping) {
+          const item = this.inHand.shift();
+          this.current = this.handle(item).catch((err) => warn(`${item.kind} for ${item.channel}/${item.agent}: ${err.message}`));
+          await this.current;
+          this.current = null;
+          this.acks.push(item.id);
+          // Said now when more of the batch is still to go, not on the next
+          // poll: that poll comes only after the whole batch, and a host
+          // killed before it had every item it finished said lost on its
+          // desk, a typed message among them as "send it again" (QA, the
+          // milestone audit's re-measure, L1). The last item of a batch
+          // rides the poll that follows at once. A failure leaves it for
+          // that poll, as before.
+          if (this.inHand.length) await this.sayDone();
+        }
         backoff = 1000;
       } catch (err) {
         if (this.stopping) break;
@@ -1917,6 +1963,16 @@ class Host {
     if (watching) await watching;
   }
 
+  /** What this run finished and has not said yet, told to the board now (the release route with nothing to release). */
+  async sayDone() {
+    const saying = this.acks.slice();
+    if (!saying.length) return;
+    try {
+      await this.request('/api/host/work/release', { method: 'POST', body: { host_id: this.cfg.hostId, boot: this.boot, done: saying, release: [] }, timeout: 5000 });
+      this.acks = this.acks.filter((id) => !saying.includes(id));
+    } catch (err) { warn(`finished work not said yet (${err.message}); it goes with the next work poll`); }
+  }
+
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
@@ -1927,6 +1983,22 @@ class Host {
     // with nobody left to hear the answer it comes off the screen.
     this.picking?.close();
     try { this.searching?.child.kill('SIGTERM'); } catch { /* already gone */ }
+    // The item in hand is finished, up to STOP_DRAIN_MS: a message half
+    // typed is the worst way to stop. What was taken and never started goes
+    // back in line for the next run, and what was finished is said, so the
+    // board loses nothing it handed over (takeHostWork's guarantee). A host
+    // killed outright says neither; its next run's registration sorts that.
+    if (this.current) {
+      const left = await Promise.race([this.current.then(() => false), sleep(STOP_DRAIN_MS).then(() => true)]);
+      if (left) warn(`stopping with an item still in hand after ${STOP_DRAIN_MS / 1000}s; the next run will say it on its desk`);
+    }
+    const release = this.inHand.map((i) => i.id);
+    if (release.length || this.acks.length) {
+      try {
+        await this.request('/api/host/work/release', { method: 'POST', body: { host_id: this.cfg.hostId, boot: this.boot, done: this.acks, release }, timeout: 2000 });
+        if (release.length) log(`handed ${release.length} item${release.length === 1 ? '' : 's'} not yet started back to the board`);
+      } catch (err) { warn(`release not delivered (${err.message}); the next run will sort what this one took`); }
+    }
     await this.flush();
     // Best effort — the board reads a host whose heartbeat has stopped as
     // gone anyway (HOST_STALE_SECONDS) — but said, like every other request

@@ -1715,6 +1715,27 @@ async function main() {
     eq(cpKeyLog().filter((k) => k[1] === '"Escape"').map((k) => k[0]), ['btw', 'cost'],
       'over the whole section the pane took two Escapes, one closing each overlay, and none in its composer');
 
+    // After the row above, which counts every Escape the section sent: the
+    // stop sign's own Escape is the one these rows are about.
+    // The stop sign's host half (milestone audit 2026-11-17, finding 2): the
+    // board's half was tested, what the window is sent was not. Escape stops
+    // a turn; Enter would submit whatever is in the composer.
+    mark = cpKeyLog().length;
+    const stopped = await W.interrupt(CP_DIR);
+    assert(stopped.ok, `the stop sign reaches the window${stopped.ok ? '' : ` — ${stopped.error}`}`);
+    assert(await until(() => keysSince(mark).some((k) => k[1] === '"Escape"'), 4000), 'as Escape');
+    eq(keysSince(mark).filter((k) => k[1] === '"Enter"').length, 0, 'and no Enter, which would submit the composer instead of stopping the turn');
+
+    // Press yes / no at a prompt nobody could read (finding 3) keeps one
+    // rule: a window back at its composer is asking nothing, and nothing is
+    // typed into it. This repo's own driver once typed "2113" into the
+    // operator's message box that way.
+    mark = cpKeyLog().length;
+    const blind = await W.pressBlind(CP_DIR, '1');
+    eq([blind.ok, blind.code], [false, 'no_prompt'], 'a blind press at a window back at its composer is refused');
+    await sleep(400);
+    eq(keysSince(mark).length, 0, 'and not one key reaches it');
+
     // The failure a person is most likely to actually hit: `claude` is not on
     // PATH, or whatever runs in its place dies on its first line. That used to
     // be indistinguishable from a window sitting on a trust dialog — the same
