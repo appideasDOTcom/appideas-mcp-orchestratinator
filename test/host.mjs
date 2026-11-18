@@ -1171,6 +1171,7 @@ try {
   };
   assert(await closeByHand(), 'with its window closed by hand, the desk is held by nobody');
   const argvAtClosed = argvLog().length;
+  const logAtMove = hostLog.length;
   eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose window is closed is a move');
   assert(await until(async () => { const d = onNewFloor(await floor()); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000),
     'it opens on the new floor with a window, on its last conversation (#24 Decided 3)');
@@ -1182,7 +1183,19 @@ try {
   // path does, and an editor holding it is a copy nobody is watching, so
   // the open says so rather than starting a second one. The editor is a
   // process outside tmux claiming the conversation — what holderOf reads.
-  assert(await closeByHand(onNewFloor), 'its window closed by hand again');
+  // Red twice on 2026-11-18 (the round's first host run, and a mutant run
+  // whose mutant was in host/node.sh), green alone after; the rows after it
+  // pass, so the floor did see the window go, only not inside 8 s. On a red
+  // the host's log since the move and what the floor last showed are
+  // printed, so the next sighting is read rather than rerun.
+  const logAtClose = hostLog.length;
+  const closedAgain = await closeByHand(onNewFloor);
+  assert(closedAgain, 'its window closed by hand again');
+  if (!closedAgain) {
+    console.log(`    the floor still shows: ${JSON.stringify(onNewFloor(await floor())?.hosted ?? null)}`);
+    console.log(`    the host's log since the move:\n${hostLog.slice(logAtMove).split('\n').map((l) => `      ${l}`).join('\n')}`);
+    console.log(`    (of which after the close: ${hostLog.length - logAtClose} chars)`);
+  }
   const editor = spawn('sleep', ['120'], { stdio: 'ignore' });
   writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: editor.pid, cwd: REPO, kind: 'interactive', startedAt: 2, sessionId: SESSION_ID, name: 'an editor' }]));
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'editor' ? true : null), 8000), 'and the conversation is open in an editor');
@@ -1937,6 +1950,11 @@ try {
     const out = execFileSync('/bin/bash', ['host/install.sh', ...args, `${inst}/projects`], { env: { PATH: instPath, HOME: inst, ...env } }).toString();
     return { out, conf: JSON.parse(readFileSync(`${inst}/.orchestratinator/host.json`, 'utf8')) };
   };
+  // First, because a drifted major makes every install below refuse, and a
+  // refusal throws out of the suite (the L4b mutant read "red by its exit").
+  const dockerMajor = /^FROM node:(\d+)/m.exec(readFileSync('Dockerfile', 'utf8'))?.[1];
+  const pickMajor = /^ORCH_NODE_MAJOR=(\d+)/m.exec(readFileSync('host/node.sh', 'utf8'))?.[1];
+  eq([pickMajor, dockerMajor], ['24', '24'], "the major the host is given is the board image's (node.sh against the Dockerfile's FROM)");
   const fromShell = install([], { ORCH_AUTH_TOKEN: 'shell-key-value' });
   eq(fromShell.conf.token, 'shell-key-value', 'install.sh with no --token writes an exported ORCH_AUTH_TOKEN to host.json');
   assert(/shared secret from ORCH_AUTH_TOKEN in this shell/.test(fromShell.out) && !/shell-key-value/.test(fromShell.out),
@@ -1954,9 +1972,6 @@ try {
   const plist = readFileSync(`${inst}/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`, 'utf8');
   const progArgs = [.../<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1].matchAll(/<string>([^<]+)<\/string>/g) ?? []].map((m) => m[1]);
   eq(progArgs, ['/bin/sh', resolve('host/run.sh')], 'the LaunchAgent starts run.sh, which picks the Node at each start, not a Node named at install');
-  const dockerMajor = /^FROM node:(\d+)/m.exec(readFileSync('Dockerfile', 'utf8'))?.[1];
-  const pickMajor = /^ORCH_NODE_MAJOR=(\d+)/m.exec(readFileSync('host/node.sh', 'utf8'))?.[1];
-  eq([pickMajor, dockerMajor], ['24', '24'], "the major the host is given is the board image's (node.sh against the Dockerfile's FROM)");
   // A Node 20 first on PATH, as on this machine, and a Node 24 under nvm.
   const old = `${inst}/old`;
   mkdirSync(old, { recursive: true });
