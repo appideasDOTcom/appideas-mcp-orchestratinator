@@ -1691,6 +1691,27 @@ try {
   host = startHost('host-test-1');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
+  // A host just started joins the desk's transcript where it stands, at its
+  // first watch tick (follow(id, 'end')), and a turn written before that
+  // tick is behind it for good. "Live" is the registration, which comes
+  // first, so the marker below was written ahead of the join whenever the
+  // tick came late: both rows after it red, the marker never on the floor
+  // (seen 2026-11-14, and on 2026-11-18 read in the log: SPOKEN-WHILE-BUSY
+  // nowhere in the run). So a turn is written first and waited for, and the
+  // relay is known to be reading before anything is timed against it.
+  const primer = `RELAY-JOINED-${Date.now()}`;
+  appendTurn({
+    type: 'assistant', uuid: `primer-${Date.now()}`, timestamp: new Date().toISOString(),
+    message: { role: 'assistant', content: [{ type: 'text', text: primer }] },
+  });
+  let joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(primer)) ? true : null), 3000);
+  for (let i = 0; !joined && i < 5; i++) {
+    // Written before the join, so never relayed: another, until one is.
+    const again = `${primer}-${i}`;
+    appendTurn({ type: 'assistant', uuid: `primer-${i}-${Date.now()}`, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: again }] } });
+    joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(again)) ? true : null), 3000);
+  }
+  assert(joined, 'the fixture: the restarted host is reading the desk\'s transcript before the timed part starts');
 
   const turnsBefore = ((await turns('free')).rows ?? []).length;
   const marker = `SPOKEN-WHILE-BUSY-${Date.now()}`;

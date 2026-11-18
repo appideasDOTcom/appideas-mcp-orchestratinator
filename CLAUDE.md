@@ -2673,6 +2673,19 @@ the mutant only its predicted red. The cause was not looked for.
 `run-mutants.mjs --control` is how to tell such a red from a mutant's in
 the same run (**mutate-in-a-copy**).
 
+**Read on the second sighting** (2026-11-18, the milestone round, one of
+four plain runs in a copy, load 3–7). The marker the row writes appears
+nowhere in that run's output, so it was never relayed, not relayed late.
+The row restarts the host and waits for the desk to read live, which is
+the registration. The host's desk then joins the transcript where it
+stands at its first watch tick (`follow(id, 'end')`), and that tick can
+come after the row has written the marker, which leaves it behind the
+offset for good. It was a race in the test, not in the relay. The row now
+writes a primer turn and waits for the floor to show it, so the relay is
+known to be reading before anything is timed against it. A row that
+restarts the host and then writes to the transcript has the same race:
+wait for a turn to arrive first.
+
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
 on it hands you the *oldest* rows; and `admin.desk.*` matches
