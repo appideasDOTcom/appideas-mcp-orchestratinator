@@ -2,7 +2,8 @@
 
 The orchestratinator's first coverage and testing audit, by appideas-qa on
 2026-11-17 at `0771ea8` (0.12.10), and the fix round that answered it,
-0.12.11, re-measured by QA on 2026-11-18 at `37672c4` + `7bebe22`. costmo's
+0.12.11, re-measured by QA on 2026-11-18 at `37672c4` + `7bebe22`,
+with four Lows that re-measure found fixed after it. costmo's
 word for the round: "solidify our product and provide the foundational
 proof before we pivot into some new features".
 
@@ -145,7 +146,7 @@ were not in the round and stand as the report wrote them.
 | 2 | Medium | What the stop sign sends to the window is not tested | **Fixed.** Rows in `test:window` (Escape, and no Enter) and `test:host`. QA's mutant F2 is red on named rows. |
 | 3 | Medium | "Press yes / no" and its composer refusal are not tested | **Fixed.** Yes is `1`, no is Escape, nothing is pressed into a window back at its composer. Rows in `test:window`, `test:host` and the press route's in `test:floor`. Mutant F3a is red on named rows. |
 | 4 | Medium | Work a host took is lost if the host stops before doing it | **Fixed and written down** (above `takeHostWork` in `src/db.js`). A host acknowledges what it finished, finishes the item in hand at a stop and hands back the rest, and the next run of a host sorts what an earlier one left: reads are handed out again, and window work is closed and said on its desk with the words handed back. At most once for window work, on purpose. QA's probe P2b: a killed run gives three error turns quoting the words, nothing handed out twice; a graceful stop gives done 1, released 2, and the next run gets them; an old host closes nothing. Not reached by P2b: a read-kind item being handed out again (rows in `test:floor` reach it). |
-| 5 | Medium | The suites test a different stack from the one that ships | **Fixed as ruled** ("lock it and test what ships"). `package-lock.json` committed, the image installs it with `npm ci` on `node:24`, `install.sh` gives the host a Node 24, the gate refuses any other major. QA: the image is v24.22.2 with the lock's versions, a stale lock fails the build, and the install pick is right in all three cases. The live host is still on Node 20 until `install.sh` is re-run (L3). |
+| 5 | Medium | The suites test a different stack from the one that ships | **Fixed as ruled** ("lock it and test what ships"). `package-lock.json` committed, the image installs it with `npm ci` on `node:24`, `install.sh` gives the host a Node 24, the gate refuses any other major. QA: the image is v24.22.2 with the lock's versions, a stale lock fails the build, and the install pick is right in all three cases. The live host is still on Node 20 until `install.sh` is re-run, once, at the 0.12.11 deploy (L3). |
 | 6 | Low | Desktop hand-off work kinds (`handback`, `attach`, `claude`) have no host-tier test | Open, not in this round. |
 | 7 | Low | Re-addressing a message has no test | Open, not in this round. QA's mutant A5 still survives, as predicted. |
 | 8 | Low | Rows that assert less than their label | Open, not in this round. Mutant B1 still survives, as predicted. |
@@ -162,7 +163,7 @@ And the three foundation items:
 
 The developer's 17 milestone mutants, in QA's lanes at `37672c4`: all red
 (`.claude/skills/mutate-in-a-copy/mutants-milestone.suite.json`). F5 is red
-only by the host suite stopping, not on a named row (L4). QA's own lanes
+only by the host suite stopping, not on a named row (L4, since given rows of its own). QA's own lanes
 there: floor 50 of 52, host 13 of 15, window 18 of 18, seats 14 of 14,
 every result as predicted. The four survivors are A5 and B1 (findings 7 and
 8, not in this round) and A2 and A3, the same faults as F2 and F3a, which
@@ -180,31 +181,47 @@ Proved in a copy that holds the event loop past `close()`: the old file
 hung 3 of 3, the fix exited 3 of 3 with the same nine coverage files, and
 both exited without page coverage. The developer and QA each ran it.
 
-## Known gaps, found in the re-measure
+## Found in the re-measure
 
-None blocks the milestone. Whether to fix or carry each Low is costmo's call.
+Four Lows, each fixed in 0.12.11 at costmo's word (2026-11-18: "fix all
+four"), and seven Infos left as known gaps.
 
-**Low**
+**Low, fixed**
 
-- **L1. A host killed mid-batch calls finished work unsent.** The acks for
-  a batch ride the next work poll, after the whole batch. A host killed
-  (not stopped) partway through has the items it did finish said "not
-  sent … send it again", though they were typed. A graceful stop sends
-  its acks with the release. `host/index.js`, the work loop.
-- **L2. The gate's package check does not check the lock.** `npm ls
-  --all` passes an installed version that differs from the lock but sits
-  inside the range (1.4.0 against a locked 1.2.3), so "node_modules matches
-  package-lock.json" says more than it checked. The run at `37672c4` was
-  on the lock: QA compared the 206 entries one by one.
-- **L3. An update does not move the host to a new Node.** The updater's
-  host step exits and launchd restarts it on the Node its plist names
-  (`host/update.js`). The live host runs v20.20.1, so the 0.12.11 deploy
-  must re-run `install.sh`, and so must every later Node bump.
-- **L4. `install.sh`'s Node pick has no named row.** "The LaunchAgent runs
-  the host on a Node 24" (`test/host.mjs`) passes with the old "first node
-  on PATH" too, because the fixture's PATH holds only Node 24 (QA's Q1
-  survived). The rule is measured by QA's extracted-block run, not by the
-  suite.
+- **L1. A host killed mid-batch called finished work unsent.** The acks for
+  a batch rode the next work poll, after the whole batch, so a host killed
+  (not stopped) partway through had the items it did finish said "not
+  sent … send it again", though they were typed. Now a host says each
+  item finished as soon as it is, while the rest of its batch is still to
+  go (`sayDone` in `host/index.js`, the release route with nothing to
+  release). A host killed between typing a message and saying so has still
+  typed it, so the words for a lost message say what the board knows: "may
+  not have been sent: the host restarted while this message was in line.
+  If it is not in the conversation, send it again". Row in `test:host`
+  ("work finished in the middle of a batch, and then the host is killed").
+- **L2. The gate's package check did not check the lock.** `npm ls --all`
+  passed an installed version that differs from the lock but sits inside
+  the range (1.4.0 against a locked 1.2.3). The gate now also runs
+  `scripts/check-lock.mjs`, which holds every package to the lock's exact
+  version (206 of 206 here). Rows in `smoke`, on a fabricated project.
+- **L3. An update did not move the host to a new Node.** The updater's host
+  step exits and launchd starts the host again, and the plist named a Node
+  binary. The LaunchAgent now starts `host/run.sh`, which picks the Node
+  at every start (`host/node.sh` has the rule, shared with `install.sh`),
+  so a later bump is that one number and the restart an update already
+  does. The live host's plist predates this and names Node 20, so the
+  0.12.11 deploy re-runs `install.sh` once.
+- **L4. `install.sh`'s Node pick had no named row.** The row passed with the
+  old "first node on PATH" because the fixture's PATH held only Node 24
+  (QA's Q1 survived). Now: a Node 20 first on PATH with a Node 24 after it,
+  for `install.sh` and for `run.sh`; no Node 24 at all; and `node.sh`'s
+  major against the Dockerfile's `FROM`. Rows in `test:host`.
+
+The mutants for these are kept in
+`.claude/skills/mutate-in-a-copy/mutants-milestone-lows.suite.json`.
+And from QA's reading of this page: `smoke` read only each versioned file's
+top-level `version`, so the lock's `packages[""]`, which `set-version` also
+writes, went unchecked. It is checked now.
 
 **Info**
 

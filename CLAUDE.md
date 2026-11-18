@@ -934,13 +934,16 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   (finding 4; the guarantee is written above `takeHostWork` in
   `src/db.js`). It used to be marked taken as it was handed out, and a
   host stopped mid-line lost the rest of its batch without a word. A host
-  says what it finished on its next poll, a host stopping finishes the
+  says each item finished as soon as it is (on the next poll, or at once
+  while more of its batch is still to go: `sayDone`, after QA's L1 in the
+  re-measure), a host stopping finishes the
   item in hand (`ORCH_STOP_DRAIN_MS`, 15 s) and hands back what it never
   started, and each run of a host has a `boot`, so the next run's
   registration sorts what an earlier one left: reads are handed out again
   (`REHANDED_WORK`), and anything that acts on a window is closed and
   said on its desk in an error turn (`lostWorkWords`). A chat's turn
-  quotes the words, and an error turn is what hands them back to the box.
+  quotes the words, says it "may not have been sent" (the board cannot
+  know), and an error turn is what hands them back to the box.
   At most once for window work, on purpose: a host can die after typing
   and before saying so, and a message typed twice is the worse failure.
 - **The stop sign and Press yes / no are tested at the window** (findings
@@ -2355,9 +2358,16 @@ caret ranges fresh at every deploy (better-sqlite3 11.10.0, SDK 1.32.2 that
 day), and the host ran under launchd on the shell's Node 20. Now:
 - **Node 24 for all three.** The Dockerfile's `FROM` names the major, the
   release gate refuses any other (`scripts/release-gate.sh` reads the
-  `FROM`), and `host/install.sh` gives the LaunchAgent a Node 24 (PATH,
-  nvm's newest v24, Homebrew's node@24, or `ORCH_NODE`), never "whatever
-  node is first". The shell's default stays 20.
+  `FROM`), and the host runs on a Node 24 (PATH, nvm's newest v24,
+  Homebrew's node@24, or `ORCH_NODE`), never "whatever node is first".
+  The pick is `host/node.sh`'s, and the LaunchAgent starts `host/run.sh`,
+  which picks at every start, so an update that moves the major moves the
+  host at the restart it already does (QA's L3; a plist that named the
+  binary kept the host on it). A plist written before 0.12.11 names the
+  binary, and `install.sh` run once replaces it. The shell's default
+  stays 20. The gate's package step is `npm ls --all` and
+  `scripts/check-lock.mjs`, because `npm ls` passes a version inside the
+  range that is not the lock's (QA's L2).
 - **`package-lock.json` is committed** (it was gitignored) and the image
   installs it with `npm ci`, copying the lock beside `package.json` so a
   lock-only change rebuilds that layer and a lock out of step fails the
@@ -2899,8 +2909,8 @@ operator's live floor.
   | `src/updates.js`, `host/update.js` | `test:update` |
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
-  | `host/install.sh` | `test:host` (its install rows, on stand-ins) |
-  | `scripts/set-version.mjs` | `smoke` |
+  | `host/install.sh`, `host/node.sh`, `host/run.sh` | `test:host` (its install rows, on stand-ins) |
+  | `scripts/set-version.mjs`, `scripts/check-lock.mjs` | `smoke` |
   | `Dockerfile`, `package.json`'s dependencies, `package-lock.json` | no suite: a real `docker build` in a scratch tag, `npm ls` inside it against the lock, and `node -v` against the gate's |
   | `scripts/release-gate.sh`, `scripts/coverage/` | themselves: a seeded red in a copy for the gate; for coverage, `report.mjs` over a known set of snapshots |
   | `plugin/` | `test:plugin`, and `test:seats`, which runs the hook |
