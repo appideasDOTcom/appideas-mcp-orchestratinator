@@ -1,0 +1,205 @@
+[
+ [
+  "a silent open room loses its session at the first look (PR #57 finding 1)",
+  "floor",
+  "src/floor.js",
+  " || stillWatched(r));",
+  " );"
+ ],
+ [
+  "a silent open room is never read as gone",
+  "floor",
+  "src/floor.js",
+  "    return nowMs - seen.at < TWIN_UNHEARD_MS;",
+  "    return true;"
+ ],
+ [
+  "the watch on a silent room is not started again once it is heard from",
+  "floor",
+  "src/floor.js",
+  "    if (!seen || seen.live_at !== r.live_at) {",
+  "    if (!seen) {"
+ ],
+ [
+  "a second session's row starts at the floor's first message (PR #57 finding 2)",
+  "floor",
+  "src/db.js",
+  "VALUES (@channel, @agent, datetime('now'), @action, datetime('now'),\n               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))",
+  "VALUES (@channel, @agent, datetime('now'), @action, datetime('now'),\n               0)"
+ ],
+ [
+  "a second session's poll with no since reads from the floor's first message",
+  "floor",
+  "src/tools.js",
+  "      const since = Math.max(args.since ?? 0, store.twinOf(channel, agent)?.start_cursor ?? 0);",
+  "      const since = args.since ?? 0;"
+ ],
+ [
+  "a name taken again starts at the newest, losing what was addressed to it",
+  "floor",
+  "src/db.js",
+  "COALESCE(NULLIF((SELECT poll_cursor FROM agents WHERE channel = @channel AND agent = @agent), 0),\n                        (SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = @channel)))",
+  "(SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = @channel))"
+ ],
+ [
+  "a name whose row never read starts at 0 again",
+  "floor",
+  "src/db.js",
+  "COALESCE(NULLIF((SELECT poll_cursor FROM agents WHERE channel = @channel AND agent = @agent), 0),",
+  "COALESCE((SELECT poll_cursor FROM agents WHERE channel = @channel AND agent = @agent),"
+ ],
+ [
+  "a row the name already has is left behind where it starts",
+  "floor",
+  "src/db.js",
+  "    q.advancePollCursor.run({ channel, agent: pick.agent, cursor: q.twinOf.get(channel, pick.agent)?.start_cursor ?? 0 });\n",
+  ""
+ ],
+ [
+  "the board takes a bind onto a working seat's name (PR #57 finding 3)",
+  "floor",
+  "src/floor.js",
+  "      if (isWorking(already, last) && already.state !== 'offline'",
+  "      if (false && already.state !== 'offline'"
+ ],
+ [
+  "send_message does not ask which session a name means (PR #57 finding 4, QA's Q4)",
+  "floor",
+  "src/tools.js",
+  "      const to = args.to ? addressed(store, channel, agent, String(args.to)) : null;",
+  "      const to = args.to ? String(args.to) : null;"
+ ],
+ [
+  "open_task does not ask which session a name means (QA's Q5)",
+  "floor",
+  "src/tools.js",
+  "      const assignee = args.assignee ? addressed(store, channel, agent, String(args.assignee)) : null;",
+  "      const assignee = args.assignee ? String(args.assignee) : null;"
+ ],
+ [
+  "whoami does not tell a second session that it is one (QA's Q14)",
+  "floor",
+  "src/tools.js",
+  "        ...(twin ? {\n          session_of: twin.base,",
+  "        ...(false ? {\n          session_of: twin.base,"
+ ],
+ [
+  "what a host said about seats is gone when the board starts (PR #57 finding 5)",
+  "floor",
+  "src/db.js",
+  "  addColumn(db, 'hosts', 'seats', 'INTEGER NOT NULL DEFAULT 0');\n",
+  "  addColumn(db, 'hosts', 'seats', 'INTEGER NOT NULL DEFAULT 0');\n  db.exec('UPDATE hosts SET seats = 0');\n"
+ ],
+ [
+  "the host closes a working seat's window for a bind (PR #57 finding 3)",
+  "seats",
+  "host/index.js",
+  "      const at = await W.busyAt(twin.where);\n      if (at.pane && at.busy) {",
+  "      const at = await W.busyAt(twin.where);\n      if (false) {"
+ ],
+ [
+  "a bind onto a name a seat carries leaves the seat standing (QA's Q2)",
+  "seats",
+  "host/index.js",
+  "    if (twin?.seat) {",
+  "    if (false) {"
+ ],
+ [
+  "the folder's own desk falls back onto a conversation its seat is running (QA's Q3)",
+  "seats",
+  "host/window.js",
+  "  const newest = await newestConversation(here, theirs);",
+  "  const newest = await newestConversation(here);"
+ ],
+ [
+  "a window killed while it is waited on is waited out (PR #57 Info 10)",
+  "host",
+  "host/window.js",
+  "      const gone = paneGone(dead, target);\n      if (gone) {",
+  "      const gone = paneGone(dead, target);\n      if (false) {"
+ ],
+ [
+  "a window killed while it is waited on is waited out (PR #57 Info 10)",
+  "window",
+  "host/window.js",
+  "      const gone = paneGone(dead, target);\n      if (gone) {",
+  "      const gone = paneGone(dead, target);\n      if (false) {"
+ ],
+ [
+  "an answer with no pane in it is not read as gone: the first cut (QA, PR #57 round 2)",
+  "window",
+  "host/window.js",
+  "  if (!now) return 'no_pane';",
+  "  if (!now) return null;"
+ ],
+ [
+  "an answer about another pane is not read as gone",
+  "window",
+  "host/window.js",
+  "  return now !== asked ? 'other_pane' : null;",
+  "  return null;"
+ ],
+ [
+  "tmux saying there is no server is not read as gone (QA, PR #57 round 2 and Info 11)",
+  "window",
+  "host/window.js",
+  "  if (!answer?.ok) return /no server running|error connecting to|server exited unexpectedly/.test(answer?.error ?? '') ? 'no_server' : null;",
+  "  if (!answer?.ok) return null;"
+ ],
+ [
+  "tmux saying there is no server is not read as gone (QA, PR #57 round 2 and Info 11)",
+  "renew",
+  "host/window.js",
+  "  if (!answer?.ok) return /no server running|error connecting to|server exited unexpectedly/.test(answer?.error ?? '') ? 'no_server' : null;",
+  "  if (!answer?.ok) return null;"
+ ],
+ [
+  "\"server exited unexpectedly\" is not read as the server gone (QA, PR #57 Info 11)",
+  "window",
+  "host/window.js",
+  "/no server running|error connecting to|server exited unexpectedly/",
+  "/no server running|error connecting to/"
+ ],
+ [
+  "any failed tmux call is read as the window gone",
+  "window",
+  "host/window.js",
+  ".test(answer?.error ?? '') ? 'no_server' : null;",
+  ".test(answer?.error ?? '') ? 'no_server' : 'no_server';"
+ ],
+ [
+  "the session's name is given to tmux as a prefix again (QA, PR #57 round 2 item 3)",
+  "window",
+  "host/window.js",
+  "const EXACT = `=${SESSION}`;",
+  "const EXACT = SESSION;"
+ ],
+ [
+  "the first window asks for the session by a name another session begins with",
+  "window",
+  "host/window.js",
+  "  const has = await tmux(['has-session', '-t', EXACT]);\n  // `-t 'orch:'`, with the colon, and not `-t orch`.",
+  "  const has = await tmux(['has-session', '-t', SESSION]);\n  // `-t 'orch:'`, with the colon, and not `-t orch`."
+ ],
+ [
+  "the host's panes are listed from a session whose name begins with its own",
+  "window",
+  "host/window.js",
+  "['list-panes', '-t', `${EXACT}:`, '-s',",
+  "['list-panes', '-t', SESSION, '-s',"
+ ],
+ [
+  "whether the server reads a folder is asked of a session whose name begins with the floor's",
+  "window",
+  "host/window.js",
+  "  if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;",
+  "  if (!(await tmux(['has-session', '-t', SESSION])).ok) return null;"
+ ],
+ [
+  "the host lists every session's panes, and takes one in a desk's folder for its window (costmo, 2026-11-16)",
+  "window",
+  "host/window.js",
+  "['list-panes', '-t', `${EXACT}:`, '-s',",
+  "['list-panes', '-t', `${EXACT}:`, '-a',"
+ ]
+]

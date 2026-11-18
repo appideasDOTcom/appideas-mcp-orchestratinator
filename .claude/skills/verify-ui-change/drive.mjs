@@ -26,9 +26,9 @@
  * bug — that is the reason for `probe(file)` rather than `probe(string)`.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const DEBUG_PORT = Number(process.env.ORCH_CDP_PORT ?? 9222);
@@ -209,6 +209,32 @@ async function connect(target) {
   await cmd('Page.enable');
   await cmd('Runtime.enable');
   await cmd('Log.enable');
+  // Page coverage for `npm run coverage` (scripts/coverage/; costmo's ruling
+  // on the milestone audit, 2026-11-17, item B; QA's instrument made
+  // permanent). Inert unless PAGECOV names a folder. Chrome's precise
+  // coverage resets its counters at every take, so each take is an
+  // increment and is its own file, written every second and at close().
+  // Not covered by this: windows a page opens itself (popouts, meeting
+  // rooms) and the hub SharedWorker, which are not targets drive.mjs holds.
+  let takeCov = async () => {};
+  let stopCov = () => {};
+  if (process.env.PAGECOV) {
+    const { writeFileSync: wcov, mkdirSync: mcov } = await import('node:fs');
+    mcov(process.env.PAGECOV, { recursive: true });
+    await cmd('Profiler.enable');
+    await cmd('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
+    let covN = 0;
+    takeCov = async () => { try { const r = await cmd('Profiler.takePreciseCoverage'); const res = r?.result?.result; if (res?.length) wcov(`${process.env.PAGECOV}/page-${process.pid}-${target.id}-${++covN}.json`, JSON.stringify({ result: res })); } catch { /* the page may be gone */ } };
+    // Stopped by close(), before the socket goes. Left running, a tick that
+    // landed while the socket was closing armed cmd()'s 30 s timer on a
+    // socket that would never answer, and every later tick armed another, so
+    // a check that ends by running out of code (check-hide) never exited.
+    // Seen only under load, where the close is slow (QA, 2026-11-18: an hour
+    // at load 34, in the audit's re-measure at 37672c4).
+    const every = setInterval(takeCov, 1000);
+    every.unref();
+    stopCov = () => clearInterval(every);
+  }
   const goto = async (url) => {
     await cmd('Page.navigate', { url });
     await waitFor(`document.readyState === 'complete'`, { timeout: 15000 });
@@ -222,6 +248,21 @@ async function connect(target) {
       const windowId = got.result?.windowId;
       if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
       await cmd('Browser.setWindowBounds', { windowId, bounds: { windowState: state } });
+    },
+    /**
+     * This page's window as the browser has it: `{ left, top, width, height,
+     * windowState }`. Given bounds, it places the window first. For a page
+     * that moves or raises another window (window.moveTo, window.focus),
+     * this is the reading the page cannot fake: what its own `screenX` says
+     * is the page's word, and this is the browser's.
+     */
+    windowBounds: async (bounds = null) => {
+      const got = await cmd('Browser.getWindowForTarget', { targetId: target.id });
+      const windowId = got.result?.windowId;
+      if (windowId == null) throw new Error(`no window for this target: ${JSON.stringify(got.error ?? got.result)}`);
+      if (!bounds) return got.result.bounds;
+      await cmd('Browser.setWindowBounds', { windowId, bounds });
+      return (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result.bounds;
     },
     /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
     console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
@@ -246,6 +287,13 @@ async function connect(target) {
       await cmd('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: dpr, mobile: false });
       return { width, height, dpr };
     },
+    /**
+     * Tell the page which colour scheme the reader prefers: 'light', 'dark',
+     * or null for the browser's own. The stylesheet has one palette per
+     * scheme and a headless Chrome takes the machine's, so a colour that
+     * only works on one of them is otherwise never looked at.
+     */
+    scheme: async (value) => cmd('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: value ?? '' }] }),
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
     /**
@@ -314,6 +362,25 @@ async function connect(target) {
       return { from: a, to: end, during, moved: { x: end.x - b.x, y: end.y - b.y } };
     },
     /**
+     * The pointer moved onto `to` (a selector's centre, or `{ x, y }`) with
+     * no button down: real input, so `:hover` is what a person gets, and
+     * nothing is pressed. For a control whose press does something to read
+     * apart from its hover (PR #56 Info 4: "In a meeting" raises a window).
+     * `held` runs with the pointer there and its answer is returned.
+     */
+    hover: async (to, { held } = {}) => {
+      const p = typeof to === 'string'
+        ? JSON.parse(await evalJs(`(() => {
+            const el = document.querySelector(${JSON.stringify(to)});
+            if (!el) throw new Error('no element for ' + ${JSON.stringify(to)});
+            const r = el.getBoundingClientRect();
+            return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+          })()`))
+        : to;
+      await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'none', buttons: 0 });
+      return held ? held() : undefined;
+    },
+    /**
      * A real key press — `key` as KeyboardEvent.key names it ('Escape', 'Enter').
      *
      * `shift` holds Shift for it. `text` is what the key types if nothing
@@ -334,6 +401,10 @@ async function connect(target) {
     type: async (text) => cmd('Input.insertText', { text }),
     /** A PNG of one element, with a little air around it. `scale` to read pixels. */
     shot: async (path, selector = null, { pad = 8, scale = 3, full = false, beyond = false } = {}) => {
+      // The folder is made here. check-hide given an out-dir that did not
+      // exist yet died on its first shot with ENOENT, after drawing its first
+      // step, and read as a check that failed (PR #57's release run).
+      mkdirSync(dirname(path), { recursive: true });
       // `beyond` crops an element that runs past the window: the clip is
       // taken in page coordinates (the rect plus the scroll) and painted with
       // captureBeyondViewport. Without it, rows below the window come out as
@@ -366,6 +437,6 @@ async function connect(target) {
     /* Closes this tab's socket, not the browser: leaving Chrome up is what makes
        the next check start in a second rather than three. `pkill -f orch-cdp`
        when you are done with all of them. */
-    close: async () => { await cmd('Target.closeTarget', { targetId: target.id }); ws.close(); },
+    close: async () => { stopCov(); await takeCov(); await cmd('Target.closeTarget', { targetId: target.id }); ws.close(); },
   };
 }

@@ -11,10 +11,11 @@ under launchd from the working tree. A deploy is therefore two restarts and
 two sets of readings, and the completion note is the readings — "I rebuilt
 it" is not one. Done three times on 2026-11-02 (tasks 237, 239, and the
 version bump); this is the procedure that was run each time. **There is a
-third half when `plugin/` changed** — the hooks every window runs come from
-Claude Code's plugin cache, not from the tree — and it has its own step
-below; a deploy that skipped it (QA, PR #32) leaves every window on the
-old hooks.
+third half when `plugin/` changed** — the hooks every window runs are
+loaded at the window's start, and on Claude Code 2.1.325 straight from the
+tree's `plugin/` (before that, from a cache the update copied into) — and
+it has its own step below; a deploy that skipped it (QA, PR #32) left every
+window on the old hooks.
 
 ## Before touching anything
 
@@ -54,7 +55,10 @@ Three things to check in it:
   that is a question for the channel, not a stash. **The exception is a
   preview, and only costmo can ask for one.** He types in the window to see
   the change before committing it, as in "rebuild and restart so I can
-  see the difference now" (twice for #43, 2026-11-05). Deploy the dirty
+  see the difference now" (twice for #43, 2026-11-05), or "rebuild and
+reload" typed straight after a change was reported as in the tree and not
+deployed (2026-11-14, with `src/floor.js` and `host/index.js` both
+changed, so both halves went). Deploy the dirty
   tree, but only the halves it touches: for a page change that is the
   container alone, and the host stays up. Say UNCOMMITTED on the channel
   before and after, and say that `/health`'s `commit` is HEAD, not what
@@ -69,15 +73,50 @@ Three things to check in it:
   are announced; a deploy does not collide with them, but a suite you run
   alongside the deploy does.
 
+- **Who your announcement reaches.** `send_message`'s reply says so. While
+  the operator has you in a meeting room, a broadcast goes to the room's
+  other participants and nobody else, and the reply carries
+  `meeting_room.reached`. On 2026-11-14 every deploy and port announcement
+  of the session reached appideas-qa and theme-developer only, because
+  both were in room 24 with the coordinator. QA was the reader that
+  mattered, so nothing was lost that day. If `reached` does not name QA,
+  send it again with `to: "appideas-qa"`: a direct message goes where it
+  is addressed, in or out of a room.
+
+**A commit named on the channel is pasted from git, never typed.** On
+2026-11-17 a host restart was announced "at 32a6ab4", a hash that exists
+nowhere; HEAD was `b2c2c10`. It was caught only because the readings
+afterwards came from `git log`, and it took a correction message. Put
+`$(git log -1 --format=%h)` into the announcement, or read it in the same
+command that writes it.
+
 ## The restart
 
 ```bash
 # say so on the channel first — QA's MCP session drops with the server
 docker compose up -d --build 2>&1 | tail -4      # must print "Recreated", not "Running"
 launchctl kickstart -k gui/$(id -u)/com.appideas.orchestratinator-host
-sleep 8
+.claude/skills/deploy-both-halves/settled.sh src/floor.js       # waits for the host to read live; then each file's hash, container against tree
 .claude/skills/deploy-both-halves/status.sh askUnanswered promptOffer
 ```
+
+[`settled.sh`](settled.sh) replaced a `sleep 8` here (2026-11-14). An
+agent's shell refuses a bare foreground `sleep`, and eight seconds was a
+guess. It waits on the fact, a hosted desk reading live in `/api/floor`,
+and says how long that took (0–2 s on the day). Then, for each `src/` file
+named, it prints the container's sha256 against the tree's:
+`src/floor.js: container a5f252c76fca = tree`. That is the proof for a
+change in `src/` outside the page, where `board-counts.sh`'s `app.js` hash
+says nothing and a symbol count needs a symbol that was absent before.
+`unask` read 2 in the served `app.js` before its deploy, inside
+`unasked`. It exits 1 on `DIFFERS`, `NOT IN THE CONTAINER` (a `host/`
+file: the image holds no host) and `HOST NOT LIVE`; each was run.
+
+A both-halves deploy leaves two failure lines in the host log, from the
+host that was going away while the container was replaced: the work poll
+`failed (UND_ERR_SOCKET: other side closed)` and `unregister not delivered
+(… ECONNRESET)`, both timed inside the swap and before the new
+registration line. They are not the new host's.
 
 `Container … Running` instead of `Recreated` means the image did not change
 and your edit is not in it. Chaining the two restarts behind `npm test` once
@@ -123,6 +162,23 @@ The host started after the bump and the plugin cache already reads
 0.10.20 (`installed_plugins.json`), so both stay. Task 275 went out as
 the server half only on that reading, and the note said so.
 
+**The served version is `/health`'s, or `update.current.version` in
+`/api/state`. Not the last `"version"` in that payload.** On 2026-11-16,
+straight after a bump to 0.12.8, a one-line `sed` over `/api/state` read
+0.12.7. It had matched `update.latest.version`, which is the newest build
+on GitHub's `main`, and the payload has no top-level `version`. `/health`
+said 0.12.8 all along. Read `/health`, or parse the JSON and name the
+field.
+
+**A preview's commit label is HEAD's, so the next clean deploy is diffed
+by hash.** After an uncommitted preview, `/health` names the commit the
+tree stood on, not what is served. When costmo then commits and asks for
+a rebuild, "what changed since what is running" is the served files'
+sha256 against the tree's (`/floor.js`, `/app.js`, `/styles.css`), and
+the host's start time against the last change under `host/`. Three
+deploys went that way on 2026-11-16: each time one page file differed,
+the host and the plugin were already current, and the note said so.
+
 ## When the deploy moves the protocol, or a dependency
 
 Since 0.12.5 the board refuses a host that does not speak its protocol
@@ -149,14 +205,31 @@ image, and the rebuild takes about a minute longer. 0.12.6 moves
 better-sqlite3 from 11 to 13: the image's Node (22.23.4) loads it and the
 live database was read through it, read-only, before the tree had it
 (**try-a-dependency**, 2026-11-08: 19 tables, `quick_check: ok`). The host
-half needs nothing for it; the host has no dependencies.
+half needs nothing for it; the host has no dependencies. Since 0.12.11 the
+image is `node:24` and installs the committed lockfile with `npm ci` (the
+milestone audit's finding 5), so a dependency change is a lockfile change.
 
 ## The third half: the plugin
 
 Only when `plugin/` changed (hooks.json, report.mjs, the manifest's version).
-The marketplace is a directory source pointing at this tree, so the update
-installs from the working tree — it must be clean at the commit being
-deployed. Measured 2026-11-03 (task 251):
+
+**On Claude Code 2.1.325 there is no copy to make** (2026-11-14, deploying
+2c0a75f, whose `report.mjs` changed with the version unchanged at 0.12.6).
+`claude plugin update` answered "orchestratinator-floor is read from its
+folder, …/plugin: nothing to update. Edits there take effect at the next
+session start or /reload-plugins", and the kernel log that day had a
+window's hook `node` reading `…/appideas-mcp-orchestratinator/plugin/hooks/report.mjs`,
+the tree's path. `installed_plugins.json` still named the 0.12.6 cache
+directory, whose `report.mjs` was the old one, so that file no longer
+says what windows run: do not compare hashes against it. Still run the
+update and quote its answer, because an older Claude Code on another
+machine copies. The note then says the change reaches each window at its
+next start or `/reload-plugins`, and the tree, not a cache, is what they
+load, which is one more reason it must be clean at the commit deployed.
+
+On older Claude Code, the marketplace is a directory source pointing at
+this tree, so the update installs from the working tree — it must be clean
+at the commit being deployed. Measured 2026-11-03 (task 251):
 
 ```bash
 grep -E '"version"|installPath' ~/.claude/plugins/installed_plugins.json   # before: the cache path and version
@@ -178,6 +251,17 @@ to prove it. Say in the note which event hooks the running windows still
 have, and that until they restart the board gets those events only from
 the host's transcript side (compaction state, model switches on 0.10.9).
 
+**On 2.1.325 a version bump is still copied** (2026-11-16, the 0.12.8
+bump). With `plugin/` unchanged but for its manifest's version, the same
+command that said "nothing to update" two days earlier answered
+`Plugin "orchestratinator-floor" updated from 0.12.7 to 0.12.8 for scope
+user. Restart to apply changes.`, and `installed_plugins.json` moved to a
+`…/orchestratinator-floor/0.12.8` cache directory. So on this version
+both readings have been seen: an edit with the version unchanged is "read
+from its folder", and a changed version is copied. Which of the two a
+window then loads was not measured that day. Quote the answer the command
+gives; do not predict it.
+
 **When only the manifest's version moved** (`npm run set-version` bumps
 all three files; 0.10.10 changed no hook), still update — the cache's
 number is what `npm run smoke`'s agreement is about on the next install —
@@ -191,6 +275,28 @@ diff "$C/<old>/hooks/hooks.json" "$C/<new>/hooks/hooks.json" && echo identical
 Identical (0.10.9 → 0.10.10, 2026-11-03) means running windows lose
 nothing by keeping what they loaded, and the note says so instead of asking
 anyone to restart a window.
+
+## What the 0.12.9 deploy added to the readings (2026-11-16)
+
+Three things, each read that day on a deploy of all three halves:
+
+- **A capability the host says at registration is a reading of its own.**
+  0.12.9's host says `seats: true`, and the board asks only a host that
+  says so. A host restart that did not take would leave the feature
+  refusing in words ("runs a build from before…") while every other
+  reading was green. Read it after the restart:
+  `curl -s localhost:8787/api/floor | python3 -c "import json,sys; print([(h['name'], h['live'], h.get('seats')) for h in json.load(sys.stdin)['hosts']])"`.
+  The same goes for any later flag a registration carries.
+- **`dirty files: 0` is read, never assumed.** The round's last change had
+  been reported as uncommitted an hour before, and the deploy was about to
+  be announced as a preview. `status.sh` read the tree clean at a new
+  HEAD: costmo had committed and pushed in between. The announcement said
+  what the reading said.
+- **A changed hook with a bumped version was copied**: `updated from
+  0.12.8 to 0.12.9 for scope user. Restart to apply changes.`, a new
+  cache directory, and its `report.mjs` equal to the tree's by sha256
+  (`shasum -a 256 "$P/hooks/report.mjs" plugin/hooks/report.mjs`). That
+  comparison is the plugin half's proof whenever the update copies.
 
 ## The server half alone
 

@@ -1,0 +1,37 @@
+[
+ [
+  "L1 what a host finished mid-batch rides the next poll again",
+  "host",
+  "host/index.js",
+  "          if (this.inHand.length) await this.sayDone();\n",
+  ""
+ ],
+ [
+  "L3a the LaunchAgent names a Node again, not run.sh",
+  "host",
+  "host/install.sh",
+  "    <string>/bin/sh</string>\n    <string>$HERE/run.sh</string>",
+  "    <string>$NODE</string>\n    <string>$HERE/index.js</string>"
+ ],
+ [
+  "L3b run.sh runs the first node on PATH",
+  "host",
+  "host/run.sh",
+  "if ! pick_node; then",
+  "NODE=\"$(command -v node)\"; if false; then"
+ ],
+ [
+  "L4a the pick takes the first node on PATH whatever its major (QA's Q1)",
+  "host",
+  "host/node.sh",
+  "    if [ -n \"$cand\" ] && [ -x \"$cand\" ] && [ \"$(node_major \"$cand\")\" = \"$ORCH_NODE_MAJOR\" ]; then",
+  "    if [ -n \"$cand\" ] && [ -x \"$cand\" ]; then"
+ ],
+ [
+  "L4b the host's major drifts from the image's",
+  "host",
+  "host/node.sh",
+  "ORCH_NODE_MAJOR=24",
+  "ORCH_NODE_MAJOR=22"
+ ]
+]

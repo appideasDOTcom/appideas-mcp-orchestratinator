@@ -557,7 +557,38 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
   return router;
 }
 
-export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null }) {
+/*
+ * A route that takes bytes: POST /api/floor/upload (issue #31).
+ *
+ * Every other operator route takes a sentence or an id from the page, and
+ * adminGuard's reasoning (a CSRF lock, not authentication) was written for
+ * those. This one takes up to 100 MB of whatever the operator dropped on the
+ * box, so it is reasoned here on its own rather than by widening that comment.
+ * Same-origin is still the only gate, on purpose: the dashboard has no
+ * credential, and anything that can reach the board can already type into
+ * every desk, which is a larger power than handing one a file. What changes
+ * with bytes, and what holds each:
+ *
+ *   - Size. Refused at the declared length before a byte is read, and cut off
+ *     at the cap while streaming when the length lied (src/uploads.js). The
+ *     body never passes through a parser (server.js skips this path) and is
+ *     never held whole in memory.
+ *   - Disk. Staged in the database's own directory and gone an hour after it
+ *     was attached or last sent, or at once when taken out of the box.
+ *   - What it becomes. Never a page: the board does not serve an upload to a
+ *     browser at all (the page draws thumbnails from its own File), so a file
+ *     cannot be turned into script on this origin. It is served only to a
+ *     host, behind the host key, and only one a message named it to.
+ *   - Where it lands. Not in a repo: the host writes it under its own
+ *     ~/.orchestratinator/uploads, by a name stripped of directories and
+ *     control characters (safeName), and deletes it on Claude Code's own
+ *     cleanupPeriodDays (host/uploads.js).
+ *
+ * What it does not do: inspect the contents. The agent reading the file is
+ * the operator's agent, on the operator's machine, reading what the operator
+ * chose to give it.
+ */
+export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null, uploads = null }) {
   const router = express.Router();
 
   // Update settings, Check now and Update (issue #40; src/updates.js). Ahead
@@ -566,7 +597,7 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth, sessions, updates, protocol: meta.protocol, version: meta.version }));
+  router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version }));
 
   router.get('/api/state', (_req, res) => {
     const state = buildState(store, sessions, sessionStats, meta);

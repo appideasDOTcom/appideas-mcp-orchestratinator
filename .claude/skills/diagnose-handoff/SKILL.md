@@ -34,6 +34,43 @@ for c in json.load(sys.stdin).get('channels',[]):
         if h: print(c['channel'], k['agent'], h.get('held'), h.get('window_open'), h.get('holders'), h.get('clients'), h.get('session_id'))"
 ```
 
+**A folder can hold several desks since 0.12.9**, each with a window of its
+own (one agent with several sessions: `host/seats.js`), so "the pane in
+that folder" is no longer one pane. Read the tag and the folder beside the
+ids, and the host's own record of its seats:
+
+```bash
+tmux list-panes -a -F '#{window_name} seat=#{@orch_seat} pid=#{pane_pid} #{pane_current_path}'
+cat ~/.orchestratinator/seats/seats.json            # each extra desk: channel, agent, folder, board
+```
+
+The folder's own desk is the window with **no** tag; a seat is the window
+tagged `<channel>/<agent>` (percent-encoded), started with `--mcp-config
+~/.orchestratinator/seats/<name>.mcp.json`. Three readings that look like
+faults and are not: a seat's panel has no **Open in VS Code** (an editor in
+the folder is the folder's own desk); its card's **Move to another floor**
+is greyed with the reason; and a desk named `<agent>-2` that vanishes when
+a meeting room ends was made for that room, and the board closed it (an
+`admin.desk.leave` row with actor `board`). One that is a fault: a desk
+answering as another desk. Ask it `whoami` and read its window's start
+command (`#{pane_start_command}`) for the `--mcp-config` it was given.
+
+What a second session (a seat) says when it does not behave, and where:
+
+| what is seen | what it is | read |
+|---|---|---|
+| "no new desk on <floor>: …" as an error on the agent's **own** desk | the host refused to make the seat; said beside it because the new desk has no row yet | the words; `host.log` has the same line |
+| the new desk drawn, never live, gone after two minutes | its host never seated it (offline, or a build from before seats: `hosts[].seats` false in `/api/floor`) | `curl -s localhost:8787/api/floor`, `hosts` |
+| `<agent>-2` still on the floor after its meeting ended | made for a room and not yet closed: it is mid-turn (closed when the turn ends), under 30 s old, or its room ended by its window going away (15 s for a reload) | `desk_twins.for_meeting`, `created_at`; the room's `ended_at` |
+| `<agent>-2` still there and never closing | it was made by **New desk here**, which no room closes (`for_meeting` 0): Leave room on its card | `desk_twins` |
+| a second session came back under the next number (`-3` for `-2`) | the old name was not free: a desk, a working agent or an open conversation still answers to it. Before 0.12.9's fix it was the closed window's SessionEnd re-seating it | `personas`, `agents.retired_at`, `agent_sessions.ended_at` for that name |
+| "open in the window of another desk in this folder" | the conversation asked for is running in a sibling desk's window; one window holds a conversation | `tmux list-panes` with the tag, the roster |
+| "this desk's binding file is missing" | `~/.orchestratinator/seats/<name>.mcp.json` is gone; the host writes it at every heartbeat, so it is back within a minute, or the seat's record is gone too | `ls ~/.orchestratinator/seats/` |
+
+`two-rooms-fixture.sh rows` in **measure-a-real-window** prints most of
+these columns for a probe board; on the live one the tables are read
+inside the container (`docker compose exec -T orchestratinator node`).
+
 A session in the roster with **no matching pane** is read as an editor holding
 it, and the floor will refuse to send. That is correct when an editor really has
 it — and a trap in tests, where a killed stand-in leaves its roster entry behind.
@@ -429,6 +466,78 @@ are gone within hours, so do not go looking for them after the fact. The
 `~/.orchestratinator/captures/<first failure>/`, along with probes that tell
 the board, the forwarder, the VM and the host apart. Its SKILL.md has the
 table for reading one.
+
+## A window that cannot read its own folder (EPERM)
+
+"Can't read the current directory (EPERM)" on a window's first line, or an
+agent's tools getting `Operation not permitted` on its own repo (2026-11-10).
+POSIX modes are not the cause here; the cause is which process is asking.
+The host now moves every window to a fresh server when this happens (CLAUDE.md, "A tmux
+server can lose the right to read a desk's folder"), so seeing it on a floor
+window means that move did not run or did not work. It did work the one time
+it was seen live: 2026-11-14 20:19:14Z, four windows moved, a `host` line on
+each desk, and no desk saw the error.
+
+**First, check that your own shell is not the one refused.** On 2026-11-14 the
+refusal landed on the operator's terminal app instead: from 12:13 local, every
+process under iTerm2 was refused `~/Documents` (Claude Code, git, zsh, node,
+java, ruby). That included a coordinator conversation running there, whose
+every command in the repo gave EPERM, and whose plugin hook could not read
+`report.mjs`. A `-L` server started *from that shell* was refused too. It is
+responsible to the terminal, not to itself the way the host's servers are. So
+probe 2 below, run from a refused shell, reads 1 and sends you to "macOS's
+grant to the host" when the host is fine. The kernel log names the
+process; grouping it shows whose tree is refused:
+
+```sh
+cd /tmp; /bin/ls ~/Documents >/dev/null 2>&1; echo "my shell: $?"   # 1 = you are the refused one
+/usr/bin/log show --last 1h --style compact \
+  --predicate 'eventMessage CONTAINS "System Policy" AND eventMessage CONTAINS "Documents"' |
+  sed -nE 's/.*System Policy: ([^(]+)\(([0-9]+)\).*/\1(\2)/p' | sort | uniq -c | sort -rn | head
+# then walk a named pid's parents: ps -o pid=,ppid=,command= -p <pid>, repeated
+```
+
+(`GamePolicyAgent` reads `~/Documents` a few times an hour and is refused
+every day. It is noise.) The remedy for a refused terminal is the operator's,
+outside anything the floor runs. They set the terminal under Privacy & Security
+→ Files & Folders, and a process that was already running stayed refused after
+it was set. The conversation came back once it was moved onto the floor (a
+fresh `claude --resume` in the host's server). Whether a terminal relaunch
+alone clears it was not measured. Until then, and only with the operator's
+go-ahead (it is their floor's server), commands can run through the host's
+server, which reads: `tmux run-shell "cd '<repo>' && <command>"`, with no `-t`
+(below), and the output comes back to your shell. A whole deploy was run
+that way that day (docker compose, the plugin update, every reading).
+`launchctl kickstart` needs no read and runs from anywhere.
+
+```sh
+D=/path/to/the/desk
+# 1. Does the floor's server read it? (exit 0 = yes). Its forks are its windows.
+#    No -t: given a target, a refused read leaves that pane (orch: is a
+#    desk's window) in view-mode, and the desk's next message goes to the
+#    mode, not to Claude Code (QA, PR #54 finding 1). If one is parked, `q`.
+tmux run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
+# 2. Does a fresh server? (the host's freshReads, by hand). Only meaningful
+#    from a shell that reads ~/Documents itself (above); from a refused one
+#    this server is refused for the shell's sake, not the host's.
+tmux -L chk -f /dev/null new-session -d -s c 'sleep 30'
+tmux -L chk run-shell "cd -- '$D' && /bin/ls -a >/dev/null 2>&1"; echo $?
+tmux -L chk kill-server
+# 3. The kernel's word. Use /usr/bin/log: zsh has a `log` builtin that eats
+#    the arguments ("too many arguments").
+/usr/bin/log show --last 5m --style compact \
+  --predicate 'eventMessage CONTAINS "System Policy" AND eventMessage CONTAINS "'"$D"'"'
+# 4. Which folders that server can read: those carrying a macl grant.
+xattr -px com.apple.macl "$D" 2>/dev/null | tr -d ' \n'; echo
+```
+
+1 refused and 2 reads is the stale server, and the host's heartbeat check
+(`checkServer`, every `ORCH_HOST_HEARTBEAT_MS`) should already have moved
+it. Read `host.log` for "the tmux server cannot read". If both refuse, the
+problem is macOS's grant to the host's process tree, not the server, and
+`open()` says `unreadable`. The agent's own diagnosis will be wrong: on the
+day, it blamed its own `cd` and saved that as a memory. Its process cannot
+lose a grant by changing directory.
 
 ## What not to do
 

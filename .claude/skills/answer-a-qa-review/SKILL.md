@@ -47,13 +47,62 @@ inversions table says which of your assertions they already trust.
   show; a first cut asserted both wrongly, costmo pushed the tree while the
   suite ran, and QA measured a red at that SHA (0d18a9f). Diff rows by
   identity against a set taken before.
+- **A new case in a slow suite is run before it rests in the tree.** On
+  2026-11-15 (PR #55) costmo committed the tree as `d5c391b` and nudged QA
+  while the round was still being written, with nothing announced. The
+  two fixes in it were green. A new `test:host` case was not: it waited on
+  `questions[0].header`, and the desk's form calls that field `tab_title`.
+  The host suite takes five minutes and had not been run, so the SHA had
+  four ✗ of mine in it. Write such a case, run its suite straight away
+  (or in a copy, **mutate-in-a-copy**), and only then go on to the next
+  file. When a push lands mid-round anyway, tell QA at once what is in it,
+  file by file: green there, red there, half done there, only in the tree.
+  They hold the lanes that cannot be measured and say which half they
+  measured.
 - **One mutant per fault line**, in a copy (**mutate-in-a-copy**): the fix
   removed must turn exactly the new assertion red. Name the mutant and the
   assertion in the reply; QA predicts their own inversions from it.
-- **The suite that covers it, then the full run** — and read the channel
-  first: their clean-clone runs share this machine's CPU, and a full run
-  overlapping theirs went red in six `test:host` pane cases that were green
-  alone (CLAUDE.md, Tests).
+- **The suites that cover it, not the full run.** That means each changed
+  file's suite (`test:floor` for the page's lifted sections, `test:host`
+  for `host/`), the page checks that read the changed code, and the
+  mutants. The full `npm test` runs once, at the SHA that ships, when
+  costmo calls the release, and not at a review, yours or QA's (costmo,
+  2026-11-16; QA's decisions/0015; CLAUDE.md, Conventions, has the map of
+  which suites a path reaches). PR #56's two rounds were answered that
+  way.
+  Read the channel before anything long: their clean-clone runs share this
+  machine's CPU, and a run of yours overlapping theirs went red in six
+  `test:host` pane cases that were green alone (CLAUDE.md, Tests).
+- **Look for a commit before every long run and before every message to
+  QA** (`git log -1 --format='%h %ci'`). On PR #57 (2026-11-16) he pushed
+  `94eb28d` and `bd557e7` while the round was being written, and it was
+  noticed eight minutes later, by chance, when `git status` listed fewer
+  files than had been edited. The first of the two held a test row that
+  was red for its fixture's reason, and QA could have started on it.
+  Nothing announces a commit; the tree looking cleaner than it should is
+  the only sign.
+- **When costmo commits mid-round, prove what was measured was the
+  commit.** He committed PR #56's fixes twice while mutants were still
+  running in copies. The copy was taken before the commit, so the reading
+  is the commit's only if the files are. Compare `shasum -a 256` of each
+  changed file in the copy with `git show <sha>:<file>` and put both hashes
+  in the account. QA compares by identity, and hashes say which algorithm.
+
+- **A mutant QA predicts will survive may be guarded a layer down. Measure
+  that layer before writing a row for it.** PR #58's Q1 removed
+  `fetchUpload`'s size check, and survived. Measured on Node 24, `fetch`
+  itself throws "terminated" on a body shorter than its content-length,
+  so the check is a second guard. The row asserts the outcome (refused,
+  nothing left) whichever guard takes it; the reply says why the mutant
+  must survive, and the check is commented as what it is.
+- **A stand-in has to have the real thing's geometry, or the mutant it is
+  for survives.** PR #58's I4 (a scrolled composer's line confirmed only
+  once the box changed) survived twice. The stand-in first scrolled by
+  whole lines, then by wrapped rows but with the long line where the row it
+  pushed off the top was blank, and `compact` ignores whitespace. It went
+  red once the long line came last, after a row of text, which is the
+  shape of the live message that failed. When a mutant survives a
+  stand-in, ask what the real window does that the stand-in does not.
 
 ## Replying in the thread
 
@@ -77,6 +126,71 @@ asserts in order; the mutants and the assertion each turned red; which SHA
 holds what (costmo may have pushed mid-work — say "the pushed X has the
 first cut; the rework is in the working tree"). The same goes in the task's
 completion note, with the suite's exit and counts.
+
+## The rounds after the first close
+
+A close is not always the end. QA's closing message can carry a new Info
+item marked "for your notes" or "yours to take or leave", found while
+re-measuring. PR #55 had three (Info 9, 10 and 11), each a way the last
+round's own test could miss its fault, and so four closes, at `f5c2a92`,
+`72017ab`, `0387b47` and `27efc57`. Each is a small round of the same
+shape: fix in the tree, a control and the mutants in a copy, the account
+to `appideas-qa` as a message (every thread is resolved by then, so there
+is nothing to reply under), and QA re-measures at costmo's next push and
+posts a closing note. What those rounds taught:
+
+- **Tell costmo the PR was approvable at the close.** The later rounds
+  harden tests and block nothing, and merge and deploy are his at any of
+  them. Say so in the report, in one line, each time.
+- **The candidate test is run from outside the tree** (`run-batches.mjs
+  --overlay`, **mutate-in-a-copy**), and copied in when its control is
+  green. This is the rule above, with the tool that makes it the easy way.
+  Not done in PR #57's round after the close, and it cost twice in twenty
+  minutes: costmo pushed `e5cce3c` with a fix whose suites were still
+  running (QA found the case it missed), then `5e0774e` with a new
+  `test:renew` row that redeclared a name, so the suite did not load at a
+  pushed SHA. Both were edits resting in the tree while a chain ran. If an
+  edit must go into the tree first, `node --check` every test file touched
+  in the same command as the edit, and run the changed suite alone and
+  first, in the foreground, so its result is read in a minute and not at
+  the end of a ten-minute chain.
+- **Take QA's pin as a mutant and run it** before answering, and before
+  offering a different fix. Their pin is usually a change to a stand-in.
+  Four runs settle it: control, fault, fault with the pin, pin alone.
+- **A fix for "the test reads too early" is not a longer wait.** Info 9
+  was a read straight after `send()`, Info 10 a count that could not see a
+  repeat, Info 11 the 400 ms sleep that answered Info 10. What held was a
+  row that needs no timer: the whole key log, read at the end of the
+  section, after later sends had waited on their own receipts (CLAUDE.md,
+  Tests, "an absence has nothing to wait on").
+- **A hash is given with its algorithm.** Bare `shasum` is SHA-1, QA
+  reads sha256, and the two were taken for two files.
+
+## Closing a PR into main
+
+Learned at the end of PR #57 (2026-11-17), which ran five rounds past its
+first close and ended with costmo asking what was stopping the merge. The
+rules are in CLAUDE.md, Conventions; this is the order.
+
+1. **QA calls it approvable.** From here nothing goes into the tree
+   (notes, skills, lists, facts included) until he has merged. Hold every
+   lesson for one batch after. A non-blocking Info from QA is named to him
+   as "after the merge".
+2. **Run the full chain at the head, unasked**: `npm test`, Node 24
+   first on PATH, alone on the machine. Tell QA first: they run their own
+   behind yours.
+3. **Then the release page checks**: `run-release-pages.sh` in
+   **verify-ui-change**. It works in a copy, so the tree does not move.
+4. **Report once**: the head SHA, both exits and counts, each page check's
+   verdict, and what is red and why. Never "merge is yours" without those
+   numbers in the same message.
+5. **After he merges**: the held lessons, in one batch, on whatever branch
+   he is on next, and the marketing facts re-anchor if code moved.
+
+**Say "whole" after every push in a round.** QA asks whether a pushed SHA
+is the whole round and holds its write-up until told. At 775672c the
+answer was owed and not sent, and QA wrote "I have no word from you". The
+moment a push lands, say whether it is whole, file by file if not.
 
 ## What the channel gets
 

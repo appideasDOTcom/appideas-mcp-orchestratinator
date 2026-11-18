@@ -1,12 +1,13 @@
 {
   "name": "appideas-mcp-orchestratinator",
-  "version": "0.12.5",
+  "version": "0.12.11",
+  "protocol": 1,
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
   "description": "Shared MCP coordination server (mailbox + contracts + tasks + status dashboard) for coordinating Claude Code agents that live in separate VS Code windows.",
   "engines": {
-    "node": ">=22.14"
+    "node": ">=24"
   },
   "scripts": {
     "start": "node src/server.js",
@@ -14,17 +15,21 @@
     "smoke": "node test/smoke.mjs",
     "reanchor-facts": "node scripts/reanchor-facts.mjs",
     "set-version": "node scripts/set-version.mjs",
+    "release-gate": "bash scripts/release-gate.sh",
+    "coverage": "bash scripts/coverage/run.sh",
     "test:admin": "node test/admin.mjs",
     "test:auth": "node test/auth.mjs",
     "test:boardlog": "node test/board-log.mjs",
     "test:capture": "node test/capture.mjs",
     "test:update": "node test/update.mjs",
-    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:boardlog && npm run test:capture && npm run test:floor && npm run test:markdown && npm run test:plugin && npm run test:update && npm run test:host && npm run test:window",
+    "test": "npm run smoke && npm run test:admin && npm run test:auth && npm run test:boardlog && npm run test:capture && npm run test:floor && npm run test:markdown && npm run test:plugin && npm run test:update && npm run test:host && npm run test:window && npm run test:renew && npm run test:seats",
     "test:floor": "node test/floor.mjs",
     "test:markdown": "node test/markdown.mjs",
     "test:host": "node test/host.mjs",
     "host": "node host/index.js",
     "test:window": "node test/window.mjs",
+    "test:seats": "node test/seats.mjs",
+    "test:renew": "node test/renew.mjs",
     "test:plugin": "node test/plugin.mjs"
   },
   "dependencies": {
@@ -32,5 +37,8 @@
     "better-sqlite3": "^13.0.3",
     "express": "^4.21.2",
     "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "c8": "10.1.3"
   }
 }

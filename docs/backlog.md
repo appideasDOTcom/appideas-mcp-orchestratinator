@@ -61,55 +61,37 @@ before the operator ever sees the prompt. Needs measuring
 this is about not asking a question whose answer is already known, not about
 auto-answering one that isn't.
 
-## A startup prompt drops off the floor while an editor session shares the desk
+## Fixed in 0.12.11: an open question drops off the floor
 
-Found by QA reviewing PR #2, 2026-09-03. The fix that made the queue's wait age
-for a startup prompt survive a re-say (`src/floor.js`, the `startup` case's
-`at`) does not survive the desk's *own hooks* firing in between. Reproduced:
-an editor session on the same desk making an ordinary tool call — the
-headline scenario the surfaced-prompt feature exists for, "a desk that has
-been on the board all morning from VS Code" and then gets a *second*,
-tmux window opened on it that hits the dialog — sends `SessionStart`,
-`UserPromptSubmit`, `Stop`, or `PreToolUse`, and `ingestHookEvent`
-(`src/floor.js:662-668`) unconditionally deletes `live.pending` for the desk
-key on any of those, whatever kind of prompt is sitting there:
+Carried here from QA's review of PR #2 (2026-09-03) as "a startup prompt
+drops off the floor while an editor session shares the desk", and narrower
+than the defect. The milestone audit (2026-11-17, finding 1, High) measured
+the whole of it: **any** open question (a permission prompt, an
+AskUserQuestion, a startup question) disappeared from the floor when another
+session on the desk made a tool call, and at **every board restart**, and
+nothing raised it again, because a window standing on a question sends no
+further hook. The heartbeat's `pending`, meant to carry open prompts across
+a restart since 2026-08-28, was dead at both ends: the host never sent it
+and the board had no case for it.
 
-```js
-if (CLEARS_AWAITING.has(event)) {
-  store.clearAwaiting(sessionId);
-  if (live?.pending.has(key)) {
-    live.pending.delete(key);              // wipes a startup prompt too
-    live.publish(key, { type: 'permission', request: null });
-  }
-  live?.answered.delete(key);
-}
-```
+What ships, in 0.12.11:
+- A prompt records the session that raised it, and only that session's own
+  work closes it (`ingestHookEvent`'s clear in `src/floor.js`). A startup
+  question records the window's, and closes when the host says it is gone.
+- Every heartbeat carries `pending`: each floor window whose bottom line
+  says it is asking (`askingIn` in `host/window.js`). The board raises
+  any it has forgotten and asks the host to read its choices
+  (`permission_request` in `applyHostEvent`), ignores one within
+  `RESAY_QUIET_MS` of an answer, and closes one it raised when the host
+  stops naming it. A host re-registers at once after a failed poll, so a
+  restarted board has its questions back within seconds.
+- Not covered: a question asked in an editor's chat. The host cannot read
+  that window, so after a board restart it is raised again by that
+  window's own next hook only.
 
-The reasoning above it is right for what it was written for — a permission
-prompt on the *same* session that just made a tool call, closed by the work
-that answered it — but a startup prompt belongs to a *different* session (the
-booting tmux window) than whichever session's hooks are firing, and nothing
-here checks that. So the prompt vanishes from the floor, the desk drops out of
-the queue, and it does not come back until the host's next re-say
-(`STARTUP_RESAY_MS`, up to a minute) — at which point it is genuinely a fresh
-`live.pending` entry (no `open.request_id` to match against), so the age
-resets too, on top of the drop. QA verified this is the *only* case the `at`
-fix leaves open — every other inversion aimed at the fix held.
-
-Not blocking PR #2: visible (the desk clearly leaves the queue and returns),
-recoverable (it does come back), and the presser it feeds is unaffected —
-`answerStartup` still refuses to press a dialog that has moved on. Low
-severity, carried here per costmo's direction 2026-09-03.
-
-The fix is narrowing the clear, not removing it: `CLEARS_AWAITING`'s wipe of
-`live.pending` should only apply when the pending request belongs to the
-*session that just reported*, not to the desk as a whole — e.g. skip the
-`live.pending` clear (leave `store.clearAwaiting(sessionId)` alone, that part
-is correctly scoped to the session already) when `live.pending.get(key)?.startup`
-is true and the event's own session isn't the one the prompt is tracking.
-Needs a real host + real hook traffic to prove, not just synthetic events —
-the interaction is between two *different* sessions reporting to the same
-desk key, which is exactly what a single synthetic event can't reproduce.
+Rows: `test:floor` "an open question stays on the floor" and the restart
+row beside the suite's own board restart; `test:host` restarts the board
+while a real pane asks and reads the question back on the floor.
 
 ## Linux and Windows backends for the folder picker
 

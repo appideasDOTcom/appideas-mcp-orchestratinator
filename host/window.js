@@ -35,6 +35,8 @@ import { basename, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { readDesk } from './identity.js';
+import { configPath } from './seats.js';
+import { log, warn } from './log.js';
 
 const run = promisify(execFile);
 
@@ -99,6 +101,33 @@ const TMUX = process.env.ORCH_TMUX ?? 'tmux';
  */
 const SEP = '|';
 const SESSION = (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._-]/g, '-') || 'orch';
+/**
+ * The session, named so that tmux cannot give the name to another one.
+ *
+ * tmux hands a session target to any session whose name BEGINS with it when
+ * none has the name exactly. Measured on 3.7c (2026-11-16; QA, PR #57 round
+ * 2, item 3; costmo: fix it in that PR): with no `orch` standing and a
+ * session called `orchid`, `has-session -t orch` exits 0, `list-panes -t
+ * orch` lists orchid's panes, `new-window -t orch:` makes its window in
+ * orchid, and `send-keys -t orch:` types into it. So the first desk window
+ * after a reboot, or after the floor's last window closed, was opened inside
+ * whatever session of the operator's own had a name starting with "orch" —
+ * a suite's `orch-test-<pid>` on this machine, anybody's `orchestra` on
+ * theirs. A leading `=` makes the match exact: `has-session -t =orch` exits
+ * 1 with "can't find session: orch". It needs the colon wherever the target
+ * is a window's and not a session's: `list-panes -t =orch` (no colon) still
+ * listed orchid's pane, `-t =orch:` did not.
+ *
+ * So every target this file writes from the name is EXACT for a session
+ * (has-session, list-clients) and `${EXACT}:` for a window in it. The
+ * targets tmux gives back (`orch:@4.%7`) are left as they are: a window id
+ * is the server's own, and with the session gone `send-keys -t orch:@9.%9`
+ * is refused ("can't find window: @9") whatever else begins with "orch".
+ * `attach -t orch` is left too: it is a line for a shell, where `=orch` is
+ * a command lookup in zsh, and it runs only after the exact has-session
+ * beside it has passed, when the exact name is what tmux prefers.
+ */
+const EXACT = `=${SESSION}`;
 const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
 /** Long enough for a cold `claude agents --json`, short enough not to stall a poll. */
 const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
@@ -191,7 +220,9 @@ async function tmux(args, { timeout = 5000 } = {}) {
     return { ok: true, out: stdout.trim() };
   } catch (err) {
     if (err?.code === 'ENOENT') return { ok: false, missing: true, error: 'tmux is not installed' };
-    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim() };
+    // What it printed before it failed is kept: two commands in one call can
+    // have the first succeed and say so (open(), a seat's tag).
+    return { ok: false, error: (err?.stderr || err?.message || String(err)).trim(), out: String(err?.stdout ?? '').trim() };
   }
 }
 
@@ -217,6 +248,35 @@ export function canonical(p) {
   if (typeof p !== 'string' || !p) return p;
   try { return realpathSync.native(p); } catch { return p; }
 }
+
+/* ───────────────────────── which window ───────────────────────── */
+
+/**
+ * Where a window is: a folder, or a folder and a seat.
+ *
+ * For as long as a folder was one desk, the directory was a window's whole
+ * identity (paneIn, below), and every function here takes it as its first
+ * argument. One agent with several sessions at once (host/seats.js) puts
+ * several windows in one folder, each a different desk, and the directory
+ * no longer says which. So the first argument is either the folder, as it
+ * always was, for the folder's own desk, or `{ cwd, seat }` for a seat,
+ * where `seat` is the tag its tmux window carries (`@orch_seat`).
+ *
+ * The folder's own window is the one with no tag, and that is the rule that
+ * keeps every desk that existed before seats exactly as it was: nothing
+ * tags a window but open() for a seat, so a host with no seats finds every
+ * window as it always did.
+ */
+export const cwdOf = (where) => (typeof where === 'string' ? where : where?.cwd ?? null);
+export const seatOf = (where) => (typeof where === 'string' ? null : where?.seat || null);
+/** The same place with its folder resolved. */
+const placed = (where) => {
+  const seat = seatOf(where);
+  const cwd = canonical(cwdOf(where));
+  return seat ? { cwd, seat } : cwd;
+};
+/** The tmux option a seat's window is tagged with. */
+export const SEAT_OPTION = '@orch_seat';
 
 /* ───────────────────────── the roster ───────────────────────── */
 
@@ -327,13 +387,25 @@ async function rosterViaCli() {
   };
 }
 
-/** The live session for a repo, if one is open. Newest wins if a repo has two. */
-export async function sessionFor(cwd) {
+/**
+ * The roster's sessions that are this desk's: the ones in its folder, and of
+ * those, for a seat the ones running in a window tagged as it, and for the
+ * folder's own desk the ones that are in no seat's window (its own window,
+ * and anything an editor runs there). `all` is panes().
+ */
+export function sessionsAt(where, sessions, all) {
+  const here = canonical(cwdOf(where));
+  const seat = seatOf(where);
+  const seatByPid = new Map(all.filter((p) => p.seat && p.pid).map((p) => [p.pid, p.seat]));
+  return sessions.filter((s) => s.cwd === here && (seatByPid.get(s.pid) ?? null) === seat);
+}
+
+/** The live session for a desk, if one is open. Newest wins if it has two. */
+export async function sessionFor(where) {
   const r = await roster();
   if (!r.ok) return { ...r, session: null };
-  const here = canonical(cwd);
-  const mine = r.sessions
-    .filter((s) => s.cwd === here && s.kind === 'interactive')
+  const mine = sessionsAt(where, r.sessions, await panes())
+    .filter((s) => s.kind === 'interactive')
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   return { ok: true, session: mine[0] ?? null };
 }
@@ -615,7 +687,42 @@ async function answerKnown(target, done = new Set()) {
  * the window that is still booting and is lost. The pane's own process is the
  * only unambiguous way to ask about the window we actually opened.
  */
-export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
+/**
+ * Whether tmux's answer to a question asked of `target` says that pane is
+ * gone, and which answer said so; null when it does not.
+ *
+ * `answer` is what `display-message -p -t <target> '#{pane_id} …'` gave.
+ * tmux does not refuse a target whose pane has been killed. Each shape was
+ * measured on 3.7c (2026-11-16, QA's PR #57 Info 10 and the rounds after):
+ *
+ *   other_pane  another pane of the session is left: exit 0, and the answer
+ *               is that pane's (`%1 0` for `%0`)
+ *   no_pane     it was its session's only pane and other sessions remain,
+ *               or the server is in the act of going: exit 0 and nothing
+ *   no_server   it was the last pane of all: exit 1, "no server running on
+ *               …"; "error connecting to …" for a socket that is gone; and
+ *               "server exited unexpectedly" for a call that met the
+ *               server as it went (7 of QA's 40 trials)
+ *
+ * Any other failed call is null: a tmux that timed out under load says
+ * nothing about the window. A function of its own so each answer has a row
+ * that does not depend on which one tmux happens to give: asked in the
+ * 400 ms after the last pane is killed, its first answer was the empty one
+ * in 27 of QA's 40 trials and "no server running" in 6, and a row that
+ * killed a pane and then looked passed with the no_server arm taken out,
+ * one run in eight.
+ */
+export function paneGone(answer, target) {
+  if (!answer?.ok) return /no server running|error connecting to|server exited unexpectedly/.test(answer?.error ?? '') ? 'no_server' : null;
+  const asked = /%\d+$/.exec(String(target ?? ''))?.[0] ?? null;
+  if (!asked) return null;
+  const now = String(answer.out ?? '').trim().split(' ')[0];
+  if (!now) return 'no_pane';
+  return now !== asked ? 'other_pane' : null;
+}
+
+export async function waitReady(where, { timeoutMs = READY_TIMEOUT_MS, pid = null, target = null } = {}) {
+  const cwd = cwdOf(where);
   const stop = Date.now() + timeoutMs;
   let seen = [];
   const answered = [];
@@ -624,8 +731,32 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
     // Did it exit? A window that is gone is never going to become ready, and
     // waiting the full timeout to say nothing useful about it helps nobody.
     if (target) {
-      const dead = await tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
-      if (dead.ok && dead.out.trim() === '1') {
+      const dead = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{pane_dead}']);
+      const deadNow = dead.ok ? dead.out.trim().split(' ')[1] : null;
+      // Gone altogether, not exited: killed with its window, by hand or by
+      // whatever closed it. tmux does not say so. Asked about a pane that no
+      // longer exists it answers for another pane of the session, exit 0
+      // (measured on 3.7c: `display-message -p -t 'p:@1.%1' '#{pane_dead}'`
+      // after `kill-pane` printed 0), so the read above took a closed window
+      // for a live one and this loop waited out the whole timeout on it —
+      // 45 s with the host's line held, every piece of work behind it
+      // waiting. That was test:host's "Take a desk seven" (QA, PR #57 Info
+      // 10: 46 s of nothing in the host's log, then a bind that took 37 ms).
+      // So the pane is asked for by its id, and an answer that is not about
+      // it is the window being gone (paneGone, above, has every shape tmux
+      // gives; the first cut knew one of them, and QA found it waiting out
+      // its limit on the others and then saying "Claude Code is open in
+      // that window", which was not so). `gone` is which answer said it.
+      const gone = paneGone(dead, target);
+      if (gone) {
+        return {
+          ok: false,
+          code: 'window_gone',
+          gone,
+          error: 'the window was closed before Claude Code had finished starting in it',
+        };
+      }
+      if (dead.ok && deadNow === '1') {
         const last = await tmux(['capture-pane', '-p', '-t', target, '-S', '-40']);
         await tmux(['kill-window', '-t', target]);
         const said = (last.out ?? '').split('\n').map((l) => l.trimEnd()).filter(Boolean).slice(-6).join(' / ');
@@ -674,7 +805,7 @@ export async function waitReady(cwd, { timeoutMs = READY_TIMEOUT_MS, pid = null,
     seen = all.sessions;
     const session = pid
       ? all.sessions.find((s) => s.pid === pid) ?? null
-      : (await sessionFor(cwd)).session;
+      : (await sessionFor(where)).session;
     if (session) {
       // Up and running: let the window close normally from here on.
       if (target) await tmux(['set-option', '-w', '-t', target, 'remain-on-exit', 'off']);
@@ -721,6 +852,28 @@ export function windowName(cwd) {
   return basename(cwd).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) || 'desk';
 }
 
+/** A seat's window: its folder, then its floor and agent, read off the tag.
+ *  No dot, because open() names this window in a tmux target to tag it. */
+export function seatWindowName(cwd, seat) {
+  const who = String(seat).split('/').map((part) => { try { return decodeURIComponent(part); } catch { return part; } }).join('-');
+  return `${basename(cwd)}-${who}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 60) || 'seat';
+}
+
+/** The variable a seat's window carries: the path of its binding file. */
+export const SEAT_ENV = 'ORCH_DESK_CONFIG';
+
+/** tmux `-e` arguments for a seat's window: what the plugin's hook reads to
+ *  report as this desk and not as the folder's (plugin/hooks/report.mjs). */
+export function seatEnv(cwd, seat, file) {
+  const [channel, agent] = String(seat).split('/').map((part) => { try { return decodeURIComponent(part); } catch { return part; } });
+  return [
+    '-e', `${SEAT_ENV}=${file}`,
+    '-e', `ORCH_DESK_ROOT=${cwd}`,
+    '-e', `ORCH_CHANNEL=${channel}`,
+    '-e', `ORCH_AGENT=${agent}`,
+  ];
+}
+
 /**
  * How many terminals are attached to our session right now.
  *
@@ -733,29 +886,43 @@ export function windowName(cwd) {
  * Zero when tmux has no server or no such session: both mean nobody is looking.
  */
 export async function clientCount() {
-  const r = await tmux(['list-clients', '-t', SESSION, '-F', '#{client_name}']);
+  const r = await tmux(['list-clients', '-t', EXACT, '-F', '#{client_name}']);
   if (!r.ok || !r.out) return 0;
   return r.out.split('\n').filter(Boolean).length;
 }
 
-/** Every live pane in our tmux session. */
+/**
+ * Every live pane in our tmux session, and in no other.
+ *
+ * `-s`, the session's panes. It was `-a` under this same comment, and `-a`
+ * is every session on the server: measured 2026-11-16 on a socket of its
+ * own, with `orch` standing and a session `mine` holding a pane in a desk's
+ * folder, this listed both and `paneFor` gave `mine:@1.%1` as that desk's
+ * window. A message from the floor would have been typed into it, a shell
+ * as readily as Claude Code. costmo's ruling the same day: only the floor's
+ * own session. A Claude Code somebody started in a tmux session of their
+ * own is then a process in no pane of the floor's, which is what
+ * `holderOf` already calls held outside it, as an editor's is.
+ */
 export async function panes() {
   // The directory goes last and takes everything after the third separator: it
   // is the one field whose contents are not ours, and a directory is allowed
-  // to contain a '|'. The three before it are tmux's own ids and a flag.
-  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', '#{pane_current_path}'];
-  const r = await tmux(['list-panes', '-t', SESSION, '-a', '-F', fields.join(SEP)]);
+  // to contain a '|'. The four before it are tmux's own ids, a flag and a tag.
+  // The seat's tag is the host's own (seatTag in seats.js: percent-encoded,
+  // so it holds no separator) and empty on every window but a seat's.
+  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
+  const r = await tmux(['list-panes', '-t', `${EXACT}:`, '-s', '-F', fields.join(SEP)]);
   if (!r.ok || !r.out) return [];
   return r.out.split('\n')
     .map((line) => {
       const parts = line.split(SEP);
       if (parts.length < fields.length) return null;
-      const [target, dead, pid] = parts;
+      const [target, dead, pid, seat] = parts;
       // The window id is inside the target (session:@window.%pane). It is what
       // a person needs to be given to sit down at this desk, and pulling it
       // out of a string we already have beats another tmux call.
       const window = target.match(/@\d+/)?.[0] ?? null;
-      return { target, window, dead: dead === '1', pid: Number(pid) || null, cwd: parts.slice(3).join(SEP) };
+      return { target, window, dead: dead === '1', pid: Number(pid) || null, seat: seat || null, cwd: parts.slice(4).join(SEP) };
     })
     .filter((p) => p && p.target && p.cwd && !p.dead);
 }
@@ -783,13 +950,16 @@ async function windowNames() {
  * a second window — visible, and recoverable — rather than quietly typing into
  * the wrong one.
  */
-export function paneIn(all, cwd) {
-  const here = canonical(cwd);
-  return all.find((p) => canonical(p.cwd) === here) ?? null;
+export function paneIn(all, where) {
+  const here = canonical(cwdOf(where));
+  // And the seat, since a folder can hold several desks (see "which
+  // window"): a seat's window carries its tag, the folder's own carries none.
+  const seat = seatOf(where);
+  return all.find((p) => (p.seat ?? null) === seat && canonical(p.cwd) === here) ?? null;
 }
 
-export async function paneFor(cwd) {
-  return paneIn(await panes(), cwd);
+export async function paneFor(where) {
+  return paneIn(await panes(), where);
 }
 
 /**
@@ -802,7 +972,7 @@ export async function paneFor(cwd) {
  * the floor believing it held a desk because *some* pane existed, while the
  * conversation on screen was in an editor tab it could never reach.
  */
-export async function holderOf(cwd, sessionId) {
+export async function holderOf(where, sessionId) {
   const [r, all] = await Promise.all([roster(), panes()]);
   // A pane for this repo, found by *directory* rather than by pid.
   //
@@ -816,7 +986,7 @@ export async function holderOf(cwd, sessionId) {
   // "nothing here at all" the same answer, and the floor offered to open a
   // window that was already on screen waiting for a keypress. Measured on the
   // qa desk: pane alive, `held` null for 60s, the pane showing the MCP prompt.
-  const paneHere = paneIn(all, cwd);
+  const paneHere = paneIn(all, where);
   const nothing = { where: null, pid: null, window: null, paneWindow: paneHere?.window ?? null, holders: 0, kind: null, name: null, job: null };
   if (!sessionId || !r.ok) return nothing;
   // Every live process claiming this conversation, not the first one found.
@@ -828,8 +998,14 @@ export async function holderOf(cwd, sessionId) {
   if (!mine.length) return nothing;
   const live = mine[0];
   const pane = all.find((p) => p.pid === live.pid);
+  // A pane of ours, but another desk's: the folder holds several desks (see
+  // "which window") and this conversation is running in the window of one
+  // that is not the desk asked about. Not `floor`, which would have the
+  // caller type this desk's message into that desk's window, and not
+  // `editor`, which names a process nobody here started.
+  const theirs = pane && (pane.seat ?? null) !== seatOf(where);
   return {
-    where: pane ? 'floor' : 'editor',
+    where: pane ? (theirs ? 'other' : 'floor') : 'editor',
     pid: live.pid,
     window: pane ? pane.window : null,
     paneWindow: paneHere?.window ?? null,
@@ -992,6 +1168,8 @@ async function settled(target, { quiet = 2, tries = 20 } = {}) {
  * takes a paste.
  */
 export function composerOf(screen) {
+  const scrolled = scrolledComposerOf(screen);
+  if (scrolled != null) return scrolled;
   const lines = screen.split('\n');
   const rule = /^[\s│|]*[─━—-]{20,}/;
   let at = -1;
@@ -1025,6 +1203,38 @@ export function composerOf(screen) {
   // in the composer" about a message that had been queued and answered.
   return QUEUE_PLACEHOLDER.test(text) ? '' : text;
 }
+
+/**
+ * The composer when Claude Code has scrolled it: the visible rows of a box
+ * whose top border reads `─── ↑ 3 more ───`, or null for any other screen.
+ *
+ * The composer is at most so many rows tall (7 on an 80x24 pane, measured
+ * on 2.1.326, 2026-11-17), and a longer message scrolls inside it with that
+ * header in place of the top rule. Its `❯` row is then off the top, so
+ * composerOf found no box (null), or, with an earlier message's `❯` echoed
+ * in the transcript above, read from there down. That is how a five-line
+ * message with two attachments, typed into an unattached 80x24 window, read
+ * as "line 5 did not appear" and was pasted after all, into
+ * <pasted_content> (issue #31's second live test). What this returns is
+ * only the END of what is in the box; scrolledOf says when that is so.
+ */
+const MORE_HEADER = /^\s*[─━]{2,}\s*↑\s*\d+\s+more\b/;
+function scrolledComposerOf(screen) {
+  const lines = String(screen ?? '').split('\n');
+  const rule = /^[\s│|]*[─━—-]{20,}/;
+  let bottom = -1;
+  for (let n = lines.length - 1; n >= 0; n--) {
+    if (rule.test(lines[n]) && !MORE_HEADER.test(lines[n])) { bottom = n; break; }
+  }
+  if (bottom < 1) return null;
+  for (let n = bottom - 1; n >= 0; n--) {
+    if (MORE_HEADER.test(lines[n])) return lines.slice(n + 1, bottom).join('\n').replace(/\s+$/, '');
+    if (rule.test(lines[n]) || /^\s*[❯>]/.test(lines[n])) return null;
+  }
+  return null;
+}
+/** Whether the composer on this screen is scrolled, so composerOf gave only its end. */
+export const scrolledOf = (screen) => scrolledComposerOf(screen) != null;
 
 /** The composer's own prompt once something is queued behind a running turn. */
 const QUEUE_PLACEHOLDER = /press up to edit queued messages/i;
@@ -1352,55 +1562,44 @@ export function overlayOf(screen) {
 }
 
 /**
- * The model picker, read off the pane: numbered rows, which one the cursor is
- * on, which one is current (✔). Its footer is the bottom line — "Enter to set
- * as default · s to use this session only · Esc to cancel" — and that line is
- * what makes it a picker; the rows are read only once it is.
+ * The cache warning a model switch raises on a conversation that is cached
+ * for the current model: "Switch model? … 1. Yes, switch to X / 2. No, go
+ * back". Measured 2026-11-03 behind the picker's `s`, and 2026-11-14 on
+ * 2.1.325 behind `/model <name>` as a command, mid-turn included; the digit
+ * answers it.
+ *
+ * The same dialog has a second title, "Change effort level?", for an
+ * `/effort <level>` that would rewrite the cached prefix (QA, PR #55
+ * finding 1), and is read as the same thing. That title is read from
+ * 2.1.325's own strings, where it shares every other line with the model's
+ * ("This conversation is cached for the current effort level. Switching
+ * to X means the full history gets re-read.", the same two choices). A
+ * live desk stood on it once, on 2.1.300 (2026-11-06, found in the desktop
+ * app's work on develop): "Change effort level? / Your next response will
+ * be slower and use more tokens / This conversation is cached for the
+ * current effort level. … / ❯ 1. Yes, switch to medium / 2. No, go back".
+ * Read as nothing then, it was left standing: the change was reported
+ * unconfirmed after 8 s, and the next two tries pasted "/model" at the
+ * dialog for a minute each. On 2.1.325 it was not raised again:
+ * `/effort <another level>` after a reply went straight through on Fable
+ * 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (probe, 2026-11-15), because
+ * those take effort per turn and a change keeps the cache. So the read is
+ * the model's, measured, with the title both the binary and that desk
+ * gave; a desk on a model that does not take effort per turn is where it
+ * stands.
+ *
+ * Read by position, like every other prompt: the dialog stands where the
+ * composer was, so its two choices are the pane's last two lines and its
+ * title is a few lines above them. It used to be the words anywhere in the
+ * capture, and a conversation that quotes "Switch model?" (this file's own
+ * desk does) would have had a `1` typed into its composer.
  */
-export function pickerOf(screen) {
-  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
-  const nonEmpty = lines.filter((l) => l.trim());
-  const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
-  // 2.1.322 ends the list with "▸ More models", and with the cursor on it the
-  // footer is "Enter to expand · Esc to cancel" (measured 2026-11-09 at
-  // 80x24). It is still the picker, with the cursor on no model: read as
-  // gone, the walk returned and left the picker open, and the desk's next
-  // /model was typed into it.
-  const onMore = /^Enter to expand\b/i.test(foot) && nonEmpty.some((l) => /^\s*Select model\s*$/.test(l));
-  if (!/s to use this session only/i.test(foot) && !onMore) return null;
-  const rows = [];
-  for (const l of nonEmpty) {
-    const m = /^\s*(❯)?\s*[↑↓]?\s*(\d+)\.\s+(.+?)(?:\s{2,}(.*))?$/.exec(l);
-    if (!m) continue;
-    rows.push({ n: Number(m[2]), label: m[3].replace(/\s*✔\s*$/, '').trim(), current: /✔/.test(m[3]), cursor: !!m[1], description: (m[4] ?? '').trim() });
-  }
-  return rows.length ? { rows, cursor: rows.find((r) => r.cursor)?.n ?? null } : null;
-}
-
-/** The cache warning a session-only switch raises on a conversation that is
- *  cached for what it is leaving: "Switch model? … 1. Yes, switch to X / 2. No,
- *  go back". Measured 2026-11-03; the digit answers it.
- *
- *  An effort-only change raises the same box under another heading, and that
- *  one was not known until a live desk stood on it (2026-11-06, 2.1.300):
- *  "Change effort level? / Your next response will be slower and use more
- *  tokens / This conversation is cached for the current effort level. … /
- *  ❯ 1. Yes, switch to medium / 2. No, go back". Read as nothing, it was left
- *  standing: the change was reported unconfirmed after 8 s, and the next two
- *  tries pasted "/model" at the dialog for a minute each.
- *
- *  Read from the bottom of the pane, not found anywhere in the capture — the
- *  rule reviewingOf follows, and for its reason: a conversation that quotes
- *  either heading above its composer would otherwise get a `1` typed into
- *  its message box. */
 export function switchConfirmOf(screen) {
-  const foot = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-10);
-  const at = foot.findIndex((l) => /^\s*(Switch model\?|Change effort level\?)\s*$/.test(l));
-  if (at < 0) return null;
-  const rest = foot.slice(at + 1);
-  if (!/^\s*2\.\s*No, go back\s*$/.test(rest[rest.length - 1] ?? '')) return null;
-  const m = /^\s*❯?\s*1\.\s*(Yes, switch to .*)$/.exec(rest[rest.length - 2] ?? '');
-  return m ? { yes: m[1].trim() } : null;
+  const nonEmpty = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const yes = /^\s*❯?\s*1\.\s*(Yes, switch to .+)$/.exec(nonEmpty[nonEmpty.length - 2] ?? '');
+  if (!yes || !/^\s*❯?\s*2\.\s*No, go back\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) return null;
+  if (!nonEmpty.slice(-9, -2).some((l) => /^\s*(Switch model|Change effort level)\?\s*$/.test(l))) return null;
+  return { yes: yes[1].trim() };
 }
 
 /** Complete JSONL records written past a byte offset. Never mid-line, for the
@@ -1424,8 +1623,15 @@ const SGR = /\x1b\[[0-9;]*m/g;
  *  tags and the SGR codes the window wrote inside them taken off. */
 function stdoutOf(records) {
   for (const d of records) {
-    if (d.type !== 'user' || d.isMeta) continue;
-    const t = textOf(d.message?.content);
+    // A command that did its job writes its line as a user record. One that
+    // refused writes it as a `system` record instead (subtype
+    // `local_command`, the text in `content`): measured 2026-11-14 on
+    // 2.1.325, "/model nonsense-9" left "Model 'nonsense-9' not found" there
+    // and nowhere else, and read as user records only, the host waited out
+    // twenty seconds on a window that had answered at once.
+    const refused = d.type === 'system' && d.subtype === 'local_command';
+    if (!refused && (d.type !== 'user' || d.isMeta)) continue;
+    const t = refused ? String(d.content ?? '') : textOf(d.message?.content);
     const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(t);
     if (m) return m[1].replace(SGR, '').trim();
   }
@@ -1441,6 +1647,26 @@ function commandRecordIn(records, name) {
 }
 
 /**
+ * What the window's own line says a `/model` or `/effort` did: the sentence
+ * (its first line, without the backticks the record carries), and the model
+ * and effort it names. Three shapes, each read off a real window on 2.1.325
+ * (2026-11-14):
+ *
+ *   Set model to `Haiku 5.5` and saved as your default for new sessions
+ *   Set model to `Sonnet 5.5` and saved as your default for new sessions with `high` effort
+ *   Set effort level to low (saved as your default for new sessions): Quick, …
+ *
+ * and the older "for this session only" forms, which a window's own picker
+ * still writes when a person presses `s` in it.
+ */
+export function switchedTo(stdout) {
+  const said = String(stdout ?? '').split('\n')[0].replace(/`/g, '').trim();
+  const model = /^Set model to (.+?)(?= and saved\b| for this session\b| with [a-z]+ effort\b|$)/i.exec(said);
+  const effort = /^Set effort level to ([a-z]+)\b/i.exec(said) ?? /\bwith ([a-z]+) effort\b/i.exec(said);
+  return { said, model: model ? model[1].trim() : null, effort: effort ? effort[1].toLowerCase() : null };
+}
+
+/**
  * The receipt a slash command actually produces, read where it is actually
  * written. Each is measured (2026-11-03, 2.1.300, issue #9), and none of them
  * is "a user record containing the text", which is what deliveryOf looks for
@@ -1453,10 +1679,13 @@ function commandRecordIn(records, name) {
  *   /compact  `<command-name>/compact` in the same file, then the window is
  *             compacting (see compactingOf) for 10–150 s
  *   /model X  `<command-name>/model…<command-args>X` plus a stdout record
- *             "Set model to `Sonnet 5.5` and saved as your default…", in the
- *             same millisecond; the args are in their own tag, so the text
- *             "/model X" is in no record
- *   /effort X the same shape: "Set effort level to low (saved as your default…"
+ *             "Set model to `Sonnet 5.5` and saved as your default for new
+ *             sessions", in the same millisecond; the args are in their own
+ *             tag, so the text "/model X" is in no record. A name the window
+ *             does not know is "Model 'X' not found", and nothing is saved
+ *             (re-measured 2026-11-14, 2.1.325)
+ *   /effort X the same shape: "Set effort level to low (saved as your default
+ *             for new sessions): Quick, straightforward…"
  *   /btw      nothing in any file; the overlay (btwOverlayOf)
  *   other     the command record, with whatever stdout followed it
  *
@@ -1498,8 +1727,13 @@ async function commandReceipt(cmd, { path, before, projectDir: dir, since, scree
     }
     case 'model':
     case 'effort': {
-      if (stdout) return { state: 'done', said: stdout.split('\n')[0] };
-      return null;
+      if (!stdout) return null;
+      // The window's line is the sentence, and what it names is what the
+      // board takes as confirmed: the model by the window's own label
+      // ("Sonnet 5.5") until a hook or the next reply names the id, the
+      // effort by its level. A line that names neither ("Model 'gpt' not
+      // found") confirms nothing, and is still what the desk is told.
+      return { state: 'done', ...switchedTo(stdout) };
     }
     case 'btw': {
       const o = btwOverlayOf(screen, cmd.args);
@@ -1548,6 +1782,27 @@ async function commandReceipt(cmd, { path, before, projectDir: dir, since, scree
 const TYPE_CHUNK = Number(process.env.ORCH_TYPE_CHUNK ?? 100);
 const TYPE_CHUNK_MS = Number(process.env.ORCH_TYPE_CHUNK_MS ?? 60);
 
+/**
+ * Whether a line typed into the composer has arrived, from the box before
+ * the line went in and the box now (both whitespace-free, as compact()
+ * gives them).
+ *
+ * - The box is what it was plus the line: arrived.
+ * - On the first line, the box is the line alone: arrived. What was there
+ *   was a prompt suggestion, which composerOf reads as text and the first
+ *   key typed replaces (issue #31's first live test).
+ * - A scrolled box shows only its end (scrolledOf), so the whole can never
+ *   be compared: arrived when the box changed and now ends with the line.
+ *   "Changed" is not decoration. A line that repeats the one before it (two
+ *   identical lines) is what the box already ends with before a key of it
+ *   lands (QA, PR #58 Info 4).
+ */
+export function lineArrived({ now, before, line, first = false, scrolled = false }) {
+  if (now === before + line) return true;
+  if (first && before && now === line) return true;
+  return !!(scrolled && now !== before && now.endsWith(line));
+}
+
 async function typeInto(target, text) {
   const lines = String(text).split('\n');
   const stop = Date.now() + PASTE_TIMEOUT_MS;
@@ -1560,13 +1815,17 @@ async function typeInto(target, text) {
         if (!typed.ok) return { ok: false, error: typed.error };
         if (at + TYPE_CHUNK < line.length) await sleep(TYPE_CHUNK_MS);
       }
-      const want = before + compact(line);
+      // When the line counts as arrived is lineArrived's (above): a prompt
+      // suggestion the first key replaced (measured on 2.1.326: unhandled,
+      // the message was pasted after all, wrapped, 10.1 s), and a box
+      // scrolled past its start. A draft a person really typed is not
+      // replaced by typing, so it still reads as before + line.
       const by = Date.now() + PASTE_CONFIRM_MS;
       let seen = !line;
       while (!seen && Date.now() < by) {
         await sleep(150);
-        const now = compact(composerOf(await screenOf(target)) ?? '');
-        if (now === want) seen = true;
+        const screen = await screenOf(target);
+        seen = lineArrived({ now: compact(composerOf(screen) ?? ''), before, line: compact(line), first: i === 0, scrolled: scrolledOf(screen) });
       }
       if (seen) break;
       if (attempt === 1 || Date.now() > stop) return { ok: false, code: 'typed_lost', error: `line ${i + 1} of ${lines.length} did not appear in the composer` };
@@ -1579,8 +1838,12 @@ async function typeInto(target, text) {
       await sleep(120);
     }
   }
-  const final = compact(composerOf(await screenOf(target)) ?? '');
-  if (final !== compact(text)) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
+  const finalScreen = await screenOf(target);
+  const final = compact(composerOf(finalScreen) ?? '');
+  // Scrolled, the box holds the message's end: every line was confirmed as
+  // it went in, so what shows must be the end of the message.
+  const whole = final === compact(text) || (scrolledOf(finalScreen) && final.length > 0 && compact(text).endsWith(final));
+  if (!whole) return { ok: false, code: 'typed_mismatch', error: 'the composer does not read back as the message' };
   return { ok: true, typed: true };
 }
 
@@ -1597,12 +1860,268 @@ async function clearComposer(target) {
  * it does in any terminal — which, for a repo that has a recent session, is
  * the same conversation the floor was just showing.
  */
-export async function open(cwd, { resume = null } = {}) {
+/* ---------- a tmux server that can no longer read a desk's folder ----------
+ *
+ * Measured 2026-11-10 on macOS 27.0.1, tmux 3.7c, after a desk died with
+ * "Can't read the current directory (EPERM)" mid-session and every window
+ * reopened for it died the same way on its first line:
+ *
+ *   - Every process in the `orch` server (up since 2026-11-08) was refused
+ *     `~/Documents` and every folder under it — `System Policy: <proc>
+ *     deny(1) file-read-data <path>` in the kernel log — except folders
+ *     carrying a `com.apple.macl` grant, which the folder dialog writes when
+ *     a folder is picked in it. So every desk taken through the dialog kept
+ *     working and a desk bound any other way did not, which is why it looked
+ *     like one folder's problem.
+ *   - A fresh tmux server started by the host's own node under launchd read
+ *     all of it, before and after that node exited, and TCC's log showed the
+ *     node's Documents grant intact (authValue=2, user consent) that morning.
+ *     tccd was not consulted at all for the refusals: the old server carried
+ *     a verdict of its own, and nothing short of a new server cleared it.
+ *   - How that server came to carry it was not found: the log from the day it
+ *     started had rotated. So this does not guess at a cause. It tests the one
+ *     thing that matters — can a process this server starts read the folder —
+ *     and when it cannot and a fresh server can, it moves every window to a
+ *     fresh server (costmo's ruling, 2026-11-10: nobody sees this error, even
+ *     once). A window is moved the way the floor reopens one: `--resume` of
+ *     the conversation it held.
+ *
+ * `run-shell` is the check because it is the server forking a shell, exactly
+ * as it forks a window's process: 16 ms, and its exit status is the answer.
+ * That a poisoned server's run-shell is refused like its windows is the same
+ * fork, not separately measured: by the time this was written there was no
+ * poisoned server left to try it on.
+ *
+ * Everything here runs on the host's work line (an open from a work item, or
+ * the heartbeat's check in run()), so nothing is being typed into a window
+ * while the server is replaced. A window mid-turn is waited for, up to
+ * RENEW_WAIT_MS; one holding a question is not, because the answer would
+ * have to come down the line this is holding — it is told instead, once it is
+ * back, as is a turn cut off at the limit and an agent that had already met
+ * the refusal. Those words go into the window labelled as the host's, since
+ * the agent is the one who has to act on them and the operator does not. */
+
+const RENEW_WAIT_MS = Number(process.env.ORCH_RENEW_WAIT_MS ?? 10 * 60_000);
+
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
+
+/** Whether a process this host's tmux server starts can read `dir`. Null when
+ *  there is no server to ask — a new one is made on the next open anyway.
+ *
+ *  `run-shell` with no `-t`, and that is not tidiness. Given a target, a
+ *  command that fails writes "'<cmd>' returned 1" into the target pane and
+ *  puts it in view-mode, and `orch:` is the session's current window — a
+ *  desk. Keys sent to a pane in view-mode go to the mode, so that desk's next
+ *  message was swallowed (`not_delivered`) while the floor's capture showed
+ *  the screen underneath (QA, PR #54 finding 1; measured on tmux 3.7c: with
+ *  `-t` the pane is left in mode, without it the exit is still 1, the words go
+ *  to this client's stdout, and no pane changes). A deleted folder is enough
+ *  to fail the read, at every heartbeat, because tmux goes on reporting it as
+ *  the pane's path. The `has-session` stays: with no server at all,
+ *  `run-shell` fails too, and that is not a refusal. */
+export async function serverReads(dir) {
+  if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;
+  return (await tmux(['run-shell', readsCmd(dir)])).ok;
+}
+
+/** The same question put to a tmux server started now, on a private socket and
+ *  gone straight after. Null if one could not be started. */
+export async function freshReads(dir) {
+  const sock = `orch-check-${process.pid}-${Date.now().toString(36)}`;
+  const made = await tmux(['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', 'check', 'sleep 30']);
+  if (!made.ok) return null;
+  try {
+    return (await tmux(['-L', sock, 'run-shell', readsCmd(dir)])).ok;   // no -t: see serverReads
+  } finally {
+    await tmux(['-L', sock, 'kill-server']);
+  }
+}
+
+let renewing = null;
+let renewedHook = null;
+/** index.js passes a function that puts a line on each moved desk. */
+export function onServerRenewed(fn) { renewedHook = fn; }
+
+/* Folders the floor's server still refused after a move to a fresh one. A
+ * move is made once for a refusal: a second would kill and resume every
+ * window again for nothing, and at the heartbeat that is every minute, each
+ * agent told "carry on" each time (QA, PR #54 finding 2, measured 3 of 3).
+ * Such a folder is said on its desk and skipped, and it leaves this set the
+ * first time the server reads it again. Nobody knows why the refusal came
+ * the first time, so the host does not promise that a second move would
+ * clear what the first did not: the fresh-server check is a private socket
+ * with no tmux.conf, which is not the server the move makes. */
+const stillRefused = new Set();
+
+/** What a desk is told about its window after a move, in the host's words. */
+export function renewNote(refused, m) {
+  if (m.stillRefused) return `the old tmux server had lost macOS permission to read ${refused}, so the host moved every window to a fresh one; the fresh server cannot read ${m.cwd} either. The host will not move the windows again for it.`;
+  if (!m.ok) return `the old tmux server had lost macOS permission to read ${refused}; reopening this desk in a fresh one failed: ${m.error}`;
+  if (!m.sessionId) return `moved to a fresh terminal window: the old tmux server had lost macOS permission to read ${refused}, and a fresh one can. Its window had not started a conversation yet, so it starts one there.`;
+  return `moved to a fresh terminal window: the old tmux server had lost macOS permission to read ${refused}, and a fresh one can.${m.told ? ' Told the agent so.' : ''}`;
+}
+
+/**
+ * Check every window's folder against the server it runs in, and move them
+ * all to a fresh server if any is refused there and readable from a fresh one.
+ * Returns what was done, or null when nothing needed doing.
+ */
+export async function checkServer() {
+  const seen = new Set();
+  for (const p of await panes()) {
+    const dir = canonical(p.cwd);
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if ((await serverReads(dir)) !== false) { stillRefused.delete(dir); continue; }
+    if (stillRefused.has(dir)) continue;
+    // A folder nothing can read — mode 000, or deleted under its window, which
+    // tmux still reports as the pane's path — is no reason to move anything:
+    // a fresh server would be refused it too, at every heartbeat.
+    if ((await freshReads(dir)) !== true) continue;
+    return renewServer(dir);
+  }
+  return null;
+}
+
+/** One move at a time: a second caller waits for the one under way. */
+export function renewServer(refused) {
+  renewing ??= renew(refused).finally(() => { renewing = null; });
+  return renewing;
+}
+
+async function renew(refused) {
+  const others = (await tmux(['list-sessions', '-F', '#{session_name}'])).out?.split('\n').filter((s) => s && s !== SESSION) ?? [];
+  if (others.length) {
+    // The server is the default socket's, so it may hold the person's own
+    // sessions too, and killing it would close them. Said, not done.
+    return { ok: false, refused, error: `the tmux server cannot read ${refused}, and it also runs tmux sessions that are not the floor's (${others.join(', ')}), so the host will not restart it` };
+  }
+  const { sessions = [] } = (await roster()) ?? {};
+  const byPid = new Map(sessions.map((s) => [s.pid, s]));
+  const moving = [];
+  for (const p of await panes()) {
+    const dir = canonical(p.cwd);
+    moving.push({ ...p, cwd: dir, sessionId: byPid.get(p.pid)?.sessionId ?? null, unreadable: (await serverReads(dir)) === false });
+  }
+  warn(`the tmux server cannot read ${refused}; a fresh one can — moving ${moving.length} window(s) to a fresh server`);
+
+  const stop = Date.now() + RENEW_WAIT_MS;
+  for (;;) {
+    let working = 0;
+    for (const p of moving) if (p.sessionId && await busy(p.target)) working++;
+    if (!working || Date.now() >= stop) break;
+    await sleep(1000);
+  }
+  for (const p of moving) {
+    const screen = (await tmux(['capture-pane', '-p', '-t', p.target])).out ?? '';
+    p.asking = !!askingOf(screen);
+    p.interrupted = isBusy(screen);
+  }
+
+  await tmux(['kill-server']);
+  const gone = moving.map((p) => p.pid).filter(Boolean);
+  for (const until = Date.now() + 10_000; Date.now() < until && gone.some(alive);) await sleep(200);
+
+  // Every window comes back, a window with no conversation yet included: it
+  // starts one, as it was about to (most often it stood on a startup question,
+  // which it asks again and the floor offers). Closed and only logged, that
+  // desk lost its window with nothing on the floor to say so (QA, PR #54
+  // Info 6). It is waited for and typed to only with a conversation: there is
+  // nothing to tell a new one, and a window on a startup question would hold
+  // waitReady to its timeout.
+  for (const p of moving) {
+    // `moving`, so that an open the new server refuses as well is said
+    // rather than moved for — from inside this move, open() asking for one
+    // more was this very promise waiting on itself (finding 2: B never
+    // reopened, and checkServer, awaited on the host's line, never returned).
+    // As the desk it was: a seat's window comes back tagged and on its own
+    // binding, or it would come back as the folder's desk (see "which window").
+    p.at = p.seat ? { cwd: p.cwd, seat: p.seat } : p.cwd;
+    p.r = await open(p.at, { resume: p.sessionId, moving: true });
+    if (p.r.ok && p.r.created && p.sessionId) await waitReady(p.at, { pid: p.r.pid, target: p.r.target });
+  }
+  // Did the move clear what it was for? Read on the new server, before any
+  // agent is told the folder is readable again.
+  for (const p of moving) {
+    p.stillRefused = p.r.code === 'unreadable' || (p.r.ok && (await serverReads(p.cwd)) === false);
+    if (p.stillRefused) stillRefused.add(p.cwd);
+  }
+  const still = moving.filter((p) => p.stillRefused).map((p) => p.cwd);
+  if (still.length) warn(`after moving to a fresh tmux server, it still cannot read ${still.join(', ')}; the host will not move the windows again for that`);
+
+  const moved = [];
+  for (const p of moving) {
+    const r = p.r;
+    const why = !p.sessionId || p.stillRefused ? null
+      : p.interrupted ? 'Your turn was cut off by the move; carry on with what you were doing.'
+        : p.asking ? 'The question or permission request you had open was closed by the move; ask it again.'
+          : p.unreadable ? 'The folder is readable again; if you stopped on a permission error (EPERM), carry on.'
+            : null;
+    if (r.ok && why) {
+      await send(p.at, `[Orchestratinator host, not the operator] This window was moved to a fresh terminal server because the old one had lost macOS permission to read this folder. ${why}`);
+    }
+    moved.push({
+      cwd: p.cwd,
+      seat: p.seat ?? null,
+      sessionId: r.resumed ?? p.sessionId,
+      ok: r.ok && !p.stillRefused,
+      stillRefused: p.stillRefused,
+      error: r.ok ? null : r.error ?? null,
+      told: r.ok ? why : null,
+    });
+  }
+  const out = { ok: true, refused, moved };
+  try { renewedHook?.(out); } catch (err) { warn(`after moving to a fresh tmux server: ${err.message}`); }
+  return out;
+}
+
+export async function open(where, { resume = null, moving = false } = {}) {
+  const cwd = cwdOf(where);
   if (!existsSync(cwd)) return { ok: false, error: `no such directory: ${cwd}` };
 
   const here = canonical(cwd);
-  const already = await paneFor(here);
+  // The desk this window is for: the folder's own, or one of its seats (see
+  // "which window"). `here` stays the folder, for everything that is about
+  // the folder: whether the server can read it, its transcripts, its model.
+  const seat = seatOf(where);
+  const at = seat ? { cwd: here, seat } : here;
+  const already = await paneFor(at);
   if (already) return { ok: true, target: already.target, created: false };
+  // A seat's window starts with the binding in its own file (host/seats.js),
+  // which the host writes whenever it looks at its desks. Without it the
+  // window would come up as the folder's desk, under the seat's name.
+  const seatFile = seat ? configPath(seat) : null;
+  if (seatFile && !existsSync(seatFile)) {
+    return { ok: false, code: 'no_seat_file', error: `this desk's binding file is missing (${seatFile}), so a window for it would start as the folder's own desk; nothing was opened` };
+  }
+
+  // A window this server starts must be able to read its folder, or Claude
+  // Code exits on its first line with EPERM — see "a tmux server that can no
+  // longer read a desk's folder" above. `moving` is renew() reopening its
+  // windows, and the server it asks is the fresh one; a folder a move has
+  // already failed to clear is not moved for again (see stillRefused).
+  const reads = await serverReads(here);
+  if (reads !== false) stillRefused.delete(here);
+  else if (moving || stillRefused.has(here)) {
+    return { ok: false, code: 'unreadable', error: `the floor's tmux server cannot read ${here}, and moving every window to a fresh server did not change that, so the host will not move them again for it` };
+  } else {
+    const fresh = await freshReads(here);
+    if (fresh === false) {
+      return { ok: false, code: 'unreadable', error: `macOS will not let anything the host starts read ${here} (EPERM), in a new terminal server as well as the current one` };
+    }
+    if (fresh === true) {
+      const r = await renewServer(here);
+      if (!r.ok) return { ok: false, code: 'unreadable', error: r.error };
+      const now = await paneFor(at);
+      if (now) return { ok: true, target: now.target, created: false };
+      // A folder with no window of its own was not among the move's checks.
+      if ((await serverReads(here)) === false) {
+        stillRefused.add(here);
+        return { ok: false, code: 'unreadable', error: `the floor's tmux server cannot read ${here}, and moving every window to a fresh server did not change that, so the host will not move them again for it` };
+      }
+    }
+  }
 
   // A live process claiming this conversation and not in a pane of ours
   // blocks a second copy, whatever kind it is. Opening one "for the floor" is
@@ -1615,8 +2134,17 @@ export async function open(cwd, { resume = null } = {}) {
   // conversation was found by holderOf and lost again, and the window opened
   // a second copy for Claude Code to refuse on its first line (2026-09-09).
   // holderOf already has the pid; use it.
-  const held = await holderOf(here, resume);
+  const held = await holderOf(at, resume);
   let released = null;
+  // Running in another desk's window in this folder: one process holds a
+  // conversation, and that window is not this desk's to type into.
+  if (held.where === 'other') {
+    return {
+      ok: false,
+      code: 'held_by_other_desk',
+      error: `That conversation is open in the window of another desk in this folder (${held.window}, pid ${held.pid}). One window holds a conversation at a time, so it was not opened here as well.`,
+    };
+  }
   if (held.where === 'editor') {
     if (held.kind !== 'background') {
       return {
@@ -1634,8 +2162,13 @@ export async function open(cwd, { resume = null } = {}) {
   // Keep the plain repo name when it is free, so `tmux attach` reads as a list
   // of desks. When another repo has already taken it, disambiguate rather than
   // create a second window with the same name — see paneFor.
-  const taken = (await windowNames()).includes(windowName(here));
-  const name = taken ? `${windowName(here)}-${(Math.abs(hash(here)) % 65536).toString(16).padStart(4, '0')}` : windowName(here);
+  // A seat's window is named for its folder and its floor, with no dot in
+  // it: its tag is set by naming the window in the same tmux command that
+  // makes it (below), and a dot in a tmux target is where the pane begins.
+  const names = await windowNames();
+  const plain = seat ? seatWindowName(here, seat) : windowName(here);
+  const taken = names.includes(plain);
+  const name = taken ? `${plain}-${(Math.abs(hash(seat ? `${here}|${seat}` : here)) % 65536).toString(16).padStart(4, '0')}` : plain;
   // `claude` is exec'd rather than run from a shell so the pane dies with the
   // session instead of dropping to a prompt that looks like a live window.
   //
@@ -1666,16 +2199,22 @@ export async function open(cwd, { resume = null } = {}) {
   // resumable(). A pin that never became a transcript makes `claude` print
   // "No conversation found with session ID" and exit, and the window dies on
   // its first line with the desk's own conversation sitting one file over.
-  const pick = await resumable(here, resume);
+  const pick = await resumable(at, resume);
   // And which model it comes up on: the operator's default, passed as
   // `--model`, because a resume on its own restores the conversation's last
   // model over the settings file — see defaultModel(). After `--resume <id>`
   // rather than before: claude does not care where the flag sits, and the
   // test stand-in reads the resumed id as `$2`.
   const model = defaultModel(here);
+  // A seat's binding goes last, as `--mcp-config <file>`: measured on
+  // 2.1.325, an entry there under the folder's own server name takes that
+  // entry's place in this window (host/seats.js). The file's path and not
+  // its contents, because tmux keeps and prints a pane's start command and
+  // the contents hold the board's key.
   const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE,
     ...(pick.id ? ['--resume', pick.id] : []),
-    ...(model ? ['--model', model] : [])]
+    ...(model ? ['--model', model] : []),
+    ...(seatFile ? ['--mcp-config', seatFile] : [])]
     .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
     .join(' ');
 
@@ -1687,7 +2226,7 @@ export async function open(cwd, { resume = null } = {}) {
   // message that opened it would be lost. `-P -F` prints the new pane's target
   // as part of creating it, which is exact and cannot race.
   const FORMAT = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_pid}'].join(SEP);
-  const has = await tmux(['has-session', '-t', SESSION]);
+  const has = await tmux(['has-session', '-t', EXACT]);
   // `-t 'orch:'`, with the colon, and not `-t orch`. new-window's target is a
   // *window index*, and tmux resolves a bare name against window names before
   // session names — by prefix. The day a desk whose folder was called
@@ -1699,10 +2238,36 @@ export async function open(cwd, { resume = null } = {}) {
   // The trailing colon is the session with no window part, which is the next
   // free index — what the bare name only appeared to mean.
   // The key a placeholder desk cannot get from the tmux server — see useKey.
-  const env = paneEnv(readDesk(here));
-  const made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${SESSION}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`])
-    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`]);
+  // A seat's window is given the path of its binding file instead, for the
+  // plugin's hook: the hook finds a desk by its folder, and in a seat's
+  // window the folder names another desk (plugin/hooks/report.mjs).
+  // With it, the folder the window starts in (the hook's `cwd` for the
+  // desk, wherever the agent wanders) and the desk's two names, which the
+  // hook has let stand in for the folder's since its first commit — so a
+  // window on a machine whose plugin predates the file still reports as
+  // itself (seen on real windows with 0.12.8 installed, 2026-11-16).
+  const env = seat ? seatEnv(here, seat, seatFile) : paneEnv(readDesk(here));
+  // And its tag, in the same tmux command that makes the window, so that no
+  // reader of panes() ever sees a seat's window untagged: untagged, it is
+  // the folder's own (paneIn), and the watch loop is a loop of its own.
+  // `=name` is an exact window name. Measured on tmux 3.7c: `set-option -w`
+  // with no target after a detached new-window tags the *current* window,
+  // and a name with a dot in it is "no such window".
+  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
+  let made = has.ok
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag])
+    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag]);
+  // The window made and the tag refused: tmux printed the new pane and then
+  // failed. Tagged by the pane it named, or closed, never left untagged.
+  if (!made.ok && seat && made.out?.includes(SEP)) {
+    const target = made.out.split('\n')[0].split(SEP)[0].trim();
+    const set = await tmux(['set-option', '-w', '-t', target, SEAT_OPTION, seat]);
+    if (!set.ok) {
+      await tmux(['kill-window', '-t', target]);
+      return { ok: false, error: `opened a window for this desk but could not mark it as this desk's (${set.error}), so it was closed again` };
+    }
+    made = { ok: true, out: made.out };
+  }
   if (!made.ok) return { ok: false, error: made.error, missing: made.missing };
   // `new-session -e` is not `new-window -e`: it sets the variable in the
   // *session's* environment, so every later window in it inherited the key
@@ -1711,7 +2276,9 @@ export async function open(cwd, { resume = null } = {}) {
   // partner's 33 placeholder desks that is likely one of them. Unset at once:
   // the pane already has its copy, and a later window gets one only by its
   // own `-e`.
-  if (!has.ok && env.length) await tmux(['set-environment', '-t', `${SESSION}:`, '-u', env[1].split('=')[0]]);
+  if (!has.ok) {
+    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${EXACT}:`, '-u', env[i].split('=')[0]]);
+  }
   const [target, pid] = made.out.split('\n')[0].split(SEP);
   if (!target?.trim()) return { ok: false, error: 'tmux created the window but did not say where' };
 
@@ -1742,19 +2309,28 @@ export async function open(cwd, { resume = null } = {}) {
 /**
  * The window a message to this repo goes into, opening one when allowed.
  *
- * The first half of send(), on its own because the model picker needs the
- * same window the same way. Returns the pane, the conversation's transcript
+ * The first half of send(). It stands on its own because the model picker's
+ * driver once needed the same window the same way (pick(), removed
+ * 2026-11-14). Returns the pane, the conversation's transcript
  * path (null for a stand-in with no session, which is what the tests drive),
  * and what opening it had to say.
  */
-async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
-  const here = canonical(cwd);
+async function windowFor(where, { open: autoOpen = false, resume = null } = {}) {
+  const here = canonical(cwdOf(where));
+  const at = placed(where);
 
   // Which window, if any, is running this conversation — and whether it is one
   // we can type into. A folder can hold several conversations at once, so
   // "some pane exists here" is not the same question and answering it that way
   // typed into whichever window happened to be open.
-  const held = await holderOf(here, resume);
+  const held = await holderOf(at, resume);
+  if (held.where === 'other') {
+    return {
+      ok: false,
+      code: 'held_by_other_desk',
+      error: `That conversation is open in the window of another desk in this folder (${held.window}, pid ${held.pid}). One window holds a conversation at a time; this desk's message was not typed into it.`,
+    };
+  }
   // A background session holding it is released by open() below, when this
   // message may open a window — the same move as a click on the floor.
   // Without that leave it is a refusal, with the reason.
@@ -1769,16 +2345,16 @@ async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
   let pane = held.where === 'floor' ? (await panes()).find((p) => p.pid === held.pid) ?? null : null;
   // With no conversation named, the folder is all there is to go on — which
   // is right for a caller that just wants "this repo's window".
-  if (!pane && !resume) pane = await paneFor(here);
+  if (!pane && !resume) pane = await paneFor(at);
   let opened = null;
   if (!pane && autoOpen) {
-    opened = await open(here, { resume });
+    opened = await open(at, { resume });
     if (!opened.ok) return opened;
     // A pane is not a session. Claude Code takes a moment to start, and on a
     // repo it has not seen before it stops to ask whether the folder is
     // trusted and whether to use its MCP servers. Pasting during any of that
     // types the message into a dialog, where it is both lost and confusing.
-    const up = await waitReady(here, { pid: opened.pid, target: opened.target });
+    const up = await waitReady(at, { pid: opened.pid, target: opened.target });
     if (!up.ok) return up;
     pane = { target: opened.target, pid: opened.pid };
   }
@@ -1791,7 +2367,7 @@ async function windowFor(cwd, { open: autoOpen = false, resume = null } = {}) {
   // typed into.
   const known = await roster();
   const live = (pane.pid ? known.sessions.find((s) => s.pid === pane.pid) : null)
-    ?? (await sessionFor(here)).session
+    ?? (await sessionFor(at)).session
     ?? null;
   const path = live?.sessionId ? transcriptPath(here, live.sessionId) : null;
   return { ok: true, here, pane, path, note: opened?.note ?? null };
@@ -1805,9 +2381,25 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
   const cmd = commandOf(text);
   // A bare /model opens a picker in the window, and a picker is not something
-  // to leave standing behind a desk — the next paste would land in it. The
-  // floor changes a model with pickModel (this session only, costmo's ruling
-  // 2026-11-03); a caller that sends the bare command is told so instead.
+  // to leave standing behind a desk — the next paste would land in it. A
+  // caller that sends the bare command is told so instead.
+  //
+  // With a name, /model goes in as typed, and so does /effort <level>: the
+  // window's own commands, which save the choice as the person's default for
+  // new sessions — costmo's ruling, 2026-11-14, reversing #10 Decided 4
+  // ("this session only"), so the floor does what the window and the editor
+  // do. For the eleven days between, the host drove the window's picker and
+  // pressed `s` instead (pick(), removed with the ruling). It is not kept
+  // behind the command with Enter in place of `s`, and the reason was
+  // measured, not preferred: Enter in the picker saves the row the cursor is
+  // on *and* the effort row together ("Set model to Sonnet 5.5 and saved as
+  // your default for new sessions with medium effort"), so an effort change
+  // on one desk re-saved that desk's model as the machine's default, over
+  // whatever another desk had just chosen. The commands save the one thing
+  // each names. They also know their own names ("fable" is whatever Fable
+  // the window has; an unknown one is "Model 'x' not found", nothing saved),
+  // which the picker's rows had to be walked for, at whatever height the
+  // pane happened to be.
   if (cmd?.name === 'model' && !cmd.args) {
     return { ok: false, code: 'picker', error: 'a bare /model opens a picker in the window — name the model (/model sonnet), or use the model control on the desk' };
   }
@@ -1856,6 +2448,17 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // `wasBusy` is only for the sentence at the end — nothing branches on it.
   const wasBusy = await busy(pane.target);
 
+  // The one thing that is not typed into a working window: a model or
+  // effort change. Measured 2026-11-14 on 2.1.325: `/model haiku` into a
+  // running turn is taken at once, and on a conversation with any history it
+  // raises "Switch model?" over the work — a dialog nobody asked for in the
+  // middle of a turn, which takes the keys of whatever is sent next.
+  // `/effort` mid-turn was not measured, and is held to the same rule until
+  // it is. Refused before a key is pressed, and said on the desk.
+  if ((cmd?.name === 'model' || cmd?.name === 'effort') && wasBusy) {
+    return { ok: false, code: 'busy', target: pane.target, error: `the desk is working — change the ${cmd.name === 'model' ? 'model' : 'effort level'} when the turn ends` };
+  }
+
   // Where the transcript stood before anything was typed. Taken here rather
   // than after the paste because getting the text in can itself take a while
   // on a window that is still starting, and a turn written during that would
@@ -1873,7 +2476,13 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   let typed = null;
   if (wouldWrap(text)) {
     typed = await typeInto(pane.target, text);
-    if (!typed.ok) await clearComposer(pane.target);
+    if (!typed.ok) {
+      await clearComposer(pane.target);
+      // Said, because the paste that follows reaches the agent wrapped in
+      // <pasted_content>, and nothing else records why. Silent, this hid a
+      // prompt suggestion defeating long messages until a live test (issue #31).
+      warn(`typing a ${text.split('\n').length}-line message into ${pane.target} did not hold (${typed.error}); pasting it, so the agent reads it as pasted content`);
+    }
   }
   if (!typed?.ok) {
     typed = await pasteInto(pane.target, text);
@@ -1915,6 +2524,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
 
   // The receipt: a command has its own (commandReceipt), a message has the
   // turn or the queue (deliveryOf). Each is read where it is written.
+  let switchYes = false;          // "Switch model?" / "Change effort level?" has been answered
   const receipt = async () => {
     // A command that closes the window (/exit) has the pane's absence as its
     // receipt; a message cannot be received by a pane that is gone.
@@ -1922,6 +2532,22 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
       return { state: 'done', said: 'the window closed' };
     }
     const screen = await screenOf(pane.target);
+    // "Switch model?" stands between a /model and its receipt on any
+    // conversation cached for the current model. The operator asked for the
+    // switch, so the host says yes, once, with the digit (measured: `1`
+    // answers it; the window's line follows). The dialog has no composer, so
+    // nothing below presses Enter into it (stillInComposer).
+    //
+    // "Change effort level?" is the same dialog behind an /effort (QA,
+    // PR #55 finding 1; switchConfirmOf has what is and is not measured
+    // about it). Unanswered, it stood: the /effort ended not_delivered at
+    // twenty seconds and the desk's next message was pasted into the dialog
+    // for a minute.
+    if ((cmd?.name === 'model' || cmd?.name === 'effort') && !switchYes && switchConfirmOf(screen)) {
+      await tmux(['send-keys', '-t', pane.target, '1']);
+      switchYes = true;
+      return null;
+    }
     if (cmd) return commandReceipt(cmd, { path, before, projectDir: projectDir(here), since, screen });
     const got = path ? await deliveryOf(path, before, text) : null;
     return got ? { state: got } : null;
@@ -2064,8 +2690,8 @@ const COMPACT_WATCH_MS = Number(process.env.ORCH_COMPACT_WATCH_MS ?? 300_000);
  * own stdout line for the command — "Compacted (ctrl+o to see full
  * summary)…" or its error — or, with no such line, the boundary record.
  */
-export async function awaitCompaction(cwd, { path = null, before = 0 } = {}) {
-  const pane = await paneFor(canonical(cwd));
+export async function awaitCompaction(where, { path = null, before = 0 } = {}) {
+  const pane = await paneFor(where);
   if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
   const stop = Date.now() + COMPACT_WATCH_MS;
   let seen = false;
@@ -2087,213 +2713,6 @@ export async function awaitCompaction(cwd, { path = null, before = 0 } = {}) {
     return { ok: true, compacted: true, said: `compacted the conversation${n(m.preTokens) && n(m.postTokens) ? `: ${n(m.preTokens)} → ${n(m.postTokens)} tokens` : ''}` };
   }
   return { ok: true, compacted: false, said: seen ? 'the compaction ended without a record of what it did' : 'no compaction ran' };
-}
-
-/** How long the picker is given to appear, and a switch to be confirmed. */
-const PICKER_MS = Number(process.env.ORCH_PICKER_MS ?? 8000);
-
-/**
- * Which picker row a model name means. "sonnet", "Sonnet 5.5" and
- * "claude-sonnet-5-5" all name the same row; the "Default (recommended)"
- * row is never the answer to a name, because it is the operator's default
- * under whatever name, not the model asked for.
- */
-export function pickerRowFor(rows, name) {
-  const want = String(name ?? '').trim().toLowerCase();
-  if (!want) return null;
-  const idm = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(want);
-  const family = idm ? idm[1] : want.split(/[\s-]+/)[0];
-  const version = idm ? (idm[3] ? `${idm[2]}.${idm[3]}` : idm[2]) : (want.match(/\d+(?:\.\d+)?/)?.[0] ?? null);
-  const candidates = rows.filter((r) => !/^default\b/i.test(r.label));
-  const exact = candidates.find((r) => r.label.toLowerCase() === want);
-  if (exact) return exact;
-  const byBoth = candidates.filter((r) => r.label.toLowerCase().includes(family) && (!version || r.label.includes(version)));
-  if (byBoth.length) return byBoth[0];
-  if (!version) return candidates.find((r) => r.label.toLowerCase().startsWith(family)) ?? null;
-  return null;
-}
-
-/**
- * Change this session's model through the window's own picker — this session
- * only.
- *
- * `/model <name>` as a command writes the person's default for every new
- * session on the machine (~/.claude/settings.json `model`; the window says
- * "saved as your default for new sessions"), and a partner switching a desk
- * from the floor must not reset the operator's machine — costmo's ruling
- * (#10 Decided 4, 2026-11-03). The picker's `s` is the window's own
- * session-only switch, so that is what is pressed. Measured on 2.1.300:
- * `/model` + Enter draws the picker with the cursor on the current row; ↑/↓
- * move it; a digit SELECTS (and starts the switch, as default), so digits
- * are never pressed here; `s` on a conversation cached for the current
- * model raises "Switch model? … 1. Yes, switch to X / 2. No, go back", and
- * `1` answers it; the receipt is the stdout record "Set model to `X` for
- * this session only", with PreModelSwitch/PostModelSwitch around it.
- */
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
-
-/** The picker's effort row — "◐ Medium effort (default) ←/→ to adjust" — as
- *  the level it reads, or null when the picker shows none. */
-export function effortRowOf(screen) {
-  const m = /^\s*[^\w\s]?\s*([A-Za-z]+) effort(?: \(default\))?\s+←\/→ to adjust/m.exec(String(screen ?? ''));
-  return m ? m[1].toLowerCase() : null;
-}
-
-/** A walk that could not read the picker must not leave it standing: the
- *  desk's next message or /model would be typed into it (measured on
- *  2.1.322, where four picks after one such return all failed). Escape only
- *  when "Select model" is still on screen, since an Escape in a bare
- *  composer is not nothing. */
-async function closePicker(target) {
-  if (/^\s*Select model\s*$/m.test(await screenOf(target, 40))) await tmux(['send-keys', '-t', target, 'Escape']);
-  return {};
-}
-
-export async function pickModel(cwd, name, opts = {}) {
-  return pick(cwd, { model: name }, opts);
-}
-
-/**
- * The same picker, for the effort level: its "○ Low effort ←/→ to adjust" row
- * moves with ←/→, and `s` applies the row and the model together — measured
- * 2026-11-03 as "Set model to `Haiku 5.5` for this session only with
- * `medium` effort", with nothing written to settings.json. `/effort <level>`
- * as a command saves the person's default instead, which is why it is not
- * what the floor sends.
- */
-export async function pickEffort(cwd, level, opts = {}) {
-  return pick(cwd, { effort: level }, opts);
-}
-
-export async function pick(cwd, { model = null, effort = null } = {}, { open: autoOpen = false, resume = null } = {}) {
-  const name = typeof model === 'string' && model.trim() ? model.trim() : null;
-  const level = typeof effort === 'string' && effort.trim() ? effort.trim().toLowerCase() : null;
-  if (!name && !level) return { ok: false, error: 'name a model or an effort level' };
-  if (level && !EFFORT_LEVELS.includes(level)) return { ok: false, code: 'bad_effort', error: `effort is one of ${EFFORT_LEVELS.join(', ')}, not "${effort}"` };
-  const w = await windowFor(cwd, { open: autoOpen, resume });
-  if (!w.ok) return w;
-  const { pane, path } = w;
-  // Only measured on an idle window. A picker over a running turn is a
-  // dialog nobody asked for in the middle of work.
-  if (await busy(pane.target)) return { ok: false, code: 'busy', error: 'the desk is working — change the model when the turn ends' };
-  const before = path ? await transcriptSize(path) : 0;
-  const put = await pasteInto(pane.target, '/model');
-  if (!put.ok) return { ...put, target: pane.target };
-  await settled(pane.target, {});
-  await tmux(['send-keys', '-t', pane.target, 'Enter']);
-  let picker = null;
-  let stop = Date.now() + PICKER_MS;
-  let pressed = 1;
-  while (!picker && Date.now() < stop) {
-    await sleep(200);
-    const screen = await screenOf(pane.target, 40);
-    picker = pickerOf(screen);
-    if (!picker && pressed < SUBMIT_ATTEMPTS && stillInComposer(screen, '/model')) {
-      await tmux(['send-keys', '-t', pane.target, 'Enter']);
-      pressed++;
-    }
-  }
-  if (!picker) {
-    await clearComposer(pane.target);
-    return { ok: false, code: 'no_picker', error: 'the window did not open its model picker', target: pane.target };
-  }
-  let row = name ? pickerRowFor(picker.rows, name) : (picker.rows.find((r) => r.n === picker.cursor) ?? null);
-  // A picker in a short pane shows part of its list. Measured on 2.1.322:
-  // under about 30 rows it draws three models and "… +3 models", and an
-  // "↑" on the first row once it has scrolled, so on a window nobody is
-  // attached to (80x24) Sonnet and Haiku were not on screen, and "sonnet"
-  // was refused as not offered. An attached terminal makes the pane taller,
-  // which is why the same pick worked after Open in Claude. Resizing the
-  // pane to read it would be moving the operator's furniture, so the cursor
-  // is walked down the list and then up it, one key at a time, reading the
-  // pane after each, until the name is on screen or the list ends. The list
-  // is a ring (measured): Down from the last model is "▸ More models", Down
-  // from that is row 1, and Up from row 1 is "▸ More models" again. So each
-  // pass ends on that row or on a cursor that did not move the way it was
-  // sent. The walk below then moves the cursor from wherever this left it.
-  if (name && !row) {
-    const seen = new Map(picker.rows.map((r) => [r.n, r]));
-    for (const dir of ['Down', 'Up']) {
-      for (let i = 0; i < 20 && !row; i++) {
-        const beforeKey = await screenOf(pane.target, 40);
-        await tmux(['send-keys', '-t', pane.target, dir]);
-        await reacted(pane.target, beforeKey, 40);
-        const next = pickerOf(await screenOf(pane.target, 40));
-        if (!next) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while its list was being read' };
-        for (const r of next.rows) seen.set(r.n, r);
-        row = pickerRowFor(next.rows, name);
-        // The end of the list in this direction: the cursor moved onto "▸ More
-        // models" (no number), or wrapped, or did not move. Leaving that row
-        // onto a numbered one counts as moving.
-        const moved = next.cursor != null && (dir === 'Down' ? next.cursor > (picker.cursor ?? -Infinity) : next.cursor < (picker.cursor ?? Infinity));
-        picker = next;
-        if (!moved) break;
-      }
-      if (row) break;
-    }
-    if (!row) {
-      await tmux(['send-keys', '-t', pane.target, 'Escape']);
-      const offered = [...seen.values()].sort((a, b) => a.n - b.n).filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label);
-      return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${offered.join(', ')}` };
-    }
-  }
-  if (!row) {
-    await tmux(['send-keys', '-t', pane.target, 'Escape']);
-    return { ok: false, code: 'model_unknown', target: pane.target, error: `"${name}" is not on the window's picker — it offers ${picker.rows.filter((r) => !/^default\b/i.test(r.label)).map((r) => r.label).join(', ')}` };
-  }
-  // Walk the cursor to the row, one key at a time, reading the pane after
-  // each: the same rule as answerQuestion, and for the same reason.
-  for (let i = 0; i < 20 && picker.cursor !== row.n; i++) {
-    const beforeKey = await screenOf(pane.target, 40);
-    // From "▸ More models" (no number) every model is above.
-    await tmux(['send-keys', '-t', pane.target, row.n > (picker.cursor ?? Infinity) ? 'Down' : 'Up']);
-    await reacted(pane.target, beforeKey, 40);
-    picker = pickerOf(await screenOf(pane.target, 40));
-    if (!picker) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the cursor was being moved' };
-  }
-  if (picker.cursor !== row.n) {
-    await tmux(['send-keys', '-t', pane.target, 'Escape']);
-    return { ok: false, code: 'picker_cursor', target: pane.target, error: `could not put the cursor on ${row.label}` };
-  }
-  if (level) {
-    // ←/→ along the effort row until it reads the level, one key at a time.
-    let at = effortRowOf(await screenOf(pane.target, 40));
-    if (!at) {
-      await tmux(['send-keys', '-t', pane.target, 'Escape']);
-      return { ok: false, code: 'no_effort_row', target: pane.target, error: 'the picker shows no effort row to adjust' };
-    }
-    for (let i = 0; i < 12 && at !== level; i++) {
-      const beforeKey = await screenOf(pane.target, 40);
-      await tmux(['send-keys', '-t', pane.target, EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(at) ? 'Right' : 'Left']);
-      await reacted(pane.target, beforeKey, 40);
-      at = effortRowOf(await screenOf(pane.target, 40));
-      if (!at) return { ...(await closePicker(pane.target)), ok: false, code: 'picker_gone', target: pane.target, error: 'the picker closed while the effort was being adjusted' };
-    }
-    if (at !== level) {
-      await tmux(['send-keys', '-t', pane.target, 'Escape']);
-      return { ok: false, code: 'effort_unreached', target: pane.target, error: `the effort row would not move to ${level} (it reads ${at})` };
-    }
-  }
-  await tmux(['send-keys', '-t', pane.target, '-l', 's']);
-  let confirmed = false;
-  stop = Date.now() + PICKER_MS;
-  while (Date.now() < stop) {
-    await sleep(200);
-    const stdout = path ? stdoutOf(await recordsSince(path, before)) : null;
-    if (stdout && /model/i.test(stdout)) {
-      const em = /with `?([a-z]+)`? effort/i.exec(stdout);
-      return {
-        ok: true, target: pane.target, confirmed: true, command: name ? 'model' : 'effort', said: stdout.split('\n')[0].replace(/`/g, ''),
-        model: row.label, effort: em ? em[1].toLowerCase() : (level ?? null), session_only: /this session only/i.test(stdout),
-      };
-    }
-    const screen = await screenOf(pane.target, 40);
-    if (!confirmed && switchConfirmOf(screen)) {
-      await tmux(['send-keys', '-t', pane.target, '1']);
-      confirmed = true;
-    }
-  }
-  return { ok: false, code: 'model_unconfirmed', target: pane.target, error: `pressed s on ${row.label} and the window gave no sign of switching within ${Math.round(PICKER_MS / 1000)}s` };
 }
 
 /**
@@ -2473,7 +2892,8 @@ export function questionOf(screen) {
     if (m) tabs.push({ title: m[2].trim(), answered: m[1] === '\u2612', submit: m[1] === '\u2714' });
   }
 
-  // A single-select draws a preview panel to the right of the choices, so every
+  // A single-select whose options carry previews draws a preview panel to
+  // the right of the choices (previewingOf has what else it changes), so every
   // line of the list has somebody else's box on the end of it. Cut by *column*,
   // not by box character: the panel's own text ("Notes: press n to add notes")
   // sits inside it on lines that carry no border at all, and cutting on the
@@ -2667,10 +3087,11 @@ const STEP_POLL_MS = Number(process.env.ORCH_STEP_POLL_MS ?? 100);
 
 // `lines` must be the size `before` was read at. `-S -N` is N lines of
 // scrollback plus the pane, so on a pane with history a 40-line `before`
-// never equals a 12-line read, and every read looked "changed": the
-// picker's walk went on ~200 ms after each key whether or not the window
-// had redrawn, and read a stale cursor as the end of the list (QA, PR #53
-// finding 1; 2 of 3 live windows had 36–74 lines of history).
+// never equals a 12-line read, and every read looked "changed": the model
+// picker's walk (since removed) went on ~200 ms after each key whether or
+// not the window had redrawn, and read a stale cursor as the end of the
+// list (QA, PR #53 finding 1; 2 of 3 live windows had 36–74 lines of
+// history). The rule outlives the walk: any caller passes its own size.
 async function reacted(target, before, lines = 12) {
   const stop = Date.now() + STEP_SETTLE_MS;
   let last = null;
@@ -2727,6 +3148,24 @@ export function askedStill(screen, asks) {
   return options.length > 0 && options.every((o) => s.includes(o));
 }
 
+/**
+ * What the desk's own window is asking, read off its bottom line, or null:
+ * `{ asking }`, the status line it ends on. For the heartbeat's `pending`
+ * (host/index.js register), which is how the board re-raises a question it
+ * lost at a restart or to another session's work (milestone audit
+ * 2026-11-17, finding 1). Positional, as askingOf is: a conversation quoting
+ * a prompt is not one. A question before Claude Code starts is not this
+ * one's: the host says those itself (STARTUP_RESAY_MS).
+ */
+export async function askingIn(where) {
+  const pane = await paneFor(where);
+  if (!pane) return null;
+  const screen = await screenOf(pane.target, 0);
+  if (startupQuestionOf(screen)) return null;
+  const foot = askingOf(screen);
+  return foot ? { asking: foot } : null;
+}
+
 /** askedStill, against the desk's own window now. */
 export async function stillAsking(cwd, asks) {
   const pane = await paneFor(cwd);
@@ -2766,9 +3205,20 @@ export async function answerQuestion(cwd, steps = []) {
     // somebody typed.
     const arg = typeof step.text === 'string' ? ['-l', step.text] : [String(step.key)];
     if (typeof step.text !== 'string' && !step.key) continue;
+    // A question drawn with a preview panel takes its digit as a move, not a
+    // choice (previewingOf). Read off the screen this key is about to go to,
+    // so it holds for a form built from the call as for one read off the pane.
+    const moves = typeof step.text !== 'string' && /^[1-9]$/.test(String(step.key)) && previewingOf(seen);
     const r = await tmux(['send-keys', '-t', pane.target, ...arg]);
     if (!r.ok) return { ok: false, error: r.error, done };
     const name = typeof step.text === 'string' ? `text(${step.text.length})` : String(step.key);
+    if (moves) {
+      done.push(name);
+      const took = await selectRow(pane.target, Number(step.key));
+      if (!took.ok) return { ...took, done };
+      done.push('Enter(select)');
+      continue;
+    }
     if (typeof step.settle === 'number') await sleep(step.settle);
     // Kept for the report, not acted on: a key the pane did not visibly react
     // to is not a failure by itself — the walk to the left end is meant to be
@@ -2860,6 +3310,89 @@ export async function answerQuestion(cwd, steps = []) {
       `${quiet.length ? `; the pane did not change after ${quiet.join(', ')}` : ''}`,
   };
 }
+
+/**
+ * Whether the question on screen is drawn with a preview panel, read from its
+ * bottom lines.
+ *
+ * A single-choice question where any option carries a `preview` is drawn
+ * side by side: the choices on the left, the highlighted one's preview in a
+ * box on the right, no "Type something." row, and a status line of its own:
+ *
+ *     Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+ *
+ * On that layout a digit only moves the cursor, and Enter is what selects.
+ * Measured on 2.1.325 (2026-11-14) on a probe, after the floor failed to
+ * answer such a form twice on a live desk ("the pane did not change after
+ * 1", the cursor having started on row 1): `2` moved the cursor and swapped
+ * the preview, the form stood, and `Enter` then recorded "→ Bravo". Alone it
+ * submitted; as the first of two questions it went on to the next tab. A
+ * plain question beside it still took its digit alone, as it always has, so
+ * an Enter after *that* digit would answer the tab it had moved on to. One
+ * option of three with a preview is enough for the layout, and a
+ * multi-select given previews is drawn as an ordinary multi-select.
+ *
+ * So the layout is told by the status line and by nothing about the call.
+ * "n to add notes" is on it and on no other form's. Positional, and
+ * rejoined, for askingOf's reasons: at 80 columns the line wraps after
+ * "Tab to switch questions ·".
+ */
+export function previewingOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  const foots = lines.slice(-3).join(' ').replace(/\s+/g, ' ');
+  return /enter to select/i.test(foots) && /\bn to add notes\b/i.test(foots);
+}
+
+/**
+ * On a preview question, the digit has just been sent: see the cursor on
+ * that row, press Enter, and see the window take it.
+ *
+ * Each half is read off the pane, not assumed. Enter selects whatever the
+ * cursor is on, so it is pressed only once the cursor is seen on the row
+ * that was asked for. A digit with no row (a form built from an older
+ * hook's call offers a "Type something." this layout does not draw) moves
+ * nothing, and is said as that with nothing selected. And the pane has to
+ * change after the Enter, or the next key of the script would be pressed
+ * into this question as if it were the next.
+ */
+async function selectRow(target, n) {
+  const said = (screen) => String(screen).split('\n').map((l) => l.trim()).filter(Boolean).slice(-2).join(' / ').slice(0, 180);
+  const stop = Date.now() + SELECT_ROW_MS;
+  let screen = '';
+  let on = false;
+  for (;;) {
+    screen = await screenOf(target);
+    const q = previewingOf(screen) ? questionOf(screen) : null;
+    on = q?.options?.[q.cursor]?.n === n;
+    if (on || Date.now() >= stop) break;
+    await sleep(STEP_POLL_MS);
+  }
+  if (!on) {
+    return {
+      ok: false,
+      code: 'not_on_row',
+      screen,
+      error: `this question takes a number as a move and Enter as the choice, and the cursor was not seen on row ${n} after ${n} was sent,` +
+        ` so Enter was not pressed — its last two lines read "${said(screen)}"`,
+    };
+  }
+  const r = await tmux(['send-keys', '-t', target, 'Enter']);
+  if (!r.ok) return { ok: false, error: r.error };
+  // Changed and still, or just changed: a form that submitted leaves a
+  // working window, whose status line never holds still.
+  if (!(await reacted(target, screen)) && (await screenOf(target)) === screen) {
+    return {
+      ok: false,
+      code: 'not_selected',
+      screen,
+      error: `the window did not take Enter on row ${n} — its last two lines read "${said(screen)}"`,
+    };
+  }
+  return { ok: true };
+}
+
+/** How long the cursor is looked for on the row a digit was sent for, on a preview question. */
+const SELECT_ROW_MS = Number(process.env.ORCH_SELECT_ROW_MS ?? 2000);
 
 /** The review screen's own words. Matching the question rather than the footer
  *  keeps this independent of how many choices the confirmation offers. */
@@ -3300,7 +3833,7 @@ export async function attachTerminal({ target = null } = {}) {
   // Checked here as well as on the server, because the two know different
   // things: the board knows a window was reported, this knows whether tmux on
   // this machine will actually answer to that name right now.
-  const has = await tmux(['has-session', '-t', SESSION]);
+  const has = await tmux(['has-session', '-t', EXACT]);
   if (!has.ok) {
     return {
       ok: false,
@@ -3408,14 +3941,24 @@ export function projectSlug(cwd) {
  * Nothing here decides silently. The note says what was asked for and what
  * was opened, and the caller puts it where the operator will read it.
  */
-export async function resumable(cwd, sessionId) {
+export async function resumable(where, sessionId) {
   if (!sessionId) return { id: null, note: null };
-  const here = canonical(cwd);
+  const here = canonical(cwdOf(where));
   const own = transcriptPath(here, sessionId);
   const exists = existsSync(own);
   if (exists && await lastTurnAt(own)) return { id: sessionId, note: null };
   const asked = `${sessionId} ${exists ? 'has no turns in it' : 'never wrote a transcript'}, so there is nothing to resume there`;
-  const newest = await newestConversation(here);
+  // A seat never falls back to "the newest in this folder". The folder is
+  // several desks' (see "which window"), and its newest conversation is most
+  // likely the one another desk's window is running: resumed here as well,
+  // two processes would append to one transcript. It starts a new one.
+  if (seatOf(where)) return { id: null, note: `${asked}; this desk shares its folder with another desk, so it starts a new conversation rather than take the folder's newest.` };
+  // And the folder's own desk never falls back onto a conversation one of
+  // its seats is running, for the same reason.
+  const [r, all] = await Promise.all([roster(), panes()]);
+  const seatPids = new Set(all.filter((p) => p.seat && p.pid).map((p) => p.pid));
+  const theirs = new Set((r.ok ? r.sessions : []).filter((x) => x.cwd === here && seatPids.has(x.pid)).map((x) => x.sessionId));
+  const newest = await newestConversation(here, theirs);
   // Said as a fact about the folder, not as something done: the caller may
   // still be refused — by a background session holding the conversation, for
   // one — and "opened X instead" above a refusal to open X is a false record.
@@ -3427,9 +3970,9 @@ export async function resumable(cwd, sessionId) {
 }
 
 /** The transcript in this folder whose last turn is latest, or null. */
-async function newestConversation(cwd) {
+async function newestConversation(cwd, skip = new Set()) {
   let names;
-  try { names = readdirSync(projectDir(cwd)).filter((f) => f.endsWith('.jsonl')); } catch { return null; }
+  try { names = readdirSync(projectDir(cwd)).filter((f) => f.endsWith('.jsonl') && !skip.has(f.slice(0, -'.jsonl'.length))); } catch { return null; }
   let best = null;
   for (const name of names) {
     const at = await lastTurnAt(join(projectDir(cwd), name));

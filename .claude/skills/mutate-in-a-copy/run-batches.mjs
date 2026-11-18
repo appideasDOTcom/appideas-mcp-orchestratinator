@@ -9,6 +9,7 @@
  *
  *   node .claude/skills/mutate-in-a-copy/run-batches.mjs batches.json \
  *        [--base <sha> --base-suite <suite> --base-paths host/,src/x.js] [--dest <dir>]
+ *        [--overlay <repo path>=<file> …]
  *
  * batches.json is an array of [label, suite, [[name, file, old, new], …]]:
  *   [["R1", "host", [["a timeout is said without its limit", "host/log.js", "const limit = /timed…", "const limit = '';"],
@@ -22,6 +23,17 @@
  * today's. What it should show is the tests for the new behaviour red and the
  * ones guarding what did not change green — say which is which in the
  * report, because QA predicts both.
+ *
+ * --overlay puts a file that is NOT in the tree into each copy at that repo
+ * path, before anything runs: a test being written, or a fix being tried.
+ * The working tree is committed whenever costmo chooses, so a new test does
+ * not rest there while its control runs (PR #55 round 3: one did, for the
+ * minutes of a window-suite control, and was taken back out by hand). Write
+ * the candidate outside the repo, run it here, and copy it into the tree
+ * when the control is green and the mutants are red. Each overlay is printed
+ * with its sha256, which is the hash to compare the tree's file against
+ * afterwards. With --base the overlay goes in after the old files, so it
+ * wins over them: overlay tests, not the code under --base-paths.
  *
  * Batch only mutants whose assertions are disjoint, and predict the reds per
  * mutant before the run (SKILL.md, "Choosing the mutants"). A batch's reds
@@ -37,8 +49,9 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, copyFileSync, renameSync, rmSync, mkdirSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 // A suite is started through scripts/node-floor.sh, which finds a Node that
 // can load this tree's better-sqlite3 (this machine's default cannot), and
 // under the name package.json gives it: every suite is `test:<name>` but
@@ -53,8 +66,28 @@ const REPO = join(D, '../../..');
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
 const spec = args.find((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1].startsWith('--')));
-if (!spec) { console.error('usage: run-batches.mjs <batches.json> [--base <sha> --base-suite <suite> --base-paths <p,…>] [--dest <dir>]'); process.exit(1); }
+if (!spec) { console.error('usage: run-batches.mjs <batches.json> [--base <sha> --base-suite <suite> --base-paths <p,…>] [--dest <dir>] [--overlay <repo path>=<file> …]'); process.exit(1); }
 const dest = opt('--dest');
+// Checked before any copy is made: a path that would leave the copy, or a
+// candidate kept inside the repo, is refused with nothing run.
+const overlays = args.flatMap((a, i) => (a === '--overlay' ? [args[i + 1] ?? ''] : [])).map((o) => {
+  const at = o.indexOf('=');
+  const [to, from] = at > 0 ? [o.slice(0, at), resolve(o.slice(at + 1))] : ['', ''];
+  const bad = !to || !from ? 'wants <repo path>=<file>'
+    : to.startsWith('/') || to.split('/').includes('..') ? 'names a path outside the copy'
+    : !existsSync(from) ? `names a file that is not there (${from})`
+    : (from + sep).startsWith(resolve(REPO) + sep) ? 'names a file inside the repo — keep the candidate outside it'
+    : null;
+  if (bad) { console.error(`--overlay ${o}: ${bad}`); process.exit(1); }
+  return [to, from];
+});
+const overlay = (copy) => {
+  for (const [to, from] of overlays) {
+    mkdirSync(dirname(join(copy, to)), { recursive: true });
+    copyFileSync(from, join(copy, to));
+    console.log(`overlay: ${to} ← ${from} (sha256 ${createHash('sha256').update(readFileSync(from)).digest('hex')})`);
+  }
+};
 const fresh = () => execFileSync(`${D}/copy-repo.sh`, dest ? [dest] : [], { encoding: 'utf8' }).trim();
 
 function suite(copy, name, label) {
@@ -88,6 +121,7 @@ if (base) {
       writeFileSync(join(copy, f), execFileSync('git', ['-C', REPO, 'show', `${base}:${f}`], { maxBuffer: 64e6 }));
     }
   }
+  overlay(copy);
   suite(copy, name, `base: ${paths.join(',')} at ${base}, today's tests`);
 }
 
@@ -95,6 +129,7 @@ const batches = JSON.parse(readFileSync(spec, 'utf8'));
 if (batches.length) {
   const copy = fresh();
   console.log('copy:', copy);
+  overlay(copy);
   for (const [label, name, muts] of batches) {
     const files = [...new Set(muts.map((m) => m[1]))];
     for (const f of files) copyFileSync(join(copy, f), join(copy, `${f}.unmutated`));

@@ -88,6 +88,18 @@ the code by identity — say "docs only, no code touched" so they know.
   line after it (`git show $NEW:src/tools.js | grep -n -A1 "server.tool("`).
   They all move together whenever a tool above them grows.
 
+- **A list with one UNSURE line in it is not written at all**
+  (2026-11-16). `src/db.js:582, 696, 918, 1736` had one line that occurs
+  twice, so the script reported that one UNSURE and left the other three
+  at their old numbers, with no line in its output about them. The
+  self-check then read "0 unsure", because the old numbers still exist in
+  the file. After `--write`, grep the dry run's UNSURE lines for a number
+  that is part of a list in the facts file, and place the whole list by
+  hand from the old lines' text.
+- **`$NEW:src/db.js` in zsh is a modifier, not a path**: `:s` and `:h`
+  are history modifiers on the variable, and the command fails with "bad
+  substitution" or asks git for `.ost/index.js`. Write `"${NEW}:src/db.js"`.
+
 - **Re-anchored by hand with a regex** (2026-11-02): six references in list
   form (`src/floor.js:2244, 2269, …`) were missed; QA found them by reading.
   The script matches every form the file uses — add a form to it, never a

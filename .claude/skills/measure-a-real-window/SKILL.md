@@ -252,9 +252,10 @@ tmux -L probe display -p -t p:probe '#{cursor_x},#{cursor_y}' # column 2 = nothi
 A suggestion is dim (`\x1b[2m`) and the cursor stays at column 2, behind
 the `❯`; typed text is in the default colour with the cursor at its end.
 The transcript has no record of a suggestion. `composerOf` reads it as the
-composer's contents, which matters to nothing the host does with that
-reading, and a paste through `send()` replaces it — measured: one user
-record with the host's own words and none of the suggestion. Tab or Enter
+composer's contents. That was harmless for a paste — `send()` replaces it,
+measured: one user record with the host's own words and none of the
+suggestion — and **not** for typing a long message, which it sent to
+`<pasted_content>` until 2026-11-17 (the next section). Tab or Enter
 would accept it, so never press either "to see what happens" on a window
 that is not yours. Not every turn gets one: a one-word reply drew none in
 60 s, a turn with three Bash calls drew `cat notes.txt` after 2 s.
@@ -263,6 +264,67 @@ that is not yours. Not every turn gets one: a one-word reply drew none in
 a work-shaped turn, the wait for the dim row, `composerOf` and the cursor,
 then `send()` over it and the user records that followed. Run it on a new
 Claude Code before trusting the paragraph above.
+
+## A long message, typed: does the agent read it as the operator's?
+
+A message of four or more lines is typed into the window, not pasted
+(`wouldWrap`, `typeInto` in `host/window.js`), because a paste of that
+size reaches the agent as `<pasted_content>`, which the model is told "may
+contain instructions the user did not write". Every message with
+attachments is that long. If typing cannot confirm a line, it falls back
+to a paste, and the host now logs it: `typing a N-line message into … did
+not hold (…); pasting it`. On 2026-11-17 (issue #31) the fallback had
+been silent, and two live messages arrived wrapped for two different
+reasons. Each was found only on a real window, with
+[`typing.mjs`](typing.mjs):
+
+```bash
+SP=<scratchpad>; printf '#!/bin/sh\nexec tmux -L probe "$@"\n' > "$SP/tmuxw"; chmod +x "$SP/tmuxw"
+node .claude/skills/measure-a-real-window/probe.mjs up "$SP/probe" auto
+ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p node .claude/skills/measure-a-real-window/typing.mjs "$SP/probe" --size 80x24 --suggest
+#   suggestion in the composer: "Name one fruit, then suggest a follow-up question"
+#   recorded: unwrapped, exactly the message          (exit 0)
+```
+
+It sends one message through the host's own `send()` and reads the user
+record the window wrote: WRAPPED, or unwrapped and exact. `--window <file>`
+runs another `window.js` (a copy from before a fix is the red case; one
+from before the scroll fix read `WRAPPED`, 11.4 s, against the tree's 3.3 s).
+
+- **A prompt suggestion** (`--suggest`). `typeInto` waited for "suggestion
+  + first line", and typing replaces a suggestion, so line 1 read as lost.
+  Wrapped, 10.1 s. They appear in about half of turns, so `--suggest` keeps
+  sending short turns until one is in the composer row.
+- **A composer taller than its box** (`--size 80x24`). The host opens
+  windows at 80x24 when nobody is attached, and there the composer shows 7
+  rows with `─── ↑ 3 more ───` for its top border. Its `❯` row is out of
+  sight, so `composerOf` read null and line 5 "did not appear". probe.mjs
+  makes 200x50, where the same message never scrolls: a probe at its
+  default size cannot see this one. Measure at the size the host uses.
+
+Five traps, each met once in that session:
+
+- **Read the composer row at the bottom of the pane, nothing above it.** A
+  grep for `❯` anywhere found an earlier user message echoed in the
+  transcript and called it a suggestion.
+- **Auto mode for the probe.** In manual mode the agent asked permission
+  for an `ls` of the path it was given, the window stood at the question,
+  and `send()` answered `asking` correctly. It read as a failure of the fix.
+- **`send-keys -l --` for text that starts with `-`.** An attachment line
+  is `- /path`, and without `--` tmux takes it as a flag ("invalid flag").
+- **zsh does not split `$size`**: `set -- $size` gave one word and
+  `resize-window` an empty `-y`, so two runs meant to be at 80 columns
+  were both at 200. Read the pane's size back (`typing.mjs` prints it).
+- **An agent's account of a file is not the file.** The probe told the
+  operator an uploaded PDF was "only pages 1–8 of the 54". The upload was
+  byte-identical to the original (`shasum -a 256`, and the page tree's
+  `/Count 54`); the agent had read part of it. Check the bytes before
+  calling an upload broken.
+
+To see why typing did not hold, not only that it did not, copy `host/`
+into the scratchpad, add a `console.error` of `composerOf`'s reading and
+the `want` at the miss in `typeInto`, and pass that copy as `--window`.
+That is how both causes were named, in one run each.
 
 ## Recording the pane over time
 
@@ -339,6 +401,39 @@ What `form.mjs` was built to measure, and what it found on 2.1.284
   `form.mjs` reads the pane on the socket directly, so only the host's keys
   are delayed.
 
+**A question with previews** (2.1.325, 2026-11-14). Ask for options that
+"each carry the optional preview field" and the window draws the question
+side by side. What was measured, each on a real form:
+
+| form | keys | what the window did |
+|---|---|---|
+| one question, previews | `2` | cursor to row 2, preview swapped, form standing |
+| | then `Enter` | "→ Bravo", form gone, no review screen |
+| preview question, then a plain one | `Left Left Left 2 Enter` | first tab ☒, second tab showing |
+| | then `3` | review screen with Bravo and Blue |
+| plain, preview, plain | `Tab`, `Left`, `Right`, `BTab` on the preview tab | each walked the strip as on a plain tab |
+| one option of three with a preview | (drawn) | the whole question side by side; "No preview available" on the other rows |
+| multi-select given previews | (drawn) | an ordinary multi-select, with "Type something" |
+| one question, previews, three rows | `4` | nothing: no such row, cursor still on row 1 |
+
+The layout has no "Type something." row, its status line is "Enter to select
+· ↑/↓ to navigate · n to add notes · Esc to cancel" (with "Tab to switch
+questions" before the last part in a form of several, wrapping at 80
+columns), and a preview taller than the pane's room is clipped by the
+window ("✂ 5 lines hidden"), so the form itself was not cut at 80x24.
+`form.mjs` answers these through the host as any other form; the rows it
+prints for `formFromInput` match the pane's now that the call-built form
+leaves the free-text row out.
+
+[`raise.sh`](raise.sh) is how the table was made: it raises a form and
+leaves it standing, where `form.mjs` answers or cancels the one it raises.
+
+```bash
+.claude/skills/measure-a-real-window/raise.sh 'one single-select question: header "Where", …' 14
+tmux -L probe send-keys -t p:probe 2; tmux -L probe capture-pane -p -t p:probe | grep -v '^\s*$' | tail -12
+tmux -L probe send-keys -t p:probe Escape     # when done
+```
+
 Timing on a probe is the floor of it, not the case: last digit to "Ready to
 submit your answers?" was 28–57 ms on a window with a short conversation. A
 desk with a long one was not measured — forms are not raised on his desks.
@@ -390,10 +485,11 @@ What to know before trusting a reading from it:
   from the floor when the settings change.
 - **`/model <name>` and `/effort <level>` as commands write the operator's
   machine-wide default** (`~/.claude/settings.json` `model`,
-  `modelSettings.<model>.effortLevel`). The probe changed his, twice, and
-  they were put back by hand — read that file before and after any
-  measurement that touches a model, and restore it. The picker's `s` does
-  not write it.
+  `modelSettings.<model>.effortLevel`), and so does Enter in the picker.
+  The probe changed his, twice, and they were put back by hand — copy that
+  file before any measurement that touches a model and put it back after
+  ("A model or effort change", below). Only the picker's `s` does not
+  write it.
 - **A compaction needs a context behind it.** Read `filler.txt` once (~85k
   tokens) for a 10–15 s manual one; `/autocompact 100k` and two reads
   provoked an auto one that thrashed three times and ended in a StopFailure
@@ -492,6 +588,221 @@ pattern. And **a command the harness moved to the background is still
 running**: one that hung on `up` carried on into its `hosts` and `down`
 when its pipe closed, on the same directory as the rerun, and the two
 scripts overwrote each other's pid files.
+
+## A model or effort change
+
+Since 2026-11-14 the floor changes a model or an effort level by typing the
+window's own command, which saves the choice as the default for new
+sessions (costmo's ruling; before it the host drove the picker and pressed
+`s`). Everything below was read off a probe on 2.1.325 that day. The probe
+runs on the operator's own profile, so every one of these writes his
+`~/.claude/settings.json`:
+
+```bash
+cp -p ~/.claude/settings.json "$SP/settings.json.before"; shasum -a 256 ~/.claude/settings.json
+# … measure …
+python3 .claude/skills/measure-a-real-window/restore-settings.py "$SP/settings.json.before"
+# differs before restore: {"model": ["claude-fable-5-2", "haiku"]}
+# restored byte for byte — sha256 d4fc2d75…        ← the hash from before
+```
+
+Copying the whole file back also undoes anything else that changed in it
+meanwhile, and the operator changes his own effort level from his windows
+(he had, minutes before the 2026-11-15 measurement). So
+[`restore-settings.py`](restore-settings.py) puts back `model`,
+`modelSettings` and `effortLevel` alone. When nothing else differs it
+writes the saved bytes and the hash is the one from before. When another
+key differs it keeps that key, names it, and the hash is a new one. Run on
+two throwaway files (a second argument names the file to restore): keys of
+a probe's only, byte for byte; `theme` changed meanwhile, kept and named; a
+file that is not JSON, exit 2 and nothing written.
+
+A window started while the file is changed starts on the probe's model, so
+keep the stretch short and put the file back before reading results.
+
+| keys | the window's line | what settings.json gained |
+|---|---|---|
+| `/model`, ↓ to Haiku, Enter | Set model to Haiku 5.5 and saved as your default for new sessions | `model: haiku` |
+| `/model`, ↑ to Sonnet, → on the effort row, Enter | …Sonnet 5.5 and saved as your default for new sessions with high effort | `model: sonnet`, `modelSettings.claude-sonnet-5-5.effortLevel: high` |
+| `/model`, ← on the effort row only, Enter | …Sonnet 5.5 and saved as your default for new sessions with medium effort | the model again, and the effort |
+| `/model opus` | Set model to Opus 5.5 and saved as your default for new sessions | `model: opus` |
+| `/model fable` | Set model to Fable 5.2 and saved… | `model: fable` |
+| `/model nonsense-9` | Model 'nonsense-9' not found | nothing |
+| `/effort low` | Set effort level to low (saved as your default for new sessions): Quick, straightforward… | `modelSettings.<current model>.effortLevel: low`, `model` untouched |
+
+The third row is why the host types the commands and does not press Enter
+in the picker: an effort change there saves the model too. Three more
+things, each seen once on purpose:
+
+- **"Switch model?"** stands between a `/model` and its line whenever the
+  conversation has a reply cached for the current model, behind the command
+  and behind the picker alike. It replaces the composer, its last two lines
+  are `❯ 1. Yes, switch to X` and `2. No, go back`, and `1` answers it.
+  With no reply since the last switch it does not appear.
+- **Into a running turn**, `/model haiku` is taken at once and the warning
+  is drawn over the work. Answered `1`, the line appears as a notice above
+  the composer and the turn carries on. The host refuses instead.
+- **A refusal is recorded differently.** A command that ran writes its
+  `<command-name>` and `<local-command-stdout>` as user records; "Model
+  'x' not found" writes both as `system` records with subtype
+  `local_command` and the text in `content`.
+
+- **"Change effort level?" is the same dialog under another title, and
+  no probe has raised it** (QA, PR #55 finding 1; 2026-11-15, 2.1.325).
+  The binary's strings hold both titles over the same lines and the same
+  two choices, and its condition for the effort one is a change that would
+  rewrite the cached prefix: a model that does not take effort per turn.
+  Each of the four families the floor offers was given a reply and then
+  `/effort <another level>` through `send.mjs`, with the pane recorded:
+
+  | model | change | the window's line | frames with the dialog |
+  |---|---|---|---|
+  | Fable 5.2 | high → medium | Set effort level to medium (saved as your default…) | 0 |
+  | Opus 5.5 | high → low | Set effort level to low (saved…) | 0 |
+  | Sonnet 5.5 | (default) → low | Set effort level to low (saved…) | 0 |
+  | Haiku 5.5 | (default) → low, a reply, → high | Set effort level to high (saved…) | 0 |
+
+  "Switch model?" stood in the same recordings on each `/model` between
+  them (1–3 frames) and was answered. So the host's read of the effort
+  title is the model's measured shape with the binary's words, and
+  `test/window.mjs`'s stand-in raises it under `effort-ask.flag`. To read
+  the strings again on a new version (the binary is the platform package,
+  not `bin/claude.exe`'s wrapper):
+
+  ```bash
+  B="$(npm root -g)/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude"
+  python3 -I -c "import sys,re;d=open(sys.argv[1],'rb').read();m=re.search(rb'Change effort level\?',d);print(d[m.start()-80:m.end()+420].decode('utf8','replace') if m else 'gone')" "$B"
+  ```
+
+  If a probe ever does show it, record its last lines and what `1` and
+  `2` write, and put the real "Kept effort level as …" record's type
+  (user or `system`) beside `stdoutOf`.
+
+[`send.mjs`](send.mjs) plays any of these through the host's own `send()`
+from the tree, against the probe, with no board or host in the loop. To see
+the host meet the warning, give the conversation a turn first, record the
+pane while it sends, and look for the choice in the recording:
+
+```bash
+.claude/skills/measure-a-real-window/record-pane.sh "$SP/rec-model.log" -- \
+  env ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p \
+  node .claude/skills/measure-a-real-window/send.mjs "$SP/probe" '/model sonnet'
+# frames: <how many were taken>
+# frames with 'Switch model?': <1 to 3 on 2026-11-15>   ← above 0: the warning stood, and the send still ended ok
+# frames with 'Change effort level?': 0
+```
+
+[`record-pane.sh`](record-pane.sh) records the pane about seven times a
+second while any command runs, and counts the frames holding each `-p
+<words>` (the two titles when none is given). The frames stay in the log.
+**A count of 0 is a reading only beside a count above 0 from the same
+recorder**: the four 0s in the effort table above stand because "Switch
+model?" was counted in the same recordings. It can be run with no Claude
+Code at all, on a tmux socket of its own (`PROBE_SOCKET`): a pane that
+drew "Change effort level?" for a second read 8 frames of it and 0 of the
+other title, and with no pane on the socket it exits 2 and says so.
+
+## Two windows in one folder, each a different desk
+
+One agent with several sessions (0.12.9, `host/seats.js`) rests on what
+Claude Code does with `--mcp-config` beside a folder's own binding. It was
+measured on 2.1.325 (2026-11-16) and costs no tokens for the first half:
+an MCP server connects when a window starts, and the board counts sessions.
+
+```bash
+SP=<your scratchpad>/ms; mkdir -p $SP/root/qa-desk $SP/rec
+PORT=8931 DB_PATH=$SP/probe.db ORCH_AUTH_TOKEN=probe-ms ORCH_AUTH_MODE=enforce node src/server.js &   # Node 22.14+
+( cd $SP/root/qa-desk && claude mcp add -s local --transport http orchestratinator http://localhost:8931/mcp \
+    -H "X-Channel: ms-a" -H "X-Agent: qa" -H "X-Orchestratinator-Key: probe-ms" )
+echo '{"mcpServers":{"orchestratinator":{"type":"http","url":"http://localhost:8931/mcp","headers":{"X-Channel":"ms-b","X-Agent":"qa","X-Orchestratinator-Key":"probe-ms"}}}}' > $SP/seat-b.json
+tmux -L probems new-session -d -s p -n a -c $SP/root/qa-desk -x 200 -y 50 'claude; echo "[exited $?]"; sleep 900'
+# trust dialog: Down, Enter. Then the second window, with a binding of its own:
+tmux -L probems new-window -d -t p: -n b -c $SP/root/qa-desk "claude --mcp-config '$SP/seat-b.json'; echo \"[exited \$?]\"; sleep 900"
+curl -s localhost:8931/health          # "sessions": 2
+curl -s -H 'x-orchestratinator-key: probe-ms' localhost:8931/api/state   # ms-a/qa and ms-b/qa, one session each
+```
+
+| what | read |
+|---|---|
+| a window started plain in the bound folder | one MCP session, `ms-a/qa` |
+| a second started with `--mcp-config` naming `ms-b/qa` under the **same server name** | one session on `ms-b`, still one on `ms-a`, two in all: the file's entry replaces the folder's in that window, it is not added beside it |
+| an approval dialog for the file's server | none |
+| `-e ORCH_DESK_CHANNEL=…` on the window, read by a `SessionStart` hook | the hook's environment has it: a hook sees what its window was given |
+| `~/.claude/sessions/` | one file a window, the same `cwd` in each: nothing on disk says which desk a window is |
+
+The second half is the tree's own host on the same board, on its tmux
+socket (the "Tighter isolation" recipe above, with `ORCH_HOST_SEATS` naming
+a scratch directory), and the floor's routes:
+
+```bash
+post /api/floor/open  '{"channel":"ms-a","agent":"qa"}'
+post /api/floor/desk  '{"host_id":"probe-host","path":"<the folder>","channel":"ms-b","agent":"qa","seat":true}'
+post /api/floor/chat  '{"channel":"ms-b","agent":"qa","text":"… call whoami once and reply with exactly: I AM <channel>/<agent>"}'
+post /api/floor/desk/twin '{"channel":"ms-a","agent":"qa"}'        # → qa-2, a third window in the folder
+```
+
+Read that day: `I AM ms-a/qa`, `I AM ms-b/qa` and `I AM ms-a/qa-2` from
+three windows in one folder; each desk's hook sessions filed under itself
+by the plugin that was already installed (it honours `ORCH_CHANNEL` and
+`ORCH_AGENT`); a session told to remember a word, left, and asked back
+with `session_id` answered with the word under its own name (`--resume
+<id> --mcp-config <file>` together). And the fault only a real window
+shows: **the plugin's SessionEnd, fired as a closing window dies, re-seated
+the desk the board had just removed**. Read the `personas` row's
+`assigned_at` against the `desk.left` row's time in `admin_events`: the
+same second. A stand-in has no plugin, so after any change to how a desk
+is closed, close a real one and read those two rows.
+
+**The whole of it in one run, from a browser:**
+[`two-rooms-fixture.sh`](two-rooms-fixture.sh) and [`two-rooms.mjs`](two-rooms.mjs).
+The fixture is everything above done for you: a board from the tree, three
+folders bound as `ms-a/qa`, `ms-a/dev` and `ms-a/ops`, the tree's host on a
+tmux socket of its own, each desk's window opened from the floor and its
+trust question answered. Then a headless Chrome on the floor does what the
+operator does: QA and the developer into one meeting room, QA and the
+service agent into a second, a question asked in each room, Bring back on
+QA's desk.
+
+```bash
+F=.claude/skills/measure-a-real-window/two-rooms-fixture.sh; S="$SP/two-rooms"      # S outside the repo
+$F up "$S"                    # 10 s: three desks reading held=floor; no tokens
+ORCH_CDP_PORT=9293 node --experimental-websocket .claude/skills/measure-a-real-window/two-rooms.mjs http://localhost:8931 "$S/shots"
+# … PASS · 13 of 13        (about a minute; four short replies of tokens; Node 22.14+ first on PATH)
+$F rows "$S"                  # the desks, the windows and their tags, the seats, the board's desk.* rows in order
+$F down "$S"                  # leaves every desk, stops it all, says what is still bound (none) and claude's version
+```
+
+`rows` is the reading to take after anything that makes or closes a second
+session: it prints, side by side, what the floor says of each desk, each
+window's tag on the socket, the host's own record of its seats, and the
+board's `personas`, `desk_twins`, conversations and `desk.*` audit rows
+with their times. The SessionEnd fault below is one line of it: a
+`personas` row for `qa-2` stamped the second its `desk.left` row was
+written. The fixture refuses a port that answers, a socket already up, a
+scratch directory inside the repo, and a Node older than the board needs
+(it finds the newest under `~/.nvm` itself; `NODE=` names another). All
+four refusals and the whole loop were run on 2026-11-16.
+
+Run twice on 2026-11-16, 13 of 13 both times: the second room held `ops`
+and `qa-2`, whose host started a real fourth window in QA's folder; asked
+in the second room it answered `I AM ms-a/qa-2` and `ops` answered `I AM
+ms-a/ops`; asked in the first, `I AM ms-a/qa` and `I AM ms-a/dev`; neither
+room held a word of the other's; the floor's panel read "Bring back from
+all 2 meeting rooms", and pressed, the board closed the second session
+(`desk.leave`, actor `board`) and its window went, with QA back on the
+conversation it had. The second run made `qa-2` again: the name was free,
+which is the closing window's hooks not re-seating it, on real windows.
+It leaves both rooms ended; the three desks are left for you to leave.
+
+Teardown is the windows, the host, the server, **and the binding**, which
+is what `two-rooms-fixture.sh down` does: `POST /api/floor/desk/leave` for
+each desk (its host closes the window and removes the binding; seats
+first, since leaving a folder's own desk does not take its seats), then
+the host and the board by their environment (`ps eww`, matched on the
+probe's port and host id, so the live host is never a candidate), the
+socket, the Chrome on the CDP port, and a read of `~/.claude.json` for any
+probe folder still bound. By hand, a folder left bound stays a desk of a
+board that is gone.
 
 ## How long a closed window stays in the roster
 

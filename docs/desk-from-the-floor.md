@@ -251,6 +251,17 @@ the guess is a window opening in the wrong project. One binding per directory
 per scope also means one agent per checkout, as today: the same agent on two
 floors is still two directories.
 
+*Since 0.12.9 (2026-11-16) it is not.* One agent can have several sessions
+out of one directory, each a desk of its own: on several floors, or in two
+meeting rooms on one. The binding is still one per directory; the second
+desk is a window started with `--mcp-config`, the route set aside below as
+"good for a window the host launches", which is exactly what it is used
+for. What that route lacked is answered there: the host keeps the record
+the disk does not (`host/seats.js`), the hook is given the window's own
+binding file, and "Open in VS Code" is refused for such a desk in words
+rather than handing its conversation to a window with another desk's
+binding.
+
 **The trust dialog stays.** A never-opened directory asks it, and the floor
 offers it as a prompt. The self-heal in [`backlog.md`](backlog.md) would make
 that one click fewer; it is not in this feature's way.

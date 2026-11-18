@@ -162,6 +162,35 @@ function findIdentity(startDir, local = readLocalScope()) {
   return null;
 }
 
+/**
+ * The desk a window was started as, when that is not the folder's.
+ *
+ * One agent can have several sessions at once (host/seats.js): a second
+ * window in a folder that is already a desk, started by the host with a
+ * binding of its own (`claude --mcp-config <file>`), on another floor or
+ * under another name. Everything above finds a desk by its folder, and in
+ * such a window the folder names the other desk — so a permission prompt
+ * raised here would be drawn on that desk, and answered into that desk's
+ * window. The host gives the window the path of its binding file
+ * (`ORCH_DESK_CONFIG`) and the folder it was started in (`ORCH_DESK_ROOT`),
+ * and that file is the same shape as a `.mcp.json`, so it is read the same
+ * way. It outranks the folder because it is what the window connected with.
+ *
+ * A file that is gone or unreadable is no answer, and the walk stands: the
+ * host also sets `ORCH_CHANNEL` and `ORCH_AGENT`, which main() has always
+ * let stand in for the folder's names, so such a window still reports as
+ * itself wherever the folder is bound at all.
+ */
+function windowIdentity(env = process.env) {
+  const file = env.ORCH_DESK_CONFIG;
+  if (typeof file !== 'string' || !file) return null;
+  let id;
+  try { id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers); } catch { return null; }
+  if (!id) return null;
+  const root = typeof env.ORCH_DESK_ROOT === 'string' && env.ORCH_DESK_ROOT ? env.ORCH_DESK_ROOT : null;
+  return { ...id, root };
+}
+
 /** Claude Code's own directory name for a folder: every character that is not
  *  a letter or digit becomes a dash. The host's projectSlug is the same rule. */
 const slugOf = (dir) => dir.replace(/[^A-Za-z0-9]/g, '-');
@@ -300,9 +329,14 @@ function reduceToolInput(input) {
       question: clip(typeof q.question === 'string' ? q.question : '', 500),
       header: clip(typeof q.header === 'string' ? q.header : '', 60),
       multiSelect: q.multiSelect === true,
+      // `preview` is forwarded as a fact, not as its text: a question where
+      // any option has one is drawn without a free-text row (measured on
+      // 2.1.325, 2026-11-14), and the board builds the form's rows from this
+      // when the host cannot read the pane (formFromInput, src/floor.js).
       options: Array.isArray(q.options) ? q.options.slice(0, 12).map((o) => ({
         label: clip(typeof o?.label === 'string' ? o.label : '', 120),
         description: clip(typeof o?.description === 'string' ? o.description : '', 300),
+        ...(typeof o?.preview === 'string' && o.preview.trim() ? { preview: true } : {}),
       })) : [],
     } : null)).filter((q) => q && q.question);
     if (qs.length) out.questions = qs;
@@ -337,7 +371,12 @@ async function main() {
   const transcriptSlug = typeof ev.transcript_path === 'string' && ev.transcript_path ? basename(dirname(ev.transcript_path)) : null;
   let id = null;
   const start = startDirOf(ev, cwd, local);
-  if (start) {
+  // A window the host started as a desk of its own says so (windowIdentity),
+  // and that is the desk whatever folder the event stands in.
+  const own = windowIdentity();
+  if (own) {
+    id = { ...own, root: own.root ?? start ?? cwd };
+  } else if (start) {
     id = findIdentity(start, local);
     if (id && sessionId) remember(sessionId, id.root);
   } else if (transcriptSlug) {

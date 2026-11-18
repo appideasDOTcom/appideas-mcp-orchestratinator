@@ -32,11 +32,13 @@ through compose, or add `--build-context gitmeta=./.git`.
 
 ## Run locally without Docker (for hacking on it)
 
-Node 22.14 or later. better-sqlite3 13 is a Node-API 10 binary, and a Node
+Node 24, the major the board's image ships and the release gate tests
+(`engines` says `>=24`). The hard minimum is Node 22.14: better-sqlite3 13
+is a Node-API 10 binary, and a Node
 that offers Node-API 9 (20.x, 22.x before 22.14) dies on loading it with no
 words at all — exit 139 — so `src/node-floor.js` says so first. The board's
-image is node:22 and has it; the host has no dependencies and still runs on
-Node 20. `. scripts/node-floor.sh` puts a suitable Node first on PATH for the
+image is node:24, and the host runs on Node 24 too (`host/run.sh` picks it
+at every start). `. scripts/node-floor.sh` puts a suitable Node first on PATH for the
 shell it is sourced in (the oldest one nvm has that will do), or says there
 is none.
 
@@ -167,9 +169,26 @@ just means a client opens a session per turn, which is normal and handled.
   keyed by `channel` — plus the floor's tables: `agent_sessions` and `turns`
   (what each window reported), `agent_profile` and `personas` (who each agent
   is and where it sits), `hosts`, `hosted_desks`, `host_outbox`,
-  `saved_prompts` and `meeting_rooms`. See [`src/db.js`](../src/db.js). A channel is never a row of
+  `saved_prompts`, `meeting_rooms` and `desk_twins` (a second session of an
+  agent on a floor it already has a desk on). See [`src/db.js`](../src/db.js). A channel is never a row of
   its own; it's a key shared across those tables, which is why archiving needs
   a flag table and deleting has to sweep all of them in one transaction.
+- **Attachments (issue #31):** `POST /api/floor/upload?name=&type=` takes one
+  file's bytes as the body (adminGuard first, no body parser on that path,
+  streamed to disk, 100 MB) and answers its id; `POST /api/floor/upload/discard
+  {ids}` drops files taken out of the box. `POST /api/floor/chat` takes
+  `files: [id…]` beside `text` (text may be empty), refuses a command with
+  files, more than twenty, an id no longer staged (410 `upload_gone`) and a
+  desk whose host has not registered `uploads: true` (`hosts.uploads`;
+  `host_no_uploads`), and hands the host `{ text, files: [{id, name, size,
+  type}] }`. The host fetches each with `GET /api/host/upload?host_id=&id=`
+  (host key; only a host a message named it to), writes it under
+  `~/.orchestratinator/uploads/<id>/<name>` and types the message with the
+  list `Attached by the operator:` / `- <path>` under the words. Staged files
+  live in `$ORCH_UPLOAD_DIR` (default: beside the database) for an hour from
+  attach or last send; the host keeps its copies for Claude Code's
+  `cleanupPeriodDays` (30 when unset, never under one). See
+  [`src/uploads.js`](../src/uploads.js) and [`host/uploads.js`](../host/uploads.js).
 - **The floor's chat controls (0.10.9):** `agent_sessions` carries `effort`,
   `model_requested`, `effort_requested`, `compacting_since` and
   `compacting_trigger`. The hooks write the confirmed side (PreCompact /
@@ -179,8 +198,12 @@ just means a client opens a session per turn, which is normal and handled.
   <level>`, refuses a bare `/model` and an unknown level, and hands every
   slash command to the host as chat work. The host answers with two events
   of its own: `receipt` (a command confirmed on its own receipt — the
-  sentence, and for the picker the model and effort it set) and `model`
-  (the model the transcript's latest reply names). `FLOOR_COMMANDS` in
+  sentence, and for a `/model` or `/effort` the model and effort the
+  window's own line names) and `model`
+  (the model the transcript's latest reply names). A change that was not
+  made clears the asked-for side: the host's `error` names the `command`
+  it was typing, and a `/model` or `/effort` receipt can confirm nothing
+  (the window's "Model 'x' not found"). `FLOOR_COMMANDS` in
   [`src/floor.js`](../src/floor.js) is the list the composer offers; the
   page carries the same list, and `test/floor.mjs` checks the two agree.
 - **Dashboard:** a separate Express router on the same port. `GET /api/state`
@@ -321,6 +344,33 @@ just means a client opens a session per turn, which is normal and handled.
   `MEETING_LIVE_SECONDS`, 150 s) stores the room's participants in
   `messages.audience`, which `pollMessages`, `unreadCounts` and
   `unreadMessages` honour. Direct messages are unaffected.
+- **One agent, several sessions (0.12.9):** a folder's binding names one
+  desk, so a second session in the same folder is a window started with a
+  binding of its own, `claude --mcp-config <file>`, whose entry takes the
+  folder's place in that window ([`host/seats.js`](../host/seats.js) has
+  what was measured). The host calls such a desk a **seat**: a record of
+  its own beside `host.json` (`seats/seats.json`), a binding file per seat
+  (mode 600; it holds the key, as `~/.claude.json` does), and a tag on its
+  tmux window (`@orch_seat`), which is how [`host/window.js`](../host/window.js)
+  tells several windows in one folder apart: every window function takes
+  the folder, or `{ cwd, seat }`. The plugin's hook reads the window's own
+  binding file (`ORCH_DESK_CONFIG`), so a prompt raised in a seat's window
+  is the seat's. On the board a seat is `hosted_desks.scope = 'seat'`
+  (`hosted.seat` on the payload). On another floor it carries the agent's
+  own name; on a floor where the name is taken it carries the name with a
+  number (`qa-2`), linked to the agent by `desk_twins` (`twin` on the
+  payload: whose, which number, and whether it was made for a meeting
+  room). Three routes: `POST /api/floor/desk` with `seat: true` (Take a
+  desk's **New desk here**; work kind `seat`, never a move's `bind`),
+  `POST /api/floor/desk/twin` `{channel, agent}` (another session on the
+  agent's own floor: what a meeting room asks for, with `as` and
+  `session_id` when Resume brings one back), and the existing
+  `/desk/leave`, which for a seat takes the desk away whole (seat, row,
+  link, and its conversations ended). `sweepTwins` closes a session made
+  for a meeting room once it is in no live room, run from the routes a
+  page polls. `addressed` in [`src/tools.js`](../src/tools.js) is which
+  session a plain name means. Refused for a seat, in words: the editor
+  handoff (`seat_no_editor`) and the card's move (`seat_no_move`).
 
 ```
 src/
@@ -335,10 +385,11 @@ src/
   backup.js   Export and restore the whole board as one JSON document
   ui/         The dashboard page (no build step, no external assets)
 host/         The workstation service that runs desks in tmux windows
+              (seats.js: a second desk in a folder that is already one)
 plugin/       The Claude Code plugin (orchestratinator-floor) — the floor's hooks
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 scripts/
   set-version.mjs   Writes the version into all three files that carry one
-test/         Eight suites; test:host and test:window drive real tmux panes
-              against a real server
+test/         Thirteen suites; test:host, test:window, test:renew and test:seats
+              drive real tmux panes, the first and last against a real server
 ```

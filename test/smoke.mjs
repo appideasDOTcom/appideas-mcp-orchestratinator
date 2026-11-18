@@ -279,6 +279,11 @@ try {
     for (const file of VERSIONED) {
       assert(versionIn(file) === want, `${file} is ${want}`);
     }
+    // The lock carries the number twice, and versionIn reads its top only
+    // (QA, the milestone audit's re-measure). set-version writes both.
+    const { readFileSync: readLock } = await import('node:fs');
+    const lockOwn = JSON.parse(readLock('package-lock.json', 'utf8')).packages?.['']?.version;
+    assert(lockOwn === want, `and package-lock.json's packages[""] is ${want} too (${lockOwn})`);
     const h = await (await fetch(`http://localhost:${PORT}/health`)).json();
     const st = await (await fetch(`http://localhost:${PORT}/api/state`)).json();
     assert(h.version === want, `and /health reports it (${h.version})`);
@@ -293,6 +298,39 @@ try {
     assert(proto('host/package.json') === proto('package.json'), `host/package.json carries the same one (${proto('host/package.json')})`);
     assert(h.protocol === proto('package.json'), `and /health reports it (${h.protocol})`);
     assert(st.server?.protocol === proto('package.json'), `as does /api/state (${st.server?.protocol})`);
+  }
+
+  {
+    // The release gate's package check (scripts/check-lock.mjs): installed
+    // means the lock's exact version, not any version its range allows.
+    // `npm ls --all` passed 1.4.0 against a locked 1.2.3 under ^1.2.0 (QA,
+    // the milestone audit's re-measure, L2). A fabricated project in tmpdir.
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { execFileSync } = await import('node:child_process');
+    const p = mkdtempSync(`${tmpdir()}/check-lock-`);
+    const pkg = (path, version) => { mkdirSync(`${p}/${path}`, { recursive: true }); writeFileSync(`${p}/${path}/package.json`, JSON.stringify({ name: path.split('node_modules/').pop(), version })); };
+    writeFileSync(`${p}/package-lock.json`, JSON.stringify({ lockfileVersion: 3, packages: {
+      '': { name: 'fab', version: '0.0.0', dependencies: { lib: '^1.2.0' } },
+      'node_modules/lib': { version: '1.2.3' },
+      'node_modules/lib/node_modules/inner': { version: '2.0.0' },
+      'node_modules/other-platform': { version: '1.0.0', optional: true },
+    } }));
+    pkg('node_modules/lib', '1.2.3');
+    pkg('node_modules/lib/node_modules/inner', '2.0.0');
+    const check = () => { try { return { rc: 0, out: execFileSync('node', ['scripts/check-lock.mjs', p]).toString() }; } catch (err) { return { rc: err.status, out: String(err.stdout) }; } };
+    const same = check();
+    assert(same.rc === 0 && /2 of 2 installed packages are the lock's versions/.test(same.out), `the lock check passes the lock's own versions, an absent optional package left alone (${same.out.trim()})`);
+    pkg('node_modules/lib', '1.4.0');
+    const inRange = check();
+    assert(inRange.rc === 1 && /node_modules\/lib: 1\.4\.0 installed, the lock has 1\.2\.3/.test(inRange.out), `and refuses a version inside the range that is not the lock's, naming it (${inRange.out.trim().split('\n').pop()})`);
+    pkg('node_modules/lib', '1.2.3');
+    rmSync(`${p}/node_modules/lib/node_modules/inner`, { recursive: true });
+    const missing = check();
+    assert(missing.rc === 1 && /inner: not installed \(the lock has 2\.0\.0\)/.test(missing.out), 'and a nested package the lock names that is not installed');
+    rmSync(p, { recursive: true, force: true });
+    const tree = (() => { try { return { rc: 0, out: execFileSync('node', ['scripts/check-lock.mjs']).toString() }; } catch (err) { return { rc: err.status, out: String(err.stdout) }; } })();
+    assert(tree.rc === 0, `this tree's node_modules is its lock's (${tree.out.trim().split('\n')[0]})`);
   }
 
   const health = await (await fetch(`http://localhost:${PORT}/health`)).json();

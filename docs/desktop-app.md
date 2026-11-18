@@ -61,7 +61,8 @@ came out of the app's phase 3, the board inside the app (task #291,
 gone), and 12.11.1 still uses the first. 13 is Node-API, with the
 prebuilt binary for each platform inside the package, so the server now
 pins `^13.0.3`. The cost is the Node floor: a Node-API 9 Node (20.x, or
-22.x before 22.14) segfaults loading it, so `engines` says 22.14 and
+22.x before 22.14) segfaults loading it, so `engines` said 22.14 (and
+says 24 since 0.12.11: one major for what ships and what is tested) and
 `src/node-floor.js` says it in words. The app measured 13.0.3 loading
 under Electron 45.2.3; whether the prebuild loads there without
 `@electron/rebuild` is the app's to measure.

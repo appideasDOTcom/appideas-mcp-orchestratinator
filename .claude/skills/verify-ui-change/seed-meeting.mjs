@@ -3,13 +3,15 @@
  * A floor to hold a meeting room on (issue #44), with a host that does what
  * a room asks of it, on a throwaway server.
  *
- *   seed-meeting.mjs <base-url> --db <scratch.db> [--key k] > work.jsonl
+ *   seed-meeting.mjs <base-url> --db <scratch.db> [--key k] [--more] > work.jsonl
  *
  * Desks, all on host h1 ("testbox"):
  *   lab/bo, lab/cy, lab/dee   live, idle, a conversation each (sess-<agent>)
  *   lab/ed                    held by an editor (outside_pid): the room's
  *                             messages to it are refused, in the board's words
  *   lab2/zed                  another floor, so Add offers nothing from it
+ *   lab/fay … lab/jo          with `--more` only: five more live desks, so
+ *                             one floor holds two meetings and desks besides
  *
  * And mail on the board: two unread messages for bo, one for cy.
  *
@@ -50,6 +52,7 @@ await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_M
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const require = createRequire(`${REPO}/package.json`);
 const Database = require('better-sqlite3');
+const UP = await import(`${REPO}/host/uploads.js`).catch(() => ({ withAttachments: (t) => t }));
 
 const args = process.argv.slice(2);
 const base = (args[0] ?? '').startsWith('http') ? args[0] : 'http://localhost:8905';
@@ -70,8 +73,15 @@ const DESKS = [
   { channel: 'lab', agent: 'dee' },
   { channel: 'lab', agent: 'ed', editor: 4242 },
   { channel: 'lab2', agent: 'zed' },
+  // `--more`: five more live desks on lab, for a floor with room for two
+  // meetings and desks left over (check-meeting-box.mjs). After the others,
+  // so the desks check-meeting.mjs reads keep their seats.
+  ...(args.includes('--more') ? ['fay', 'gus', 'hal', 'ivy', 'jo'].map((agent) => ({ channel: 'lab', agent })) : []),
 ];
 db.prepare(`INSERT OR REPLACE INTO hosts (host_id, name, last_seen) VALUES (?, ?, datetime('now'))`).run(HOST, 'testbox');
+// A host as current as the tree: it fetches attachments (issue #31). Skipped
+// on a schema from before the column.
+try { db.prepare(`UPDATE hosts SET uploads = 1 WHERE host_id = ?`).run(HOST); } catch { /* no column */ }
 DESKS.forEach((d, i) => {
   db.prepare(`INSERT OR REPLACE INTO agents (channel, agent, last_seen) VALUES (?, ?, datetime('now'))`).run(d.channel, d.agent);
   db.prepare(`INSERT OR REPLACE INTO personas (channel, agent, seat, assigned_at) VALUES (?, ?, ?, datetime('now'))`).run(d.channel, d.agent, i);
@@ -132,7 +142,13 @@ console.error(`seeded ${DESKS.map((d) => `${d.channel}/${d.agent}`).join(', ')} 
 async function handle(item) {
   const { channel, agent, kind, payload } = item;
   if (kind === 'chat') {
-    const text = payload?.text ?? '';
+    // A message's files are typed under its words as the host types them
+    // (host/uploads.js withAttachments), under a made-up home: nothing is
+    // fetched, so this host proves what the page sent and draws, not the fetch.
+    const files = Array.isArray(payload?.files) ? payload.files : [];
+    const text = files.length
+      ? UP.withAttachments(payload?.text ?? '', files.map((f) => `/Users/seed/.orchestratinator/uploads/${f.id}/${f.name}`))
+      : payload?.text ?? '';
     if (text.startsWith('/')) {
       await sleep(300);
       // A command is confirmed on its own receipt (host/window.js

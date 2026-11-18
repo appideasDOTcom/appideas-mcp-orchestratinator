@@ -1,0 +1,56 @@
+[
+ [
+  "a paste takes no files",
+  "src/ui/floor.js",
+  "    if (!pasteTakes(files, e.clipboardData?.getData('text/plain'))) return;",
+  "    if (true) return;"
+ ],
+ [
+  "a drop on the panel takes no files",
+  "src/ui/floor.js",
+  "    if (dropPanel(e)) addFiles(e.dataTransfer.files);",
+  ""
+ ],
+ [
+  "no preview on hover",
+  "src/ui/floor.js",
+  "      if (on) showPreview(chip);",
+  "      if (on) void chip;"
+ ],
+ [
+  "the recorded turn draws the path list as words",
+  "src/ui/floor.js",
+  "    const att = t.role === 'user' ? splitAttached(t.text) : null;",
+  "    const att = null;"
+ ],
+ [
+  "an error turn drops the files",
+  "src/ui/floor.js",
+  "      for (const p of ui.sending) if (p.files?.length) giveChipsBack(p.key, p.files);\n",
+  ""
+ ],
+ [
+  "Send leaves the files out",
+  "src/ui/floor.js",
+  "        body: JSON.stringify({ ...ui.open, text, ...(att.ids.length ? { files: att.ids } : {}) }),",
+  "        body: JSON.stringify({ ...ui.open, text }),"
+ ],
+ [
+  "the paperclip ignores the host's word",
+  "src/ui/floor.js",
+  "    const why = canChat ? attachRefusal(openHostRow()) : 'Nothing typed here can be delivered right now.';",
+  "    const why = canChat ? null : 'Nothing typed here can be delivered right now.';"
+ ],
+ [
+  "the chips wrap onto rows again",
+  "src/ui/styles.css",
+  ".p-attach { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; flex: none; }",
+  ".p-attach { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; }"
+ ],
+ [
+  "the desk's hosted carries no host_id",
+  "src/floor.js",
+  "                host_id: h.host_id,\n",
+  ""
+ ]
+]

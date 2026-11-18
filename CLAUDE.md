@@ -138,7 +138,13 @@ two lines are the server half and reach the live board only with a rebuild.
 What issue #5 turned out to be, once caught: the board shares Docker
 Desktop's VM with everything else in Docker, and at 4 GiB a site e2e matrix
 ran it out of memory. The board's loop was held 59.5 s until the VM's kernel
-killed a MySQL, and Docker Desktop at 8 GiB fixed it (2026-11-03). A capture
+killed a MySQL, and Docker Desktop at 8 GiB fixed it (2026-11-03). The board
+itself is small, measured 2026-11-17 with `docker stats`: 130 MiB, of about
+420 MiB for everything in the VM that day. So the 8 GiB is the site e2e
+matrices' (Syncinator Pro calls it the floor for its own), not the board's.
+With only the board and light services in Docker, 4 GB is about ten times
+what is used; with a matrix running in the same VM, 4 GB is the setting
+that failed. A capture
 summary's `OOM kills in the VM` line is that reading.
 
 **The server is the other half, and it goes stale independently.** The
@@ -199,6 +205,73 @@ search all return at once and answer later as events; the search goes further
 and runs as a process of its own, because one 70 MB transcript is a third of a
 second of `JSON.parse` on the event loop the relay shares.
 
+**A tmux server can lose the right to read a desk's folder, and the host
+moves every window to a fresh one rather than let a desk see it** (costmo,
+2026-11-10: "I will not accept a user ever seeing this error, even once").
+Measured that day on macOS 27.0.1: the `orch` server, up two days, was
+refused `~/Documents` and everything under it (`System Policy: … deny(1)
+file-read-data` in the kernel log, with tccd never consulted), except
+folders the folder dialog had stamped with a `com.apple.macl` grant. So
+desks taken through the dialog worked, and a desk bound any other way died
+mid-session with "Can't read the current directory (EPERM)", as did every
+window reopened for it. A fresh tmux server started the host's way read all
+of it, and TCC still had the host's Documents grant. Why that one server
+carried the refusal was not found (the log of its first day had rotated), so
+the host does not guess. `checkServer()` runs a 16 ms `run-shell` read of
+each window's folder at every heartbeat, and `open()` runs the same check
+before it makes a window. When the server is refused and a fresh one is not,
+`renewServer()` waits for working windows to end their turn (up to
+`ORCH_RENEW_WAIT_MS`), kills the server, and resumes each conversation in a
+fresh one; a window that had no conversation yet starts one there. An agent
+whose turn was cut off, whose question was closed, or which had met the
+refusal is told in the host's words, and each desk gets a `host` line
+(`renewNote`). It refuses to kill a server that also runs sessions which are
+not the floor's, and an `open()` of a folder that nothing can read (mode
+000, or deleted under its window, which tmux still gives as the pane's path)
+returns `unreadable` with nothing moved. Three rules from QA's review of
+PR #54, each measured:
+- **The read is `run-shell` with no `-t`.** With a target, a refused read
+  writes "returned 1" into that pane and leaves it in view-mode, and
+  `orch:` is a desk's window: its next message went to the mode and the
+  host said `not_delivered`, with the floor's capture showing the screen
+  underneath. Without `-t` the exit is still 1 and no pane changes. Any
+  `run-shell` against the floor's server, by hand included, goes without
+  one.
+- **A move is made once for a refusal.** After the move, the folders are
+  read again on the new server, before any agent is told "readable again".
+  One still refused is said on its desk and kept in `stillRefused`: no
+  check moves for it and no open makes a window in it until the server
+  reads it again. Moving again was a full kill-and-resume at every
+  heartbeat, 3 of 3. `freshReads` is a private socket with no tmux.conf,
+  which is not the server a move makes, so "a fresh server reads it" never
+  promised the move would clear it.
+- **renew()'s own reopens never ask for a move.** They pass `moving`, and
+  a refusal on the new server returns `unreadable` instead. Asking for a
+  move from inside the move returned the promise that was running. It never
+  resolved, so the window was not reopened, and `checkServer()`, awaited on
+  the host's line in `run()`, never returned.
+
+`test:renew` drives it on a socket of its own, never the default, because
+the default socket is the live `orch`. Its refusal belongs to the server
+running when it is set (`refuse()`), as on the day, or `sticky` to every
+server for the move that does not clear it. What it does not drive is
+`index.js`'s two lines, the heartbeat's call and the hook. `test:host` runs
+its host on the default socket beside the live `orch` session, where a
+move is a `kill-server` of the operator's floor (and `renew()`'s own guard
+refuses it because of that session), so the host suite can reach only the
+refusal. The words those two lines carry are `renewNote`, and `test:renew`
+asserts them. **diagnose-handoff** has the readings.
+
+It has been seen live once, and the floor was spared: on 2026-11-14 at
+20:19:14Z the heartbeat moved all four windows, with a `host` line on each
+desk. The same afternoon the refusal also landed on the operator's
+terminal: from 12:13 local every process under iTerm2 was refused
+`~/Documents`, so a conversation run there could not read its own repo. A
+server it started was refused as well, and that is not the host's to move.
+So an agent whose own commands get EPERM checks its own shell before
+reading the floor's (diagnose-handoff, first step). Moving the conversation onto the floor
+is what brought it back.
+
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
 [`host/dialog.js`](host/dialog.js), with a backend per platform and only
@@ -218,7 +291,8 @@ Everything the host knows about a window is a text capture of its pane, and
 **every rule for typing into one was measured, not reasoned**. They are recorded
 in [`.claude/skills/watch-the-window`](.claude/skills/watch-the-window/SKILL.md),
 and the obvious guess is wrong in all four cases: on an AskUserQuestion a digit
-*selects* on a single-select, *toggles* on a multi-select, the free-text row
+*selects* on a single-select (and only *moves* on one drawn with previews,
+below), *toggles* on a multi-select, the free-text row
 *withdraws the form* on a single-select but *opens a field* on a multi, and the
 Submit tab is arrived at by answering the last question rather than walked to. A
 day was spent proving each of those; do not adjust `answerSteps()` in
@@ -232,6 +306,47 @@ Three consequences worth knowing before touching `host/window.js`:
   window's index and every open on the board failed with `create window
   failed: index 1 in use` (3.7c, 2026-09-09). A session target carries the
   trailing colon: `orch:`.
+- **And `orch:` is not only that session: the name is written `=orch`.**
+  With no session of the exact name, tmux gives a session target to any
+  session whose name *begins* with it. Measured on 3.7c (2026-11-16; QA,
+  PR #57 round 2, read plus one measurement; repeated here on a socket
+  with only a session called `orchid`): `has-session -t orch` exits 0,
+  `list-panes -t orch` lists orchid's panes, `new-window -t orch:` makes
+  its window in orchid, `send-keys -t orch:` types into it. So the first
+  desk window after a reboot, or after the floor's last window closed, was
+  made inside whatever session of the operator's own started with "orch":
+  a suite's `orch-test-<pid>` on this machine, anybody's `orchestra` on
+  theirs. costmo's ruling, by AskUserQuestion, the same day: fixed in
+  PR #57 and not after it. Every target `host/window.js` writes from the
+  name is `EXACT` (`=orch`) for a session and `${EXACT}:` for a window in
+  it. Three things about `=`, each measured: it needs the colon wherever
+  the target is a window's (`list-panes -t =orch` still listed orchid's
+  pane, `-t =orch:` did not); the targets tmux hands back (`orch:@4.%7`)
+  are left alone, because a window id is the server's own and `send-keys
+  -t orch:@9.%9` is refused whatever else begins with "orch"; and `attach
+  -t orch` is left too, since it is a line for a shell, where `=orch` is a
+  command lookup in zsh, and it runs only after the exact `has-session`
+  beside it. A tmux command written by hand against the floor, in a test
+  or a skill, takes `=name` the same way: the window suite's own cleanup
+  `kill-session -t orch-test-<pid>` would take a look-alike with it.
+- **The host's panes are its own session's, and no other's** (costmo,
+  2026-11-16, by AskUserQuestion to me and to QA the same hour: fixed in
+  PR #57). `panes()` asked `list-panes -t <session> -a` under a comment
+  that said "every live pane in our tmux session", and `-a` is every pane
+  on the server whatever the target. Measured on a socket of its own, with
+  `orch` standing and a session `mine` holding one pane in a desk's
+  folder: `panes()` listed both sessions, `paneFor` gave `mine:@1.%1` as
+  that desk's window, and `open()` answered ok, created false, with no
+  window made (QA's reading of the same). So a message to that desk went
+  into a pane the floor never opened, a plain shell as readily as Claude
+  Code, and a Leave, a move or a reopen would have closed it
+  (`closeWindow` kills what `paneFor` finds). It is `-s` now. A Claude
+  Code somebody started in a tmux session of their own is then a process
+  in no pane of the floor's, which `holderOf` already reads as held
+  outside it, as an editor's is. "Keep it, any session counts" was the
+  other offer; do not re-propose it. `windowNames()` still asks `-a`, on
+  purpose: it is only the names a new window avoids, and avoiding more
+  than it must costs nothing.
 - **Pane width is set by whoever is attached.** A footer that fits on one line at
   160 columns wraps at 80, which broke `askingOf` and made a real fault look
   intermittent. Read footers as the last few lines rejoined.
@@ -245,6 +360,21 @@ Three consequences worth knowing before touching `host/window.js`:
   "esc to interrupt" read as busy for ever. Status is positional: `footOf` reads
   the bottom line, and nothing quoted above it can fake one.
 
+- **tmux answers for another pane when the one named is gone.** Measured
+  on 3.7c (2026-11-16, QA's PR #57 Info 10 and its second round). After
+  `kill-pane` of `p:@1.%1`, `display-message -p -t 'p:@1.%1' '#{pane_dead}'`
+  exits 0 and prints `0`: tmux resolved what it could of the target, the
+  session, and answered for that session's current pane. When the pane was
+  its session's only one and other sessions remain, it exits 0 and prints
+  nothing. When it was the last pane of all, the server is gone: exit 1,
+  "no server running on …" ("error connecting to …" for a socket that no
+  longer exists). So a read through `-t <target>` proves nothing about
+  *that* pane unless the answer carries the pane's own id: ask for
+  `#{pane_id}` beside whatever is wanted and compare. `waitReady`'s exit
+  check did not, took a killed window for a live one, and held the host's
+  line for 45 s. A pane that exited is different: `remain-on-exit` keeps
+  it, and `pane_dead` is 1.
+
 - **A line in the composer that nobody typed is a prompt suggestion.**
   Claude Code 2.1.300 draws a suggested next prompt as ghost text after a
   turn ends — dim (SGR `2m`), after the cursor, which stays at column 2
@@ -252,13 +382,37 @@ Three consequences worth knowing before touching `host/window.js`:
   at its end. Ten of twenty-one idle windows on this machine held one on
   2026-11-02, and three of them were reported as "typed into the composer
   and never sent" with no record anywhere, because nothing had entered
-  them. `composerOf` reads a suggestion as the composer's contents, and that
-  is harmless where the host uses it — the paste check wants the composer to
-  *change*, the stuck check looks for the *sent* text — and measured on a
-  probe, a paste through `send()` replaces the suggestion: one user record,
-  the host's own words, nothing of the suggestion in it. Tab or Enter in
+  them. `composerOf` reads a suggestion as the composer's contents. That is
+  harmless for the paste check (it wants the composer to *change*) and the
+  stuck check (it looks for the *sent* text), and measured on a probe, a
+  paste through `send()` replaces the suggestion: one user record, the
+  host's own words, nothing of it. It was **not** harmless for typing
+  (2026-11-17, issue #31's first live test): `typeInto` waited for
+  "suggestion + first line", typing replaces a suggestion, so the line read
+  as lost and the message was pasted after all, reaching the agent in
+  `<pasted_content>`. Every message of four lines or more was exposed, and
+  every message with attachments is one. Reproduced on a probe on 2.1.326
+  (wrapped, 10.1 s, against 3.3 s unwrapped), fixed by accepting the first
+  line alone, and re-measured over two real suggestions (typed, unwrapped).
+  A draft a person really typed is not replaced, so it still reads as
+  draft + line. The fallback to a paste now says so in the host log; it
+  used to be silent, which is why this went unseen. Tab or Enter in
   such a window would accept it. Before chasing a phantom keystroke source,
   read the row with `capture-pane -e` and the cursor with `#{cursor_x}`.
+
+- **A composer taller than its box scrolls, and its `❯` row goes out of
+  sight.** Measured on 2.1.326, 2026-11-17, in an unattached 80x24 window:
+  at most 7 rows show, and the top rule becomes `─── ↑ 3 more ───`.
+  `composerOf` found a box by its `❯` row, so it read null there (or, with
+  an earlier message's `❯` echoed above, from that line down), and
+  `typeInto`, comparing the whole box with the whole text, read the last
+  line of a five-line message as lost and pasted it into
+  `<pasted_content>`. A message with attachments at 80 columns is that
+  tall. `composerOf` now reads a scrolled box by its header
+  (`scrolledComposerOf`), and `scrolledOf` says when what it gives is only
+  the end: a line is confirmed when the box changed and ends with it, and
+  the finished message when the box shows its end. Re-measured on the same
+  pane: the same message typed and recorded verbatim, 2 runs of 2.
 
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
@@ -266,8 +420,9 @@ none of this needs the operator to sit and click.
 ## A question on the floor
 
 Four rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
-2.1.284). Each is the opposite of what the code did the day before, and each
-had a reasonable argument behind the old way — which is why they are here.
+2.1.284), and a fifth from 2026-11-14. Each is the opposite of what the code
+did the day before, and each had a reasonable argument behind the old way —
+which is why they are here.
 
 - **A form with a question unanswered is never sent.** costmo's ruling. The
   window's own review screen warns "You have not answered all questions" and
@@ -331,8 +486,41 @@ had a reasonable argument behind the old way — which is why they are here.
   the picks, or re-measuring the row on the current window — were
   considered and not chosen; do not re-propose them.
 
+- **A question with previews takes its digit as a move, and the host
+  presses Enter once it has read the cursor on that row.** costmo answered
+  such a form from the floor twice on 2026-11-14 and both failed ("the pane
+  did not change after 1"); the host log holds four more from a designer
+  desk, older than its timestamps. Measured on a probe on 2.1.325: a
+  single-select where *any* option carries a `preview` is drawn side by
+  side, with the choices beside the highlighted one's preview. It has no
+  "Type something." row, and its status line reads "Enter to select · ↑/↓
+  to navigate · n to add notes". There `2` moved the cursor and the form
+  stood, and `Enter` recorded "→ Bravo". A plain question in the same form
+  still takes its digit alone, so "digit, then Enter" everywhere is the old
+  bug back: the Enter answers the next tab with its first row. Tab, Left,
+  Right and Shift+Tab walk a preview tab like any other, and a multi-select
+  given previews is an ordinary multi-select. So `answerSteps` is unchanged,
+  and the host decides at the key: when the pane it is about to press a
+  digit into is a preview question (`previewingOf`, the status line, read
+  positionally and rejoined because it wraps at 80 columns), it sends the
+  digit, waits to read the cursor on that row, presses Enter, and waits for
+  the pane to change (`selectRow`). It is the host's and not the board's
+  because the pane says which layout a question got. That holds for a form
+  built from the call, on a desk whose plugin is older than the fix, and a
+  wrong guess presses nothing. A digit with no row behind it ends as
+  `not_on_row` with no Enter sent. That case is real: the form built from
+  the call used to add "Type something." as row 4 of such a question. The
+  hook now forwards `preview: true` for an option that has one, never the
+  text, and `formFromInput` leaves the row out; that half reaches a desk
+  with the next plugin update. The floor does not draw the previews
+  themselves. That was not asked for and is not backlog by default: a
+  preview is a mock-up of any size, and where it would go on the panel is
+  costmo's call.
+
 `form.mjs` in **measure-a-real-window** raises a real form on a probe window,
-reads it both ways, and answers it through the host's own code.
+reads it both ways, and answers it through the host's own code. `raise.sh`
+beside it raises one and leaves it standing, for pressing keys by hand
+before there is a rule to play.
 
 ## A message to a desk that is working
 
@@ -442,29 +630,96 @@ a reasonable argument behind it.
   `ORCH_BTW_LINGER_MS` for anyone looking at the window, then closed with
   Escape — the host does close it, on purpose, because a dialog left
   standing takes the next message instead of the composer.
-- **A model or effort change from the floor is this session's only**
-  (costmo, #10 Decided 4). `/model <name>` and `/effort <level>` as commands
-  write the person's machine-wide default (`~/.claude/settings.json`
-  `model`, `modelSettings.<model>.effortLevel` — "saved as your default for
-  new sessions"); the probe changed the operator's and they had to be put
-  back by hand. The window's picker has `s` for this session only, so the
-  host drives it (`pick`): `/model` + Enter, ↑/↓ to the row (a digit
-  SELECTS and starts the switch, so digits are never pressed; in a pane
-  under ~30 rows, 2.1.322 shows three models and "… +3 models", so a row
-  not on screen is looked for by walking the cursor, never by resizing
-  the pane — the floor's Sonnet and Haiku failed on every unattached
-  window until it did, 2026-11-09. The list is a ring ending in "▸ More
-  models", whose footer is "Enter to expand · Esc to cancel", and that is
-  still the picker; read as gone, it was left open and took the desk's
-  next /model. Read before and after each key at one size: `-S -N` on a
-  pane with history differs by size, QA PR #53), ←/→ along
-  the effort row, `s`, and `1` on the "Switch model?" cache warning. The
-  chat route refuses a bare `/model` (a picker nobody is driving) and an
-  effort level the picker has no row for; the page offers both as controls
-  and shows asked-for beside confirmed until the window confirms —
-  PreModelSwitch/PostModelSwitch, the stdout record, and the `model` on the
-  transcript's next reply, which is how the header follows a `/model`
-  typed into the window.
+- **A model or effort change from the floor is the window's own command,
+  and so the default for new sessions** (costmo, 2026-11-14, reversing #10
+  Decided 4, so the floor does what the window and the editor do). The
+  host types `/model <name>` or `/effort <level>` like any other command
+  (`send()`), and the window's line is the receipt and names what the
+  board takes as confirmed (`switchedTo`): "Set model to Haiku 5.5 and
+  saved as your default for new sessions", "Set effort level to low (saved
+  as your default for new sessions): …". The default is the machine's the
+  desk's host runs on (`~/.claude/settings.json` `model`,
+  `modelSettings.<model>.effortLevel`). For the eleven days before, a
+  change was "this session only": the host opened the window's picker,
+  walked its rows and pressed `s` (`pick()`, PR #53's short-pane walk
+  with it). That is removed, not kept with Enter in place of `s`, and the
+  reason was measured on 2.1.325: Enter in the picker saves the cursor's
+  row *and* the effort row together ("Set model to Sonnet 5.5 and saved
+  as your default for new sessions with medium effort"), so an effort
+  change on one desk re-saved that desk's model as the machine's default,
+  over whatever another desk had just chosen. The commands save the one
+  thing each names, resolve a family themselves ("fable" was Fable 5.2),
+  and answer an unknown name in words with nothing saved. Do not bring
+  the picker back for either. Four things the command path needed, each
+  measured that day:
+  - **"Switch model?" still stands between a `/model` and its line** on a
+    conversation cached for its model, behind the command as behind the
+    picker. The host answers `1`, once (`switchConfirmOf`, read from the
+    pane's last lines; it used to match the words anywhere in the capture,
+    and a conversation quoting them would have had a `1` typed into its
+    composer).
+  - **The same dialog has a second title, "Change effort level?", and the
+    host answers it for an `/effort` the same way** (QA, PR #55 finding 1).
+    It is in 2.1.325's strings with the model's lines under it, raised when
+    an effort change would rewrite the cached prefix. It has not been seen
+    on a window: `/effort <another level>` after a reply went straight
+    through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (probe,
+    2026-11-15), because those take effort per turn. So the read is the
+    measured one with the binary's title, and a desk on a model that does
+    not take effort per turn is where it would stand. Unanswered, on the
+    suite's stand-in, the `/effort` ended `not_delivered` and the desk's
+    next message was pasted into the dialog for a minute. A change the
+    window was told to keep writes "Kept effort level as <level>" (the
+    binary again), which names no level set and so clears the asked-for.
+  - **A refusal is a `system` record, not a user one.** "Model 'x' not
+    found" is written with subtype `local_command` and its text in
+    `content`. Read as user records only, the host waited out twenty
+    seconds on a window that had answered at once (`stdoutOf`).
+  - **Neither is typed into a working window.** `/model haiku` into a
+    running turn is taken at once and raises "Switch model?" over the
+    work. `/effort` mid-turn was not measured and is held to the same
+    rule. Refused before a key is pressed, in words on the desk.
+  - **The page's selects are written only where they changed**
+    (`fillSelect` in `src/ui/floor.js`). The panel is drawn again on every
+    poll and stream event, and both selects were emptied and refilled each
+    time: twice in the two seconds after a panel opens, then every 2 s.
+    costmo's report was a pick in those first seconds not taking, with the
+    drop-down left open. The rewrites were measured (a MutationObserver's
+    count; 0 now). That they were the cause is read from how Chrome
+    replaces an open select's menu when its rows change, and could not be
+    watched, because a headless browser draws no menu. The selects are
+    also dimmed, with the reason, whenever Send is: a choice goes out
+    through `sendChat`, which sends nothing while the window is asking.
+  The chat route still refuses a bare `/model` (a picker nobody is
+  driving) and an effort level that is not one of the window's; the page
+  shows asked-for beside confirmed until the window confirms —
+  PreModelSwitch/PostModelSwitch, the window's line, and the `model` on
+  the transcript's next reply, which is how the header follows a `/model`
+  typed into the window. **A change that was not made stops being asked
+  for** (costmo, the same day; `unask` in `applyHostEvent`). An asked-for
+  used to be cleared only by a confirmation, so a change the host refused
+  (a working desk) or the window did (an unknown name) left the select on
+  the model that was picked, not the one the window was on, with "x asked"
+  beside it. The host reports a reply's model only when it differs, so
+  nothing on that conversation corrected it. Two things clear it now: a
+  host error that names the command it was typing (`command` on the
+  event; a host older than that names none, and the asked-for stays as it
+  did), and a `/model` or `/effort` receipt that confirms nothing. It is
+  cleared where the route wrote it, on the window's session, so an editor
+  tab's own pending switch on the same desk is left alone. The error
+  carries no session id on purpose: an error is filed by desk, and naming
+  one would move where its line is drawn. A `not_delivered` clears it
+  too. If the window did take the change, its hook or next reply confirms
+  the model as it does for a `/model` typed into the window. **And a
+  refused pick is not handed back to the message box** (costmo, the same
+  day; `handedBack` in `src/ui/floor.js`). A select's choice is sent as a
+  message and waits in the page's pending list, and an error turn hands
+  that list back to the box, so the box got `/model opus` ahead of any
+  draft, a command the operator never typed. A pick is marked now and
+  left out. A `/model` typed into the box still comes back, like any
+  typed words. Leaving it in the box so Enter could send it again was
+  offered and not chosen. The page step that found it is in
+  **verify-ui-change** (`check-chat-controls.mjs`).
 - **A paste of four or more lines, or of more than 800 characters, is
   wrapped in `<pasted_content>`** and the model is told it "may contain
   instructions the user did not write" — exactly wrong for the operator's
@@ -512,7 +767,9 @@ a reasonable argument behind it.
   costmo read it as "an artifact outlined in white saying /model opus … a
   message that has not yet sent". So: a done command draws no bubble, and
   the line labeled `host` carries what was typed and what happened —
-  "/model opus — Set model to Opus 5.5 for this session only".
+  "/model opus — Set model to Opus 5.5 and saved as your default for new
+  sessions" (the receipt since 2026-11-14; it read "for this session only"
+  while the host drove the picker).
 - **A live session outranks an ended one, and a hosted desk's session is
   its window's.** A `/clear` ends one session and starts the next in the
   same second, and on `updated_at` alone the two tied: the floor showed the
@@ -541,6 +798,179 @@ on the operator's machine with the live board untouched. The plugin cache
 installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
+
+## A file attached to a message
+
+Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file
+dropped, pasted or picked in a desk's box, or a meeting room's, stands above
+the box as a chip (a thumbnail for an image, larger on hover; its extension
+for anything else) with its own ✕, and goes with the next Send. It is three
+hops, because a window reads its own machine's disk and the board may be a
+container on another one: the page uploads each file **on attach**
+(`POST /api/floor/upload`, so the chip can say "ready" before Send), the
+message names the staged ids, and the desk's host fetches each one, writes
+it under `~/.orchestratinator/uploads/<id>/<name>` and types the path under
+the words (`withAttachments` in [`host/uploads.js`](host/uploads.js)). Six
+things behind it, each of which looks simpler than it is:
+
+- **Outside every repo, and a window may read it there.** Inside the desk's
+  folder an attachment is a change in somebody's working tree (costmo: not
+  git-visible). Outside it, measured on 2.1.326 with a probe in **manual**
+  mode: a Read of a text file and a PNG under `~/.orchestratinator` raised
+  no permission prompt, and a message the host's own `send()` typed with
+  two paths (one with a space) was recorded exactly and both were read. On
+  a machine whose settings do ask, it is an ordinary prompt on the floor.
+- **The path is typed, not pasted as an image.** An image path inside a
+  typed or pasted message stays text: the files-only message is two lines,
+  so `send()` pastes it rather than types it, and it was still recorded as
+  text and read (same probe). The agent reads a file when it wants it,
+  which is also what lets a 100 MB log go without filling the context.
+- **Lifetime is Claude Code's own** (costmo: "the operator should not have
+  to think about it"). The host keeps a file for `cleanupPeriodDays` from
+  Claude Code's `settings.json`, 30 when unset, read at every heartbeat's
+  sweep, never under a day (Claude Code reads 0 as "keep nothing"). That is
+  how long the transcript naming the file lives. A file sent again is kept
+  from that send. The board keeps its staged copy an hour from attach or
+  last send, and does **not** delete it when a host fetches it: a meeting
+  room sends one file to desks on several hosts, and an error turn hands
+  the files back to the box to be sent again.
+- **100 MB a file, twenty a message** (costmo). Refused on the page before a
+  byte is sent, on the declared length before the board reads one, and cut
+  off at the cap while streaming. The body is never parsed (server.js skips
+  the path, so a `.json` file is not read as a request) and never held
+  whole in memory: the board shares Docker's VM (issue #5).
+- **A host says it takes files, as it says it takes seats.** `uploads: true`
+  at registration, kept on `hosts.uploads`. A host from before ignores
+  `files` and would type the words alone, so the board refuses files to it
+  in words (`host_no_uploads`) and the paperclip is dimmed with the same
+  sentence. The desk's `hosted.host_id` in `/api/floor` is how the page
+  finds that row; it was not in the projection, and the page check's first
+  row is there because the paperclip read live by fallback without it.
+- **The board never serves an upload to a page.** Thumbnails are drawn from
+  the File the page holds, so nothing from the operator's clipboard becomes
+  a document on this origin. The route's reasoning is beside adminGuard's
+  in [`src/web.js`](src/web.js) ("A route that takes bytes"), as the issue
+  asked, not a widening of that comment.
+
+What the page does with the result: the host writes the list as `Attached
+by the operator:` (`Attached from the floor:` until costmo renamed it the
+same day, still read) and one `- <path>` a line, after a blank line, and
+`splitAttached` draws a user turn ending in exactly that as its words plus
+file chips, the path on hover. Anything else that only looks like a list is
+the operator's words, left as typed. The page and the host spell the header
+once each and `test:floor` holds them to one. A pending message of files
+alone is matched to its turn by the first file's id and name, which only
+its own path holds (`attachMatch`): an empty match took the next user turn
+of any kind, and the name alone took an earlier message carrying a file of
+the same name (the room check sends one screenshot twice for that). The chips are one row,
+scrolled sideways: two rows pushed the panel's foot off a 640px window.
+
+Left out, with why: **thumbnails in the history** (the board keeps no bytes
+after its hour, and a recorded turn is drawn from the transcript, which
+holds a path); **a progress bar** (a local board takes 100 MB in about a
+second; the chip's spinner is the receipt); **a slash command with files**
+(the window reads the line as a command, so there is nowhere to put them;
+refused on the page and the route). `check-attach.mjs` in
+**verify-ui-change** is the page; the host's half is "a message with files
+attached" in `test:host`.
+
+What PR #58's review added (QA, 2026-11-17, 1 Low + 8 Info), each a rule
+now:
+
+- **A command is the board's `commandOf`, on the page too** (`commandLike`
+  in the attachments section, a copy, and `test:floor` runs the two over
+  the same messages). The page's first rule, "starts with / and a letter",
+  refused files on "/Users/me/build.log keeps failing", which the board
+  takes, and called it a command.
+- **The host's error is the why, then "; nothing was typed"**, never "not
+  sent — …": a meeting room puts "not delivered — " before a desk's error,
+  and the two read as a stutter. A folder the host cannot write names its
+  file ("x.png could not be written on this machine (EEXIST)").
+- **Nothing in the box is cut.** Files a failed send hands back go back
+  every one, and Send says when the box holds more than twenty and how
+  many to take out. A `slice` there dropped them without a word.
+- **A body shorter than its content-length never reaches the agent, and
+  Node's fetch is what stops it**, measured on Node 24: it throws
+  "terminated" before `fetchUpload`'s own size check runs, whether the
+  board closes or drops the socket. That check is a second guard, so QA's
+  mutant removing it survives by design; the row asserts the outcome.
+- **When a typed line counts as arrived is one function**, `lineArrived`,
+  so a row can name each case on its own, the same line typed twice
+  included.
+
+Two items were left for a later branch, and the reasons are what stop them
+being re-proposed as gaps:
+
+- **A visible row starting with `>` is read as the prompt** (Info 5,
+  older than #31). A quoted line in a message with attachments can then
+  fail the scrolled check and be pasted after all, and the host log says
+  so. The fix is a new reading of what marks a composer's first row, in
+  both the scrolled and the unscrolled reader, and it wants a real window
+  measured with a quoted line first (`typing.mjs --text-file` in
+  **measure-a-real-window**). Not a release check's change.
+- **A fetch may outlast the board's 90 s host-live window** (Info 8). It
+  takes a board on another machine at about 9 Mbit/s or less to fetch
+  100 MB that slowly; locally it is a second. The two fixes behave
+  differently (the host touches the board while a fetch runs, or the fetch
+  times out under 90 s and refuses large files on slow links), so it is a
+  choice to make with a slow link measured, not a guess. Meanwhile the
+  floor draws that host's desks unreachable until the fetch ends, then
+  live again, and the message is typed then.
+
+## The milestone audit's foundation (0.12.11)
+
+QA's coverage and testing audit (2026-11-17, at 0771ea8) was the gate to a
+milestone, and costmo's word for the round was "solidify our product and
+provide the foundational proof before we pivot into some new features".
+It ruled in findings 1–5 and two foundation items. The report is in the QA
+repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
+
+- **An open question never leaves the floor while the window asks it**
+  (finding 1, High). docs/backlog.md has the whole account. A prompt is
+  closed only by the work of the session that raised it, and every
+  heartbeat says which floor windows are asking (`pending`), which is
+  how a board restart, every deploy, no longer forgets them.
+- **Work a host takes is done once, handed out again, or said lost**
+  (finding 4; the guarantee is written above `takeHostWork` in
+  `src/db.js`). It used to be marked taken as it was handed out, and a
+  host stopped mid-line lost the rest of its batch without a word. A host
+  says each item finished as soon as it is (on the next poll, or at once
+  while more of its batch is still to go: `sayDone`, after QA's L1 in the
+  re-measure), a host stopping finishes the
+  item in hand (`ORCH_STOP_DRAIN_MS`, 15 s) and hands back what it never
+  started, and each run of a host has a `boot`, so the next run's
+  registration sorts what an earlier one left: reads are handed out again
+  (`REHANDED_WORK`), and anything that acts on a window is closed and
+  said on its desk in an error turn (`lostWorkWords`). A chat's turn
+  quotes the words, says it "may not have been sent" (the board cannot
+  know), and an error turn is what hands them back to the box.
+  At most once for window work, on purpose: a host can die after typing
+  and before saying so, and a message typed twice is the worse failure.
+- **The stop sign and Press yes / no are tested at the window** (findings
+  2 and 3): Escape and no Enter for a stop; 1 for yes and Escape for no;
+  nothing pressed into a window back at its composer. Rows in
+  `test:window`, `test:host` and the press route's in `test:floor`.
+- **One stack** (finding 5): Tests, above.
+- **The release gate is one command: `npm run release-gate`** (item A).
+  Every suite and the eleven release page checks, on the Node and the
+  packages that ship, with one log whose first line names the head, the
+  tree and `node -v`, and whose last is `EXIT=`. Both halves run even
+  when the first is red. Measured with a red seeded in a copy, one in
+  smoke and one in check-attach: `EXIT=1`, both named. It replaces
+  running `npm test` and `run-release-pages.sh` by hand at a release.
+- **The project owns a coverage reading: `npm run coverage`** (item B).
+  The instrument is QA's from the audit, kept as measured
+  (`scripts/coverage/`: the preload, `report.mjs`, `run.sh`; and
+  drive.mjs records page coverage when `PAGECOV` is set). Over the
+  audit's own snapshots, `report.mjs` gives QA's per-file table exactly:
+  88.4 % code lines, 94.1 % functions, 77.8 % branches at 0771ea8, the
+  baseline. Three things it needs, each found the hard way: a process ended
+  by a signal writes no coverage, so the preload snapshots before every
+  SIGKILL and on SIGTERM; each snapshot resets V8's counters, so every file
+  is kept and summed; and page logic is tested from lifted copies in
+  `data/`, which the preload keeps and the report credits back to
+  `src/ui`. Not seen by it: the hub SharedWorker and windows a page opens
+  itself.
 
 ## Moving a desk to another floor
 
@@ -598,6 +1028,23 @@ opposite of what ran before.
   it, and the page stays). The target's seat, made when the board took the
   move, stays behind undrawn (#20) — a new floor named in a refused move is
   an empty storey until removed, as with any take the host refuses.
+
+- **Take a desk opened from a floor keeps that floor when a folder is
+  chosen** (costmo, 2026-11-16, 0.12.8; `takeListing` in `src/ui/app.js`).
+  A bound folder used to put its own floor in the form, so an operator
+  standing on a floor who chose a folder to bring over got "bring it onto
+  the floor it is already on". Now the floor is the operator's: the one
+  the dialog opened on, or whatever they have picked in it since, and a
+  folder bound elsewhere is a move to it, said by the title, the note and
+  the button ("Move to lab") before anything is pressed. Opened from all
+  floors, where no floor is being looked at, a bound folder still proposes
+  its own. The reading taken of "should not change": a floor the operator
+  picked by hand in the dialog also survives the next folder, where an
+  unbound folder used to put it back to the floor the dialog opened on.
+  Read on a page with a folder bound on another floor: from `lab` the
+  form held `lab` and "Move to lab"; from all floors it held the folder's
+  floor and "Bring onto the floor". The folder was chosen through
+  `browseTo()`, which is what a row's click calls, not through a click.
 
 Two page facts behind the card. **"All floors" with two or more floors is
 the building, and a storey there is navigation** — a click on a desk rides
@@ -725,6 +1172,239 @@ re-read, unwatched), and a host being left that runs an older build.
 `two-instances.sh` in **measure-a-real-window** is the rig (two throwaway
 instances, a host each, a tmux server of their own), and
 `check-release.mjs` in **verify-ui-change** is the page.
+
+## One agent, several sessions
+
+0.12.9 (costmo, 2026-11-16). One agent can be in several places at once, each
+a session of its own: on several floors, and in several meeting rooms on one
+floor. His case is the QA agent reviewing three projects' PRs at once, and
+auditing with one agent while reviewing with another. It is built on one
+measurement and four of his rulings, and each part of it replaced a sentence
+that used to be true here.
+
+**"One agent per checkout" was Claude Code's limit, and it is not one.**
+[`docs/desk-from-the-floor.md`](docs/desk-from-the-floor.md) said so: local
+scope holds one `orchestratinator` entry a directory, so every window in a
+folder is that folder's desk. Measured 2026-11-16 on 2.1.325, on a throwaway
+board and a tmux socket of its own: a folder bound as `ms-a/qa`, one window
+started plain and one with `claude --mcp-config <file>` naming `ms-b/qa`
+**under the same server name**. The board counted one MCP session on each
+floor and two in all, so the file's entry takes the folder's place in that
+window; no approval dialog was drawn. Then, through the tree's host: both
+answered `I AM ms-a/qa` and `I AM ms-b/qa` to the same question, a third
+answered `I AM ms-a/qa-2`, and one closed and reopened with `--resume <id>
+--mcp-config <file>` answered with the word it had been told to remember
+before it closed. [`host/seats.js`](host/seats.js) is the record.
+
+The host calls such a desk a **seat**. Five things about it, each of which
+looks like it could be simpler:
+
+- **A seat is told from the folder's own desk by a tag on its tmux window**
+  (`@orch_seat`), never by directory. "The directory is the identity, and the
+  only one" (`paneIn`) is still true of the folder's own window, which is the
+  one with **no** tag; so a host with no seats finds every window exactly as
+  it did. Every function in `host/window.js` takes the folder, or
+  `{ cwd, seat }` ("which window" there), and a desk's roster sessions are
+  shared out the same way (`sessionsAt`): a seat's are the ones in its tagged
+  window, the folder's own desk has the rest, an editor's included.
+- **The tag is set in the tmux command that makes the window.** Set a moment
+  later, a watch tick between the two read the new window as the folder's
+  own. Measured on tmux 3.7c: `set-option -w` with no target after a
+  detached `new-window` tags the *current* window, not the new one, and a
+  window named with a dot in it cannot be named in a target (`p:=qa-desk.x`
+  is "no such window": the dot is where the pane begins). So a seat's window
+  name has no dot, and the tag is `; set-option -w -t <session>:=<name>`.
+- **A seat's window is the first window of all, sometimes, and then what it
+  was given must not stay in the session.** `new-session -e` writes the
+  session's environment (the PR #52 lesson). A seat is given four variables,
+  and left there the folder's own window, opened next, would inherit
+  `ORCH_CHANNEL` and report every hook as the seat. All four are unset after
+  the session is made. `test:seats` opens a seat first for exactly this.
+- **The hook is told which desk its window is.** It finds a desk by folder,
+  and in a seat's window the folder names another desk, so a permission
+  prompt raised there would be drawn on, and answered into, the wrong
+  window. The window carries `ORCH_DESK_CONFIG` (its binding file, read like
+  a `.mcp.json`), `ORCH_DESK_ROOT`, and `ORCH_CHANNEL` / `ORCH_AGENT`. The
+  last two are what the hook has let stand in for the folder's names since
+  its first commit (2026-08-27; every copy in this machine's plugin cache,
+  0.10.12 on, has it), which is why a seat reported correctly on real windows
+  with the plugin that was installed before this was written. The file is
+  what keeps it reporting when the folder's own desk has left.
+- **A seat never resumes "the folder's newest conversation".** That is
+  `resumable()`'s fallback for a pin with no transcript, and in a shared
+  folder the newest is most likely the one another desk's window is running:
+  two processes on one transcript. A seat starts a new one and says so on
+  its desk; the folder's own desk skips conversations its seats are running;
+  and a conversation live in another desk's window is refused
+  (`held_by_other_desk`) and never typed into.
+
+What the board adds, and costmo's four rulings (each an AskUserQuestion,
+2026-11-16; do not re-propose the alternatives):
+
+- **A second session on a floor the agent is already on is named with a
+  number: `qa-2`, `qa-3`.** The board files turns, mail, tasks and a room's
+  members by floor and agent, so it needs a name of its own there; on
+  another floor it keeps the agent's name. `desk_twins` is the link, and the
+  link is that row, never the spelling. It carries the agent's name and face
+  (copied to its own profile row and kept the same by `setProfile`, not
+  looked up through the link, because a profile is read by agent in a dozen
+  places) and the nameplate adds the number: "Quinn · 2". `agent.2` was the
+  other offer.
+- **A plain name means the session in the sender's room.** `addressed` in
+  [`src/tools.js`](src/tools.js): a message or task to `qa` from somebody in
+  a live meeting room with `qa-2` goes to `qa-2`; otherwise to the first
+  desk; `qa-2` written out goes exactly there. "Always the first desk" and
+  "every session" were the other offers.
+- **A session made for a meeting room closes when it is in none**
+  (`sweepTwins`): End meeting, a Remove, Bring back, or the room's window
+  gone without a word. Closed is the desk's own Leave, never mid-turn (it
+  waits for the turn), and the desk leaves the floor whole: seat, row, link,
+  and its conversations ended. The conversation stays in the folder, and
+  Resume makes the session again on it (`meetingResumePlan`'s `twin` step).
+  Keeping it as a desk was the other offer. Four timings, each for a
+  reason: 30 s after it is made (its room is recorded a moment later, by the
+  room's window), 15 s after a room ends by its window going away (a reload
+  ends a room and opens it again; End meeting says `final` and is not
+  waited for), two minutes for one its host never seated, and 90 s of
+  watching an open room the sweep has found silent (below). The sweep runs
+  from the routes a page polls, not on a timer of the board's own.
+- **A window that slept is not gone** (QA, PR #57 finding 1;
+  `stillWatched`, `TWIN_UNHEARD_MS`). "Gone without a word" was "not live
+  after `MEETING_LIVE_SECONDS`", read at one look. A room that is open and
+  150 s unheard is also every window stopped together, a laptop asleep, and
+  then the page poll that runs the sweep reaches the board before the
+  room's touch does. QA measured it: a browser stopped 165 s lost the
+  session in 2 of 2 runs, in a meeting nobody had ended, and the room's
+  window then saved itself without it. Now the silence counts from the
+  look that first finds it. The watch is kept by the room's last touch
+  (`live.unheard`: room id, when, and the `live_at` it was silent since),
+  so a room heard from and silent again later is watched afresh with no
+  look needed in between. 90 s, because a window that is there touches
+  within 30 s, or within Chrome's one wake-up a minute when it is hidden.
+  A crashed window's session closes that much later than it did. The
+  number is the developer's, open to costmo's reversal; how long a room
+  contains its broadcasts (150 s) is unchanged. A real sleep, where the
+  board's clock stops too, is still not measured: if the clock has caught
+  up by the first request the room reads silent and is watched, and if it
+  has not the room still reads live. Do not go back to closing at the
+  first silent look.
+- **A second session's mail starts where it is made** (QA, PR #57 finding
+  2; `desk_twins.start_cursor`). Its `agents` row is made when its window
+  connects, and was made at cursor 0, so every broadcast the floor had
+  ever carried read as unread for it (7 of 7 measured, 222 on this floor
+  that day), the room's Nudge counted them, and its first poll with no
+  `since` was handed the oldest hundred. A second session is not a new
+  agent: what was sent before it was made is in its first desk's mail,
+  read or waiting. So a name never on the board starts at the floor's
+  newest message, and a name taken again starts where it stopped, so a
+  message addressed to it while it was away is not lost. A row at 0 (one
+  that never read, or a session made before this) starts at the newest
+  too. The link holds the number, the row `touchAgent` makes takes it,
+  `createTwin` brings an existing row up to it, and `poll_messages` floors
+  `since` at it for a second session. Two readings that were not taken:
+  the first desk's own cursor (both sessions would then read, and maybe
+  act on, the same unread broadcasts), and the stored cursor as the
+  default `since` for every agent (a change to the tool for everybody, at
+  a release check). Left as it was, on purpose: New desk here on
+  *another* floor is the agent's first desk there and starts at that
+  floor's first message, as any agent arriving on a floor always has.
+- **A bind does not take a name from a working seat** (QA, PR #57 finding
+  3). A folder bound to names one of its seats already carries on that
+  floor closes that seat's window (`bind()`: two desks cannot answer to
+  one name, and the folder's own entry is what its windows connect with).
+  Leave on that seat was refused mid-turn and the bind was not. Both doors
+  onto a bind refuse it now in one sentence (`seatWorkingWords`, in
+  `seatDesk`), and the host refuses from the pane, quoting it, for a
+  window that started working after the board looked. The host says it on
+  the desk the move is from, or on the seat itself for a take: both have a
+  row.
+- **Leave room asks first**, with the panel's own Leave desk dialog.
+
+And two of his from the same day, on the nameplate card: **Leave room**
+under Hide desk, and **nothing from Open conversation down can be pressed
+while the desk is in a meeting room** (`cardRefusal`), with the one reason
+under the buttons. One reason, not one a button: Hide desk had its own
+there since PR #56 ("In a meeting: it stands in the meeting's box…"), and
+two paragraphs beginning "In a meeting" under four dimmed buttons said one
+thing twice, so it is folded in, with what becomes of a desk hidden before
+it joined. check-meeting-box's three rows on that sentence read the one
+reason now (they went red on the first cut, which is how it was noticed). A click on the desk itself still opens its panel, which
+is where Bring back from the meeting room is, so the lock strands nobody.
+**Bring back takes the agent out of every room**, on every floor
+(`agentDesks`): an agent's desks are the ones of its name out of its folder
+on its host. The name alone is not the agent, because `developer` on two
+floors is two repos. The folder there is its last segment, since the
+payload carries no path: two folders of one name on one host, each with an
+agent of the same name, are one agent to it, and Bring back on either
+takes both out of their rooms (QA, PR #57 Info 9, read, no fixture built).
+Known and left: the fix is the path on the payload, which no finding has
+asked for.
+
+Two things found only by running it, and both are why the last tier is not
+optional:
+
+- **A closing window's last hooks re-seated the desk the board had just
+  removed.** Every hook event upserts its session (which clears `ended_at`)
+  and seats its desk. The plugin's SessionEnd arrives around the host's
+  `unbound`, in no order, and one that landed after put the desk back: a
+  seat with no host, its name taken for good. Seen on real windows: a
+  session asked back as `qa-2` came back as `qa-3`. The suites' stand-in
+  has no plugin and could not see it. A seat that was just left ignores its
+  window's hooks for a minute (`live.left`), and is heard from at once if
+  it is seated again.
+- **A closed session's conversation read as a live window for an hour.**
+  The next session made under the same name was drawn the moment the board
+  named it, before any host had seated it (the browser check drew a desk
+  for a session its host had refused). `unbound` for a seat ends its
+  conversations.
+
+**How a new thing was asked of the host, for the next one.** Three parts,
+each of which has a failure behind it elsewhere in this file. A **work
+kind of its own** (`seat`), never a flag on an existing one: a host from
+before it ignores a kind it does not know ("work for a desk this host
+doesn't have"), where `bind` with `seat: true` would have been carried out
+as a move by every older host. A **word at registration** (`seats: true`),
+kept by the board on the host's row (`hosts.seats`) and on the payload
+(`hosts[].seats`), so the page can dim the control with the reason and the
+route refuses in the same words (`noSeatsWords`), as `capabilities:
+["finish"]` does for an update. **On its row, not in the server's
+memory** (QA, PR #57 finding 5): it was a Map, a host registers once a
+minute, and the board calls a host live from its row for 90 s, so for up
+to a minute after every restart the board told the operator that a
+current host "runs a build from before… Update it", just after a deploy.
+What a host last said is kept where "when it was last seen" is. Anything
+else the board decides from a registration and reads while the host is
+still "live" has the same gap; the folder list and the update report are
+the two that remain in memory, and both say "not reported yet" rather
+than a refusal. And **the refusal said on a desk that has
+a row**: a desk being made has none until `bound`, and an error for it is
+dropped, so `sit()` says it on the desk it was made beside, as a refused
+move is said where the agent still is.
+
+Left out on purpose, with why:
+
+- **A seat is not moved by the card** (`seat_no_move`). A move rebinds a
+  folder, and a seat is not its folder's desk; done as leave-and-seat it
+  would arrive under another name on a floor where the agent's name is
+  free, and the page follows a move by name. The card says what to use: New
+  desk here on the floor wanted, Leave room on this one. Open to costmo's
+  reversal; it is two existing controls, not a missing capability.
+- **A seat's conversation is not handed to an editor** (`seat_no_editor`;
+  the panel does not draw the link). An editor opened in the folder loads
+  the folder's binding, so the conversation would carry on as another desk.
+  Nothing can give a VS Code chat a binding of its own. Open in tmux and
+  Open in Claude reach it.
+- **A desk in its own popout is still one place at a time.** Only a desk
+  that is in a meeting room gets a second session for another room, which
+  is what he asked for. And a room's **Add** offers what it did.
+
+How it is tested: the decisions in `test:floor` ("one agent, several
+sessions"), the host's half in **`test:seats`**, the hook in `test:plugin`,
+a move to a fresh tmux server in `test:renew`, and the page in
+**check-sessions.mjs** (**verify-ui-change**). The mutant lists are kept:
+`mutants-sessions.suite.json` (**mutate-in-a-copy**) and
+`mutants-sessions.page.json`. What only a real Claude Code can say is in
+**measure-a-real-window** ("Two windows in one folder").
 
 ## History is read off the hosts, not the board
 
@@ -889,9 +1569,32 @@ were measured, and each looks like it could be done more simply:
 
 The operator's calls on what the issue left open (Not established): a
 click anywhere on a desk in a selecting room checks it and does nothing
-else. The mode stays on after an action, with the checks kept, so the
-actions chain, and only a second Nudge while one is still in line is
-refused. Mark read shows its count on the control before it runs.
+else. Mark read shows its count on the control before it runs.
+
+**Selection closes itself once an action is sent** (costmo, 2026-11-14,
+0.12.x; `doneActing`). It used to stay on with the checks kept, so that
+actions could chain and because the results were drawn on the checkboxes
+and the toolbar. That was the developer's call, and he reversed it: a mode
+still on after its action read as unfinished. All four actions close it:
+Nudge, Mark read and Hide when their requests have answered, Meeting room
+when its window opened. A nudge is closed on *sent*, not on *typed*, so
+desks are still in line after it (130 ms to close, 41 s to the last
+verdict in check-select.mjs), and the pending bubble's rule is unchanged.
+With the mode gone, nothing drawn on it can report, so costmo chose where
+a desk that was not reached is said: **one line on the room, under its
+header, and only then** (`missedNote`, `missBar`). It is the action's
+summary with the missed desks named and each reason on hover. A run that
+reached every desk leaves nothing. A desk the Nudge control already said
+it could not reach is on the line too. The line goes on a click, and when
+selection is started or ended by hand (`settleBulk`), which keeps only a
+nudge still in line. One that fails after that is new, and the line comes
+back for it. Two alternatives were offered and not chosen: saying it on
+each desk the way its own control does (the bell's 2.5 s red), and staying
+open only on a failure. Do not re-propose either, or the mode staying on.
+One exception is deliberate: a Meeting room window the browser blocked
+leaves the room selecting with its checks, because nothing was done and
+the remedy is the same click again. A second Nudge while one is in line is
+still refused, now when the room is selected again.
 
 Two more rulings went into the same diff:
 - **A floor unread pill opens its dialog every time** (Decided 5). The
@@ -1124,9 +1827,26 @@ dialog through `openPill`, so Mark all read, read to here, reassign and
 Nudge agent are the backlog dialog's. Then its bell, the floor's `strike()`,
 which now returns the board's refusal so the room can say it in the
 transcript, having no drawn bell to put it on. Then its stop sign.
-**Nudge** beside Send is "nudge all": it nudges whoever the To chips
-choose, with the unread count in its label (`meetingNudgeChip`), as one
-room message with each desk's delivery under it.
+**Nudge** beside Send is "nudge all": one room message with each desk's
+delivery under it (`meetingNudgeChip`).
+
+**The room's Nudge goes only to the desks with something waiting, and
+says how much** (costmo, 2026-11-16, 0.12.9). It used to nudge every desk
+the To chips chose and read "Nudge everyone · 3 unread", so a room where
+one agent had mail sent all of them off to check in. Now it reads
+"Nudge all (3)", or the names when the chips narrow it, and the click
+types the word into the chosen desks that have something waiting and no
+others; the message in the transcript names who it went to. Two of his
+picks: the count is unread messages **plus unclaimed tasks**
+(`board.unread + board.assigned_open`, the ✉ and ☰ badges added; unread
+alone was the other offer, and left the count missing while a task was
+waiting), and with nothing waiting the button has no count and is
+**dimmed, with why** (nudging everyone anyway was the other offer). A task
+a desk has *claimed* is not waiting: it already knows about it. The bell
+on a desk's box is the deliberate nudge, waiting or not, and is unchanged.
+A desk with something waiting that the board will not nudge is still
+counted, and is refused in the room in the board's words when the rest
+are sent. Do not bring back "nudge everyone chosen".
 
 **A room's conversation is contained, and that is the board's job, not
 the page's** (costmo, on the second preview: agents on the floor outside a
@@ -1162,6 +1882,77 @@ An `@` later in a sentence is the operator's words. A name that is nobody
 in the room sends nothing and leaves the box as it was. Mentions outrank
 the chips for that message.
 
+**A click on a name's chip means that desk, so with everyone lit it is a
+solo** (costmo, 2026-11-14; `meetingToClick`). The chips were plain
+toggles. With everyone lit, the first click on Bo took Bo *out*, and
+"only Bo" in a room of four was three clicks on the others. He read it as
+working "the opposite of how one would expect". His rule: everyone lit, a
+click leaves only that desk; one lit, a click on it gives everyone back
+and a click on another adds that one; some lit but not all, a click
+toggles. So the chips never reach "nobody" by a click: the last lit chip
+gives everyone back. A room still stands at nobody when the one desk
+chosen leaves it, and a click then adds the desk clicked. Each chip's
+tooltip says what a click on it will do (`meetingToTitle`, which reads it
+off `meetingToClick`). The **everyone** chip is as it was. Do not bring
+the plain toggle back.
+
+**A choice that comes to name the whole room is everyone, stored as
+everyone** (`meetingToLeft`; QA, PR #55 finding 2). The chips and the hint
+are drawn from who is lit, the stored choice was a list, and the two came
+apart when desks left: narrowed to Bo with the others removed, the room lit
+**everyone** and said everyone hears, while the choice was still "Bo". A
+desk added next was not lit, and the next message went to Bo alone in a
+room that had just said everyone hears. Now a desk leaving takes itself out
+of the choice, and a choice naming every desk left becomes everyone, as
+`meetingToClick` already wrote it. This was the developer's pick of QA's
+two readings (the other: keep the list and say "Only Bo" in a room of
+one), on the ground that the page had already told the operator everyone
+hears. It is open to costmo's reversal. The rule below about a desk added
+to a narrowed room stands: such a room no longer reads as narrowed.
+
+**The chips' choice stays after a send** (costmo, the same day, reversing
+#44 Decided 2's "narrowed for this one message"). It used to go back to
+everyone once a message was taken, so a run of messages to one desk was a
+click before each. Now it stays until the operator changes it, and it is
+kept on the page only (`ui.meeting.to`): a reload, or the room opened
+again, starts at everyone, which he asked for. An `@name` at the start of
+the box is still for that one message and leaves the chips as they were.
+A desk added while the room is narrowed is not lit, because the choice
+was made without it. Do not re-propose the reset.
+
+**A participant's box is a control: a click on it hides or shows that
+desk's part of the transcript** (costmo, 2026-11-14; `meetingShown`,
+`m.hide`). The click is any part of the box that is not one of its
+buttons. Each button has a `data-act` of its own and the handler takes
+the nearest, so the box gets only the clicks that landed on none of them,
+a dimmed button's included. Five things were decided in building it, none
+of them his words, so each is open to his reversal:
+- **A desk's conversation is what it said and what was said to it.** Its
+  own turns go. A message goes only when every desk it went to is hidden,
+  and one that stays is drawn whole, with the hidden desk's delivery line
+  under it: a refusal is still said. The room's notes always stay.
+- **Hiding is not muting.** A hidden desk still hears what the chips or an
+  `@name` send it, and its prompt box still stands against the composer:
+  a question that needs the operator is never put away. The hint under
+  the box names a hidden desk that will hear the next message
+  (`meetingHiddenNote`), and drops its own second half to make room. The
+  longer line squeezed "Nudge everyone · 1 unread" onto two lines at the
+  room's own width, seen in the check's picture and pinned there.
+- **It lives on the page, like the chips' choice.** A reload or the room
+  opened again shows everyone.
+- **A hidden desk that leaves the room is shown again**, because what it
+  said stays in the transcript and it has no box left to click.
+- **The row of boxes keeps focus through its own redraw.** It is drawn
+  whole whenever a desk's state changes, so Enter on a focused box worked
+  once and then the next poll left focus on the body, one check run in
+  two. `renderMeeting` now puts focus back on the same control of the
+  same desk, which also holds for a bell or a pill reached by Tab.
+
+The filter runs over the list `meetingItems` made and reorders nothing,
+which is what puts a desk's turns back "properly inline" when it is shown
+again. A reply being typed by a hidden desk is not drawn either; no
+fixture streams a reply, so that one line is read, not measured.
+
 **A desk Resume could not bring back for a reason that may pass stays in
 the room's record, `absent`, and absent is on the floor**: it is not in
 the room for containment either way, so its broadcasts reach the floor
@@ -1186,15 +1977,140 @@ names each input by its prompt's request id. The panel only ever drew one
 form, which is why the name was never scoped before. A prompt box's
 answering spinner is per desk for the same reason (`ui.answering` is a Map).
 
-Left out on purpose. **Model and effort controls**: a desk's select drives
-its window's picker, so a room would need one per desk; `/model sonnet`
-narrowed to one desk takes the same route. **A reading view**: History
+Left out on purpose. **Model and effort controls**: a desk's select types
+`/model` or `/effort` into its own window, so a room would need one per
+desk; `/model sonnet` narrowed to one desk takes the same route. **A reading view**: History
 reads a meeting desk in the floor's panel, because reading types into
 nothing (renderPanel's `outMeeting` branch). **Audit rows**: a room is a
 window arrangement, like a popout, and popouts write none; the reopens a
 Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it names
 sessions on disks that may not be this machine's. `check-meeting.mjs` in
 **verify-ui-change** drives all of it.
+
+**A meeting's desks stand in a box of their own on the floor** (costmo,
+2026-11-16; "a meeting on the floor" in `src/ui/floor.js`). A 2.5px light
+grey edge, "In a meeting" on its upper left corner, and **End meeting**,
+a button, on its upper right. On one floor the boxes are at the top, one
+per meeting, stacked, three desks to a row, the floor's full width, and the
+desks in no meeting follow under them. In the building a storey stays one
+row: costmo's pick of three (stack above the row; box inside the row; no
+box in the building). A meeting's desks come first in the row with the box
+around them and scroll with it, so a meeting of four is four wide there and
+the button reads "End" around a single desk. End acts at once, as the
+room's own button does; asking first was offered and not chosen. Do not
+re-propose the stacked building or a confirmation. Six things behind it:
+- **Where a desk stands is the plan's, by agent.** `roomGeometry` and
+  `deskXY(i)` are gone: a desk's place stopped being a function of its
+  index. `floorPlan` returns `at`, the boxes and the room's size, and
+  `room()`, the envelopes and the scroll arrows all read it. A floor with
+  no meeting is laid out to the old numbers in the old order of arithmetic;
+  `test/floor.mjs` keeps the two old functions as the reference and reads
+  the layout constants out of floor.js by name.
+- **Who is boxed is what the rooms' windows say** (`ui.outs`), the record
+  that already takes a desk's composer off the floor's panel. Not the
+  board's `meeting_rooms`: that row is for Resume and containment, and it
+  lags a window by up to `MEETING_LIVE_SECONDS`. So the box is drawn in
+  this browser's floor tabs only, which is where the window is.
+- **The box is one box from the click.** The desks are out from the
+  Meeting room click under no room number, tagged with that click
+  (`batch`). The window then says `here` a desk at a time, and its first
+  word names the room for the whole batch. Without that the floor drew two
+  boxes for a moment (page mutant, red).
+- **A `here` or `gone` that changes a box draws the rooms then**, not at
+  the next poll. Both handlers used to redraw the panel only, because
+  nothing on the floor moved when a desk went out.
+- **End meeting on the floor is a message to the room's window** (`end`),
+  which runs its own `endMeeting()`. The floor does not end the board's
+  record: while the window stood, its next touch would open it again. A
+  window that has not ended 1.5 s later did not hear it (one loaded before
+  this build knows no `end`), and the floor closes it by its handle
+  (`ui.popWins`), which ends a meeting as a closed window always has. A
+  floor tab that did not open the window has no handle: the placard reads
+  "Ending…" for 6 s and is a button again on a box that still stands.
+- **A room that ended is not "ending" when it is resumed.** Resume reuses
+  the room's number, and a box that came back four seconds after its End
+  still read "Ending…" and could not be pressed (the page check's first
+  run). `render()` drops the state for any room with no desk out.
+- **End's 1.5 s close closes only the windows it asked.** The timer used
+  to look up whatever window held the room's number when it fired, and
+  Resume reuses the number: a room ended from the floor and resumed inside
+  the 1.5 s had its new window closed by the old End. Not reported by
+  anyone. It was found while writing PR #56 finding 1's rows, which ran 0.6 s
+  after a Resume on the check's own fixture. `endMeetingHere` now keeps the
+  handles it held at the press, and the check has a row for a room resumed
+  inside the timer.
+- **A desk in a meeting stands in its box, hidden or empty** (QA, PR #56
+  finding 1; the developer's pick of QA's three, open to costmo's
+  reversal). The box says who is in the room's window. With hide applied
+  inside it, a hidden participant left the box and its sentences ("Bo and
+  Dee are in a meeting room" with Cy in the room), and a meeting whose
+  every desk was hidden had no box, no In a meeting and no End on the
+  floor, while its window held three. `deskRows(c, boxed)` draws a boxed
+  desk whatever its flag, and makes no pill of it. `floorRows` is the
+  page's reading, and every caller that means "what the floor draws" uses
+  it. The flag is kept, so the desk is a pill again when the meeting ends.
+  Hide is refused while a desk is boxed, said under the card's dimmed
+  buttons (since 0.12.9 in the card's one reason for a desk in a meeting
+  room, `cardRefusal`, which carries what becomes of a desk hidden before
+  it joined) and on the room's line for a bulk Hide (`hideRefusal`): pressed,
+  it would write a flag that changes nothing until the meeting ends, a
+  button that seems to do nothing. The other two picks, counting a hidden
+  participant in the box's words only and leaving it as a pill, were not
+  chosen. The first leaves the all-hidden meeting with no box to put the
+  words on, and the second is a pill outside the box that speaks for it.
+
+**"In a meeting" is a button too: a click brings that room's window to the
+pointer** (costmo, the same day: three monitors, a dozen windows, rooms
+that look alike, some minimized, some covered). `raiseMeeting` focuses the
+window through its handle, fits it to the screen the click was made on if
+it is larger, moves it so it is centred on the pointer and wholly on that
+screen (`meetingRaisePlace`), and focuses it again. Focus comes first
+because a minimized window has no place to be moved to until it is back.
+A floor tab with no handle sends `focus` with the place, and the window
+moves itself; whether it may raise itself is the browser's call. What was
+measured, and where: on a headless Chrome the calls arrive in that order,
+the browser's own bounds show the window under the pointer, and an
+oversized window is resized first. Two things a headless browser cannot
+say, so they were costmo's to see on his screen, and neither was held for
+(his word: as close as reasonably possible, without delaying progress):
+- **A minimized window. Measured by costmo on real Chrome on macOS**
+  (2026-11-16): a click on In a meeting for a room whose window was
+  minimized brought the window back, to the front, under the pointer, as
+  for a covered one. Headless had left it minimized after `focus()`, which
+  is headless's stand-in window and not Cocoa's: the check has no row for
+  it, and his reading is the measurement. The fallback that was named in
+  case it did not come back (close a window still `hidden` after a second
+  and open the room again at the pointer) is not needed and is not to be
+  built: it would reload rooms that are raised perfectly well.
+- **Another monitor.** Measured by costmo on two 4K monitors and a
+  laptop, the same day: without the browser's window-management
+  permission, a room on another monitor came to the front and stopped in
+  the corner of its own screen nearest the pointer. Chrome keeps a moved
+  window on the screen it is on. So when the room's window stands on
+  another screen than the click (`meetingElsewhere`: its centre is outside
+  that screen), `raiseMeeting` asks for the permission from inside the
+  click (`getScreenDetails()`), and makes the same move again once it is
+  given. Chrome puts the question to the operator once per site. It is
+  asked only then: never on a desktop of one screen (`screen.isExtended`),
+  never for a window already on this screen. Refused, the behaviour is
+  what he saw, which he called acceptable. That the grant makes the move
+  cross is Chrome's documented behaviour and was not seen by me: the page
+  check stages the desktop (`leave()`), so it proves the asking and the
+  second move, not the crossing. His to see.
+
+He reported the monitor case first, after trying it. He confirmed the
+minimized case later the same day, when asked what the window did.
+
+Riding along: a desk's open nameplate card now follows the desk when the
+rooms are redrawn, since desks move with nothing clicked. One thing not
+built, deliberate for now: the board view shows nothing of a meeting.
+(A box for a meeting whose every desk was hidden or empty was the other,
+and PR #56 finding 1 showed it was a meeting with no trace on the floor;
+see the bullet above.) `check-meeting-box.mjs` in **verify-ui-change** is
+the page. QA ran its twenty-five page mutants in PR #56's review: 23 red,
+and the two greens were rows that saw their fault only by chance (a redraw
+inside a reload's gap; the one-screen guard), both pinned since. The list
+and the command are kept beside the check (`mutants-meeting-box.page.json`).
 
 **A dialog holding a text field closes only from its own buttons and on
 Escape, and a closed dialog stays closed.** Issue #11 and PR #36 (0.10.14,
@@ -1510,12 +2426,23 @@ server half is [`src/updates.js`](src/updates.js), the host half
   board. Not in `BACKUP_TABLES`: a restore that turned checking back on
   would be a setting changed by a file nobody looked inside.
 
-Not measured: a real update end to end on the live board. It replaces the
-board's container and restarts the live host, which is costmo's to call;
-every step was run against real git and real processes with stand-ins for
-`docker` and `claude`, and the two Docker halves (the image recording its
-commit, and the host finding the live container from launchd's
-environment) were each run for real.
+A real update on the live board was read once, 2026-11-15, when costmo
+merged PR #55, put the clone on `main` at the merge by hand and pressed
+Update (run `mwi3pd86-ddfc8e0`, `e651798` → `ddfc8e0`). It took 8.6 s from
+the run's start to the host back as the commit: preflight, 0.7 s; the
+rebuild and `/health` answering as `ddfc8e0`, 6.5 s; the host's exit to
+its registration under launchd, 0.8 s. The run closed `done`. The host
+logged one failed work poll while the container was replaced, which is
+the relay riding out the restart. Read afterwards: `/health` at the
+commit, the served `floor.js`, `app.js` and `hub.js` byte for byte the
+tree's, and the host's process started after every `host/*.js` on disk.
+Two steps did nothing in that run, so they are still measured only on
+stand-ins: the fetch and fast-forward (the clone was already at the
+commit) and `claude plugin update` (`plugin/` was the same in both
+commits). Before that day every step had been run against real git and
+real processes with stand-ins for `docker` and `claude`, and the two
+Docker halves (the image recording its commit, and the host finding the
+live container from launchd's environment) each for real.
 
 ## The host under the desktop app
 
@@ -1567,8 +2494,9 @@ one number, one word and one process came apart:
   recorded the table; the header of `host/dialog.js` has it. A host told
   to ask a parent it was not started with has no dialog and says so at
   startup.
-- **better-sqlite3 is 13, and the board's Node floor is 22.14** (task
-  #291, 0.12.6). 11.x does not compile against Electron 45's V8, and
+- **better-sqlite3 is 13, and it needs Node-API 10, so Node 22.14 or
+  later** (task #291, 0.12.6; the board, the gate and the host are all on
+  Node 24 since 0.12.11, Tests, "What ships is what is tested"). 11.x does not compile against Electron 45's V8, and
   12.11.1 still calls `v8::Context::GetIsolate`; 13 is Node-API with the
   prebuilt binary for each platform inside the package. Its binary is
   Node-API 10, and a Node that offers 9 (20.x, 22.x before 22.14) does not
@@ -1576,8 +2504,8 @@ one number, one word and one process came apart:
   Measured on 20.20.1 — this machine's default `node`, and the one the
   host's LaunchAgent runs on — and on 22.11.0. So `src/node-floor.js`,
   imported ahead of better-sqlite3 in `src/db.js`, says it in words. The
-  host has no dependencies and stays at Node 20; the image is node:22 and
-  loads it. Two things keep that from costing anyone a round here.
+  host has no dependencies, and ran on Node 20 then; the image was node:22
+  and loaded it. Both are Node 24 since 0.12.11. Two things keep that from costing anyone a round here.
   `scripts/node-floor.sh` is sourced by every runner under `.claude/skills`
   and by hand before a suite (`. scripts/node-floor.sh && npm test`): it
   reads `process.versions.napi`, leaves a good `node` alone, and otherwise
@@ -1612,13 +2540,51 @@ one number, one word and one process came apart:
 
 ## Tests
 
-**Run them as `. scripts/node-floor.sh && npm test`.** The server needs a
-Node with Node-API 10 since 0.12.6 and this machine's default `node` does
-not have it (above, "The host under the desktop app"). Without the first
-half the smoke suite stops on its first line, in words; with it the shell
-gets nvm's 24.22.2 and nothing else changes.
+**Every suite, check and scratch board on this machine needs a newer Node
+than its default first on `PATH`.** The default is 20.20.1, and costmo's
+ruling is that it stays. The `node_modules` here holds better-sqlite3
+13.0.3, and under Node 20 loading it ends the process with exit 139 and
+not a word (measured 2026-11-16: `node -e "require('better-sqlite3')…"`,
+139 under v20.20.1, `ok` under v24.22.2), which reads as a suite or a
+server that printed nothing. So a run names its own:
+`export PATH=$HOME/.nvm/versions/node/v24.22.2/bin:$PATH` at the top of the
+command. Or `. scripts/node-floor.sh && npm test`, which puts such a Node
+first for the shell, chosen by what it needs (Node-API 10), not by its
+number ("The host under the desktop app", above); every runner under
+`.claude/skills` sources it.
 
-`npm test` runs eleven suites. `test:host` and `test:window` are not unit tests:
+**What ships is what is tested: one Node major and one lockfile**
+(costmo's ruling on the milestone audit's finding 5, 2026-11-17, in
+0.12.11). Before it the suites ran Node 24 with better-sqlite3 13.0.3 and
+SDK 1.29.0, while the image ran Node 22 and `npm install` resolved the
+caret ranges fresh at every deploy (better-sqlite3 11.10.0, SDK 1.32.2 that
+day), and the host ran under launchd on the shell's Node 20. Now:
+- **Node 24 for all three.** The Dockerfile's `FROM` names the major, the
+  release gate refuses any other (`scripts/release-gate.sh` reads the
+  `FROM`), and the host runs on a Node 24 (PATH, nvm's newest v24,
+  Homebrew's node@24, or `ORCH_NODE`), never "whatever node is first".
+  The pick is `host/node.sh`'s, and the LaunchAgent starts `host/run.sh`,
+  which picks at every start, so an update that moves the major moves the
+  host at the restart it already does (QA's L3; a plist that named the
+  binary kept the host on it). A plist written before 0.12.11 names the
+  binary, and `install.sh` run once replaces it. The shell's default
+  stays 20. The gate's package step is `npm ls --all` and
+  `scripts/check-lock.mjs`, because `npm ls` passes a version inside the
+  range that is not the lock's (QA's L2).
+- **`package-lock.json` is committed** (it was gitignored) and the image
+  installs it with `npm ci`, copying the lock beside `package.json` so a
+  lock-only change rebuilds that layer and a lock out of step fails the
+  build. The versions locked are the ones the suites had run on all along.
+  `npm run set-version` writes the lock's two version fields too, and
+  smoke holds all four files to one number.
+- **c8 10.1.3 is the one dev dependency**, pinned exactly, for
+  `npm run coverage`. The image installs `--omit=dev` and ships none of it.
+- npm 11 warns that better-sqlite3's install script is "not yet covered by
+  allowScripts". It is advice about a future default, not a failure:
+  measured, a real `docker build` of the round's tree loads it (SQLite
+  3.53.4) on Node 24.22.2 / npm 11.19.1.
+
+`npm test` runs thirteen suites. `test:host` and `test:window` are not unit tests:
 they drive **real tmux panes** against a **real server**, with a stand-in
 `claude` (a `.cjs`, because this package is `"type": "module"`). They use their
 own tmux session names and ports, so they are safe to run beside a live host —
@@ -1670,7 +2636,19 @@ x.db-shm`). And a word starting with `=` is a command lookup, so `echo
 flags (`invalid argument -m=eeting`). Use `command grep -i -e "pat"`. Shell
 scripts are not affected, because `sh` does not load the function. And
 `md5` is not installed: a comparison of two `$(md5 -q …)` is two empty
-strings and always equal. Use `shasum`.
+strings and always equal. Use `shasum`, and say which: with no flag it is
+SHA-1, and one sent to QA unlabelled was set against their sha256 of the
+same file and read as two files (PR #55 round 4). `shasum -a 256`.
+Two more from 2026-11-16. **A heredoc whose delimiter is unquoted runs the
+backticks in its text.** A Python edit fed through `<<EOF` carried
+"\`npm test\`" in a sentence, so the shell started the whole chain. Smoke
+failed against the load and stopped it, and its output was written into
+the file in place of the two words. Quote the delimiter (`<<'EOF'`) for
+any heredoc that holds prose, and pass values in through the environment
+instead of `$VAR`. **`sysctl` is not on an agent shell's PATH.** A
+wait-until-load-drops loop built on `sysctl -n vm.loadavg` read an empty
+string, compared it as small, and reported "load ok" at 336. Use
+`/usr/sbin/sysctl`, and make such a loop refuse an empty reading.
 
 Three more reds were seen in `test:window` on 2026-10-01, in one full run
 under load (load average 7–14): "the presser succeeds once the cursor is
@@ -1691,6 +2669,19 @@ straight after was green (2026-11-03, task 247). Read the channel for
 their announcement before a full run, and if you overlapped, rerun the
 red suite alone before reading the pane.
 
+**Load from other projects is expected, and nothing waits for it to
+pass** (costmo, 2026-11-16: "work around high system load as needed … work
+needs to continue on both fronts"). This machine also builds and tests a
+mobile app, and PR #56's round ran at load averages of 100 to 350 from its
+Xcode and Go builds. A wait-until-quiet loop was stopped by his word. Run
+anyway, and make the run readable instead: mutants always beside an
+unmutated control, a red rerun alone before it is called real, and fixture
+rows kept apart from behaviour rows, so a slow machine reads as one. An
+example is "the fixture held: Resume landed N ms after the End" in
+check-meeting-box. Give the load beside the result. Do not widen a timeout
+to make a load red go away: that is how a row stops seeing its fault, as
+Info 5's 8 s wait did.
+
 **Seven take-a-desk reds in `test:host` were a race in the case before
 them, not load** (2026-11-07). "and within seconds the host has bound it"
 and six after it went red with the window suite running beside the host
@@ -1710,9 +2701,11 @@ the session, before anything is taken down. A red of that shape again is
 something else; read the host log's gap first. The suite prints the host's
 log at its end, every line timed, and a gap of `READY_TIMEOUT_MS` between
 two lines is a window the host was waiting on. The gap in `waitReady` is
-the host's own and is still there: a window closed by hand while it is
-starting holds the host's line for 45 s. It is open, not deliberate, and
-not filed as an issue as of 2026-11-08; only the test was changed.
+the host's own, and was left open when this was written (2026-11-08,
+on develop): a window closed by hand while it is starting held the host's
+line for 45 s. It was fixed since, on main, in `waitReady` itself (QA,
+PR #57 Info 10, below: it says `window_gone` at its next look), after the
+same seven reds were first written down there as load.
 
 **One move-section red in `test:host` has now been seen twice with no other
 suite on its ports.** "the new floor holds no session row for the
@@ -1736,6 +2729,190 @@ re-review of PR #49 (dc6de34): red once in one of ten single-suite host runs
 both full suites. Four sightings, each alone or under load, each green on
 the next run: the session rows at the moment of the move are still unread,
 and that is now overdue rather than next.
+
+**Fifth, 2026-11-15**, in the PR #55 round, with seven reds before it in
+*Take a desk* ("and within seconds the host has bound it and registered
+the desk" and the six rows that read that binding): load average 57 at the
+suite's start and 171 at its end, from another project's Android and Xcode
+test builds on this machine, with a page-mutant run of ours beside it.
+`test:host` alone at load 7 twenty minutes later read 327 ✓ and 0 ✗. The
+session rows were again not read: the round was a review's fixes, none in
+the move.
+
+**Sixth, the same day**, in QA's close of PR #55 at f5c2a92: their first
+chain run, load 16–27 with their own page lane beside it; 327 ✓ in the
+second.
+
+**The Take a desk seven again, 2026-11-16**, building 0.12.9: "and within
+seconds the host has bound it and registered the desk" and the six rows
+that read that binding, with this session's own floor suite and a mutant
+lane running beside the host suite at load 22 to 34. Alone straight after,
+at load 10 to 23: 327 ✓. Nothing in the bind had changed. It is the fifth
+sighting's shape, and the same reading: a bind that did not land inside
+its twenty seconds under load.
+
+**That reading was wrong, and the seven are read now** (QA, PR #57 Info
+10, the same day). QA printed the suite's own host log beside the reds:
+the bind took 37 ms, and before it the host had logged nothing for 46 s.
+The twenty seconds were gone before the bind began. What held the host's
+line was the section above it, the placeholder-key desk: the floor opens
+its window, the suite reads what the pane was given and kills the pane at
+once. The host's `open` was still in `waitReady`, and whether it had seen
+the window in the roster by then was a race, lost more often under load,
+which is why it read as load. `waitReady` then waited out
+`READY_TIMEOUT_MS`, 45 s, on a window that was not there, because its
+"did it exit?" read could not see a killed pane (the bullet in *Driving a
+window*, below "a prompt suggestion"). Everything behind it in `run()`
+waited: the rescan the suite had asked for, then the bind.
+
+Fixed in `waitReady`, which now says `window_gone` at its next look, and
+pinned on every run: the suite arms `ready-delay.flag` for that window,
+so the host is always still waiting when the pane goes, and a row reads
+the host doing the next thing asked of it at once. With the fix out it is
+that row and the seven, 8 red, every run. Two things to take from it. A
+red that goes green on a rerun is not thereby load: four sightings of
+this one were written down as load, each with a load average beside it.
+And **the host's log beside the reds is what named it**: a gap in the log
+is work held on the host's line, and the line before the gap is where to
+look.
+
+**The red now reads the rows itself** (2026-11-15, after the sixth). They
+were never read because they are gone with the run's database before
+anyone looks. When that assertion fails, the suite prints the session row
+(its floor, and its times beside the board's clock), the newest turns
+filed under the old conversation's id with the floor each was filed on,
+and the host's log from the move on. A session row is keyed by its id
+alone, so the red means something filed under the old id named the new
+floor after the move. The print says which kind. Run with the mutant the
+case was written against (the move's `bound` naming the conversation it
+left; control 327 ✓, the mutant that one red), it read: the row on the
+new floor, updated in the second of the bind, and every turn under that
+id still on the old floor. So that mutant is an event that writes no
+turn. A turn on the new floor in the print would instead be the relay
+still reading the old transcript after the rebind. Which one the six
+sightings were is not known. The next sighting is read, not rerun.
+
+**Seventh, 2026-11-16, read** (QA's chain run at `da67c91`, load about
+87; the printed block is in QA's evidence, `pr56/npm-test-da67c91.log`).
+The old id's row was on `host-test-2`, updated at 18:33:03, the second of
+the bind. All eight turns under that id were on `host-test`, the newest at
+18:32:39. So it is the event that writes no turn. The host's log names the
+gap: `found desk host-test-2/free` at .340, and `closed its window to
+reopen` at .570. In between, the folder's old window is still running the
+old conversation. `bind()` creates the new desk inside `rescan()` and sets
+the reopen's intent only after that, and after an `await W.paneFor()`.
+`watchLoop()` is a loop of its own and can tick in that await. A desk with
+no intent adopts the newest live session (`watch()`'s newest-wins). That is
+the old window's, and the desk emits `session` for it on the new floor,
+which the board files by id alone. The comment above `fresh` in `bind()`
+already says the intent must be set "before anything else can tick"; it is
+set one await too late. Under load the tick lands in the gap, and that is
+why every sighting was under load.
+
+**Fixed the same day, at costmo's word.** `bind()` asks `paneFor` before
+the rescan and hands the intent over in `intents`. The rescan sets it on
+the desk as it creates it, so the desk has it from its first tick. The
+same race was open on the live instance in any real move. `test:host`
+sets `ORCH_HOST_BIND_GAP_MS=700`, a seam that holds the moment after the
+rescan open for longer than a watch tick. The assertion now sees the race
+on every run instead of under load only. Unset, the seam is no pause.
+Measured in copies at load 6 to 26: the old order (the intent set after
+the rescan) was red on that one assertion 3 of 3, with the same two ids
+as every sighting. With no intent handed to the rescan it was red 1 of 1.
+The control was 327 ✓. The list is
+`.claude/skills/mutate-in-a-copy/mutants-move-race.suite.json`.
+
+**Three more reds seen under other suites' load, none explained, written
+down so the next one is recognised and read** (2026-11-16/17, PR #57's
+rounds after the close; QA's logs are in the QA repo, `evidence/pr57/r3/`
+and `r4/`).
+- `test:host`, issue #5's section: "a failed poll still re-registers
+  before the next" (got `["register","work","register"]`, wanted four),
+  "the work poll is told apart from the register that shares its warning",
+  and once "a refusal by status names the board as well as the path". Red
+  in 5 of QA's runs across two commits, green in the next six on the same
+  trees. Load average did not separate the two groups (12–36 red, 15–41
+  green). What the red runs had was window suites, QA's and mine, on the
+  default tmux server beside them. The rows share `runHost`, which ends
+  the host after 8000 ms and wants four requests seen in that time.
+- `test:host`, "a run leaves no stand-in claude running": one process
+  alive 8 s after `kill-session`, once, at load 28 with five lanes going;
+  328 ✓ twice alone straight after. Whether it was slow to die or outside
+  the suite's session was not caught.
+- `test:renew`, what an agent is told after a move: "the agent whose
+  question was closed is told to ask it again" got the unreadable-folder
+  sentence once in QA's lane, and "the agent that met the refusal is told
+  it can carry on" failed once in mine. The first is not a wait running
+  out: `renew()` read that window's screen as not asking
+  (`p.asking = !!askingOf(screen)`, taken after the wait and before
+  `kill-server`), while the test's `asking` file was still there. So the
+  stand-in had not drawn the question or `askingOf` did not read what it
+  drew. Neither repeated in three runs alone.
+None is in code PR #57 touched. A fourth sighting of any of them is read
+with its log kept (`run-mutants.mjs --logs`, or the suite's own output),
+not rerun.
+
+**A key log is read after a wait, not straight after `send()`** (QA,
+PR #55 Info 9). The composer stand-in writes its log when a key reaches
+it, and `send()` returns when tmux has taken the key. "which the host
+closed afterwards, once" read the log at once and found no Escape in 1 of
+QA's 4 window runs (load 24–84), with the composer back on the next row.
+It waits for the Escape now and then counts it. A count of keys taken
+straight after a send that ends on a key has the same gap. **And a count
+by mode is not a count** (Info 10): the first Escape puts the stand-in
+back in composer mode, so a second was logged there, and with the host
+made to send two the row still read "once". It is the shape of the
+effort dialog's "once", which needed a dialog that stands 700 ms: a key
+log filtered by the mode a key ends cannot see a repeat. **And an absence
+has nothing to wait on** (Info 11). The first fix counted the Escape in
+every mode 400 ms after the composer was back, and an Escape logged
+600 ms late went unseen. The row now stands at the end of the composer
+section, after a dozen sends that each waited on their own receipts: every
+Escape the pane took, by mode, is `btw` then `cost` and none in a
+composer. When the thing to prove is that a key did not arrive, read the
+whole log after later work has been observed, not after a sleep.
+
+**A row that does something and then looks is answered by whatever tmux
+says at that moment** (QA, PR #57 Info 11). "The last window of all,
+closed while it is waited on" killed a pane and let `waitReady`'s next
+look land where it landed. Asked about a server's last pane in the 400 ms
+after the kill, tmux's first answer was empty in 27 of QA's 40 trials, a
+failed call in the rest, and the two are read by different arms of the
+code. So with the "no server running" arm taken out, the row still passed
+one run in eight. Two things replaced the hope that it would not. The
+decision is a function of tmux's answer (`paneGone`), with a row for each
+answer in tmux's own words, which no timing can move. And the live row
+for that arm waits until the server is gone before the look that counts.
+When a mutant survives once in several runs, the row is being answered
+by another path some of the time: find the second path before adding a
+wait. **And count reds by what the suite printed**: `run-mutants.mjs`
+read `FAIL ❌ — 2 failure(s)`, the closing line of most suites, as a
+third red, from the day it learned to read `test:renew`'s `FAIL <name>`.
+`--logs` keeps each run's output, so a count can be checked against it.
+
+**Two more `test:host` reds seen once, in a mutant's run in a copy**
+(2026-11-14, load 5.5, nothing else on the ports): "a turn written while
+the send is still in flight reaches the floor anyway" and "the floor
+gained a turn rather than replaying the transcript", both in *hearing the
+desk while a message is still going in*, which waits 4 s on the relay.
+The mutant was a field dropped from the host's error event, 500 lines
+away. Run again beside an unmutated control, the control read 320 ✓ and
+the mutant only its predicted red. The cause was not looked for.
+`run-mutants.mjs --control` is how to tell such a red from a mutant's in
+the same run (**mutate-in-a-copy**).
+
+**Read on the second sighting** (2026-11-18, the milestone round, one of
+four plain runs in a copy, load 3–7). The marker the row writes appears
+nowhere in that run's output, so it was never relayed, not relayed late.
+The row restarts the host and waits for the desk to read live, which is
+the registration. The host's desk then joins the transcript where it
+stands at its first watch tick (`follow(id, 'end')`), and that tick can
+come after the row has written the marker, which leaves it behind the
+offset for good. It was a race in the test, not in the relay. The row now
+writes a primer turn and waits for the floor to show it, so the relay is
+known to be reading before anything is timed against it. A row that
+restarts the host and then writes to the transcript has the same race:
+wait for a turn to arrive first.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
@@ -1784,17 +2961,32 @@ with a restore step, the commit landed mid-run, and `8788a6d` reached
 **A composer pane and a command-aware stand-in, since 0.10.9.** The window
 suite's `composer-desk` pane (`run.cjs` in `test/window.mjs`) is a node
 program on the alternate screen that draws what Claude Code draws — a
-composer box, the `/btw` overlay with its answer arriving late, the model
-picker with its effort row, the compaction spinner — writes the records
-Claude Code writes, drops the first Enter the way a paste-consumed one is
-dropped, and logs every key it is sent by mode. That log is how "no Enter
-after a command that opened something" and "two Downs then `s`, never a
-digit" are asserted rather than assumed. The host suite's stand-in answers
+composer box, the `/btw` overlay with its answer arriving late, the
+"Switch model?" warning (with `switch.flag`), the compaction spinner —
+writes the records Claude Code writes (a `/model` or `/effort` line as a
+user record, a refusal as a `system` one), drops the first Enter the way a
+paste-consumed one is dropped, and logs every key it is sent by mode. That
+log is how "no Enter after a command that opened something" and "the
+warning got one key, the digit" are asserted rather than assumed. It drew
+the model picker until 2026-11-14, when the host stopped driving one. The host suite's stand-in answers
 `/clear` with a new session file and a roster change, `/btw` with an
 overlay, and any other command with its `<command-name>` record. Neither
 has a composer the way the real window does for a *typed* message, so the
 typed delivery (`typeInto`) is proved on the composer pane and on a real
 probe, and the plain stand-in gets a paste.
+
+**Three fixtures from PR #55's review (2026-11-15), each for a path no
+fixture reached.** The composer pane's `effort-ask.flag` makes an
+`/effort` raise "Change effort level?", and that dialog stands 700 ms
+after its digit, so a host that answers at every look is seen pressing
+twice (the "once" in `send()`). A tab marked `deaf` in the window suite's
+`previewPane` logs Enter and does nothing with it, which is the only way
+`not_selected` is reached. And the host suite's `prompt.flag` takes
+`preview`: a preview-layout question drawn once and never redrawn, so the
+cursor stays on row 1 whatever digit is sent and the answer ends
+`not_on_row`, said on the desk as "the form was not submitted". The desk's
+form names a question's header `tab_title`; the first cut of that case
+waited on `header` and was red at a pushed SHA (**answer-a-qa-review**).
 
 **The host suite's stand-in can be slow to die, and can start fresh under
 an id of its own, since 0.10.10** — two flag files, read the way the others
@@ -1829,6 +3021,58 @@ is not counted), sweeps whatever is left, and does the same on SIGINT or
 SIGTERM. Anything new that keeps a pane's process alive past its hangup
 needs the same: its own event loop is not there to end it.
 
+**A chain put in the background with `( … ) &` reports done at once.** The
+agent's shell says "completed" for the command it ran, which was only the
+launch, so the notification arrives with nothing to read and the suites
+are still running (2026-11-16, three suites launched that way). Give the
+harness the chain itself as the background command, or wait on the
+process: `while kill -0 <pid> 2>/dev/null; do sleep 3; done`. And a suite
+run beside your own floor suite or mutant lanes is run under load of your
+making: the host suite read seven reds that way and 327 ✓ alone.
+
+**`test:seats` is the host suite for several windows in one folder**
+(0.12.9). The host suite's stand-in is one window at a time: it writes a
+roster of one entry and one transcript, both named for the fixture's single
+conversation, and a second window overwrites the first's. So seats have a
+suite of their own, whose stand-in is what Claude Code is when several run
+in a folder: each writes its own session file (the host's fast path) and
+its own transcript, connects as the desk its `--mcp-config` file names (or
+else the folder's), and answers every message "I AM <channel>/<agent> on
+<conversation>", which is what lets a row say *which desk* a window is. It
+runs on a tmux socket of its own, because it opens the session a seat's
+window creates. Port 8902. It has no plugin, so what a real window's hooks
+do at a close is not in it (see "One agent, several sessions": the fault it
+missed). And **a row that says something "stays" proves nothing while the
+thing is too young to be looked at**: "a session made by New desk here is
+not a room's to close" was green on the mutant that closed it, because the
+sweep leaves any session alone for its first 30 s. The row ages it first.
+
+Three more from PR #57's round (2026-11-16), each a way a row read
+something other than what it named:
+- **A name the fixture uses twice carries the first use's holds.** The
+  floor suite makes `quinn-3` for one room, ends the room, and makes
+  `quinn-3` again. A room that ended inside 15 s still holds every session
+  it lists, so the silent-room rows read "not closed" for the wrong reason
+  and then "not closed" where they wanted a close. The rows age the ended
+  rooms first, and say so. Before trusting a "stays" on a reused name,
+  check what else on the floor still lists it.
+- **A broadcast from a desk in a live room is contained, in a test too.**
+  The mail rows first sent their "before" and "after" broadcasts from
+  `rae`, which an earlier row had left in a live room, so nobody outside
+  it heard them. They are sent by a desk in no room.
+- **The floor suite restarts its board once**, on the same database, for
+  the one thing only a restart shows (what a host said about seats). It
+  is in the last section that talks to the server, because everything the
+  board keeps in memory is gone after it. `startServer()` is the function;
+  a new row that needs a restart goes beside that one, not earlier.
+
+The seats stand-in can look mid-turn: a message containing `look busy`
+draws "esc to interrupt" as the pane's last line, and `look idle` ends
+it. Its last turn is still a reply, so the board takes it for idle, which
+is the one case the host's own busy check is for. The floor suite runs its
+board with `ORCH_TWIN_UNHEARD_MS=3000`, so the silent-room rows wait
+seconds and not a minute and a half.
+
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
 a fault there shows up as prompts quietly never reaching the floor while the
@@ -1843,6 +3087,86 @@ operator's live floor.
 
 ## Conventions
 
+- **Run the suites a change reaches; the full `npm test` runs once, at the
+  release.** costmo, 2026-11-16, in two steps. While building the meeting
+  box: "limit tests you run during turn-by-turn development to those that
+  are about code you've touched (and related)", and "I am in no way
+  opposed to thorough testing … being confident that no release will pass
+  without a full run." After PR #56's two rounds: "defer full suite
+  testing until close to (or at) final release checks … running the full
+  suite during turn-by-turn work is now causing tasks to take a very long
+  time for little real benefit. If we test new + related code along the
+  way, our processes make sure the full suite is covered prior to
+  release." QA took the same ruling (their decisions/0015, msg 3242): the
+  full chain runs once, at the SHA that ships, when he calls the release.
+  So it is not run while building, while answering a QA review, while
+  validating a merge or before a deploy, by you or by QA. Every one of
+  those runs the suites the diff reaches, the page checks for the area,
+  and the mutants that prove a new row. Long mutation batches and page
+  checks that only *might* be affected wait for the release too. Write
+  down what was left (beside the check, with the mutant list), and say it
+  in the report. It is a rule about when, not about how much: do not thin
+  a test to save a run.
+
+  **And the full chain runs before any merge to main, unasked** (costmo,
+  2026-11-17, at the end of PR #57: "When there are documentation-only
+  changes, the full test suite does not need to be re-run, but it does
+  need to be re-run prior to any main to merge"). QA and the developer
+  both wrote "full chain not run, waits for the release" through five
+  rounds, then called the PR approvable and told him the merge was his
+  with the chain still unrun, and he had to ask what was stopping it.
+  "Approvable" from a review of related suites is not the release check.
+  So when a PR into main is approvable, the next thing done is the one
+  `npm test` at the head, then the release page checks
+  (`run-release-pages.sh`, **verify-ui-change**), and "approvable" reaches
+  him with their results beside it, or with "the full chain is running" in
+  the same sentence. A commit after that run that changes documentation
+  only does not need it again; any other change does. Run the two one
+  after the other, never beside QA's: QA runs its own chain too, queued
+  behind yours (their decisions/0007).
+
+- **Once a PR into main is approvable, nothing goes into the tree until he
+  has merged** (costmo, the same evening: "I need for you to stop updating
+  files if it is interrupting with and/or interfering with our PR
+  progress"). PR #57 went from `a9fa870` to `185b4a5` over a dozen
+  commits after its first close, most of them notes, skills, mutant lists
+  and a facts re-anchor written into the tree as each round ended: he
+  commits the tree when he sees it, and QA measures every push. A finding
+  QA marks as not blocking is named to him as "after the merge", not
+  started. Lessons for the repo are held and written once, after the
+  merge, in one batch. The updater refuses a dirty clone too
+  (`host/update.js`), so an uncommitted note also blocks his update.
+
+  Which suites a change reaches, read from the paths each `test/*.mjs`
+  names (QA's map, with two additions from that reading):
+
+  | Changed | Run |
+  |---|---|
+  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:window` and `test:markdown` also read `floor.js`, `test:update` reads `app.js` |
+  | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
+  | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
+  | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
+  | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
+  | `src/updates.js`, `host/update.js` | `test:update` |
+  | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
+  | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
+  | `host/install.sh`, `host/node.sh`, `host/run.sh` | `test:host` (its install rows, on stand-ins) |
+  | `scripts/set-version.mjs`, `scripts/check-lock.mjs` | `smoke` |
+  | `Dockerfile`, `package.json`'s dependencies, `package-lock.json` | no suite: a real `docker build` in a scratch tag, `npm ls` inside it against the lock, and `node -v` against the gate's |
+  | `scripts/release-gate.sh`, `scripts/coverage/` | themselves: a seeded red in a copy for the gate; for coverage, `report.mjs` over a known set of snapshots |
+  | `plugin/` | `test:plugin`, and `test:seats`, which runs the hook |
+  | a version bump | `smoke` |
+
+- **When the platform will not do all of it, ship the nearest thing that
+  works and say what is unmeasured.** His words on the "In a meeting"
+  click, where a browser decides what a page may do to a window: "I'll
+  take as much as we can reasonably do … get as close to the desired
+  features as possible without delaying progress." He then tried it on
+  his three monitors and reported the one case that fell short, which is
+  how the window-management permission was found in ten minutes. A
+  headless browser could not have said. Do not hold a change for a
+  measurement only his desktop can make, and do not build a fallback for
+  a failure nobody has seen.
 - **Git is Chris's.** Never commit, push, or offer to. Leave changes in the
   working tree; reviewing the diff is how he checks the work.
 - **The tree is committed whenever costmo chooses, so an edit is not

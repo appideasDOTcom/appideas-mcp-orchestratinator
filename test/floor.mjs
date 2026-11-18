@@ -11,8 +11,11 @@
 //   npm run test:floor
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, protocolRefusal } from '../src/floor.js';
+import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import http from 'node:http';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal } from '../src/floor.js';
+import { addressed } from '../src/tools.js';
 
 // The host<->board protocol this tree speaks: every registration a suite
 // rolls by hand is a host, and a host that sends no number is refused.
@@ -67,15 +70,26 @@ const deskOf = (f, agent, channel = CH) =>
   f.channels.find((c) => c.channel === channel)?.desks.find((d) => d.agent === agent);
 
 rmDb(DB_PATH);
-const server = spawn('node', ['src/server.js'], {
+// How long this suite's board watches a silent meeting room before it reads
+// its window as gone (TWIN_UNHEARD_MS in src/floor.js; 90 s on a real board).
+const UNHEARD_MS = 3000;
+const UPLOAD_DIR = `./data/floor-${process.pid}-uploads`;
+const UPLOAD_CAP = 4096;
+// A function, because one section restarts the board on the same database.
+const startServer = () => spawn('node', ['src/server.js'], {
   // FLOOR_SESSION_TTL_MINUTES at its 1-minute floor, so the staleness assertions
   // can age a session out with a direct SQL touch instead of a real hour.
   env: {
     ...process.env, PORT: String(PORT), DB_PATH,
     ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
+    ORCH_TWIN_UNHEARD_MS: String(UNHEARD_MS),
+    // Attachments (issue #31): staged in a folder of this run's, and a cap
+    // small enough to meet without sending 100 MB.
+    ORCH_UPLOAD_DIR: UPLOAD_DIR, ORCH_UPLOAD_MAX_BYTES: String(UPLOAD_CAP),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
+let server = startServer();
 
 try {
   if (!(await waitHealthy())) throw new Error('server never became healthy');
@@ -1231,7 +1245,30 @@ try {
     eq(fm.agent, 'dev', 'and so is one typed before the home folder is listed, on a dialog opened with no folder');
     fm = form({ agent: 'dev', agentTyped: true });
     takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
-    eq([fm.agent, fm.channel], ['cy', 'elsewhere'], 'a bound folder\'s agent wins over anything typed, and proposes its floor');
+    eq([fm.agent, fm.channel], ['cy', CH], 'a bound folder\'s agent wins over anything typed, and the floor stays the one the dialog was opened from: bringing it here is what the operator came to do');
+    // The floor is the operator's when the dialog was opened from one
+    // (costmo, 2026-11-16): choosing a folder never changes it.
+    fm = form({ channel: 'picked', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, 'picked', 'a floor the operator picked in the dialog is kept when a bound folder is chosen after it');
+    fm = form({ channel: 'picked', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.channel, 'picked', 'and when an unbound one is');
+    fm = form({ channel: '__new__', path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, '__new__', 'a new floor being named is not taken away either');
+    fm = form({ channel: null });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, CH, 'a form with no floor in it gets the one the dialog was opened from, not the folder\'s');
+    fm = form({ channel: null, wantChannel: null });
+    takeListing(fm, listingOf('/repo/a', { channel: 'elsewhere', agent: 'cy', scope: 'local' }));
+    eq(fm.channel, 'elsewhere', 'opened from all floors, where no floor is being looked at, a bound folder still proposes its own');
+    fm = form({ channel: 'picked', wantChannel: null, path: '/repo/b', prefilled: '/repo/a' });
+    takeListing(fm, listingOf('/repo/b'));
+    eq(fm.channel, 'picked', 'and an unbound one leaves the floor as it is there');
+    // A folder bound to another instance (the desktop app's release, on
+    // develop): its agent is fixed, and it never proposes that instance's
+    // floor, wherever the dialog was opened.
     fm = form({ agent: 'dev', agentTyped: true });
     takeListing(fm, { path: '/repo/a', self: { path: '/repo/a', bound: { channel: 'theirs', agent: 'cy', scope: 'project', board: 'http://localhost:8787' }, other_board: 'http://localhost:8787' } });
     eq([fm.agent, fm.channel], ['cy', CH], 'a folder bound to another instance fixes its agent too, and proposes no floor of that instance\'s: the dialog stays on the floor it was opened from (costmo, 2026-11-08)');
@@ -1577,8 +1614,8 @@ try {
   let rr2 = await say('/model');
   eq([rr2.status, (await rr2.json()).code], [400, 'picker'], 'a bare /model is refused — it would open a picker nobody is driving');
   rr2 = await say('/effort absurd');
-  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the picker does not have is refused');
-  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the picker\'s');
+  eq([rr2.status, (await rr2.json()).code], [400, 'bad_effort'], 'an effort level the window does not have is refused');
+  eq(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max'], 'the levels are the window\'s');
   rr2 = await say('/model haiku');
   eq(rr2.status, 200, '/model <name> goes to the host');
   assert((await takeWork()).includes('chat'), 'as chat work — the host decides it is a picker');
@@ -1616,27 +1653,89 @@ try {
   // the window's session rather than "the desk's newest".
   await sleep(1100);
   await post(ev('twofold', 's-two-editor', 'Stop', {}));
-  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 for this session only', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'twofold', command: 'model', said: 'Set model to Opus 5.5 and saved as your default for new sessions', text: '/model opus', model: 'Opus 5.5', session_id: 's-two-window' }]);
   two = await sessOf('twofold');
-  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the picker's words land on the window's session the host named");
+  eq([two?.model, two?.model_requested], ['Opus 5.5', null], "the window's words land on the window's session the host named");
   await post(ev('twofold', 's-two-window', 'SessionEnd', { reason: 'prompt_input_exit' }));
   await hostEvents([{ type: 'session', channel: CH, agent: 'twofold', session_id: null }]);
   eq((await sessOf('twofold'))?.model, 'claude-fable-5-1', 'and the other live session was never touched');
 
   // The host's receipts, in the command's own terms (issue #9).
   const noteOf = async (agent) => deskOf(await floor(), agent)?.delivery ?? null;
-  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 for this session only with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
+  eq((await hostEvents([{ type: 'receipt', channel: CH, agent: 'typist', command: 'effort', said: 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', text: '/effort xhigh', model: 'Haiku 5.5', effort: 'xhigh' }])).applied, 1, 'a receipt is applied');
   let ty = await sessOf('typist');
-  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "the picker's receipt confirms the effort and clears both asked-fors");
-  eq(ty?.model, 'Haiku 5.5', "and the picker's own words stand as the model until a hook or a reply names the id — the select follows at once");
+  eq([ty?.effort, ty?.effort_requested, ty?.model_requested], ['xhigh', null, null], "a receipt naming both confirms the effort and clears both asked-fors");
+  eq(ty?.model, 'Haiku 5.5', "and the window's own words stand as the model until a hook or a reply names the id — the select follows at once");
   eq((await noteOf('typist'))?.state, 'done', 'and the composer\'s note says the command is done');
-  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 for this session only with xhigh effort', 'in the window\'s words');
-  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 for this session only with xhigh effort', tool_name: 'host' }]);
+  eq((await noteOf('typist'))?.said, 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', 'in the window\'s words');
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'context', text: 'Set model to Haiku 5.5 and saved as your default for new sessions with xhigh effort', tool_name: 'host' }]);
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'assistant', text: '10', via: '/btw' }]);
   eq((await noteOf('typist'))?.state, 'done', "the command's own lines — the host's sentence, a /btw answer — do not take the note down");
   await hostEvents([{ type: 'turn', channel: CH, agent: 'typist', role: 'user', text: 'the next thing' }]);
   eq(await noteOf('typist'), null, 'the operator\'s next message does');
   eq(((await turns('typist')).rows ?? []).find((t) => t.text === '10')?.via, '/btw', 'and a /btw answer is the agent\'s, labeled by the command');
+
+  // A change that was not made stops being asked for (costmo, 2026-11-14).
+  // It used to stand until something confirmed a model: the select showed
+  // the model that was picked, not the one the window was on.
+  await register({ channel: CH, agent: 'changer', cwd: '/repo/changer', window: '@16' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: 's-changer', cwd: '/repo/changer' }]);
+  await post(ev('changer', 's-changer', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  await post(ev('changer', 's-changer', 'Stop', { effort_level: 'medium' }));
+  const change = async (text) => {
+    const r = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'changer', text }) });
+    await takeWork();
+    return r.status;
+  };
+  const asked = async () => { const s = await sessOf('changer'); return [s?.model, s?.model_requested, s?.effort, s?.effort_requested]; };
+  eq([await change('/model sonnet'), await change('/effort high')], [200, 200], 'a model and an effort change are both asked of a desk');
+  eq(await asked(), ['claude-opus-5-5', 'sonnet', 'medium', 'high'], 'and both stand as asked for');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'not_delivered', message: 'the window did not record the message' }]);
+  eq(await asked(), ['claude-opus-5-5', 'sonnet', 'medium', 'high'], 'an error that names no command leaves them standing: it may be about anything');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'model', message: 'the desk is working — change the model when the turn ends' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', 'high'], 'a model change the host refused is no longer asked for, and the effort asked beside it still is');
+  eq(((await turns('changer')).rows ?? []).at(-1)?.text, 'the desk is working — change the model when the turn ends', 'with the refusal on the desk in words');
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'effort', message: 'the desk is working — change the effort level when the turn ends' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'and so with an effort change');
+  await change('/model gpt');
+  eq((await asked())[1], 'gpt', 'a name the window does not have is asked for like any other');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'model', said: "Model 'gpt' not found", text: '/model gpt', session_id: 's-changer' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], "and the window's refusal, a receipt that names no model, clears it with the model as it was");
+  await change('/effort low');
+  // The sentence is 2.1.325's own for a change it was told to keep ("No, go
+  // back" on "Change effort level?"), read from its strings and not seen on
+  // a window (QA, PR #55 finding 1). The rule under test is the receipt
+  // naming no level it was set to, whatever its words.
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'effort', said: 'Kept effort level as medium', text: '/effort low', session_id: 's-changer' }]);
+  eq(await asked(), ['claude-opus-5-5', null, 'medium', null], 'the same for an effort receipt that names no level');
+  await change('/model sonnet');
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'changer', command: 'btw', said: 'answered in the window', text: '/btw hello', session_id: 's-changer' }]);
+  eq((await asked())[1], 'sonnet', "another command's receipt clears nothing");
+  // On the window's session, as the ask was (PR #32 finding 1): an editor
+  // tab on the same desk, newer by the clock, keeps what its own window
+  // asked for.
+  await post(ev('changer', 's-changer-editor', 'SessionStart', { source: 'startup', model: 'claude-fable-5-1' }));
+  await sleep(1100);
+  await post(ev('changer', 's-changer-editor', 'PreModelSwitch', { from_model: 'claude-fable-5-1', to_model: 'claude-haiku-5-5', requested_model: 'haiku', source: 'picker' }));
+  await hostEvents([{ type: 'error', channel: CH, agent: 'changer', code: 'busy', command: 'model', message: 'the desk is working — change the model when the turn ends' }]);
+  eq((await asked())[1], null, "the refusal clears the ask on the window's session");
+  await post(ev('changer', 's-changer', 'SessionEnd', { reason: 'prompt_input_exit' }));
+  await hostEvents([{ type: 'session', channel: CH, agent: 'changer', session_id: null }]);
+  eq((await asked()).slice(0, 2), ['claude-fable-5-1', 'claude-haiku-5-5'], "and not the one the editor's own picker made on the other session");
+  // A desk whose window has never registered has only the board's
+  // placeholder for a session, and the route writes its ask on the desk's
+  // newest row (here the one an editor's hooks made). A receipt that names
+  // that placeholder clears it there: the placeholder is no row of its own
+  // to clear (QA, PR #55 Info 7).
+  await register({ channel: CH, agent: 'unseated', cwd: '/repo/unseated', window: '@17' });
+  await post(ev('unseated', 's-unseated-editor', 'SessionStart', { source: 'startup', model: 'claude-opus-5-5' }));
+  const unseated = async () => { const d = deskOf(await floor(), 'unseated'); return [d?.hosted?.session_id, d?.session?.session_id, d?.session?.effort_requested ?? null]; };
+  const askUnseated = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'unseated', text: '/effort high' }) });
+  await takeWork();
+  eq([askUnseated.status, await unseated()], [200, [`host:h-open:${CH}:unseated`, 's-unseated-editor', 'high']],
+    "an effort change asked of a desk on its placeholder stands on the desk's newest session");
+  await hostEvents([{ type: 'receipt', channel: CH, agent: 'unseated', command: 'effort', said: 'Kept effort level as medium', text: '/effort high', session_id: `host:h-open:${CH}:unseated` }]);
+  eq((await unseated())[2], null, 'and a receipt that names only the placeholder clears it where it was written');
 
   // The transcript's model, reported by the host when it changes.
   await hostEvents([{ type: 'model', channel: CH, agent: 'typist', session_id: 's-typist', model: 'claude-opus-5-5' }]);
@@ -1668,11 +1767,11 @@ try {
     const b = src.indexOf('  /* ---------- chat controls: the drawing ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the chat-controls section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/chat-controls-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { FLOOR_COMMANDS as PAGE_COMMANDS, EFFORT_LEVELS as PAGE_LEVELS, MODEL_CHOICES as PAGE_MODELS, slashMatches, modelFamily, modelLine, compactingLine, deliveryNote, modelSelectValue, effortSelectValue, modelOptions, effortOptions, selectBlock, handedBack };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
-    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the picker\'s levels');
+    eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the window\'s levels');
     eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'a slash alone offers every command');
     eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
     eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
@@ -1701,6 +1800,34 @@ try {
     eq(page.PAGE_MODELS.every((m) => page.modelFamily(m.label) === m.value), true, 'and each label reads as the family its value sends');
     eq(page.effortSelectValue({ effort: 'low', effort_requested: 'high' }), 'high', 'the effort select shows the asked-for level while pending');
     eq(page.effortSelectValue({ effort: 'low' }), 'low', 'else the confirmed one');
+    // The selects' rows are data, so the drawing can leave an unchanged
+    // select untouched (fillSelect): the same session gives the same rows.
+    const fams = page.PAGE_MODELS.map((m) => m.value);
+    eq(page.modelOptions({ model: 'claude-haiku-5-5' }).map((o) => o.value), fams, 'a model the control offers: the families and nothing else');
+    eq(page.modelOptions({ model: null }).map((o) => [o.value, o.label])[0], ['', 'model…'], 'no model named yet: a placeholder row first');
+    eq(page.modelOptions({ model: 'Mystery 9' })[0], { value: 'mystery', label: 'Mystery 9' }, 'a model that is none of them: its own row, in the window\'s words');
+    eq(JSON.stringify(page.modelOptions({ model: 'claude-haiku-5-5', model_requested: 'opus', effort: 'low' })), JSON.stringify(page.modelOptions({ model: 'claude-haiku-5-5' })),
+      'and what was asked for, or the effort, changes no row — only a change of model can');
+    eq(page.effortOptions({ effort: 'low' }).map((o) => o.value), EFFORT_LEVELS, 'the effort rows are the levels');
+    eq(page.effortOptions({}).map((o) => o.value), ['', ...EFFORT_LEVELS], 'under a placeholder while none is known');
+    // The selects are dimmed when Send is, in the composer's words: a
+    // choice is sent as a message, and one that would be dropped is not taken.
+    eq(page.selectBlock(true, false, false, 'Bo'), null, 'a desk that can be typed into takes a choice');
+    eq(page.selectBlock(true, false, true, 'Bo'), 'Bo is asking something — answer it above first.', 'a window that is asking takes none — Send would send nothing — and says so');
+    eq(page.selectBlock(false, true, false, 'Bo'), 'Bo’s conversation is open in your editor.', 'nor one an editor holds');
+    eq(page.selectBlock(false, false, false, 'Bo'), 'Bo’s machine isn’t reachable right now.', 'nor one whose host is away');
+    // What an error turn gives back to the box: typed words, never a pick.
+    eq(page.handedBack([{ text: 'a paragraph somebody wrote' }, { text: '/model opus', pick: true }, { text: 'and a second' }]), 'a paragraph somebody wrote\n\nand a second',
+      'an error hands back what was typed, in order — and not a pick from a select, which was never in the box');
+    eq(page.handedBack([{ text: '/effort high', pick: true }]), '', 'a refused pick alone hands back nothing');
+    eq(page.handedBack([{ text: '/model opus' }]), '/model opus', 'a /model typed into the box is the operator\'s words and comes back like any other');
+    // The hints say what a choice does now (costmo, 2026-11-14).
+    for (const list of [page.PAGE_COMMANDS, FLOOR_COMMANDS]) {
+      for (const name of ['model', 'effort']) {
+        const hint = list.find((c) => c.name === name).hint;
+        assert(/default for new sessions/.test(hint) && !/session only/.test(hint), `/${name} is offered as saving the default, on the page and the server alike — "${hint}"`);
+      }
+    }
   }
 
   console.log('\nstopping a turn');
@@ -2346,6 +2473,25 @@ try {
     eq(rows(formFromInput(INPUT.slice(1)).questions).map((q) => [q.strip, q.options.at(-1).n, q.options.at(-1).text]), [[true, 5, 'Type something']],
       'a lone multi-select has one, and its free-text row is the next number, spelled as a multi spells it');
     eq(built.questions[0].options[0].detail, 'Use red for the probe.', 'each choice keeps its description');
+    // A question with a preview has no free-text row. The call and the
+    // pane's reading below are one real form (2.1.325 at 80x24, 2026-11-14):
+    // the first question's options each had a preview, the second's none.
+    const PREVIEW_INPUT = [
+      { question: 'Where should it go?', header: 'Where', multiSelect: false, options: [
+        { label: 'Alpha', description: 'first', preview: 'AAA box' }, { label: 'Bravo', description: 'second', preview: 'BBB box' }, { label: 'Charlie', description: 'third', preview: 'CCC box' }] },
+      { question: 'Which plain one?', header: 'Plain', multiSelect: false, options: [{ label: 'Red', description: 'red' }, { label: 'Green', description: 'green' }] },
+    ];
+    const PREVIEW_PANE = [['Where', true, 'single', [[1, 'Alpha', false, null], [2, 'Bravo', false, null], [3, 'Charlie', false, null]]],
+      ['Plain', true, 'single', [[1, 'Red', false, null], [2, 'Green', false, null], [3, 'Type something.', true, null]]]];
+    const flat = (qs) => qs.map((q) => [q.tab_title, q.strip, q.kind, q.options.map((o) => [o.n, o.text, !!o.other, o.checked])]);
+    eq(flat(formFromInput(PREVIEW_INPUT).questions), PREVIEW_PANE,
+      'form-from-input: a question whose options carry a preview is built without "Type something.", as the pane draws it, and the plain one beside it keeps its row');
+    const flagged = PREVIEW_INPUT.map((q) => ({ ...q, options: q.options.map(({ preview, ...o }) => ({ ...o, ...(preview ? { preview: true } : {}) })) }));
+    eq(flat(formFromInput(flagged).questions), PREVIEW_PANE, 'the same from the hook\'s copy, which carries the preview as a flag and not its text');
+    eq(flat(formFromInput([{ ...PREVIEW_INPUT[0], options: [PREVIEW_INPUT[0].options[0], { label: 'Bravo' }, { label: 'Charlie', preview: '  ' }] }]).questions)[0][3].length, 3,
+      'one option with a preview is enough: the window draws the whole question that way (measured)');
+    eq(flat(formFromInput([{ ...PREVIEW_INPUT[0], multiSelect: true }]).questions)[0][3].at(-1), [4, 'Type something', true, false],
+      'and a multi-select given previews keeps its free-text row: it is drawn as any other multi-select (measured)');
     eq(built.tabs.map((t) => t.title), ['Colour', 'Toppings', 'Submit'], 'and the tabs are the headers, then Submit');
     eq([formFromInput(null), formFromInput([]), formFromInput([{ question: 'Q?', options: [{ label: 'A' }, { description: 'no label' }] }]),
       formFromInput([{ question: 'Q?', options: Array.from({ length: 12 }, (_, i) => ({ label: `c${i}` })) }])],
@@ -2703,10 +2849,10 @@ try {
       const b = src.indexOf('  /* ---------- a desk\'s place on the floor: the drawing ---------- */');
       if (a < 0 || b < 0 || b < a) throw new Error('the desk-place section was not found in src/ui/floor.js between its two section comments');
       const tmp = `./data/desk-place-${process.pid}.mjs`;
-      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords };\n`);
+      writeFileSync(tmp, `${src.slice(a, b)}\nexport { deskEmpty, deskRows, moveBlockedWords, hideRefusal };\n`);
       try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     })();
-    const { deskEmpty, deskRows, moveBlockedWords } = lifted;
+    const { deskEmpty, deskRows, moveBlockedWords, hideRefusal } = lifted;
     // The card's Move to another floor (#18), drawn disabled with Take a
     // desk's no_host words while no live host runs the desk — the page's
     // copy of the sentence held to the server's.
@@ -2843,6 +2989,30 @@ try {
     eq(await admin('channel/unarchive', { channel: CHW }), 200, 'restored');
     eq(deskRows(channelOf(await floor(), CHW)).pills.length, 2, 'and the pills are back under it, both still hidden');
 
+    // A desk in a meeting stands in its box, hidden or empty (QA, PR #56
+    // finding 1): the box says who is in the room's window. `boxed` is the
+    // page's reading of the rooms' windows; here it names the desks.
+    {
+      fl = await floor();
+      const c = channelOf(fl);
+      const inMeeting = (names) => (x) => names.includes(x.agent);
+      const empty = c.desks.find((x) => !x.hidden && deskEmpty(x))?.agent;
+      eq([d('waiter').hidden, d('boardonly').hidden, deskEmpty(d('boardonly')), !!empty], [true, true, true, true],
+        'the fixture: waiter hidden, boardonly hidden and empty, and an empty desk nobody hid');
+      assert(!deskRows(c).drawn.some((x) => x.agent === empty), 'which in no meeting is not drawn');
+      const met = deskRows(c, inMeeting(['waiter', 'boardonly', empty]));
+      eq(['waiter', 'boardonly', empty].map((a) => met.drawn.some((x) => x.agent === a)), [true, true, true],
+        'in a meeting, each is drawn: the hidden one, the hidden and empty one, and the empty one');
+      eq(met.pills.map((x) => x.agent), [], 'and none of them is a pill while it stands in the box');
+      const after = deskRows(c, inMeeting([]));
+      eq(after, deskRows(c), 'when the meeting ends the storey is as it was without one');
+      eq(after.pills.map((x) => x.agent).sort(), ['boardonly', 'waiter'], 'the two hidden desks back as pills: the flag was kept all along');
+      eq(deskRows({ ...c, archived: true }, inMeeting(['waiter'])), { drawn: [], pills: [] }, 'archive still wins: a put-away floor draws nobody, in a meeting or not');
+      eq(hideRefusal(d(empty), false), null, 'a desk in no meeting can be hidden');
+      assert(/^In a meeting: .*Hide it once the meeting has ended\.$/.test(hideRefusal(d(empty), true) ?? ''), 'one in a meeting cannot, and its card says why', hideRefusal(d(empty), true));
+      assert(/^In a meeting: .*its pill again when the meeting ends\.$/.test(hideRefusal(d('waiter'), true) ?? ''), 'and one hidden before it joined is told it goes back to its pill', hideRefusal(d('waiter'), true));
+    }
+
     // Restore is the pill, and only the pill.
     eq(await admin('desk/show', { channel: CH, agent: 'waiter' }), 200, 'the pill is clicked');
     fl = await floor();
@@ -2879,10 +3049,10 @@ try {
     };
     const { deskRows } = await lift('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */',
       '  /* ---------- a desk\'s place on the floor: the drawing ---------- */', ['deskRows']);
-    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary } = await lift(
+    const { checkedDesks, nudgePlan, nudgeChip, readPlan, readChip, hideChip, nudgeOutcome, aheadOf, bulkWait, bulkTag, bulkSummary, missedNote, bulkKept } = await lift(
       '  /* ---------- bulk selection: what the page decides ---------- */',
       '  /* ---------- bulk selection: the drawing ---------- */',
-      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary']);
+      ['checkedDesks', 'nudgePlan', 'nudgeChip', 'readPlan', 'readChip', 'hideChip', 'nudgeOutcome', 'aheadOf', 'bulkWait', 'bulkTag', 'bulkSummary', 'missedNote', 'bulkKept']);
 
     const CHB = 'bulky';
     const events = hostEvents;
@@ -3010,6 +3180,27 @@ try {
     eq(bulkTag({ kind: 'read', entries: [{ agent: 'hook', state: 'sending', count: 4 }] }, 'hook', null)?.text, 'marking', 'a mark-read still on its way is not called a failure before its answer');
     eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'done' }] }, 'win', { nudge: { ok: true } }), null, 'a desk back from its pill has nothing left to say about the hide');
     eq(bulkTag({ kind: 'hide', entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }] }, 'win', null), { text: 'not hidden', kind: 'bad', title: 'HTTP 500' }, 'and one the hide did not reach says so');
+
+    // Selection closes itself once an action is sent (costmo, 2026-11-14),
+    // so what it did not reach is said on the room, and only that.
+    eq(missedNote({ nudge: rec }), { text: 'nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', title: 'ed: held\nhook: no host' },
+      'a room whose nudge missed desks keeps one line: every desk counted, the missed ones named, each reason on hover');
+    eq(missedNote({ nudge: { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }, { agent: 'cold', state: 'line', host: 'openbox' }] } }), null,
+      'a nudge that has missed nobody leaves nothing on the room, in line or landed');
+    eq(missedNote({ read: { kind: 'read', entries: [{ agent: 'hook', state: 'done', cleared: 4 }] }, hide: { kind: 'hide', entries: [{ agent: 'win', state: 'done' }] } }), null,
+      'nor does a mark read or a hide that reached every desk');
+    eq(missedNote({ nudge: { ...rec, at: 1 }, hide: { kind: 'hide', at: 2, entries: [{ agent: 'win', state: 'failed', words: 'HTTP 500' }, { agent: 'cold', state: 'done' }] }, read: { kind: 'read', at: 3, entries: [{ agent: 'hook', state: 'done', cleared: 4 }] } })?.text,
+      'hide: 1 hidden · 1 not hidden — win   ·   nudge: 1 nudged · 1 in line · 2 not nudged — ed, hook', 'two actions that each missed a desk are both on it, newest first, and one that missed nobody is not');
+    eq(missedNote(null), null, 'and a room that did nothing says nothing');
+    // Seen (the line clicked, or selection started or ended by hand): only
+    // a nudge still in line is kept, for the pending bubble and its verdict.
+    const kept = bulkKept({ nudge: rec, read: { kind: 'read', entries: [{ agent: 'hook', state: 'failed', words: 'x' }] } });
+    eq(kept?.nudge.entries.map((e) => `${e.agent}:${e.state}`), ['cold:line'], 'a seen room keeps only the nudge still in line');
+    eq([missedNote(kept), !!kept.read], [null, false], 'so its line is gone');
+    eq(bulkWait(kept.nudge.entries, 'cold', true)?.note, 'opening its window — the host waits up to 45 s for it', 'and the desk in line still waits on the same facts');
+    kept.nudge.entries[0].state = 'failed'; kept.nudge.entries[0].words = 'never came up';
+    eq(missedNote(kept), { text: 'nudge: 1 not nudged — cold', title: 'cold: never came up' }, 'a nudge that fails after that is new, and the room says it');
+    eq(bulkKept({ nudge: { kind: 'nudge', entries: [{ agent: 'win', state: 'sent' }] } }), null, 'with nothing in line, a seen room keeps nothing');
 
     // Decided 5: a desk's unread pill opens its backlog dialog every time.
     // The dialog reads app.js's /api/state copy, polled apart from the
@@ -3395,6 +3586,334 @@ try {
       'in a window too short for it the desk gives way, to half the floor\'s size and no further; with room it is the floor\'s');
   }
 
+
+  // Issue #31: a file attached to a message. The board stages it until a
+  // host fetches it (src/uploads.js); these rows are the board's half —
+  // what is taken, what is refused, what a host may fetch — driven against a
+  // desk a host registered. The host's half (fetch, write outside the repo,
+  // the message as typed) is test:host's; the page's is below and
+  // check-attach.mjs.
+  console.log('\nattachments');
+  {
+    const ACH = 'att-ch';
+    const aHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const reg = (hostId, name, desks, uploads = true) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: aHK, body: JSON.stringify({ host_id: hostId, name, tmux: 'orch', protocol: PROTOCOL, desks, ...(uploads ? { uploads: true } : {}) }),
+    }).then((r) => r.json());
+    const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const up = (bytes, { name = 'f.bin', type = 'application/octet-stream', headers = {} } = {}) =>
+      fetch(`${HOST}/api/floor/upload?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`, {
+        method: 'POST', headers: { 'content-type': type, ...headers }, body: bytes,
+      }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const work = (hostId) => fetch(`${HOST}/api/host/work?host_id=${hostId}`, { headers: aHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    const fetchAs = (hostId, id, key = KEY) => fetch(`${HOST}/api/host/upload?host_id=${hostId}&id=${id}`, { headers: key ? { 'x-orchestratinator-key': key } : {} });
+    const staged = () => { try { return readdirSync(UPLOAD_DIR).length; } catch { return 0; } };
+
+    await reg('h-att', 'attbox', [{ channel: ACH, agent: 'ada', cwd: '/repo/ada', session_id: 'sdk-ada' }]);
+    await reg('h-noup', 'oldbox', [{ channel: ACH, agent: 'ole', cwd: '/repo/ole', session_id: 'sdk-ole' }], false);  // not h-old: the protocol rows above use that id, and queue rescans for it
+    for (const a of ['ada', 'ole']) await post({ channel: ACH, agent: a, session_id: `sdk-${a}`, hook_event_name: 'SessionStart', cwd: `/repo/${a}` });
+    const hostsNow = (await floor()).hosts ?? [];
+    eq([hostsNow.find((h) => h.host_id === 'h-att')?.uploads, hostsNow.find((h) => h.host_id === 'h-noup')?.uploads], [true, false],
+      'the payload says which hosts fetch attachments, from what each said at registration');
+    eq(deskOf(await floor(), 'ada', ACH)?.hosted?.host_id, 'h-att', 'and a desk names its host by id, which is how the box finds that row');
+
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5]);
+    let r = await up(png, { name: 'shot one.png', type: 'image/png' });
+    eq([r.status, r.body.name, r.body.type, r.body.size], [200, 'shot one.png', 'image/png', png.length], 'a file is staged, and answered with its id, its name, its type and its size');
+    const shot = r.body.id;
+    r = await up(new TextEncoder().encode('{"not":"parsed"'), { name: 'broken.json', type: 'application/json' });
+    eq([r.status, r.body.size], [200, 15], 'a .json file sent as application/json is the file\'s bytes, not a body to parse (and broken JSON is still a file)');
+    const json = r.body.id;
+    r = await up(new Uint8Array([1]), { name: '../../.ssh/id_rsa\nrm -rf' });
+    eq(r.body.name, 'id_rsa rm -rf', 'a name loses its directories, its leading dot and its newline: it is written on a host\'s disk and typed into a window');
+
+    r = await up(new Uint8Array(UPLOAD_CAP + 1));
+    eq([r.status, r.body.code], [413, 'too_large'], 'a file over the cap is refused on its declared length');
+    // Told apart from the streaming cap (QA, PR #58 Info 2): a request that
+    // declares more than the cap and then sends a body that never ends is
+    // answered by the declared-length refusal alone, while it is still
+    // sending. The streaming cap would wait for bytes past the cap that
+    // never come.
+    const declared = await new Promise((done) => {
+      const req = http.request(`${HOST}/api/floor/upload?name=never.bin`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'content-length': String(UPLOAD_CAP * 4) } }, (res) => {
+        let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { req.destroy(); done({ status: res.statusCode, code: (() => { try { return JSON.parse(b).code; } catch { return null; } })() }); });
+      });
+      req.on('error', () => {});
+      req.write(Buffer.alloc(16));
+      setTimeout(() => { req.destroy(); done({ status: 'no answer in 4 s', code: null }); }, 4000);
+    });
+    eq(declared, { status: 413, code: 'too_large' }, 'and refused on that length while its body is still coming, before a byte past the cap could be counted');
+    const before = staged();
+    const chunks = new ReadableStream({ start(c) { for (let i = 0; i < 5; i++) c.enqueue(new Uint8Array(UPLOAD_CAP / 2)); c.close(); } });
+    r = await fetch(`${HOST}/api/floor/upload?name=big.bin`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: chunks, duplex: 'half' })
+      .then(async (x) => ({ status: x.status, body: await x.json().catch(() => ({})) }))
+      .catch((e) => ({ status: 'reset', body: { error: e.message } }));
+    eq([r.status === 413 || r.status === 'reset', staged()], [true, before], 'and one with no length is cut off at the cap while it streams, leaving nothing behind');
+    r = await up(png, { headers: { origin: 'http://evil.example' } });
+    eq([r.status, staged()], [403, before], 'a page on another origin cannot stage a file, and nothing is written for it');
+
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'look at these', files: [shot, json] });
+    eq(r.status, 200, 'a message carries the files staged for it');
+    let w = await work('h-att');
+    eq(w.map((x) => [x.kind, x.payload.text, x.payload.files.map((f) => [f.id, f.name])]),
+      [['chat', 'look at these', [[shot, 'shot one.png'], [json, 'broken.json']]]], 'and the host is handed the words and each file by id and name, in order');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: '', files: [shot] });
+    w = await work('h-att');
+    eq([r.status, w[0]?.payload.text, w[0]?.payload.files.length], [200, '', 1], 'files alone are a message');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: '' });
+    eq(r.status, 400, 'nothing at all still is not');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: '/compact', files: [shot] });
+    eq([r.status, r.body.code], [400, 'command_files'], 'a command cannot carry files');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'x', files: Array.from({ length: 21 }, (_, i) => `aaaaaaaa${i}`) });
+    eq([r.status, r.body.code], [400, 'too_many_files'], 'twenty files a message, and no more');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'x', files: ['deadbeefdeadbeef'] });
+    eq([r.status, r.body.code], [410, 'upload_gone'], 'a file that is not on the board is said, not dropped from the message');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ole', text: 'see attached', files: [shot] });
+    eq([r.status, r.body.code], [409, 'host_no_uploads'], 'a desk whose host does not fetch attachments is refused files');
+    assert(/^oldbox runs a build from before attachments/.test(r.body.error ?? ''), `in words naming the host — ${r.body.error}`);
+    eq((await work('h-noup')).map((w) => `${w.kind} ${w.channel}/${w.agent}`), [], 'and nothing is queued for it');
+
+    let f = await fetchAs('h-att', shot);
+    const gotBytes = [...new Uint8Array(await f.arrayBuffer())];
+    eq([f.status, gotBytes.length <= 64 ? gotBytes : `${gotBytes.length} bytes`], [200, [...png]], 'the host a message named it to fetches the file, byte for byte');
+    f = await fetchAs('h-noup', shot);
+    eq(f.status, 403, 'another host may not');
+    f = await fetchAs('h-att', shot, null);
+    eq(f.status, 401, 'nor anything without the host key');
+    f = await fetchAs('h-att', 'cafebabecafebabe');
+    eq(f.status, 404, 'and a file that is not there is not found');
+    eq((await fetch(`${HOST}/api/floor/upload?id=${shot}`)).status === 200, false, 'the board never hands an upload to a page');
+
+    r = await op('/api/floor/upload/discard', { ids: [json] });
+    eq(r.body.removed, 1, 'a file taken out of the box is discarded');
+    r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'again', files: [json] });
+    eq([r.status, r.body.code], [410, 'upload_gone'], 'and a message naming it afterwards is refused');
+
+    // The staging store's clock and names, in-process: an hour is not waited.
+    const { createUploads, safeName } = await import('../src/uploads.js');
+    const tdir = `./data/floor-${process.pid}-stage-unit`;
+    const u = createUploads({ dir: tdir, ttlMs: 1000 });
+    const fakeReq = (buf) => Readable.from([buf]);
+    const a = (await u.stage(fakeReq(Buffer.from('aaa')), { name: 'a.txt', type: 'text/plain' })).file;
+    const b2 = (await u.stage(fakeReq(Buffer.from('bbb')), { name: 'b.txt', type: 'nonsense type' })).file;
+    eq(b2.type, 'application/octet-stream', 'a type that is not a media type is stored as the neutral one');
+    u.grant([a.id], 'h1');
+    const t0 = Date.now();
+    eq(u.sweep(t0 + 500), 0, 'nothing is swept inside its hour');
+    eq(u.sweep(t0 + 1500), 2, 'both are swept once it passes');
+    eq(u.resolve([a.id]).code, 'upload_gone', 'and a message naming one is told it is gone');
+    const c = (await u.stage(fakeReq(Buffer.from('ccc')), { name: 'c.txt' })).file;
+    const tc = Date.now();
+    u.grant([c.id], 'h1');
+    eq(u.sweep(tc + 900), 0, 'a send keeps a file another hour from that send');
+    eq([safeName(''), safeName('...'), safeName('a/b\\c.png'), safeName(`${'x'.repeat(200)}.tar.gz`).length, safeName(`${'x'.repeat(200)}.png`).slice(-4)],
+      ['file', 'file', 'c.png', 120, '.png'], 'safeName: never empty, never a directory, never longer than 120, keeping a short extension');
+    rmSync(tdir, { recursive: true, force: true });
+
+    // The page's half (issue #31): one lifted section of floor.js. What is
+    // drawn, hovered and dropped is check-attach.mjs (verify-ui-change).
+    const src31 = readFileSync('src/ui/floor.js', 'utf8');
+    const a31 = src31.indexOf('  /* ---------- attachments: what the page decides ---------- */');
+    const b31 = src31.indexOf('  /* ---------- attachments: the drawing ---------- */');
+    if (a31 < 0 || b31 < 0 || b31 < a31) throw new Error('the attachments section was not found in src/ui/floor.js between its two section comments');
+    const tmp31 = `./data/attach-${process.pid}.mjs`;
+    writeFileSync(tmp31, `${src31.slice(a31, b31)}\nexport { ATTACHED_HEADER, ATTACH_MAX_BYTES, ATTACH_MAX_FILES, splitAttached, attachMatch, fileKind, sizeLabel, attachAdmit, pasteTakes, attachSendable, attachRefusal, commandLike };\n`);
+    let pg;
+    try { pg = await import(new URL(tmp31, `file://${process.cwd()}/`)); } finally { rmSync(tmp31, { force: true }); }
+    const hostUp = await import('../host/uploads.js');
+    eq(pg.ATTACHED_HEADER, hostUp.ATTACHED_HEADER, 'the page reads the list by the header the host writes it under');
+    const { createUploads: cu, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES } = await import('../src/uploads.js');
+    void cu;
+    eq([pg.ATTACH_MAX_BYTES, pg.ATTACH_MAX_FILES], [UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES], 'and refuses at the board\'s own caps');
+    const composed = hostUp.withAttachments('what broke?\n- not a file', ['/Users/x/.orchestratinator/uploads/abc123abc/shot one.png', '/Users/x/.orchestratinator/uploads/def456def/build.log']);
+    eq(pg.splitAttached(composed), { text: 'what broke?\n- not a file', files: [
+      { path: '/Users/x/.orchestratinator/uploads/abc123abc/shot one.png', name: 'shot one.png' },
+      { path: '/Users/x/.orchestratinator/uploads/def456def/build.log', name: 'build.log' },
+    ] }, 'a message the host composed splits into the words and the files, a name with a space in it included');
+    eq(pg.splitAttached(hostUp.withAttachments('', ['/u/abcdefgh/a.png'])), { text: '', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] }, 'files alone are files and no words');
+    eq(pg.splitAttached(composed.replace(/\n/g, '\r\n')).files.length, 2, 'and a window that records CRLF reads the same');
+    eq(pg.ATTACHED_HEADER, 'Attached by the operator:', 'the list is the operator\'s, wherever it was attached from: the panel, a popout or a meeting room (costmo, 2026-11-17)');
+    eq(pg.splitAttached('see this\n\nAttached from the floor:\n- /u/abcdefgh/a.png'), { text: 'see this', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] },
+      'and a message sent under the old spelling still draws its files as files');
+    for (const typedByHand of [
+      `see below\n\n${pg.ATTACHED_HEADER}\n- /a/b.png\nand then I said more`,
+      `${pg.ATTACHED_HEADER} my notes\n- /a/b.png`,
+      `see below\n\n${pg.ATTACHED_HEADER}\n- relative/path.png`,
+      `see below\n${pg.ATTACHED_HEADER}\n- /a/b.png`,
+    ]) eq(pg.splitAttached(typedByHand), { text: typedByHand, files: [] }, `words that only look like a list are left as typed: ${JSON.stringify(typedByHand.slice(-28))}`);
+    eq([pg.attachMatch('  hi ', [{ id: 'abc123abc', name: 'a.png' }]), pg.attachMatch('', [{ id: 'abc123abc', name: 'a.png' }]), pg.attachMatch('', [])], ['hi', 'abc123abc/a.png', ''],
+      'a pending message is matched by its words, or by its first file\'s id and name when it has none: a name alone is any file of that name');
+    assert(hostUp.withAttachments('', ['/u/abc123abc/a.png']).includes(pg.attachMatch('', [{ id: 'abc123abc', name: 'a.png' }])), 'and that is in the list the host writes');
+    eq([pg.fileKind('x.PNG', '').kind, pg.fileKind('x', 'image/jpeg').kind, pg.fileKind('r.pdf', '').kind, pg.fileKind('a.tar.gz', 'application/gzip')],
+      ['image', 'image', 'pdf', { kind: 'file', ext: 'gz' }], 'a thumbnail for what the browser can draw, the extension for the rest');
+    eq([pg.sizeLabel(900), pg.sizeLabel(2048), pg.sizeLabel(5.5 * 1048576), pg.sizeLabel(42 * 1048576)], ['900 B', '2 KB', '5.5 MB', '42 MB'], 'sizes read as people read them');
+    const many = Array.from({ length: 19 }, (_, i) => ({ name: `h${i}` }));
+    const adm = pg.attachAdmit(many, [{ name: 'ok', size: 10 }, { name: 'big', size: pg.ATTACH_MAX_BYTES + 1 }, { name: 'late', size: 1 }]);
+    eq([adm.take.map((f) => f.name), adm.refused.map((f) => [f.name, f.why])], [['ok'], [['big', 'larger than 100 MB'], ['late', '20 files a message']]],
+      'a file over the size is refused before it is sent, and past twenty the rest are said, not dropped');
+    eq([pg.pasteTakes([{ name: 'shot.png' }], ''), pg.pasteTakes([{ name: 'r.pdf' }], 'r.pdf'), pg.pasteTakes([{ name: 'image.png' }], 'Q3 total\t4,210'), pg.pasteTakes([], '')],
+      [true, true, false, false], 'a paste attaches a screenshot, and a file copied in Finder, but not the picture a spreadsheet puts beside its words');
+    const chip = (state, id = 'x1') => ({ state, id });
+    eq([pg.attachSendable('hi', []), pg.attachSendable('', [chip('ready')]), pg.attachSendable('hi', [chip('uploading')]).why, pg.attachSendable('hi', [chip('failed')]).why, pg.attachSendable('/compact', [chip('ready')]).why, pg.attachSendable('  ', [])],
+      [{ ok: true, ids: [] }, { ok: true, ids: ['x1'] }, 'still uploading', 'remove the file that failed', 'a command cannot carry files', { ok: false, why: null }],
+      'Send takes words, files or both; waits for an upload; says what stops it');
+    // One rule on both sides (QA, PR #58 finding 1): the page reads a
+    // command as the board's commandOf does, so a message that opens with a
+    // path is not refused its files as a command.
+    const asCommand = ['/compact', '/model sonnet', '/Users/costmo/build.log keeps failing, see the shot', '/tmp/out.txt is empty after this run', '/review\nplease look at the attached screenshot', 'see /Users/costmo/build.log', '  /btw what is 6*7?  ', '/', '/9lives'];
+    eq(asCommand.map((t) => pg.commandLike(t)), asCommand.map((t) => !!commandOf(t)), 'the page reads a command exactly where the board does');
+    eq(asCommand.map((t) => pg.attachSendable(t, [chip('ready')]).why ?? 'sendable'),
+      ['a command cannot carry files', 'a command cannot carry files', 'sendable', 'sendable', 'sendable', 'sendable', 'a command cannot carry files', 'sendable', 'sendable'],
+      'so a message opening with a path, or a /word followed by more lines, carries its files');
+    // Info 7: more than twenty is said at Send, never cut away.
+    const many21 = Array.from({ length: 21 }, (_, i) => chip('ready', `f${i}`));
+    eq([pg.attachSendable('hi', many21).why, pg.attachSendable('hi', many21.slice(1)).ok], ['20 files a message: take 1 out', true],
+      'a box holding more than twenty says so at Send, and how many to take out');
+    eq([pg.attachRefusal({ name: 'box', uploads: true }), pg.attachRefusal(null), /^old runs a build from before attachments/.test(pg.attachRefusal({ name: 'old', uploads: false }))],
+      [null, null, true], 'the paperclip is dimmed, with why, for a desk whose host does not fetch files');
+  }
+
+
+  // Milestone audit 2026-11-17, finding 1: an open question must not
+  // disappear from the floor. Two ways it did: another session on the desk
+  // (an editor in the repo) working closed it, and a board restart forgot
+  // it, with nothing to raise it again because a window standing on a
+  // question sends no further hook. The host now says, at every heartbeat,
+  // which of its floor windows are asking (`pending`), and the board raises
+  // those. The restart itself is driven where this suite restarts its board
+  // (below, "an open question across a board restart"); the host's half,
+  // read off a real pane, is test:host's.
+  console.log('\nan open question stays on the floor');
+  {
+    const QCH = 'ask-ch';
+    const qHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const qDesks = [{ channel: QCH, agent: 'asa', cwd: '/repo/asa', session_id: 'sdk-asa' }, { channel: QCH, agent: 'bea', cwd: '/repo/bea', session_id: 'sdk-bea' }];
+    const beat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', protocol: PROTOCOL, desks: qDesks, ...(pending ? { pending } : {}) }) }).then((r) => r.status);
+    const asked = async (agent) => deskOf(await floor(), agent, QCH)?.permission ?? null;
+    const queued = () => fetch(`${HOST}/api/host/work?host_id=h-ask`, { headers: qHK }).then((r) => r.json()).then((b) => (b.work ?? []).map((w) => w.kind));
+    await beat();
+    for (const d of qDesks) await post({ channel: QCH, agent: d.agent, session_id: d.session_id, hook_event_name: 'SessionStart', cwd: d.cwd });
+    await queued();
+
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PermissionRequest', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'git push' } });
+    assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'the window asks, and the floor shows it');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa-editor', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Read', tool_input: { file_path: '/repo/asa/x' } });
+    assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'another session on the desk working (an editor in the repo) does not close the window\'s question (probe P1)');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'git push' } });
+    eq(await asked('asa'), null, 'the window\'s own work does: it was answered');
+    await queued();
+    await beat([{ channel: QCH, agent: 'asa', session_id: 'sdk-asa', summary: 'the window is waiting for a decision' }]);
+    eq(await asked('asa'), null, 'and a heartbeat that read the pane just before the answer does not raise it again (RESAY_QUIET_MS)');
+
+    // bea's window is asking, and the board has heard nothing of it: the
+    // shape after a board restart. The heartbeat says it.
+    await beat([{ channel: QCH, agent: 'bea', session_id: 'sdk-bea', summary: 'the window is waiting for a decision' }]);
+    const raised = await asked('bea');
+    eq([raised?.summary, raised?.standing], ['the window is waiting for a decision', true], 'a question a heartbeat says the window is asking is raised on the floor');
+    eq((await queued()).filter((k) => k === 'prompt').length, 1, 'and the host is asked to read its choices off the pane, once');
+    eq(deskOf(await floor(), 'bea', QCH)?.nudge?.code, 'asking', 'and the desk takes no message while it stands, as for any question');
+    await beat([{ channel: QCH, agent: 'bea', session_id: 'sdk-bea', summary: 'the window is waiting for a decision' }]);
+    eq([(await asked('bea'))?.request_id, (await queued()).length], [raised?.request_id, 0], 'said again at the next heartbeat, it is the same question, and nothing more is asked of the host');
+    await beat([]);
+    eq(await asked('bea'), null, 'a heartbeat that no longer names it closes it: answered in the window');
+
+    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea', hook_event_name: 'PermissionRequest', cwd: '/repo/bea', tool_name: 'Bash', tool_input: { command: 'npm publish' } });
+    await beat([]);
+    assert(/npm publish/.test((await asked('bea'))?.summary ?? ''), 'but a question a hook raised is not closed by a heartbeat: the hook can be newer than the screen the host read');
+    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea', hook_event_name: 'PreToolUse', cwd: '/repo/bea', tool_name: 'Bash', tool_input: { command: 'npm publish' } });
+    await queued();
+
+    // The startup half (docs/backlog.md, open since PR #2): a question the
+    // window asks before Claude Code starts, said by the host, is not closed
+    // by another session's work on the desk either; the host's `gone` is
+    // what closes it.
+    const hostEv = (events) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', events }) });
+    await hostEv([{ type: 'startup', channel: QCH, agent: 'bea', session_id: 'sdk-bea', request_id: 'startup:trust', kind: 'trust', asks: 'Do you trust the files in this folder?', options: [{ n: 1, text: 'Yes, proceed' }, { n: 2, text: 'No, exit' }] }]);
+    eq((await asked('bea'))?.startup, true, 'a startup question is on the floor');
+    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea-editor', hook_event_name: 'PreToolUse', cwd: '/repo/bea', tool_name: 'Read', tool_input: { file_path: '/repo/bea/y' } });
+    eq((await asked('bea'))?.startup, true, 'and an editor\'s tool call on the same desk leaves it there');
+    await hostEv([{ type: 'startup', channel: QCH, agent: 'bea', session_id: 'sdk-bea', request_id: 'startup:trust', gone: true }]);
+    eq(await asked('bea'), null, 'the host saying it is gone closes it');
+    await queued();
+
+    // Press yes / no's route (finding 3): the floor's answer for a prompt
+    // nothing could read. The keys are the host's (test:host); the route
+    // decides whether to queue them at all.
+    const press = (choice) => fetch(`${HOST}/api/floor/press`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: QCH, agent: 'asa', choice }) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    let pr = await press('yes');
+    eq([pr.status, pr.body.code], [409, 'not_waiting'], 'Press is refused for a desk that is not waiting on anything');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'Notification', cwd: '/repo/asa', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    await queued();
+    pr = await press('maybe');
+    eq([pr.status, pr.body.code], [400, 'bad_choice'], 'a choice that is not yes or no is refused');
+    pr = await press('yes');
+    const pressWork = await fetch(`${HOST}/api/host/work?host_id=h-ask`, { headers: qHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    eq([pr.status, pressWork.map((w) => [w.kind, w.payload?.choice])], [200, [['press', 'yes']]], 'and for a waiting desk it queues one press, carrying the choice, for the host to turn into a key');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'true' } });
+    await queued();
+  }
+
+
+  // Milestone audit 2026-11-17, finding 4: work a host took and never
+  // finished. It used to be gone: marked taken as it was handed out, and a
+  // host stopped mid-line (every restart) took the rest of its batch with
+  // it. The guarantee is takeHostWork's (src/db.js): carried out once,
+  // handed out again because it was never started, or said lost on its desk.
+  // This drives the board as a host would, a boot at a time; what a real
+  // host sends at a stop is test:host's.
+  console.log('\nwork a host took and never finished');
+  {
+    const WCH = 'boot-ch';
+    const wHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const wDesks = [{ channel: WCH, agent: 'kip', cwd: '/repo/kip', session_id: 'sdk-kip' }];
+    const beat = (boot) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: wHK, body: JSON.stringify({ host_id: 'h-boot', name: 'bootbox', tmux: 'orch', protocol: PROTOCOL, desks: wDesks, ...(boot ? { boot } : {}) }) }).then((r) => r.status);
+    const poll = (boot, done = []) => fetch(`${HOST}/api/host/work?host_id=h-boot${boot ? `&boot=${boot}` : ''}${done.length ? `&done=${done.join(',')}` : ''}`, { headers: wHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    const { default: Database } = await import('better-sqlite3');
+    const put = (kind, payload) => { const db = new Database(DB_PATH); try { return Number(db.prepare(`INSERT INTO host_outbox (host_id, channel, agent, kind, payload) VALUES ('h-boot', ?, 'kip', ?, ?)`).run(WCH, kind, JSON.stringify(payload)).lastInsertRowid); } finally { db.close(); } };
+    const errorsNow = async () => ((await turns('kip', WCH)).rows ?? []).filter((r) => r.role === 'error').map((r) => r.text);
+    await beat('boot-a');
+    await post({ channel: WCH, agent: 'kip', session_id: 'sdk-kip', hook_event_name: 'SessionStart', cwd: '/repo/kip' });
+    await poll('boot-a');
+
+    const chatId = put('chat', { text: 'ship the release notes' });
+    const readId = put('sessions', { request_id: 'r1' });
+    const stopId = put('interrupt', {});
+    const doneId = put('open', {});
+    eq((await poll('boot-a')).map((w) => w.id), [chatId, readId, stopId, doneId], 'run A of the host takes four items');
+    await poll('boot-a', [doneId]);
+    const before = await errorsNow();
+    await beat('boot-a');
+    eq(await errorsNow(), before, 'its own heartbeat, the same run, sorts nothing: the work is in hand');
+
+    await beat('boot-b');
+    const said = (await errorsNow()).filter((t) => !before.includes(t));
+    assert(said.some((t) => t.startsWith('may not have been sent: the host restarted while this message was in line. If it is not in the conversation, send it again — "ship the release notes"')),
+      `run B registering: a message run A never finished is said on its desk, with its words, never typed twice — ${said.join(' | ')}`);
+    assert(said.some((t) => /^the stop may not have reached the window/.test(t)), 'a stop is said too, with what to do');
+    eq(said.length, 2, 'and nothing else is said: the item run A finished is not, and a read is not');
+    eq((await poll('boot-b')).map((w) => [w.id, w.kind]), [[readId, 'sessions']], 'a read run A never finished is handed to run B, harmless to do twice');
+    await poll('boot-b', [readId]);
+    await beat('boot-c');
+    eq((await errorsNow()).length, before.length + 2, 'and nothing is said twice when a later run registers');
+
+    const r1 = put('chat', { text: 'one' });
+    const r2 = put('chat', { text: 'two' });
+    eq((await poll('boot-c')).map((w) => w.id), [r1, r2], 'run C takes two messages');
+    const rel = (body) => fetch(`${HOST}/api/host/work/release`, { method: 'POST', headers: wHK, body: JSON.stringify({ host_id: 'h-boot', ...body }) }).then((r) => r.json());
+    eq((await rel({ boot: 'boot-other', release: [r2] })).released, 0, 'another run cannot hand back what this one took');
+    eq(await rel({ boot: 'boot-c', done: [r1], release: [r2] }), { ok: true, done: 1, released: 1 }, 'stopping, run C says what it finished and hands back what it never started');
+    eq((await poll('boot-d')).map((w) => w.id), [r2], 'and the next run is handed it, to type once');
+    await poll('boot-d', [r2]);
+
+    const old = put('chat', { text: 'from an old host' });
+    await poll(null);
+    await beat(null);
+    eq((await errorsNow()).length, before.length + 2, 'a host from before boots says none and is said none of: its work is taken as it always was');
+    void old;
+  }
+
   // Issue #44: meeting rooms. The board half is a bounded record Resume
   // reads — the routes are driven here against desks a host registered —
   // and the page half is one lifted section of floor.js, run with the
@@ -3567,13 +4086,13 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingResumePlan, meetingTo, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
+      'export { meetingQuery, meetingOf, meetingPlace, meetingChip, meetingAddable, meetingEntry, meetingEntryWord, meetingItems, meetingShown, meetingHiddenNote, meetingResumePlan, meetingTo, meetingToClick, meetingToLeft, meetingToTitle, meetingToLine, meetingNudgeChip, meetingMentions, MEET_STATE_WORD, MEET_W, nudgePlan };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
 
     const fresh = pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: ['bo', 'cy', 'bo'] }));
-    eq(fresh, { id: null, channel: 'lab', agents: ['bo', 'cy'], resume: false }, 'a new room\'s address names its floor and desks, each once');
+    eq(fresh, { id: null, channel: 'lab', agents: ['bo', 'cy'], twins: [], resume: false }, 'a new room\'s address names its floor and desks, each once');
     eq(pg.meetingOf(pg.meetingQuery({ id: 7, resume: true })), { id: 7, channel: null, agents: [], resume: true }, 'a Resume names the room and asks for the reopen');
     eq(pg.meetingOf(pg.meetingQuery({ id: 7 })).resume, false, 'and the address it settles on does not, so a reload reopens nothing');
     eq([pg.meetingOf(''), pg.meetingOf('?popout=1&channel=a&agent=b'), pg.meetingOf('?meeting=new&channel=lab'), pg.meetingOf('?meeting=0')], [null, null, null, null],
@@ -3616,6 +4135,25 @@ try {
     eq(pg.meetingItems([{ agent: 'bo', turns: [{ id: 1, role: 'user', text: 'x', created_at: '2026-11-05T10:00:00Z' }] }, { agent: 'cy', turns: [{ id: 2, role: 'user', text: 'x', created_at: '2026-11-05T10:05:00Z' }] }], [], [])
       .map((it) => it.key), ['u:1', 'u:2'], 'and five minutes apart they are two');
 
+    // A participant's box hides or shows that desk's part of the transcript
+    // (costmo, 2026-11-14). items: a message to bo and cy, each one's reply,
+    // a note, words typed into both windows, a message to bo alone.
+    const keysWith = (...hidden) => pg.meetingShown(items, new Set(hidden)).map((it) => it.key);
+    eq(pg.meetingShown(items, new Set()), items, 'with nobody hidden the transcript is the transcript, the same list');
+    eq(keysWith('cy'), ['send:1', 't:22', 'n:3', 'u:30', 'send:2'], 'a hidden desk\'s own turns are gone, and a message that also went to a desk still shown stays');
+    eq(keysWith('bo'), ['send:1', 't:25', 'n:3', 'u:30'], 'a message that went only to the hidden desk goes with it — pending or not');
+    eq(keysWith('bo', 'cy'), ['n:3'], 'with every desk it went to hidden a message is gone too; the room\'s notes are always here');
+    eq(keysWith('dee'), items.map((it) => it.key), 'hiding a desk that said nothing and was sent nothing changes nothing');
+    eq(pg.meetingShown(items, new Set(['cy'])).find((it) => it.key === 'send:1').send.entries.map((e) => e.agent), ['bo', 'cy'],
+      'a message kept is drawn whole: the hidden desk\'s delivery line is still under it');
+    const shownAgain = pg.meetingShown(items, new Set());
+    eq([shownAgain.map((it) => it.key), shownAgain.indexOf(items.find((it) => it.key === 't:25'))], [['send:1', 't:22', 't:25', 'n:3', 'u:30', 'send:2'], 2],
+      'shown again, the desk\'s turns are back in line where they were said');
+    eq(pg.meetingShown([{ key: 'send:9', kind: 'send', send: { entries: [] } }], new Set(['bo'])).length, 1, 'a message that went to nobody is not hidden by anyone');
+    eq([pg.meetingHiddenNote(['bo', 'cy'], new Set(['cy']), (a) => a.toUpperCase()), pg.meetingHiddenNote(['bo', 'cy'], new Set(['bo', 'cy', 'dee']), (a) => a), pg.meetingHiddenNote(['bo'], new Set(['cy']), (a) => a), pg.meetingHiddenNote(['bo'], new Set(), (a) => a)],
+      ['Replies from CY are hidden above.', 'Replies from bo, cy are hidden above.', '', ''],
+      'the line under the box names a hidden desk only when it will hear the message');
+
     const H = (extra = {}) => ({ host: 'box', window: 'bo', live: true, held: 'floor', session_id: 'S1', ...extra });
     const chans = (deskList, others = []) => [{ channel: 'lab', desks: deskList }, ...others];
     const roomOf = (participants) => ({ channel: 'lab', participants });
@@ -3634,15 +4172,29 @@ try {
     eq(pg.meetingResumePlan(roomOf([P('bo'), P('cy')]), chans([{ agent: 'bo', persona: 'Bo', hosted: H() }]), new Set()).map((s) => s.act), ['join', 'skip'],
       'one desk that cannot be reopened does not stop the rest');
 
-    const U = (agent, unread, nudge = { ok: true, host: 'h' }) => ({ ...D(agent, { nudge }), board: { unread } });
+    const U = (agent, unread, nudge = { ok: true, host: 'h' }, assigned = 0) => ({ ...D(agent, { nudge }), board: { unread, assigned_open: assigned } });
     let nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 1), U('dee', 0)], true);
-    eq([nc.text, nc.disabled, nc.waiting], ['Nudge everyone · 3 unread', false, true], 'the room\'s Nudge says a nudge is needed: the unread waiting for its recipients');
+    eq([nc.text, nc.disabled, nc.waiting], ['Nudge all (3)', false, true], 'the room\'s Nudge says a nudge is needed, and how much is waiting: "Nudge all (3)" (costmo, 2026-11-16)');
+    eq(nc.agents, ['bo', 'cy'], 'and it goes to the desks with something waiting, not to the one with nothing');
+    assert(/^Types “nudge” into 2 desks with something waiting.* The others have nothing waiting and are left alone\.$/m.test(nc.title), 'which its hover says', nc.title);
     assert(/Bo: 2 unread messages/.test(nc.title) && /Cy: 1 unread message$/m.test(nc.title), 'and whose, on hover');
+    nc = pg.meetingNudgeChip([U('bo', 1, undefined, 2), U('cy', 0, undefined, 1), U('dee', 0)], true);
+    eq([nc.text, nc.agents], ['Nudge all (4)', ['bo', 'cy']], 'an unclaimed task is something waiting too: the count is messages and tasks together, and a desk with a task alone is nudged');
+    assert(/Bo: 1 unread message, 2 unclaimed tasks/.test(nc.title) && /Cy: 1 unclaimed task$/m.test(nc.title), 'each named on hover');
+    nc = pg.meetingNudgeChip([{ ...U('bo', 0), board: { unread: 0, assigned_open: 0, claimed_tasks: [{ id: 1 }] } }, U('cy', 0)], true);
+    eq([nc.text, nc.disabled, nc.waiting, nc.agents], ['Nudge all', true, false, []], 'with nothing waiting there is no count and the button is dimmed: a task a desk has claimed is work it already knows about');
+    assert(/^Nobody chosen has anything waiting on the board/.test(nc.title) && /The bell on a desk’s box nudges that one desk anyway\.$/m.test(nc.title), 'saying why, and what still nudges one desk on purpose', nc.title);
     nc = pg.meetingNudgeChip([U('bo', 0)], false);
-    eq([nc.text, nc.waiting], ['Nudge Bo', false], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    eq([nc.text, nc.waiting, nc.disabled], ['Nudge Bo', false, true], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 0)], false);
+    eq([nc.text, nc.agents], ['Nudge Bo, Cy (2)', ['bo']], 'narrowed to some, the names with the same count, and still only the one with something waiting');
+    nc = pg.meetingNudgeChip([U('bo', 3)], true);
+    eq(nc.text, 'Nudge Bo (3)', 'a room of one names its desk');
     nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' })], false);
-    eq(nc.disabled, true, 'a desk the board will not nudge is not offered');
+    eq([nc.disabled, nc.text], [true, 'Nudge Ed (4)'], 'a desk the board will not nudge is not offered, though what waits for it is still counted');
     assert(/Can't nudge Ed: held by your editor/.test(nc.title), 'and says why');
+    nc = pg.meetingNudgeChip([U('ed', 4, { ok: false, reason: 'held by your editor' }), U('bo', 1)], true);
+    eq([nc.disabled, nc.agents], [false, ['ed', 'bo']], 'one that can be nudged keeps the button live, and the one that cannot is refused in the room in the board\'s words');
 
     const who = [{ agent: 'bo', persona: 'Bo' }, { agent: 'cy', persona: 'Cy' }, { agent: 'dee', persona: 'Dee' }];
     eq(pg.meetingMentions('@bo @CY, take a look', who), { to: ['bo', 'cy'], text: 'take a look', unknown: [] },
@@ -3662,6 +4214,720 @@ try {
 
     eq([pg.meetingTo(['a', 'b'], null), pg.meetingTo(['a', 'b'], new Set(['b', 'z']))], [['a', 'b'], ['b']], 'everyone by default; narrowed, only desks still in the room');
     eq([pg.meetingToLine(['a', 'b'], true, (x) => x.toUpperCase()), pg.meetingToLine(['a'], true, (x) => x)], ['everyone (A, B)', 'a'], 'the line over a message names who heard it');
+
+    // A click on a To chip (costmo, 2026-11-14): with everyone lit a name is
+    // a solo, the last lit chip gives everyone back, and between the two a
+    // name is a toggle. Null is everyone.
+    const R = ['bo', 'cy', 'dee', 'ed'];
+    const lit = (to) => (to ? [...to].sort() : 'everyone');
+    const after = (room, start, ...clicks) => lit(clicks.reduce((to, a) => pg.meetingToClick(room, to, a), start));
+    eq(after(R, null, 'cy'), ['cy'], 'with everyone lit, a click on a name leaves only that desk hearing the next message — not everyone but it');
+    eq(after(R, null, 'cy', 'cy'), 'everyone', 'a click on the only lit name gives everyone back');
+    eq(after(R, null, 'cy', 'dee'), ['cy', 'dee'], 'with one lit, a click on another adds it');
+    eq(after(R, null, 'cy', 'dee', 'bo'), ['bo', 'cy', 'dee'], 'with some lit and not all, a click on an unlit name adds it');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'dee'), ['bo', 'cy'], 'and a click on a lit one takes it out');
+    eq(after(R, null, 'cy', 'dee', 'dee'), ['cy'], 'down to one, which stays lit');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'ed'), 'everyone', 'adding the last one is everyone again, written as everyone and not as a list of all four');
+    eq(after(R, null, 'cy', 'dee', 'bo', 'ed', 'ed'), ['ed'], 'so the click after that is a solo again');
+    eq(R.map((a) => after(R, new Set(['cy']), a)), [['bo', 'cy'], 'everyone', ['cy', 'dee'], ['cy', 'ed']], 'from one lit: every other name adds itself, and its own gives everyone');
+    eq(after(R, new Set(R), 'bo'), ['bo'], 'a list that names the whole room is everyone, and a click on it is a solo');
+    eq(after(R, new Set(['cy', 'gone']), 'cy'), 'everyone', 'a desk that left the room is not counted: cy is the only one lit, so its click gives everyone');
+    eq(after(R, new Set(), 'dee'), ['dee'], 'with nobody lit (the one desk chosen left the room), a click adds the desk clicked');
+    eq(after(['bo', 'cy'], null, 'bo', 'cy'), 'everyone', 'in a room of two, the solo and then the other is everyone');
+    eq(after(['bo'], null, 'bo'), 'everyone', 'a room of one stays everyone');
+    eq(lit(pg.meetingToClick(R, new Set(['cy']), 'zed')), ['cy'], 'a name that is not in the room changes nothing');
+    // A desk leaves the room under a choice (QA, PR #55 finding 2). The room
+    // given is who is still in it.
+    const left = (room, to) => lit(pg.meetingToLeft(room, to));
+    eq(left(['bo'], new Set(['bo'])), 'everyone', 'narrowed to Bo and the others gone, Bo is the whole room: the choice is everyone, as the chips and the hint already said');
+    eq(left(['bo', 'ed'], new Set(['bo', 'cy', 'ed'])), 'everyone', 'so is a choice of several once the one desk left out of it has gone');
+    eq(left(['bo', 'dee'], new Set(['bo', 'cy'])), ['bo'], 'a room still narrowed stays narrowed, without the desk that left');
+    eq(left(['cy', 'dee'], new Set(['bo'])), [], 'the one desk chosen leaving leaves nobody chosen, as before: the room asks who hears');
+    eq([left(['bo', 'cy'], null), left([], new Set(['bo']))], ['everyone', 'everyone'], 'everyone stays everyone, and an emptied room has no choice left in it');
+    eq(lit(pg.meetingToClick(['bo', 'ed'], pg.meetingToLeft(['bo'], new Set(['bo'])), 'ed')), ['ed'], 'and a desk added after that is lit with the rest: a click on it is a solo, not an add');
+    const kept = new Set(['bo', 'cy']);
+    pg.meetingToLeft(['bo'], kept);
+    eq([...kept].sort(), ['bo', 'cy'], 'the set it was given is left as it was');
+    const start = new Set(['cy', 'dee']);
+    pg.meetingToClick(R, start, 'cy');
+    eq([...start].sort(), ['cy', 'dee'], 'the set it was given is left as it was');
+    const T = (to, a) => pg.meetingToTitle(R, to, a, a.toUpperCase());
+    eq([T(null, 'cy'), T(new Set(['cy']), 'cy'), T(new Set(['cy']), 'dee'), T(new Set(['cy', 'dee']), 'dee'), T(new Set(['bo', 'cy', 'dee']), 'ed')],
+      ['Only CY hears your messages', 'Everyone hears your messages', 'DEE hears your messages too', 'Leave DEE out of your messages', 'Everyone hears your messages'],
+      'each chip says on hover what a click on it will do');
+
+    // A meeting on the floor (costmo, 2026-11-16): its desks in a box of
+    // their own. Where everything stands is one function over the drawn
+    // desks, lifted here with the file's own layout constants in front of
+    // it — the real numbers, read out of floor.js by name, so a constant
+    // changed there is a constant changed here.
+    console.log('\na meeting on the floor: its desks in a box of their own');
+    const NAMES = ['COLS', 'PAD', 'HEAD_BAND', 'DESK_W', 'GAP', 'ROOM_W', 'BUBBLE_LINES', 'BUBBLE_LINE', 'BUBBLE_PAD', 'BUBBLE_LIFT', 'BUBBLE_ASCENT', 'BUBBLE_DESCENT',
+      'SIGN_LINE', 'SIGN_LINES', 'FRAME', 'SIGN_PAD', 'FACE_Y', 'SIGN_H', 'FACE_H', 'PLATE_Y', 'PILL_H', 'PILL_Y', 'PILL_ROW_GAP', 'DESK_BELOW', 'BUBBLE_ABOVE', 'DESK_H', 'HEAD_AIR', 'HEAD_H'];
+    const decls = NAMES.map((n) => {
+      const m = new RegExp(`^  const ${n} = .*;.*$`, 'm').exec(src);
+      if (!m) throw new Error(`the layout constant ${n} was not found in src/ui/floor.js as a one-line const`);
+      return { at: m.index, text: m[0] };
+    });
+    const bh = /^  function bubbleHeight\(n\) \{[\s\S]*?\n  \}/m.exec(src);
+    if (!bh) throw new Error('bubbleHeight was not found in src/ui/floor.js');
+    const tmpBox = `./data/meeting-box-${process.pid}.mjs`;
+    writeFileSync(tmpBox, [
+      ...[...decls, { at: bh.index, text: bh[0] }].sort((a, b) => a.at - b.at).map((d) => d.text),
+      cut('  /* ---------- a meeting on the floor: what the page decides ---------- */', '  /* ---------- a meeting on the floor: the drawing ---------- */'),
+      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
+    ].join('\n'));
+    let fp;
+    try { fp = await import(new URL(tmpBox, `file://${process.cwd()}/`)); } finally { rmSync(tmpBox, { force: true }); }
+    const K = fp;
+
+    eq([fp.meetBoxKey(undefined), fp.meetBoxKey({ at: 1, id: 'w' }), fp.meetBoxKey({ meeting: null }), fp.meetBoxKey({ meeting: 7 }), fp.meetBoxKey({ meeting: 'new', batch: 'new-ab12' }), fp.meetBoxKey({ meeting: 'new' })],
+      [null, null, null, '7', 'new:new-ab12', 'new:'],
+      'a desk on the floor or out in its own popout is in no box; one in a room is boxed by the room\'s number, and before the window has one, by the click that opened it');
+
+    const desksOf = (...names) => names.map((agent) => ({ agent }));
+    const nine = desksOf('bo', 'cy', 'dee', 'ed', 'fay', 'gus', 'hal', 'ivy', 'jo');
+    const inRooms = (map) => (d) => map[d.agent] ?? null;
+    const seated = fp.meetingSeating(nine, inRooms({ gus: '12', hal: '12', bo: '7', dee: '7', fay: '7', jo: 'new:x' }));
+    eq(seated.boxes.map((b) => [b.key, b.id, b.desks.map((d) => d.agent)]), [['7', 7, ['bo', 'dee', 'fay']], ['12', 12, ['gus', 'hal']], ['new:x', null, ['jo']]],
+      'one group per meeting, each in the floor\'s own order: the rooms oldest first, so a second meeting opens under the first, and a room with no number yet after them');
+    eq(seated.rest.map((d) => d.agent), ['cy', 'ed', 'ivy'], 'and the desks in no meeting after them, in the floor\'s order');
+    eq(fp.meetingSeating(nine, inRooms({ bo: '10', cy: '9' })).boxes.map((b) => b.key), ['9', '10'], 'rooms are ordered by number, not as text');
+
+    // With no meeting on it a floor is laid out to the numbers it always
+    // was: the two functions the plan replaced, kept here as the reference.
+    const oldGeo = (n, collapsed, pillLines = 0, band = 0) => {
+      const rows = collapsed ? 1 : Math.max(1, Math.ceil(Math.max(1, n) / K.COLS));
+      const bottom = (n ? K.PAD + K.HEAD_H + (rows - 1) * (K.DESK_H + K.GAP) + K.DESK_BELOW : K.HEAD_BAND) + band;
+      const pillY = bottom + K.PILL_ROW_GAP;
+      return { collapsed, top: band, pillY, h: (pillLines ? pillY + pillLines * (K.PILL_H + K.PILL_ROW_GAP) - K.PILL_ROW_GAP : bottom) + K.PAD };
+    };
+    const oldXY = (i, geo) => ({
+      x: K.PAD + (geo.collapsed ? i : i % K.COLS) * (K.DESK_W + K.GAP),
+      y: K.PAD + K.HEAD_H + geo.top + (geo.collapsed ? 0 : Math.floor(i / K.COLS)) * (K.DESK_H + K.GAP),
+    });
+    const same = [];
+    for (let n = 0; n <= 9; n++) for (const collapsed of [false, true]) for (const [pillLines, band] of [[0, 0], [2, 0], [0, 52], [1, 24]]) {
+      const drawn = nine.slice(0, n);
+      const plan = fp.floorPlan(drawn, () => null, { collapsed, pillLines, band });
+      const was = oldGeo(n, collapsed, pillLines, band);
+      const ok = plan.h === was.h && plan.pillY === was.pillY && plan.w === K.ROOM_W && plan.boxes.length === 0
+        && drawn.every((d, i) => plan.at.get(d.agent).x === oldXY(i, was).x && plan.at.get(d.agent).y === oldXY(i, was).y)
+        && plan.order.map((d) => d.agent).join() === drawn.map((d) => d.agent).join();
+      if (!ok) same.push({ n, collapsed, pillLines, band });
+    }
+    eq(same, [], 'a floor with no meeting on it is laid out exactly as it was — every desk, the pills\' tray and the room\'s height, on one floor and in the building, with a band and without');
+    eq(fp.floorPlan(nine, () => null, { collapsed: true }).rowY, K.PAD + K.HEAD_H, 'and a storey\'s arrows stand beside its one row, where they did');
+
+    // What a desk draws: its cell's width, from a two-line bubble above its
+    // origin to the pills under its nameplate.
+    const cell = (xy) => ({ l: xy.x, r: xy.x + K.DESK_W, t: xy.y - K.BUBBLE_ABOVE, b: xy.y + K.DESK_BELOW });
+    const within = (c, b) => c.l >= b.x && c.r <= b.x + b.w && c.t >= b.y && c.b <= b.y + b.h;
+    const apart = (c, b) => c.r <= b.x || c.l >= b.x + b.w || c.b <= b.y || c.t >= b.y + b.h;
+    const rooms2 = inRooms({ bo: '7', cy: '7', dee: '7', fay: '7', gus: '12', hal: '12' });
+    for (const band of [0, 52]) {
+      const plan = fp.floorPlan(nine, rooms2, { band });
+      const [a, b] = plan.boxes;
+      const at = (n) => plan.at.get(n);
+      const tag = band ? ' (under the selection toolbar\'s band)' : '';
+      eq(plan.boxes.map((x) => [x.key, x.id, x.agents]), [['7', 7, ['bo', 'cy', 'dee', 'fay']], ['12', 12, ['gus', 'hal']]], `on one floor: a box per meeting, naming its desks${tag}`);
+      eq([at('bo').y === at('cy').y && at('cy').y === at('dee').y, [at('bo').x, at('cy').x, at('dee').x], at('fay').x, at('fay').y - at('bo').y],
+        [true, [0, 1, 2].map((c) => K.PAD + c * (K.DESK_W + K.GAP)), K.PAD, K.DESK_H + K.GAP],
+        `the box keeps three to a row: the fourth desk starts its second row, on the floor's own columns and pitch${tag}`);
+      assert(a.agents.every((n) => within(cell(at(n)), a)) && b.agents.every((n) => within(cell(at(n)), b)), `every desk in a meeting is drawn inside its box, bubble and pills included${tag}`);
+      assert(['ed', 'ivy', 'jo'].every((n) => apart(cell(at(n)), a) && apart(cell(at(n)), b)) && a.agents.every((n) => apart(cell(at(n)), b)), `and no other desk is: not one from the floor, not one from the other meeting${tag}`);
+      assert(a.y - K.MEET_TAB_H / 2 > K.HEAD_BAND + band, `the first box, placards and all, stands under the header${band ? ' and its band' : ''}, at the top of the floor${tag}`);
+      assert(b.y - K.MEET_TAB_H / 2 > a.y + a.h && b.x === a.x && b.w === a.w, `a second meeting is stacked under the first, the same width, its placards clear of the box above${tag}`);
+      eq([a.x, a.x + a.w], [K.PAD - K.MEET_PAD_X, K.ROOM_W - K.PAD + K.MEET_PAD_X], `a box is the floor's full row wide whatever it holds, like the floor itself${tag}`);
+      assert(['ed', 'ivy', 'jo'].every((n) => cell(at(n)).t > b.y + b.h) && at('ed').y === at('ivy').y && at('ed').x === K.PAD, `the desks in no meeting follow under the last box, three to a row${tag}`);
+      eq(plan.order.map((d) => d.agent), ['bo', 'cy', 'dee', 'fay', 'gus', 'hal', 'ed', 'ivy', 'jo'], `drawn in that order${tag}`);
+      eq(plan.h, at('ed').y + K.DESK_BELOW + K.PAD, `and the room ends under its last row, as it always did${tag}`);
+    }
+    const all = fp.floorPlan(desksOf('bo', 'cy'), inRooms({ bo: '7', cy: '7' }), {});
+    eq(all.h, all.boxes[0].y + all.boxes[0].h + K.PAD, 'a floor whose every desk is in the meeting ends under the box');
+    const tray = fp.floorPlan(desksOf('bo', 'cy'), inRooms({ bo: '7', cy: '7' }), { pillLines: 1 });
+    assert(tray.pillY > tray.boxes[0].y + tray.boxes[0].h && tray.h === tray.pillY + K.PILL_H + K.PAD, 'and its hidden desks\' pills stand under the box, not in it');
+
+    // The building: a storey stays one row, and a meeting's desks come
+    // first in it with the box around them (costmo's pick).
+    const row = fp.floorPlan(nine, rooms2, { collapsed: true });
+    const rat = (n) => row.at.get(n);
+    eq(row.order.map((d) => d.agent), ['bo', 'cy', 'dee', 'fay', 'gus', 'hal', 'ed', 'ivy', 'jo'], 'in the building: the meetings\' desks first in the storey\'s one row, then the rest');
+    assert(row.order.every((d, i) => rat(d.agent).y === row.rowY && rat(d.agent).x === K.PAD + i * (K.DESK_W + K.GAP)), 'every desk on that one row, a cell apart, so the storey scrolls a desk at a time as before');
+    const [ra, rb] = row.boxes;
+    assert(ra.agents.every((n) => within(cell(rat(n)), ra)) && rb.agents.every((n) => within(cell(rat(n)), rb)), 'each meeting\'s desks inside its box');
+    assert(row.order.filter((d) => !ra.agents.includes(d.agent)).every((d) => apart(cell(rat(d.agent)), ra)) && ['ed', 'ivy', 'jo'].every((n) => apart(cell(rat(n)), rb)), 'and nobody else\'s');
+    assert(rb.x >= ra.x + ra.w + 6 && rb.y === ra.y && rb.h === ra.h, 'two meetings stand side by side, with air between their boxes');
+    eq(ra.w, 3 * (K.DESK_W + K.GAP) + K.DESK_W + 2 * K.MEET_PAD_X, 'a meeting of four is four desks wide there: the row is not wrapped');
+    assert(ra.y - K.MEET_TAB_H / 2 > K.HEAD_BAND, 'the box and its placards are under the header');
+    const plainRow = fp.floorPlan(nine, () => null, { collapsed: true });
+    assert(row.h > plainRow.h && row.h - plainRow.h < K.DESK_H / 4, `the storey is a little taller for the box, not a row taller (${(row.h - plainRow.h).toFixed(1)} of a ${K.DESK_H.toFixed(1)} row)`);
+    assert(ra.x >= K.PAD - K.MEET_PAD_X, 'and the first box\'s left edge is inside the margin the storey is clipped to');
+    const rowBand = fp.floorPlan(nine, rooms2, { collapsed: true, band: 52 });
+    eq([rowBand.rowY - row.rowY, rowBand.boxes[0].y - ra.y, rowBand.h - row.h].map((n) => Math.round(n * 1000) / 1000), [52, 52, 52], 'under the selection toolbar\'s band the row, its boxes and the storey\'s height all stand that much lower');
+    assert(rowBand.boxes[0].y - K.MEET_TAB_H / 2 > K.HEAD_BAND + 52, 'so a box\'s placards are clear of the toolbar, not under it');
+
+    // The two placards.
+    const wide = fp.meetTabs({ id: 7, w: K.ROOM_W - 2 * (K.PAD - K.MEET_PAD_X) }, ['Bo', 'Cy', 'Dee'], false);
+    eq([wide.label.text, wide.end.text, wide.end.disabled], ['In a meeting', 'End meeting', false], 'the placards: "In a meeting" and End meeting, which can be pressed');
+    assert(wide.label.x < 20 && wide.end.x + wide.end.w > K.ROOM_W - 2 * (K.PAD - K.MEET_PAD_X) - 20, 'the label at the box\'s upper left corner, the button at its upper right');
+    assert(/^Bo, Cy and Dee are in a meeting room\./.test(wide.label.title) && /Bo, Cy and Dee go back to the floor/.test(wide.end.title) && /Recent meeting rooms/.test(wide.end.title),
+      'each says on hover who is in it, and End meeting what it will do');
+    const boxW = (n) => (n - 1) * (K.DESK_W + K.GAP) + K.DESK_W + 2 * K.MEET_PAD_X;
+    const fits = [1, 2, 3, 4].map((n) => { const t = fp.meetTabs({ id: 7, w: boxW(n) }, ['Bo'], false); return [t.end.text, t.label.x >= 0 && t.end.x >= t.label.x + t.label.w + K.MEET_TAB_GAP && t.end.x + t.end.w <= boxW(n)]; });
+    eq(fits, [['End', true], ['End meeting', true], ['End meeting', true], ['End meeting', true]], 'around one desk in the building the button reads "End", and at every width both placards are on the box and clear of each other');
+    assert(/^Bo is in a meeting room\. Its chat/.test(fp.meetTabs({ id: 7, w: boxW(1) }, ['Bo'], false).label.title), 'a meeting of one is said in the singular');
+    const opening = fp.meetTabs({ id: null, w: boxW(3) }, ['Bo', 'Cy'], false);
+    eq([opening.end.disabled, opening.end.text, opening.end.title], [true, 'End meeting', 'This meeting room’s window is still opening.'], 'a room whose window has not said it is open cannot be ended yet, and says why');
+    const ending = fp.meetTabs({ id: 7, w: boxW(1) }, ['Bo'], true);
+    eq([ending.end.disabled, ending.end.text], [true, 'Ending…'], 'once pressed it reads "Ending…" and cannot be pressed again');
+    assert(ending.end.x >= ending.label.x + ending.label.w + K.MEET_TAB_GAP, 'which still fits beside the label on the narrowest box');
+    assert(/Click to bring that window here, to the front\.$/.test(wide.label.title), 'and the label says what a click on it does');
+
+    // "In a meeting", clicked: where the room's window goes (costmo,
+    // 2026-11-16). The pointer and the screen are in screen coordinates;
+    // the screen is the one the click was made on.
+    const main = { left: 0, top: 25, width: 1920, height: 1055 };
+    eq(fp.meetingRaisePlace({ x: 1000, y: 600 }, { width: 760, height: 600 }, main), { left: 620, top: 300, width: 760, height: 600 }, 'a room\'s window is brought to the pointer: centred on it');
+    eq(fp.meetingRaisePlace({ x: 1900, y: 40 }, { width: 760, height: 600 }, main), { left: 1160, top: 25, width: 760, height: 600 }, 'and kept wholly on that screen: a pointer in a corner puts the window against the corner, not over the edge');
+    eq(fp.meetingRaisePlace({ x: 10, y: 1070 }, { width: 760, height: 600 }, main), { left: 0, top: 480, width: 760, height: 600 }, 'at the other corner too');
+    const leftMon = { left: -2560, top: 0, width: 2560, height: 1415 };
+    const onLeft = fp.meetingRaisePlace({ x: -1300, y: 700 }, { width: 760, height: 1055 }, leftMon);
+    eq(onLeft, { left: -1680, top: 173, width: 760, height: 1055 }, 'a click on a monitor to the left of the main one puts it on that monitor, in that monitor\'s coordinates');
+    assert(onLeft.left >= leftMon.left && onLeft.left + onLeft.width <= leftMon.left + leftMon.width, 'inside it');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 760, height: 1415 }, { left: 0, top: 25, width: 1440, height: 875 }), { left: 120, top: 25, width: 760, height: 875 },
+      'a window taller than the screen it is brought to is made to fit it: one opened full height on a tall monitor does not hang off a short one');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 2000, height: 400 }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 100, width: 1440, height: 400 }, 'nor a wider one off its side');
+    eq(fp.meetingRaisePlace({ x: 500, y: 300 }, { width: 0, height: NaN }, { left: 0, top: 0, width: 1440, height: 900 }), { left: 0, top: 0, width: 1440, height: 900 }, 'and a size that is not a size is the screen\'s, never nothing');
+    // Whether the move has to cross to another screen, which is when the
+    // browser is asked for its leave to place windows on any of them.
+    const here = { left: 0, top: 25, width: 1920, height: 1055 };
+    eq([fp.meetingElsewhere({ left: 1100, top: 25, width: 760, height: 1055 }, here), fp.meetingElsewhere({ left: 1700, top: 400, width: 760, height: 600 }, here)], [false, true],
+      'a room\'s window on the screen that was clicked needs no leave to be moved; one whose centre is on the next screen does, though its edge is on this one');
+    eq([fp.meetingElsewhere({ left: -2000, top: 100, width: 760, height: 900 }, here), fp.meetingElsewhere({ left: 400, top: 1200, width: 760, height: 900 }, here), fp.meetingElsewhere({ left: 400, top: -1400, width: 760, height: 900 }, here)], [true, true, true],
+      'a monitor to the left, below or above is another screen');
+    eq([fp.meetingElsewhere({ left: undefined, top: undefined, width: 760, height: 600 }, here), fp.meetingElsewhere({ left: 10, top: 30, width: NaN, height: 600 }, here)], [true, true],
+      'and a window with no place to read is asked about, not assumed to be here');
+    eq([fp.meetNames([]), fp.meetNames(['Bo']), fp.meetNames(['Bo', 'Cy']), fp.meetNames(['Bo', 'Cy', 'Dee'])], ['', 'Bo', 'Bo and Cy', 'Bo, Cy and Dee'], 'names are joined the way a sentence joins them');
+  }
+  /* ── one agent, several sessions (costmo, 2026-11-16) ───────────────────────
+   * The board's half and the page's decisions. What a host does with a `seat`
+   * is the host suite's; what two real windows in one folder do is measured
+   * on a probe (host/seats.js). Every refusal must queue nothing. */
+  console.log('\none agent, several sessions');
+  {
+    const SA = 'seat-a';
+    const SB = 'seat-b';
+    const sHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const sFolders = [
+      { path: '/repo/quinn', name: 'quinn', depth: 1, bound: { channel: SA, agent: 'quinn', scope: 'local', board: HOST }, has_mcp_json: false, other_board: null, trusted: true, last_active: '2026-11-16T01:02:03.000Z', sessions: 3 },
+      { path: '/repo/unbound', name: 'unbound', depth: 1, bound: null, has_mcp_json: false, other_board: null, trusted: true, last_active: null, sessions: 0 },
+    ];
+    const sDesks = new Map();
+    const reg = (seats = true) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: sHK,
+      body: JSON.stringify({ host_id: 'h-seat', name: 'seatbox', tmux: 'orch', protocol: PROTOCOL, roots: ['/repo'], folders: sFolders, desks: [...sDesks.values()], ...(seats ? { seats: true } : {}) }),
+    }).then((r) => r.json());
+    const work = () => fetch(`${HOST}/api/host/work?host_id=h-seat&wait=0`, { headers: sHK }).then((r) => r.json()).then((b) => b.work ?? []);
+    const hev = (events) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: sHK, body: JSON.stringify({ host_id: 'h-seat', events }) }).then((r) => r.json());
+    const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const sql = async (fn) => {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH);
+      try { return fn(db); } finally { db.close(); }
+    };
+    /** The host seating a desk it was asked for: it registers it and says `bound`. */
+    const seated = async (channel, agent, session = null) => {
+      sDesks.set(`${channel}|${agent}`, { channel, agent, cwd: '/repo/quinn', scope: 'seat', session_id: session, window: '@9' });
+      const r = await hev([{ type: 'bound', channel, agent, cwd: '/repo/quinn', scope: 'seat', session_id: null, from: null }]);
+      await reg();
+      return r;
+    };
+    const gone = async (channel, agent) => {
+      sDesks.delete(`${channel}|${agent}`);
+      const r = await hev([{ type: 'unbound', channel, agent, cwd: '/repo/quinn', seat: true }]);
+      await reg();
+      return r;
+    };
+    const desk = async (channel, agent) => deskOf(await floor(), agent, channel) ?? null;
+
+    sDesks.set(`${SA}|quinn`, { channel: SA, agent: 'quinn', cwd: '/repo/quinn', scope: 'local', session_id: 'sdk-q1', window: '@1' });
+    sDesks.set(`${SA}|rae`, { channel: SA, agent: 'rae', cwd: '/repo/rae', scope: 'local', session_id: 'sdk-r1', window: '@2' });
+    await reg(false);
+    await work();
+
+    // A host from before seats is not asked for one.
+    let r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    eq([r.status, r.body.code, r.body.error], [409, 'no_seats', noSeatsWords('seatbox')], 'New desk here is refused on a host that does not say it can seat a second desk, in words');
+    eq((await floor()).hosts.find((h) => h.host_id === 'h-seat')?.seats, false, 'and the payload says which hosts can');
+    await reg(true);
+    eq((await floor()).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'a host that says so is one that can');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says it too');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/unbound', channel: SB, agent: 'newbie', seat: true });
+    eq([r.status, r.body.code], [400, 'not_bound'], 'a folder that is not a desk yet has no agent to seat a second time');
+    eq((await work()).map((w) => w.kind), [], 'and neither refusal queued anything');
+
+    // A new desk its host refuses leaves a seat behind, undrawn, as a
+    // refused move does. That seat is nobody: asked for again, the agent
+    // still gets its own name there.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: 'seat-refused', agent: 'quinn', seat: true });
+    eq([r.body.agent, (await work()).map((w) => w.kind)], ['quinn', ['seat']], 'the board takes a new desk on a third floor, under the agent\'s name');
+    eq([(await desk('seat-refused', 'quinn'))?.hosted ?? null, (await desk('seat-refused', 'quinn'))?.live], [null, false], 'which its host never seats: a seat with nothing behind it');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: 'seat-refused', agent: 'quinn', seat: true });
+    eq(r.body.agent, 'quinn', 'asked for again, it is the agent\'s own name again: a seat nobody sat at does not make the name taken');
+    await work();
+    await sql((db) => db.prepare(`DELETE FROM personas WHERE channel = 'seat-refused'`).run());
+    // A window reporting under the name through its hooks, with no host and
+    // no MCP call yet, is somebody: the name is taken there.
+    await post({ channel: 'seat-hooked', agent: 'quinn', session_id: 'hooked-1', hook_event_name: 'SessionStart', cwd: '/elsewhere/quinn' });
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: 'seat-hooked', agent: 'quinn', seat: true });
+    eq(r.body.agent, 'quinn-2', 'on a floor where a window is reporting under the agent\'s name, the new desk takes the name with a number');
+    await work();
+    await post({ channel: 'seat-hooked', agent: 'quinn', session_id: 'hooked-1', hook_event_name: 'SessionEnd', cwd: '/elsewhere/quinn' });
+    await sql((db) => { db.prepare(`DELETE FROM personas WHERE channel = 'seat-hooked'`).run(); db.prepare(`DELETE FROM desk_twins WHERE channel = 'seat-hooked'`).run(); });
+
+    // New desk here, on another floor: the agent keeps its name there.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    eq([r.status, r.body.mode, r.body.agent, r.body.channel], [200, 'seat', 'quinn', SB], 'New desk here on another floor seats the agent there under its own name');
+    let w = await work();
+    eq(w.map((x) => ({ kind: x.kind, channel: x.channel, agent: x.agent, path: x.payload.path, beside: x.payload.beside, open: x.payload.open, from: x.payload.from ?? null })),
+      [{ kind: 'seat', channel: SB, agent: 'quinn', path: '/repo/quinn', beside: { channel: SA, agent: 'quinn' }, open: true, from: null }],
+      'its host is handed one `seat`: the folder, the new desk\'s names, the desk it is beside — and no `from`, because nothing is moved');
+    eq((await desk(SA, 'quinn'))?.hosted?.live, true, 'the desk it has is left as it is: still hosted');
+    eq((await desk(SB, 'quinn'))?.hosted ?? null, null, 'and the new one is drawn at once, as not hosted, until the host says otherwise');
+    eq((await seated(SB, 'quinn')).applied, 1, 'the host answers with `bound`, scope seat');
+    const onB = await desk(SB, 'quinn');
+    eq([onB?.hosted?.seat, onB?.hosted?.scope, onB?.twin], [true, 'seat', null], 'the new desk is hosted as a seat: a desk of its own in a folder that is another desk\'s, and nobody\'s second session on that floor');
+    eq([(await desk(SA, 'quinn'))?.hosted?.seat, (await desk(SA, 'quinn'))?.hosted?.live], [false, true], 'and the folder\'s own desk is not one, and is still there');
+    const actB = (await fetch(`${HOST}/api/activity?limit=50&channel=${SB}`).then((x) => x.json())).rows;
+    assert(actB.some((x) => x.kind === 'admin.desk.take' && /^a new desk at \/repo\/quinn, beside seat-a\/quinn/.test(x.detail ?? '')), 'logged as a take, saying it is a new desk and beside which');
+    assert(!actB.some((x) => x.kind === 'admin.desk.moved'), 'and never as a move');
+
+    // New desk here, on the floor the agent is already on: its name with a number.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SA, agent: 'quinn', seat: true });
+    eq([r.status, r.body.mode, r.body.agent, r.body.base], [200, 'seat', 'quinn-2', 'quinn'], 'on the floor the agent is already on, the new desk takes its name with a number (costmo: agent-2, agent-3)');
+    w = await work();
+    eq(w.map((x) => [x.kind, x.agent, x.payload.agent, x.payload.beside]), [['seat', 'quinn-2', 'quinn-2', { channel: SA, agent: 'quinn' }]], 'and the host is asked for that name');
+    await seated(SA, 'quinn-2', 'sdk-q2');
+    const two = await desk(SA, 'quinn-2');
+    eq(two?.twin, { of: 'quinn', n: 2, meeting: false }, 'the board says whose second session it is, and which number');
+    eq([two?.persona, two?.shirt, two?.hair], [(await desk(SA, 'quinn')).persona, (await desk(SA, 'quinn')).shirt, (await desk(SA, 'quinn')).hair], 'and it carries the agent\'s own name and colours');
+    await op('/api/floor/persona', { channel: SA, agent: 'quinn', persona: 'Quinn Q' });
+    eq([(await desk(SA, 'quinn-2')).persona, (await desk(SB, 'quinn')).persona], ['Quinn Q', 'Quinn Q'], 'a rename of the agent renames its second session with it');
+    await op('/api/floor/persona', { channel: SA, agent: 'quinn-2', persona: 'Quinn' });
+    eq((await desk(SA, 'quinn')).persona, 'Quinn', 'and a rename of the second session renames the agent: they are one');
+
+    // Another session, asked for by the desk (what a meeting room asks).
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'nobody-here' });
+    eq([r.status, r.body.code], [409, 'no_host'], 'another session of a desk no host runs is refused');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', session_id: 'not a session' });
+    eq([r.status, r.body.code], [400, 'bad_session'], 'and a conversation that is not an id');
+    eq((await work()).length, 0, 'with nothing queued');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn-2', meeting: true });
+    eq([r.status, r.body.agent, r.body.base], [200, 'quinn-3', 'quinn'], 'another session of a second session is another session of the agent: the next free number');
+    w = await work();
+    eq([w[0]?.kind, w[0]?.payload.path, w[0]?.payload.beside, w[0]?.payload.session_id], ['seat', '/repo/quinn', { channel: SA, agent: 'quinn-2' }, null],
+      'its host is asked for a seat in the folder the board has the desk at — no path was sent — on a new conversation');
+    eq((await desk(SA, 'quinn-3'))?.twin, { of: 'quinn', n: 3, meeting: true }, 'made for a meeting room, which is what closes it later');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'quinn-7', session_id: 'sess-old-7', meeting: true });
+    eq([r.body.agent, (await work())[0]?.payload.session_id], ['quinn-7', 'sess-old-7'], 'a name asked for by number is taken when it is free, with the conversation to open it on (a resumed room)');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'rae', meeting: true });
+    eq(r.body.agent, 'quinn-4', 'a name that is not this agent\'s with a number is not taken: the next free one is');
+    await work();
+    await seated(SA, 'quinn-7');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: 'quinn-7', meeting: true });
+    eq([r.body.agent, r.body.existing, (await work()).length], ['quinn-7', true, 0], 'and one asked for by name that is there already is that one: nothing is made twice');
+
+    // What a seat cannot do, in words.
+    r = await op('/api/floor/handback', { channel: SA, agent: 'quinn-2' });
+    eq([r.status, r.body.code, r.body.error], [409, 'seat_no_editor', SEAT_NO_EDITOR], 'a seat\'s conversation is not handed to an editor: an editor in that folder is the folder\'s own desk');
+    r = await op('/api/floor/desk/move', { channel: SB, agent: 'quinn', to: 'elsewhere' });
+    eq([r.status, r.body.code, r.body.error], [409, 'seat_no_move', SEAT_NO_MOVE], 'and a seat is not moved from its card: a move rebinds a folder, and this desk is not its folder\'s');
+    eq((await work()).length, 0, 'neither queued anything');
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: 'elsewhere' });
+    eq([r.status, r.body.mode], [200, 'move'], 'the folder\'s own desk still moves, as it always did');
+    await work();
+    await sql((db) => db.prepare(`DELETE FROM personas WHERE channel = 'elsewhere'`).run());
+
+    // Leaving a seat takes the desk away and nothing else.
+    r = await op('/api/floor/desk/leave', { channel: SB, agent: 'quinn' });
+    eq([r.status, (await work()).map((x) => `${x.kind}:${x.channel}/${x.agent}`)], [200, [`unbind:${SB}/quinn`]], 'a seat is left like any desk: its host is handed the unbind');
+    eq((await gone(SB, 'quinn')).applied, 1, 'the host answers with unbound');
+    eq(await desk(SB, 'quinn'), null, 'and the desk is gone from that floor, seat and row: it was one of several desks of an agent that is still on the board');
+    eq((await desk(SA, 'quinn'))?.hosted?.live, true, 'the agent\'s own desk is untouched');
+    await op('/api/floor/desk/leave', { channel: SA, agent: 'quinn-2' });
+    await work();
+    await gone(SA, 'quinn-2');
+    eq([await desk(SA, 'quinn-2'), await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ? AND agent = 'quinn-2'`).get(SA).n)], [null, 0], 'a second session that is left gives up its desk and its link');
+    // Its window's last hooks arrive around the leave, in no order (the
+    // plugin's SessionEnd, a Stop for a turn the close cut off). Neither may
+    // put the desk back: measured on real windows, the SessionEnd did, and
+    // the name stayed taken.
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2', hook_event_name: 'Stop', cwd: '/repo/quinn', last_assistant_message: 'cut off' });
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2', hook_event_name: 'SessionEnd', cwd: '/repo/quinn' });
+    eq(await desk(SA, 'quinn-2'), null, 'and the last hooks of its closed window do not seat it again');
+    eq(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM personas WHERE channel = ? AND agent = 'quinn-2'`).get(SA).n), 0, 'nor leave a seat behind for its name to be stuck on');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SA, agent: 'quinn', seat: true });
+    eq(r.body.agent, 'quinn-2', 'and its name: the next one made takes it again, so a floor does not count upward for ever');
+    eq([(await desk(SA, 'quinn-2'))?.live, (await desk(SA, 'quinn-2'))?.hosted ?? null], [false, null],
+      'and not its conversation: the new one is not live until a host seats it, though the one that left was on a conversation an hour has not yet aged out');
+    await work();
+    await seated(SA, 'quinn-2', 'sdk-q2b');
+    eq((await desk(SA, 'quinn-2'))?.hosted?.live, true, 'seated again under it');
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2b', hook_event_name: 'Notification', cwd: '/repo/quinn', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    eq((await floor()).queue.filter((x) => x.channel === SA).map((x) => x.agent), ['quinn-2'], 'and heard from at once: a desk seated again under a name that was just left is not the one that left');
+    await post({ channel: SA, agent: 'quinn-2', session_id: 'sdk-q2b', hook_event_name: 'Stop', cwd: '/repo/quinn', last_assistant_message: 'ok' });
+
+    // Closing a second session made for a meeting room once it is in none.
+    const room = async (agents) => (await op('/api/floor/meeting', { channel: SA, agents })).body.room;
+    const age = (agent, s) => sql((db) => db.prepare(`UPDATE desk_twins SET created_at = datetime('now', ?) WHERE channel = ? AND agent = ?`).run(`-${s} seconds`, SA, agent));
+    const closes = async () => (await work()).filter((x) => x.kind === 'unbind').map((x) => x.agent);
+    await seated(SA, 'quinn-3', 'sdk-q3');
+    await age('quinn-3', 5);
+    let rm = await room(['rae', 'quinn-3']);
+    eq(meetingSeat('quinn-3', { sdk_session_id: 'sdk-q3', host_name: 'seatbox', cwd: '/repo/quinn' }, null, 4, 'quinn').base, 'quinn', 'a room\'s record keeps whose second session a participant is, for Resume to make it again');
+    eq(rm.participants.find((p) => p.agent === 'quinn-3')?.base, 'quinn', 'as the board writes it');
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'a second session in a live room is left alone');
+    await op('/api/floor/meeting/participants', { id: rm.id, agents: ['rae'] });
+    eq(await closes(), [], 'taken out of its room a moment after it was made, it is still left: its room may not have recorded it yet');
+    await age('quinn-3', 60);
+    // And the one New desk here made, which is in no room either and as old:
+    // a row that it "stays" proves nothing while it is too young to be looked at.
+    await age('quinn-2', 60);
+    await op('/api/floor/meeting/participants', { id: rm.id, agents: ['rae'] });
+    eq(await closes(), ['quinn-3'], 'out of every room, it is closed: its host is handed the unbind (costmo: "Close it") — it, and not the second session New desk here made, which is no room\'s to close');
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'once, not at every poll');
+    const actA = (await fetch(`${HOST}/api/activity?limit=80&channel=${SA}`).then((x) => x.json())).rows;
+    assert(actA.some((x) => x.kind === 'admin.desk.leave' && x.actor === 'board' && /a second session of quinn, in no meeting room now/.test(x.detail ?? '')), 'with a row saying the board did it and why');
+    await gone(SA, 'quinn-3');
+    eq(await desk(SA, 'quinn-3'), null, 'and it leaves the floor when its host has closed it');
+    eq((await desk(SA, 'quinn-2'))?.hosted?.live, true, 'a second session made by New desk here is not a room\'s to close, and stays');
+
+    // Never mid-turn, and not on a reload's End.
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    eq(r.body.agent, 'quinn-3', 'the name is free again');
+    await work();
+    await seated(SA, 'quinn-3', 'sdk-q3b');
+    await age('quinn-3', 60);
+    rm = await room(['rae', 'quinn-3']);
+    await hev([{ type: 'turn', channel: SA, agent: 'quinn-3', session_id: 'sdk-q3b', role: 'tool', text: 'Bash: make' }]);
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    eq(await closes(), [], 'a second session that is working is not closed mid-turn when its room ends');
+    await hev([{ type: 'turn', channel: SA, agent: 'quinn-3', session_id: 'sdk-q3b', role: 'assistant', text: 'done' }]);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'and when it has finished, an End that was a window going away is given a moment: a reload ends a room and opens it again');
+    await op('/api/floor/meeting/open', { id: rm.id });
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'reopened inside that moment, the room has its session still');
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    eq(await closes(), ['quinn-3'], 'End meeting is final: it is closed at once');
+    await gone(SA, 'quinn-3');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    await work();
+    await sql((db) => db.prepare(`UPDATE desk_twins SET created_at = datetime('now', '-200 seconds') WHERE channel = ? AND agent = ?`).run(SA, r.body.agent));
+    await sleep(2100);
+    await floor();
+    eq([await desk(SA, r.body.agent), await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ? AND agent = ?`).get(SA, r.body.agent).n)], [null, 0],
+      'one its host never seated gives its name back after two minutes, room or no room');
+
+    // A room that is open and merely silent (QA, PR #57 finding 1). Every
+    // window stopped for longer than a room stays live — a laptop asleep —
+    // and the first page poll afterwards reached the board before the room's
+    // touch: the session was closed in a meeting nobody had ended. `hush`
+    // is that silence: the room's last touch, 200 s ago.
+    const hush = (id) => sql((db) => db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-200 seconds') WHERE id = ?`).run(id));
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    const quiet = r.body.agent;
+    await work();
+    await seated(SA, quiet, 'sdk-quiet');
+    await age(quiet, 60);
+    rm = await room(['rae', quiet]);
+    // The name is one a room above held until it ended a few seconds ago,
+    // and a room ended that lately still holds its sessions (a reload). Aged,
+    // so the only room these rows read is the silent one.
+    await sql((db) => db.prepare(`UPDATE meeting_rooms SET ended_at = datetime('now', '-60 seconds') WHERE channel = ? AND ended_at IS NOT NULL`).run(SA));
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'a room that is open and has not been heard from keeps its second session at the look that finds it so: the board was not watching while it was silent');
+    eq((await op('/api/floor/meeting/touch', { id: rm.id })).body.live, true, 'its window, awake again, says the room is open');
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [], 'heard from inside the watch, the room has its session still, however long ago the silence was found');
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    eq(await closes(), [], 'silent again later, it is watched afresh from that look, not from the first one');
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [quiet], 'watched for the whole of it and still silent, its window is gone without a word: the session is closed');
+    await gone(SA, quiet);
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+
+    // A second session's mail (QA, PR #57 finding 2), through the agents'
+    // own MCP tools: it starts where it is made, not at the floor's first
+    // message, and a name taken again starts where it stopped.
+    const mcp = async (agent, tool, args = {}) => {
+      const h = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': SA, 'X-Agent': agent, 'x-orchestratinator-key': KEY };
+      const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: h, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'floor-test', version: '0' } } }) });
+      await init.text();
+      const sid = init.headers.get('mcp-session-id');
+      await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }).then((x) => x.text());
+      const x = await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...h, 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } }) });
+      const text = await x.text();
+      const data = text.includes('data:') ? text.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5)).join('') : text;
+      return JSON.parse(JSON.parse(data).result.content[0].text);
+    };
+    const unreadOf = async (agent) => (await desk(SA, agent))?.board?.unread ?? null;
+    const leave = async (agent) => { await op('/api/floor/desk/leave', { channel: SA, agent }); await work(); await gone(SA, agent); };
+    // Sent by quinn-2, which is in no room: rae is in one, and a broadcast
+    // from inside a room reaches only that room.
+    await mcp('quinn-2', 'send_message', { body: 'before the second session, one' });
+    await mcp('quinn-2', 'send_message', { body: 'before the second session, two' });
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', meeting: true });
+    const mail = r.body.agent;
+    await work();
+    await seated(SA, mail, 'sdk-mail');
+    const who = await mcp(mail, 'whoami');
+    eq([who.agent, who.session_of, /^You are a second session of quinn on this channel/.test(who.note ?? '')], [mail, 'quinn', true], 'whoami tells a second session that it is one, and whose (through the tool)');
+    eq((await mcp('quinn', 'whoami')).session_of ?? null, null, 'and tells the agent\'s first desk nothing of the kind');
+    eq(await unreadOf(mail), 0, 'a second session starts with nothing unread: what the floor carried before it was made is in its first desk\'s mail');
+    eq((await mcp(mail, 'poll_messages')).count, 0, 'and its first poll, with no `since`, is handed none of it');
+    await mcp('quinn-2', 'send_message', { body: 'after it was made' });
+    eq(await unreadOf(mail), 1, 'what is sent after it was made is its to read');
+    eq((await mcp(mail, 'poll_messages')).messages.map((m) => m.body), ['after it was made'], 'and its poll returns that, and only that');
+    await leave(mail);
+    await mcp('quinn-2', 'send_message', { body: 'while it was away', to: mail });
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: mail, meeting: true });
+    eq(r.body.agent, mail, 'the name is taken again');
+    await work();
+    await seated(SA, mail, 'sdk-mail-2');
+    eq([await unreadOf(mail), (await mcp(mail, 'poll_messages')).messages.map((m) => m.body)], [1, ['while it was away']], 'a name taken again starts where it stopped: what was addressed to it while it was away is not lost');
+    await leave(mail);
+    await sql((db) => db.prepare(`UPDATE agents SET poll_cursor = 0 WHERE channel = ? AND agent = ?`).run(SA, mail));
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn', as: mail, meeting: true });
+    await work();
+    await seated(SA, mail, 'sdk-mail-3');
+    eq(await unreadOf(mail), 0, 'and one whose row never read anything (a session made before this) starts at the newest, as a new name does');
+
+    // Which session a name means, at the two tools that ask (QA, PR #57
+    // finding 4): the rule was pinned as a function and at neither call.
+    await age(mail, 60);
+    rm = await room(['rae', mail]);
+    let sent = await mcp('rae', 'send_message', { body: 'to the one in my room', to: 'quinn' });
+    eq([sent.to, sent.addressed_as], [mail, 'quinn'], 'send_message: a name written from inside a meeting room with one of that agent\'s sessions goes to that session, and the reply says so');
+    eq((await mcp(mail, 'poll_messages')).messages.map((m) => m.body), ['to the one in my room'], 'which is the one that reads it');
+    let task = await mcp('rae', 'open_task', { title: 'for the one in my room', assignee: 'quinn' });
+    eq([task.assignee, task.addressed_as], [mail, 'quinn'], 'open_task: the same name is assigned to the same session');
+    eq((await mcp(mail, 'list_tasks', { status: 'open', mine: true })).tasks.map((t) => t.title), ['for the one in my room'], 'which is the one that lists it as its own');
+    sent = await mcp('quinn-2', 'send_message', { body: 'from outside the room', to: 'quinn' });
+    eq([sent.to, sent.addressed_as ?? null], ['quinn', null], 'written from outside the room, the name is the agent\'s first desk');
+    task = await mcp('quinn-2', 'open_task', { title: 'for the first desk', assignee: 'quinn' });
+    eq([task.assignee, task.addressed_as ?? null], ['quinn', null], 'and so is a task\'s');
+    await op('/api/floor/meeting/end', { id: rm.id, final: true });
+    await closes();
+    await gone(SA, mail);
+
+    // A bind onto a name one of the folder's extra desks carries (QA, PR
+    // #57 finding 3). The host gives the name to the folder's own binding
+    // and closes that desk's window, so it is Leave's rule: never mid-turn.
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn', seat: true });
+    await work();
+    await seated(SB, 'quinn', 'sdk-qb2');
+    await hev([{ type: 'turn', channel: SB, agent: 'quinn', session_id: 'sdk-qb2', role: 'tool', text: 'Bash: make' }]);
+    r = await op('/api/floor/desk/leave', { channel: SB, agent: 'quinn' });
+    eq([r.status, r.body.code], [409, 'working'], 'a working seat is not left');
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: SB });
+    eq([r.status, r.body.code, r.body.error], [409, 'working', seatWorkingWords(SB, 'quinn')], 'and the folder\'s own desk is not moved onto its name either: the move would close the working seat\'s window');
+    r = await op('/api/floor/desk', { host_id: 'h-seat', path: '/repo/quinn', channel: SB, agent: 'quinn' });
+    eq([r.status, r.body.code], [409, 'working'], 'nor is the folder taken there from Take a desk');
+    eq((await work()).length, 0, 'with nothing queued by any of the three');
+    await hev([{ type: 'turn', channel: SB, agent: 'quinn', session_id: 'sdk-qb2', role: 'assistant', text: 'done' }]);
+    r = await op('/api/floor/desk/move', { channel: SA, agent: 'quinn', to: SB });
+    eq([r.status, r.body.mode, (await work()).map((x) => `${x.kind}:${x.channel}/${x.agent}`)], [200, 'move', [`bind:${SB}/quinn`]], 'once its turn has ended, the move is taken and handed to the host');
+
+    // What a host said about seats outlives the board (QA, PR #57 finding
+    // 5). It was the board's memory, a host registers once a minute, and
+    // the board calls a host live from its row for 90 s: after every
+    // restart the operator was told a current host "runs a build from
+    // before…". The board is restarted here on the same database, and the
+    // host does not register again.
+    // An open question across a board restart (milestone audit 2026-11-17,
+    // finding 1, probe P3): raised by its hook before, forgotten with the
+    // board's memory, and raised again by the host's next heartbeat.
+    const rHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const rDesks = [{ channel: 'ask-ch', agent: 'asa', cwd: '/repo/asa', session_id: 'sdk-asa' }, { channel: 'ask-ch', agent: 'bea', cwd: '/repo/bea', session_id: 'sdk-bea' }];
+    const rBeat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', protocol: PROTOCOL, desks: rDesks, ...(pending ? { pending } : {}) }) });
+    await rBeat();
+    await post({ channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PermissionRequest', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'make deploy' } });
+    assert(/make deploy/.test(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary ?? ''), 'before the restart, the question is on the floor');
+
+    server.kill();
+    await sleep(300);
+    server = startServer();
+    if (!(await waitHealthy())) throw new Error('the board did not come back');
+    eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission ?? null, null, 'a restarted board has forgotten it: open questions are memory');
+    await rBeat([{ channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', summary: 'the window is waiting for a decision' }]);
+    eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary, 'the window is waiting for a decision', 'and the host\'s first heartbeat after it raises the question again (probe P3)');
+    const hostNow = (await floor()).hosts.find((h) => h.host_id === 'h-seat');
+    eq([hostNow?.live, hostNow?.seats], [true, true], 'a board that restarted still knows a live host can seat a second desk, before that host has registered again');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says so');
+    r = await op('/api/floor/desk/twin', { channel: SA, agent: 'quinn-2', meeting: true });
+    eq([r.status, r.body.code ?? null], [200, null], 'so another session is not refused as "a build from before"');
+    await work();
+
+    // Deleting the floor takes the links with it, like its meeting rooms.
+    assert(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ?`).get(SA).n) > 0, 'the floor has a second session on it');
+    eq((await op('/api/admin/channel/delete', { channel: SA, confirm: SA })).status, 200, 'deleting the floor');
+    eq(await sql((db) => db.prepare(`SELECT COUNT(*) AS n FROM desk_twins WHERE channel = ?`).get(SA).n), 0, 'takes its second sessions\' links with it (purgeChannel sweeps them)');
+
+    // Which session a name means (costmo: the one in the sender's room).
+    const rooms = { dev: { participants: [{ agent: 'dev' }, { agent: 'qa-2' }, { agent: 'gone-3', absent: true }] } };
+    const fake = {
+      twinOf: (_c, a) => ({ 'qa-2': { base: 'qa' }, 'gone-3': { base: 'ops' } }[a] ?? null),
+      liveMeetingOf: (_c, a) => rooms[a] ?? null,
+    };
+    eq(addressed(fake, 'c', 'dev', 'qa'), 'qa-2', 'a name written by somebody in a meeting room with one of that agent\'s sessions means that session');
+    eq(addressed(fake, 'c', 'outsider', 'qa'), 'qa', 'written from outside any room, it is the agent\'s first desk');
+    eq(addressed(fake, 'c', 'dev', 'qa-2'), 'qa-2', 'a second session\'s own name always goes exactly there');
+    eq(addressed(fake, 'c', 'dev', 'ops'), 'ops', 'a session the room only keeps for Resume is not in it: the name stays the first desk');
+    eq(addressed(fake, 'c', 'dev', 'dev'), 'dev', 'and a name in the room under itself is itself');
+    eq(addressed(fake, 'c', 'dev', null), null, 'a broadcast names nobody');
+
+    // The page's half.
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const cut = (from, to) => {
+      const a = src.indexOf(from);
+      const b = src.indexOf(to);
+      if (a < 0 || b < 0 || b < a) throw new Error(`a section was not found in src/ui/floor.js between ${JSON.stringify(from)} and ${JSON.stringify(to)}`);
+      return src.slice(a, b);
+    };
+    const tmp = `./data/sessions-${process.pid}.mjs`;
+    writeFileSync(tmp, [
+      'const SENDING_GRACE_MS = 30000;',
+      cut('  /* ---------- a desk\'s place on the floor: what the page decides ---------- */', '  /* ---------- a desk\'s place on the floor: the drawing ---------- */'),
+      cut('  /* ---------- chat controls: what the page decides ---------- */', '  /* ---------- chat controls: the drawing ---------- */'),
+      cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
+      cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
+      cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
+      'export { moveBlockedWords, leaveBlockedWords, cardRefusal, plateName, meetingQuery, meetingOf, meetingChip, seatAgain, agentDesks, meetingResumePlan, deskFate, boundTo };',
+    ].join('\n'));
+    let pg;
+    try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    eq(pg.moveBlockedWords({ hosted: { host: 'seatbox', live: true, seat: true } }), SEAT_NO_MOVE, 'the card\'s Move is dimmed on a seat with the route\'s own words');
+    eq(pg.moveBlockedWords({ hosted: { host: 'seatbox', live: true, seat: false } }), null, 'and not on the folder\'s own desk');
+    eq(pg.leaveBlockedWords({ hosted: { host: 'seatbox', live: true } }), null, 'Leave room can be pressed on a desk its host is running');
+    assert(/^The host seatbox is not on this board right now/.test(pg.leaveBlockedWords({ hosted: { host: 'seatbox', live: false } }) ?? ''), 'not on one whose host is away, which is said');
+    assert(/no binding here to remove/.test(pg.leaveBlockedWords({ live: true, hosted: null }) ?? ''), 'nor on a desk no host runs: the floor has no binding there to take away');
+    eq(pg.cardRefusal(false), null, 'a desk in no meeting room has its card\'s controls');
+    assert(/^In a meeting room: .*Bring it back from the meeting room, or end the meeting, to use these\.$/.test(pg.cardRefusal(true) ?? ''), 'one in a meeting room has none of them, and the card says why and what gives them back');
+    assert(/to use these\. It was hidden before it joined: .*is its pill again when the meeting ends\.$/.test(pg.cardRefusal(true, true) ?? ''), 'a desk hidden before it joined is told, in the same reason, that it is its pill again when the meeting ends');
+    eq(pg.cardRefusal(false, true), null, 'and a hidden desk in no meeting room has nothing to be told');
+    eq([pg.plateName({ persona: 'Quinn', twin: null }), pg.plateName({ persona: 'Quinn', twin: { of: 'quinn', n: 2 } })], ['Quinn', 'Quinn · 2'], 'a second session\'s nameplate is the agent\'s name with its number');
+
+    const D = (agent, extra = {}) => ({ agent, persona: agent[0].toUpperCase() + agent.slice(1), nudge: { ok: true, host: 'h' }, last_turn: { id: 10 }, hosted: { host: 'seatbox', window: agent, live: true }, ...extra });
+    const hostsCan = [{ name: 'seatbox', seats: true }];
+    eq(pg.seatAgain(D('bo'), hostsCan), true, 'a desk whose host is here and can seat may be given a second session');
+    assert(/runs a build from before/.test(pg.seatAgain(D('bo'), [{ name: 'seatbox', seats: false }])), 'one whose host cannot may not, and why');
+    assert(/is offline\.$/.test(pg.seatAgain(D('bo', { hosted: { host: 'seatbox', window: 'bo', live: false } }), hostsCan)), 'nor one whose host is away');
+    assert(/no host on this board/.test(pg.seatAgain(D('bo', { hosted: null }), hostsCan)), 'nor one no host runs');
+    const inRoom = new Set(['lab|cy', 'lab|dee']);
+    const again = (d) => (d.agent === 'cy' ? true : d.agent === 'dee' ? null : null);
+    let chip = pg.meetingChip([D('bo'), D('cy'), D('dee')], inRoom, 'lab', again);
+    eq([chip.disabled, chip.text, chip.agents, chip.twins], [false, 'Meeting room · 2', ['bo'], ['cy']],
+      'a checked desk that is in another meeting room is in the new one too, as a second session; one out in its own popout is still left out');
+    assert(/Cy \(cy\) is in another meeting room: this room gets a new session of it, and the one there carries on\./.test(chip.title), 'said on hover');
+    assert(/Dee \(dee\) is in a window already/.test(chip.title), 'beside the one that is left out');
+    chip = pg.meetingChip([D('cy'), D('dee')], inRoom, 'lab', () => true);
+    eq([chip.disabled, chip.agents, chip.twins], [false, [], ['cy', 'dee']], 'a room of nothing but desks that are in other rooms is a room: each gets a second session');
+    chip = pg.meetingChip([D('bo'), D('cy')], inRoom, 'lab', () => 'its host (seatbox) is offline.');
+    eq([chip.disabled, chip.twins], [true, []], 'a desk that cannot be given one is not counted');
+    assert(/cannot be given a second session: its host \(seatbox\) is offline\./.test(chip.title), 'with the reason');
+    chip = pg.meetingChip([D('bo'), D('cy')], new Set(['lab|cy']), 'lab');
+    eq([chip.disabled, chip.agents, chip.twins], [true, ['bo'], []], 'and with nothing said about it, a desk out in a window is left out as before');
+    eq(pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: ['bo'], twins: ['cy', 'bo', 'cy'] })), { id: null, channel: 'lab', agents: ['bo'], twins: ['cy'], resume: false },
+      'the new room\'s address names the desks to make a second session of, each once, and none that joins as itself');
+    eq(pg.meetingOf(pg.meetingQuery({ channel: 'lab', agents: [], twins: ['cy', 'dee'] }))?.twins, ['cy', 'dee'], 'a room of second sessions alone is still a room');
+
+    const floors = [
+      { channel: 'lab', desks: [
+        { agent: 'qa', hosted: { host: 'box', window: 'qa-repo', live: true } },
+        { agent: 'qa-2', twin: { of: 'qa', n: 2 }, hosted: { host: 'box', window: 'qa-repo', live: true, seat: true } },
+        { agent: 'dev', hosted: { host: 'box', window: 'dev-repo', live: true } },
+      ] },
+      { channel: 'lab2', desks: [
+        { agent: 'qa', hosted: { host: 'box', window: 'qa-repo', live: true, seat: true } },
+        { agent: 'dev', hosted: { host: 'box', window: 'other-repo', live: true } },
+      ] },
+      { channel: 'lab3', desks: [{ agent: 'qa', hosted: { host: 'otherbox', window: 'qa-repo', live: true } }] },
+    ];
+    eq(pg.agentDesks(floors, 'lab', 'qa'), [['lab', 'qa'], ['lab', 'qa-2'], ['lab2', 'qa']], 'one agent\'s desks are every desk of its name out of its folder on its host, on any floor — its second sessions with it');
+    eq(pg.agentDesks(floors, 'lab', 'qa-2'), [['lab', 'qa-2'], ['lab', 'qa'], ['lab2', 'qa']], 'asked from a second session, the same desks');
+    eq(pg.agentDesks(floors, 'lab', 'dev'), [['lab', 'dev']], 'the same name in another folder is another agent: developer on two floors is two repos');
+    eq(pg.agentDesks(floors, 'lab3', 'qa'), [['lab3', 'qa']], 'and so is the same folder name on another host');
+    eq(pg.agentDesks(floors, 'lab', 'nobody'), [['lab', 'nobody']], 'a desk nothing is known about is only itself');
+
+    const bound = (host, window, extra = {}) => ({ host, window, state: 'idle', ...extra });
+    const fl = (...cs) => cs.map(([channel, desks]) => ({ channel, desks }));
+    eq(pg.deskFate(fl(['lab', [{ agent: 'qa', hosted: bound('box', 'qa-repo', { state: 'offline' }) }]], ['lab2', [{ agent: 'qa', hosted: bound('box', 'qa-repo', { seat: true }) }]]), { channel: 'lab', agent: 'qa' }, { host: 'box', window: 'qa-repo', seat: false }).state, 'left',
+      'a desk that left while the agent has a seat on another floor has left, not moved there: that seat was there all along');
+    eq(pg.deskFate(fl(['lab', []], ['lab2', [{ agent: 'qa', hosted: bound('box', 'qa-repo') }]]), { channel: 'lab', agent: 'qa' }, { host: 'box', window: 'qa-repo', seat: true }).state, 'gone',
+      'and a seat that is gone has not moved to the folder\'s own desk');
+    eq(pg.deskFate(fl(['lab', []], ['lab2', [{ agent: 'qa', hosted: bound('box', 'qa-repo') }]]), { channel: 'lab', agent: 'qa' }, { host: 'box', window: 'qa-repo', seat: false }).state, 'moved',
+      'a folder\'s own desk found on another floor is still a move');
+    eq(pg.boundTo({ hosted: bound('box', 'qa-repo', { seat: true }) }), { host: 'box', window: 'qa-repo', seat: true }, 'what a desk is bound to says whether it is a seat');
+
+    const plan = pg.meetingResumePlan(
+      { channel: 'lab', participants: [{ agent: 'dev', session_id: 's-dev' }, { agent: 'qa-3', base: 'qa', session_id: 's-q3' }, { agent: 'ops-2', base: 'ops', session_id: 's-o2' }] },
+      [{ channel: 'lab', desks: [
+        { agent: 'dev', persona: 'Dev', hosted: { host: 'box', window: 'dev-repo', live: true, session_id: 's-dev' } },
+        { agent: 'qa', persona: 'Quinn', hosted: { host: 'box', window: 'qa-repo', live: true, session_id: 's-q1' } },
+      ] }], new Set());
+    eq(plan.map((x) => x.act), ['join', 'twin', 'skip'], 'Resume makes a second session again when its agent has a desk, and says so when it has none');
+    eq(plan[1], { agent: 'qa-3', persona: 'Quinn', act: 'twin', base: 'qa', session_id: 's-q3' }, 'under the name it had, beside its agent, on the conversation it was on');
+    assert(/was a second session of ops, which has no desk on lab now/.test(plan[2].why), 'in words');
+    const offline = pg.meetingResumePlan({ channel: 'lab', participants: [{ agent: 'qa-3', base: 'qa', session_id: 's-q3' }] },
+      [{ channel: 'lab', desks: [{ agent: 'qa', persona: 'Quinn', hosted: { host: 'box', window: 'qa-repo', live: false } }] }], new Set())[0];
+    eq([offline.act, offline.keep], ['skip', true], 'one whose agent\'s host is away is kept for the next Resume');
+
+    // Take a desk's third button.
+    const dsrc = readFileSync('src/ui/app.js', 'utf8');
+    const da = dsrc.indexOf('/* ---------- take a desk: what the dialog reads ---------- */');
+    const db_ = dsrc.indexOf('/* ---------- take a desk: the dialog ---------- */');
+    const dtmp = `./data/desk-seat-${process.pid}.mjs`;
+    writeFileSync(dtmp, `${dsrc.slice(da, db_)}\nexport { takeBody, seatOffer, seatOutcome };\n`);
+    let dlg;
+    try { dlg = await import(new URL(dtmp, `file://${process.cwd()}/`)); } finally { rmSync(dtmp, { force: true }); }
+    const fm = { hostId: 'h', path: '/repo/quinn', channel: 'lab2', newChannel: '', agent: 'quinn' };
+    eq(dlg.takeBody(fm, { seat: true }), { host_id: 'h', path: '/repo/quinn', channel: 'lab2', agent: 'quinn', open: true, seat: true }, 'New desk here sends what a take sends, and says it is a new desk');
+    eq(Object.hasOwn(dlg.takeBody(fm), 'seat'), false, 'which a take and a move never say');
+    const b = { channel: 'lab', agent: 'quinn', scope: 'local' };
+    eq(dlg.seatOffer(null, 'lab2', { name: 'box', seats: true }), null, 'a folder that is not a desk is not offered a second one');
+    eq(dlg.seatOffer(b, '', { name: 'box', seats: true }), null, 'nor is one with no floor chosen');
+    const off = dlg.seatOffer(b, 'lab2', { name: 'box', seats: true });
+    eq([off.label, off.why], ['New desk here', null], 'a folder bound elsewhere is offered New desk here, beside Move');
+    assert(/starts a new session of quinn on lab2, in the same folder\. The session it has on lab is left running, and so is every other one\.$/.test(off.note), 'and the note says what it does to the session it has: nothing', off.note);
+    assert(/under its name with a number \(quinn-2\)/.test(dlg.seatOffer(b, 'lab', { name: 'box', seats: true }).note), 'on its own floor the note says the name it will take');
+    assert(/under its name with a number \(quinn-2\)/.test(dlg.seatOffer(b, 'lab2', { name: 'box', seats: true }, true).note), 'and on a floor where somebody already answers to its name');
+    assert(/^box runs a build from before/.test(dlg.seatOffer(b, 'lab2', { name: 'box', seats: false }).why ?? ''), 'on a host that cannot, it is dimmed and says why');
+    const seatFloor = (here, beside) => ({ channels: [
+      { channel: 'lab2', desks: here ? [{ agent: 'quinn-2', ...here }] : [] },
+      { channel: 'lab', desks: [{ agent: 'quinn', ...beside }] },
+    ] });
+    const ask = { channel: 'lab2', agent: 'quinn-2', beside: { channel: 'lab', agent: 'quinn' } };
+    eq(dlg.seatOutcome(seatFloor(null, { last_turn: { id: 5, role: 'assistant' } }), ask, 5), null, 'a new desk the board accepted is not there yet');
+    eq(dlg.seatOutcome(seatFloor({ hosted: null }, {}), ask, 5), null, 'nor while it is drawn as not hosted');
+    eq(dlg.seatOutcome(seatFloor({ hosted: { live: true } }, {}), ask, 5), 'seated', 'it is there once its host is running it');
+    eq(dlg.seatOutcome(seatFloor(null, { last_turn: { id: 9, role: 'error', text: 'no new desk on lab2: refused' } }), ask, 5), { refused: 'no new desk on lab2: refused' }, 'a refusal is read off the desk it was made beside, where the host says it');
+    eq(dlg.seatOutcome(seatFloor(null, { last_turn: { id: 5, role: 'error', text: 'an old one' } }), ask, 5), null, 'and an error that was there before is not this one');
   }
 } catch (err) {
   failures++;
@@ -3670,6 +4936,7 @@ try {
   server.kill();
   await sleep(150);
   rmDb(DB_PATH);
+  rmSync(UPLOAD_DIR, { recursive: true, force: true });
 }
 
 console.log(failures ? `\nFAIL ❌ — ${failures} failure(s)` : '\nPASS ✅ — 0 failure(s)');

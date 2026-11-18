@@ -61,6 +61,105 @@ behaviour green. Every batch's reds were the ones predicted for its mutants.
 In the report, say which assertions are expected to stay green at the base
 and why.
 
+**A test being written goes into the copy, not the tree: `--overlay`**
+(2026-11-15). The tree is committed whenever costmo chooses, and a copy is
+made from the tree, so the easy way to run a new test in a copy is to
+write it in the tree first. In PR #55's third round a new window-suite
+row stood in the tree, unrun, for the minutes its control took, and was
+taken back out by hand. Write the candidate outside the repo and name it:
+
+```bash
+cp test/window.mjs "$SP/window.candidate.mjs"      # edit this one
+node .claude/skills/mutate-in-a-copy/run-batches.mjs "$SP/batches.json" \
+     --overlay test/window.mjs="$SP/window.candidate.mjs"
+# overlay: test/window.mjs ← …/window.candidate.mjs (sha256 <the candidate's>)
+# control (window, 160s): 0 failing, 406 ✓
+# twice (window, 158s): 1 failing, 405 ✓
+cp "$SP/window.candidate.mjs" test/window.mjs && shasum -a 256 test/window.mjs   # the overlay's hash
+```
+
+The control now proves the candidate, and each batch's mutants can name
+text that exists only in it. A candidate kept inside the repo is refused,
+and so is a path that would leave the copy. Run once on the markdown
+suite with a row added: the control read 38 ✓ against the tree's 37, a
+mutant of that row's own words read it red, and without `--overlay` the
+same mutant said DID NOT APPLY, because the row is not in the tree.
+
+**A reviewer's pin is a mutant of the stand-in, and it goes in a batch
+with the fault** (PR #55 Info 11). QA showed a test's blind spot by making
+the window suite's stand-in log one key 600 ms late. That pin is a change
+to `test/window.mjs` like any other, so the claim "the new row sees the
+fault even then" is four runs of one file: a control, the fault alone,
+the fault with the pin, and the pin alone, which must be green, since a
+pin that is red by itself proves nothing about the row. The stand-in is
+written inside a template literal, so its text in the file already has
+doubled backslashes (`'\\t'`), and JSON doubles them again (`"\\\\t"`).
+`mutate.py` wants the old text exactly once and says how many times it
+found it, which is how a wrong count of backslashes shows. Run a
+counter-proposal against the reviewer's pin before sending it: "read the
+keys by order" was offered to QA untested in that round, and their pin
+passed it too.
+
+**`run-mutants.mjs` reads `test:renew`'s lines too** (2026-11-16). That
+suite prints `FAIL <name>` and `ok   <name>` where the others print ✗ and
+✓. `run-mutant.sh` has counted both since PR #54; the JSON runner counted
+✗ alone, and its first renew mutant read `0 failing — SURVIVED (0 ✓)`
+about a run with two reds. **0 ✓ beside 0 failing is a suite the runner
+cannot read, never a survivor**: run the mutant by hand in the copy before
+believing either number. The lists for one agent with several sessions are
+kept here and beside the page check: `mutants-sessions.suite.json` (54,
+across `floor`, `seats`, `plugin` and `renew`) and
+`../verify-ui-change/mutants-sessions.page.json`. `mutants-pr57.suite.json`
+(20: 13 `floor`, 3 `seats`, then one `host`, two `window` and one `renew`
+for the killed-window wait, Info 10 and its second round) is the round
+that answered QA's review of PR #57: the silent room, a second session's mail, a bind onto a working
+seat's name, the two tools that ask which session a name means, and what
+a host said about seats across a board restart.
+
+**Run `validate-mutants.mjs` on every kept list after a round, not only
+the one you wrote.** QA found one kept row that no longer applied (PR #57
+Info 6: `cardRefusal` had taken the text it replaced). Validating all of
+them that day found two more: a sessions row the round's own fix had
+reworded, and a meeting-box page row that had not applied since 0.12.9. A
+row that does not apply is not red, it is unread, and the count in the
+notes goes on including it.
+
+**Lines of the seats work that no row reads, and why they are left**
+(QA's inversions on PR #57, Info 7; each stayed green there). Two were
+given rows in that round: a bind onto a name a seat carries (Q2) and the
+folder's own desk falling back onto a conversation its seat is running
+(Q3). The rest, by QA's ids, for whoever touches the line next:
+- Q1, `sit()` refusing a name that is already a desk at another folder.
+  The board never asks for one: a hosted desk under a name makes the name
+  taken, and the new desk gets a number. It is the host's belt against a
+  board that disagrees with it, and reaching it means a `seat` work item
+  written by hand.
+- Q9, `open()` refusing a seat whose binding file is missing. The host
+  rewrites the file whenever it looks at its desks, so the fixture has to
+  delete it and hold the rewrite off.
+- Q10, a real binding outranking a seat of the same name in
+  `host/identity.js`. `bind()` removes the seat's record before it binds,
+  so the two only meet if that removal fails.
+- Q11, a moved seat's note said on its own desk and not its folder's.
+  That is `index.js`'s handler for a move to a fresh tmux server, which
+  `test:renew` does not drive (CLAUDE.md says why: the host suite's host
+  is on the default socket beside the live `orch`).
+- Q12, History listing a shared folder once.
+- P3, Take a desk reading that the name is taken on *another* floor
+  (check-sessions' case is the agent's own floor).
+- Q7 and Q8 are a second belt in every flow the suites have (QA's words).
+None is a finding. A row for any of them needs a fixture of its own, and
+was not written at a release check. Several suites at once is
+several copies: `--dest` each, and `FLOOR_TEST_PORT` for more than one
+floor lane (8911–8913 that day, three lanes, about four minutes for 34).
+
+**Give a hash with its algorithm, and keep the file you measured.** Bare
+`shasum` is SHA-1. A SHA-1 sent to QA as "the file I measured" was set
+against their sha256 of the same file, and their closing note said the
+runs might be of an earlier cut. The measured copy was still in the
+scratchpad, so one command settled it. Say `shasum -a 256`, and `git show
+<sha>:<path> | shasum -a 256` for the pushed file.
+
 **A red you did not predict in an older section is load first** (task 255,
 20:27Z): QA's clean-clone suite started on the same ports during the
 tool's base run, and the base read 19 red. Those were the predicted 11,
@@ -69,7 +168,34 @@ folder dialog). Read the channel for a QA announcement before believing
 those, and rerun once the ports are quiet. Rerun at 20:53Z with nothing
 else on them, it read the predicted 11 and 268 ✓.
 
-Keep the JSON file outside the repo. A mutant whose new text is the old
+**`run-mutants.mjs --logs <dir>` keeps every run's whole output**
+(2026-11-16). The runner prints eight reds and kept nothing else. In the
+round after PR #57's close a host mutant read "9 failing" beside eight
+printed rows where QA and I had both predicted eight, and a renew mutant
+read a second FAIL in an older section ("the agent that met the refusal
+is told it can carry on"). Neither could be named or dismissed without
+running again. Run again with the output kept, at load 15: the host
+mutant read its eight and the renew mutant its one, control 58 ✓. So
+both extras were seen once, in lanes run at load 13 to 56 beside other
+lanes, and their text for the host one is not known. Pass `--logs` on
+any lane whose reds will be quoted to somebody; the files are
+`<n>-<suite>.log` and `control-<suite>.log`.
+
+**`run-mutants.mjs --control` settles it in the same run** (2026-11-14).
+It runs each suite in the list once more at the end with nothing mutated:
+`CONTROL [nothing mutated] (floor, 10s): 0 failing, 1057 ✓`. That day a
+host mutant read three reds: the one predicted, and "a turn written while
+the send is still in flight reaches the floor anyway" with "the floor
+gained a turn rather than replaying the transcript", in a section 500
+lines from the change, at load 5.5 with nothing else on the ports. Run
+again beside a control, the control was 320 ✓ and the mutant had its one
+red. Report an unpredicted red with what the control read, not as "load".
+
+Keep the JSON file outside the repo while it is scratch. A list that is
+still owed a run, or that a check's write-up points at, is kept beside
+that check instead (verify-ui-change's `mutants-meeting-box.*.json`,
+2026-11-16: thirteen page mutants were stopped unrun to save a turn's
+time, and their list was in a scratchpad). A mutant whose new text is the old
 text plus a dead branch is a no-op and proves nothing — one was written
 that way on 2026-11-02 and had to be discounted in the report; say so if
 it happens rather than counting it as a survivor.
@@ -78,6 +204,54 @@ The suites take their own ports (8896–8898) and tmux session names by pid,
 so the copy runs exactly like the repo — and collides with a run in the
 repo or in QA's clone for the same reason. One at a time, and say so on the
 channel first, as for any suite run.
+
+## A kept list, and a batch stopped half-way
+
+**Check a kept list before the batch, not during it.**
+[`validate-mutants.mjs`](validate-mutants.mjs) reads a page or suite list
+against a directory and names every entry whose old text is not there
+exactly once (mutate.py's rule), in under a second:
+
+```bash
+node .claude/skills/mutate-in-a-copy/validate-mutants.mjs .claude/skills/verify-ui-change/mutants-meeting-box.page.json
+# all 25 apply, each exactly once
+# 2 of 3 do not apply:                                    (exit 1; run on a list with a stale and a doubled entry)
+#   a stale entry: its old text is in src/ui/floor.js 0 times, not once
+```
+
+A list kept beside a check goes stale with every edit to the files it
+names. In the 0.12.8 round three later edits each broke an entry or two
+(a hover rule gained a selector, a move became a function), and each was
+found by counting by hand before the list was saved again. Run this after
+any such edit, and first thing at the hand-off.
+
+**Stopping a batch takes five kills, and then a look.** A page batch is
+`run-page-mutants.mjs`, the `run-page-mutant.sh` it started, the check's
+runner (`run-check-*.sh`), the check itself, and under those a seed, a
+server and a Chrome on the batch's ports. Killing the first leaves the
+rest running the current mutant to its end. On 2026-11-16 a 17-mutant
+batch was stopped after four when costmo asked for long runs to wait:
+
+```bash
+pgrep -f "run-page-mutants.mjs" | xargs kill; pgrep -f "run-page-mutant.sh" | xargs kill
+pgrep -f "run-check-meeting-box.sh" | xargs kill; pgrep -f "check-meeting-box.mjs" | xargs kill
+pgrep -f "seed-meeting.mjs http://localhost:8946" | xargs kill
+for pid in $(pgrep -f "node src/server.js"); do ps eww -o command= -p $pid | grep -q "PORT=8946" && kill $pid; done
+pkill -f "remote-debugging-port=9286( |$)"
+curl -s -m 1 -o /dev/null localhost:8946/health; echo "rc=$? (7 is down)"
+```
+
+What it had finished is still evidence: its log has one block per mutant.
+What it had not is written down as owed, with the list kept in the repo
+(verify-ui-change, `mutants-meeting-box.*.json`), never left in a
+scratchpad.
+
+**`--control` reading `0 ✓` is a suite that did not load.** The same
+round, new rows in `test/floor.mjs` declared a name twice. Every mutant
+read "SURVIVED (0 ✓)" with "the run threw: SyntaxError", and so did the
+control. A `grep -E "✗|PASS|FAIL"` over the suite's own output had printed
+nothing at all a minute earlier and was read as quiet success. No verdict
+line is a failure; look for the line, not for the absence of a ✗.
 
 ## Choosing the mutants
 
@@ -97,6 +271,21 @@ facts — and read which assertions went red, not the count:
 - A mutant that makes a helper return `null` usually ends the suite on a
   `TypeError` at the next line. That is a kill, but check the assertion
   before it was the one you meant.
+- **"The old code" is often two edits, and an entry is one replacement.**
+  The PR #56 move-race fix moved an intent from after the rescan to the
+  rescan itself. A mutant that only put the old line back still had the
+  new one, so it was not the old code and could not go red. Build the
+  entry from the file in a script: take `old` as the exact span from the
+  first edit to the last (comments between included), make `new` from it,
+  and run `validate-mutants.mjs` on it. `mutants-move-race.suite.json`
+  holds such an entry.
+- **Ask whether the test can see the fault every run, not only whether it
+  went red once.** A race that lands under load is red one run in many,
+  and that is not a test. The move race needed a seam,
+  `ORCH_HOST_BIND_GAP_MS`, so that a watch tick always lands in the gap.
+  Then the old order was red 3 of 3, and QA showed that the same mutant
+  without the seam is green at load 7. Repeat a mutant before calling a
+  timing row deterministic.
 
 ## Reading a survivor
 
@@ -162,6 +351,38 @@ node .claude/skills/mutate-in-a-copy/run-page-mutants.mjs /tmp/page.json \
   'PORT=8916 CDP=9266 .claude/skills/verify-ui-change/run-check-chatbox.sh "$PWD"'
 # [["the operator's height is not a floor", "src/ui/floor.js", "const floorH = Math.max(base, set ?? 0);", "const floorH = base;"], …]
 ```
+
+The file a page mutant breaks need not be a page file. The check's runner
+serves the whole copy, so a mutant in `src/floor.js` is read off the page
+the same way. On 2026-11-14 the board's clearing of a refused model change
+was removed there, and `run-check-chat-controls.sh` went red on the two
+select lines. And until that day the command above printed its own usage:
+without `--dest` the tool dropped its first argument. It was run both ways
+after the repair.
+
+**An unpredicted red beside the predicted one can be the check's own
+race, and the control will not show it** (2026-11-14, check-meeting.mjs).
+A mutant in the room's hint line read two reds: the hint, and "everything
+else is where it was", with one extra row, Bo's "stopped.". The step
+before had posted that turn and the step read the transcript before it
+was drawn, so it arrived later as a row nobody expected. The control was
+green and so were five tree runs: the race lost about one run in ten.
+Read what the extra or missing row *is* before blaming the mutant or the
+load; here the fix was a `waitFor` on that row in the check. And **a
+survivor can be the check measuring a box that cannot change**: the same
+batch's "hint at full length" mutant passed, because the check compared
+the Nudge button's rect and that button is a fixed 28px. `scrollHeight`
+turned it red (verify-ui-change, check-meeting).
+
+**"THE CHECK DID NOT FINISH" is the machine until shown otherwise; read
+`uptime` before the code.** The same day, with another desk's emulator
+and Xcode builds holding the load average at 66–90, a control ended that
+way once and two of three mutants did in the next batch. Each died in
+`open()` (`drive.mjs:96`, the page's first load), before any step of the
+check. The check itself was green 4 of 4 on the tree in between. The tool
+now prints a control's last lines when it has no verdict, as it already
+did for a mutant. A mutant that did not finish is not a result either way:
+run it again, and report the run in which it reached a verdict.
 
 Two things a new page check needs before it can be mutation-tested this
 way, both learned on issue #13:

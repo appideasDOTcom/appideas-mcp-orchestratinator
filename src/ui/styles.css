@@ -732,8 +732,8 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .rooms.building svg.room { cursor: pointer; }
 /* Not while the pointer is on an arrow: the arrow stays on this floor, and
    lighting the storey under it promises the opposite. */
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .deskPill:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
-.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .deskPill:hover)) .roomName { fill: var(--accent); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomFloor { fill: color-mix(in srgb, var(--text) 7%, var(--surface-2)); }
+.rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomName { fill: var(--accent); }
 
 /* Scroll arrows, in the floor's own margin. An arrow with nowhere to go is not
    drawn at all: it is anchored to the room's edge rather than to its partner,
@@ -1491,6 +1491,10 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    desk: a reason is the useful part of a button that cannot be pressed. */
 .dp-move:disabled, .dp-move:disabled:hover { cursor: not-allowed; opacity: .55; border-color: var(--border); color: var(--muted); }
 .dp-move-why { margin: 4px 2px 0; font: 11px/1.35 var(--sans); color: var(--muted); }
+/* In a meeting room, everything from Open conversation down is dimmed
+   (costmo, 2026-11-16), Open conversation included, with the one reason
+   under the last button. */
+.dp-open:disabled, .dp-open:disabled:hover { cursor: not-allowed; opacity: .55; border-color: var(--border); color: var(--muted); background: var(--surface-2); }
 
 
 /* Floor picker — one pill per channel, above the rooms. Empty with one floor,
@@ -1520,6 +1524,15 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .selBand { fill: color-mix(in srgb, var(--accent) 7%, var(--surface-2)); }
 .selText { fill: var(--text); font: 11px var(--mono); }
 .selSum  { fill: var(--muted); font: 10.5px var(--mono); }
+/* What a finished action did not reach, left on the room once selection has
+   closed itself: the block colour, because it is the one thing still to read. */
+.missBar { cursor: pointer; }
+.missBar:focus { outline: none; }
+.missBand { fill: color-mix(in srgb, var(--block) 9%, var(--surface-2)); }
+.missText { fill: var(--block); font: 10.5px var(--mono); }
+.missX { fill: var(--muted); font: 11px var(--mono); }
+.missBar:hover .missX, .missBar:focus-visible .missX { fill: var(--text); }
+.missBar:hover .missBand, .missBar:focus-visible .missBand { fill: color-mix(in srgb, var(--block) 15%, var(--surface-2)); }
 .selAll, .selChip, .selBox { cursor: pointer; }
 .selAll:focus, .selChip:focus, .selBox:focus { outline: none; }
 .selAllBox { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; }
@@ -1545,6 +1558,44 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 .selTag.ok   { fill: var(--idle); }
 .selTag.bad  { fill: var(--block); }
 .selTag.note { fill: var(--muted); }
+
+/* A meeting on the floor (costmo, 2026-11-16).
+   -------------------------------------------
+   The desks in a meeting room stand in a box of their own. Its edge is a
+   light grey in both themes, and 2.5px on screen whatever size the room is
+   drawn at (a room is scaled to its width, and a stroke in the drawing's
+   own units would be 3px on a wide floor and 1.5 on a narrow one). The
+   carpet inside is a shade off the floor's, mixed with transparent so it
+   lifts with the storey under the pointer in the building.
+
+   The two placards sit on the box's top edge at its corners, filled, so
+   the edge does not show through them. The label is the edge's own grey
+   with dark words on it, in either theme. End meeting is the same plate
+   drawn as a control: the surface colour with the grey edge, and the
+   block colour under the pointer, because it ends something. */
+:root { --meet-line: #b8bec7; --meet-ink: #1b2026; }
+.meetFrame {
+  fill: color-mix(in srgb, var(--text) 4%, transparent);
+  stroke: var(--meet-line); stroke-width: 2.5px; vector-effect: non-scaling-stroke;
+}
+.meetTabBox { stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+.meetTabText { font: 600 10.5px var(--mono); }
+.meetLabel .meetTabBox { fill: var(--meet-line); stroke: var(--meet-line); }
+.meetLabel .meetTabText { fill: var(--meet-ink); }
+/* The label is pressed to bring the room's window to the pointer: it lifts
+   to white under the pointer, and takes the accent's edge with focus. */
+.meetLabel { cursor: pointer; }
+.meetLabel:focus { outline: none; }
+.meetLabel:hover .meetTabBox { fill: #fff; stroke: #fff; }
+.meetLabel:focus-visible .meetTabBox { stroke: var(--accent); stroke-width: 2px; }
+.meetEnd { cursor: pointer; }
+.meetEnd:focus { outline: none; }
+.meetEnd .meetTabBox { fill: var(--surface); stroke: var(--meet-line); }
+.meetEnd .meetTabText { fill: var(--text); }
+.meetEnd:not(.disabled):hover .meetTabBox, .meetEnd:not(.disabled):focus-visible .meetTabBox { fill: var(--block-bg); stroke: var(--block); }
+.meetEnd:not(.disabled):hover .meetTabText, .meetEnd:not(.disabled):focus-visible .meetTabText { fill: var(--block); }
+.meetEnd.disabled { cursor: default; }
+.meetEnd.disabled .meetTabText { fill: var(--muted); }
 
 /* A selecting storey in the building is operated on, not ridden from: no
    pointer over its carpet, no lift, and its desks show their checkboxes. */
@@ -1828,6 +1879,16 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
   font-size: 12px; background: var(--surface);
 }
 .m-part .m-state { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+/* The box is a control: a click outside its buttons hides or shows this
+   desk's part of the transcript. Hidden reads as off without dimming its
+   badges, bell or stop sign, which all still work. */
+.m-part[data-act="m-show"] { cursor: pointer; user-select: none; }
+.m-part[data-act="m-show"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.m-part.m-off { border-style: dashed; border-left-style: solid; border-top-style: solid; }
+.m-part.m-off:not(.s-needs-you) { background: transparent; }
+.m-part.m-off .m-row-name b { text-decoration: line-through; opacity: .6; }
+.m-part.m-off .m-state { opacity: .6; }
+.m-part .m-off-word { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 .m-part.s-working .m-state { color: var(--busy); }
 .m-part.s-needs-you { border-color: color-mix(in srgb, var(--wait) 55%, var(--border)); border-left-color: var(--m-c); background: var(--wait-bg); }
 .m-part.s-needs-you .m-state { color: var(--wait); font-weight: 600; }
@@ -1880,3 +1941,65 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .m-part, .m-to .m-to-one { border-top: 3px solid var(--m-h, var(--border)); }
 /* The unread and needs-you outlines colour every side; the hair stays on top. */
 .m-part.has-unread, .m-part.s-needs-you { border-top-color: var(--m-h, var(--border)); }
+
+/* Attachments (issue #31): files above the box before Send, each with its
+   own remove, a thumbnail for an image and its extension for anything else,
+   and one larger preview on hover or focus, drawn on the page rather than
+   inside the panel because the panel clips what overflows it. */
+.btn.attachbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: auto; height: var(--p-ctl-h); padding: 0 2px; border-color: transparent; background: none;
+}
+.attachGlyph { height: calc(var(--p-ctl-h) - 2px); width: auto; display: block; }
+.attachGlyph path { fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.btn.attachbtn:hover:not(:disabled) { border-color: transparent; background: none; }
+.btn.attachbtn:hover:not(:disabled) .attachGlyph path { stroke: var(--busy); }
+.btn.attachbtn:focus { outline: none; }
+.btn.attachbtn:focus-visible .attachGlyph path { stroke: var(--accent); stroke-width: 2.2; }
+.btn.attachbtn:disabled { opacity: .32; }
+/* One row, scrolled sideways past what fits: two rows of chips pushed the
+   panel's foot off a 640px window (check-attach.mjs, before this). */
+.p-attach { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; flex: none; }
+.p-attach > .att-chip { flex: none; }
+.p-attach.hidden { display: none; }
+.att-chip {
+  position: relative; display: flex; align-items: center; gap: 6px; max-width: 200px;
+  padding: 3px 22px 3px 3px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+}
+.att-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.att-chip.failed { border-color: color-mix(in srgb, var(--block) 60%, var(--border)); }
+.att-chip.uploading .att-thumb { opacity: .45; }
+.att-thumb { width: 34px; height: 34px; flex: none; border-radius: 4px; object-fit: cover; background: var(--bg); }
+.att-generic {
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 600 9px var(--mono); letter-spacing: .02em; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg);
+}
+.att-thumb.att-generic { width: 34px; height: 34px; }
+.att-spin { position: absolute; left: 12px; top: 50%; margin-top: -7px; }
+.att-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.att-name { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-size { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-chip.failed .att-size { color: var(--block); }
+.att-x {
+  position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; padding: 0; line-height: 14px;
+  font-size: 10px; border: none; border-radius: 50%; background: none; color: var(--muted); cursor: pointer;
+}
+.att-x:hover, .att-x:focus-visible { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--text); outline: none; }
+.p-compose.dropping { outline: 2px dashed color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: -4px; }
+#att-preview {
+  position: fixed; z-index: 1000; display: none; padding: 6px; pointer-events: none;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  box-shadow: 0 6px 24px rgb(0 0 0 / .22);
+}
+#att-preview.on { display: block; }
+#att-preview img { display: block; max-width: 100%; max-height: 300px; margin: 0 auto; border-radius: 4px; }
+.att-pcap { margin-top: 4px; font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The same files once sent: in a pending bubble and in the recorded turn. */
+.t-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.t-file {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 6px 2px 2px;
+  font-size: 11.5px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.t-file .att-generic { width: 22px; height: 18px; font-size: 8px; flex: none; }

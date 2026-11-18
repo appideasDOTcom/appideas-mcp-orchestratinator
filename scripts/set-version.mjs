@@ -31,6 +31,11 @@ export const VERSIONED = [
   'package.json',
   'host/package.json',
   'plugin/.claude-plugin/plugin.json',
+  // Committed since 0.12.11 (the milestone audit's finding 5: the image
+  // installs exactly the lock), and it records the package's version twice:
+  // at its top and as packages[""]. npm writes both on an install, so a
+  // bump that left them behind would come back as a diff nobody asked for.
+  'package-lock.json',
 ];
 
 const root = new URL('../', import.meta.url);
@@ -42,7 +47,18 @@ export function setVersion(next) {
   for (const rel of VERSIONED) {
     const path = new URL(rel, root);
     const before = readFileSync(path, 'utf8');
-    const after = before.replace(/("version"\s*:\s*")[^"]*(")/, `$1${next}$2`);
+    // The lock's own two: its top, then packages[""], the first two
+    // "version" keys in npm's order. Every other file has one.
+    const times = rel === 'package-lock.json' ? 2 : 1;
+    let after = before;
+    for (let i = 0, from = 0; i < times; i++) {
+      const m = /("version"\s*:\s*")[^"]*(")/.exec(after.slice(from));
+      if (!m) break;
+      const at = from + m.index;
+      const swapped = `${m[1]}${next}${m[2]}`;
+      after = after.slice(0, at) + swapped + after.slice(at + m[0].length);
+      from = at + swapped.length;
+    }
     if (after === before && versionIn(rel) !== next) {
       throw new Error(`${rel} has no "version" field to set`);
     }
@@ -50,6 +66,10 @@ export function setVersion(next) {
     // Read back rather than trust the substitution: a regex that matched the
     // wrong "version" would otherwise report success on the wrong line.
     if (versionIn(rel) !== next) throw new Error(`${rel} still reads ${versionIn(rel)} — check which "version" it matched`);
+    if (rel === 'package-lock.json') {
+      const own = JSON.parse(readFileSync(path, 'utf8')).packages?.['']?.version;
+      if (own !== next) throw new Error(`package-lock.json's packages[""] still reads ${own}`);
+    }
   }
   return changed;
 }

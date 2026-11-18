@@ -20,10 +20,12 @@
 //   npm run test:host
 import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale, parentPort, readParentAnswer, askParent, dialogBackend } from '../host/dialog.js';
+import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads, fetchUpload } from '../host/uploads.js';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -310,12 +312,18 @@ function fixture() {
     `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
     String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
     // And a flag file that leaves the window asking something: a permission
-    // menu (`bash`) or a one-question form (`form`), drawn once at the bottom
+    // menu (`bash`), a one-question form (`form`) or one with previews
+    // (`preview`), drawn once at the bottom
     // of the pane and never redrawn — for an answer that waited in the host's
     // line past ANSWER_TTL_MS (QA, PR #49 finding 2 and Info 4).
     `const PROMPT_FLAG = ${JSON.stringify(`${FIX}/prompt.flag`)};`,
     `let promptKind = ''; try { promptKind = fs.readFileSync(PROMPT_FLAG, 'utf8').trim(); } catch {}`,
-    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"] })};`,
+    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"],
+      // A question drawn with previews, as 2.1.325 draws one: the choices
+      // beside the highlighted one's preview, no "Type something." row, and
+      // "n to add notes" on its status line. Never redrawn, so a digit moves
+      // nothing here (QA, PR #55 Info 8).
+      preview: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Where", "", "Where should it go?", "", "❯ 1. Alpha                        ┌────────┐", "  2. Bravo                        │ AAA box│", "  3. Charlie                      └────────┘", "                                  Notes: press n to add notes", "────────────────────────────────────────────────────────────────────────────────", "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"] })};`,
     `for (const l of PROMPTS[promptKind] ?? []) process.stdout.write(l + '\\n');`,
     // A prompt takes a bare key with no Enter, as a person pressing one
     // would, and a tty in canonical mode holds it until a newline that never
@@ -406,6 +414,14 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
       ORCH_HOST_ID: id, ORCH_HOST_NAME: 'Test Mac',
       ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION,
       ORCH_HOST_WATCH_MS: '300', ORCH_HOST_CONFIG: '/nonexistent/host.json',
+      // A message's attachments are written here (host/uploads.js), not
+      // beside a host.json that does not exist.
+      ORCH_HOST_UPLOADS: `${FIX}/uploads`,
+      // Every bind holds 700 ms after its rescan: more than a watch tick, so
+      // a move's desk is always watched before bind() goes on. The move
+      // section's "no session row for the conversation it left" reads the
+      // race every run (CLAUDE.md, Tests, the seventh sighting).
+      ORCH_HOST_BIND_GAP_MS: '700',
       // send() waits for the message to show up in the transcript before it
       // calls it delivered. The stand-in writes one, so this is the real path;
       // the timeout is only shortened so a genuine failure fails fast.
@@ -483,10 +499,13 @@ try {
 
   rmDb(DB_PATH);
   fixture();
-  server = spawn('node', ['src/server.js'], {
-    env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce' },
+  // A function, because one row restarts the board on the same database,
+  // as a deploy does (the milestone audit's finding 1).
+  const startServer = () => spawn('node', ['src/server.js'], {
+    env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  server = startServer();
   if (!(await waitHealthy())) throw new Error('server never became healthy');
 
   console.log('host');
@@ -559,6 +578,55 @@ try {
   eq(btwRows?.find((r) => r.via === '/btw')?.text, '42', "the answer is read off the window's overlay and is the agent's, labeled by the command");
   assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/btw what is 6*7? — answered in the window'), 'the desk says what was typed and where the answer went, as one line labeled host');
   assert(!(btwRows ?? []).some((r) => r.role === 'error'), 'and no error turn says it did not confirm');
+
+
+  /* Issue #31: a file attached on the floor. The board stages it, the host
+   * fetches it to its own disk, outside every repo, and types its path into
+   * the message. What the window is sent is read off the pane's sink; what
+   * is on the disk is read off the disk. */
+  console.log('\n  a message with files attached');
+  const stage = (bytes, name, type = 'application/octet-stream') =>
+    fetch(`${HOST}/api/floor/upload?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`, { method: 'POST', headers: { 'content-type': type }, body: bytes })
+      .then((r) => r.json());
+  const shotBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 8, 7, 6]);
+  const shotUp = await stage(shotBytes, 'shot one.png', 'image/png');
+  const logUp = await stage(Buffer.from('line 1\nline 2\n'), 'build.log', 'text/plain');
+  const withFiles = await json('/api/floor/chat', { channel: CH, agent: 'free', text: 'what broke here?', files: [shotUp.id, logUp.id] });
+  eq(withFiles.status, 200, 'a message with two files is accepted');
+  const shotPath = `${FIX}/uploads/${shotUp.id}/shot one.png`;
+  const logPath = `${FIX}/uploads/${logUp.id}/build.log`;
+  const typed = await until(() => (clean(received()).includes(logPath) ? clean(received()) : null), 15000);
+  assert((typed ?? '').replace(/\r\n?/g, '\n').includes(`what broke here?\n\n${ATTACHED_HEADER}\n- ${shotPath}\n- ${logPath}`),
+    'the window is sent the words, then the list: one path a line, in the order attached');
+  eq([existsSync(shotPath) && [...readFileSync(shotPath)], existsSync(logPath) && readFileSync(logPath, 'utf8')], [[...shotBytes], 'line 1\nline 2\n'],
+    'and each file is on the host\'s disk under its own name, byte for byte');
+  assert(!shotPath.startsWith(REPO) && !existsSync(`${REPO}/shot one.png`), 'outside the desk\'s folder: nothing lands in the repo');
+  const before31 = clean(received()).length;
+  const alone = await json('/api/floor/chat', { channel: CH, agent: 'free', files: [shotUp.id] });
+  eq(alone.status, 200, 'files alone are a message');
+  const aloneTyped = await until(() => {
+    const now = clean(received()).slice(before31);
+    return now.includes(shotPath) ? now : null;
+  }, 15000);
+  assert(aloneTyped != null && aloneTyped.trim().startsWith(ATTACHED_HEADER), 'and it is the list alone, opening on its header');
+  // A file the host cannot write: its folder is taken by a plain file, so
+  // the fetch fails before a byte is written. Nothing of the message is typed.
+  const blocked = await stage(Buffer.from('x'), 'blocked.txt', 'text/plain');
+  writeFileSync(`${FIX}/uploads/${blocked.id}`, 'in the way');
+  const before31b = clean(received()).length;
+  const failing = await json('/api/floor/chat', { channel: CH, agent: 'free', text: 'about the blocked one', files: [blocked.id] });
+  eq(failing.status, 200, 'the board takes a message whose file the host will fail to write');
+  const failRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.role === 'error' && /blocked\.txt.*; nothing was typed$/.test(r.text ?? '')) ? rows : null;
+  }, 15000);
+  const failText = failRows?.filter((r) => r.role === 'error').at(-1)?.text ?? '';
+  assert(!!failRows, `the desk is told why, then that nothing was typed, in an error turn — ${failText}`);
+  // Not "not sent — …": a meeting room puts "not delivered — " before a
+  // desk's error, and the two read as one stutter (QA, PR #58 Info 6).
+  assert(!/^not (sent|delivered)\b/.test(failText), 'in words that read whole under a meeting room\'s own "not delivered — "');
+  await sleep(500);
+  assert(!clean(received()).slice(before31b).includes('about the blocked one'), 'and none of its words reach the window');
 
   console.log('\nreading the conversation back');
   // What Claude Code writes is what the floor shows — including a turn nobody
@@ -732,6 +800,16 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'pane')?.hosted?.live === true ? true : null), 10000), 'and hosted');
   // Opened, not messaged: the stand-in writes whatever it is sent into the
   // fixture's one transcript, which is `free`'s, and later cases count that.
+  //
+  // The window registers late here, on purpose (QA, PR #57 Info 10). This
+  // case kills the pane as soon as it has read what the pane was given, and
+  // whether the host had seen the window ready by then was a race. When it
+  // had not, the host waited 45 s on a window that was gone, with its line
+  // held, and the seven rows of "taking a desk" below failed for it. That
+  // was the "Take a desk seven", read as load four times. With the delay
+  // the host is always still waiting when the pane goes.
+  writeFileSync(`${FIX}/ready-delay.flag`, '8000');
+  const paneOpenedAt = host.log.length;
   eq((await json('/api/floor/open', { channel: CH, agent: 'pane' })).status, 200, 'the floor opens it');
   const paneEnvLine = await until(() => {
     const log = existsSync(`${FIX}/pane-env.log`) ? readFileSync(`${FIX}/pane-env.log`, 'utf8') : '';
@@ -762,9 +840,13 @@ try {
     const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
     for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);
   } catch { /* gone */ }
+  rmSync(`${FIX}/ready-delay.flag`, { force: true });
   writeFileSync(`${FIX}/roster.json`, rosterWas);
   rmSync(`${paneDir}/.mcp.json`);
   await json('/api/floor/rescan', {});
+  assert(await until(() => (/dropped desk .*\/pane .*asked from the floor/.test(host.log.slice(paneOpenedAt)) ? true : null), 10000),
+    'a window closed while the host was still waiting for it to start does not hold the host\'s line: what is asked of it next is done at once',
+  );
 
   /* ── taking a desk from the floor ──────────────────────────────────────────
    * The first door that needs no terminal. The route refuses what the board
@@ -936,6 +1018,17 @@ try {
   assert(/esc to interrupt/.test(errTurn?.text ?? ''), `quoting the pane's status line — ${errTurn?.text}`);
   eq(paneOf(), busyPanes, 'and the working window is left exactly as it was');
   eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_B, `still on its conversation (was ${idBefore})`);
+
+  // A model change asked of that working window: the host refuses it before
+  // a key is pressed, and the board stops showing it as asked for. The error
+  // names the command, which is the only way the board knows what was
+  // refused; without it the select kept the model that was picked until the
+  // window's model next changed (costmo, 2026-11-14).
+  eq((await chat('free', '/model sonnet')).status, 200, 'a model change is queued for the working window — the board cannot see the pane');
+  const busyModel = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /change the model when the turn ends/.test(r.text ?? '')) ?? null, 15000);
+  assert(!!busyModel, 'the host refuses it in words on the desk');
+  eq(deskOf(await floor(), 'free')?.session?.model_requested ?? null, null, 'and the model is no longer asked for: the select shows what the window is on');
+  eq(paneOf(), busyPanes, 'with the working window left as it was');
   rmSync(`${FIX}/busy.flag`, { force: true });
 
   // A fresh conversation: no --resume, and the desk follows whatever id the
@@ -1114,7 +1207,11 @@ try {
     assert(/removed the local-scope entry "oldboard" in .*rel-local, which pointed at http:\/\/localhost:9/.test(host.log), 'the host says which entry it removed, by its name');
     assert(await until(() => { const now = panesIn(relC); return now.length === 1 && now[0] !== idlePane ? true : null; }, 30000),
       'the window that was open under the other instance is closed, and one of this host\'s is open in its place');
-    const relArgv = argvLog().slice(argvAtRelC).split('\n').slice(0, -1);
+    // The pane is tmux's and comes first; argv.log is the stand-in's, written
+    // once it has started, a moment later. Read at the pane alone, the log
+    // was sometimes still empty (the main → develop merge's host run,
+    // 2026-11-18: `[]`), so the row waits for the line itself.
+    const relArgv = await until(() => { const l = argvLog().slice(argvAtRelC).split('\n').slice(0, -1); return l.length ? l : null; }, 8000) ?? [];
     assert(relArgv.length === 1 && !relArgv[0].includes('--resume'), `on a new conversation, like a move that closes a window — ${JSON.stringify(relArgv)}`);
     // The host's open is still waiting for that window to register (see the
     // placeholder-key case above): nothing is taken down before it has.
@@ -1222,8 +1319,30 @@ try {
     const { default: Database } = await import('better-sqlite3');
     const db = new Database(DB_PATH, { readonly: true });
     const onNew = db.prepare(`SELECT session_id FROM agent_sessions WHERE channel = ? AND agent = ?`).all(CH2, 'free').map((r) => r.session_id);
+    // This row has gone red by itself six times (CLAUDE.md, Tests), each
+    // time green on the next run, and each time nobody read the rows,
+    // because by then they were gone with the run's database. So a red
+    // reads them itself. A session row is keyed by its id alone, so "on the
+    // new floor" means something filed under the old conversation's id
+    // named the new floor, after the move. The row's times against the
+    // board's clock say when, the turns filed under that id say whether it
+    // was a turn (and on which floor) or an event that writes none, and the
+    // host's log from the move on says what the host was doing.
+    const read = !onNew.includes(SESSION_ID) ? null : {
+      row: db.prepare(`SELECT channel, agent, started_at, updated_at, ended_at, transcript FROM agent_sessions WHERE session_id = ?`).get(SESSION_ID),
+      clock: db.prepare(`SELECT datetime('now') AS t`).get().t,
+      turns: db.prepare(`SELECT id, channel, agent, role, tool_name, created_at, substr(text, 1, 60) AS text FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT 8`).all(SESSION_ID),
+    };
     db.close();
-    assert(!onNew.includes(SESSION_ID), `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+    assert(!read, `the new floor holds no session row for the conversation it left — ${JSON.stringify(onNew)}`);
+    if (read) {
+      const say = (l) => console.log(`      · ${l}`);
+      say(`the row, read at ${read.clock} by the board's clock: ${JSON.stringify(read.row)}`);
+      say(`the newest turns filed under that id (${read.turns.length}, newest first):`);
+      for (const t of read.turns) say(`  ${JSON.stringify(t)}`);
+      say('the host log from the move on:');
+      for (const l of host.log.slice(host.log.lastIndexOf('moving it from host-test/free')).split('\n').filter(Boolean).slice(0, 40)) say(`  ${l.slice(0, 200)}`);
+    }
   }
   const turnsOnNew = await json(`/api/floor/turns?channel=${CH2}&agent=free`).then((r) => r.json());
   eq((turnsOnNew.rows ?? []).filter((r) => r.role === 'error').map((r) => r.text), [], 'its chat on the new floor does not open on a refusal (#24 Decided 2)');
@@ -1259,6 +1378,7 @@ try {
   };
   assert(await closeByHand(), 'with its window closed by hand, the desk is held by nobody');
   const argvAtClosed = argvLog().length;
+  const logAtMove = hostLog.length;
   eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose window is closed is a move');
   assert(await until(async () => { const d = onNewFloor(await floor()); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000),
     'it opens on the new floor with a window, on its last conversation (#24 Decided 3)');
@@ -1270,7 +1390,19 @@ try {
   // path does, and an editor holding it is a copy nobody is watching, so
   // the open says so rather than starting a second one. The editor is a
   // process outside tmux claiming the conversation — what holderOf reads.
-  assert(await closeByHand(onNewFloor), 'its window closed by hand again');
+  // Red twice on 2026-11-18 (the round's first host run, and a mutant run
+  // whose mutant was in host/node.sh), green alone after; the rows after it
+  // pass, so the floor did see the window go, only not inside 8 s. On a red
+  // the host's log since the move and what the floor last showed are
+  // printed, so the next sighting is read rather than rerun.
+  const logAtClose = hostLog.length;
+  const closedAgain = await closeByHand(onNewFloor);
+  assert(closedAgain, 'its window closed by hand again');
+  if (!closedAgain) {
+    console.log(`    the floor still shows: ${JSON.stringify(onNewFloor(await floor())?.hosted ?? null)}`);
+    console.log(`    the host's log since the move:\n${hostLog.slice(logAtMove).split('\n').map((l) => `      ${l}`).join('\n')}`);
+    console.log(`    (of which after the close: ${hostLog.length - logAtClose} chars)`);
+  }
   const editor = spawn('sleep', ['120'], { stdio: 'ignore' });
   writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: editor.pid, cwd: REPO, kind: 'interactive', startedAt: 2, sessionId: SESSION_ID, name: 'an editor' }]));
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'editor' ? true : null), 8000), 'and the conversation is open in an editor');
@@ -1345,6 +1477,24 @@ try {
       return until(async () => { const p = deskOf(await floor(), 'free')?.permission; return p && (p.summary ?? '').includes(command) && (p.options?.length ?? 0) >= 3 ? p : null; }, 25000);
     };
     await reopenAsking('bash');
+
+    // Press yes / no (milestone audit 2026-11-17, finding 3): the floor's
+    // answer for a prompt it could not read. Route, host and window: the
+    // desk is waiting (a Notification with nothing parsed), the operator
+    // presses, and the window is sent the key the host maps it to. Yes is
+    // the menu's first row; no is Escape, which cancels.
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    let pressAt = sinkAt();
+    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'yes' })).status, 200, 'Press yes is taken for a desk that is waiting');
+    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
+    eq(readFileSync(SINK, 'utf8').slice(pressAt), '1', 'and the key for yes is the first row, 1');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+    pressAt = sinkAt();
+    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'no' })).status, 200, 'Press no is taken');
+    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
+    eq(readFileSync(SINK, 'utf8').slice(pressAt), '\u001b', 'and the key for no is Escape, which cancels; never a row that could approve');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
+
     let p = await askBash('rm -rf build-cache');
     assert(!!p, 'the host reads the menu\'s choices off the window');
     let sink0 = sinkAt();
@@ -1376,6 +1526,43 @@ try {
     assert(await until(async () => (hostLog.slice(log0).includes('-old answer, and its question is still on screen — answering it') ? true : null), 15000),
       'an old answer whose form is still on screen is pressed — this call site, not only askedStill (Info 4)');
     assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its keys reached the window');
+
+    // A preview question the host could not answer is said as a form that
+    // was not submitted, not as answers that did not land (QA, PR #55 Info
+    // 8). The stand-in never redraws, so the cursor stays on row 1 whatever
+    // digit is sent: the host reads that, presses no Enter, and the desk is
+    // told the form is still standing. "Did not land" was once said about
+    // answers that had landed (issue #7), and here nothing was chosen at all.
+    await reopenAsking('preview');
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Where should it go?', header: 'Where', multiSelect: false,
+        options: [{ label: 'Alpha', description: 'First.', preview: true }, { label: 'Bravo', description: 'Second.', preview: true }, { label: 'Charlie', description: 'Third.', preview: true }] }] } });
+    const pv = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 25000);
+    assert(!!pv, 'a question with previews is on the desk');
+    eq(pv?.questions?.[0]?.options?.length, 3, 'with its three rows and no free-text row, as the window draws it');
+    const errsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+    eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: pv?.request_id, answers: [{ choose: [2] }] })).status, 200, 'its answer is queued');
+    const unplaced = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && !errsBefore.has(r.id)) ?? null, 20000);
+    assert(/^the form was not submitted — this question takes a number as a move and Enter as the choice, and the cursor was not seen on row 2/.test(unplaced?.text ?? ''),
+      `a preview question whose cursor never reached the row is said as a form not submitted — ${unplaced?.text ?? 'no error turn'}`);
+
+    // A board restart (every deploy) while the window is still asking
+    // (milestone audit 2026-11-17, finding 1, probe P3). The board keeps open
+    // prompts in memory only, and a window standing on a question sends no
+    // further hook, so the floor lost the question for good. The host's work
+    // poll fails at the restart, it re-registers at once, and that heartbeat
+    // says which of its windows are asking (`pending`): the board raises the
+    // question again and asks the host to read it off the pane.
+    const restarted = server;
+    await new Promise((done) => { restarted.once('exit', done); restarted.kill('SIGTERM'); });
+    server = startServer();
+    assert(await waitHealthy(), 'the board restarts on the same database');
+    const back = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 30000);
+    assert(!!back, 'and the question the window is still asking is back on the floor, read off the pane, with no hook to say it');
+    // Closed by the window's own work, as any prompt is: the session the
+    // host named is the window's.
+    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
+    assert(await until(async () => (deskOf(await floor(), 'free')?.permission ? null : true), 8000), 'and closed by the window\'s own next tool call, so nothing is left standing for the sections after');
 
     rmSync(`${FIX}/prompt.flag`, { force: true });
     assert(await closeByHand(), 'the asking window is closed by hand');
@@ -1744,6 +1931,81 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'and runs');
   eq((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-1')?.dialog, false, 'with no dialog, so the page draws its own list for it');
 
+  // The host's half of takeHostWork's guarantee (milestone audit
+  // 2026-11-17, finding 4): it says what it finished, and a host told to
+  // stop finishes the item in hand and hands back what it never started, so
+  // nothing it took is left unfinished and unsaid. Read off the board's own
+  // table: what the host reported is the fact, not what the page shows.
+  console.log('\n  work in hand when the host stops');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
+    const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    eq((await chat('free', 'reported finished')).status, 200, 'a message is sent');
+    assert(await until(() => (clean(received()).includes('reported finished') ? true : null), 20000), 'and typed');
+    assert(await until(() => (rows(`SELECT done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)[0]?.done_at ? true : null), 15000),
+      'and the host reports it finished, on its next poll');
+    const mark2 = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    // Four, so the host is holding a batch it has not started when it is
+    // told to stop: it types the first, and takes the other three in one
+    // poll once that is done. The stop waits until at least two are taken
+    // and unfinished. With fewer, the later ones were never taken at all,
+    // and "back in line" said nothing about the release (the first cut of
+    // this row: its mutant, the release emptied, stayed green).
+    for (const t of ['in line one', 'in line two', 'in line three', 'in line four']) await chat('free', t);
+    const held = await until(() => (rows(`SELECT id FROM host_outbox WHERE id > ? AND taken_at IS NOT NULL AND done_at IS NULL`, mark2).length >= 2 ? true : null), 30000);
+    assert(held, 'the fixture: the host is holding more than the one it is typing when it is told to stop');
+    const exited = new Promise((done) => host.once('exit', done));
+    host.kill('SIGTERM');
+    await Promise.race([exited, sleep(25000)]);
+    const after = rows(`SELECT id, taken_at, done_at FROM host_outbox WHERE id > ?`, mark2);
+    eq(after.filter((r) => r.taken_at && !r.done_at).length, 0, `a host stopped with messages in its line leaves none taken and unfinished: each is done or handed back (${after.filter((r) => r.done_at).length} done, ${after.filter((r) => !r.taken_at).length} back in line)`);
+    assert(after.filter((r) => !r.taken_at).length >= 1, 'and what it held and never started was handed back, not only never taken');
+    // Back in line is for the next run of this host; none comes in this
+    // suite, so they are taken out of the line rather than left to be typed
+    // by a host a later section starts.
+    const db = new Database(DB_PATH);
+    try { db.prepare(`DELETE FROM host_outbox WHERE id > ? AND taken_at IS NULL`).run(mark2); } finally { db.close(); }
+    host = startHost();
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and a new run of the host is up again for what follows');
+    await sleep(WATCH_SETTLE_MS);
+  }
+
+  // A host killed outright says nothing at the end, so what it finished has
+  // to have been said already (QA, the re-measure's L1). It used to ride the
+  // next poll, after the whole batch, and every message of a batch the host
+  // had typed before it was killed was said lost on its desk: "send it
+  // again" about words the window had. The fixture makes the batch: one
+  // message is taken alone, and three more are queued while it is typed, so
+  // the next poll takes them together.
+  console.log('\n  work finished in the middle of a batch, and then the host is killed');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
+    const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    const byText = () => Object.fromEntries(rows(`SELECT payload, taken_at, done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)
+      .map((r) => [JSON.parse(r.payload).text, r]));
+    await chat('free', 'batch one');
+    assert(await until(() => (byText()['batch one']?.taken_at ? true : null), 15000), 'the fixture: the first message is taken alone');
+    for (const t of ['batch two', 'batch three', 'batch four']) await chat('free', t);
+    assert(await until(() => (clean(received()).includes('batch two') ? true : null), 30000), 'the fixture: the first of the batch of three is typed');
+    const saidAt = await until(() => (byText()['batch two']?.done_at ? { fourTyped: clean(received()).includes('batch four') } : null), 15000);
+    assert(saidAt && !saidAt.fourTyped, `a message finished in the middle of a batch is said done before the batch ends${!saidAt ? ' (never said)' : saidAt.fourTyped ? ' (said only once "batch four" was typed)' : ''}`);
+    const open = Object.entries(byText()).filter(([, r]) => r.taken_at && !r.done_at).map(([t]) => t);
+    host.kill('SIGKILL');
+    assert(open.length >= 1, `the fixture: the host is killed with work of the batch still unfinished (${open.join(', ') || 'none'})`);
+    const errorsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+    host = startHost();
+    const lost = await until(async () => {
+      const said = ((await turns('free')).rows ?? []).filter((r) => r.role === 'error' && !errorsBefore.has(r.id)).map((r) => r.text ?? '');
+      return said.length >= open.length ? said : null;
+    }, 20000);
+    assert(lost && open.every((t) => lost.some((s) => s.includes(`"${t}"`))), `the next run says what the killed one left unfinished, with its words (${open.join(', ')}) — ${(lost ?? []).join(' | ')}`);
+    assert(lost && !lost.some((s) => s.includes('"batch two"')), 'and not the message it had finished and said');
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and the new run is up for what follows');
+    await sleep(WATCH_SETTLE_MS);
+  }
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
@@ -1775,6 +2037,27 @@ try {
   host = startHost('host-test-1');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
+  // A host just started joins the desk's transcript where it stands, at its
+  // first watch tick (follow(id, 'end')), and a turn written before that
+  // tick is behind it for good. "Live" is the registration, which comes
+  // first, so the marker below was written ahead of the join whenever the
+  // tick came late: both rows after it red, the marker never on the floor
+  // (seen 2026-11-14, and on 2026-11-18 read in the log: SPOKEN-WHILE-BUSY
+  // nowhere in the run). So a turn is written first and waited for, and the
+  // relay is known to be reading before anything is timed against it.
+  const primer = `RELAY-JOINED-${Date.now()}`;
+  appendTurn({
+    type: 'assistant', uuid: `primer-${Date.now()}`, timestamp: new Date().toISOString(),
+    message: { role: 'assistant', content: [{ type: 'text', text: primer }] },
+  });
+  let joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(primer)) ? true : null), 3000);
+  for (let i = 0; !joined && i < 5; i++) {
+    // Written before the join, so never relayed: another, until one is.
+    const again = `${primer}-${i}`;
+    appendTurn({ type: 'assistant', uuid: `primer-${i}-${Date.now()}`, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: again }] } });
+    joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(again)) ? true : null), 3000);
+  }
+  assert(joined, 'the fixture: the restarted host is reading the desk\'s transcript before the timed part starts');
 
   const turnsBefore = ((await turns('free')).rows ?? []).length;
   const marker = `SPOKEN-WHILE-BUSY-${Date.now()}`;
@@ -2025,7 +2308,8 @@ try {
   writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
   for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
   for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
-  for (const t of ['cat', 'mkdir', 'sleep']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
+  // ls for node.sh's nvm lookup: launchd's PATH has /bin, this one may not.
+  for (const t of ['cat', 'mkdir', 'sleep', 'ls']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
   const instPath = `${instBin}:/usr/bin:${resolve(process.execPath, '..')}`;
   const install = (args, env = {}) => {
     const which = execFileSync('/bin/sh', ['-c', 'command -v launchctl'], { env: { PATH: instPath } }).toString().trim();
@@ -2033,12 +2317,57 @@ try {
     const out = execFileSync('/bin/bash', ['host/install.sh', ...args, `${inst}/projects`], { env: { PATH: instPath, HOME: inst, ...env } }).toString();
     return { out, conf: JSON.parse(readFileSync(`${inst}/.orchestratinator/host.json`, 'utf8')) };
   };
+  // First, because a drifted major makes every install below refuse, and a
+  // refusal throws out of the suite (the L4b mutant read "red by its exit").
+  const dockerMajor = /^FROM node:(\d+)/m.exec(readFileSync('Dockerfile', 'utf8'))?.[1];
+  const pickMajor = /^ORCH_NODE_MAJOR=(\d+)/m.exec(readFileSync('host/node.sh', 'utf8'))?.[1];
+  eq([pickMajor, dockerMajor], ['24', '24'], "the major the host is given is the board image's (node.sh against the Dockerfile's FROM)");
   const fromShell = install([], { ORCH_AUTH_TOKEN: 'shell-key-value' });
   eq(fromShell.conf.token, 'shell-key-value', 'install.sh with no --token writes an exported ORCH_AUTH_TOKEN to host.json');
   assert(/shared secret from ORCH_AUTH_TOKEN in this shell/.test(fromShell.out) && !/shell-key-value/.test(fromShell.out),
     'and says where it came from, without printing it');
   eq(install(['--token', 'flag-key-value'], { ORCH_AUTH_TOKEN: 'shell-key-value' }).conf.token, 'flag-key-value', '--token still wins over the shell');
   eq(install([]).conf.token, 'flag-key-value', "and with neither, host.json's token is kept");
+  // One Node major for what ships and what is tested (milestone audit
+  // 2026-11-17, finding 5): the host runs on Node 24, the major the board's
+  // image ships and these suites run on, not whatever node is first on PATH
+  // (the shell's default here is 20). The pick is host/node.sh's, and the
+  // LaunchAgent starts host/run.sh, which picks at every start, so an update
+  // that moves the major needs only the restart it already does (QA, the
+  // re-measure's L3). Each half has a row of its own (L4: the row before
+  // this passed with "first node on PATH", whose PATH held only a 24).
+  const plist = readFileSync(`${inst}/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`, 'utf8');
+  const progArgs = [.../<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1].matchAll(/<string>([^<]+)<\/string>/g) ?? []].map((m) => m[1]);
+  eq(progArgs, ['/bin/sh', resolve('host/run.sh')], 'the LaunchAgent starts run.sh, which picks the Node at each start, not a Node named at install');
+  // A Node 20 first on PATH, as on this machine, and a Node 24 under nvm.
+  const old = `${inst}/old`;
+  mkdirSync(old, { recursive: true });
+  writeFileSync(`${old}/node`, '#!/bin/sh\necho 20\n');
+  chmodSync(`${old}/node`, 0o755);
+  const nvm24 = `${inst}/.nvm/versions/node/v24.99.0/bin`;
+  mkdirSync(nvm24, { recursive: true });
+  try { execFileSync('ln', ['-sf', process.execPath, `${nvm24}/node`]); } catch { /* there */ }
+  const withOld = execFileSync('/bin/bash', ['host/install.sh', `${inst}/projects`], { env: { PATH: `${old}:${instPath}`, HOME: inst } }).toString();
+  assert(withOld.includes(`host runs on ${nvm24}/node (${process.version})`), `with a Node 20 first on PATH, install picks the Node 24 after it, not the first node — ${withOld.split('\n').find((l) => l.startsWith('host runs on')) ?? withOld.trim()}`);
+  // run.sh, as launchd starts it: a stand-in Node 24 that says what it was
+  // asked to run, so the row reads the pick and the exec without a host.
+  const runHome = `${inst}/run-home`;
+  const runNvm = `${runHome}/.nvm/versions/node/v24.98.0/bin`;
+  mkdirSync(runNvm, { recursive: true });
+  writeFileSync(`${runNvm}/node`, '#!/bin/sh\nif [ "$1" = -p ]; then echo 24; else echo "RAN $*"; fi\n');
+  chmodSync(`${runNvm}/node`, 0o755);
+  const ran = execFileSync('/bin/sh', ['host/run.sh'], { env: { PATH: `${old}:/usr/bin:/bin`, HOME: runHome } }).toString().trim();
+  eq(ran, `RAN ${resolve('host/index.js')}`, 'run.sh picks the Node 24 at start, past a Node 20 first on PATH, and runs the host on it');
+  let noNode = '';
+  try { execFileSync('/bin/sh', ['host/run.sh'], { env: { PATH: `${old}:/usr/bin:/bin`, HOME: `${inst}/nowhere` }, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (err) { noNode = `exit ${err.status}: ${String(err.stderr)}`; }
+  // Homebrew's node@24 is found wherever HOME points, so on a machine that has one this row has nothing to say.
+  if (['/opt/homebrew/opt/node@24/bin/node', '/usr/local/opt/node@24/bin/node'].some((f) => existsSync(f))) console.log('  - (a Homebrew node@24 is installed here: "no Node 24" cannot be staged)');
+  else assert(/^exit 1: no Node 24 found/.test(noNode) && /not started/.test(noNode), `and with no Node 24 it starts nothing and says why in the log — ${noNode.trim().split('\n')[0]}`);
+  writeFileSync(`${instBin}/node20`, '#!/bin/sh\necho 20\n');
+  chmodSync(`${instBin}/node20`, 0o755);
+  let refusal = '';
+  try { install([], { ORCH_NODE: `${instBin}/node20` }); } catch (err) { refusal = String(err.stderr ?? ''); }
+  assert(/^ORCH_NODE is .*node20, which is not Node 24/.test(refusal), `and a Node of another major is refused, in words, before anything is written — ${refusal.trim()}`);
 
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
@@ -2050,6 +2379,59 @@ try {
    * waited. Run against a stand-in board in this process, so each way a
    * request fails is one the case chose, and the backoff and the events
    * requeue are asserted beside it: this round adds evidence, not behaviour. */
+
+  /* Issue #31, in-process: how long an attachment is kept. Claude Code's own
+   * cleanupPeriodDays, 30 when unset or unreadable, never under a day. */
+  console.log('\n  how long an attachment is kept');
+  {
+    const sdir = `${FIX}/retention`;
+    mkdirSync(sdir, { recursive: true });
+    const settings = (v) => { writeFileSync(`${sdir}/settings.json`, v === undefined ? '{}' : JSON.stringify({ cleanupPeriodDays: v })); return `${sdir}/settings.json`; };
+    eq([retentionDays(settings(undefined)), retentionDays(settings(7)), retentionDays(settings(0)), retentionDays(settings('x')), retentionDays(`${sdir}/none.json`)],
+      [30, 7, 1, 30, 30], 'Claude Code\'s cleanupPeriodDays when set, 30 when it is not, and never less than a day');
+    const udir = `${FIX}/sweep`;
+    const old = 'aaaaaaaaaaaa1111', fresh = 'bbbbbbbbbbbb2222';
+    for (const id of [old, fresh]) { mkdirSync(`${udir}/${id}`, { recursive: true }); writeFileSync(`${udir}/${id}/f.txt`, id); }
+    mkdirSync(`${udir}/Not-an-upload`, { recursive: true });
+    const t = (Date.now() - 8 * 86400_000) / 1000;
+    utimesSync(`${udir}/${old}`, t, t);
+    utimesSync(`${udir}/Not-an-upload`, t, t);
+    eq(sweepUploads({ dir: udir, days: 7 }), 1, 'a sweep removes what is older than the retention');
+    eq([existsSync(`${udir}/${old}`), existsSync(`${udir}/${fresh}`), existsSync(`${udir}/Not-an-upload`)], [false, true, true],
+      'and leaves what is younger, and anything in the folder that is not an upload of its own');
+    eq(withAttachments('', ['/u/a b.png']), `${ATTACHED_HEADER}\n- /u/a b.png`, 'a message of files alone is the list alone');
+
+    // QA, PR #58 Info 3: two of fetchUpload's claims, against a board of a
+    // few lines. A body that ends short of its length is never put where the
+    // agent is told to look. (Node's fetch throws on it before fetchUpload's
+    // own size check runs, measured: that check is a second guard, so this
+    // row is about the outcome, whichever guard takes it.) And a file sent
+    // again is kept from that send: its folder's time moves, so a sweep at
+    // the retention leaves it.
+    const fdir = `${FIX}/fetch-unit`;
+    let served = 0;
+    const tiny = http.createServer((req, res) => { served++; res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '5' }); res.end('hello'); });
+    await new Promise((r) => tiny.listen(0, '127.0.0.1', r));
+    const short = net.createServer((sock) => sock.once('data', () => sock.end('HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: 10\r\nconnection: close\r\n\r\nabcd')));
+    await new Promise((r) => short.listen(0, '127.0.0.1', r));
+    try {
+      const sid = 'shortaaaa1111';
+      const why = await fetchUpload({ url: `http://127.0.0.1:${short.address().port}`, token: KEY, hostId: 'h', file: { id: sid, name: 'cut.bin' }, dir: fdir }).then(() => null, (e) => e.message);
+      assert(/^cut\.bin did not arrive whole/.test(why ?? ''), `a file that arrives short is refused — ${why}`);
+      eq([existsSync(`${fdir}/${sid}/cut.bin`), existsSync(`${fdir}/${sid}/cut.bin.part`)], [false, false], 'and nothing of it is left where the agent would be told to look');
+      const rid = 'resendbbbb2222';
+      const url = `http://127.0.0.1:${tiny.address().port}`;
+      const first = await fetchUpload({ url, token: KEY, hostId: 'h', file: { id: rid, name: 'again.txt' }, dir: fdir });
+      const old = (Date.now() - 8 * 86400_000) / 1000;
+      utimesSync(`${fdir}/${rid}`, old, old);
+      const second = await fetchUpload({ url, token: KEY, hostId: 'h', file: { id: rid, name: 'again.txt' }, dir: fdir });
+      eq([first === second, served], [true, 1], 'a file sent again is the same file, not fetched twice');
+      eq([sweepUploads({ dir: fdir, days: 7 }), existsSync(second)], [0, true], 'and it is kept from that send: a sweep at the retention leaves it');
+    } finally {
+      tiny.close(); short.close();
+    }
+  }
+
   console.log('\n  what the host log says');
   const STAMP = /^\[host\] (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z) /;
   const timedLines = (out, from, to) => {
@@ -2123,8 +2505,10 @@ try {
     'a refusal by status names the board as well as the path, and how long it took');
 
   const polled = await against({ work: 500 }, /retrying in 2s/);
-  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1 → 500 after \\d+ms; retrying in 1s`).test(polled.out),
-    'the work poll is told apart from the register that shares its warning');
+  // The poll names its run (`boot`, takeHostWork's guarantee; milestone
+  // audit 2026-11-17, finding 4), so the line ends on it.
+  assert(new RegExp(`GET ${BOARD_RE}\\/api\\/host\\/work\\?host_id=[^ ]+&wait=1&boot=[0-9a-f-]{36} → 500 after \\d+ms; retrying in 1s`).test(polled.out),
+    'the work poll is told apart from the register that shares its warning, and names the run of the host it is');
   eq(stand.seen.map((s) => s.route).slice(0, 4), ['register', 'work', 'register', 'work'],
     'and a failed poll still re-registers before the next, as it did');
 

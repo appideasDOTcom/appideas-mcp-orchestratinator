@@ -148,6 +148,50 @@ const AWAITING_NOTIFICATIONS = new Set(['permission_prompt']);
  * never mistaken for an echo — only the notification-only path is affected.
  */
 const ANSWER_ECHO_MS = 15_000;
+/**
+ * How long after a prompt was answered or worked past a heartbeat's
+ * "still asking" is not believed. The host reads the pane and then
+ * registers, so its reading can be older than the answer that closed the
+ * prompt; a heartbeat a minute later says it again if the window really
+ * still asks.
+ */
+const RESAY_QUIET_MS = 10_000;
+
+/**
+ * What becomes of work an earlier run of a host took and never finished
+ * (takeHostWork in src/db.js has the guarantee; milestone audit 2026-11-17,
+ * finding 4). Handed out again: work that only reads, which is harmless to
+ * do twice (no keystroke, no window opened or closed). Everything else acts
+ * on a window or a seat and may have half happened, so it is closed and said
+ * on its desk as an error turn, in words that say what to do. A chat's turn
+ * quotes the message, and an error turn is what hands a pending message's
+ * words back to the box on the page. A lost answer to a question needs no
+ * more: if the window still asks, the host's heartbeat raises it again
+ * (the permission_request case). An update has its own record and timeout
+ * (src/updates.js), so it is closed and nothing is said on a desk.
+ */
+export const REHANDED_WORK = new Set(['prompt', 'sessions', 'read', 'recent', 'search', 'browse', 'rescan']);
+export function lostWorkWords(item) {
+  const text = typeof item?.payload?.text === 'string' ? item.payload.text.trim() : '';
+  const quoted = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  switch (item?.kind) {
+    // "May not have", because the board cannot know: a host says an item
+    // finished as soon as it is (sayDone), but one killed between typing a
+    // message and saying so has typed it (QA, the re-measure's L1).
+    case 'chat':
+      return quoted
+        ? `may not have been sent: the host restarted while this message was in line. If it is not in the conversation, send it again — "${quoted}"`
+        : 'may not have been sent: the host restarted while the message (its files only) was in line. If it is not in the conversation, send it again';
+    case 'permission': case 'answer': case 'press':
+      return 'your answer may not have reached the window: the host restarted while it was in line. If the window still asks, the question is on the floor again; answer it there';
+    case 'interrupt':
+      return 'the stop may not have reached the window: the host restarted while it was in line. If the desk is still working, press stop again';
+    case 'update':
+      return null;
+    default:
+      return `"${item?.kind}" may not have happened: the host restarted before it was done. Check the desk and do it again if it is needed`;
+  }
+}
 
 /**
  * Events that prove a human is no longer the blocker, because work happened.
@@ -181,16 +225,20 @@ export function commandOf(text) {
  * no way to read it from outside — and anything not on it passes through as
  * typed, confirmed on the window's record of having run it.
  *
- * `/model` and `/effort` are not sent as commands at all: as commands they
- * save the person's machine-wide default ("saved as your default for new
- * sessions"), and a change from the floor is this session's only (costmo,
- * #10 Decided 4, 2026-11-03). The host drives the window's picker instead.
+ * `/model <name>` and `/effort <level>` go to the window as typed, like the
+ * rest, and so save the person's default for new sessions on that machine
+ * ("saved as your default for new sessions") — costmo's ruling, 2026-11-14,
+ * so the floor does what the window and the editor do. It reverses #10
+ * Decided 4 (2026-11-03), under which a change from the floor was that
+ * session's only and the host drove the window's picker to make it so; the
+ * reasoning for the commands over the picker is beside send() in
+ * host/window.js.
  */
 export const FLOOR_COMMANDS = [
   { name: 'clear', args: false, hint: 'start a new conversation on this desk', receipt: 'the new conversation\u2019s first record' },
   { name: 'compact', args: false, hint: 'summarise the conversation to free context', receipt: 'the window compacting' },
-  { name: 'model', args: 'name', hint: 'change the model for this session only', receipt: 'the window\u2019s own picker' },
-  { name: 'effort', args: 'level', hint: 'change the effort level for this session only', receipt: 'the window\u2019s own picker' },
+  { name: 'model', args: 'name', hint: 'change the model, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
+  { name: 'effort', args: 'level', hint: 'change the effort level, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
 ];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -514,6 +562,124 @@ export const NAME_WHY = 'An agent or channel name is letters, digits, dots, dash
  * a minute away). The page has its own copy (`moveBlockedWords` in
  * src/ui/floor.js); test/floor.mjs holds the two to one sentence.
  */
+/* How long a seat that was left ignores its closed window's last hooks (ingestHookEvent). */
+const LEFT_HOLD_MS = 60_000;
+
+/** Why a seat is not moved to another floor by the card: the move rebinds a folder, and this desk is not its folder's. */
+export const SEAT_NO_MOVE = 'This is one of several desks of this agent in one folder, so there is no folder to rebind for it. For a session of it on another floor, use Take a desk there and choose New desk here; Leave room takes this one away.';
+
+/* How long a second session made for a meeting room is left alone: after it
+   is made (its room is recorded a moment later, by the room's window), and
+   after its room ends (a reload of the room's window ends the room and opens
+   it again within a second or two). */
+const TWIN_NEW_S = 30;
+const TWIN_ENDED_S = 15;
+/* How long one whose host never seated it is kept before its name is given
+   back, and how long a host is given to close one before it is asked again. */
+const TWIN_UNSEATED_S = 120;
+const TWIN_CLOSE_RETRY_MS = 30_000;
+/* How long the board watches an open room it has found silent before it
+   reads the silence as the room's window being gone. A room that is open
+   and unheard for MEETING_LIVE_SECONDS is two things the board cannot tell
+   apart at one look: a window that crashed, and one that was stopped with
+   everything else (a laptop asleep), where the page poll that runs this
+   sweep reaches the board before the room's touch does. QA measured the
+   second closing a session whose meeting was never ended (PR #57 finding
+   1: a browser stopped 165 s, closed 2 of 2). So silence counts from the
+   look that first finds it: a window that is there says so within its
+   30 s touch, or within Chrome's one wake-up a minute when it is hidden,
+   and 90 s is past both. A crashed window's session closes that much
+   later than it did, which nobody is waiting on. The suites shorten it. */
+const TWIN_UNHEARD_MS = Math.max(0, Number(process.env.ORCH_TWIN_UNHEARD_MS ?? 90_000));
+
+/**
+ * Close the second sessions that are in no meeting room now (costmo,
+ * 2026-11-16: "Close it" — its window closes and the extra desk leaves the
+ * floor, so the agent is back to one desk; the conversation stays in the
+ * folder for History and for Resume).
+ *
+ * A second session made for a room (`for_meeting`) belongs to rooms: it is
+ * left while any room that names it as present is live or ended only a
+ * moment ago, and closed otherwise — End meeting, a Remove, Bring back, or
+ * the room's window gone without a word: not live after
+ * MEETING_LIVE_SECONDS, and still unheard TWIN_UNHEARD_MS after the look
+ * that first found it so (`stillWatched`; a window that slept is not gone).
+ * Closed is the desk's own Leave: the host closes its window and drops the
+ * seat, and its `unbound` takes the row away.
+ *
+ * Never mid-turn. Leave refuses a working desk, and so does this: the
+ * session is closed when its turn has ended, at a later look. Asked of a
+ * host once in TWIN_CLOSE_RETRY_MS, not at every look.
+ *
+ * Run from the routes a page polls and the ones a room's window calls, not
+ * on a timer of the board's own: with no page open nobody is looking at the
+ * floor, and the next page to open runs it.
+ */
+export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {}) {
+  const closed = [];
+  // An open room that is not live: held while the board has not yet watched
+  // it stay silent for TWIN_UNHEARD_MS. The watch is kept by the room's last
+  // touch, so one heard from and silent again later is watched afresh, with
+  // no look needed in between to notice it was live.
+  const stillWatched = (r) => {
+    if (r.ended_at) return false;
+    const seen = live.unheard.get(r.id);
+    if (!seen || seen.live_at !== r.live_at) {
+      live.unheard.set(r.id, { at: nowMs, live_at: r.live_at });
+      return TWIN_UNHEARD_MS > 0;
+    }
+    return nowMs - seen.at < TWIN_UNHEARD_MS;
+  };
+  for (const t of store.listTwins()) {
+    if (!t.for_meeting) continue;
+    const k = deskKey(t.channel, t.agent);
+    const h = store.hostedDesk(t.channel, t.agent);
+    if (!h) {
+      // Never seated: the host refused it or was not there. Its name goes
+      // back, whatever room still lists it — a room cannot hold a desk that
+      // does not exist, and its window says so when the seat goes.
+      if (t.age_s >= TWIN_UNSEATED_S) {
+        store.unseat(t.channel, t.agent);
+        store.retireAgent(t.channel, t.agent);
+        store.dropTwin(t.channel, t.agent);
+      }
+      continue;
+    }
+    if (t.age_s < TWIN_NEW_S) continue;
+    // `ended`: a room ended by its End meeting button just now, which is
+    // final — the moment's grace is for a window that may be reloading.
+    const held = store.meetingsOn(t.channel)
+      .filter((r) => r.participants.some((p) => p.agent === t.agent && !p.absent))
+      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || stillWatched(r));
+    if (held) continue;
+    const last = store.lastTurns().find((x) => x.channel === t.channel && x.agent === t.agent) ?? null;
+    if (switchable(h, last, nowMs, { editorOk: true }).error) continue;
+    if (nowMs - (live.closing.get(k) ?? 0) < TWIN_CLOSE_RETRY_MS) continue;
+    live.closing.set(k, nowMs);
+    store.logAdmin(t.channel, 'desk.leave', { actor: 'board', target: t.agent, detail: `${h.cwd} — a second session of ${t.base}, in no meeting room now` });
+    store.enqueueHostWork(h.host_id, t.channel, t.agent, 'unbind', { queued_at: new Date(nowMs).toISOString() });
+    live.wake(h.host_id);
+    closed.push(k);
+  }
+  return closed;
+}
+
+/** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
+export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor opened in that folder is the other desk, so this conversation stays in the floor\'s window; Open in tmux reaches it.';
+
+/**
+ * A bind that would take a name from a working seat: the folder is being
+ * bound to names one of its extra desks already carries on that floor.
+ */
+export function seatWorkingWords(channel, agent) {
+  return `${agent} already has a desk on ${channel} in this folder, and it is working — its host says so, or its last turn is a tool call. Binding the folder to that name closes that desk's window mid-turn. Wait for it to finish, or stop it first.`;
+}
+
+/** A host from before seats (host/seats.js) cannot be asked for one. */
+export function noSeatsWords(hostName) {
+  return `The host ${hostName ?? 'for this folder'} runs a build from before one agent could have several sessions. Update it (the board's Update does), and this will go through.`;
+}
+
 export function noHostWords(hostName) {
   return hostName
     ? `The host ${hostName} is not on this board right now, so there is nobody to bind it.`
@@ -558,10 +724,15 @@ const MEETING_DESKS_MAX = 24;
  *   since      — the turn its part of the transcript starts after: the
  *                desk's newest turn when it first joined, kept from then on
  */
-export function meetingSeat(agent, h, prev, lastTurnId) {
+export function meetingSeat(agent, h, prev, lastTurnId, base = null) {
   const sid = h?.sdk_session_id && !String(h.sdk_session_id).startsWith('host:') ? h.sdk_session_id : null;
   return {
     agent,
+    // Whose second session this is, when it is one (desk_twins). Kept in the
+    // record because the desk is closed when the room ends: Resume makes it
+    // again under this name, from this agent's desk, on the conversation
+    // below.
+    ...(base ?? prev?.base ? { base: base ?? prev.base } : {}),
     session_id: sid ?? prev?.session_id ?? null,
     host: h?.host_name ?? prev?.host ?? null,
     window: (h?.cwd ? h.cwd.split('/').filter(Boolean).pop() : null) ?? prev?.window ?? null,
@@ -693,6 +864,17 @@ function askForOptions(store, live, channel, agent, requestId) {
  * this", is not an answer and is left out here as it is there. A lone
  * single-select draws no tab strip; anything else does.
  *
+ * One layout has no free-text row at all: a single-select where any option
+ * carries a `preview`. The window draws it side by side, the choices beside
+ * the highlighted one's preview, and "Type something." is not among them
+ * (measured on 2.1.325, 2026-11-14: three choices on the pane where this
+ * built four). The row is left out for it, because a row offered here and
+ * absent there is a digit that moves nothing. A multi-select given previews
+ * is drawn as any other multi-select and keeps its row. The hook sends the
+ * fact as `preview: true` (plugin/hooks/report.mjs); the call's own input
+ * has the text. The keys for that layout are the host's, read off the pane
+ * at the moment of pressing (`previewingOf`, host/window.js).
+ *
  * Null when the numbering cannot be trusted: no questions, a choice with no
  * label, or a list long enough that the hook may have cut it
  * (plugin/hooks/report.mjs keeps 8 questions of 12 choices; the tool allows 4
@@ -709,6 +891,7 @@ export function formFromInput(input) {
     const given = Array.isArray(q?.options) ? q.options : [];
     if (!str(q?.question) || !given.length || given.length >= 12 || given.some((o) => !str(o?.label))) return null;
     const multi = q.multiSelect === true;
+    const previewed = !multi && given.some((o) => o?.preview === true || (typeof o?.preview === 'string' && o.preview.trim() !== ''));
     const options = given.map((o, k) => ({
       n: k + 1,
       text: str(o.label),
@@ -716,7 +899,7 @@ export function formFromInput(input) {
       checked: multi ? false : null,
       other: false,
     }));
-    options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
+    if (!previewed) options.push({ n: given.length + 1, text: multi ? 'Type something' : 'Type something.', checked: multi ? false : null, other: true });
     questions.push({
       tab: i, tab_title: str(q.header), strip, question: str(q.question),
       kind: multi ? 'multi' : 'single', options, cursor: 0, submit: multi,
@@ -867,11 +1050,21 @@ export function unansweredOf(questions, answers) {
  * Every mechanic here was measured on a real prompt, and two of them are not
  * what you would guess:
  *
- *   - on a single-select a digit only *moves the cursor*; Enter is what selects,
- *     and selecting advances to the next tab by itself;
+ *   - on a single-select a digit *selects*, and selecting advances to the
+ *     next tab by itself, so an Enter after it answers that next tab;
  *   - on a multi-select a digit *toggles that box outright* and leaves the
  *     cursor where it was, so choices are pressed by number and Enter is never
  *     used — there it would toggle whatever the cursor happens to be on.
+ *
+ * One layout is the exception, and its keys are not written here: a
+ * single-select whose options carry previews takes the digit as a move and
+ * Enter as the choice (measured on 2.1.325, 2026-11-14). This still emits the
+ * digit alone for it. The host adds the Enter when the pane it is about to
+ * press into is drawn that way, having read the cursor on the row
+ * (`previewingOf`, `selectRow` in host/window.js). It is the host's because
+ * the pane is what says which layout a question got, for a form built from
+ * the call as for one read off the pane, and an Enter decided here on a
+ * wrong guess would answer the next question with its first row.
  *
  * Positions are counted from the left end rather than detected: which tab is
  * showing is marked by colour, and a plain capture has none. So the sequence
@@ -1066,6 +1259,25 @@ export function ingestHookEvent(store, body, live = null) {
   const event = str(body.hook_event_name) ?? 'unknown';
   const pid = Number.isInteger(Number(body.pid)) && Number(body.pid) > 0 ? Number(body.pid) : null;
 
+  // A seat that was left a moment ago takes nothing from its dying window.
+  // The host closes the window and then says the desk is gone, and the
+  // window's last hooks (SessionEnd, a Stop for the turn the close cut off)
+  // arrive around that, in no order. Every event upserts its session, which
+  // clears `ended_at`, and seats its desk (below), so one that landed after
+  // the desk was taken away put it back: a seat with no host, its name taken
+  // for good — measured on real windows, 2026-11-16: a second session asked
+  // back as qa-2 came back as qa-3, because the plugin's SessionEnd had
+  // re-seated qa-2 in the second it was left. The stand-in in the suites
+  // has no plugin, which is why they did not see it. Ignored for
+  // LEFT_HOLD_MS; a desk seated again under the name inside that (`bound`)
+  // is heard from at once.
+  const leftKey = deskKey(channel, agent);
+  const leftAt = live?.left?.get(leftKey);
+  if (leftAt != null) {
+    if (Date.now() - leftAt < LEFT_HOLD_MS) return { ok: true, ignored: 'left' };
+    live.left.delete(leftKey);
+  }
+
   store.upsertSession({
     session_id: sessionId,
     channel,
@@ -1142,10 +1354,18 @@ export function ingestHookEvent(store, body, live = null) {
     // qa-probe/scratch, 2026-11-03: a flag that stood for six minutes).
     if (event !== 'SessionStart' && store.clearCompacting(sessionId)) live?.publish(key, { type: 'compacting', compacting: null });
     // A prompt that was open is closed by work happening, whether it was
-    // answered from the floor or by the person sitting at the window.
-    if (live?.pending.has(key)) {
+    // answered from the floor or by the person sitting at the window. Work
+    // in THAT window: another session on the same desk (an editor in the
+    // repo) working is not an answer, and its PreToolUse used to close the
+    // floor's prompt while the window still stood on the question, which
+    // then sent no hook to raise it again (milestone audit 2026-11-17,
+    // finding 1, probe P1). A prompt with no session recorded (the
+    // notification's, from before this) closes as it always did.
+    const open = live?.pending.get(key);
+    if (open && (!open.session_id || open.session_id === sessionId)) {
       live.pending.delete(key);
       live.publish(key, { type: 'permission', request: null });
+      live.clearedAt?.set(key, Date.now());
     }
     // Work happening is the proof an answer landed, so there is nothing left to
     // put back. Without this an old answered prompt could be resurrected by a
@@ -1264,6 +1484,8 @@ export function ingestHookEvent(store, body, live = null) {
       // that has since closed — the window itself is answered with a keystroke.
       live?.pending.set(key, {
         request_id: `${sessionId}:${body.tool_name ?? 'tool'}:${Date.parse(new Date().toISOString())}`,
+        // The window asking, so only its own work closes the prompt (above).
+        session_id: sessionId,
         tool: str(body.tool_name) ?? 'tool',
         // A question is a form, and the host goes and reads it off the pane —
         // a walk of the tabs, a second or two. Until it comes back the panel
@@ -1330,6 +1552,7 @@ export function ingestHookEvent(store, body, live = null) {
       if (kind === 'permission_prompt' && live && !open) {
         live.pending.set(key, {
           request_id: `${sessionId}:notification:${Date.now()}`,
+          session_id: sessionId,
           tool: null,
           // Never empty. "permission prompt —" with nothing after it tells the
           // operator less than the desk already told them.
@@ -1433,6 +1656,9 @@ export function createLive() {
   // back — unless it was kept here. See the answer_failed case in
   // applyHostEvent, which is what puts it back.
   const answered = new Map(); // deskKey -> { request_id, tool, summary, message, at }
+  // When a desk's prompt was last closed by its window's work, so a
+  // heartbeat that read the pane just before is not believed (RESAY_QUIET_MS).
+  const clearedAt = new Map(); // deskKey -> ms
   /**
    * Messages a window has taken but not yet turned into a turn.
    *
@@ -1512,8 +1738,20 @@ export function createLive() {
    * reached no floor at all (the gap PR #33 closed for a move only).
    */
   const takes = new Map();         // takeKey -> { host_id, path, channel, agent, mode, from_board, asked_at, state, at, error, code }
+  /** A second session being closed because it is in no meeting room now:
+   *  when the host was asked, so it is asked once and not at every poll. */
+  const closing = new Map();       // deskKey -> ms
+  /** Open meeting rooms the sweep found silent: when it first looked, and
+   *  the touch it was silent since (sweepTwins' `stillWatched`). */
+  const unheard = new Map();       // room id -> { at, live_at }
+  /** Seats that were just left: when, so their closed windows' last hooks
+   *  do not seat them again (ingestHookEvent). */
+  const left = new Map();          // deskKey -> ms
   return {
     takes,
+    closing,
+    unheard,
+    left,
     recent,
     searches,
     refused,
@@ -1526,6 +1764,7 @@ export function createLive() {
     reads,
     pending,
     answered,
+    clearedAt,
     delivery,
     sentAfter,
     rescanAsked,
@@ -1759,9 +1998,16 @@ function applyHostEvent(store, live, hostId, ev) {
     // it left is the agent's again without waiting for its window to connect.
     const releasedFrom = str(ev.released_from);
     if (releasedFrom) store.unretireAgent(channel, agent);
+    // A seat (one agent, several sessions: host/seats.js) that closed was
+    // retired as it went, so that a second session's row does not stand on
+    // the board after it. One made again under the same name is the
+    // operator seating it, as a move is.
+    if (str(ev.scope) === 'seat') store.unretireAgent(channel, agent);
+    // And it is heard from again, if it was left a moment ago (ingestHookEvent).
+    live.left.delete(key);
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
-    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: releasedFrom ? `${cwd} — released from ${releasedFrom}` : cwd });
+    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: `${cwd}${str(ev.scope) === 'seat' ? ' — a desk beside the folder\'s own' : ''}${releasedFrom ? ` — released from ${releasedFrom}` : ''}` });
     settleTake(live, hostId, channel, agent, { state: 'seated' });
     // Something starting on an archived floor brings it back (Decided 6).
     store.wakeChannel(channel, `${ev.from ? 'a desk moved onto it' : 'a host bound a desk on it'}: ${agent}`, agent);
@@ -1800,6 +2046,31 @@ function applyHostEvent(store, live, hostId, ev) {
   const state = (s) => {
     store.setHostedState(channel, agent, s);
     live.publish(key, { type: 'state', state: s });
+  };
+  /**
+   * A model or effort change the window did not make: what the floor asked
+   * for stops standing beside what the window has. `what` is 'model' or
+   * 'effort'.
+   *
+   * Nothing used to do this. An asked-for was cleared only by a confirmation
+   * — the window's line, a hook, a reply naming another model — so a change
+   * the host refused (a working desk) or the window did ("Model 'x' not
+   * found") left the select showing the model that was picked, not the one
+   * the window was on, with "x asked" beside it, until the model next
+   * changed. The host reports a reply's model only when it differs, so on
+   * that conversation nothing ever corrected it (costmo, 2026-11-14: fix it).
+   *
+   * Cleared where the route wrote it: the window's session — the one the
+   * event names, and the roster's on the hosted desk — and only on "the
+   * desk's newest" when neither is a real id (PR #32 finding 1). An empty
+   * string is the cleared value; NULL in these statements means "leave it".
+   */
+  const unask = (what) => {
+    const cleared = { [what]: '' };
+    const ids = [...new Set([str(ev.session_id), desk.sdk_session_id].filter((id) => id && !String(id).startsWith('host:')))];
+    if (ids.length) for (const id of ids) store.setRequestedFor(id, cleared);
+    else store.setRequested(channel, agent, cleared);
+    live.publish(key, { type: 'session', session_id: ids[0] ?? sessionId });
   };
 
   switch (str(ev.type)) {
@@ -1878,7 +2149,28 @@ function applyHostEvent(store, live, hostId, ev) {
       live.pending.delete(key);
       live.partial.delete(key);
       live.delivery.delete(key);
+      live.closing.delete(key);
       store.logAdmin(channel, 'desk.left', { target: agent, detail: desk.cwd });
+      // A seat that is left is gone, seat and row: it was one of several
+      // desks of an agent that is still on the board elsewhere, and what a
+      // folder's own desk leaves behind (the offline row, for a return to
+      // resume on) would here be a second row for one agent, on the board
+      // view and in every count, with nothing coming back to it. Its
+      // conversation stays in the folder, where History reads it.
+      if (desk.scope === 'seat') {
+        // Its conversations end with it: the host closed its window before
+        // it said this. Left open, they read as a live window for an hour
+        // (SESSION_STALE_MINUTES), and the next session made under the same
+        // name — a floor gives a closed second session's name to the next
+        // one — was drawn as live the moment the board named it, before any
+        // host had seated it (seen on the page: a desk for a session its
+        // host had refused).
+        store.endDeskSessions(channel, agent);
+        live.left.set(key, Date.now());
+        store.unseat(channel, agent);
+        store.retireAgent(channel, agent);
+        store.dropTwin(channel, agent);
+      }
       break;
     }
     case 'session': {
@@ -2019,7 +2311,7 @@ function applyHostEvent(store, live, hostId, ev) {
     /**
      * A slash command did its job, in its own terms: the host read the
      * command's own receipt (a new conversation's first record, the window
-     * compacting, the picker's "Set model to … for this session only", the
+     * compacting, the window's "Set model to … and saved as your default", the
      * /btw overlay) and says so here. The sentence is already on the desk as
      * a line labeled host; this is the structured half — the session the
      * desk moved to, the model or effort confirmed — and the note that ends
@@ -2031,23 +2323,28 @@ function applyHostEvent(store, live, hostId, ev) {
       if (!command) return false;
       const sid = str(ev.session_id) ?? sessionId;
       if (str(ev.model) || str(ev.effort)) {
-        // The picker names a model by its label ("Haiku 5.5"), the hooks by
-        // id; the id wins when the hook arrives, and clears the asked-for
-        // either way. Effort has no hook of its own: the picker's word, and
-        // the next Stop's effort.level, are its only confirmations.
+        // The window's line names a model by its label ("Haiku 5.5"), the
+        // hooks by id; the id wins when the hook arrives, and clears the
+        // asked-for either way. Effort has no hook of its own: the window's
+        // line, and the next Stop's effort.level, are its only confirmations.
         // On the window's session when the host names it — the one it drove
         // — and only on "the desk's newest live" for a host that does not.
-        // With two live sessions on one desk the picker's words landed on
+        // With two live sessions on one desk the window's words landed on
         // the other, newer one (QA, PR #32 finding 1).
         const named = !!str(ev.session_id);
         if (str(ev.effort)) { if (named) store.setEffort(sid, str(ev.effort)); else store.setDeskEffort(channel, agent, str(ev.effort)); }
-        // The picker's own words ("Opus 5.5") stand as the model until a hook
+        // The window's own words ("Opus 5.5") stand as the model until a hook
         // or the next reply names the id — a window on the older plugin
         // sends no PostModelSwitch, and the select snapped back to the
         // previous model until the reply came (costmo, 2026-11-03).
         if (str(ev.model)) { if (named) store.setModel(sid, str(ev.model)); else store.setDeskModel(channel, agent, str(ev.model)); }
         live.publish(key, { type: 'session', session_id: sid });
       }
+      // The window answered and confirmed nothing: "Model 'gpt' not found",
+      // a change it kept as it was. Its line is on the desk; what was asked
+      // for is no longer pending, and the select goes back to what stands.
+      if (command === 'model' && !str(ev.model)) unask('model');
+      if (command === 'effort' && !str(ev.effort)) unask('effort');
       if (ev.compacting) {
         store.setCompacting(sid, 'manual');
         state('working');
@@ -2224,6 +2521,11 @@ function applyHostEvent(store, live, hostId, ev) {
       // question (a different request_id) starts the clock over.
       const at = open?.request_id === rid ? open.at : now;
       live.pending.set(key, {
+        // The window's session, so another session's hooks on the desk (an
+        // editor's tool call) do not close it: closing a startup question is
+        // the host's `gone` (above). docs/backlog.md carried this as open
+        // from PR #2 until the milestone audit's finding 1 (2026-11-17).
+        session_id: sessionId,
         request_id: rid, tool: 'startup', startup: true, kind: str(ev.kind) ?? null,
         summary: asks, options, read: true, reading: false, at,
       });
@@ -2245,6 +2547,13 @@ function applyHostEvent(store, live, hostId, ev) {
       // explaining that it was not — and the browser hands the words back to
       // the compose box on an error turn, so the message is not lost by this.
       if (live.delivery.delete(key)) live.publish(key, { type: 'delivery', delivery: null });
+      // A model or effort change that ended here was not made, as far as
+      // anyone read: the desk was working, the window was asking, or its
+      // line never came. The host names the command it was typing (a host
+      // from before 2026-11-14 does not, and the asked-for stays as it did).
+      // If the window took it after all, its hook or its next reply confirms
+      // the model, as for a /model typed into the window.
+      if (str(ev.command) === 'model' || str(ev.command) === 'effort') unask(str(ev.command));
       // An answer that never took is not just an error to report — the window
       // is still holding that question, so offer it again rather than leaving
       // the operator to go and find it. The prompt was kept when they answered;
@@ -2293,6 +2602,49 @@ function applyHostEvent(store, live, hostId, ev) {
         store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
         state(again ? 'awaiting' : 'idle');
       }
+      break;
+    }
+
+    /**
+     * A question the window is still holding, said again by the host at
+     * every heartbeat (`pending` on /api/host/register): read off the pane's
+     * bottom line, so it is said for as long as the window asks, whatever
+     * the board has forgotten. `live.pending` is memory, so a board restart
+     * (every deploy) lost every open prompt, and a window standing on a
+     * question sends no further hook to raise it again. This case did not
+     * exist: the register route had applied `pending` since 2026-08-28
+     * (ddbfc42) into the default below, and the host never sent it
+     * (milestone audit 2026-11-17, finding 1, probe P3).
+     *
+     * Only when nothing stands on the desk: a prompt a hook raised carries
+     * the tool, the summary and the asked form, and is never replaced by
+     * this one. Not within a moment of the prompt being answered or worked
+     * past: the heartbeat read the pane a little before it arrived here, and
+     * the screen it read may be the one the answer has since cleared.
+     * Raised, the host is asked to read its choices (the prompt case), and
+     * one it finds no question for is closed there as gone.
+     */
+    case 'permission_request': {
+      if (live.pending.has(key)) break;
+      const cleared = live.clearedAt?.get(key) ?? 0;
+      const answered = live.answered.get(key)?.answered_at ?? 0;
+      if (Date.now() - Math.max(cleared, answered) < RESAY_QUIET_MS) break;
+      const summary = clip(str(ev.summary) ?? 'the window is waiting for a decision', 500);
+      live.pending.set(key, {
+        request_id: `${sessionId}:standing:${Date.now()}`,
+        session_id: sessionId,
+        tool: null,
+        summary,
+        message: null,
+        // Said by the host, not by a hook: cleared when the host's next
+        // heartbeat no longer names it (the register route).
+        standing: true,
+        at: now,
+      });
+      store.setAwaiting(sessionId, 'permission_request', summary);
+      state('awaiting');
+      live.publish(key, { type: 'permission', request: live.pending.get(key) });
+      askForOptions(store, live, channel, agent, live.pending.get(key).request_id);
       break;
     }
 
@@ -2361,6 +2713,9 @@ export function buildFloor(store, live = null, sessions = null) {
       scope: h.scope ?? null,
     });
   }
+  // One agent, several sessions: which desks are a second session of an
+  // agent on their floor (desk_twins in db.js).
+  const twins = new Map(store.listTwins().map((t) => [key(t.channel, t.agent), t]));
 
   // Every agent the board knows gets a desk, not only the ones whose windows
   // run the plugin. A floor is a channel, and a channel with four agents on the
@@ -2533,9 +2888,17 @@ export function buildFloor(store, live = null, sessions = null) {
           // Put away by hand. The page draws such a desk as a pill under its
           // storey and nothing else here changes — see hiddenDesks above.
           hidden: hiddenDesks.has(k),
+          // A second session of an agent on this floor: whose, which number,
+          // and whether it was made for a meeting room (and so closes when it
+          // is in none). The nameplate draws the number; the name and the
+          // face are the agent's own already (createTwin copies the profile).
+          twin: twins.has(k) ? { of: twins.get(k).base, n: twins.get(k).n, meeting: !!twins.get(k).for_meeting } : null,
           hosted: h
             ? {
                 host: h.host_name,
+                // Which of `hosts` runs it: the box reads that row's
+                // `uploads` to offer a paperclip or say why not (issue #31).
+                host_id: h.host_id,
                 live: h.live,
                 state: h.state,
                 window: h.cwd ? h.cwd.split('/').filter(Boolean).pop() : null,
@@ -2557,6 +2920,12 @@ export function buildFloor(store, live = null, sessions = null) {
                 // repo's .mcp.json). Says which file to look in, and what
                 // leaving takes the entry out of.
                 scope: h.scope ?? null,
+                // An extra desk in a folder that is another desk's (one
+                // agent, several sessions: host/seats.js). Its window is
+                // the floor's only — an editor opened in the folder is the
+                // folder's own desk — and it is a desk of its own, never
+                // the other one moved (the page's deskFate).
+                seat: h.scope === 'seat',
                 // Whether a window is sitting in that repo at all. `held` says
                 // null all through Claude Code's startup — nothing can be typed
                 // into a window still asking whether it may use an MCP server —
@@ -2729,6 +3098,13 @@ export function buildFloor(store, live = null, sessions = null) {
     // the words, or null. A host refused before it ever registered has no
     // row and is listed below from the refusal alone.
     refused: live?.refused?.get(h.host_id)?.why ?? null,
+    // Whether it can put a second desk in a folder (host/seats.js).
+    // Its own word at its last registration, kept on its row: a board that
+    // restarted still knows it (hosts.seats in src/db.js).
+    seats: !!h.seats,
+    // Whether it fetches attachments (issue #31; hosts.uploads): the box
+    // dims its paperclip, with why, for a desk whose host does not.
+    uploads: !!h.uploads,
   }));
   for (const [hostId, r] of live?.refused ?? []) {
     if (hosts.some((h) => h.host_id === hostId)) continue;
@@ -2762,7 +3138,7 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null, uploads = null }) {
   const router = express.Router();
   const live = createLive();
   // What this board speaks, for the registration check below. Null only in a
@@ -2801,9 +3177,13 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
 
   /**
    * A host announces itself and the desks it can run. Called at startup and
-   * then once a minute as a heartbeat, carrying any permission prompt it is
-   * still holding open — which is how `live.pending` survives a server restart
-   * without ever being written down.
+   * then once a minute as a heartbeat, carrying `pending`: every floor
+   * window of its whose bottom line says it is asking a question. That is
+   * how an open prompt survives a board restart, and another session's work
+   * on the desk, without `live.pending` ever being written down (the
+   * permission_request case in applyHostEvent). A host also re-registers at
+   * once after a failed poll, so a restarted board hears it within seconds.
+   * Until 2026-11-17 neither end did this (milestone audit, finding 1).
    *
    * The reply tells the host which SDK session each desk last had, so a host
    * that restarted can resume the conversation rather than start a new one.
@@ -2824,7 +3204,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       }
       live.refused.delete(hostId);
     }
-    store.registerHost(hostId, name, str(req.body?.tmux));
+    // `seats`: it can put a second desk in a folder (host/seats.js). A host
+    // from before seats says nothing, and is not asked: it would not know
+    // the work.
+    // `uploads`: it fetches a message's attachments (issue #31); a host from
+    // before them is refused files rather than handed ids it would ignore.
+    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -2860,7 +3245,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         // live board showed scope: null on every desk while the host suite was
         // green, because there the field had only ever arrived through the
         // `bound` event. A field crosses eight places; this was the missed one.
-        scope: str(d?.scope) === 'local' ? 'local' : str(d?.scope) === 'project' ? 'project' : null,
+        // 'seat': an extra desk in a folder that is another desk's — one
+        // agent with several sessions (host/seats.js).
+        scope: ['local', 'project', 'seat'].includes(str(d?.scope)) ? str(d.scope) : null,
       });
       store.ensurePersona(channel, agent);
       // The conversation the host is following, when it names one. The desk's
@@ -2914,8 +3301,42 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       live.publish(k, { type: 'state', state: 'offline' });
     }
 
+    // A new run of this host (`boot` changed): what an earlier run took
+    // and never finished is handed out again or said lost (LOST_WORK above).
+    // Before the pending prompts below, so a question whose answer was lost
+    // is raised again by this same heartbeat.
+    const boot = str(req.body?.boot);
+    if (boot) {
+      for (const item of store.unfinishedHostWork(hostId, boot)) {
+        if (REHANDED_WORK.has(item.kind)) { store.rehandHostWork(item.id); continue; }
+        store.doneHostWork(hostId, [item.id]);
+        const words = lostWorkWords(item);
+        if (words) applyHostEvent(store, live, hostId, { type: 'error', channel: item.channel, agent: item.agent, code: 'work_lost', message: words });
+      }
+      live.wake(hostId);
+    }
+    const asking = new Set();
     for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
-      applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' });
+      if (applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' }) || live.pending.has(deskKey(str(p?.channel), str(p?.agent)))) {
+        asking.add(deskKey(str(p?.channel), str(p?.agent)));
+      }
+    }
+    // A prompt this host said, that its window no longer shows: answered in
+    // the window, or worked past by a session the hook could not tie to it.
+    // Only the host's own (`standing`): a hook's prompt can be newer than
+    // the screen the heartbeat read, and is closed by the window's own work.
+    // A host from before `pending` sends none and said none.
+    if (Array.isArray(req.body?.pending)) {
+      for (const d of store.listHostedDesks()) {
+        if (d.host_id !== hostId) continue;
+        const k = deskKey(d.channel, d.agent);
+        const open = live.pending.get(k);
+        if (!open?.standing || asking.has(k)) continue;
+        live.pending.delete(k);
+        store.clearAwaiting(open.session_id);
+        store.clearDeskAwaiting(d.channel, d.agent);
+        live.publish(k, { type: 'permission', request_id: open.request_id, decision: 'gone', resolved: true });
+      }
     }
 
     res.json({ ok: true, host_id: hostId, desks: accepted, work_wait_max_ms: WORK_WAIT_MAX_MS });
@@ -2947,14 +3368,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     store.touchHost(hostId);
     const waitMs = Math.min(WORK_WAIT_MAX_MS, Math.max(0, Number(req.query.wait) || 0) * 1000);
+    // What it finished since its last poll, said before it is handed more
+    // (takeHostWork's guarantee). `boot` names this run of the host.
+    const boot = str(req.query.boot);
+    const done = String(req.query.done ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (done.length) store.doneHostWork(hostId, done);
 
-    let items = store.takeHostWork(hostId);
+    let items = store.takeHostWork(hostId, boot);
     if (!items.length && waitMs > 0) {
       let gone = false;
       req.on('close', () => { gone = true; live.wake(hostId); });
       await live.wait(hostId, waitMs);
       if (gone) return;
-      items = store.takeHostWork(hostId);
+      items = store.takeHostWork(hostId, boot);
       store.touchHost(hostId);
     }
     // How long each item sat here, by this server's clock alone. A host that
@@ -2964,6 +3390,43 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // while its laptop sleeps.
     const handedAt = Date.now();
     res.json({ work: items.map((w) => ({ ...w, waited_ms: Math.max(0, handedAt - Date.parse(iso(w.created_at))) })) });
+  });
+
+  /**
+   * A host stopping on purpose: what it finished, and what it took and
+   * never started, which goes back in line for its next run (takeHostWork's
+   * guarantee; milestone audit 2026-11-17, finding 4). Only items this run
+   * took are released: `boot` must match. A working host uses it too, with
+   * nothing to release, to say an item is finished while the rest of its
+   * batch is still going (sayDone in host/index.js).
+   */
+  router.post('/api/host/work/release', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    const boot = str(req.body?.boot);
+    if (!hostId || !boot) return res.status(400).json({ error: 'host_id and boot are required' });
+    const ids = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []);
+    const done = store.doneHostWork(hostId, ids(req.body?.done));
+    const released = store.releaseHostWork(hostId, boot, ids(req.body?.release));
+    res.json({ ok: true, done, released });
+  });
+
+  /**
+   * One staged attachment, for the host whose desk a message named it to
+   * (issue #31). Streamed, never read whole into memory; the host writes it
+   * to its own disk and owns it from there (host/uploads.js).
+   */
+  router.get('/api/host/upload', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.query.host_id);
+    const id = str(req.query.id);
+    if (!hostId || !id) return res.status(400).json({ error: 'host_id and id are required' });
+    if (!uploads) return res.status(404).json({ error: 'this board takes no attachments' });
+    store.touchHost(hostId);
+    const f = uploads.forHost(id, hostId);
+    if (f.error) return res.status(f.status).json({ error: f.error });
+    res.set({ 'content-type': 'application/octet-stream', 'content-length': String(f.size), 'cache-control': 'no-store' });
+    res.sendFile(f.path, { dotfiles: 'allow' }, (err) => {
+      if (err && !res.headersSent) res.status(500).json({ error: 'could not read the upload' });
+    });
   });
 
   /** What a host's desks are doing. A batch, because a streaming reply would
@@ -3010,6 +3473,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         dialog: f?.dialog === true,
         release: f?.release === true,
         refused: live.refused.get(h.host_id)?.why ?? null,
+        // Whether it can put a second desk in a folder: Take a desk offers
+        // "New desk here" only on a host that can.
+        seats: !!h.seats,
       };
     });
     // The names somebody has saved, by agent id — for the dialog to show the
@@ -3021,7 +3487,18 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     res.json({ now: new Date(nowMs).toISOString(), hosts, names });
   });
 
+  // The look that closes a second session once it is in no meeting room
+  // (sweepTwins): at most once in two seconds however many pages poll.
+  let sweptAt = 0;
+  const sweep = (force = false, opts = {}) => {
+    const now = Date.now();
+    if (!force && now - sweptAt < 2000) return;
+    sweptAt = now;
+    try { sweepTwins(store, live, now, opts); } catch { /* the floor is still served */ }
+  };
+
   router.get('/api/floor', (_req, res) => {
+    sweep();
     res.json(buildFloor(store, live, sessions));
   });
 
@@ -3183,13 +3660,28 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
-    if (!channel || !agent || !text) return res.status(400).json({ error: 'channel, agent and text are required' });
+    // Files attached in the box (issue #31): ids the upload route staged. A
+    // message may be files alone, as in every other chat client.
+    const ids = req.body?.files ?? null;
+    const hasFiles = Array.isArray(ids) && ids.length > 0;
+    if (!channel || !agent || (!text && !hasFiles)) return res.status(400).json({ error: 'channel, agent and text are required' });
     if (text.length > CHAT_MAX) return res.status(400).json({ error: `text must be ${CHAT_MAX} characters or fewer` });
+    let files = [];
+    if (hasFiles) {
+      if (!uploads) return res.status(409).json({ error: 'This board takes no attachments.', code: 'no_uploads' });
+      // A command is typed into the window as a command, and the window reads
+      // the line it is on as one: there is nowhere to put a file.
+      if (commandOf(text)) return res.status(400).json({ error: 'A command cannot carry files. Send the files as a message of their own.', code: 'command_files' });
+      const r = uploads.resolve(ids);
+      if (r.error) return res.status(r.code === 'upload_gone' ? 410 : 400).json(r);
+      files = r.files;
+    }
     // A slash command goes to the window as typed, and the host confirms it
     // on the command's own receipt (FLOOR_COMMANDS). Two are checked here,
     // because their failure would otherwise be a dialog left standing in
-    // somebody's window: a bare /model opens a picker nobody is driving, and
-    // an effort level the picker does not have cannot be reached.
+    // somebody's window, or a wait for a line the window never writes: a bare
+    // /model opens a picker nobody is driving, and an effort level that is
+    // not one of the window's is answered here, in the floor's words.
     const cmd = commandOf(text);
     if (cmd?.name === 'model' && !cmd.args) {
       return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. A bare /model opens a picker in the window.', code: 'picker' });
@@ -3203,8 +3695,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (asking) return res.status(409).json(asking);
 
     const h = check.hosted;
+    // The files go as ids with their names: the host fetches each one, writes
+    // it on its own disk and names the path in what it types (host/uploads.js).
+    // A host from before attachments ignores `files` and types the words
+    // alone, so a desk whose host has not said it takes them is refused here
+    // rather than sent a message missing what it was about.
+    if (files.length) {
+      if (!store.hostTakesUploads?.(h.host_id)) {
+        return res.status(409).json({ error: `${h.host_name ?? 'This desk’s host'} runs a build from before attachments. Update it to send files.`, code: 'host_no_uploads' });
+      }
+      uploads.grant(files.map((f) => f.id), h.host_id);
+    }
     // What the floor asked for, shown apart from what the window confirms —
-    // the picker's receipt or the hook clears it.
+    // the window's own line or the hook clears it.
     // On the window's session — the roster's, which the host reports on the
     // hosted desk — not the desk's newest live row, which with two live
     // sessions is the other one (QA, PR #32 finding 1). A desk whose window
@@ -3230,9 +3733,46 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // Mark where the conversation stood, so the delivery report can tell this
     // message's turn from an older one that says the same words — see sentAfter.
     live.sentAfter.set(deskKey(channel, agent), store.deskLastUserTurn(channel, agent)?.id ?? 0);
-    store.enqueueHostWork(h.host_id, channel, agent, 'chat', { text });
+    store.enqueueHostWork(h.host_id, channel, agent, 'chat', files.length ? { text, files } : { text });
     live.wake(h.host_id);
-    res.json({ ok: true, host: h.host_name ?? h.host_id });
+    res.json({ ok: true, host: h.host_name ?? h.host_id, ...(files.length ? { files: files.length } : {}) });
+  });
+
+  /**
+   * Stage one file for a message (issue #31). The body is the file's bytes,
+   * as-is; its name and media type ride in the query string. Answered with
+   * the id the message will name. Why this route is a different thing from
+   * every other one on the operator surface is written beside adminGuard's
+   * routes in src/web.js ("A route that takes bytes").
+   *
+   * adminGuard runs before a byte is read, and server.js keeps the JSON
+   * parser off this path, so the stream reaches uploads.stage untouched.
+   */
+  router.post('/api/floor/upload', auth.adminGuard, async (req, res) => {
+    if (!uploads) return res.status(409).json({ error: 'This board takes no attachments.', code: 'no_uploads' });
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > uploads.maxBytes) {
+      // Said before the body is read; the connection is closed rather than
+      // drained, so a browser sending 2 GB stops sending.
+      res.set('connection', 'close');
+      return res.status(413).json({ error: `larger than ${Math.round(uploads.maxBytes / 1048576)} MB`, code: 'too_large' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name : '';
+    const type = typeof req.query.type === 'string' ? req.query.type : req.headers['content-type'];
+    const r = await uploads.stage(req, { name, type });
+    if (r.error) {
+      if (r.status === 413) res.set('connection', 'close');
+      return res.status(r.status).json({ error: r.error, code: r.code });
+    }
+    uploads.sweep();
+    res.json({ ok: true, ...r.file });
+  });
+
+  /** Files taken out of the box before Send: gone from the board at once. */
+  router.post('/api/floor/upload/discard', auth.adminGuard, (req, res) => {
+    if (!uploads) return res.json({ ok: true, removed: 0 });
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 100) : [];
+    res.json({ ok: true, removed: uploads.discard(ids) });
   });
 
   /**
@@ -3248,6 +3788,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
     const h = store.hostedDesk(channel, agent);
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
+    // Not a seat's conversation (one agent, several sessions): an editor
+    // opened in the folder connects as the folder's own desk, so the
+    // conversation would carry on there under another desk's name.
+    if (h.scope === 'seat') return res.status(409).json({ error: SEAT_NO_EDITOR, code: 'seat_no_editor' });
     store.enqueueHostWork(h.host_id, channel, agent, 'handback', {});
     live.wake(h.host_id);
     res.json({ ok: true });
@@ -3337,7 +3881,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!folder) {
       return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
     }
-    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false, fromBoard: str(req.body?.from_board) });
+    // `seat`: "New desk here" — a second desk for the folder's agent, on this
+    // floor, with a session of its own; the folder's own desk is left as it is.
+    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false, fromBoard: str(req.body?.from_board), seat: req.body?.seat === true });
   });
 
   /**
@@ -3353,6 +3899,50 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const agent = str(req.query.agent);
     if (!hostId || !channel || !agent) return res.status(400).json({ error: 'host_id, channel and agent are required' });
     return res.json({ take: live.takes.get(takeKey(hostId, channel, agent)) ?? null });
+  });
+
+
+  /**
+   * Another session of an agent, on the floor it is already on: a second
+   * desk in the same folder, under the agent's name with a number (qa-2).
+   * What a meeting room asks for when it is given a desk that is already in
+   * another room (costmo, 2026-11-16), and what Resume asks for to bring
+   * such a session back (`as` its name then, `session_id` its conversation).
+   *
+   * No path in the request, as for the card's move: the folder and the host
+   * are the ones this board has the agent's desk at.
+   */
+  router.post('/api/floor/desk/twin', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const sessionId = str(req.body?.session_id) ?? null;
+    if (sessionId && !SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'That is not a session id.', code: 'bad_session' });
+    const as = str(req.body?.as) ?? null;
+    if (as && !NAME_RE.test(as)) return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
+    const nowMs = Date.now();
+    const h = store.hostedDesk(channel, agent);
+    const hostRow = h ? store.listHosts().find((x) => x.host_id === h.host_id) ?? null : null;
+    if (!h || h.state === 'offline' || !hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
+      return res.status(409).json({ error: noHostWords(hostRow?.name ?? h?.host_name ?? h?.host_id ?? null), code: 'no_host' });
+    }
+    if (!hostRow.seats) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
+    const base = store.twinOf(channel, agent)?.base ?? agent;
+    // Asked for by name and there already, as this agent's: that is it.
+    const there = as ? store.twinOf(channel, as) : null;
+    if (there && there.base === base && store.hostedDesk(channel, as)?.state !== 'offline' && store.hostedDesk(channel, as)) {
+      return res.json({ ok: true, agent: as, base, existing: true });
+    }
+    const id = store.createTwin(channel, base, { forMeeting: req.body?.meeting === true, as });
+    if (!id) return res.status(409).json({ error: `No name is free on ${channel} for another session of ${base}.`, code: 'no_name' });
+    store.logAdmin(channel, 'desk.twin', { target: id, detail: `another session of ${base}, at ${h.cwd}${sessionId ? ` — on ${sessionId}` : ''}` });
+    store.enqueueHostWork(hostRow.host_id, channel, id, 'seat', {
+      path: h.cwd, channel, agent: id, beside: { channel, agent }, session_id: sessionId,
+      known: sessionId ? (store.turnsInSessions(channel, id, [sessionId])?.n ?? 0) > 0 : false,
+      open: true, queued_at: new Date(nowMs).toISOString(),
+    });
+    live.wake(hostRow.host_id);
+    res.json({ ok: true, agent: id, base, host: hostRow.name });
   });
 
   /**
@@ -3384,6 +3974,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!h || h.state === 'offline' || !hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
       return res.status(409).json({ error: noHostWords(hostRow?.name ?? h?.host_name ?? h?.host_id ?? null), code: 'no_host' });
     }
+    // A seat has no folder of its own to rebind: the move would rebind the
+    // folder's own desk instead, which is another desk.
+    if (h.scope === 'seat') return res.status(409).json({ error: SEAT_NO_MOVE, code: 'seat_no_move' });
     const folder = { path: h.cwd, bound: { channel, agent, scope: h.scope ?? null }, other_board: null };
     return seatDesk(res, { hostRow, folder, path: h.cwd, channel: to, agent, nowMs, open: true, via: 'from its nameplate card' });
   });
@@ -3403,7 +3996,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * `desk.take` row, the archived-floor wake and the host's bind work are
    * all here, so the card cannot drift from Take a desk (#18 Decided 2).
    */
-  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null, fromBoard = null }) {
+  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null, fromBoard = null, seat = false }) {
     // A folder bound to another instance is released from it and seated
     // here, when the request says which instance it is leaving. It used to
     // be refused outright ("Change it there"); costmo reversed that
@@ -3438,6 +4031,39 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (folder.bound && folder.bound.agent !== agent) {
       return res.status(400).json({ error: `This folder already names its agent — ${folder.bound.agent}. Only the floor can change.`, code: 'agent_fixed' });
     }
+    // "New desk here" (costmo, 2026-11-16): the folder's agent gets a desk
+    // on this floor as well, with a session of its own, and the desk it has
+    // — and every other one — is left running. Not a move: nothing is
+    // rebound, closed or retired. The agent keeps its name on a floor where
+    // nobody answers to it, and takes it with a number (qa-2) on one where
+    // somebody does, its own floor included.
+    if (seat) {
+      // A folder bound to another instance is released here (below), never
+      // given a second desk beside the one it has there: that desk is on
+      // the other instance, and nothing here could run it.
+      if (folder.other_board) return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, so it has no desk on this instance to sit beside. Take it here to release it from there.`, code: 'other_board', other_board: folder.other_board });
+      if (!folder.bound) {
+        return res.status(400).json({ error: 'That folder is not a desk yet, so there is no agent to seat a second time. Take the desk first.', code: 'not_bound' });
+      }
+      if (!hostRow.seats) return res.status(409).json({ error: noSeatsWords(hostRow.name), code: 'no_seats' });
+      const base = folder.bound.agent;
+      let id = base;
+      if (!store.nameFree(channel, base)) {
+        id = store.createTwin(channel, base, { forMeeting: false });
+        if (!id) return res.status(409).json({ error: `No name is free on ${channel} for another session of ${base}.`, code: 'no_name' });
+      } else {
+        store.unretireAgent(channel, id);
+        store.ensurePersona(channel, id);
+      }
+      store.logAdmin(channel, 'desk.take', { target: id, detail: `a new desk at ${path}, beside ${folder.bound.channel}/${base}${via ? ` — ${via}` : ''}` });
+      store.wakeChannel(channel, `a desk was taken on it: ${id}`, 'operator');
+      store.enqueueHostWork(hostRow.host_id, channel, id, 'seat', {
+        path, channel, agent: id, beside: { channel: folder.bound.channel, agent: base },
+        open, queued_at: new Date(nowMs).toISOString(),
+      });
+      live.wake(hostRow.host_id);
+      return res.json({ ok: true, mode: 'seat', host: hostRow.name, channel, agent: id, base });
+    }
     // A release is never a move, whatever floor it lands on: `from` names a
     // desk on THIS instance for the `bound` handler to unseat and retire,
     // and the names a folder carries on another instance are either nobody
@@ -3462,6 +4088,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         error: `${channel}/${agent} already sits at ${already.cwd} on ${already.host_name ?? already.host_id}. Pick another name, or leave that desk first.`,
         code: 'desk_taken',
       });
+    }
+    // A desk of this name in this very folder that is one of the folder's
+    // extra desks (a seat, host/seats.js) gives the name up to the folder's
+    // own binding: the host closes its window and removes it (`bind()`). So
+    // Leave's rule holds for it as for the desk that moves — never mid-turn.
+    // It was checked for neither: Leave on a working seat was refused and a
+    // move onto its name was taken (QA, PR #57 finding 3). The host refuses
+    // the same thing from the pane, for a window that started working since.
+    if (already && already.scope === 'seat' && already.cwd === path) {
+      const last = store.lastTurns().find((t) => t.channel === channel && t.agent === agent) ?? null;
+      if (isWorking(already, last) && already.state !== 'offline' && secondsSince(iso(already.host_seen), nowMs) < HOST_STALE_SECONDS) {
+        return res.status(409).json({ error: seatWorkingWords(channel, agent), code: 'working' });
+      }
     }
     // The seat exists from this moment, so the desk is drawn — as not hosted —
     // while the host works, and the name it was given is on it when it comes.
@@ -3829,7 +4468,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   // so a note about a desk that has gone from the floor still says "Bo".
   const roomOut = (r, personas = personasNow()) => r && ({
     ...r,
-    participants: r.participants.map((p) => ({ ...p, persona: personas.get(deskKey(r.channel, p.agent)) ?? p.agent })),
+    // A second session that closed with its room has no seat to be named
+    // from: it carries its agent's name (`base`).
+    participants: r.participants.map((p) => ({ ...p, persona: personas.get(deskKey(r.channel, p.agent)) ?? (p.base ? personas.get(deskKey(r.channel, p.base)) : null) ?? p.agent })),
     started_at: iso(r.started_at),
     updated_at: iso(r.updated_at),
     ended_at: r.ended_at ? iso(r.ended_at) : null,
@@ -3861,7 +4502,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   /** Each participant as it stands now, keeping what an earlier record knew. */
   const seatsNow = (channel, names, prev = []) => {
     const last = new Map(store.lastTurns().filter((t) => t.channel === channel).map((t) => [t.agent, t.id]));
-    return names.map((a) => meetingSeat(a, store.hostedDesk(channel, a), prev.find((p) => p.agent === a) ?? null, last.get(a) ?? 0));
+    return names.map((a) => meetingSeat(a, store.hostedDesk(channel, a), prev.find((p) => p.agent === a) ?? null, last.get(a) ?? 0, store.twinOf(channel, a)?.base ?? null));
   };
   const roomOr404 = (req, res) => {
     const id = Number(req.body?.id ?? req.query?.id);
@@ -3874,7 +4515,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   router.post('/api/floor/meeting', auth.adminGuard, (req, res) => {
     const channel = str(req.body?.channel);
     if (!channel) return res.status(400).json({ error: 'channel is required' });
-    const ok = seatedOn(channel, req.body?.agents);
+    // `empty`: a room whose every desk is in another room already — each
+    // joins as a second session the window makes a moment later.
+    const ok = req.body?.empty === true && Array.isArray(req.body?.agents) && !req.body.agents.length ? { names: [] } : seatedOn(channel, req.body?.agents);
     if (ok.error) return res.status(400).json(ok);
     const id = store.createMeeting(channel, seatsNow(channel, ok.names), MEETINGS_KEEP);
     res.json({ ok: true, room: roomOut(store.meeting(id)) });
@@ -3890,6 +4533,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const ok = Array.isArray(agents) && !agents.length ? { names: [] } : seatedOn(room.channel, agents);
     if (ok.error) return res.status(400).json(ok);
     store.setMeetingParticipants(room.id, [...seatsNow(room.channel, ok.names, room.participants), ...absentKept(room.participants, ok.names, req.body?.absent)]);
+    // A second session taken out of its room closes (sweepTwins), now.
+    sweep(true);
     res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
   });
 
@@ -3928,6 +4573,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // on now is not the conversation it had in this room.
     const here = room.participants.filter((p) => !p.absent);
     store.endMeeting(room.id, [...seatsNow(room.channel, here.map((p) => p.agent), here), ...room.participants.filter((p) => p.absent)]);
+    // A second session made for the room closes now that it has ended
+    // (sweepTwins) — at once for End meeting (`final`), after a moment for a
+    // window that went away and may be reloading.
+    if (req.body?.final === true) sweep(true, { ended: room.id });
     res.json({ ok: true });
   });
 

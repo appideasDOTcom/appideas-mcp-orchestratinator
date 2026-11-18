@@ -1,0 +1,200 @@
+[
+ [
+  "the window's first word does not name the room for the rest of its click's desks",
+  "src/ui/floor.js",
+  "if (batch && msg.meeting) for (const o of ui.outs.values()) if (o.batch === batch && o.meeting === 'new') o.meeting = msg.meeting;",
+  ""
+ ],
+ [
+  "a desk going into a meeting is redrawn only at the floor's next poll",
+  "src/ui/floor.js",
+  "if (boxed !== meetBoxOf(msg.channel, msg.agent)) render();\n      else if (!was",
+  "if (!was"
+ ],
+ [
+  "a desk let go by its meeting stays in the box until the next poll",
+  "src/ui/floor.js",
+  "else if (o.meeting) render();\n      else renderPanel();",
+  "else renderPanel();"
+ ],
+ [
+  "the room's window does not act on the floor's End meeting",
+  "src/ui/floor.js",
+  "else if (msg.t === 'end' && m.id != null && String(msg.meeting) === String(m.id)) endMeeting();",
+  ""
+ ],
+ [
+  "the floor does not close a window that did not hear it",
+  "src/ui/floor.js",
+  "for (const w of asked) if (!w.closed && holding.has(w)) { try { w.close(); } catch { /* not ours to close */ } }",
+  ""
+ ],
+ [
+  "a press on End meeting is not handled ahead of the storey",
+  "src/ui/floor.js",
+  "if (endCtl && ui.on) {",
+  "if (false) {"
+ ],
+ [
+  "Enter on a focused End meeting does nothing",
+  "src/ui/floor.js",
+  "svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"meet-end\"], svg.room [data-act=\"select-room\"]",
+  "svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"select-room\"]"
+ ],
+ [
+  "a storey with a box is clipped where one without is",
+  "src/ui/floor.js",
+  "const edge = PAD - 2 - (geo.boxes.length ? MEET_PAD_X : 0);",
+  "const edge = PAD - 2;"
+ ],
+ [
+  "a room that ended is still ending when it is resumed",
+  "src/ui/floor.js",
+  "for (const k of [...ui.meetEnding.keys()]) if (!boxed.has(k)) ui.meetEnding.delete(k);",
+  ""
+ ],
+ [
+  "who is in a meeting is not part of what the rooms depict",
+  "src/ui/floor.js",
+  "const sig = JSON.stringify([ui.floorFilter, shown, sel, meets]);",
+  "const sig = JSON.stringify([ui.floorFilter, shown, sel]);"
+ ],
+ [
+  "the box is drawn over its desks",
+  "src/ui/floor.js",
+  "for (const b of geo.boxes) track.appendChild(meetBox(b, c, meetEndingNow(b.id)));\n    for (const d of geo.order) track.appendChild(desk(d, geo.at.get(d.agent), c.channel));",
+  "for (const d of geo.order) track.appendChild(desk(d, geo.at.get(d.agent), c.channel));\n    for (const b of geo.boxes) track.appendChild(meetBox(b, c, meetEndingNow(b.id)));"
+ ],
+ [
+  "the desks are not boxed from the click that opens the window",
+  "src/ui/floor.js",
+  "ui.outs.set(outKey(channel, a), { at: Date.now(), id: null, meeting: 'new', batch: key });",
+  "ui.outs.set(outKey(channel, a), { at: Date.now(), id: null });"
+ ],
+ [
+  "a reloading room's desks are out of their meeting for the reload",
+  "src/ui/floor.js",
+  "ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: o.meeting ?? null });",
+  "ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: null });"
+ ],
+ [
+  "an open card stays where its desk was",
+  "src/ui/floor.js",
+  "if (cell) ui.detailsRect = cell.getBoundingClientRect();\n        }",
+  "}"
+ ],
+ [
+  "the placard never reads Ending",
+  "src/ui/floor.js",
+  "ui.meetEnding.set(key, Date.now());\n    say({ t: 'end', channel, meeting: id });",
+  "say({ t: 'end', channel, meeting: id });"
+ ],
+ [
+  "the box's edge is a hairline",
+  "src/ui/styles.css",
+  "stroke: var(--meet-line); stroke-width: 2.5px; vector-effect: non-scaling-stroke;",
+  "stroke: var(--meet-line); stroke-width: 1px; vector-effect: non-scaling-stroke;"
+ ],
+ [
+  "the storey lights under the End button",
+  "src/ui/styles.css",
+  ".deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomFloor",
+  ".deskPill:hover, .meetLabel:hover)) .roomFloor"
+ ],
+ [
+  "a press on In a meeting is not handled ahead of the storey",
+  "src/ui/floor.js",
+  "if (raiseCtl && ui.on) {",
+  "if (false) {"
+ ],
+ [
+  "the room's window is moved but not brought to the front",
+  "src/ui/floor.js",
+  "          w.moveTo(place.left, place.top);\n          w.focus();\n        };",
+  "          w.moveTo(place.left, place.top);\n        };"
+ ],
+ [
+  "a window larger than the screen is not made to fit it",
+  "src/ui/floor.js",
+  "if (place.width !== w.outerWidth || place.height !== w.outerHeight) w.resizeTo(place.width, place.height);",
+  ""
+ ],
+ [
+  "a tab with no handle sends no place with its focus",
+  "src/ui/floor.js",
+  "say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1), at, area });",
+  "say({ t: 'focus', channel, agent: keys[0].slice(channel.length + 1) });"
+ ],
+ [
+  "Enter on a focused In a meeting does nothing",
+  "src/ui/floor.js",
+  "closest?.('svg.room [data-act=\"meet-raise\"], svg.room [data-act=\"meet-end\"],",
+  "closest?.('svg.room [data-act=\"meet-end\"],"
+ ],
+ [
+  "the browser is asked for its leave though the window is on this screen",
+  "src/ui/floor.js",
+  "if (meetingElsewhere(was, area)) across().then(",
+  "if (true) across().then("
+ ],
+ [
+  "with the leave given, the move is not made again",
+  "src/ui/floor.js",
+  "try { if (ok && !w.closed) put(); } catch",
+  "try { if (false) put(); } catch"
+ ],
+ [
+  "the leave is asked on a desktop of one screen",
+  "src/ui/floor.js",
+  "if (!scr.isExtended || typeof window.getScreenDetails !== 'function') return Promise.resolve(false);",
+  "if (typeof window.getScreenDetails !== 'function') return Promise.resolve(false);"
+ ],
+ [
+  "PR #56 F1: a hidden desk in a meeting leaves its box (the box reads the floor's drawn desks alone)",
+  "src/ui/floor.js",
+  "drawn: desks.filter((d) => boxed(d) || (!d.hidden && !deskEmpty(d))),",
+  "drawn: desks.filter((d) => !d.hidden && !deskEmpty(d)),"
+ ],
+ [
+  "PR #56 F1: the card offers Hide desk on a desk in a meeting",
+  "src/ui/floor.js",
+  "      (hideWhy || meetWhy ? ' disabled' : '') +",
+  "      (hideWhy ? ' disabled' : '') +"
+ ],
+ [
+  "PR #56 F1: bulk Hide hides a desk in a meeting",
+  "src/ui/floor.js",
+  "if (why) { e.state = 'failed'; e.words = why; continue; }",
+  ""
+ ],
+ [
+  "PR #56: End's close timer closes whatever window holds the room's number when it fires (a resumed room's)",
+  "src/ui/floor.js",
+  "for (const w of asked) if (!w.closed && holding.has(w)) { try { w.close(); } catch { /* not ours to close */ } }",
+  "for (const w of new Set(still().map((k) => ui.popWins.get(k)).filter((w) => w && !w.closed))) { try { w.close(); } catch { /* not ours to close */ } }"
+ ],
+ [
+  "PR #56 Info 2 (QA's): a reloading room's desks are out of their meeting for the reload",
+  "src/ui/floor.js",
+  "ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: o.meeting ?? null });",
+  "ui.outs.set(k, { at: Date.now() - POP_TTL_MS + REJOIN_MS, id: o.id, held: false, meeting: null });"
+ ],
+ [
+  "PR #56 Info 3 (QA's): the leave is asked on a desktop of one screen",
+  "src/ui/floor.js",
+  "if (!scr.isExtended || typeof window.getScreenDetails !== 'function') return Promise.resolve(false);",
+  "if (typeof window.getScreenDetails !== 'function') return Promise.resolve(false);"
+ ],
+ [
+  "PR #56 Info 4 (QA's QP3): the storey lights under In a meeting",
+  "src/ui/styles.css",
+  ".rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover, .meetLabel:hover)) .roomFloor",
+  ".rooms.building svg.room:not(.selecting):hover:not(:has(.deskArrow:hover, .roomPut:hover, .roomSel:hover, .missBar:hover, .deskPill:hover, .meetEnd:hover)) .roomFloor"
+ ],
+ [
+  "PR #56 Info 5 (QA's QP4): a desk whose room's window closed leaves its box only at the next poll",
+  "src/ui/floor.js",
+  "setTimeout(() => { if (!isOut(msg.channel, msg.agent)) render(); }, REJOIN_MS + 50);",
+  "setTimeout(() => { if (!isOut(msg.channel, msg.agent)) renderPanel(); }, REJOIN_MS + 50);"
+ ]
+]

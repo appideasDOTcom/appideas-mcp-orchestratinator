@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -10,6 +11,7 @@ import { createWebRouter } from './web.js';
 import { createAuth } from './auth.js';
 import { buildCommit } from './build-info.js';
 import { createUpdates } from './updates.js';
+import { createUploads } from './uploads.js';
 import { HOST_STALE_SECONDS } from './floor.js';
 
 // Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
@@ -77,7 +79,9 @@ setInterval(() => {
   loopAt = performance.now();
   if (held > 1000) console.warn(`[orchestratinator] event loop held ${Math.round(held)}ms`);
 }, 250).unref();
-const STREAMS = new Set(['GET /api/floor/stream', 'GET /mcp']);
+// And the two ends of an attachment (issue #31): 100 MB at the page's or the
+// host's pace is not the board being slow, and a line for it would read as one.
+const STREAMS = new Set(['GET /api/floor/stream', 'GET /mcp', 'POST /api/floor/upload', 'GET /api/host/upload']);
 app.use((req, res, next) => {
   const t0 = performance.now();
   const what = `${req.method} ${req.path}`;
@@ -101,8 +105,14 @@ app.use('/mcp', auth.mcpGuard);
 // limit globally: 4mb stays the ceiling for everything an agent can post.
 const jsonBody = express.json({ limit: process.env.BODY_LIMIT ?? '4mb' });
 const jsonRestore = express.json({ limit: process.env.RESTORE_BODY_LIMIT ?? '128mb' });
-app.use((req, res, next) =>
-  (req.path === '/api/admin/backup/restore' ? jsonRestore : jsonBody)(req, res, next));
+// An attachment's body is the file itself (issue #31), streamed to disk by its
+// route after adminGuard has run, so no parser may touch it: a .json file sent
+// as application/json would otherwise be parsed here, against the 4mb limit.
+const UPLOAD_PATH = '/api/floor/upload';
+app.use((req, res, next) => {
+  if (req.path === UPLOAD_PATH) return next();
+  return (req.path === '/api/admin/backup/restore' ? jsonRestore : jsonBody)(req, res, next);
+});
 
 // One transport per MCP session (keyed by the mcp-session-id header).
 const transports = Object.create(null);
@@ -396,6 +406,19 @@ app.delete('/mcp', handleSessionRequest);
 
 // Checking GitHub for a newer build, and the update the host carries out.
 const updates = createUpdates({ store, sessions, version: VERSION, commit: COMMIT, hostStaleSeconds: HOST_STALE_SECONDS });
+// Attachments waiting for a host (issue #31; src/uploads.js). Beside the
+// database by default, so in the container they are on the /data volume and
+// a rebuild does not lose a file attached a moment before it.
+// ORCH_UPLOAD_MAX_BYTES is the suites' seam, so a cap can be met without
+// sending 100 MB; nothing in a deployment sets it.
+const uploads = createUploads({
+  dir: process.env.ORCH_UPLOAD_DIR ?? join(dirname(DB_PATH), 'uploads'),
+  ...(Number(process.env.ORCH_UPLOAD_MAX_BYTES) > 0 ? { maxBytes: Number(process.env.ORCH_UPLOAD_MAX_BYTES) } : {}),
+});
+uploads.sweep();
+setInterval(() => {
+  try { uploads.sweep(); } catch (err) { console.warn(`[orchestratinator] upload sweep failed: ${err.message}`); }
+}, 5 * 60_000).unref();
 updates.startTimer();
 
 // Dashboard at `/` (+ its /api/* endpoints). Mounted last so it can never shadow
@@ -407,6 +430,7 @@ app.use(createWebRouter({
   store,
   sessions,
   updates,
+  uploads,
   sessionStats,
   auth,
   closeSessionsFor,

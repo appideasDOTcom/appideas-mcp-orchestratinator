@@ -64,8 +64,13 @@ touched the same page script (here `src/ui/app.js`: #23's
 - **Read where the two meet.** Here that was the backlog dialog. It is
   async now and holds no text field, so #11's backdrop rule keeps
   closing it. Name the meeting point in the report.
-- **`npm test` in full.** Announce the ports on the channel first. The
-  count should be both sides' sums. Here it was 1,899 + 9 = 1,908 ✓.
+- **Each side's suites, not `npm test` in full.** Since 2026-11-16 the
+  full chain runs once, at the SHA that ships (CLAUDE.md, Conventions, and
+  QA's decisions/0015). Run the suites every file either side changed
+  reaches (the map is in CLAUDE.md), announcing the ports first. A suite's count should be both
+  sides' additions over the base's. On this merge the whole chain was
+  still run, and read 1,899 + 9 = 1,908 ✓. Run the whole chain only when
+  the merge is the release candidate, or when costmo asks.
 - **Each side's page check**, since the suites can't see the page:
   `check-select.mjs` for #23 and `run-check-backdrop.sh` for #11, on
   private ports (**verify-ui-change**). Both passed on the merged tree,

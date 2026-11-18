@@ -1,0 +1,8 @@
+[
+ [
+  "the room's Nudge click types into every desk chosen",
+  "src/ui/floor.js",
+  "    const to = nudge ? meetingNudgeChip(chosen.map((a) => deskIn(m.channel, a)).filter(Boolean), false).agents : chosen;",
+  "    const to = chosen;"
+ ]
+]

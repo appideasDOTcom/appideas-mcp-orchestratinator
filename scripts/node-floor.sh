@@ -19,7 +19,7 @@
 # never the version number. With a `node` on PATH that has it, nothing
 # changes. Otherwise the oldest Node under nvm that has it goes first on
 # PATH, said on stderr. Oldest, not newest: it is the one nearest the board's
-# image (node:22) and the one the suites were run on, and a major installed
+# image (node:24 since 0.12.11) and the one the suites were run on, and a major installed
 # yesterday should not become what every check runs on by being newest (the
 # first cut picked 26.13.0 the day it appeared beside 24.22.2). It picks
 # rather than refuses because the remedy is known and the same every time; it

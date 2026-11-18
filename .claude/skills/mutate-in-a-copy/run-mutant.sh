@@ -21,7 +21,8 @@ if python3 "$HERE/mutate.py" "$FILE" "$4" "$5"; then
   # Every suite is `test:<name>` in package.json but smoke, which is `smoke`.
   SCRIPT="test:$SUITE"; [ "$SUITE" = smoke ] && SCRIPT=smoke
   OUT="$(npm run "$SCRIPT" 2>&1)"
-  R="$(echo "$OUT" | grep -c '✗')"; G="$(echo "$OUT" | grep -c '✓')"
+  # ✗ for most suites; test:renew prints `FAIL <name>` for a red and `ok  <name>` for a green (PR #54).
+  R="$(echo "$OUT" | grep -E '✗|^FAIL ' | grep -cv '^FAIL ❌')"; G="$(echo "$OUT" | grep -cE '✓|^ok {2,}')"
   if [ "$R" = 0 ] && [ "$G" = 0 ]; then
     # No ✗ and no ✓: the suite never ran (a script name npm does not have, a
     # Node that cannot load the server). That is not a survivor, and "0
@@ -31,7 +32,7 @@ if python3 "$HERE/mutate.py" "$FILE" "$4" "$5"; then
   elif [ "$R" = 0 ]; then
     echo "MUTANT [$NAME] ($SUITE): 0 failing — SURVIVED ($G ✓)"
   else
-    echo "MUTANT [$NAME] ($SUITE): $R failing — $(echo "$OUT" | grep '✗' | head -1 | cut -c1-200)"
+    echo "MUTANT [$NAME] ($SUITE): $R failing — $(echo "$OUT" | grep -E '✗|^FAIL ' | grep -v '^FAIL ❌' | head -1 | cut -c1-200)"
   fi
 else
   echo "MUTANT [$NAME]: DID NOT APPLY"

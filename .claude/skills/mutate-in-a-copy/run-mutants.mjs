@@ -5,7 +5,7 @@
  * quote without a round of shell escaping. Written on 2026-11-02 after the
  * ninth mutant of a round was spent on quoting.
  *
- *   node .claude/skills/mutate-in-a-copy/run-mutants.mjs mutants.json [--dest <dir>]
+ *   node .claude/skills/mutate-in-a-copy/run-mutants.mjs mutants.json [--dest <dir>] [--control] [--logs <dir>]
  *
  * mutants.json is an array of [name, suite, file, old, new]:
  *   [["a pill is not the restore control", "floor", "src/ui/app.js",
@@ -26,11 +26,26 @@
  * use different ports (floor 8897, host 8896), so a floor mutant can run
  * beside a host mutant run — in its own --dest.
  *
+ * --control runs each suite named in the list once more at the end, with
+ * nothing mutated, and prints its reds. Ask for it whenever a mutant shows
+ * a red you did not predict. On 2026-11-14 a host mutant read 3 failing:
+ * the one predicted, and two in "hearing the desk while a message is still
+ * going in", 500 lines from the change, at load 5.5. Run again beside a
+ * control, the control read 320 ✓ and the mutant its one red. That control
+ * was a list entry whose new text was the old plus a space, which is a
+ * no-op by another name; this flag is the honest form of it.
+ *
+ * --logs keeps every run's whole output in <dir>, as <n>-<suite>.log for
+ * the list's nth mutant and control-<suite>.log. Only eight reds are
+ * printed, and nothing else of a run was kept: on 2026-11-16 a host mutant
+ * read "9 failing" beside eight printed rows, QA had predicted eight, and
+ * the ninth could only be had by running the three minutes again.
+ *
  * The copy is made once, outside the repo; the runner never touches the
  * working tree, and puts each file back whatever the suite did.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, copyFileSync, renameSync } from 'node:fs';
+import { readFileSync, copyFileSync, renameSync, mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 // A suite is started through scripts/node-floor.sh, which finds a Node that
@@ -44,14 +59,30 @@ const didNotRun = (out) => out.trim().split('\n').filter(Boolean).slice(-4).map(
 
 const D = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
-const spec = args.find((a) => !a.startsWith('--') && args[args.indexOf(a) - 1] !== '--dest');
+const spec = args.find((a) => !a.startsWith('--') && !['--dest', '--logs'].includes(args[args.indexOf(a) - 1]));
+const control = args.includes('--control');
 const destAt = args.indexOf('--dest');
 const dest = destAt >= 0 ? args[destAt + 1] : null;
-if (!spec) { console.error('usage: run-mutants.mjs <mutants.json> [--dest <dir>]'); process.exit(1); }
+const logsAt = args.indexOf('--logs');
+const logs = logsAt >= 0 ? args[logsAt + 1] : null;
+if (logs) mkdirSync(logs, { recursive: true });
+const keep = (name, out) => { if (logs) writeFileSync(join(logs, name), out); };
+if (!spec) { console.error('usage: run-mutants.mjs <mutants.json> [--dest <dir>] [--control] [--logs <dir>]'); process.exit(1); }
+// A red and a green, as the suites print them: ✗ and ✓ for most, and
+// `FAIL <name>` / `ok   <name>` at the start of a line for test:renew.
+// Counting ✗ alone read a renew mutant its suite had failed twice as
+// "0 failing — SURVIVED (0 ✓)" (2026-11-16; run-mutant.sh has counted both
+// since PR #54, and this runner had not been used on that suite). A count
+// of 0 ✓ beside 0 failing is a suite this cannot read, not a survivor.
+// Not `FAIL ❌ — N failure(s)`, which is how floor, admin and the rest
+// close a red run: counted, it read "3 failing" beside 2 ✗ (QA, PR #57
+// round 2).
+const isRed = (l) => l.includes('✗') || (/^FAIL /.test(l) && !/^FAIL ❌/.test(l));
+const isGreen = (l) => l.includes('✓') || /^ok {2,}/.test(l);
 const M = JSON.parse(readFileSync(spec, 'utf8'));
 const copy = execFileSync(`${D}/copy-repo.sh`, dest ? [dest] : [], { encoding: 'utf8' }).trim();
 console.log('copy:', copy);
-for (const [name, suite, file, oldS, newS] of M) {
+for (const [n, [name, suite, file, oldS, newS]] of M.entries()) {
   const f = join(copy, file);
   copyFileSync(f, `${f}.unmutated`);
   try {
@@ -60,14 +91,38 @@ for (const [name, suite, file, oldS, newS] of M) {
     const t0 = Date.now();
     const run = runSuite(copy, suite);
     const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
-    const red = out.split('\n').filter((l) => l.includes('✗'));
-    const green = out.split('\n').filter((l) => l.includes('✓')).length;
+    keep(`${n + 1}-${suite}.log`, out);
+    const red = out.split('\n').filter(isRed);
+    const green = out.split('\n').filter(isGreen).length;
     if (!red.length && !green) { console.log(`MUTANT [${name}] (${suite}): THE SUITE DID NOT RUN — not a result. Its last lines:\n${didNotRun(out)}`); continue; }
+    // A suite that stops on a throw prints a stack, not a ✗, and its own
+    // catch still fails the run: its exit is the verdict then. Read by ✗
+    // lines alone, such a run was reported SURVIVED (milestone round,
+    // 2026-11-17: install.sh refusing under a mutant threw out of the host
+    // suite, which said "host: 1 failed" and exited 1, with 28 rows unrun).
+    if (!red.length && run.status !== 0) {
+      const stop = out.split('\n').find((l) => /^(\w*Error|Error)[:\s]/.test(l.trim())) ?? out.trim().split('\n').pop() ?? '';
+      console.log(`MUTANT [${name}] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): RED by its exit (${run.status}), no ✗ printed: the suite stopped (${green} ✓ before it) — ${stop.trim().slice(0, 200)}`);
+      continue;
+    }
     console.log(`MUTANT [${name}] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing${red.length ? '' : ` — SURVIVED (${green} ✓)`}`);
     for (const l of red.slice(0, 8)) console.log(`    ${l.trim().slice(0, 220)}`);
     const threw = !red.length && out.match(/(TypeError|ReferenceError|SyntaxError)[^\n]*/);
     if (threw) console.log(`    (no ✗, but the run threw: ${threw[0].slice(0, 160)})`);
   } finally {
     renameSync(`${f}.unmutated`, f);
+  }
+}
+if (control) {
+  for (const suite of [...new Set(M.map((m) => m[1]))]) {
+    const t0 = Date.now();
+    const run = runSuite(copy, suite);
+    const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+    keep(`control-${suite}.log`, out);
+    const red = out.split('\n').filter(isRed);
+    const green = out.split('\n').filter(isGreen).length;
+    const stopped = !red.length && run.status !== 0;
+    console.log(`CONTROL [nothing mutated] (${suite}, ${Math.round((Date.now() - t0) / 1000)}s): ${red.length} failing, ${green} ✓${red.length || stopped ? ` — THE COPY IS RED WITHOUT A MUTANT${stopped ? ` (exit ${run.status}, no ✗: it stopped)` : ''}: these are not the mutants' reds` : ''}`);
+    for (const l of red.slice(0, 8)) console.log(`    ${l.trim().slice(0, 220)}`);
   }
 }
