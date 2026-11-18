@@ -3723,7 +3723,7 @@ try {
 
     await beat('boot-b');
     const said = (await errorsNow()).filter((t) => !before.includes(t));
-    assert(said.some((t) => t.startsWith('not sent: the host restarted before it typed this message, so send it again — "ship the release notes"')),
+    assert(said.some((t) => t.startsWith('may not have been sent: the host restarted while this message was in line. If it is not in the conversation, send it again — "ship the release notes"')),
       `run B registering: a message run A never finished is said on its desk, with its words, never typed twice — ${said.join(' | ')}`);
     assert(said.some((t) => /^the stop may not have reached the window/.test(t)), 'a stop is said too, with what to do');
     eq(said.length, 2, 'and nothing else is said: the item run A finished is not, and a read is not');

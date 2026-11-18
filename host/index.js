@@ -1942,6 +1942,14 @@ class Host {
           await this.current;
           this.current = null;
           this.acks.push(item.id);
+          // Said now when more of the batch is still to go, not on the next
+          // poll: that poll comes only after the whole batch, and a host
+          // killed before it had every item it finished said lost on its
+          // desk, a typed message among them as "send it again" (QA, the
+          // milestone audit's re-measure, L1). The last item of a batch
+          // rides the poll that follows at once. A failure leaves it for
+          // that poll, as before.
+          if (this.inHand.length) await this.sayDone();
         }
         backoff = 1000;
       } catch (err) {
@@ -1953,6 +1961,16 @@ class Host {
       }
     }
     if (watching) await watching;
+  }
+
+  /** What this run finished and has not said yet, told to the board now (the release route with nothing to release). */
+  async sayDone() {
+    const saying = this.acks.slice();
+    if (!saying.length) return;
+    try {
+      await this.request('/api/host/work/release', { method: 'POST', body: { host_id: this.cfg.hostId, boot: this.boot, done: saying, release: [] }, timeout: 5000 });
+      this.acks = this.acks.filter((id) => !saying.includes(id));
+    } catch (err) { warn(`finished work not said yet (${err.message}); it goes with the next work poll`); }
   }
 
   async stop() {

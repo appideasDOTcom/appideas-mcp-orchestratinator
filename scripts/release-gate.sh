@@ -54,9 +54,15 @@ load() { /usr/sbin/sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | xargs; }
 T0=$(date +%s)
 echo "### release gate · head $SHA · $CHANGES tracked change(s) · node $(node -v) · started $(date -u +%FT%TZ) · load $(load)" | tee "$LOG"
 
-# The packages: the lockfile's, or nothing here is what ships.
-if npm ls --all > "$OUT/npm-ls.txt" 2>&1; then LOCK=0; echo "### packages: node_modules matches package-lock.json" | tee -a "$LOG"
-else LOCK=1; echo "### packages: node_modules does NOT match package-lock.json (npm ls --all, in $OUT/npm-ls.txt): run npm ci" | tee -a "$LOG"; fi
+# The packages: the lockfile's, or nothing here is what ships. Two checks,
+# because `npm ls --all` alone passes a version that differs from the lock
+# but satisfies its range (QA, the milestone audit's re-measure, L2):
+# check-lock.mjs holds every package to the lock's exact version, and npm ls
+# still says what is missing, extraneous or invalid.
+npm ls --all > "$OUT/npm-ls.txt" 2>&1; LS=$?
+node scripts/check-lock.mjs > "$OUT/check-lock.txt" 2>&1; EXACT=$?
+if [ $LS -eq 0 ] && [ $EXACT -eq 0 ]; then LOCK=0; echo "### packages: node_modules is package-lock.json's ($(tail -1 "$OUT/check-lock.txt"))" | tee -a "$LOG"
+else LOCK=1; echo "### packages: node_modules is NOT package-lock.json's (npm ls --all exit $LS, in $OUT/npm-ls.txt; exact versions exit $EXACT, in $OUT/check-lock.txt): run npm ci" | tee -a "$LOG"; sed -n '1,6p' "$OUT/check-lock.txt" | tee -a "$LOG"; fi
 
 # Every suite.
 echo "### npm test · $(date -u +%FT%TZ)" | tee -a "$LOG"

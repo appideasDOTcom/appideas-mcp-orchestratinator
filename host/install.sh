@@ -80,30 +80,14 @@ if [ -z "$TOKEN" ] && [ -n "${ORCH_AUTH_TOKEN:-}" ]; then
   TOKEN_FROM="ORCH_AUTH_TOKEN in this shell"
 fi
 
-# The host runs on the Node major the release gate tests and the board's
-# image ships (costmo's ruling on the milestone audit's finding 5,
-# 2026-11-17: one major for what ships and what is tested; the Dockerfile's
-# FROM says which). Not "whatever node is first on PATH": on this machine
-# that is a Node 20 kept as the shell's default, and the host ran on it
-# while every suite ran the host on 24. ORCH_NODE names one outright;
-# otherwise the first Node 24 of: PATH, nvm's newest v24, Homebrew's node@24.
-# The shell's default node is left alone either way.
-NODE_MAJOR=24
-node_major() { "$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null; }
-if [ -n "${ORCH_NODE:-}" ]; then
-  NODE="$ORCH_NODE"
-  if [ "$(node_major "$NODE")" != "$NODE_MAJOR" ]; then
-    echo "ORCH_NODE is $NODE, which is not Node $NODE_MAJOR (the host runs on the major the board ships and the suites test)" >&2; exit 1
-  fi
-else
-  NODE=""
-  for cand in "$(command -v node || true)" "$(ls -d "$HOME"/.nvm/versions/node/v$NODE_MAJOR.*/bin/node 2>/dev/null | sort -t. -k2,2n -k3,3n | tail -1)" /opt/homebrew/opt/node@$NODE_MAJOR/bin/node /usr/local/opt/node@$NODE_MAJOR/bin/node; do
-    if [ -n "$cand" ] && [ -x "$cand" ] && [ "$(node_major "$cand")" = "$NODE_MAJOR" ]; then NODE="$cand"; break; fi
-  done
-  if [ -z "$NODE" ]; then
-    echo "no Node $NODE_MAJOR found (PATH, ~/.nvm, Homebrew node@$NODE_MAJOR): install one, or name it with ORCH_NODE=/path/to/node" >&2; exit 1
-  fi
-fi
+# The host's Node: the major the board ships and the gate tests, picked by
+# node.sh (the rule and its reasons are there). The LaunchAgent starts
+# run.sh, which picks again at every start, so an update that moves the
+# major takes effect at the restart the update already does (QA, the
+# milestone audit's re-measure, L3). Picked here too, to refuse before
+# anything is written when there is none, and to say which it will be.
+. "$HERE/node.sh"
+pick_node || exit 1
 echo "host runs on $NODE ($("$NODE" -v))"
 if ! command -v claude >/dev/null; then echo "claude is not on PATH — install Claude Code and sign in first" >&2; exit 1; fi
 
@@ -145,11 +129,12 @@ cat > "$PLIST" <<PLIST
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE</string>
-    <string>$HERE/index.js</string>
+    <string>/bin/sh</string>
+    <string>$HERE/run.sh</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict>
+  <dict>${ORCH_NODE:+
+    <key>ORCH_NODE</key><string>$ORCH_NODE</string>}
     <key>PATH</key><string>$(dirname "$NODE"):$(dirname "$(command -v claude)"):/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     <key>HOME</key><string>$HOME</string>
   </dict>

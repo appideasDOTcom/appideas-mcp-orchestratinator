@@ -175,10 +175,13 @@ export function lostWorkWords(item) {
   const text = typeof item?.payload?.text === 'string' ? item.payload.text.trim() : '';
   const quoted = text.length > 200 ? `${text.slice(0, 200)}…` : text;
   switch (item?.kind) {
+    // "May not have", because the board cannot know: a host says an item
+    // finished as soon as it is (sayDone), but one killed between typing a
+    // message and saying so has typed it (QA, the re-measure's L1).
     case 'chat':
       return quoted
-        ? `not sent: the host restarted before it typed this message, so send it again — "${quoted}"`
-        : 'not sent: the host restarted before it typed the message (its files only), so send it again';
+        ? `may not have been sent: the host restarted while this message was in line. If it is not in the conversation, send it again — "${quoted}"`
+        : 'may not have been sent: the host restarted while the message (its files only) was in line. If it is not in the conversation, send it again';
     case 'permission': case 'answer': case 'press':
       return 'your answer may not have reached the window: the host restarted while it was in line. If the window still asks, the question is on the floor again; answer it there';
     case 'interrupt':
@@ -3255,7 +3258,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * A host stopping on purpose: what it finished, and what it took and
    * never started, which goes back in line for its next run (takeHostWork's
    * guarantee; milestone audit 2026-11-17, finding 4). Only items this run
-   * took are released: `boot` must match.
+   * took are released: `boot` must match. A working host uses it too, with
+   * nothing to release, to say an item is finished while the rest of its
+   * batch is still going (sayDone in host/index.js).
    */
   router.post('/api/host/work/release', auth.ingestGuard, (req, res) => {
     const hostId = str(req.body?.host_id);

@@ -1612,6 +1612,41 @@ try {
     await sleep(WATCH_SETTLE_MS);
   }
 
+  // A host killed outright says nothing at the end, so what it finished has
+  // to have been said already (QA, the re-measure's L1). It used to ride the
+  // next poll, after the whole batch, and every message of a batch the host
+  // had typed before it was killed was said lost on its desk: "send it
+  // again" about words the window had. The fixture makes the batch: one
+  // message is taken alone, and three more are queued while it is typed, so
+  // the next poll takes them together.
+  console.log('\n  work finished in the middle of a batch, and then the host is killed');
+  {
+    const { default: Database } = await import('better-sqlite3');
+    const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
+    const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
+    const byText = () => Object.fromEntries(rows(`SELECT payload, taken_at, done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)
+      .map((r) => [JSON.parse(r.payload).text, r]));
+    await chat('free', 'batch one');
+    assert(await until(() => (byText()['batch one']?.taken_at ? true : null), 15000), 'the fixture: the first message is taken alone');
+    for (const t of ['batch two', 'batch three', 'batch four']) await chat('free', t);
+    assert(await until(() => (clean(received()).includes('batch two') ? true : null), 30000), 'the fixture: the first of the batch of three is typed');
+    const saidAt = await until(() => (byText()['batch two']?.done_at ? { fourTyped: clean(received()).includes('batch four') } : null), 15000);
+    assert(saidAt && !saidAt.fourTyped, `a message finished in the middle of a batch is said done before the batch ends (${saidAt ? 'said, but only once "batch four" was typed' : 'never said'})`);
+    const open = Object.entries(byText()).filter(([, r]) => r.taken_at && !r.done_at).map(([t]) => t);
+    host.kill('SIGKILL');
+    assert(open.length >= 1, `the fixture: the host is killed with work of the batch still unfinished (${open.join(', ') || 'none'})`);
+    const errorsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
+    host = startHost();
+    const lost = await until(async () => {
+      const said = ((await turns('free')).rows ?? []).filter((r) => r.role === 'error' && !errorsBefore.has(r.id)).map((r) => r.text ?? '');
+      return said.length >= open.length ? said : null;
+    }, 20000);
+    assert(lost && open.every((t) => lost.some((s) => s.includes(`"${t}"`))), `the next run says what the killed one left unfinished, with its words (${open.join(', ')}) — ${(lost ?? []).join(' | ')}`);
+    assert(lost && !lost.some((s) => s.includes('"batch two"')), 'and not the message it had finished and said');
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and the new run is up for what follows');
+    await sleep(WATCH_SETTLE_MS);
+  }
+
   console.log('\nwhen the host is gone');
   host.kill('SIGTERM');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
@@ -1908,12 +1943,43 @@ try {
   eq(install(['--token', 'flag-key-value'], { ORCH_AUTH_TOKEN: 'shell-key-value' }).conf.token, 'flag-key-value', '--token still wins over the shell');
   eq(install([]).conf.token, 'flag-key-value', "and with neither, host.json's token is kept");
   // One Node major for what ships and what is tested (milestone audit
-  // 2026-11-17, finding 5): the LaunchAgent runs the host on Node 24, the
-  // major the board's image ships and these suites run on, not whatever
-  // node is first on PATH (the shell's default here is 20).
+  // 2026-11-17, finding 5): the host runs on Node 24, the major the board's
+  // image ships and these suites run on, not whatever node is first on PATH
+  // (the shell's default here is 20). The pick is host/node.sh's, and the
+  // LaunchAgent starts host/run.sh, which picks at every start, so an update
+  // that moves the major needs only the restart it already does (QA, the
+  // re-measure's L3). Each half has a row of its own (L4: the row before
+  // this passed with "first node on PATH", whose PATH held only a 24).
   const plist = readFileSync(`${inst}/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`, 'utf8');
-  const runsOn = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/.exec(plist)?.[1];
-  eq([runsOn, execFileSync(runsOn, ['-p', 'process.versions.node.split(".")[0]']).toString().trim()], [process.execPath, '24'], 'the LaunchAgent runs the host on a Node 24');
+  const progArgs = [.../<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1].matchAll(/<string>([^<]+)<\/string>/g) ?? []].map((m) => m[1]);
+  eq(progArgs, ['/bin/sh', resolve('host/run.sh')], 'the LaunchAgent starts run.sh, which picks the Node at each start, not a Node named at install');
+  const dockerMajor = /^FROM node:(\d+)/m.exec(readFileSync('Dockerfile', 'utf8'))?.[1];
+  const pickMajor = /^ORCH_NODE_MAJOR=(\d+)/m.exec(readFileSync('host/node.sh', 'utf8'))?.[1];
+  eq([pickMajor, dockerMajor], ['24', '24'], "the major the host is given is the board image's (node.sh against the Dockerfile's FROM)");
+  // A Node 20 first on PATH, as on this machine, and a Node 24 under nvm.
+  const old = `${inst}/old`;
+  mkdirSync(old, { recursive: true });
+  writeFileSync(`${old}/node`, '#!/bin/sh\necho 20\n');
+  chmodSync(`${old}/node`, 0o755);
+  const nvm24 = `${inst}/.nvm/versions/node/v24.99.0/bin`;
+  mkdirSync(nvm24, { recursive: true });
+  try { execFileSync('ln', ['-sf', process.execPath, `${nvm24}/node`]); } catch { /* there */ }
+  const withOld = execFileSync('/bin/bash', ['host/install.sh', `${inst}/projects`], { env: { PATH: `${old}:${instPath}`, HOME: inst } }).toString();
+  assert(withOld.includes(`host runs on ${nvm24}/node (${process.version})`), `with a Node 20 first on PATH, install picks the Node 24 after it, not the first node — ${withOld.split('\n').find((l) => l.startsWith('host runs on')) ?? withOld.trim()}`);
+  // run.sh, as launchd starts it: a stand-in Node 24 that says what it was
+  // asked to run, so the row reads the pick and the exec without a host.
+  const runHome = `${inst}/run-home`;
+  const runNvm = `${runHome}/.nvm/versions/node/v24.98.0/bin`;
+  mkdirSync(runNvm, { recursive: true });
+  writeFileSync(`${runNvm}/node`, '#!/bin/sh\nif [ "$1" = -p ]; then echo 24; else echo "RAN $*"; fi\n');
+  chmodSync(`${runNvm}/node`, 0o755);
+  const ran = execFileSync('/bin/sh', ['host/run.sh'], { env: { PATH: `${old}:/usr/bin:/bin`, HOME: runHome } }).toString().trim();
+  eq(ran, `RAN ${resolve('host/index.js')}`, 'run.sh picks the Node 24 at start, past a Node 20 first on PATH, and runs the host on it');
+  let noNode = '';
+  try { execFileSync('/bin/sh', ['host/run.sh'], { env: { PATH: `${old}:/usr/bin:/bin`, HOME: `${inst}/nowhere` }, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (err) { noNode = `exit ${err.status}: ${String(err.stderr)}`; }
+  // Homebrew's node@24 is found wherever HOME points, so on a machine that has one this row has nothing to say.
+  if (['/opt/homebrew/opt/node@24/bin/node', '/usr/local/opt/node@24/bin/node'].some((f) => existsSync(f))) console.log('  - (a Homebrew node@24 is installed here: "no Node 24" cannot be staged)');
+  else assert(/^exit 1: no Node 24 found/.test(noNode) && /not started/.test(noNode), `and with no Node 24 it starts nothing and says why in the log — ${noNode.trim().split('\n')[0]}`);
   writeFileSync(`${instBin}/node20`, '#!/bin/sh\necho 20\n');
   chmodSync(`${instBin}/node20`, 0o755);
   let refusal = '';
