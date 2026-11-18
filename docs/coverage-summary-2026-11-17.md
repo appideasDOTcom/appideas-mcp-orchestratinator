@@ -2,8 +2,9 @@
 
 The orchestratinator's first coverage and testing audit, by appideas-qa on
 2026-11-17 at `0771ea8` (0.12.10), and the fix round that answered it,
-0.12.11, re-measured by QA on 2026-11-18 at `37672c4` + `7bebe22`,
-with four Lows that re-measure found fixed after it. costmo's
+0.12.11, re-measured by QA on 2026-11-18 at `37672c4` + `7bebe22`, and
+the four Lows that re-measure found, fixed after it and re-measured by QA
+at `2895099` (committed whole as `e9aecd0`). costmo's
 word for the round: "solidify our product and provide the foundational
 proof before we pivot into some new features".
 
@@ -32,7 +33,18 @@ the same commits, named where used.
 
 The release gate at `37672c4` (`npm run release-gate`, developer's run):
 `EXIT=0 · packages 0 · npm test 0 · pages 0`, 2,913 ✓ 0 ✗, release pages 11
-of 11, Node v24.22.2, 1,139 s.
+of 11, Node v24.22.2, 1,139 s. At the shipping head, `2895099` with the
+tree committed as `e9aecd0` (QA's run, 2026-11-18): `EXIT=0 · packages 0 ·
+npm test 0 · pages 0`, 2,930 ✓ 0 ✗, release pages 11 of 11, 1,118 s, the
+packages step reading 206 of 206 at the lock's exact versions.
+
+**The coverage tables are at `37672c4`, and not re-run at the shipping
+head, on purpose.** The code that came after them is the four Lows below:
+29 changed lines in `host/index.js` and `src/floor.js` and the 48 of the
+new `scripts/check-lock.mjs`, comments included, against about 18,000
+code lines, which is far inside the run-to-run spread described next. The
+`.sh` files it adds (`host/node.sh`, `host/run.sh`) are not in what the
+coverage counts. Their proof is the named rows and the mutants.
 
 ### Two runs of one commit do not read the same
 
@@ -106,7 +118,8 @@ Two rows went down, and neither is a test lost:
   developer's run reads 88.3 % with it and 89.1 % without it.
 - `scripts/set-version.mjs` went from 32.4 % (12 / 37) to 25.5 %
   (13 / 51): its new lines write the lockfile's version fields, and no
-  suite runs the script (`smoke` checks only that the four files agree).
+  suite runs the script (`smoke` checks only that the four files agree,
+  and that the lock's `packages[""]` agrees with them).
 
 ## By layer, at 0.12.11
 
@@ -219,6 +232,22 @@ four"), and seven Infos left as known gaps.
 
 The mutants for these are kept in
 `.claude/skills/mutate-in-a-copy/mutants-milestone-lows.suite.json`.
+QA measured the four at `2895099` with the tree as committed in `e9aecd0`:
+
+- L1: QA's board probe. An item said done mid-batch is not said lost, the
+  unfinished two get the new words quoting their text, and a control
+  without `sayDone` says all three.
+- L2: `check-lock.mjs` over five fabricated cases. In-range drift,
+  out-of-range drift, nested drift and a missing package each fail by
+  name; the lock's own versions pass. QA's major-only mutant: `smoke` 1 ✗
+  on the in-range row, control 71 ✓.
+- L3: `node.sh` in seven cases. Node 20, Node 26 or Homebrew first on PATH
+  each gives the v24; `ORCH_NODE` 22 is refused and 24 taken; with no 24
+  it refuses, and `run.sh` exits 1 with words. `host/*.js` parses on Node
+  20, so an update that lands before `install.sh` is re-run still loads.
+- L4 and the list: the five host mutants red on named rows (L1 2 ✗, L3a
+  1, L3b 2, L4a 3, L4b 1, the last before anything throws), control
+  376 ✓.
 And from QA's reading of this page: `smoke` read only each versioned file's
 top-level `version`, so the lock's `packages[""]`, which `set-version` also
 writes, went unchecked. It is checked now.
