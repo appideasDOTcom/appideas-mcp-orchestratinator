@@ -1631,7 +1631,7 @@ try {
     for (const t of ['batch two', 'batch three', 'batch four']) await chat('free', t);
     assert(await until(() => (clean(received()).includes('batch two') ? true : null), 30000), 'the fixture: the first of the batch of three is typed');
     const saidAt = await until(() => (byText()['batch two']?.done_at ? { fourTyped: clean(received()).includes('batch four') } : null), 15000);
-    assert(saidAt && !saidAt.fourTyped, `a message finished in the middle of a batch is said done before the batch ends (${saidAt ? 'said, but only once "batch four" was typed' : 'never said'})`);
+    assert(saidAt && !saidAt.fourTyped, `a message finished in the middle of a batch is said done before the batch ends${!saidAt ? ' (never said)' : saidAt.fourTyped ? ' (said only once "batch four" was typed)' : ''}`);
     const open = Object.entries(byText()).filter(([, r]) => r.taken_at && !r.done_at).map(([t]) => t);
     host.kill('SIGKILL');
     assert(open.length >= 1, `the fixture: the host is killed with work of the batch still unfinished (${open.join(', ') || 'none'})`);
@@ -1928,7 +1928,8 @@ try {
   writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
   for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
   for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
-  for (const t of ['cat', 'mkdir', 'sleep']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
+  // ls for node.sh's nvm lookup: launchd's PATH has /bin, this one may not.
+  for (const t of ['cat', 'mkdir', 'sleep', 'ls']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
   const instPath = `${instBin}:/usr/bin:${resolve(process.execPath, '..')}`;
   const install = (args, env = {}) => {
     const which = execFileSync('/bin/sh', ['-c', 'command -v launchctl'], { env: { PATH: instPath } }).toString().trim();
