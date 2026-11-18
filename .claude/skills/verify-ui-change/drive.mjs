@@ -217,6 +217,7 @@ async function connect(target) {
   // Not covered by this: windows a page opens itself (popouts, meeting
   // rooms) and the hub SharedWorker, which are not targets drive.mjs holds.
   let takeCov = async () => {};
+  let stopCov = () => {};
   if (process.env.PAGECOV) {
     const { writeFileSync: wcov, mkdirSync: mcov } = await import('node:fs');
     mcov(process.env.PAGECOV, { recursive: true });
@@ -224,7 +225,15 @@ async function connect(target) {
     await cmd('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
     let covN = 0;
     takeCov = async () => { try { const r = await cmd('Profiler.takePreciseCoverage'); const res = r?.result?.result; if (res?.length) wcov(`${process.env.PAGECOV}/page-${process.pid}-${target.id}-${++covN}.json`, JSON.stringify({ result: res })); } catch { /* the page may be gone */ } };
-    setInterval(takeCov, 1000).unref();
+    // Stopped by close(), before the socket goes. Left running, a tick that
+    // landed while the socket was closing armed cmd()'s 30 s timer on a
+    // socket that would never answer, and every later tick armed another, so
+    // a check that ends by running out of code (check-hide) never exited.
+    // Seen only under load, where the close is slow (QA, 2026-11-18: an hour
+    // at load 34, in the audit's re-measure at 37672c4).
+    const every = setInterval(takeCov, 1000);
+    every.unref();
+    stopCov = () => clearInterval(every);
   }
   const goto = async (url) => {
     await cmd('Page.navigate', { url });
@@ -428,6 +437,6 @@ async function connect(target) {
     /* Closes this tab's socket, not the browser: leaving Chrome up is what makes
        the next check start in a second rather than three. `pkill -f orch-cdp`
        when you are done with all of them. */
-    close: async () => { await takeCov(); await cmd('Target.closeTarget', { targetId: target.id }); ws.close(); },
+    close: async () => { stopCov(); await takeCov(); await cmd('Target.closeTarget', { targetId: target.id }); ws.close(); },
   };
 }
