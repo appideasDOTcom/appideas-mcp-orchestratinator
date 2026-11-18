@@ -1587,13 +1587,21 @@ try {
     assert(await until(() => (rows(`SELECT done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)[0]?.done_at ? true : null), 15000),
       'and the host reports it finished, on its next poll');
     const mark2 = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
-    for (const t of ['in line one', 'in line two', 'in line three']) await chat('free', t);
-    await until(() => (rows(`SELECT taken_at FROM host_outbox WHERE id > ?`, mark2).some((r) => r.taken_at) ? true : null), 10000);
+    // Four, so the host is holding a batch it has not started when it is
+    // told to stop: it types the first, and takes the other three in one
+    // poll once that is done. The stop waits until at least two are taken
+    // and unfinished. With fewer, the later ones were never taken at all,
+    // and "back in line" said nothing about the release (the first cut of
+    // this row: its mutant, the release emptied, stayed green).
+    for (const t of ['in line one', 'in line two', 'in line three', 'in line four']) await chat('free', t);
+    const held = await until(() => (rows(`SELECT id FROM host_outbox WHERE id > ? AND taken_at IS NOT NULL AND done_at IS NULL`, mark2).length >= 2 ? true : null), 30000);
+    assert(held, 'the fixture: the host is holding more than the one it is typing when it is told to stop');
     const exited = new Promise((done) => host.once('exit', done));
     host.kill('SIGTERM');
     await Promise.race([exited, sleep(25000)]);
     const after = rows(`SELECT id, taken_at, done_at FROM host_outbox WHERE id > ?`, mark2);
     eq(after.filter((r) => r.taken_at && !r.done_at).length, 0, `a host stopped with messages in its line leaves none taken and unfinished: each is done or handed back (${after.filter((r) => r.done_at).length} done, ${after.filter((r) => !r.taken_at).length} back in line)`);
+    assert(after.filter((r) => !r.taken_at).length >= 1, 'and what it held and never started was handed back, not only never taken');
     // Back in line is for the next run of this host; none comes in this
     // suite, so they are taken out of the line rather than left to be typed
     // by a host a later section starts.
