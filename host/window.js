@@ -1593,9 +1593,20 @@ export function overlayOf(screen) {
  * title is a few lines above them. It used to be the words anywhere in the
  * capture, and a conversation that quotes "Switch model?" (this file's own
  * desk does) would have had a `1` typed into its composer.
+ *
+ * Since 2.1.327 the dialog ends in a line of its own under the choices,
+ * "Enter to confirm · Esc to cancel", and the choices are the two lines
+ * above it. Read as before, by the last two lines, the dialog was nothing:
+ * it stood unanswered, the change ended `not_delivered` after twenty
+ * seconds ("no longer in the composer. Check the window"), and the
+ * operator pressed it in the window (costmo's report, 2026-11-18, the day
+ * 2.1.327 arrived; reproduced on a probe through send(), and `1` still
+ * answers it). So that one line, exactly, is stepped over when it is the
+ * pane's last; nothing else under the choices is.
  */
 export function switchConfirmOf(screen) {
   const nonEmpty = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  if (/^\s*Enter to confirm · Esc to cancel\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) nonEmpty.pop();
   const yes = /^\s*❯?\s*1\.\s*(Yes, switch to .+)$/.exec(nonEmpty[nonEmpty.length - 2] ?? '');
   if (!yes || !/^\s*❯?\s*2\.\s*No, go back\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) return null;
   if (!nonEmpty.slice(-9, -2).some((l) => /^\s*(Switch model|Change effort level)\?\s*$/.test(l))) return null;

@@ -1368,6 +1368,24 @@ async function main() {
     eq(W.switchConfirmOf(screenWith('❯ ').replace(RULE2, `${SWITCH}\n${RULE2}`)), null,
       'a conversation that quotes the warning above a composer is not one: it is read at the bottom of the pane');
     eq(W.switchConfirmOf(SWITCH.replace('   Switch model?\n', '')), null, 'nor are two such choices under any other title');
+    // As 2.1.327 draws it (a probe, 2026-11-18, at 150 columns): a line of
+    // its own under the choices. Read by the last two lines alone, this was
+    // no dialog, and a model change from the floor stood unanswered.
+    const SWITCH_327 = [
+      '⏺ PONG',
+      '✻ Brewed for 1s · done 3:24 PM',
+      '▔'.repeat(150),
+      '  Switch model?',
+      '  Your next response will be slower and use more tokens',
+      '  This conversation is cached for the current model. Switching to Fable 5.2 means the full history gets re-read.',
+      '  ❯ 1. Yes, switch to Fable 5.2',
+      '    2. No, go back',
+      '  Enter to confirm · Esc to cancel',
+      '',
+    ].join('\n');
+    eq(W.switchConfirmOf(SWITCH_327)?.yes, 'Yes, switch to Fable 5.2', 'the warning as 2.1.327 draws it, with "Enter to confirm · Esc to cancel" under its choices, is read');
+    eq(W.switchConfirmOf(SWITCH_327.replace('  Enter to confirm · Esc to cancel', '  ? for shortcuts')), null, 'and any other line under the choices is still not the dialog');
+    eq(W.switchConfirmOf(`${SWITCH_327}\n${RULE2}\n❯ \n${RULE2}\n  Enter to confirm · Esc to cancel`), null, 'nor is it one quoted above a composer, whatever the pane ends with');
     // The dialog's other title (QA, PR #55 finding 1): 2.1.325's own
     // strings, with the model's lines under it.
     const EFFORT_ASK = SWITCH.replace('Switch model?', 'Change effort level?').replace('current model. Switching to Haiku 5.5', 'current effort level. Switching to high').replace('Yes, switch to Haiku 5.5', 'Yes, switch to high');
