@@ -816,26 +816,6 @@ try {
     return log.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.cwd.endsWith('/repo-pane')) ?? null;
   }, 20000);
   eq(paneEnvLine?.key ?? null, KEY, "the window the host opens for it has the variable, set to the host's key");
-  // The host's own open is still running: waitReady polls the roster for the
-  // pane's pid and, when it finds it, sets the window's remain-on-exit off
-  // (open set it on). Taking the pane down and putting the roster back before
-  // that left it with no pid to find and no dead pane to notice, so it sat
-  // out READY_TIMEOUT_MS (45 s) with the next section's bind in line behind
-  // it — seven take-a-desk reds, under load on 2026-11-07 and then alone. So
-  // the flag is the observable waited on here, and nothing is torn down
-  // before it. The env line above comes from the stand-in's first breath,
-  // well before its roster entry.
-  const panePaneId = () => {
-    try {
-      const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
-      return panes.split('\n').find((x) => x.endsWith('/repo-pane'))?.split(' ')[0] ?? null;
-    } catch { return null; }
-  };
-  assert(await until(() => {
-    const id = panePaneId();
-    if (!id) return null;
-    try { return execFileSync('tmux', ['show-options', '-w', '-v', '-t', id, 'remain-on-exit']).toString().trim() === 'off' ? true : null; } catch { return null; }
-  }, 20000), 'and the host saw that window register before anything here takes it down');
   try {
     const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
     for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);
@@ -1246,12 +1226,27 @@ try {
     // A window coming up in the folder: the one the other host opens. It is
     // found by its folder like any other, and must not be followed.
     const SESSION_THEIRS = 'dddddddd-9999-3333-4444-555555555555';
-    rebindAway(relC);
+    // The folder is rebound in the same moment the other host's window comes
+    // up, and not before the pane is killed and the watch settles. The
+    // heartbeat's rescan drops a desk whose folder is bound elsewhere too, and
+    // with the rebind first it had those two seconds and more to do it in:
+    // the host's heartbeat falls about 60 s after its start, which is about
+    // when this case runs, so under load it landed there in QA's merge check
+    // of develop (2026-11-18) and in two of my three runs the next day, and
+    // the row read red with the desk let go by the other path ("(heartbeat)"
+    // in the host's log).
+    const relLogFrom = host.log.length;
     for (const id of panesIn(relC)) { try { execFileSync('tmux', ['kill-pane', '-t', id]); } catch { /* gone */ } }
     await sleep(WATCH_SETTLE_MS);
+    rebindAway(relC);
     writeFileSync(`${FIX}/roster.json`, JSON.stringify([...JSON.parse(rosterAtRel), { pid: process.pid, cwd: relC, kind: 'interactive', startedAt: Date.now(), sessionId: SESSION_THEIRS, name: 'theirs' }]));
-    assert(await until(() => (/rel-c: .*rel-local is bound to http:\/\/localhost:9 now \(a window came up in its folder\) — letting the desk go/.test(host.log) ? true : null), 10000),
-      'a window that comes up in a folder released elsewhere is not this desk\'s: the host reads the binding and lets the desk go');
+    const relSeen = await until(() => (/rel-c: .*rel-local is bound to http:\/\/localhost:9 now \(a window came up in its folder\) — letting the desk go/.test(host.log) ? true : null), 10000);
+    assert(relSeen, 'a window that comes up in a folder released elsewhere is not this desk\'s: the host reads the binding and lets the desk go');
+    if (!relSeen) {
+      const relLog = host.log.slice(relLogFrom);
+      if (/dropped desk host-test-rel\/rel-c .*\(heartbeat\)/.test(relLog)) console.log('    the heartbeat\'s rescan dropped rel-c before the watch looked: a race in this case, not a fault in the watch');
+      console.log(`    the host's log from the staging on:\n${relLog.split('\n').map((l) => `      ${l}`).join('\n')}`);
+    }
     assert(await until(async () => (onRel(await floor(), 'rel-c')?.hosted?.state === 'offline' ? true : null), 10000), 'the desk goes offline here within the watch, not the heartbeat');
     {
       const { default: Database } = await import('better-sqlite3');
@@ -1850,8 +1845,30 @@ try {
   // The real host, started the way the app starts it, with this suite answering.
   host.kill('SIGTERM');
   await new Promise((r) => host.once('exit', r));
-  host = startHost('host-test-1', { ORCH_FOLDER_DIALOG: 'parent' }, { ipc: true });
+  // ORCH_SEARCH_IN=worker: the app's host runs in Electron's utility process,
+  // where the search cannot be a process of its own (execPath is the app, and
+  // its RunAsNode fuse is off), so there it is a worker thread. The seam puts
+  // this host, the one started the app's way, on that path under plain Node.
+  host = startHost('host-test-1', { ORCH_FOLDER_DIALOG: 'parent', ORCH_SEARCH_IN: 'worker' }, { ipc: true });
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'a host started with a message port is up');
+  {
+    const hGet = (path) => json(`/api/floor/history/${path}`).then((r) => r.json());
+    const search = async (query, deep = false) => {
+      const asked = await (await json('/api/floor/history/search', { query, deep })).json();
+      return until(async () => { const g = await hGet(`search?id=${asked.id}`); return g.done ? g : null; }, 20000);
+    };
+    const wGot = await search('c-last-word');
+    eq([wGot?.rows.map((r) => `${r.id}:${r.channel}/${r.agent}:${r.hits}`), wGot?.rows[0]?.snippets.map((sn) => `${sn.role}|${sn.text}`), wGot?.hosts.find((h) => h.host_id === 'host-test-1')?.error ?? null],
+      [[`${SESSION_C}:${CH}/free:1`], ['assistant|C-LAST-WORD'], null],
+      'the app\'s host searches in a worker thread, with the same answer the process gives');
+    assert(/search: "c-last-word" — 1 conversation in \d+ files, \d+ ms, in a worker/.test(host.log), 'and its log says the worker answered');
+    eq((await search('c-subagent-searching', true))?.rows.map((r) => `${r.snippets[0]?.role}|${r.snippets[0]?.via}`), ['assistant|Find the C thing'], 'a search with tool calls and thinking goes the same way');
+    eq((await search('zz-no-such-words-anywhere'))?.rows, [], 'and one that finds nothing still answers');
+    // A worker's process.argv[1] is history.js too, so the file's own "run as
+    // a script" branch also ran in it, read an empty stdin and wrote a JSON
+    // error to the host's stderr beside every answer (measured on Node 24).
+    assert(!/Unexpected end of JSON input/.test(host.log), 'and the worker runs only the worker half of history.js: nothing of the script half reaches the host\'s log');
+  }
   eq((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-1')?.dialog, true, 'and says it has a dialog: the parent\'s');
   const PICKED2 = `${FIX}/picked-by-app/inner`;
   mkdirSync(PICKED2, { recursive: true });

@@ -45,6 +45,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { Worker } from 'node:worker_threads';
 import { discover, listFolder, localEntries, originOf, readDesk, readLocalScope } from './identity.js';
 import * as W from './window.js';
 import * as M from './mcp.js';
@@ -85,6 +86,13 @@ const READ_PAGE_CHARS = Number(process.env.ORCH_READ_PAGE_CHARS ?? 256 * 1024);
 // own, and is ended if it has not answered in this long.
 const HISTORY_SCRIPT = fileURLToPath(new URL('./history.js', import.meta.url));
 const SEARCH_TIMEOUT_MS = Number(process.env.ORCH_SEARCH_TIMEOUT_MS ?? 60_000);
+// Under the desktop app the search cannot be a process: the host runs in
+// Electron's utility process, whose execPath is the app's binary, and the
+// app's RunAsNode fuse is off. So there it is a worker thread (history.js
+// says why that keeps what the process was for). Everywhere else it is the
+// process, as it always was. ORCH_SEARCH_IN=worker is the suites' seam for
+// the app's path under plain Node; nothing installed sets it.
+const SEARCH_IN_WORKER = !!process.versions.electron || process.env.ORCH_SEARCH_IN === 'worker';
 /** How long a request for the folder dialog stays worth acting on — shorter
  *  than the 8 s the page waits, on purpose, so a dialog that does open is one
  *  the page is still there to hear about. See D.pickIsStale. */
@@ -1423,6 +1431,7 @@ class Host {
       this.searching.superseded = true;
       try { this.searching.child.kill('SIGTERM'); } catch { /* already gone */ }
     }
+    if (SEARCH_IN_WORKER) return this.searchInWorker(query, deep, say);
     let child;
     try {
       child = spawn(process.execPath, [HISTORY_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -1456,6 +1465,44 @@ class Host {
       say({ rows: [], error: `the search ${how}${tail ? `: ${tail}` : ''}` });
     });
     child.stdin.end(JSON.stringify({ desks: this.deskFolders(), query, deep }));
+    return undefined;
+  }
+
+  /**
+   * search(), run as a worker thread: the desktop app's path (SEARCH_IN_WORKER).
+   * The same answer, the same log lines and the same words on a failure, so
+   * the floor cannot tell the two apart. `child.kill` is what a newer search
+   * calls on the one it replaces, so the worker is given one.
+   */
+  searchInWorker(query, deep, say) {
+    let worker;
+    try {
+      worker = new Worker(new URL('./history.js', import.meta.url), { workerData: { historyAsk: { desks: this.deskFolders(), query, deep } } });
+    } catch (err) {
+      warn(`search: could not start — ${err.message}`);
+      return say({ rows: [], error: `could not start the search: ${err.message}` });
+    }
+    const mine = { child: { kill: () => { mine.ended = true; worker.terminate(); } }, query, superseded: false };
+    this.searching = mine;
+    let got = null;
+    let failed = '';
+    const timer = setTimeout(() => { mine.timedOut = true; mine.child.kill(); }, SEARCH_TIMEOUT_MS);
+    worker.on('message', (m) => { if (m?.out) got = m.out; else failed = m?.error ?? ''; });
+    worker.on('error', (err) => { failed = err?.message ?? String(err); });
+    worker.on('exit', (code) => {
+      clearTimeout(timer);
+      if (this.searching === mine) this.searching = null;
+      if (mine.superseded) return;
+      if (!mine.timedOut && got && Array.isArray(got.rows)) {
+        log(`search: "${query}"${deep ? ' (with tool calls and thinking)' : ''} — ${got.rows.length} conversation${got.rows.length === 1 ? '' : 's'} in ${got.files} files, ${got.ms} ms, in a worker`);
+        say({ rows: got.rows, files: got.files, ms: got.ms });
+        return;
+      }
+      const tail = failed.trim().split('\n').pop() || '';
+      const how = mine.timedOut ? `was ended after ${Math.round(SEARCH_TIMEOUT_MS / 1000)}s` : mine.ended ? 'was ended' : `ended with exit code ${code}`;
+      warn(`search: "${query}" ${how}${tail ? `: ${tail}` : ''}`);
+      say({ rows: [], error: `the search ${how}${tail ? `: ${tail}` : ''}` });
+    });
     return undefined;
   }
 

@@ -2549,6 +2549,39 @@ async function main() {
     eq(thereResult.chose, 'Use this MCP server', 'and reports which row it took');
     assert(existsSync(enterMark), 'with Enter actually reaching the window this time');
 
+    // A cursor that moves, but late. On 2.1.328 under load the host read the
+    // pane 80 ms after its last key, before the redraw, and refused to press
+    // a trust question whose cursor was already on the row (the reader sweep,
+    // 2026-11-19). This stand-in moves on Up and Down and redraws 500 ms
+    // later; Enter is noted with the row the cursor was on when it arrived.
+    const lagDir = `${PROMPT_DIR}/startup-lag`;
+    mkdirSync(lagDir, { recursive: true });
+    const lagMark = `${lagDir}/enter-at.mark`;
+    writeFileSync(`${lagDir}/run.cjs`, [
+      '#!/usr/bin/env node',
+      `const fs = require('fs');`,
+      `const body = ${JSON.stringify(mcpBody(-1))};`,
+      `const rows = ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'];`,
+      `let at = 2;`,
+      `const draw = () => { const out = body.slice(); const first = out.indexOf('    ' + rows[0]); rows.forEach((t, i) => { out[first + i] = (i === at ? '  \u276f ' : '    ') + t; }); process.stdout.write('\\x1b[2J\x1b[H' + out.join('\\n') + '\\n'); };`,
+      `draw();`,
+      `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+      `process.stdin.resume();`,
+      `process.stdin.on('data', (buf) => {`,
+      `  const s = buf.toString('latin1');`,
+      `  if (s.includes('\\x1b[A') || s.includes('\\x1bOA')) { at = Math.max(0, at - 1); setTimeout(draw, 500); }`,
+      `  if (s.includes('\\x1b[B') || s.includes('\\x1bOB')) { at = Math.min(2, at + 1); setTimeout(draw, 500); }`,
+      `  if (s.includes('\\r') || s.includes('\\n')) fs.appendFileSync(${JSON.stringify(lagMark)}, String(at));`,
+      `});`,
+    ].join('\n'));
+    chmodSync(`${lagDir}/run.cjs`, 0o755);
+    await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', lagDir, `${lagDir}/run.cjs`]).catch(() => {});
+    await drawn(lagDir);
+    const lagResult = await W.answerStartup(lagDir, 1);
+    eq([lagResult.ok, lagResult.chose ?? lagResult.error], [false, 'the window is still showing the same question after Enter \u2014 it reads "Use this MCP server"'],
+      'a cursor that redraws late is waited for: the host pressed Enter once it read the row (this stand-in keeps its dialog up, so the after-check says so)');
+    eq(existsSync(lagMark) ? readFileSync(lagMark, 'utf8') : '', '0', 'and Enter arrived with the cursor on the row it walked to, after the redraw, not before it');
+
     // waitReady's early return. A window sitting on this dialog is registered
     // — it is a live interactive tty — but must never be waited out to the
     // full timeout: the watch loop has already put the question on the floor,

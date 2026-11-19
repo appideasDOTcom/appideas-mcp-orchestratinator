@@ -2631,6 +2631,81 @@ one number, one word and one process came apart:
   host running now reads as a refused host, in words, until the host is
   restarted.
 
+**Catching the app up to develop, and a first run that asks nothing**
+(2026-11-19, meeting room 1 with orchestratinator-desktop-dev, at costmo's
+ask: everything since the app stopped following, around 11-09; install to
+first use on macOS without Docker; connect to a local Docker board). His
+rule for the round, again: nothing that works in the Docker+launchd app
+today may break. What the app runs and places is the contract
+`orchestratinator.app_setup` on the orchestratinator-desktop channel,
+beside `orchestratinator.consumed`. Four things this repo changed or
+decided for it, each additive:
+
+- **A History search under the app runs in a worker thread.** The search
+  is `process.execPath host/history.js`, a process of its own so a 70 MB
+  `JSON.parse` stays off the relay's loop. Under Electron's utility process
+  `execPath` is the app's helper binary, and the app's RunAsNode fuse is
+  off, so that cannot start there. `SEARCH_IN_WORKER` (true under
+  `process.versions.electron`, or `ORCH_SEARCH_IN=worker`, the suite's
+  seam) sends it to `searchInWorker`, a `worker_threads` Worker with the
+  same answer, the same words on a failure and `terminate()` for a newer
+  search. Everywhere else the spawn is untouched. One trap, measured: a
+  worker's `process.argv[1]` is the worker's file, so history.js's "run as
+  a script" branch also ran in it and wrote a JSON error to the host's
+  stderr; it is guarded with `isMainThread`. Not yet measured: a Worker
+  loading history.js from inside the packaged app's asar (desktop-dev's
+  packaged check reads it; a failure is said on the floor, not silent).
+- **The hook runs without a node on PATH.** A Mac whose only Claude Code
+  is Anthropic's native install has no `node`, so every hook died in
+  silence: no prompt, question or stop ever reached the floor. The line in
+  hooks.json tries `command -v node` first, as before, then
+  `~/.orchestratinator/bin/node`, a link the app keeps to the Node it
+  carries, then nothing. `test:plugin` runs all three under a bare PATH.
+  The hook line is in hooks.json twelve times, so mutate.py's
+  exactly-once rule cannot carry its mutants: both were run as a whole
+  file (the old line; the link tried before PATH), each red on its row.
+  The other four of the round are `mutants-desktop-catchup.suite.json`.
+- **The app installs the plugin as its own directory marketplace,
+  `orchestratinator-app`, and only when no `orchestratinator-floor@…` is
+  installed** (`claude plugin list --json`). Two copies would fire every
+  hook twice, and on costmo's machine the live clone's
+  `appideas-orchestratinator` is the installed one. Measured on 2.1.328 in
+  an empty config dir: `marketplace add <dir>` and `install` exit 0 with
+  stdin closed, need no sign-in, are idempotent, and a directory
+  marketplace loads in place, so rewriting the copy is the update.
+- **The app's host shares session `orch` on the default socket with a
+  launchd host**, and does not run at all when a launchd host serves the
+  same board. A release finds the window open in the folder through the
+  host's own session (`list-panes -s`), so a session of the app's own would
+  leave the launchd-opened window running beside the app's after a move
+  from Docker, two processes on one conversation. And two hosts for one
+  board would both find every folder bound to it, and both relay and type
+  into its desks. Known and left: `renewServer` is run by whichever host
+  notices a refused server, and resumes only its own desks.
+- **A startup question's cursor is read until it lands, not once.** The
+  reader sweep on 2.1.328 (2026-11-19, load about 100) had `answerStartup`
+  refuse the trust question, `not_taken`, with the pane showing the cursor
+  on "Yes, I trust this folder": the read 80 ms after the last key came
+  before the redraw. That is the first thing every new desk asks, on
+  every machine, so it is fixed for the launchd host too: the cursor is
+  read every 80 ms for up to `ORCH_STARTUP_CURSOR_MS` (1.5 s), and a
+  cursor that never gets there is refused as before, that much later. The
+  keys move one way, so the wanted row is where the cursor stops.
+  `test:window` has a stand-in that redraws 500 ms late. Everything else
+  the sweep read on 2.1.328 held: permission menu (with a new "Tip: auto
+  mode…" line, which lands in the question's text), both form shapes,
+  `/model` with "Switch model?", `/btw`, `/cost` (now listed as "/usage
+  (cost)").
+
+A board to test "connect to Docker" against is a scratch container from
+this tree's image, never the live one: `docker build --build-context
+gitmeta=./.git -t orch-dev-scratch:develop .`, then `docker run` with its
+own `--name`, `-p 127.0.0.1:89xx:8787` and named volume (2026-11-19: 8981,
+`orch-dev-scratch`). That is not `docker compose up`, which would collide
+with the live container by name. The app reads such a board's key from
+`docker inspect` (Config.Env `ORCH_AUTH_TOKEN`), so nobody pastes it, and
+`/health` names it `appideas-orchestratinator`.
+
 ## Tests
 
 **Every suite, check and scratch board on this machine needs a newer Node
@@ -3029,15 +3104,27 @@ rows. QA's logs: `evidence/merge-develop-2026-11-18/` in the QA repo
   waits for the window's `remain-on-exit` to read `off`, which the host
   sets only once it has seen the window (2026-11-07). Together, the wait
   outlasts the delay, the host is no longer waiting when the pane goes,
-  and the row near 848 no longer sets up what it names. Keep main's (the
-  flag) and take develop's wait out, then rerun the host suite enough
-  times to read it.
-- **Not known:** the other two. Two of the rows are main's, and both run
-  through the watch tick's `await this.host.letGoIfReleased(…)`, which
-  develop added before a new process is adopted (`host/index.js`). Whether
-  the rows' waits are too short for that path or the release feature has
-  a race is not settled. QA recommended these rows print the host's log
-  on a red first. Settle it before develop is deployed anywhere.
+  and the row near 848 no longer sets up what it names. **Done
+  2026-11-19:** develop's wait is out, main's flag kept.
+- **The release rows: a race in the case, read and fixed 2026-11-19.**
+  Red in 2 of my 3 runs that day (load 39 to 130), always "a window that
+  comes up in a folder released elsewhere is not this desk's", and the
+  host's log said why: `dropped desk host-test-rel/rel-c … (heartbeat)`,
+  before the watch had looked. The case rebound the folder, then killed
+  the pane and slept `WATCH_SETTLE_MS`, then put the other host's window
+  in the roster. The heartbeat's rescan drops a desk whose folder is
+  bound elsewhere too, it falls about 60 s after the suite's host starts,
+  and that is about when this case runs, so under load it landed in
+  those two seconds. Not a fault in the host: the desk was let go, by the
+  other path. The folder is now rebound in the same moment the window
+  appears, and a red prints the host's log and names the heartbeat if it
+  was that. 3 of 3 green after. The watch path removed is still red there
+  (a mutant in a copy). Two wrong turns on the way, so they are not taken
+  again: `last_seen` does not mark a heartbeat (the host registers after
+  every bind and rescan too), and the heartbeat is not every 60 s on the
+  dot (it is checked when the work poll returns, up to 25 s later).
+- **Not seen in six runs on 2026-11-19:** "joined at its tail" (near
+  981). If it comes back, read the host's log beside it first.
 - **Also owed, from QA's review of 0.12.12 (PR #60, review 5969322428,
   three Infos):** the window suite's form stand-in (`test/window.mjs`
   near the "Ready to submit your answers?" fixtures) still draws the old

@@ -21,9 +21,9 @@
 // hook is spawned as a real child process against a stub server, with HOME
 // pointed at a fixture so the session memo it writes cannot touch the real one.
 //   npm run test:plugin
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync, symlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -760,6 +760,36 @@ async function main() {
     eq(wrappedBroken.stdout + wrappedBroken.stderr, '', 'in silence — node’s own crash goes to /dev/null with everything else');
     await settle();
     eq(received.length, 0, 'and neither case reached the board');
+
+    // Which node runs it. A Mac whose only Claude Code is Anthropic's native
+    // install has no node on PATH, and the line used to die there in silence
+    // on every event: no prompt, question or stop ever reached the floor. The
+    // desktop app keeps ~/.orchestratinator/bin/node linked to the Node it
+    // carries, and the line falls back to it. node on PATH still comes first.
+    const NO_NODE_PATH = '/usr/bin:/bin';
+    assert(!execFileSync('/bin/sh', ['-c', 'command -v node || true'], { env: { PATH: NO_NODE_PATH } }).toString().trim(), `the fixture's bare PATH (${NO_NODE_PATH}) has no node`);
+    const event = (n) => JSON.stringify({ session_id: 'wrapper-session', hook_event_name: 'UserPromptSubmit', cwd: `${FIX}/repo`, message: n });
+    received.length = 0;
+    const noNode = await runWrapper(event('no node anywhere'), { PATH: NO_NODE_PATH });
+    eq([noNode.code, noNode.stdout + noNode.stderr], [0, ''], 'with no node on PATH and no fallback, the line still exits 0 in silence');
+    await settle();
+    eq(received.length, 0, 'and nothing reaches the board');
+    const binDir = join(FIX, '.orchestratinator', 'bin');
+    mkdirSync(binDir, { recursive: true });
+    symlinkSync(process.execPath, join(binDir, 'node'));
+    received.length = 0;
+    const viaFallback = await runWrapper(event('through the app\'s node'), { PATH: NO_NODE_PATH });
+    eq([viaFallback.code, viaFallback.stdout + viaFallback.stderr], [0, ''], 'with no node on PATH and the app\'s link in place, it exits 0 in silence');
+    await settle();
+    eq(received.map((r) => r.body?.message), ['through the app\'s node'], 'and the report arrives, run by the linked node');
+    // A fallback that is not node, to see which one ran.
+    rmSync(join(binDir, 'node'));
+    writeFileSync(join(binDir, 'node'), `#!/bin/sh\ntouch "${FIX}/fallback-ran"\n`, { mode: 0o755 });
+    received.length = 0;
+    await runWrapper(event('node on PATH first'));
+    await settle();
+    eq([received.map((r) => r.body?.message), existsSync(join(FIX, 'fallback-ran'))], [['node on PATH first'], false], 'a node on PATH outranks the link: the line is what it was wherever node is installed');
+    rmSync(join(FIX, '.orchestratinator'), { recursive: true, force: true });
   } finally {
     server?.closeAllConnections?.();
     server?.close();

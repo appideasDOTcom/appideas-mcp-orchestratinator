@@ -574,8 +574,22 @@ export async function answerStartup(cwd, n) {
     if (!moved.ok) return { ok: false, error: moved.error };
     await sleep(80);
   }
-  const now = startupQuestionOf(await screenOf(pane.target, 30));
-  const under = now?.options[now.at]?.text ?? null;
+  // Read the cursor until it is on the row, up to STARTUP_CURSOR_MS, never
+  // once at a fixed moment. On 2.1.328 under load (average about 100) the read
+  // 80 ms after the last key came before the redraw: the pane then showed the
+  // cursor on "Yes, I trust this folder" and the host had refused to press,
+  // on the one question every first window asks (reader sweep, 2026-11-19).
+  // The keys move one way, so the cursor reaching the wanted row is where it
+  // stops; a cursor that never gets there is still refused, a bound later.
+  let now = null;
+  let under = null;
+  const give = Date.now() + STARTUP_CURSOR_MS;
+  for (;;) {
+    now = startupQuestionOf(await screenOf(pane.target, 30));
+    under = now?.options[now.at]?.text ?? null;
+    if (!now || under === want.text || Date.now() >= give) break;
+    await sleep(80);
+  }
   if (!now || under !== want.text) {
     return {
       ok: false, code: 'not_taken',
@@ -3489,6 +3503,8 @@ const CONFIRM_TRIES = Number(process.env.ORCH_CONFIRM_TRIES ?? 3);
 
 /** How long the window gets to act on an answer before we look at the result. */
 const ANSWER_CONFIRM_MS = Number(process.env.ORCH_ANSWER_CONFIRM_MS ?? 900);
+/** How long answerStartup reads for the cursor to land on the row it walked to. */
+const STARTUP_CURSOR_MS = Number(process.env.ORCH_STARTUP_CURSOR_MS ?? 1_500);
 /** How long a step waits for a busy window before calling it stopped. Generous
  *  against a tool call finishing mid-sequence; short of the operator noticing. */
 const BUSY_WAIT_MS = Number(process.env.ORCH_BUSY_WAIT_MS ?? 20_000);
