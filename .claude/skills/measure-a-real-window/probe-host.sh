@@ -7,15 +7,17 @@
 #   probe-host.sh up <probe dir> [port]  # scratch board (default 8931), the dir bound to it
 #                                        # in local scope as probe-floor/probe, and a dev host
 #                                        # on the probe socket (-L probe, session p) rooted at
-#                                        # the dir alone. Then start the window:
-#                                        #   node probe.mjs up <probe dir> auto
+#                                        # the dir alone
+#   probe-host.sh window                 # the real window in that dir, its trust question
+#                                        # answered, and its MCP session on the board waited for:
+#                                        # without one an outage has nothing to take away
 #   probe-host.sh outage <seconds>       # stop the board, wait, start it again, then watch up
 #                                        # to 90 s for the window's MCP session and the host's
 #                                        # reconnect line. 5 s healed by itself on 2.1.328; 90 s
 #                                        # did not, and the host reconnected it 25 s after.
 #   probe-host.sh room                   # open a meeting room with the probe desk, end it, and
 #                                        # print what the window was sent and the floor filed
-#   probe-host.sh down                   # stop the host and the board, remove the binding
+#   probe-host.sh down                   # stop the host, the board and the window, remove the binding
 #
 # Refuses 8787 and 6724 (the live Docker board and the app's), and any
 # port something already answers on. The host's id is its own
@@ -52,8 +54,23 @@ case "${1:-}" in
     grep -q "1 desk" "$ST/host.log" && echo "up: board :$PORT, $DIR bound as probe-floor/probe, host probe-rig-host (logs in $ST)" \
       || { echo "the host did not find the desk:"; tail -5 "$ST/host.log"; exit 1; }
     ;;
+  window)
+    DIR="$(val dir)"; [ -n "$DIR" ] || { echo "run up first"; exit 2; }
+    "$ST/tmuxw" kill-server 2>/dev/null
+    # Not the agent's own environment: a window started from inside Claude
+    # Code inherits CLAUDECODE and the rest and reads as nested (SKILL.md).
+    env $(env | grep -oE '^CLAUDE[^=]*' | sed 's/^/-u /') "$ST/tmuxw" new-session -d -s p -n probe -c "$DIR" -x 200 -y 50 'claude; sleep 30'
+    for _ in $(seq 1 30); do
+      P="$("$ST/tmuxw" capture-pane -p -t p:probe 2>/dev/null)"
+      if echo "$P" | grep -q "Yes, I trust this folder"; then "$ST/tmuxw" send-keys -t p:probe Down; sleep 0.4; "$ST/tmuxw" send-keys -t p:probe Enter; fi
+      [ "$(sessions)" = "1" ] && { echo "window up, and its MCP session is on the board (sessions=1)"; exit 0; }
+      sleep 2
+    done
+    echo "no MCP session after 60 s; the pane:"; "$ST/tmuxw" capture-pane -p -t p:probe | sed '/^\s*$/d' | tail -8; exit 1
+    ;;
   outage)
     SECS="${2:?seconds}"
+    [ "$(sessions)" = "1" ] || { echo "refusing: the window holds no MCP session (sessions=$(sessions)), so an outage takes nothing away; run window first"; exit 2; }
     echo "before: sessions=$(sessions)"
     board_down; echo "board stopped at $(date -u +%T)"; sleep "$SECS"
     board_up || exit 1; echo "board back at $(date -u +%T)"
@@ -65,6 +82,7 @@ case "${1:-}" in
     tail -n +"$((MARK + 1))" "$ST/host.log" | grep -e "lost the board" -e "reconnect" || echo "(no reconnect by the host: the window came back by itself, or not at all)"
     ;;
   room)
+    "$ST/tmuxw" capture-pane -p -t p:probe >/dev/null 2>&1 || { echo "no probe window; run window first"; exit 2; }
     R=$(curl -s -X POST "localhost:$(val port)/api/floor/meeting" -H "$J" -d '{"channel":"probe-floor","agents":["probe"]}')
     ID=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['room']['id'])") || { echo "no room: $R"; exit 1; }
     echo "room $ID opened at $(date -u +%T)"
@@ -81,7 +99,8 @@ for t in json.load(sys.stdin).get('rows',[])[-6:]: print(' ', t['role'], t.get('
     [ -s "$ST/host.pid" ] && kill "$(val host.pid)" 2>/dev/null; rm -f "$ST/host.pid"
     board_down
     [ -s "$ST/dir" ] && ( cd "$(val dir)" && claude mcp remove -s local orchestratinator >/dev/null 2>&1 )
-    echo "down: host and board stopped, binding removed (the probe window is probe.mjs down's)"
+    [ -x "$ST/tmuxw" ] && "$ST/tmuxw" kill-server 2>/dev/null
+    echo "down: host, board and window stopped, binding removed"
     ;;
   *) sed -n '2,24p' "$0"; exit 1;;
 esac

@@ -601,16 +601,20 @@ is in [`probe-host.sh`](probe-host.sh).
 export PROBE_HOST_STATE=$SP/ph                           # its pids, logs and database
 H=.claude/skills/measure-a-real-window/probe-host.sh
 $H up "$SP/rig"                                          # board :8931, binding, host probe-rig-host
-bash -c 'for v in $(env | grep -oE "^CLAUDE[^=]*"); do unset "$v"; done
-         node .claude/skills/measure-a-real-window/probe.mjs up "$1" auto' _ "$SP/rig"
+$H window          # the window, its trust question answered, its MCP session waited for
 $H outage 5        # 2.1.328: sessions=1 within seconds, no host line (it healed by itself)
 $H outage 90       # 2.1.328: the host's line "the desk's tools had lost the board, so the
                    # host ran /mcp — Reconnected to orchestratinator", 25 s after the board
 $H room            # the window's two notes, filed as context/meeting-room
-$H down; node .claude/skills/measure-a-real-window/probe.mjs down
+$H down
 ```
 
 Bind before the window starts: a window reads its MCP servers at start.
+And an outage only means something to a window that holds a session.
+The first cut of this script let `probe.mjs up` start the window in a
+new folder, where it sat on the trust question with nothing connected,
+and both outages then read "no reconnect" as if that were a result.
+`outage` refuses now unless the board has the session.
 `up` refuses 8787, 6724 and any port that answers, and the host's id is
 its own, never the hostname (the live host's row). Read without a
 script, `/mcp` itself on 2.1.328: bare, it opens the "MCP servers" panel
