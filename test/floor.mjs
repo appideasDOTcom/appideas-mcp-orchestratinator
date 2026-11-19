@@ -1512,6 +1512,19 @@ try {
   eq((await noteOn('racer'))?.text, 'and this one is still waiting',
      'and a context turn retires no queued note — only the person becoming a turn does that');
 
+  // A room's notice that met a working window (desktop-dev, from costmo's
+  // screenshot, 2026-11-19): the page drew it as his bubble, "queued — the
+  // desk is working", and nothing ever took it down, because the notice
+  // becomes a context turn and never a user one.
+  const NOTICE = roomNoticeText('leave');
+  await register({ channel: CH, agent: 'roomer', cwd: '/repo/roomer', window: '@13' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'roomer', session_id: 's-roomer', cwd: '/repo/roomer' }]);
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'roomer', state: 'queued', text: NOTICE }]);
+  eq(await noteOn('roomer'), null, 'a notice queued behind a working turn puts no note on the desk: it is not the operator\'s message');
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'roomer', state: 'queued', text: 'and the next thing' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'roomer', role: 'context', tool_name: 'meeting-room', text: '<meeting-room>and the next thing</meeting-room>' }]);
+  eq(await noteOn('roomer'), null, 'and a context turn carrying the queued words retires the note, as a user turn does');
+
   // A repeat. The desk's last user turn already says the same words — the
   // operator nudged earlier and is nudging again — but that turn is from
   // BEFORE this send, so it is not this message arriving. Matching on the
@@ -4582,6 +4595,14 @@ try {
     eq(kinds(roomNoticePlan([room(1, ['cy'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }, { channel: 'f', agent: 'cy', meeting_id: 1 }])), ['leave:bo:1'], 'a desk taken out of a live room is told at once, and the one still in it nothing');
     eq(kinds(roomNoticePlan([room(1, ['cy'], { open: false, holding: false }), room(2, ['bo'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['enter:bo:2'],
       'a desk that goes straight from one room to another is told of the new room, and not that it is on the floor');
+    // costmo, 2026-11-19: a stale room the app reopened and the room he
+    // opened beside it, the same two desks in each, sent the note twice.
+    eq(kinds(roomNoticePlan([room(17, ['bo', 'cy'], { open: false, holding: true }), room(18, ['bo', 'cy'])],
+      [{ channel: 'f', agent: 'bo', meeting_id: 17 }, { channel: 'f', agent: 'cy', meeting_id: 17 }])), ['quiet:bo:18', 'quiet:cy:18'],
+      'straight into another room with the same company: the record moves and nothing is sent');
+    eq(kinds(roomNoticePlan([room(17, ['bo', 'cy'], { open: false, holding: true }), room(18, ['bo', 'cy', 'dee'])],
+      [{ channel: 'f', agent: 'bo', meeting_id: 17 }])), ['enter:bo:18', 'enter:cy:18', 'enter:dee:18'],
+      'into a room with somebody new, the note is sent, naming them');
     eq(kinds(roomNoticePlan([], [{ channel: 'f', agent: 'bo-2', meeting_id: 1 }], new Set(['f|bo-2']))), ['forget:bo-2:1'],
       'a second session made for a room is closed when the room ends, so it is told nothing');
     eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: true })], [])), [], 'a silent room tells nobody they have entered it');

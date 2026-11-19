@@ -122,6 +122,14 @@ const noticeLine = await page.evalJs(noticeExpr);
 console.log('== a room notice:', JSON.stringify(noticeLine));
 ok(/^meeting-room · You are now in a meeting room with cy and the operator\. This note needs no reply\.$/.test(noticeLine ?? ''), 'a room notice is drawn as one quiet line labeled meeting-room, with no tags');
 ok(!(await page.evalJs(`[...document.querySelectorAll('#p-turns .t-user, #p-turns .t-you')].some((x) => /meeting room with cy/.test(x.textContent))`)), 'and never as a message from the operator');
+// One that met a working window is reported queued by the host: it used to
+// stand as his bubble, "queued — the desk is working", for good (desktop-dev,
+// from costmo's screenshot, 2026-11-19).
+await hostEvents([{ type: 'delivery', channel: CH, agent: AG, state: 'queued', text: '<meeting-room>You have left the meeting room and are back on the floor. This note needs no reply.</meeting-room>' }]);
+await new Promise((res) => setTimeout(res, 2500));
+const stuck = await page.evalJs(`[...document.querySelectorAll('#p-turns .t-pending, #p-turns .t-user')].filter((x) => /back on the floor/.test(x.textContent)).map((x) => x.textContent.replace(/\\s+/g, ' ').trim())`);
+console.log('== a notice reported queued:', JSON.stringify(stuck));
+ok(Array.isArray(stuck) && stuck.length === 0, 'a notice queued behind a working turn draws no bubble from the operator');
 
 await page.evalJs(box('/btw what is 6*7? reply with just the number'));
 await page.waitFor(`document.querySelectorAll('#p-turns .t-pending').length === 1`);

@@ -964,7 +964,16 @@ started again.
   within a second) sends neither notice, End meeting sends the way back at
   once, and a window that crashed sends it after `MEETING_LIVE_SECONDS`
   plus `TWIN_UNHEARD_MS`. A desk moved straight into another room is told
-  of the new room only. A second session made for a room is told nothing
+  of the new room only, and told nothing when the new room has the same
+  others (`quiet`; his pick the same evening, after a stale room the app
+  reopened and the room he opened beside it, the same two desks in each,
+  sent the note twice). **A notice is never a queued note**: one that meets
+  a working window comes back from the host as `delivery: queued`, and the
+  page drew that as his bubble, "queued — the desk is working", which
+  nothing retired, because a notice becomes a `context` turn and never a
+  user one (desktop-dev, from his screenshot). The board drops a delivery
+  for wholly-tagged text (`WHOLE_TAG`), and a context turn carrying the
+  queued words retires a note as a user turn does. A second session made for a room is told nothing
   on the way out, because it is being closed. A desk whose window is
   asking, held by an editor, or on an offline host is not marked told,
   and is tried again at the next look. Run from the sweep: every route a

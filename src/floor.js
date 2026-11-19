@@ -758,6 +758,8 @@ export function reconnectDue(desks, { present, used, state, pending = new Map(),
  * it, not he. One line, so the host pastes it rather than types it.
  */
 export const ROOM_NOTICE_TAG = 'meeting-room';
+/** Text that is wholly one tagged block: what the relay files as `context` (contextTagOf in host/window.js). */
+const WHOLE_TAG = /^\s*<([A-Za-z][\w-]*)>[\s\S]*<\/[A-Za-z][\w-]*>\s*$/;
 export function roomNoticeText(kind, others = []) {
   const wrap = (t) => `<${ROOM_NOTICE_TAG}>${t}</${ROOM_NOTICE_TAG}>`;
   if (kind === 'leave') {
@@ -783,6 +785,8 @@ export function roomNoticeText(kind, others = []) {
  *   sends neither notice, and End meeting sends `leave` at once.
  * - A second session made for a room is closed when it is in none
  *   (sweepTwins), so it is `forget`: told nothing, its row cleared.
+ * - A desk that goes straight into another room with the same others is
+ *   `quiet`: its row names the new room, and nothing is sent.
  */
 export function roomNoticePlan(rooms, told, twins = new Set()) {
   const out = [];
@@ -796,10 +800,23 @@ export function roomNoticePlan(rooms, told, twins = new Set()) {
     }
   }
   const toldBy = new Map(told.map((t) => [deskKey(t.channel, t.agent), t]));
+  const byId = new Map(rooms.map((r) => [r.id, r]));
+  const same = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
   for (const [k, r] of inOpen) {
     const agent = k.slice(r.channel.length + 1);
-    if (toldBy.get(k)?.meeting_id === r.id) continue;
-    out.push({ kind: 'enter', channel: r.channel, agent, room: r.id, others: r.present.filter((a) => a !== agent) });
+    const was = toldBy.get(k);
+    if (was?.meeting_id === r.id) continue;
+    const others = r.present.filter((a) => a !== agent);
+    // Straight from one room into another with the same company: nothing
+    // it was told has changed, so the record moves and nothing is sent
+    // (costmo, 2026-11-19, after a stale room the app reopened and the room
+    // he opened beside it, with the same two desks, sent the note twice).
+    const before = was ? byId.get(was.meeting_id) : null;
+    if (before && same(before.present.filter((a) => a !== agent), others)) {
+      out.push({ kind: 'quiet', channel: r.channel, agent, room: r.id });
+      continue;
+    }
+    out.push({ kind: 'enter', channel: r.channel, agent, room: r.id, others });
   }
   for (const [k, t] of toldBy) {
     if (inOpen.has(k) || held.has(`${t.meeting_id}|${k}`)) continue;
@@ -2402,7 +2419,9 @@ function applyHostEvent(store, live, hostId, ev) {
       // the conversation now", and that is the only thing that should end the
       // wait. Anything else — a timer, the desk going idle — would clear the
       // note while the message was still sitting in the queue.
-      if (role === 'user') {
+      // A context turn carrying the queued words is that message too (one
+      // wholly tagged, typed by the board), and retires it the same way.
+      if (role === 'user' || role === 'context') {
         const q = live.delivery.get(key);
         if (q && squash(ev.text).includes(squash(q.text))) {
           live.delivery.delete(key);
@@ -2424,6 +2443,14 @@ function applyHostEvent(store, live, hostId, ev) {
     case 'delivery': {
       const text = str(ev.text);
       if (!text) return false;
+      // Text that is wholly one tagged block (a room's notice, which the
+      // board typed) is filed by the relay as a `context` turn, never a user
+      // one, so a note for it would never be retired: the page drew it as the
+      // operator's bubble, "queued — the desk is working", and it stayed
+      // (desktop-dev, from costmo's screenshot, 2026-11-19: a notice that met
+      // a working window). It is not the operator's message, and the page has
+      // no pending bubble to settle for it.
+      if (WHOLE_TAG.test(text)) return false;
       // The turn may already have beaten this here, and often does.
       //
       // Two loops run in the host and neither waits for the other: the relay
@@ -3701,6 +3728,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const twins = new Set(store.listTwins().filter((t) => t.for_meeting).map((t) => deskKey(t.channel, t.agent)));
     for (const n of roomNoticePlan(rooms, store.listRoomTold(), twins)) {
       if (n.kind === 'forget') { store.clearRoomTold(n.channel, n.agent); continue; }
+      if (n.kind === 'quiet') { store.setRoomTold(n.channel, n.agent, n.room); continue; }
       const check = hostedOrWhyNot(n.channel, n.agent);
       if (check.code === 'not_hosted') {
         if (n.kind === 'leave') store.clearRoomTold(n.channel, n.agent);
