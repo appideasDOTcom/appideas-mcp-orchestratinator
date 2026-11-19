@@ -1440,6 +1440,32 @@ export function commandOf(text) {
 }
 
 /**
+ * What the window is given for a message from the floor: the words as
+ * typed, except a bare `/mcp`, which is typed as `/mcp reconnect <server>`.
+ *
+ * In the window a bare `/mcp` opens the "MCP servers" panel, an arrow list
+ * with nothing chosen. From the floor that panel was read as a screen,
+ * shown on the desk and closed with Escape, so nothing reconnected. What
+ * the operator means by it on the floor is the thing he reaches for after
+ * the desktop app restarts its board: the desk's tools back. Measured on
+ * 2.1.328 (2026-11-19), a probe with the board stopped and started again:
+ * `/mcp reconnect orchestratinator` wrote "Reconnected to orchestratinator",
+ * "Couldn't reconnect to orchestratinator" with the board down, and
+ * `MCP server "x" not found` for a name the window does not have, each as
+ * local-command-stdout under the command's record, which is the receipt
+ * every other command is confirmed on. `/mcp reconnect all` works too, but
+ * counts the disabled built-in computer-use and so always ends "1 still not
+ * connected · run /mcp to check", which on the floor reads as a failure.
+ * So it is this desk's own entry, by the name its binding gives it. `/mcp`
+ * with anything after it goes as typed.
+ */
+export function typedCommand(text, server = 'orchestratinator') {
+  const c = commandOf(text);
+  if (c?.name === 'mcp' && !c.args) return `/mcp reconnect ${server}`;
+  return text;
+}
+
+/**
  * Whether the window would wrap this paste in `<pasted_content>` tags.
  *
  * Measured on 2.1.300 (2026-11-03, issue #10): a bracketed paste of four or
@@ -2501,6 +2527,15 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // it is. Refused before a key is pressed, and said on the desk.
   if ((cmd?.name === 'model' || cmd?.name === 'effort') && wasBusy) {
     return { ok: false, code: 'busy', target: pane.target, error: `the desk is working — change the ${cmd.name === 'model' ? 'model' : 'effort level'} when the turn ends` };
+  }
+  // Nor an MCP reconnect. Measured 2026-11-19 on 2.1.328, a probe 9 s into
+  // a 25 s tool call: `/mcp reconnect orchestratinator` left the composer and
+  // was never heard of again: no command record, no queue entry, no line on
+  // screen, and the turn ended without it. Typed, it waited out the 20 s and
+  // said not_delivered about a command that had gone nowhere. Idle, the same
+  // command answered in about 3 s every time.
+  if (cmd?.name === 'mcp' && wasBusy) {
+    return { ok: false, code: 'busy', target: pane.target, error: 'the desk is working, and the window drops an /mcp typed into a turn — send /mcp when the turn ends' };
   }
 
   // Where the transcript stood before anything was typed. Taken here rather

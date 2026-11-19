@@ -188,6 +188,10 @@ export function lostWorkWords(item) {
       return 'the stop may not have reached the window: the host restarted while it was in line. If the desk is still working, press stop again';
     case 'update':
       return null;
+    // The board asks again while the window still has no MCP session
+    // (reconnectDue), so a lost one is nothing to say.
+    case 'reconnect':
+      return null;
     default:
       return `"${item?.kind}" may not have happened: the host restarted before it was done. Check the desk and do it again if it is needed`;
   }
@@ -233,6 +237,10 @@ export function commandOf(text) {
  * session's only and the host drove the window's picker to make it so; the
  * reasoning for the commands over the picker is beside send() in
  * host/window.js.
+ *
+ * A bare `/mcp` reconnects the desk's own server: the host types it as
+ * `/mcp reconnect <name>`, because in the window `/mcp` alone opens a panel
+ * nobody on the floor is driving (typedCommand in host/window.js).
  */
 export const FLOOR_COMMANDS = [
   { name: 'clear', args: false, hint: 'start a new conversation on this desk', receipt: 'the new conversation\u2019s first record' },
@@ -240,6 +248,7 @@ export const FLOOR_COMMANDS = [
   { name: 'model', args: 'name', hint: 'change the model, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'effort', args: 'level', hint: 'change the effort level, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
+  { name: 'mcp', args: false, hint: 'reconnect this desk\u2019s tools to the board', receipt: 'the window\u2019s own line' },
 ];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -615,21 +624,34 @@ const TWIN_UNHEARD_MS = Math.max(0, Number(process.env.ORCH_TWIN_UNHEARD_MS ?? 9
  * on a timer of the board's own: with no page open nobody is looking at the
  * floor, and the next page to open runs it.
  */
+/**
+ * An open room that is not live: held while the board has not yet watched
+ * it stay silent for TWIN_UNHEARD_MS. The watch is kept by the room's last
+ * touch, so one heard from and silent again later is watched afresh, with
+ * no look needed in between to notice it was live. Shared by the twin sweep
+ * and the room notices, which ask the same question of the same room.
+ */
+function roomStillWatched(live, r, nowMs) {
+  if (r.ended_at) return false;
+  const seen = live.unheard.get(r.id);
+  if (!seen || seen.live_at !== r.live_at) {
+    live.unheard.set(r.id, { at: nowMs, live_at: r.live_at });
+    return TWIN_UNHEARD_MS > 0;
+  }
+  return nowMs - seen.at < TWIN_UNHEARD_MS;
+}
+
+/**
+ * Whether a room still holds the desks in it: live, or ended a moment ago
+ * by a window that may be reloading (not by End meeting, `ended`), or open
+ * and silent but not yet watched long enough to call its window gone.
+ */
+function roomHolds(live, r, nowMs, ended = null) {
+  return r.live || (!!r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || roomStillWatched(live, r, nowMs);
+}
+
 export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {}) {
   const closed = [];
-  // An open room that is not live: held while the board has not yet watched
-  // it stay silent for TWIN_UNHEARD_MS. The watch is kept by the room's last
-  // touch, so one heard from and silent again later is watched afresh, with
-  // no look needed in between to notice it was live.
-  const stillWatched = (r) => {
-    if (r.ended_at) return false;
-    const seen = live.unheard.get(r.id);
-    if (!seen || seen.live_at !== r.live_at) {
-      live.unheard.set(r.id, { at: nowMs, live_at: r.live_at });
-      return TWIN_UNHEARD_MS > 0;
-    }
-    return nowMs - seen.at < TWIN_UNHEARD_MS;
-  };
   for (const t of store.listTwins()) {
     if (!t.for_meeting) continue;
     const k = deskKey(t.channel, t.agent);
@@ -650,7 +672,7 @@ export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {
     // final — the moment's grace is for a window that may be reloading.
     const held = store.meetingsOn(t.channel)
       .filter((r) => r.participants.some((p) => p.agent === t.agent && !p.absent))
-      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || stillWatched(r));
+      .some((r) => roomHolds(live, r, nowMs, ended));
     if (held) continue;
     const last = store.lastTurns().find((x) => x.channel === t.channel && x.agent === t.agent) ?? null;
     if (switchable(h, last, nowMs, { editorOk: true }).error) continue;
@@ -662,6 +684,128 @@ export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {
     closed.push(k);
   }
   return closed;
+}
+
+/*
+ * When a floor window's tools have dropped and the board asks its host to
+ * reconnect them (costmo, 2026-11-19, by AskUserQuestion: "Yes,
+ * automatically"). The desktop app runs the board as a process of its own,
+ * so every launch starts a fresh board, and an MCP session lives in the
+ * board's memory: every window's tools were gone after each launch, and
+ * Claude Code does not connect again by itself (measured on 2.1.328: a
+ * window whose board went away reads "MCP server … disconnected · open /mcp
+ * to reconnect" and stays so). He reconnected each by hand with /mcp.
+ *
+ * AFTER: how long a window must stand with no MCP session first. A window
+ * that is starting connects within seconds; this is well past that.
+ * RETRY and TRIES: a window that does not come back from one reconnect (a
+ * folder whose server was declined, a board refusing its key) is asked
+ * once more two minutes later and then left alone, so a desk that will not
+ * connect is not given a `host` line every half-minute. A session arriving
+ * resets all of it.
+ */
+export const RECONNECT_AFTER_MS = Math.max(0, Number(process.env.ORCH_RECONNECT_AFTER_MS ?? 20_000));
+export const RECONNECT_RETRY_MS = Math.max(0, Number(process.env.ORCH_RECONNECT_RETRY_MS ?? 120_000));
+export const RECONNECT_TRIES = 2;
+
+/**
+ * Which of a host's desks to reconnect now. Pure, over what the board
+ * already knows; `state` (deskKey -> { since, tries, at }) is kept between
+ * looks and updated here.
+ *
+ * Only a desk with a floor window (`window_id`, and no editor holding it:
+ * an editor's tab is not something the host can type into), no MCP session,
+ * and an agent that has used its tools on this board before (`used`: an
+ * agents row, which only an MCP connect or a tool call makes). That is what
+ * "its tools dropped" means. A window that never connected (its server
+ * declined at the folder's question, a stand-in in a suite) has nothing to
+ * get back. A Claude Code that is connected holds a stream open, and the
+ * board never expires a streaming session (sweepIdleSessions in
+ * src/server.js), so an idle window keeps its session for as long as it is
+ * idle and is never taken for one that dropped. Its silence is counted while it works or asks too, but it is
+ * asked only while idle and not asking: `/mcp reconnect` typed into a turn
+ * is dropped by the window without a trace (measured, see typedCommand in
+ * host/window.js), and into a prompt it would answer the prompt.
+ */
+export function reconnectDue(desks, { present, used, state, pending = new Map(), lastTurnOf = () => null, nowMs = Date.now(), after = RECONNECT_AFTER_MS, retry = RECONNECT_RETRY_MS, tries = RECONNECT_TRIES } = {}) {
+  const due = [];
+  for (const d of desks) {
+    const k = deskKey(d.channel, d.agent);
+    if (present.has(k) || !used.has(k) || !d.window_id || d.outside_pid) { state.delete(k); continue; }
+    let s = state.get(k);
+    if (!s) { s = { since: nowMs, tries: 0, at: 0 }; state.set(k, s); }
+    if (d.state === 'offline' || isWorking(d, lastTurnOf(k)) || pending.get(k)) continue;
+    if (nowMs - s.since < after || s.tries >= tries || (s.tries && nowMs - s.at < retry)) continue;
+    s.tries += 1;
+    s.at = nowMs;
+    due.push(d);
+  }
+  return due;
+}
+
+/**
+ * What a desk is told as it enters a meeting room, and as it is back on the
+ * floor (costmo, 2026-11-19: he prefixed his first message in every room
+ * with this by hand, so that agents stop relaying what he says to the room
+ * and answering what was not meant for them). His pick of three, by
+ * AskUserQuestion: a message of its own at each change, over the note
+ * riding on the next message and over hidden context from the plugin's
+ * hook. Do not re-propose either.
+ *
+ * The words are one tagged block, so the relay files the message as a
+ * `context` turn labeled `meeting-room` (contextTagOf in host/window.js),
+ * drawn as a quiet line and never as the operator's bubble: the board sent
+ * it, not he. One line, so the host pastes it rather than types it.
+ */
+export const ROOM_NOTICE_TAG = 'meeting-room';
+export function roomNoticeText(kind, others = []) {
+  const wrap = (t) => `<${ROOM_NOTICE_TAG}>${t}</${ROOM_NOTICE_TAG}>`;
+  if (kind === 'leave') {
+    return wrap('You have left the meeting room and are back on the floor. The operator\'s messages are addressed to you again, and your broadcasts reach the whole floor. This note needs no reply.');
+  }
+  const names = others.length ? `${others.length === 1 ? others[0] : `${others.slice(0, -1).join(', ')} and ${others.at(-1)}`} and the operator` : 'the operator';
+  return wrap(`You are now in a meeting room with ${names}. Messages the operator sends to the room go to every agent in it, so they are not necessarily addressed to you, and there is no need to relay them to the others. Answer only what is meant for you. Your broadcasts reach only the room. This note needs no reply.`);
+}
+
+/**
+ * Who is owed a room notice now. Pure, so the suite can run it over the
+ * cases that matter without a window.
+ *
+ * `rooms`: every room, each { id, channel, open (live now), holding
+ * (roomHolds), present: [agents in it, not absent] }. `told`: the
+ * room_told rows. `twins`: deskKeys of second sessions made for a room.
+ *
+ * - A desk present in a live room it was not told of is sent `enter`
+ *   (from the floor, or straight from another room).
+ * - A desk told of a room it is no longer held by is sent `leave`. Held is
+ *   the twin sweep's rule (roomHolds): a reload ends the room and opens it
+ *   again within a second or two, and End meeting is final. So a reload
+ *   sends neither notice, and End meeting sends `leave` at once.
+ * - A second session made for a room is closed when it is in none
+ *   (sweepTwins), so it is `forget`: told nothing, its row cleared.
+ */
+export function roomNoticePlan(rooms, told, twins = new Set()) {
+  const out = [];
+  const inOpen = new Map();
+  const held = new Set();
+  for (const r of rooms) {
+    for (const a of r.present) {
+      const k = deskKey(r.channel, a);
+      if (r.open && !inOpen.has(k)) inOpen.set(k, r);
+      if (r.holding) held.add(`${r.id}|${k}`);
+    }
+  }
+  const toldBy = new Map(told.map((t) => [deskKey(t.channel, t.agent), t]));
+  for (const [k, r] of inOpen) {
+    const agent = k.slice(r.channel.length + 1);
+    if (toldBy.get(k)?.meeting_id === r.id) continue;
+    out.push({ kind: 'enter', channel: r.channel, agent, room: r.id, others: r.present.filter((a) => a !== agent) });
+  }
+  for (const [k, t] of toldBy) {
+    if (inOpen.has(k) || held.has(`${t.meeting_id}|${k}`)) continue;
+    out.push({ kind: twins.has(k) ? 'forget' : 'leave', channel: t.channel, agent: t.agent, room: t.meeting_id });
+  }
+  return out;
 }
 
 /** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
@@ -1747,8 +1891,12 @@ export function createLive() {
   /** Seats that were just left: when, so their closed windows' last hooks
    *  do not seat them again (ingestHookEvent). */
   const left = new Map();          // deskKey -> ms
+  /** Floor windows with no MCP session: since when, and the reconnects the
+   *  board has asked of their host since (reconnectDue). */
+  const reconnect = new Map();     // deskKey -> { since, tries, at }
   return {
     takes,
+    reconnect,
     closing,
     unheard,
     left,
@@ -3209,7 +3357,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // the work.
     // `uploads`: it fetches a message's attachments (issue #31); a host from
     // before them is refused files rather than handed ids it would ignore.
-    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true);
+    // `reconnect`: it types `/mcp reconnect` into a floor window whose tools
+    // dropped, when the board asks (reconnectDue).
+    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3363,6 +3513,41 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * message within milliseconds of it being typed without polling in a tight
    * loop, and without this server ever connecting *to* a workstation.
    */
+  /**
+   * Ask a host to reconnect its floor windows whose tools dropped
+   * (reconnectDue), at its work poll: a host polls at least every
+   * WORK_WAIT_MAX_MS whether or not a page is open, which is what the
+   * desktop app's fresh board needs, since nobody may be looking. Only a host
+   * that said it takes the work; at most once in five seconds a host.
+   */
+  const reconnectLooked = new Map();
+  const askReconnects = (hostId) => {
+    const now = Date.now();
+    if (now - (reconnectLooked.get(hostId) ?? 0) < 5000) return false;
+    reconnectLooked.set(hostId, now);
+    if (!store.hostReconnects?.(hostId)) return false;
+    let asked = false;
+    try {
+      const present = new Set(mcpSessionCounts(sessions, deskKey).keys());
+      const used = new Set(store.agentKeys().map((a) => deskKey(a.channel, a.agent)));
+      const last = new Map(store.lastTurns().map((t) => [deskKey(t.channel, t.agent), t]));
+      const desks = store.listHostedDesks().filter((d) => d.host_id === hostId);
+      for (const d of reconnectDue(desks, { present, used, state: live.reconnect, pending: live.pending, lastTurnOf: (k) => last.get(k) ?? null, nowMs: now })) {
+        store.enqueueHostWork(hostId, d.channel, d.agent, 'reconnect', {});
+        asked = true;
+      }
+    } catch (err) { console.error(`[floor] reconnect check: ${err.message}`); }
+    return asked;
+  };
+  // And every five seconds, waking the host's poll when there is work: a
+  // host's poll can sit in its wait for WORK_WAIT_MAX_MS, and a desk whose
+  // tools dropped should not wait that long again after RECONNECT_AFTER_MS.
+  setInterval(() => {
+    try {
+      for (const hostId of new Set(store.listHostedDesks().map((d) => d.host_id))) if (askReconnects(hostId)) live.wake(hostId);
+    } catch { /* the next tick looks again */ }
+  }, 5000).unref();
+
   router.get('/api/host/work', auth.ingestGuard, async (req, res) => {
     const hostId = str(req.query.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
@@ -3374,6 +3559,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const done = String(req.query.done ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
     if (done.length) store.doneHostWork(hostId, done);
 
+    askReconnects(hostId);
     let items = store.takeHostWork(hostId, boot);
     if (!items.length && waitMs > 0) {
       let gone = false;
@@ -3495,6 +3681,37 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!force && now - sweptAt < 2000) return;
     sweptAt = now;
     try { sweepTwins(store, live, now, opts); } catch { /* the floor is still served */ }
+    try { noticeRooms(now, opts.ended ?? null); } catch (err) { console.error(`[floor] room notices: ${err.message}`); }
+  };
+
+  /**
+   * Send each desk the notice it is owed (roomNoticePlan): one as it enters
+   * a meeting room, one as it is back on the floor. Run with the sweep, so
+   * from the routes a page polls and every route a room's window calls.
+   * Through the chat route's own checks, as a message the board types:
+   * a desk that cannot take one now (host offline, held by an editor, its
+   * window asking) is not marked told, and is tried again at a later look.
+   * A desk with no hosted row any more has nobody to tell: its row goes.
+   */
+  const noticeRooms = (nowMs, ended) => {
+    const rooms = store.allMeetings().map((r) => ({
+      id: r.id, channel: r.channel, open: r.live, holding: roomHolds(live, r, nowMs, ended),
+      present: r.participants.filter((p) => !p.absent).map((p) => p.agent),
+    }));
+    const twins = new Set(store.listTwins().filter((t) => t.for_meeting).map((t) => deskKey(t.channel, t.agent)));
+    for (const n of roomNoticePlan(rooms, store.listRoomTold(), twins)) {
+      if (n.kind === 'forget') { store.clearRoomTold(n.channel, n.agent); continue; }
+      const check = hostedOrWhyNot(n.channel, n.agent);
+      if (check.code === 'not_hosted') {
+        if (n.kind === 'leave') store.clearRoomTold(n.channel, n.agent);
+        continue;
+      }
+      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent)))) continue;
+      store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others) });
+      live.wake(check.hosted.host_id);
+      if (n.kind === 'enter') store.setRoomTold(n.channel, n.agent, n.room);
+      else store.clearRoomTold(n.channel, n.agent);
+    }
   };
 
   router.get('/api/floor', (_req, res) => {
@@ -4520,6 +4737,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const ok = req.body?.empty === true && Array.isArray(req.body?.agents) && !req.body.agents.length ? { names: [] } : seatedOn(channel, req.body?.agents);
     if (ok.error) return res.status(400).json(ok);
     const id = store.createMeeting(channel, seatsNow(channel, ok.names), MEETINGS_KEEP);
+    // Each desk is told it is in a room now (roomNoticePlan).
+    sweep(true);
     res.json({ ok: true, room: roomOut(store.meeting(id)) });
   });
 
@@ -4543,6 +4762,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const room = roomOr404(req, res);
     if (!room) return;
     store.openMeeting(room.id);
+    // A Resume tells its desks they are in a room again; a reload's open
+    // tells nobody, because the room still held them (roomNoticePlan).
+    sweep(true);
     res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
   });
 
@@ -4556,7 +4778,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   router.post('/api/floor/meeting/touch', auth.adminGuard, (req, res) => {
     const room = roomOr404(req, res);
     if (!room) return;
-    res.json({ ok: true, live: store.touchMeeting(room.id) });
+    const alive = store.touchMeeting(room.id);
+    // A window is looking, even when no floor tab is: a room that ended
+    // without End meeting is found here as well as from the floor's polls.
+    sweep();
+    res.json({ ok: true, live: alive });
   });
 
   /**

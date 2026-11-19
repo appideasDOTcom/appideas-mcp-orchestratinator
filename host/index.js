@@ -162,10 +162,14 @@ function loadConfig() {
  * turn twice.
  */
 class Desk {
-  constructor(host, { channel, agent, cwd, scope = 'project', seat = null }) {
+  constructor(host, { channel, agent, cwd, scope = 'project', seat = null, server = null }) {
     this.host = host;
     this.channel = channel;
     this.agent = agent;
+    // The name this desk's window knows the board's server by: what a bare
+    // `/mcp` from the floor reconnects (typedCommand in window.js). A seat's
+    // binding file is written under the host's own name (seats.js).
+    this.server = server || M.SERVER_NAME;
     // A seat: an extra desk in a folder that is some other desk's, with a
     // window and a binding of its own (host/seats.js). Null for the folder's
     // own desk, which is every desk there was before seats.
@@ -489,6 +493,26 @@ class Desk {
     }, true);
   }
 
+  /**
+   * Bring this desk's tools back: `/mcp reconnect <server>` in its window,
+   * asked by the board when the window has stood with no MCP session for a
+   * while (reconnectDue in src/floor.js; costmo, 2026-11-19, so that a fresh
+   * board after the desktop app restarts does not leave him to /mcp every
+   * desk by hand). The window's own line is said on the desk. Nothing is
+   * opened for it, and nothing is typed into a turn, where the window drops
+   * the command without a trace (typedCommand in window.js): the board asks
+   * again later while the session is still missing.
+   */
+  async reconnect() {
+    const at = await W.busyAt(this.where);
+    if (!at.pane) return;
+    if (at.busy) { log(`${this.label}: its tools have dropped, but it is working; reconnecting when the board asks again`); return; }
+    const r = await W.send(this.where, W.typedCommand('/mcp', this.server));
+    const id = this.sessionId ?? this.lastSessionId;
+    if (r.ok && r.said) this.told(`the desk's tools had lost the board, so the host ran /mcp — ${r.said}`, id);
+    else warn(`${this.label}: reconnecting its tools: ${r.error ?? r.code ?? 'no receipt from the window'}`);
+  }
+
   /** Type into this repo's window, opening one if there isn't one. */
   async say(text) {
     // Resume the conversation this desk is, not merely the one that happens to
@@ -500,7 +524,11 @@ class Desk {
     // for new sessions (costmo, 2026-11-14, reversing #10 Decided 4). The
     // picker that was driven here for "this session only" is gone, and why it
     // was not kept with Enter in place of `s` is beside send() in window.js.
-    const r = await W.send(this.where, text, { open: true, resume: id });
+    // What the window is given, which is the operator's words except where a
+    // command means something else in the window than it does on the floor:
+    // a bare /mcp opens a panel there, and reconnects here (typedCommand).
+    // The line on the desk still says what the operator typed.
+    const r = await W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id });
     if (r.note) this.told(r.note, id);
     if (!r.ok) {
       // The command that was being typed, when it was one: a model or effort
@@ -782,7 +810,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, pending, boot: this.boot, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, pending, boot: this.boot, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -878,6 +906,7 @@ class Host {
         // Same repo, same conversation — only where the binding is written
         // may have changed, which a floor import does (.mcp.json → local
         // scope). Not a new desk; say where it is bound now and carry on.
+        if (d.server && have.server !== d.server) have.server = d.server;
         if (have.scope !== d.scope) {
           have.scope = d.scope;
           log(`desk ${d.channel}/${d.agent} is now bound in ${d.scope} scope  (${reason})`);
@@ -1947,6 +1976,9 @@ class Host {
       }
       case 'interrupt':
         await desk.interrupt();
+        break;
+      case 'reconnect':
+        await desk.reconnect();
         break;
       case 'handback': {
         // Give the conversation to the editor: close ours first, then open it

@@ -1304,6 +1304,11 @@ async function main() {
     eq(W.commandOf('/btw first\nsecond'), null, 'a message with a newline in it is a message, whatever its first character');
     eq(W.commandOf('look at /tmp/x'), null, 'and so is a slash anywhere but first');
     eq(W.commandOf(''), null, 'nothing is not a command');
+    eq(W.typedCommand('/mcp'), '/mcp reconnect orchestratinator', 'a bare /mcp is typed as a reconnect of the board\'s server (alone it opens a panel nobody drives)');
+    eq(W.typedCommand('  /MCP  ', 'board-b'), '/mcp reconnect board-b', 'by the name the desk\'s binding gives that server, however it was typed');
+    eq(W.typedCommand('/mcp reconnect all'), '/mcp reconnect all', '/mcp with anything after it goes as typed');
+    eq(W.typedCommand('/mcp\nplease'), '/mcp\nplease', 'and a message that starts with /mcp is a message');
+    eq(W.typedCommand('/model opus'), '/model opus', 'every other command goes as typed');
     eq(W.wouldWrap('a'.repeat(800)), false, '800 characters on one line are pasted as they are');
     eq(W.wouldWrap('a'.repeat(801)), true, 'one more is wrapped in <pasted_content> (850 was, measured)');
     eq(W.wouldWrap('one\ntwo\nthree'), false, 'three lines are not wrapped');
@@ -1746,7 +1751,12 @@ async function main() {
     const busyModel = await W.send(CP_DIR, '/model opus');
     eq([busyModel.ok, busyModel.code], [false, 'busy'], 'a model change is refused while the window is working');
     eq((await W.send(CP_DIR, '/effort low')).code, 'busy', 'and so is an effort change');
-    eq(keysSince(mark).length, 0, 'with no key sent for either');
+    // And an MCP reconnect: measured on 2.1.328, the window drops one typed
+    // into a turn without a trace, so it is refused here in words instead.
+    const busyMcp = await W.send(CP_DIR, W.typedCommand('/mcp'));
+    eq([busyMcp.ok, busyMcp.code], [false, 'busy'], 'a reconnect is refused while the window is working');
+    assert(/drops an \/mcp typed into a turn/.test(busyMcp.error ?? ''), `in words that say why — ${busyMcp.error}`);
+    eq(keysSince(mark).length, 0, 'with no key sent for any of them');
     const behind = await W.send(CP_DIR, 'sent while it compacts');
     assert(behind.ok && behind.queued, `a message sent into a compaction is taken${behind.ok ? '' : ` — ${behind.error}`}`);
     eq(behind.held, 'compacting', 'and said to be held by the compaction, with no twenty-second wait');

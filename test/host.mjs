@@ -93,9 +93,11 @@ function fixture() {
   mkdirSync(`${HOME}/.claude/projects/${slug()}`, { recursive: true });
   writeFileSync(SINK, '');
   writeFileSync(transcript(), '');
+  // Under a name of its own, as a hand-written .mcp.json may be: a bare /mcp
+  // from the floor reconnects the server by the name the window knows it by.
   writeFileSync(`${REPO}/.mcp.json`, JSON.stringify({
     mcpServers: {
-      orchestratinator: {
+      'team-board': {
         type: 'http', url: `${HOST}/mcp`,
         headers: { 'X-Channel': CH, 'X-Agent': 'free', 'X-Orchestratinator-Key': KEY },
       },
@@ -365,6 +367,19 @@ function fixture() {
     String.raw`        process.stdout.write('\n' + '\u2594'.repeat(60) + '\n    /btw ' + (cmd[2] || '') + '\n      42\n    \u2191/\u2193 to scroll \u00b7 c to copy \u00b7 f to fork \u00b7 Esc to close\n');`,
     `        continue;`,
     `      }`,
+    // /mcp as 2.1.328 does it (measured 2026-11-19): bare, the servers
+    // panel, which writes nothing; `/mcp reconnect <name>`, the command
+    // record and its line as local-command-stdout.
+    `      if (cmd && cmd[1] === 'mcp' && !cmd[2]) {`,
+    String.raw`        process.stdout.write('\n' + '\u2594'.repeat(60) + '\n  MCP servers\n  1 server\n  \u276f \u2718 team-board\n  \u2191/\u2193 to navigate \u00b7 Enter to view \u00b7 Esc to close\n');`,
+    `        continue;`,
+    `      }`,
+    `      if (cmd && cmd[1] === 'mcp') {`,
+    `        const said = /^reconnect\\s+(\\S+)$/.test(cmd[2]) ? 'Reconnected to ' + cmd[2].split(/\\s+/)[1] : 'MCP server not found';`,
+    `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>' + cmd[2] + '</command-args>' } }) + '\\n');`,
+    `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<local-command-stdout>' + said + '</local-command-stdout>' } }) + '\\n');`,
+    `        continue;`,
+    `      }`,
     `      if (cmd) { fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/' + cmd[1] + '</command-name><command-message>' + cmd[1] + '</command-message><command-args>' + (cmd[2] || '') + '</command-args>' } }) + '\\n'); continue; }`,
     String.raw`      if (text) fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: text } }) + '\n');`,
     `      continue;`,
@@ -502,7 +517,11 @@ try {
   // A function, because one row restarts the board on the same database,
   // as a deploy does (the milestone audit's finding 1).
   const startServer = () => spawn('node', ['src/server.js'], {
-    env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged` },
+    // A floor window whose tools dropped is asked about after 1.5 s here (20 s
+    // on a real board), and not again within the run: the stand-in never
+    // connects, so a retry would type into it again mid-suite.
+    env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged`,
+      ORCH_RECONNECT_AFTER_MS: '1500', ORCH_RECONNECT_RETRY_MS: '3600000' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   server = startServer();
@@ -578,6 +597,39 @@ try {
   eq(btwRows?.find((r) => r.via === '/btw')?.text, '42', "the answer is read off the window's overlay and is the agent's, labeled by the command");
   assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/btw what is 6*7? — answered in the window'), 'the desk says what was typed and where the answer went, as one line labeled host');
   assert(!(btwRows ?? []).some((r) => r.role === 'error'), 'and no error turn says it did not confirm');
+
+  // A bare /mcp opens a panel in the window that nobody on the floor drives;
+  // from the floor it reconnects the desk's tools, by the name its binding
+  // gives the board's server (here `team-board`, from the repo's .mcp.json).
+  const mcpSent = await chat('free', '/mcp');
+  eq(mcpSent.status, 200, 'a bare /mcp is accepted');
+  const mcpRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.tool_name === 'host' && /^\/mcp — /.test(r.text ?? '')) || rows.some((r) => r.role === 'error') ? rows : null;
+  }, 15000);
+  assert(clean(received()).includes('/mcp reconnect team-board'), 'the window is sent a reconnect of the desk\'s own server, by the name its binding gives it');
+  assert((mcpRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/mcp — Reconnected to team-board'),
+    `the desk says what the operator typed and the window's own line — ${JSON.stringify((mcpRows ?? []).filter((r) => r.tool_name === 'host' || r.role === 'error').map((r) => r.text))}`);
+  assert(!(mcpRows ?? []).some((r) => r.role === 'error'), 'with no error turn');
+
+  // And by itself: a desk whose agent had a session on this board, and has
+  // none now (as after the desktop app restarts its board), is reconnected
+  // by its host when the board asks, with the window's line on the desk.
+  // The stand-in never connects, so the suite connects as the desk and then
+  // drops the session, which is what a board restart does to it.
+  const mh = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': CH, 'X-Agent': 'free', 'x-orchestratinator-key': KEY };
+  const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: mh, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'host-test', version: '0' } } }) });
+  await init.text();
+  const freeSid = init.headers.get('mcp-session-id');
+  await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh, 'mcp-session-id': freeSid } }).then((x) => x.text());
+  const sentBefore = clean(received()).split('/mcp reconnect team-board').length;
+  const rcRows = await until(async () => {
+    const rows = (await turns('free')).rows ?? [];
+    return rows.some((r) => r.tool_name === 'host' && /lost the board/.test(r.text ?? '')) ? rows : null;
+  }, 45000);
+  assert(clean(received()).split('/mcp reconnect team-board').length > sentBefore, 'with nothing typed by anybody, the window is sent a reconnect of its own server');
+  assert((rcRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === "the desk's tools had lost the board, so the host ran /mcp — Reconnected to team-board"),
+    `and the desk says why the host did it, and what the window said — ${JSON.stringify((rcRows ?? []).filter((r) => r.tool_name === 'host').map((r) => r.text).slice(-3))}`);
 
 
   /* Issue #31: a file attached on the floor. The board stages it, the host

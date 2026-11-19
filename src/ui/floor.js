@@ -5066,6 +5066,7 @@
     { name: 'model', args: 'name', hint: 'change the model — saved as the default for new sessions' },
     { name: 'effort', args: 'level', hint: 'change the effort level — saved as the default for new sessions' },
     { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools' },
+    { name: 'mcp', args: '', hint: 'reconnect this desk\u2019s tools to the board' },
   ];
   const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
   /** The models the floor offers by name; the name goes to the window's own

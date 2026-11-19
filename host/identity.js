@@ -109,7 +109,7 @@ export function unsetIn(value, env = process.env) {
 /** The orchestratinator entry in a set of MCP servers, as a desk, or null. The
  *  signature is the pair of headers, never the entry's name. */
 function deskIn(servers, dir, extra) {
-  for (const s of Object.values(servers && typeof servers === 'object' ? servers : {})) {
+  for (const [server, s] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
     const channel = header(s?.headers, 'X-Channel');
     const agent = header(s?.headers, 'X-Agent');
     if (channel && agent && typeof s?.url === 'string') {
@@ -123,8 +123,11 @@ function deskIn(servers, dir, extra) {
       // placeholder gets none: the variable set to the board's key would make
       // the key something else.
       const whole = raw ? WHOLE_PLACEHOLDER.exec(raw)?.[1] : null;
+      // `server`: the name the window knows this entry by, which is what
+      // `/mcp reconnect <name>` takes (typedCommand in window.js). The host
+      // writes `orchestratinator`; one added by hand may be called anything.
       return {
-        channel, agent, cwd: dir, url: s.url, key,
+        channel, agent, cwd: dir, url: s.url, key, server,
         ...(unset.length ? { keyUnset: unset } : {}),
         ...(whole && unset.includes(whole) ? { keyVar: whole } : {}),
         ...extra,

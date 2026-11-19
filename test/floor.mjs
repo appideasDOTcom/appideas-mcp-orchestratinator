@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 // The host<->board protocol this tree speaks: every registration a suite
@@ -83,6 +83,10 @@ const startServer = () => spawn('node', ['src/server.js'], {
     ...process.env, PORT: String(PORT), DB_PATH,
     ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
     ORCH_TWIN_UNHEARD_MS: String(UNHEARD_MS),
+    // A floor window with no MCP session is asked to reconnect after this
+    // long, and once more after the retry (reconnectDue; 20 s and 2 min on a
+    // real board).
+    ORCH_RECONNECT_AFTER_MS: '1000', ORCH_RECONNECT_RETRY_MS: '2500',
     // Attachments (issue #31): staged in a folder of this run's, and a cap
     // small enough to meet without sending 100 MB.
     ORCH_UPLOAD_DIR: UPLOAD_DIR, ORCH_UPLOAD_MAX_BYTES: String(UPLOAD_CAP),
@@ -1625,7 +1629,12 @@ try {
   await takeWork();
   eq((await sessOf('typist'))?.effort_requested, 'xhigh', 'asked for, until the window confirms');
   eq(commandOf('/btw is it late?'), { name: 'btw', args: 'is it late?' }, 'the route and the host parse a command the same way');
-  eq(FLOOR_COMMANDS.map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'the floor\'s own list');
+  eq(FLOOR_COMMANDS.map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw', 'mcp'], 'the floor\'s own list');
+  // A bare /mcp goes to the host as typed: the host is what knows the
+  // window's name for the board's server, and types the reconnect.
+  rr2 = await say('/mcp');
+  eq(rr2.status, 200, 'a bare /mcp is taken, not refused like a bare /model');
+  assert((await takeWork()).includes('chat'), 'and goes to the host as chat work');
 
   // Two live sessions on one desk — the floor's window and an editor tab —
   // and the window is the one the host drives. The picker's words and the
@@ -1772,7 +1781,9 @@ try {
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
     eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the window\'s levels');
-    eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'a slash alone offers every command');
+    eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw', 'mcp'], 'a slash alone offers every command');
+    eq(page.slashMatches('/mc').map((c) => c.name), ['mcp'], '/mcp is offered by its first letters');
+    assert(/reconnect/.test(page.PAGE_COMMANDS.find((c) => c.name === 'mcp').hint), 'and says it reconnects the desk\'s tools');
     eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
     eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
     eq(page.slashMatches('hello /co'), [], 'a slash anywhere but first is text');
@@ -4541,6 +4552,157 @@ try {
    * The board's half and the page's decisions. What a host does with a `seat`
    * is the host suite's; what two real windows in one folder do is measured
    * on a probe (host/seats.js). Every refusal must queue nothing. */
+  console.log('\nwhat a desk is told as it enters a meeting room and leaves it (costmo, 2026-11-19)');
+  {
+    // The words: one tagged block, so the relay files it as a context line
+    // labeled meeting-room (contextTagOf in host/window.js), and one line,
+    // so it is pasted, never typed in pieces.
+    const enter = roomNoticeText('enter', ['bo', 'cy']);
+    assert(enter.startsWith(`<${ROOM_NOTICE_TAG}>`) && enter.endsWith(`</${ROOM_NOTICE_TAG}>`) && !enter.includes('\n'), 'a notice is one line, wholly one tagged block', enter);
+    assert(/in a meeting room with bo and cy and the operator\./.test(enter), 'entering names who else is in the room', enter);
+    assert(/not necessarily addressed to you/.test(enter) && /no need to relay them/.test(enter) && /needs no reply/.test(enter),
+      'and says what costmo typed by hand: messages to the room are not all for it, nothing to relay, no reply needed');
+    assert(/with bo, cy and dee and the operator/.test(roomNoticeText('enter', ['bo', 'cy', 'dee'])) && /with the operator\./.test(roomNoticeText('enter', [])),
+      'a list of three reads as one, and a room of one names only the operator');
+    const leave = roomNoticeText('leave');
+    assert(/back on the floor/.test(leave) && /addressed to you again/.test(leave) && /needs no reply/.test(leave), 'leaving says it is back on the floor', leave);
+    const W = await import('../host/window.js');
+    eq(W.typedCommand(enter), enter, 'and the host types it as given');
+
+    // The decision, over the cases that matter.
+    const room = (id, present, more = {}) => ({ id, channel: 'f', open: true, holding: true, present, ...more });
+    const kinds = (plan) => plan.map((n) => `${n.kind}:${n.agent}:${n.room}`);
+    eq(kinds(roomNoticePlan([room(1, ['bo', 'cy'])], [])), ['enter:bo:1', 'enter:cy:1'], 'a new room: everybody in it is told');
+    eq(roomNoticePlan([room(1, ['bo', 'cy'])], [])[0].others, ['cy'], 'with the others named');
+    eq(kinds(roomNoticePlan([room(1, ['bo', 'cy'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['enter:cy:1'], 'a desk already told is not told again');
+    eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: true })], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), [],
+      'a room ended a moment ago by a window that may be reloading still holds its desks: a reload says nothing');
+    eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: false })], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['leave:bo:1'],
+      'once it no longer holds them (End meeting, or the grace past), each is told it is back on the floor');
+    eq(kinds(roomNoticePlan([room(1, ['cy'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }, { channel: 'f', agent: 'cy', meeting_id: 1 }])), ['leave:bo:1'], 'a desk taken out of a live room is told at once, and the one still in it nothing');
+    eq(kinds(roomNoticePlan([room(1, ['cy'], { open: false, holding: false }), room(2, ['bo'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['enter:bo:2'],
+      'a desk that goes straight from one room to another is told of the new room, and not that it is on the floor');
+    eq(kinds(roomNoticePlan([], [{ channel: 'f', agent: 'bo-2', meeting_id: 1 }], new Set(['f|bo-2']))), ['forget:bo-2:1'],
+      'a second session made for a room is closed when the room ends, so it is told nothing');
+    eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: true })], [])), [], 'a silent room tells nobody they have entered it');
+
+    // End to end: the board queues each notice as chat work for the desk's host.
+    const TCH = 'tell-ch';
+    const tHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const desksT = ['tia', 'udo', 'vel'].map((a, i) => ({ channel: TCH, agent: a, cwd: `/repo/${a}`, session_id: `sdk-${a}`, window: `@${30 + i}` }));
+    const regT = () => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: tHK, body: JSON.stringify({ host_id: 'h-tell', name: 'tellbox', tmux: 'orch', protocol: PROTOCOL, desks: desksT }) }).then((r) => r.json());
+    await regT();
+    for (const d of desksT) await post({ channel: TCH, agent: d.agent, session_id: d.session_id, hook_event_name: 'SessionStart', cwd: d.cwd });
+    const opT = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const told = () => fetch(`${HOST}/api/host/work?host_id=h-tell&wait=0`, { headers: HK }).then((r) => r.json())
+      .then((b) => (b.work ?? []).filter((w) => w.kind === 'chat').map((w) => `${w.agent}:${new RegExp(`^<${ROOM_NOTICE_TAG}>You are now`).test(w.payload.text) ? 'enter' : /back on the floor/.test(w.payload.text) ? 'leave' : w.payload.text}`).sort());
+    let r = await opT('/api/floor/meeting', { channel: TCH, agents: ['tia', 'udo'] });
+    const tRoom = r.body.room.id;
+    eq(await told(), ['tia:enter', 'udo:enter'], 'opening a room sends each desk in it the note, as chat work for its host, at once');
+    r = await opT('/api/floor/meeting/participants', { id: tRoom, agents: ['tia', 'udo', 'vel'] });
+    eq(await told(), ['vel:enter'], 'Add tells the desk added, and nobody already told');
+    await opT('/api/floor/meeting/touch', { id: tRoom });
+    eq(await told(), [], 'a touch of a live room tells nobody anything');
+    // A reload: End without final, then Open within a second.
+    await opT('/api/floor/meeting/end', { id: tRoom });
+    await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    await opT('/api/floor/meeting/open', { id: tRoom });
+    await sleep(2100);
+    await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    eq(await told(), [], 'a reload of the room\'s window (End, then Open) tells nobody they left or entered');
+    r = await opT('/api/floor/meeting/participants', { id: tRoom, agents: ['tia', 'udo'] });
+    eq(await told(), ['vel:leave'], 'Remove tells the desk taken out that it is back on the floor');
+    // Asking: the window takes no message, so the note waits for the prompt to go.
+    await post({ channel: TCH, agent: 'vel', session_id: 'sdk-vel', hook_event_name: 'PermissionRequest', cwd: '/repo/vel', tool_name: 'Bash', tool_input: { command: 'ls' } });
+    await opT('/api/floor/meeting/participants', { id: tRoom, agents: ['tia', 'udo', 'vel'] });
+    eq(await told(), [], 'a desk whose window is asking is not sent the note while it asks');
+    await post({ channel: TCH, agent: 'vel', session_id: 'sdk-vel', hook_event_name: 'PreToolUse', cwd: '/repo/vel', tool_name: 'Bash', tool_input: { command: 'ls' } });
+    await sleep(2100);
+    await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    eq(await told(), ['vel:enter'], 'and is sent it at the next look once the prompt is gone');
+    await opT('/api/floor/meeting/end', { id: tRoom, final: true });
+    eq(await told(), ['tia:leave', 'udo:leave', 'vel:leave'], 'End meeting tells every desk it is back on the floor, at once');
+    await opT('/api/floor/meeting/open', { id: tRoom });
+    eq(await told(), ['tia:enter', 'udo:enter', 'vel:enter'], 'Resume tells them they are in the room again');
+    // The board restarting between the two is in the table (room_told), not memory.
+    const { default: Database } = await import('better-sqlite3');
+    const sqlT = new Database(DB_PATH, { readonly: true });
+    eq(sqlT.prepare(`SELECT agent, meeting_id FROM room_told WHERE channel = ? ORDER BY agent`).all(TCH).map((x) => `${x.agent}:${x.meeting_id}`), ['tia:' + tRoom, 'udo:' + tRoom, 'vel:' + tRoom],
+      'what each desk was told is kept in the database, so a board restarted mid-meeting still owes the way back');
+    sqlT.close();
+    await opT('/api/floor/meeting/end', { id: tRoom, final: true });
+    eq((await told()).length, 3, 'and is cleared as each is told it is back');
+  }
+
+  console.log('\nreconnecting a floor window whose tools dropped (costmo, 2026-11-19)');
+  {
+    const k = (a) => `f|${a}`;
+    const desk = (agent, more = {}) => ({ channel: 'f', agent, window_id: '@1', outside_pid: null, state: 'idle', ...more });
+    const used = new Set([k('bo'), k('cy'), k('dee'), k('ed')]);
+    const state = new Map();
+    const due = (desks, nowMs, more = {}) => reconnectDue(desks, { present: new Set(), used, state, nowMs, after: 1000, retry: 5000, tries: 2, ...more }).map((d) => d.agent);
+    eq(due([desk('bo')], 0), [], 'a window with no MCP session is not asked about at once: it may be starting');
+    eq(due([desk('bo')], 1000), ['bo'], 'it is, once it has stood that long');
+    eq(due([desk('bo')], 2000), [], 'and not again inside the retry');
+    eq(due([desk('bo')], 6000), ['bo'], 'once more after the retry');
+    eq(due([desk('bo')], 20000), [], 'and then left alone: a window that will not connect is not given a line every half-minute');
+    eq(due([desk('bo')], 21000, { present: new Set([k('bo')]) }), [], 'a session arriving');
+    eq(due([desk('bo')], 22000), [], 'starts the count again');
+    eq(due([desk('bo')], 23000), ['bo'], 'from the start');
+    eq(due([desk('zed')], 0) && due([desk('zed')], 9999), [], 'an agent that never used its tools on this board has nothing to get back (a server declined at the folder\'s question)');
+    eq([due([desk('cy', { window_id: null })], 0), due([desk('cy', { window_id: null })], 9999)], [[], []], 'nor a desk with no floor window');
+    eq(due([desk('dee', { outside_pid: 4242 })], 9999), [], 'nor one an editor holds');
+    due([desk('ed', { state: 'working' })], 0);
+    eq(due([desk('ed', { state: 'working' })], 5000), [], 'a working window is not asked: the window drops /mcp typed into a turn');
+    eq(due([desk('ed')], 5001), ['ed'], 'and is asked once its turn ends, its silence already counted');
+    state.clear();
+    due([desk('ed')], 0, { pending: new Map([[k('ed'), { request_id: 'r' }]]) });
+    eq(due([desk('ed')], 5000, { pending: new Map([[k('ed'), { request_id: 'r' }]]) }), [], 'nor one that is asking: the keys would answer the prompt');
+
+    // End to end: a host that said it takes the work, a window whose agent
+    // connected and then lost its session.
+    const RCH = 'rc-ch';
+    const rHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const regR = (reconnect) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-rc', name: 'rcbox', tmux: 'orch', protocol: PROTOCOL, reconnect,
+      desks: [{ channel: RCH, agent: 'rex', cwd: '/repo/rex', session_id: 'sdk-rex', window: '@40' }, { channel: RCH, agent: 'sol', cwd: '/repo/sol', session_id: 'sdk-sol', window: '@41' }] }) }).then((x) => x.json());
+    await regR(true);
+    const mh = (agent) => ({ 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': RCH, 'X-Agent': agent, 'x-orchestratinator-key': KEY });
+    const connect = async (agent) => {
+      const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: mh(agent), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'floor-test', version: '0' } } }) });
+      await init.text();
+      const sid = init.headers.get('mcp-session-id');
+      await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...mh(agent), 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }).then((x) => x.text());
+      return sid;
+    };
+    const asked = () => fetch(`${HOST}/api/host/work?host_id=h-rc&wait=0`, { headers: HK }).then((x) => x.json()).then((b) => (b.work ?? []).filter((w) => w.kind === 'reconnect').map((w) => w.agent));
+    // The board looks at a host at most once in five seconds, and counts the
+    // silence from the look that first finds it: an ask lands up to ten
+    // seconds after the session goes, plus RECONNECT_AFTER_MS. So these read
+    // until an ask arrives, or for a stated time when none should.
+    const askedIn = async (ms, { all = false } = {}) => {
+      const end = Date.now() + ms;
+      let got = [];
+      while (Date.now() < end) {
+        got = got.concat(await asked());
+        if (got.length && !all) return got;
+        await sleep(400);
+      }
+      return got;
+    };
+    const rexSid = await connect('rex');
+    eq(await askedIn(7000, { all: true }), [], 'a window holding its session is never asked; one whose agent never connected (sol) is not either');
+    await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh('rex'), 'mcp-session-id': rexSid } }).then((x) => x.text());
+    eq(await askedIn(20000), ['rex'], 'once its session is gone (as after the board restarts), its host is asked to reconnect it');
+    eq(await askedIn(20000), ['rex'], 'once more after the retry, while the session is still missing');
+    eq(await askedIn(11000, { all: true }), [], 'and then left alone');
+    await connect('rex');
+    eq(await askedIn(7000, { all: true }), [], 'and the session coming back ends it');
+    await regR(false);
+    await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh('rex'), 'mcp-session-id': await connect('rex') } }).then((x) => x.text());
+    eq(await askedIn(12000, { all: true }), [], 'a host that has not said it takes the work is never handed it');
+  }
+
   console.log('\none agent, several sessions');
   {
     const SA = 'seat-a';

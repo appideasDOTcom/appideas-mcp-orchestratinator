@@ -302,6 +302,21 @@ export function openDb(path) {
     );
     CREATE INDEX IF NOT EXISTS idx_meeting_rooms_updated ON meeting_rooms(updated_at);
 
+    -- Which meeting room each desk was last told it is in (costmo,
+    -- 2026-11-19): a desk is sent one message as it enters a room and one
+    -- as it is back on the floor (roomNoticePlan in src/floor.js). A row is
+    -- "told it is in room N"; no row is "on the floor". A table, not memory,
+    -- because the desktop app restarts its board on every launch, and a desk
+    -- told it is in a room before a restart is still owed the way back.
+    -- Not in BACKUP_TABLES, for meeting_rooms' reason.
+    CREATE TABLE IF NOT EXISTS room_told (
+      channel    TEXT NOT NULL,
+      agent      TEXT NOT NULL,
+      meeting_id INTEGER NOT NULL,
+      told_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
+    );
+
     -- ─── One agent, several sessions (costmo, 2026-11-16) ─────────────────────
     -- A second session of an agent on a floor it already has a desk on. The
     -- board files turns, unread mail, tasks and a meeting room's members by
@@ -457,6 +472,10 @@ export function openDb(path) {
   // board refuses files to it, and a restarted board must still know which
   // hosts can take them.
   addColumn(db, 'hosts', 'uploads', 'INTEGER NOT NULL DEFAULT 0');
+  // Whether the host takes `reconnect` work: typing `/mcp reconnect` into a
+  // floor window whose tools dropped (reconnectDue in src/floor.js). On the
+  // row for `seats`' reason. A host from before it would drop the work.
+  addColumn(db, 'hosts', 'reconnects', 'INTEGER NOT NULL DEFAULT 0');
   // A host's work, past being handed out (milestone audit 2026-11-17,
   // finding 4). `boot`: which run of the host took it, so the next run can
   // tell work it never finished from work it is doing. `done_at`: the host
@@ -918,6 +937,18 @@ export function makeStore(db) {
               (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
          FROM meeting_rooms WHERE channel = ?`
     ),
+    allMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
+              CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
+              (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
+         FROM meeting_rooms ORDER BY id`
+    ),
+    listRoomTold: db.prepare(`SELECT channel, agent, meeting_id FROM room_told`),
+    setRoomTold: db.prepare(
+      `INSERT INTO room_told (channel, agent, meeting_id) VALUES (?, ?, ?)
+       ON CONFLICT(channel, agent) DO UPDATE SET meeting_id = excluded.meeting_id, told_at = datetime('now')`
+    ),
+    clearRoomTold: db.prepare(`DELETE FROM room_told WHERE channel = ? AND agent = ?`),
     // One agent, several sessions: the link from a second session to its agent.
     twinOf: db.prepare(`SELECT channel, agent, base, n, for_meeting, created_at, start_cursor,
                                CAST((julianday('now') - julianday(created_at)) * 86400 AS INTEGER) AS age_s
@@ -939,6 +970,7 @@ export function makeStore(db) {
     ),
     deleteTwin: db.prepare(`DELETE FROM desk_twins WHERE channel = ? AND agent = ?`),
     agentRow: db.prepare(`SELECT agent, retired_at FROM agents WHERE channel = ? AND agent = ?`),
+    agentKeys: db.prepare(`SELECT channel, agent FROM agents`),
     hostedRow: db.prepare(`SELECT state FROM hosted_desks WHERE channel = ? AND agent = ?`),
     liveSession: db.prepare(`SELECT 1 FROM agent_sessions WHERE channel = ? AND agent = ? AND ended_at IS NULL LIMIT 1`),
     profileOf: db.prepare(`SELECT persona, gender, shirt, hair, skin FROM agent_profile WHERE agent = ?`),
@@ -1464,15 +1496,16 @@ export function makeStore(db) {
 
     // ─── Hosting ────────────────────────────────────────────────────────────
     upsertHost: db.prepare(
-      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, last_seen)
-       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, datetime('now'))
+      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, reconnects, last_seen)
+       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, @reconnects, datetime('now'))
        ON CONFLICT(host_id) DO UPDATE SET
          name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats,
-         uploads = excluded.uploads, last_seen = datetime('now')`
+         uploads = excluded.uploads, reconnects = excluded.reconnects, last_seen = datetime('now')`
     ),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
     listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, registered_at, last_seen FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
+    hostReconnects: db.prepare(`SELECT reconnects FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
@@ -1576,7 +1609,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins', 'room_told']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1874,6 +1907,8 @@ export function makeStore(db) {
     messageHighWater: () => q.messageHighWater.get().id,
     pollCursorOf: (channel, agent) => q.pollCursorOf.get({ channel, agent })?.poll_cursor ?? 0,
     listAgents: (channel) => q.listAgents.all({ channel }),
+    /** Every (channel, agent) that has an agents row: only an MCP connect or a tool call makes one (touchAgent, set_status). */
+    agentKeys: () => q.agentKeys.all(),
 
     // --- operator actions -----------------------------------------------------
     retireAgent: (channel, agent) => q.retireAgent.run({ channel, agent }).changes,
@@ -1975,6 +2010,13 @@ export function makeStore(db) {
     /** Every room on a floor, each with `live` (open and heard from lately) and `ended_s` (seconds since it ended). */
     meetingsOn: (channel, liveSeconds = MEETING_LIVE_SECONDS) =>
       q.meetingsOn.all(`-${liveSeconds} seconds`, channel).map((r) => ({ ...meetingRow(r), live: !!r.live })),
+    /** Every room on every floor, shaped as meetingsOn's. */
+    allMeetings: (liveSeconds = MEETING_LIVE_SECONDS) =>
+      q.allMeetings.all(`-${liveSeconds} seconds`).map((r) => ({ ...meetingRow(r), live: !!r.live })),
+    /** The room each desk was last told it is in (room_told). */
+    listRoomTold: () => q.listRoomTold.all(),
+    setRoomTold: (channel, agent, meetingId) => q.setRoomTold.run(channel, agent, meetingId).changes,
+    clearRoomTold: (channel, agent) => q.clearRoomTold.run(channel, agent).changes,
     // --- one agent, several sessions -------------------------------------------
     /** The link from a second session to its agent, or null: `{ base, n, for_meeting, age_s }`. */
     twinOf: (channel, agent) => q.twinOf.get(channel, agent) ?? null,
@@ -2136,9 +2178,10 @@ export function makeStore(db) {
     // `seats`: whether it said it can put a second desk in a folder; a host
     // from before seats says nothing, and is not asked for one.
     // `uploads`: whether it fetches a message's attachments (issue #31).
-    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false) =>
-      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0 }).changes,
+    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false, reconnects = false) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0, reconnects: reconnects ? 1 : 0 }).changes,
     hostTakesUploads: (hostId) => !!q.hostUploads.get(hostId)?.uploads,
+    hostReconnects: (hostId) => !!q.hostReconnects.get(hostId)?.reconnects,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>

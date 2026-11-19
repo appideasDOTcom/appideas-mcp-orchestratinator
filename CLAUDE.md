@@ -905,6 +905,72 @@ installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
 
+## /mcp from the floor, a reconnect the board asks for, and a room's notices
+
+costmo, 2026-11-19, three rulings by AskUserQuestion. All three were
+measured on 2.1.328 on a probe with a scratch board that was stopped and
+started again.
+
+- **A bare `/mcp` from a desk's box or a room is typed as `/mcp reconnect
+  <the desk's server>`** (`typedCommand` in `host/window.js`). In the
+  window, `/mcp` alone opens the "MCP servers" panel. Before this, the
+  floor read that panel as a screen, put it on the desk ("shown in the
+  window"), and closed it with Escape. Nothing reconnected. `reconnect
+  <name>` writes "Reconnected to …", "Couldn't reconnect to …" or `MCP
+  server "x" not found` as local-command-stdout, the receipt every other
+  command is confirmed on. `reconnect all` counts the disabled built-in
+  computer-use, so it always adds "1 still not connected", which reads as
+  a failure on the floor. The name is the binding's own (`server` from
+  `deskIn` in `host/identity.js`): a hand-written `.mcp.json` need not
+  call it `orchestratinator`. `/mcp` with arguments goes as typed.
+- **`/mcp` is never typed into a working window.** Typed 9 s into a 25 s
+  tool call, it left the composer and was never heard of again: no command
+  record, no queue entry, no line on screen. The host refuses it in words,
+  as it already did `/model` and `/effort`.
+- **The board asks a host to reconnect a floor window whose tools
+  dropped** (`reconnectDue` in `src/floor.js`, work kind `reconnect`,
+  `reconnect: true` at registration, kept on `hosts.reconnects`). The
+  desktop app runs its board as a child process, so every launch is a
+  fresh board, MCP sessions live in the board's memory, and Claude Code
+  does not connect again by itself. He used to `/mcp` each desk by hand.
+  "Dropped" is three facts together: a floor window, no MCP session, and
+  an `agents` row. Only an MCP connect or a tool call makes that row, so a
+  window that never connected (a server declined at the folder's question,
+  every stand-in in the suites) is never asked. An idle connected window
+  never reads as dropped, because Claude Code holds its GET stream open
+  and `sweepIdleSessions` skips a streaming session. A desk is asked after
+  `RECONNECT_AFTER_MS` (20 s), once more two minutes later, then left
+  alone until a session comes back. It is checked at the host's work poll
+  and on a 5 s board timer that wakes the poll, because a poll can sit 25 s
+  in its wait. The host does it only while the window is idle and not
+  asking, and says it on the desk: "the desk's tools had lost the board,
+  so the host ran /mcp — Reconnected to orchestratinator". A lost
+  `reconnect` item is said nowhere (`lostWorkWords`): the board asks again.
+- **A desk is sent a message as it enters a meeting room, and another as
+  it is back on the floor** (`roomNoticeText`, `roomNoticePlan`,
+  `noticeRooms` in `src/floor.js`). He used to type the first one himself
+  at the start of every room. His pick was a message at each change. The
+  other offers were the note riding on the next message, and hidden
+  context from the plugin's UserPromptSubmit hook. Do not re-propose
+  either. Each notice is one line, wholly one `<meeting-room>…</meeting-room>`
+  block, so the relay files it as a `context` turn labeled `meeting-room`
+  (`contextTagOf`) and the floor draws it as a quiet line, never as his
+  bubble. On a real window, each got one short line back ("Okay, I'm in
+  the room."), which is the cost of that pick. What each desk was last told
+  is the `room_told` table, not memory: the app restarts its board on
+  every launch, and a desk told it is in a room is still owed the way
+  back. Leaving uses the twin sweep's rule for whether a room still holds
+  a desk (`roomHolds`), so a reload of the room's window (End, then Open
+  within a second) sends neither notice, End meeting sends the way back at
+  once, and a window that crashed sends it after `MEETING_LIVE_SECONDS`
+  plus `TWIN_UNHEARD_MS`. A desk moved straight into another room is told
+  of the new room only. A second session made for a room is told nothing
+  on the way out, because it is being closed. A desk whose window is
+  asking, held by an editor, or on an offline host is not marked told,
+  and is tried again at the next look. Run from the sweep: every route a
+  page polls and every meeting route, a touch included, so a room's own
+  window keeps it going with no floor tab open.
+
 ## A file attached to a message
 
 Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file
