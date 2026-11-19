@@ -374,9 +374,12 @@ function fixture() {
     String.raw`        process.stdout.write('\n' + '\u2594'.repeat(60) + '\n  MCP servers\n  1 server\n  \u276f \u2718 team-board\n  \u2191/\u2193 to navigate \u00b7 Enter to view \u00b7 Esc to close\n');`,
     `        continue;`,
     `      }`,
+    // The argument without what is left of a paste's closing sequence: the
+    // composer above keeps a trailing escape byte with the text it submits.
     `      if (cmd && cmd[1] === 'mcp') {`,
-    `        const said = /^reconnect\\s+(\\S+)$/.test(cmd[2]) ? 'Reconnected to ' + cmd[2].split(/\\s+/)[1] : 'MCP server not found';`,
-    `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>' + cmd[2] + '</command-args>' } }) + '\\n');`,
+    `        const arg = cmd[2].replace(/[\\u0000-\\u001f]/g, '').trim();`,
+    `        const said = /^reconnect\\s+(\\S+)$/.test(arg) ? 'Reconnected to ' + arg.split(/\\s+/)[1] : 'MCP server not found';`,
+    `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>' + arg + '</command-args>' } }) + '\\n');`,
     `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<local-command-stdout>' + said + '</local-command-stdout>' } }) + '\\n');`,
     `        continue;`,
     `      }`,

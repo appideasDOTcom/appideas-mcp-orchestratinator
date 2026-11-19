@@ -104,6 +104,25 @@ await page.evalJs(`(() => { const ta = document.querySelector('#p-text'); ta.foc
 r = await read(); console.log('== after Tab:', JSON.stringify({ textarea: r.textarea }));
 await page.evalJs(box(''));
 
+// /mcp (costmo, 2026-11-19): offered by the menu, and said for what it does
+// from the floor, which is not what it does typed in the window.
+await page.evalJs(box('/mc', false));
+const mcRows = JSON.parse(await page.evalJs(`JSON.stringify([...document.querySelectorAll('#floor-panel .p-slash-row')].filter((x) => !x.closest('.hidden')).map((x) => x.textContent.replace(/\\s+/g, ' ').trim()))`));
+console.log('== slash menu on /mc:', JSON.stringify(mcRows));
+ok(mcRows.length === 1 && /^\/mcp/.test(mcRows[0]) && /reconnect this desk.s tools to the board/.test(mcRows[0]), '/mcp is in the menu, saying it reconnects the desk\'s tools');
+await page.evalJs(box(''));
+
+// A room's notice is the board's words, not the operator's: one quiet line
+// labeled meeting-room, its tags gone, never a bubble from "you".
+await hostEvents([{ type: 'turn', channel: CH, agent: AG, session_id: SID, role: 'context', tool_name: 'meeting-room', at: new Date().toISOString(),
+  text: '<meeting-room>You are now in a meeting room with cy and the operator. This note needs no reply.</meeting-room>' }]);
+const noticeExpr = `[...document.querySelectorAll('#p-turns .t-context')].find((x) => /meeting-room/.test(x.textContent))?.textContent.replace(/\\s+/g, ' ').trim()`;
+await page.waitFor(noticeExpr, { timeout: 8000 }).catch(() => null);
+const noticeLine = await page.evalJs(noticeExpr);
+console.log('== a room notice:', JSON.stringify(noticeLine));
+ok(/^meeting-room · You are now in a meeting room with cy and the operator\. This note needs no reply\.$/.test(noticeLine ?? ''), 'a room notice is drawn as one quiet line labeled meeting-room, with no tags');
+ok(!(await page.evalJs(`[...document.querySelectorAll('#p-turns .t-user, #p-turns .t-you')].some((x) => /meeting room with cy/.test(x.textContent))`)), 'and never as a message from the operator');
+
 await page.evalJs(box('/btw what is 6*7? reply with just the number'));
 await page.waitFor(`document.querySelectorAll('#p-turns .t-pending').length === 1`);
 console.log('== /btw pending:', await page.evalJs(`document.querySelector('#p-turns .t-pending .t-when').textContent`));

@@ -971,6 +971,20 @@ started again.
   page polls and every meeting route, a touch included, so a room's own
   window keeps it going with no floor tab open.
 
+How it is tested: the decisions and both board halves in `test:floor`
+("what a desk is told…", "reconnecting a floor window…"), `typedCommand`
+and the working-window refusal in `test:window`, the host typing both
+reconnects in `test:host` (its stand-in answers `/mcp` as 2.1.328 does;
+the suite connects as a desk and drops the session, since the stand-in
+never connects), the slash menu and a notice's line in
+`check-chat-controls.mjs`. The 17 mutants are
+`mutants-mcp-rooms.suite.json` (**mutate-in-a-copy**), all red on their
+rows. Seen end to end once on a real window (2026-11-19, a scratch board
+and a dev host): a board down 5 s healed by itself and nothing was asked;
+a board down 90 s was not, and the host reconnected the window 25 s after
+the board came back. A room opened and ended put both notices in the
+window, filed as `meeting-room` lines.
+
 ## A file attached to a message
 
 Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file

@@ -1783,7 +1783,7 @@ try {
     eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the window\'s levels');
     eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw', 'mcp'], 'a slash alone offers every command');
     eq(page.slashMatches('/mc').map((c) => c.name), ['mcp'], '/mcp is offered by its first letters');
-    assert(/reconnect/.test(page.PAGE_COMMANDS.find((c) => c.name === 'mcp').hint), 'and says it reconnects the desk\'s tools');
+    assert(/reconnect/.test(page.PAGE_COMMANDS.find((c) => c.name === 'mcp')?.hint ?? ''), 'and says it reconnects the desk\'s tools');
     eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
     eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
     eq(page.slashMatches('hello /co'), [], 'a slash anywhere but first is text');
@@ -4604,9 +4604,13 @@ try {
     eq(await told(), ['vel:enter'], 'Add tells the desk added, and nobody already told');
     await opT('/api/floor/meeting/touch', { id: tRoom });
     eq(await told(), [], 'a touch of a live room tells nobody anything');
-    // A reload: End without final, then Open within a second.
+    // A reload: End without final, then Open a moment later. The look in
+    // between waits out the sweep's two-second throttle, so the board does
+    // look while the room stands ended, which is what the hold is for.
     await opT('/api/floor/meeting/end', { id: tRoom });
+    await sleep(2100);
     await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    eq(await told(), [], 'a room ended a moment ago still holds its desks: nobody is told they left while it may be reloading');
     await opT('/api/floor/meeting/open', { id: tRoom });
     await sleep(2100);
     await fetch(`${HOST}/api/floor`).then((x) => x.json());
