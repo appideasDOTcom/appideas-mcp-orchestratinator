@@ -1427,6 +1427,31 @@ async function main() {
     const COST = ['❯ /cost', '▔'.repeat(80), '   Total cost:            $0.0066', '   Total duration (API):  12s', '   Esc to cancel'].join('\n');
     eq(W.overlayOf(COST), { foot: 'Esc to cancel', text: 'Total cost:            $0.0066\nTotal duration (API):  12s' }, "a screen a command opened: what is under the window's rule, above its footer");
     eq(W.overlayOf(COMPACTING), null, 'and a composer is not one');
+    // The settings screen /cost opens on 2.1.327, taller than its pane (a
+    // probe at 80x24, 2026-11-18): its last line, "… · Esc to close", is
+    // out of sight and the last row in view ends in a "↓". Read by the footer
+    // alone it was no screen, and a /cost from the floor ended not_delivered
+    // with the screen left standing.
+    const USAGE_TOP = [
+      '✻ Cogitated for 3s · done 7:18 PM',
+      '▔'.repeat(79),
+      '  Settings  Status   Config   Usage   Stats',
+      '',
+      '  Session',
+      '  Estimated cost:         $0.3532',
+      '  Total duration (API):   9s',
+      '',
+      '  Current week (all models)',
+      '  ████████████████████████████▉                      58% used',
+    ];
+    const USAGE_CUT = [...USAGE_TOP, '  Current week (Fable)', `  ${'█'.repeat(40)}           80% used                  ↓`, ''].join('\n');
+    const cut = W.overlayOf(USAGE_CUT);
+    eq([cut?.cut, cut?.foot, cut?.text.split('\n')[0], cut?.text.split('\n').at(-1)], [true, '', 'Settings  Status   Config   Usage   Stats', `${'█'.repeat(40)}           80% used`],
+      'the settings screen taller than its pane is a screen too, known by its row of tabs under the rule, its "↓" not part of what it says');
+    const whole = W.overlayOf([...USAGE_TOP, '  ←/→ to switch · r to retry · d to show day · w to show week · Esc to close', ''].join('\n'));
+    eq([whole?.cut ?? false, /Esc to close$/.test(whole?.foot ?? '')], [false, true], 'and with its last line in view it is read as it always was');
+    eq(W.overlayOf(USAGE_CUT.replace('  Settings  Status   Config   Usage   Stats', '  Something else entirely')), null, 'a pane with no closing line and no such tabs under its rule is still no screen');
+    eq(W.overlayOf(`${USAGE_CUT}\n${RULE2}\n❯ \n${RULE2}\n  ? for shortcuts`), null, 'nor is that screen quoted above a composer');
 
     /* ── a composer pane: the receipts, against a real pane ───────────────
      * A node stand-in on the alternate screen that draws what Claude Code
@@ -2139,6 +2164,39 @@ async function main() {
       W.reviewingOf('  ←  ☒ One  ☐ Two  ✔ Submit  →\n  And which?\n  ❯ 1. Red\n    2. Green\n  Enter to select · Tab/Arrow keys to navigate · Esc to cancel\n'),
     ], [true, false, false],
       'reviewingOf: the review screen as 2.1.284 draws it is one; the same words above a composer are not; a question tab is not');
+    // As 2.1.327 draws it (a probe at 80x24, 2026-11-18): the title, each
+    // question with its answer, and the two rows. No "Ready to submit your
+    // answers?" any more, and no status line under the rows. Read by the old
+    // words it was no review screen: the form stood unsubmitted while the
+    // host said it was answered, live on two desks that day.
+    const REVIEW_327 = [
+      '  the single word done.',
+      '',
+      '─'.repeat(78),
+      '←  ☒ One  ☒ Two  ✔ Submit  →',
+      '',
+      'Review your answers',
+      '',
+      ' ● Which one?',
+      '   → Bravo',
+      ' ● And which?',
+      '   → Red',
+      '',
+      '❯ 1. Submit answers',
+      '  2. Cancel',
+      '',
+    ].join('\n');
+    eq([
+      W.reviewingOf(REVIEW_327),
+      W.reviewingOf(`${REVIEW_327}\n${RULE60}\n❯ \n${RULE60}\n  ⏸ manual mode on · ? for shortcuts\n`),
+      W.reviewingOf(REVIEW_327.replace('Review your answers', 'Pick one of these')),
+      W.reviewingOf(`Review your answers\n${RULE60}\n❯ 1. Submit answers\n  2. Cancel\n`),
+      W.reviewingOf(REVIEW_327.replace('❯ 1. Submit answers', '❯ 1. Start over')),
+    ], [true, false, false, false, false],
+      'reviewingOf: the review screen as 2.1.327 draws it is one; quoted above a composer it is not; nor the two rows under another title, with a rule between them and the title, or under other rows');
+    const reviewTab = W.questionOf(REVIEW_327);
+    eq([reviewTab?.kind, reviewTab?.options, reviewTab?.tabs.map((t) => [t.title, t.submit])], ['review', [], [['One', false], ['Two', false], ['Submit', true]]],
+      'and questionOf reads that tab as the review, not as one more question whose choices are "Submit answers" and "Cancel"');
 
     // A form too tall for its pane — issue #7, item 3.
     //

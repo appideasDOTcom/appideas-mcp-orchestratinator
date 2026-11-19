@@ -1548,12 +1548,31 @@ export function btwOverlayOf(screen, question = '') {
  * what the window showed, since nothing writes it anywhere else (measured
  * 2026-11-03: /cost writes no record in any file).
  */
+/** The settings screen's row of tabs, as 2.1.327 draws it. */
+const SETTINGS_TABS = /^\s*Settings\s+Status\s+Config\s+Usage\s+Stats\s*$/;
 export function overlayOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
   if (composerOf(screen) !== null) return null;
   const nonEmpty = lines.filter((l) => l.trim());
   const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
-  if (!/Esc to (close|cancel)/i.test(foot)) return null;
+  if (!/Esc to (close|cancel)/i.test(foot)) {
+    // The settings screen (/cost and /usage open its Usage tab; /status,
+    // /config and /stats the others) when it is taller than the pane. Its
+    // last line, "… · Esc to close", is then out of sight: measured
+    // 2026-11-18 on 2.1.327, the Usage tab is 41 lines, so the line shows at
+    // 200x120 and not at 80x24 (where the last row ends in a "↓") or 200x50.
+    // Read by the footer alone it was no screen: a /cost from the floor
+    // ended "no sign of running it within 20s" with the screen left
+    // standing, to take the desk's next message. So it is known by its top:
+    // the row of its tabs, first under the rule that tops an overlay. Escape
+    // closes it whether or not its last line is in view (measured).
+    let top = -1;
+    for (let n = nonEmpty.length - 1; n >= 0; n--) {
+      if (/^\s*▔{20,}\s*$/.test(nonEmpty[n])) { top = n; break; }
+    }
+    if (top < 0 || !SETTINGS_TABS.test(nonEmpty[top + 1] ?? '')) return null;
+    return { foot: '', cut: true, text: nonEmpty.slice(top + 1).map((l) => l.replace(/\s+↓\s*$/, '').trim()).join('\n').trim() };
+  }
   let from = 0;
   for (let n = nonEmpty.length - 2; n >= 0; n--) {
     if (/^[\s▔─━]{20,}$/.test(nonEmpty[n])) { from = n + 1; break; }
@@ -2919,7 +2938,11 @@ export function questionOf(screen) {
   const question = said[0]?.trim() ?? null;
 
   // The Submit tab shows what you are about to send rather than a question.
-  if (/ready to submit your answers/i.test(said.join('\n'))) {
+  // Its first line is its title, and since 2.1.326 the title is all that
+  // says so: "Ready to submit your answers?" is gone from under it
+  // (reviewingOf). Read as a question, its two rows became a last question
+  // called Submit, with "Submit answers" and "Cancel" for choices.
+  if (/ready to submit your answers/i.test(said.join('\n')) || /^Review your answers$/.test(question ?? '')) {
     return { tabs, strip, question: 'Review your answers', kind: 'review', options: [], cursor: -1, submit: false };
   }
 
@@ -3425,7 +3448,25 @@ const CONFIRMING = /ready to submit your answers/i;
  */
 export function reviewingOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
-  return CONFIRMING.test(lines.slice(-6).join('\n')) && /^\s*\d+\.\s*Cancel\s*$/i.test(lines[lines.length - 1] ?? '');
+  if (!/^\s*\d+\.\s*Cancel\s*$/i.test(lines[lines.length - 1] ?? '')) return false;
+  if (CONFIRMING.test(lines.slice(-6).join('\n'))) return true;
+  // Since 2.1.326 the screen has no "Ready to submit your answers?": under
+  // its title, "Review your answers", it lists each question with its
+  // answer and then the same two rows. Read by the old words alone it was
+  // no review screen, so the form stood on it unsubmitted while the host
+  // called it answered (the form was "gone": this screen has no status line
+  // for askingOf either), and the walk that reads a form took the Submit tab
+  // for one more question. Seen live on two desks, 2026-11-18 23:07Z and
+  // 23:09Z, the operator opening each window after; measured on a probe on
+  // 2.1.327 the same evening. Still positional: the pane's last two lines
+  // are the two rows, with the title above them and no rule in between
+  // (a composer's box, or a transcript that quotes the screen, has one).
+  if (!/^\s*❯?\s*1\.\s*Submit answers\s*$/i.test(lines[lines.length - 2] ?? '')) return false;
+  for (let i = lines.length - 3; i >= 0 && i >= lines.length - 40; i--) {
+    if (/^\s*Review your answers\s*$/.test(lines[i])) return true;
+    if (/^[\s─━▔]{20,}$/.test(lines[i])) return false;
+  }
+  return false;
 }
 
 /**
