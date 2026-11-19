@@ -26,6 +26,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
+. "$REPO/scripts/node-floor.sh" || exit 2
 ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows"
 LIST="${*:-$ALL}"
 COPY="$("$REPO/.claude/skills/mutate-in-a-copy/copy-repo.sh" "${TMPDIR:-/tmp}/orch-release-pages")" || exit 2

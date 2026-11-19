@@ -9,6 +9,7 @@
 # run-check-chatbox.sh: a PORT or CDP anything answers on is refused, and the
 # pkill matches the port exactly. Under a minute. Announce PORT and CDP first.
 set -u
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; PORT="${PORT:-8922}"; CDP="${CDP:-9262}"
 S="$(mktemp -d "${TMPDIR:-/tmp}/check-chat-controls.XXXXXX")"
 taken() { curl -s -m 1 -o /dev/null "localhost:$1/$2"; [ $? -ne 7 ]; }

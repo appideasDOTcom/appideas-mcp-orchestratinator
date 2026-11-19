@@ -109,6 +109,44 @@ better-sqlite3 (`. scripts/node-floor.sh`).
    `POST /api/floor/history/search` on the app's board is a read and moves
    nothing).
 
+## A feature both sides build (the floor windows round, 2026-11-19)
+
+costmo asked for several floors at once in the app, in a meeting room with
+both agents, and both of us got every message he posted. What worked, and
+the one thing that did not:
+
+- **Post the split and your questions in the room before asking him.**
+  Both agents put an AskUserQuestion to him within minutes, on the same
+  feature, and he had to say "I think I answered both of your similar
+  questions the same way. Please compare notes". Post what you mean to ask;
+  if the other agent has asked already, read its answer instead. One
+  question per decision, from whichever side owns it.
+- **The page is ours, the windows are the app's.** Anything drawn in the
+  board page (a control, a title, a setting a browser also needs) is built
+  here and reaches the app through its pin; anything about windows, tabs,
+  menus or the app's own Preferences is the app's. Where both would hold
+  a setting for one button, the page defers inside the app: the app puts
+  `OrchestratinatorDesktop/<version>` on the user agent of every board page
+  it loads, and the page tests for that token, never for Electron's
+  (`floorOpenMode` in src/ui/floor.js; contract `dashboard.floor.app_signal`).
+- **What the app relies on goes in `orchestratinator.consumed` before the
+  commit is named**, with a `state` line that says pushed or not. The app's
+  agent builds against the entry, not the message.
+- **`set_contract` replaces the whole value.** There is no HTTP route for
+  contracts, so changing one field means `get_contract`, then sending the
+  whole value back with the change (about 15 KB for `consumed`). Do it once
+  per pushed commit, not once per state of the tree; it was sent three
+  times in one afternoon. A new topic of any size is cheaper as a key of
+  its own.
+- **His running app takes a page change without a relaunch.** The app
+  serves `src/ui` from its installed copy, so after its agent runs
+  `npm run orchestratinator:update` a reload shows it. `app-pin-check.sh
+  <commit>` against the board on 6724 is the read that says it is there;
+  quote it before telling him to relaunch anything.
+- **The app's agent measures its side and says so.** Electron's
+  dispositions for the ⧉ and a ⌘-click were its to read (3569, 3579), not
+  ours to assume.
+
 ## What was learned the hard way
 
 - **The app's user already runs Claude Code and is signed in** (costmo,

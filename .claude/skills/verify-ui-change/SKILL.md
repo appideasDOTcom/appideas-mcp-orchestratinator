@@ -270,6 +270,11 @@ is ticked, hidden again when a pick replaces it, never shown for the multi.
 
 ### seed-archive.mjs and check-archive.mjs — archive on both views
 
+`PORT=8950 CDP=9290 run-check-archive.sh <dir>` is the whole fixture in one
+command (2026-11-19). The check prints its steps and asserts little, so the
+runner calls it PASS when it reaches its last line ("shots in …"); a probe
+made to throw reads FAIL, exit 3.
+
 Issues #21 and #6 (2026-11-02): archive is the one way to put a floor away,
 the pill lists at the bottom of both views are the only place a put-away
 floor is drawn, and the board and the floor list the same channels.

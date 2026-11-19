@@ -2677,6 +2677,10 @@ one number, one word and one process came apart:
   host has no dependencies, and ran on Node 20 then; the image was node:22
   and loaded it. Both are Node 24 since 0.12.11. Two things keep that from costing anyone a round here.
   `scripts/node-floor.sh` is sourced by every runner under `.claude/skills`
+  (seven `run-check-*.sh` had drifted without it until 2026-11-19, and from
+  a Node 20 shell such a runner printed nothing at all; a new runner is
+  checked with `grep -L node-floor.sh .claude/skills/*/run-*.sh`, which
+  should list nothing)
   and by hand before a suite (`. scripts/node-floor.sh && npm test`): it
   reads `process.versions.napi`, leaves a good `node` alone, and otherwise
   puts the oldest nvm Node that has Node-API 10 first on PATH, or refuses in
