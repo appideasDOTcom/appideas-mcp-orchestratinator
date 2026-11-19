@@ -22,8 +22,19 @@ use without Docker, connect to local Docker). This repo's agent owns what
 crosses the seam and proves it here; the app's agent owns the app. What the
 app may rely on is the contract `orchestratinator.consumed` on the
 `orchestratinator-desktop` channel; what it runs and places on a machine is
-`orchestratinator.app_setup` beside it. A new thing the app depends on is a
-bump of one of those, not a message.
+`orchestratinator.app_setup` beside it; what each page window reports for
+the app's tab strip, tray bell and Dock (`window.orchAttention`) is
+`orchestratinator.attention` (2026-11-19). A new thing the app depends on is
+a bump of one of those, or a key of its own for a new topic, not a message.
+
+**A feature that is drawn by the app but known by the page** (the tabs'
+pulse, the bell, the Dock badge, a tray list of windows): the page reports
+and acts, the app draws. Board pages have no preload, on purpose, so the
+page cannot send anything to the app: it exposes a function on `window`
+that main calls with `executeJavaScript`, with a `next(version)` that
+returns a promise so main can long-poll without a timer. Settled with the
+app's agent in the room in two messages (3580–3583) because the split was
+posted before anything was built.
 
 **His rule over all of it: nothing that works in the Docker+launchd app may
 break.** Every change made for the app is off unless the app turns it on, or
@@ -132,12 +143,20 @@ the one thing that did not:
 - **What the app relies on goes in `orchestratinator.consumed` before the
   commit is named**, with a `state` line that says pushed or not. The app's
   agent builds against the entry, not the message.
-- **`set_contract` replaces the whole value.** There is no HTTP route for
-  contracts, so changing one field means `get_contract`, then sending the
-  whole value back with the change (about 15 KB for `consumed`). Do it once
-  per pushed commit, not once per state of the tree; it was sent three
-  times in one afternoon. A new topic of any size is cheaper as a key of
-  its own.
+- **`set_contract` replaces the whole value, so change one field with
+  `contract.mjs`** (in this directory). There is no HTTP route for
+  contracts, and moving one line of `consumed` (about 15 KB) through the
+  tool meant retyping all of it, which on 2026-11-19 was put off and left a
+  commit name stale. `contract.mjs get|patch|set <channel> <key> …` talks to
+  the board's `/mcp` with this folder's own binding (the same board and
+  identity as `whoami`; the key is never printed), and `patch` sets one
+  dotted path and sends the rest back as it was. `--dry` sends nothing.
+  Measured that day: a bad value and a missing key refused (exit 2), a dry
+  run left the value equal, and two patches moved v12 → v14 with a
+  whole-value diff naming only the two fields. In zsh pass the channel and
+  key as two words, never through one unquoted variable (`$C` is not
+  split). Still once per pushed commit, not once per state of the tree.
+  A new topic of any size is a key of its own.
 - **His running app takes a page change without a relaunch.** The app
   serves `src/ui` from its installed copy, so after its agent runs
   `npm run orchestratinator:update` a reload shows it. `app-pin-check.sh

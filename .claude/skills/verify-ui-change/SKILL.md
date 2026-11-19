@@ -1611,6 +1611,12 @@ await page.shot('out.png', '#floor-pick');            // a PNG of one element
 await page.close();
 ```
 
+`page.beforeLoad(js)` runs `js` in every document the page loads after it,
+ahead of the page's own scripts (`Page.addScriptToEvaluateOnNewDocument`).
+It is how a row fails the first poll (check-floor-windows), or stands up
+the desktop app's user-agent token before load (check-attention); call it,
+then `page.goto()`.
+
 It exists because the same thirty lines were written from scratch six times in
 one session. Four things are built into it, and they are the four that have
 cost rounds here — worth knowing even if you hand-roll something else:

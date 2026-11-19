@@ -3517,7 +3517,7 @@ operator's live floor.
 
   | Changed | Run |
   |---|---|
-  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:window` and `test:markdown` also read `floor.js`, `test:update` reads `app.js` |
+  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:markdown` also reads `floor.js` (the renderer), `test:window` only its `LINK_LABEL.attach` (read 2026-11-19), `test:update` reads `app.js` |
   | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
   | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
