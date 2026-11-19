@@ -1393,6 +1393,7 @@ function toolsPanel() {
     : '';
 
   return `
+    ${floorsSection()}
     ${updatesSection(ui.state?.update)}
     <div class="set-tool">
       <div>
@@ -1426,6 +1427,32 @@ function toolsPanel() {
     <p class="dlg-note">Moving to a new host: export here, start the new instance with the same
       <span class="mono">ORCH_AUTH_TOKEN</span> in its <span class="mono">.env</span> (that part does not travel in the
       file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`;
+}
+
+/*
+ * "Open new floors" (costmo, 2026-11-19): what the ⧉ beside a floor's name
+ * opens, this browser's choice. The rule and the key are floor.js's
+ * (window.floorOpen); this is only the row. Left out where floor.js did not
+ * load, and in the desktop app, whose Preferences own the choice.
+ */
+function floorsSection() {
+  const fo = window.floorOpen;
+  if (!fo || fo.inApp()) return '';
+  const mode = fo.get();
+  return `
+    <div class="set-tool set-floors" id="set-floors">
+      <div>
+        <h4 class="set-h">Open new floors</h4>
+        <p>What the <span class="mono">⧉</span> beside a floor's name in the floor picker opens. A ⌘-click or a
+          middle-click on the name still opens a tab. Kept in this browser.</p>
+        <p class="muted">A web page cannot open a full browser window, so a new window is one of its own with no
+          tab strip, the size of this one.</p>
+      </div>
+      <select class="input" id="floor-open" data-set-floor-open aria-label="Open new floors">
+        <option value="tab"${mode === 'window' ? '' : ' selected'}>In tabs</option>
+        <option value="window"${mode === 'window' ? ' selected' : ''}>In windows</option>
+      </select>
+    </div>`;
 }
 
 function renderSettings() {
@@ -1546,6 +1573,8 @@ el.setDlg.addEventListener('click', (e) => {
 });
 
 el.setBody.addEventListener('change', (e) => {
+  const open = e.target.closest('[data-set-floor-open]');
+  if (open) { window.floorOpen?.set(open.value); return; }
   const input = e.target.closest('#restore-file');
   if (!input?.files?.[0]) return;
   chooseBackupFile(input.files[0]);

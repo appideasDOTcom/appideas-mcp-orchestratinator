@@ -1909,11 +1909,28 @@ decides" in `src/ui/floor.js`:
   middle-click to a macOS tab behind), and the app adds File ▸ New Floor
   Window ⌘N, macOS tabs and reopening at launch. The all-floors chip has
   no ⧉ (his pick's picture), but is a link like the rest.
+- **Where the ⧉ opens is a setting: "Open new floors: In tabs | In
+  windows", In tabs by default** (costmo, 2026-11-19, the same day). In a
+  browser it is a row at the top of Settings, kept in this browser
+  (`orch.floorOpen`), not a board row like the update settings: it is about
+  one browser's windows, and a row on the board would reach the app's
+  pages too. "In windows" is `window.open` with a `popup` features string,
+  the size of the window it came from and set down 24 px, because a page
+  cannot open a full browser window: the browser gives it one with no tab
+  strip, and the row says so. **Inside the desktop app the page offers
+  nothing and always opens with no features**: the app's own Preferences
+  pane has the setting and maps the request, and two settings for one
+  button would fight. The app says it is the app with
+  `OrchestratinatorDesktop/<version>` on the user agent, its own token,
+  not Electron's (any Electron browser carries that). There the ⧉ reads
+  "Open <floor> in a new session", his word from the app's menu, since the
+  page does not know which the app will do. The rule is `floorOpenMode` in
+  the lifted section; Settings reaches it through `window.floorOpen`.
 Two floor tabs were already safe together before this: each asks `who`
 and holds its own record of which desks are out, and the hub is shared by
 every window of the origin. What two tabs on one desk do (both may open
 its panel) is as it was. `check-floor-windows.mjs` in **verify-ui-change**
-is the page, with ten page mutants beside it, and it runs at every
+is the page, with sixteen page mutants beside it, and it runs at every
 release.
 
 **A meeting room is a popout of several desks, out the popout's way**
@@ -3099,6 +3116,17 @@ and `r4/`).
 None is in code PR #57 touched. A fourth sighting of any of them is read
 with its log kept (`run-mutants.mjs --logs`, or the suite's own output),
 not rerun.
+
+**Two `test:update` reds seen once, under load** (2026-11-19, the Open
+new floors round, load average 84–98): "finished: the board is not rebuilt
+again, the plugin is updated, the host restarts and comes back" (got
+undefined) and "every part on the commit: no button, and now \"You have the
+latest\"" (got "Not checked on this branch yet"). Both are in the Finish
+the update flow, which that round did not touch (it changed Settings'
+first row in app.js). The suite alone straight after read 0 red on the tree
+and 0 red on a copy holding HEAD's page, at load 38. The cause was not
+looked for. A second sighting is read with the suite's output kept, not
+rerun.
 
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches

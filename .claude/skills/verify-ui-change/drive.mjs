@@ -264,6 +264,13 @@ async function connect(target) {
       await cmd('Browser.setWindowBounds', { windowId, bounds });
       return (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result.bounds;
     },
+    /**
+     * Which browser window this page is in: two tabs of one window share an
+     * id, and a page opened as a window of its own (a popup) has another
+     * (task 315's "Open new floors"). Bounds alone cannot tell them apart
+     * in a headless browser, which may draw every window in one place.
+     */
+    windowId: async () => (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result?.windowId ?? null,
     /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
     console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,

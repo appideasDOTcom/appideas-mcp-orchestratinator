@@ -3535,7 +3535,7 @@ try {
     const b = src.indexOf('  /* ---------- popouts: what the page decides ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the floor windows section was not found in src/ui/floor.js between its two section comments');
     const tmp = `./data/floorwin-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { addressOf, addressFor, floorHref, windowTitle, opensElsewhere };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { addressOf, addressFor, floorHref, windowTitle, opensElsewhere, floorOpenMode, floorOpenFeatures, floorPopTitle };\n`);
     let page;
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
 
@@ -3567,6 +3567,24 @@ try {
     eq([click({}), click({ altKey: true })], [false, false], 'a plain click, and an Alt-click, ride to the floor in this tab');
     eq([click({ metaKey: true }), click({ ctrlKey: true }), click({ shiftKey: true }), click({ button: 1 })], [true, true, true, true],
       '⌘, Ctrl, Shift and any other button are the browser\'s to open elsewhere');
+
+    // "Open new floors: In tabs | In windows" (costmo, 2026-11-19).
+    const CHROME = 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/142.0 Safari/537.36';
+    const APP = `${CHROME} Electron/45.2.3 OrchestratinatorDesktop/0.14.0`;
+    eq([page.floorOpenMode(null, CHROME), page.floorOpenMode('nonsense', CHROME)], ['tab', 'tab'], 'nothing stored, or nothing it knows, is In tabs: the default');
+    eq(page.floorOpenMode('window', CHROME), 'window', 'In windows when this browser chose it');
+    eq([page.floorOpenMode('window', APP), page.floorOpenMode(null, APP)], ['app', 'app'], 'inside the desktop app the app decides, whatever this browser stored');
+    eq(page.floorOpenMode('window', `${CHROME} Electron/45.2.3`), 'window', 'and Electron alone is not the app: its own token is what says so');
+    eq([page.floorOpenFeatures('tab', {}, {}), page.floorOpenFeatures('app', {}, {})], ['noopener', 'noopener'], 'a tab, and the app\'s choice, are opened with no features: noopener alone');
+    const scr = { availWidth: 1440, availHeight: 875, availLeft: 0, availTop: 25 };
+    eq(page.floorOpenFeatures('window', { outerWidth: 1000, outerHeight: 700, screenX: 100, screenY: 60 }, scr),
+      'noopener,popup,width=1000,height=700,left=124,top=84', 'a window: the size of this one, set down 24 px from it');
+    eq(page.floorOpenFeatures('window', { outerWidth: 1000, outerHeight: 700, screenX: 430, screenY: 190 }, scr),
+      'noopener,popup,width=1000,height=700,left=440,top=200', 'and kept wholly on the screen when this one is near its edge');
+    eq(page.floorOpenFeatures('window', { outerWidth: 3000, outerHeight: 2000, screenX: 0, screenY: 25 }, scr),
+      'noopener,popup,width=1440,height=875,left=0,top=25', 'and never larger than the screen');
+    eq([page.floorPopTitle('lab', 'tab'), page.floorPopTitle('lab', 'window'), page.floorPopTitle('lab', 'app')],
+      ['Open lab in a new tab', 'Open lab in a new window', 'Open lab in a new session'], 'the ⧉ says what it will do, and in the app, where the page does not know, a new session');
   }
 
   console.log('\na desk\'s popout: what the page decides (issue #19)');

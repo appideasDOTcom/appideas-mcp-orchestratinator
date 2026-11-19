@@ -1534,8 +1534,14 @@ takes `{ modifiers }` (CDP's mask: Alt 1, Ctrl 2, ⌘ 4, Shift 8) and
 `{ button: 'middle' }` for this check, because a browser follows a link
 elsewhere and opens a window only on real input. New tabs are found with
 `targets()` before and after, not by a window name, since the ⧉ uses
-none. `mutants-floor-windows.page.json` is the list: ten, all red, the
-control 23 of 23 (load 91, 2026-11-19). One red on the first run was the
+none. Whether a new page is a tab or a window of its own is read with
+`page.windowId()` (CDP's `Browser.getWindowForTarget`): a tab shares the
+opener's id, a popup has its own. The app's case stands up its user-agent
+token with `Object.defineProperty(navigator, 'userAgent', …)`, which works
+because the page reads the agent at each use.
+`mutants-floor-windows.page.json` is the list: sixteen since the Open new
+floors setting (the first ten all red with the control at 23 of 23, load
+91, 2026-11-19). One red on the first run was the
 check's own: the all-floors chip's parent is the picker, which holds every
 ⧉, so "has a ⧉ beside it" reads `.closest('.fchip')`.
 

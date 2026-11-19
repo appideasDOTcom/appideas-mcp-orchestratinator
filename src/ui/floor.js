@@ -5348,6 +5348,52 @@
    */
   const opensElsewhere = (e) => (e.button ?? 0) !== 0 || !!e.metaKey || !!e.ctrlKey || !!e.shiftKey;
 
+  /*
+   * Where the ⧉ opens a floor (costmo, 2026-11-19: "Open new floors: In
+   * tabs | In windows", default In tabs). In a browser it is this browser's
+   * choice, kept in localStorage under FLOOR_OPEN_KEY and set in Settings:
+   * it is about this browser's windows, not the board's, and a row on the
+   * board would also reach the desktop app's pages. A web page cannot open a
+   * full browser window: "In windows" is window.open with a features string,
+   * which the browser opens as a window of its own with no tab strip (a
+   * popup), the size of the one it came from and set down from it.
+   *
+   * Inside the desktop app the app decides, from its own Preferences, and
+   * the page offers no copy of the choice: two settings would fight (a
+   * features string reaches the app as another disposition). The app says
+   * it is the app with a token of its own in the user agent (contract
+   * orchestratinator.consumed, dashboard.floor), not Electron's, which any
+   * Electron browser carries.
+   */
+  const FLOOR_OPEN_KEY = 'orch.floorOpen';
+  const APP_UA = /\bOrchestratinatorDesktop\//;
+  /** 'tab' | 'window' in a browser, from what is stored; 'app' when the desktop app decides. */
+  function floorOpenMode(stored, ua) {
+    if (APP_UA.test(ua ?? '')) return 'app';
+    return stored === 'window' ? 'window' : 'tab';
+  }
+  /** The window.open features for a floor opened elsewhere: noopener always, and a window's place for 'window'. */
+  function floorOpenFeatures(mode, win, scr) {
+    if (mode !== 'window') return 'noopener';
+    const W = scr?.availWidth ?? 1280;
+    const H = scr?.availHeight ?? 800;
+    const L = scr?.availLeft ?? 0;
+    const Tp = scr?.availTop ?? 0;
+    const width = Math.max(480, Math.min(win?.outerWidth || 1200, W));
+    const height = Math.max(360, Math.min(win?.outerHeight || 800, H));
+    // Set down 24 px from the window it came from, the way a new window
+    // cascades, and kept wholly on the screen.
+    const left = Math.max(L, Math.min((win?.screenX ?? L) + 24, L + W - width));
+    const top = Math.max(Tp, Math.min((win?.screenY ?? Tp) + 24, Tp + H - height));
+    return `noopener,popup,width=${Math.round(width)},height=${Math.round(height)},left=${Math.round(left)},top=${Math.round(top)}`;
+  }
+  /** What the ⧉ says it does. */
+  function floorPopTitle(name, mode) {
+    return mode === 'window' ? `Open ${name} in a new window`
+      : mode === 'app' ? `Open ${name} in a new session`
+        : `Open ${name} in a new tab`;
+  }
+
   /* ---------- popouts: what the page decides ---------- */
   // Issue #19. Pure, and lifted into test/floor.mjs by the two markers around
   // this section — see CLAUDE.md on page logic.
@@ -7627,7 +7673,8 @@
     if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
     ui.floorNames = names;
     syncAddress();
-    const pickSig = JSON.stringify([names, ui.floorFilter]);
+    const openMode = floorOpenNow();
+    const pickSig = JSON.stringify([names, ui.floorFilter, openMode]);
     if (pickSig !== ui.pickSig) {
       ui.pickSig = pickSig;
       // Each chip is a link to its floor, so ⌘-click, middle-click and the
@@ -7637,7 +7684,7 @@
       // 315). A popout's page has no picker, so none of this is drawn there.
       const chip = (n) => {
         const on = ui.floorFilter === n ? ' on' : '';
-        const tip = `Open ${n} in a new window`;
+        const tip = floorPopTitle(n, openMode);
         return `<span class="fchip${on}"><a class="chip${on}" href="${esc(floorHref(n))}" data-floor="${esc(n)}">${esc(n)}</a>`
           + `<button type="button" class="fchip-pop" data-floor-pop="${esc(n)}" title="${esc(tip)}" aria-label="${esc(tip)}">⧉</button></span>`;
       };
@@ -7742,13 +7789,34 @@
     if (title && document.title !== title) document.title = title;
   }
 
-  /** Open a floor in a tab of its own, or a window of its own in the desktop app (task 315). */
-  function openFloorElsewhere(name) {
-    // No features and no target name, so each press opens one more and the
-    // browser makes it a tab; noopener, because a floor is a peer of the one
-    // it was opened from, not its child.
-    try { window.open(`${location.pathname}${floorHref(name)}`, '_blank', 'noopener'); } catch { /* blocked: nothing to undo */ }
+  /** Where the ⧉ opens a floor here and now: this browser's choice, or the desktop app's. */
+  function floorOpenNow() {
+    let stored = null;
+    try { stored = localStorage.getItem(FLOOR_OPEN_KEY); } catch { /* the default */ }
+    return floorOpenMode(stored, navigator.userAgent);
   }
+
+  /** Open a floor in a tab or window of its own (task 315; the choice, costmo 2026-11-19). */
+  function openFloorElsewhere(name) {
+    // No target name, so each press opens one more; noopener, because a floor
+    // is a peer of the one it was opened from, not its child. With no
+    // features the browser makes it a tab and the desktop app decides; with
+    // them the browser makes it a window (floorOpenFeatures).
+    const features = floorOpenFeatures(floorOpenNow(), window, window.screen);
+    try { window.open(`${location.pathname}${floorHref(name)}`, '_blank', features); } catch { /* blocked: nothing to undo */ }
+  }
+
+  // Settings (app.js) reads and writes the choice through this, so the rule
+  // and the key live here once. In the desktop app `inApp` is true and
+  // Settings leaves the choice out: the app's Preferences own it.
+  window.floorOpen = {
+    get: () => floorOpenNow(),
+    inApp: () => floorOpenNow() === 'app',
+    set: (v) => {
+      try { localStorage.setItem(FLOOR_OPEN_KEY, v === 'window' ? 'window' : 'tab'); } catch { /* not worth failing over */ }
+      if (ui.on) render();
+    },
+  };
 
   /** Ride to a floor, or back out to the building. */
   function setFloor(name) {

@@ -63,7 +63,7 @@ const chips = await page.evalJs(`JSON.stringify([...document.querySelectorAll('#
 ok(JSON.stringify(chips) === JSON.stringify([['', '?floor=', false], ['alpha', '?floor=alpha', true], ['beta', '?floor=beta', true], ['solo-only', '?floor=solo-only', true]]),
   'each chip is a link to its floor, and each floor\'s has a ⧉ beside it', JSON.stringify(chips));
 const tip = await page.evalJs(`document.querySelector('[data-floor-pop="beta"]')?.title ?? null`);
-ok(tip === 'Open beta in a new window', 'the ⧉ says what it does', tip);
+ok(tip === 'Open beta in a new tab', 'the ⧉ says what it does: In tabs is the default (costmo, 2026-11-19)', tip);
 await page.shot(`${shots}/floor-pick.png`, '#floor-pick', { scale: 2 });
 
 let before = await floorsOpen();
@@ -98,6 +98,8 @@ await until(beta, `document.querySelectorAll('#floor-rooms svg.room').length ===
 let b = await read(beta);
 ok(b.rooms.join() === 'beta' && b.title === T('beta'), 'it stands on beta, titled beta', JSON.stringify(b));
 ok(b.opener === null, 'and it is a peer of the tab it came from, not its child (no opener)', b.opener);
+const [pageWin, betaWin] = [await page.windowId(), await beta.windowId()];
+ok(pageWin !== null && pageWin === betaWin, 'a tab: in the same browser window as the one it came from', JSON.stringify([pageWin, betaWin]));
 f = await read(page);
 ok(f.rooms.length === 3 && f.title === T('All floors'), 'the tab it was pressed in did not move', JSON.stringify(f));
 
@@ -139,7 +141,53 @@ await until(bare, `document.querySelectorAll('#floor-rooms svg.room').length ===
 const r = await read(bare);
 ok(r.rooms.join() === 'solo-only' && r.title === T('solo-only') && r.search === '?floor=solo-only', 'a bare address lands on the stored floor, and then names it', JSON.stringify(r));
 
-const errs = [page, beta, bare].flatMap((p) => p.console()).filter((m) => /^error/.test(m) && !/Failed to load resource/.test(m));
+console.log('\nOpen new floors: In tabs | In windows, in Settings (costmo, 2026-11-19)');
+const settings = async (p) => {
+  await p.press('#open-settings');
+  await until(p, `document.getElementById('settings-dlg').open && !!document.getElementById('set-updates')`, 'Settings opened');
+  return JSON.parse(await p.evalJs(`JSON.stringify({
+    value: document.getElementById('floor-open')?.value ?? null,
+    options: [...document.querySelectorAll('#floor-open option')].map((o) => o.textContent),
+    heading: document.querySelector('#set-floors .set-h')?.textContent ?? null,
+  })`));
+};
+const shut = (p) => p.evalJs(`document.getElementById('settings-dlg').close(), 1`);
+let st = await settings(bare);
+ok(st.heading === 'Open new floors' && JSON.stringify(st.options) === '["In tabs","In windows"]' && st.value === 'tab',
+  'Settings offers Open new floors, In tabs or In windows, and In tabs is chosen when nothing was', JSON.stringify(st));
+await bare.evalJs(`(() => { const s = document.getElementById('floor-open'); s.value = 'window'; s.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+ok(await bare.evalJs(`localStorage.getItem('orch.floorOpen')`) === 'window', 'choosing In windows is kept in this browser');
+await shut(bare);
+await until(bare, `document.querySelector('[data-floor-pop="alpha"]')?.title === 'Open alpha in a new window'`, 'the ⧉ says In windows');
+ok(true, 'and the ⧉ says so at once: "Open alpha in a new window"');
+before = await floorsOpen();
+await bare.press('#floor-pick [data-floor-pop="alpha"]');
+const winUrl = await newTarget(before, 'the ⧉ on alpha, In windows');
+const win = await attach((u) => u === winUrl);
+await until(win, `document.querySelectorAll('#floor-rooms svg.room').length === 1`, 'the new window drew a floor');
+const w = await read(win);
+const [bareWin, winWin] = [await bare.windowId(), await win.windowId()];
+ok(w.rooms.join() === 'alpha' && w.title === T('alpha') && w.opener === null, 'it opens alpha, titled alpha, a peer', JSON.stringify(w));
+ok(bareWin !== null && winWin !== null && bareWin !== winWin, 'in a browser window of its own, not a tab of this one', JSON.stringify([bareWin, winWin]));
+
+console.log('\ninside the desktop app, whose Preferences decide');
+// The app's own token on the user agent (contract dashboard.floor). The page
+// reads navigator.userAgent at each use, so standing it up here is what the
+// app's setUserAgent gives every board page before it loads.
+await bare.evalJs(`Object.defineProperty(navigator, 'userAgent', { value: navigator.userAgent + ' Electron/45.2.3 OrchestratinatorDesktop/0.14.0', configurable: true }), 1`);
+await until(bare, `document.querySelector('[data-floor-pop="alpha"]')?.title === 'Open alpha in a new session'`, 'the ⧉ says a new session in the app');
+ok(true, 'the ⧉ says "Open alpha in a new session": the app decides, and the page does not know which');
+st = await settings(bare);
+ok(st.heading === null && st.value === null, 'Settings leaves Open new floors out: the app\'s Preferences own it', JSON.stringify(st));
+await shut(bare);
+before = await floorsOpen();
+await bare.press('#floor-pick [data-floor-pop="alpha"]');
+const appUrl = await newTarget(before, 'the ⧉ on alpha, in the app');
+const appTab = await attach((u) => u === appUrl);
+ok(await appTab.windowId() === bareWin, 'and the ⧉ opens with no features, whatever this browser stored (a tab here; in the app, its setting)', JSON.stringify([await appTab.windowId(), bareWin]));
+await bare.evalJs(`localStorage.removeItem('orch.floorOpen'), 1`);
+
+const errs = [page, beta, bare, win, appTab].flatMap((p) => p.console()).filter((m) => /^error/.test(m) && !/Failed to load resource/.test(m));
 ok(errs.length === 0, 'no errors in any tab\'s console', errs.join(' | '));
 
 console.log(fails ? `\nFAIL · ${fails} of ${total} red` : `\nPASS · ${total} of ${total}`);
