@@ -89,6 +89,19 @@ behaviour, not a fault. The host pins its board with `url` in
 `~/.orchestratinator/host.json`; when desks disagree and nothing pins it, the
 host refuses to start rather than guess.
 
+**That paragraph is the launchd host's, and this folder's own window is no
+longer on that board** (read 2026-11-19). Since costmo moved his work into
+the desktop app (2026-11-08), this folder's binding in local scope is
+`http://127.0.0.1:6724/mcp`, the app's own board, as `coordinator`, and the
+app's agent is bound there too. So `whoami`, every poll and a meeting room
+are on 6724, and `localhost:8787` is the Docker board the live clone runs,
+with the launchd host: still never built, restarted or tested against from
+here. A third board in a round is a scratch one of your own. Read the
+binding, never assume it; the one-liner and the table are in
+**catch-up-the-desktop-app**. And when costmo restarts the app, every
+agent's orchestratinator tools go with its board (`ECONNREFUSED`) until he
+runs `/mcp` in each window: read the board with curl meanwhile, and say so.
+
 ## The live instance runs from its own clone, and this one is for development
 
 costmo's ruling, 2026-11-18, by AskUserQuestion through appideas-qa, when
@@ -2697,14 +2710,30 @@ decided for it, each additive:
   `/model` with "Switch model?", `/btw`, `/cost` (now listed as "/usage
   (cost)").
 
+- **The app stops its host with SIGTERM and waits 20 s, because the host
+  needs that long and Electron gives two.** The host's stop finishes the
+  item in hand (up to `ORCH_STOP_DRAIN_MS`, 15 s), then releases and
+  unregisters at up to 2 s each. Electron's `utilityProcess.kill()` ends
+  the process 2 s after asking, whatever it is doing (the app's agent,
+  measured with a stand-in that takes 3 s to leave: gone at 2.2 s, last
+  step never run). So before 2026-11-19 every stop of a *busy* host under
+  the app (quit, leaving the board, a restart) was cut off with nothing
+  handed back, and 0.12.11's hand-back never ran there. An idle host never
+  showed it. Nothing changed in this repo; it is here because the host's
+  stop is this repo's, and a supervisor that gives it less than 20 s
+  breaks "done once, handed out again, or said lost".
+
 A board to test "connect to Docker" against is a scratch container from
-this tree's image, never the live one: `docker build --build-context
-gitmeta=./.git -t orch-dev-scratch:develop .`, then `docker run` with its
-own `--name`, `-p 127.0.0.1:89xx:8787` and named volume (2026-11-19: 8981,
-`orch-dev-scratch`). That is not `docker compose up`, which would collide
-with the live container by name. The app reads such a board's key from
-`docker inspect` (Config.Env `ORCH_AUTH_TOKEN`), so nobody pastes it, and
-`/health` names it `appideas-orchestratinator`.
+this tree's image, never the live one, and it is a script:
+`.claude/skills/catch-up-the-desktop-app/scratch-docker-board.sh up [port]
+| status | down` (its own tag, name, loopback port and volume; it refuses
+8787 and 6724). That is not `docker compose up`, which would collide with
+the live container by name. The app reads such a board's key from `docker
+inspect` (Config.Env `ORCH_AUTH_TOKEN`), so nobody pastes it, and `/health`
+names it `appideas-orchestratinator`. The same skill has the read that says
+which commit the app really runs (`app-pin-check.sh`), the plugin commands
+on today's Claude Code (`plugin-install-probe.sh`), and how a round with
+the app's agent goes.
 
 ## Tests
 

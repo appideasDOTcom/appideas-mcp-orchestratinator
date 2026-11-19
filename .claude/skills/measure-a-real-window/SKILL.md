@@ -637,6 +637,22 @@ asks for them. A reader that fails gets its fix, a row from the real
 capture beside the old shape's, and a mutant
 (`mutants-claude-2-1-326.suite.json` is the list from that day).
 
+**2.1.328, the same sweep (2026-11-19, a subagent, about five minutes).**
+Every reader held. One fault, in a presser and not a reader: under a load
+average near 100 `answerStartup` read the cursor 80 ms after its key,
+before the redraw, and refused the trust question with the cursor already
+on "Yes, I trust this folder". It reads until the cursor lands now
+(CLAUDE.md, "The host under the desktop app"). Three things that moved and
+broke nothing: the permission menu has a line under "Bash command", "Tip:
+auto mode handles these prompts for you…", which lands in the question's
+text; `/cost` is listed as "/usage (cost)" and still opens the settings
+screen on its Usage tab; and `/model sonnet` on a conversation whose
+replies were Fable's raised no "Switch model?" (0 of 34 frames), while
+`/model haiku` after one more reply did, which is not what "whenever the
+conversation has a reply cached" says below. Not chased. The sweep is a
+good thing to hand a subagent whole: give it this section, the scratchpad,
+and "never the default socket, never 8787 or 6724, restore settings.json".
+
 Unexplained, seen once on 2.1.327: `probe.mjs up` printed "up" with an
 empty footer, and the probe's tmux server was gone (its pane runs `exec
 claude`, so an exit leaves nothing to read). Started by hand as above, the

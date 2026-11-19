@@ -539,6 +539,40 @@ problem is macOS's grant to the host's process tree, not the server, and
 day, it blamed its own `cd` and saved that as a memory. Its process cannot
 lose a grant by changing directory.
 
+## Another agent's step has run past its own estimate
+
+A desk that says "about two minutes" and has run seven is either slow or
+held, and the pane alone does not say which. One read does:
+
+```bash
+.claude/skills/diagnose-handoff/desk-step.sh orchestratinator-desktop   # any part of the desk's folder
+```
+
+It prints the bottom of the pane (the turn's elapsed time, the step's own
+label and time) and every process under the pane with how long each has
+run. Reads only. What it showed the day it was written (2026-11-19):
+
+- **Held.** The step was `node rehearse.mjs | tail -110`. The script had
+  finished, but the packaged app it launched never quit, so node could not
+  exit and `tail` never saw the end of its input: seven minutes on a
+  two-minute step, with the output unread. The sign is a leaf process as
+  old as the step whose work is plainly over (its scratch folder was
+  already deleted, its ports closed). It was a real fault in the app's
+  quit, found because the hang was read and not just waited out.
+- **Slow.** A full suite at a load average of 600: twelve minutes on a
+  four-minute step, and the leaves were two seconds old. Leave it alone.
+
+Then: **message the agent with what you read, and kill nothing.** Its
+processes are its evidence and its lane, and the permission check refuses
+the kill anyway. If the operator wants the step freed now, hand him the one
+line (`! kill -9 <pid>`). A step also frees itself at the Bash tool's
+limit, ten minutes at most, with its output lost.
+
+For a wait he is watching, a loop does this every five minutes
+(`CronCreate */5`): poll and list tasks, `desk-step.sh`, two to four lines
+to him with times in Pacific, deleted at the final report. The loop fires
+only while your own session is idle.
+
 ## What not to do
 
 - Do not theorise about environment drift, versions, or infrastructure until
