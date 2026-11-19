@@ -78,6 +78,57 @@ touched the same page script (here `src/ui/app.js`: #23's
 - **Not the live board.** A merge in progress is not deployed. The
   deploy is its own task (**deploy-both-halves**).
 
+## 3. Resolving the conflicts yourself, and what main → develop taught
+
+costmo asked for the conflicts resolved, not only checked, on 2026-11-18:
+`main` (76 commits, 0.12.11) into `develop` (the desktop app's four), 16
+files. What it took, for the next one:
+
+- **See each hunk against the base.** `git checkout --conflict=diff3 --
+  <files>` rewrites only the unresolved files' markers, adding the base
+  between `|||||||` and `=======`. Without the base, "both sides added a
+  section" and "one side rewrote what the other kept" look the same.
+- **Resolve a hunk at a time, by its index, with the text written to a
+  file**, not by hand-editing a 400-line conflict. The helper used that day
+  replaced the Nth `<<<<<<< … >>>>>>>` block of a file with a file's text,
+  and refused when the block was not there. Run a syntax check (`node
+  --check`) on every resolved `.js`/`.mjs` straight after.
+- **Most hunks were "keep both"**, each side's new function, route, map or
+  section. Where both sides wrote the same rule differently, the newer
+  measured one won and the other side's measured fact was carried into it.
+  Example: main's `switchConfirmOf` comment said "Change effort level?" had
+  "not been seen on a window", and develop had seen it on a live desk, so
+  that sighting and its real capture went in beside main's code.
+- **A file git merged cleanly can still be wrong.** Two kinds were found:
+  - Both sides had fixed one test race in contradictory ways in
+    `test/host.mjs`'s placeholder-key section (main's `ready-delay.flag`,
+    develop's wait for `remain-on-exit off`). Git merged them without a
+    conflict, and the row no longer tested what it names. It was found
+    only through intermittent reds afterwards.
+  - Develop's text said the board's Node floor was 22.14 and the image was
+    `node:22`, beside main's Node 24 ruling, in CLAUDE.md, the docs and a
+    script comment.
+
+  So grep the clean-merged files for each side's fix of anything the
+  other side also touched, and for facts one side's ruling changed.
+- **One side's tests meet the other side's rules.** Develop's board
+  refuses a host that sends no protocol number, and main's newer floor
+  rows and `seed-sessions.mjs` registered hosts by hand without one: 40
+  floor reds. And both sides' rows used host id `h-old` with different
+  expectations. Read the first reds by what they share before reading
+  them one by one.
+- **The protocol number.** Section 4 of `check-merge.sh` now flags a merge
+  that drops it. Both forward merges of 2026-11 did: the version line
+  conflicted, main's side was taken, and develop's `"protocol": 1` beside
+  it went too. It now sits away from `"version"`. A forward merge keeps
+  develop's version (0.14.x) over main's (0.12.x).
+- **Run the scripts on Node 24.** `check-merge.sh` calls `node -e`, and on
+  this machine's default Node 20 that is a different Node from the one
+  that runs the tree.
+- **After the commit, the full chain at the merge commit from a clean
+  clone** is QA's (it found the intermittent host reds there, 3 of 17,
+  which piecewise runs between fixes had not shown).
+
 ## Reporting
 
 Lead with the verdict (good to commit, or the one thing to fix). Then

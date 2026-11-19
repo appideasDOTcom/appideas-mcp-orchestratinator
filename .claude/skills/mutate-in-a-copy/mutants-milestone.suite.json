@@ -110,12 +110,5 @@
   "host/index.js",
   "    const release = this.inHand.map((i) => i.id);",
   "    const release = [];"
- ],
- [
-  "F5 the LaunchAgent takes whatever node is first",
-  "host",
-  "host/install.sh",
-  "NODE_MAJOR=24\n",
-  "NODE_MAJOR=20\n"
  ]
 ]

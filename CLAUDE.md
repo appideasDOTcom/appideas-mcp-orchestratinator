@@ -2732,6 +2732,10 @@ scripts are not affected, because `sh` does not load the function. And
 strings and always equal. Use `shasum`, and say which: with no flag it is
 SHA-1, and one sent to QA unlabelled was set against their sha256 of the
 same file and read as two files (PR #55 round 4). `shasum -a 256`.
+One from 2026-11-18. **In zsh, `$var:h…` is a modifier, not a colon.**
+`git show "$r:host/x.js"` takes `:h` as "head of the path", so git was
+asked for `.ost/x.js` and said "ambiguous argument". It bit twice in one
+evening, in a loop over commits. Write `"${r}:host/x.js"`.
 Two more from 2026-11-16. **A heredoc whose delimiter is unquoted runs the
 backticks in its text.** A Python edit fed through `<<EOF` carried
 "\`npm test\`" in a sentence, so the shell started the whole chain. Smoke
@@ -3006,6 +3010,43 @@ writes a primer turn and waits for the floor to show it, so the relay is
 known to be reading before anything is timed against it. A row that
 restarts the host and then writes to the transcript has the same race:
 wait for a turn to arrive first.
+
+**Open on `develop` after the main → develop merge (2026-11-18): the
+host suite is red intermittently, and one cause is known.** QA's check of
+the merge (0b51ba0, from a clean clone) read `test:host` red in 3 of 17
+runs, on four timing rows in three places on the watch path: "joined at
+its tail" (`test/host.mjs` near 981), "a window closed while the host was
+still waiting for it to start does not hold the host's line" (near 848),
+and "a window that comes up in a folder released elsewhere is not this
+desk's" with "the desk goes offline here within the watch". Main's tree
+read 0 of about 29 that day, and develop before the merge 0 of 6 on those
+rows. QA's logs: `evidence/merge-develop-2026-11-18/` in the QA repo
+(alt-merge-2.log, alt-merge-5.log, L3a-host-run-with-extra-red.log).
+- **Known, and the merge's:** both sides had fixed one race in the
+  placeholder-key section, differently, and git merged the file without a
+  conflict. Main writes `ready-delay.flag` (8000) so that the host is
+  always still waiting when the pane is killed (PR #57 Info 10). Develop
+  waits for the window's `remain-on-exit` to read `off`, which the host
+  sets only once it has seen the window (2026-11-07). Together, the wait
+  outlasts the delay, the host is no longer waiting when the pane goes,
+  and the row near 848 no longer sets up what it names. Keep main's (the
+  flag) and take develop's wait out, then rerun the host suite enough
+  times to read it.
+- **Not known:** the other two. Two of the rows are main's, and both run
+  through the watch tick's `await this.host.letGoIfReleased(…)`, which
+  develop added before a new process is adopted (`host/index.js`). Whether
+  the rows' waits are too short for that path or the release feature has
+  a race is not settled. QA recommended these rows print the host's log
+  on a red first. Settle it before develop is deployed anywhere.
+- **Also owed, from QA's review of 0.12.12 (PR #60, review 5969322428,
+  three Infos):** the window suite's form stand-in (`test/window.mjs`
+  near the "Ready to submit your answers?" fixtures) still draws the old
+  review screen, so no stand-in carries the 2.1.327 screen end to end; a
+  "Switch model?" raised by hand in the window (a `/model` typed there and
+  left standing) is unmeasured on a real window: a floor message is
+  refused as `asking`, and the floor offers nothing to answer it with; and
+  a multi-question form answered from the floor on a live desk is still
+  owed as the live proof of the review-screen fix.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`

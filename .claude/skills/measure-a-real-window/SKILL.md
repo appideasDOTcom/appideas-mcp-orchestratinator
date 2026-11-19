@@ -589,6 +589,60 @@ running**: one that hung on `up` carried on into its `hosts` and `down`
 when its pipe closed, on the same directory as the rerun, and the two
 scripts overwrote each other's pid files.
 
+## When `claude --version` moves: the reader sweep
+
+Claude Code 2.1.326 moved two screens the host reads by position, and the
+floor failed on every desk without a word that blamed the update: a model
+change ended "no sign of running it within 20s", and a multi-question form
+was called answered while it stood unsubmitted (CLAUDE.md, "A Claude Code
+update can move a line the host reads by position"; 0.12.12). The sweep
+that found both, and `/cost`, took about forty minutes on 2.1.327
+(2026-11-18). Run it when the version moves, before believing a report
+that the floor "stopped working". Every step goes through the tree's own
+host code against a probe on `-L probe`, at **80x24**, the size the host
+opens windows at.
+
+```bash
+SP=<scratchpad>; export PATH=$HOME/.nvm/versions/node/v24.22.2/bin:$PATH
+printf '#!/bin/sh\nexec tmux -L probe "$@"\n' > "$SP/tmuxw"; chmod +x "$SP/tmuxw"
+export ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p
+cp -p ~/.claude/settings.json "$SP/settings.json.before"     # /model writes it
+mkdir -p "$SP/p" "$SP/panes"   # a NEW folder each time, so the trust question is asked
+# `claude; sleep 30`, not `exec claude`: an exit stays on screen to read.
+tmux -L probe new-session -d -s p -n probe -c "$SP/p" -x 80 -y 24 'claude; sleep 30'
+```
+
+1. **Trust question**: capture the pane, read it with `startupQuestionOf`,
+   then `answerStartup(dir, 2)` (the host's presser). 2.1.327: read, and
+   "Yes, I trust this folder" chosen.
+2. **Permission menu**: restart with `claude --permission-mode default`,
+   ask for a `touch`, then `readPrompt`, `promptChoices`, and
+   `answerPrompt(dir, String(deny))`. 2.1.327 has four rows ("Yes, and
+   switch to auto mode" is new) and Deny is row 4; the floor finds Approve
+   and Deny by their words, so it held.
+3. **Forms**: `form.mjs` with two single-selects, then a preview question
+   plus a multi-select (the Usage at the top of `form.mjs`). The receipt is
+   the tool result in the transcript. "readQuestions → … Submit[single,2]"
+   or "tool result NONE" is the review screen not being read.
+4. **Commands**: `send.mjs` with `/model <other>` on a conversation that
+   has a reply cached (the "Switch model?" path), then `/btw …`, then
+   `/cost` and a plain message after it (the message must reach the
+   composer).
+5. Put the settings back: `restore-settings.py "$SP/settings.json.before"`,
+   then `tmux -L probe kill-server`.
+
+Save every pane you read (`capture-pane -p > "$SP/panes/<name>.txt"`):
+the fixes' rows in `test/window.mjs` are built from those captures, and QA
+asks for them. A reader that fails gets its fix, a row from the real
+capture beside the old shape's, and a mutant
+(`mutants-claude-2-1-326.suite.json` is the list from that day).
+
+Unexplained, seen once on 2.1.327: `probe.mjs up` printed "up" with an
+empty footer, and the probe's tmux server was gone (its pane runs `exec
+claude`, so an exit leaves nothing to read). Started by hand as above, the
+same folder worked. If `up` does that again, start it by hand and read
+what Claude Code says before it exits.
+
 ## A model or effort change
 
 Since 2026-11-14 the floor changes a model or an effort level by typing the
