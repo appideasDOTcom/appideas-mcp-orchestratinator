@@ -31,7 +31,11 @@ J='content-type: application/json'
 val() { cat "$ST/$1" 2>/dev/null; }
 sessions() { curl -s -m 2 "localhost:$(val port)/health" | python3 -c "import sys,json; print(json.load(sys.stdin)['sessions'])" 2>/dev/null; }
 board_up() {
-  ( cd "$REPO" && PORT="$(val port)" DB_PATH="$ST/board.db" ORCH_AUTH_MODE=off nohup node src/server.js >> "$ST/board.log" 2>&1 & echo $! > "$ST/board.pid" )
+  # exec, and every stream redirected on the subshell itself: a subshell
+  # left holding the caller's stdout kept `probe-host.sh up | tail` open for
+  # as long as the board ran (the first cut did).
+  ( cd "$REPO" && PORT="$(val port)" DB_PATH="$ST/board.db" ORCH_AUTH_MODE=off exec node src/server.js ) >> "$ST/board.log" 2>&1 < /dev/null &
+  echo $! > "$ST/board.pid"
   for _ in $(seq 1 40); do curl -s -m 1 "localhost:$(val port)/health" >/dev/null && return 0; sleep 0.25; done
   echo "the board did not come up; $ST/board.log"; return 1
 }
@@ -49,7 +53,8 @@ case "${1:-}" in
         -H "X-Channel: probe-floor" -H "X-Agent: probe" >/dev/null 2>&1 ) || { echo "claude mcp add failed"; exit 1; }
     ( cd "$REPO" && ORCH_HOST_CONFIG=/nonexistent/host.json ORCH_URL="http://127.0.0.1:$PORT" \
         ORCH_HOST_ID=probe-rig-host ORCH_HOST_NAME=probe-rig ORCH_HOST_ROOTS="$DIR" \
-        ORCH_TMUX="$ST/tmuxw" ORCH_TMUX_SESSION=p nohup node host/index.js >> "$ST/host.log" 2>&1 & echo $! > "$ST/host.pid" )
+        ORCH_TMUX="$ST/tmuxw" ORCH_TMUX_SESSION=p exec node host/index.js ) >> "$ST/host.log" 2>&1 < /dev/null &
+    echo $! > "$ST/host.pid"
     sleep 3
     grep -q "1 desk" "$ST/host.log" && echo "up: board :$PORT, $DIR bound as probe-floor/probe, host probe-rig-host (logs in $ST)" \
       || { echo "the host did not find the desk:"; tail -5 "$ST/host.log"; exit 1; }
@@ -59,14 +64,27 @@ case "${1:-}" in
     "$ST/tmuxw" kill-server 2>/dev/null
     # Not the agent's own environment: a window started from inside Claude
     # Code inherits CLAUDECODE and the rest and reads as nested (SKILL.md).
-    env $(env | grep -oE '^CLAUDE[^=]*' | sed 's/^/-u /') "$ST/tmuxw" new-session -d -s p -n probe -c "$DIR" -x 200 -y 50 'claude; sleep 30'
+    # `exec claude`, never `claude; sleep 30`: the host matches a session to
+    # its pane by pid, and with a shell in between the pane's pid is the
+    # shell's. The host then reads the window as held outside the floor (an
+    # editor: window_id null, outside_pid set), and the board, rightly,
+    # asks for no reconnect and sends no notice. Measured the first time
+    # this script ran.
+    env $(env | grep -oE '^CLAUDE[^=]*' | sed 's/^/-u /') "$ST/tmuxw" new-session -d -s p -n probe -c "$DIR" -x 200 -y 50 'exec claude'
     for _ in $(seq 1 30); do
       P="$("$ST/tmuxw" capture-pane -p -t p:probe 2>/dev/null)"
       if echo "$P" | grep -q "Yes, I trust this folder"; then "$ST/tmuxw" send-keys -t p:probe Down; sleep 0.4; "$ST/tmuxw" send-keys -t p:probe Enter; fi
-      [ "$(sessions)" = "1" ] && { echo "window up, and its MCP session is on the board (sessions=1)"; exit 0; }
+      if [ "$(sessions)" = "1" ]; then
+        HELD=$(curl -s -m 2 "localhost:$(val port)/api/floor" | python3 -c "
+import sys,json
+for c in json.load(sys.stdin)['channels']:
+  for d in c['desks']:
+    if d['agent'] == 'probe': print((d.get('hosted') or {}).get('held'))" 2>/dev/null)
+        [ "$HELD" = "floor" ] && { echo "window up, held by the floor, and its MCP session is on the board (sessions=1)"; exit 0; }
+      fi
       sleep 2
     done
-    echo "no MCP session after 60 s; the pane:"; "$ST/tmuxw" capture-pane -p -t p:probe | sed '/^\s*$/d' | tail -8; exit 1
+    echo "after 60 s: sessions=$(sessions), held=${HELD:-?} (want 1 and floor); the pane:"; "$ST/tmuxw" capture-pane -p -t p:probe | sed '/^\s*$/d' | tail -8; exit 1
     ;;
   outage)
     SECS="${2:?seconds}"

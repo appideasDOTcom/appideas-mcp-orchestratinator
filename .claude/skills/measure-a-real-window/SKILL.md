@@ -614,7 +614,12 @@ And an outage only means something to a window that holds a session.
 The first cut of this script let `probe.mjs up` start the window in a
 new folder, where it sat on the trust question with nothing connected,
 and both outages then read "no reconnect" as if that were a result.
-`outage` refuses now unless the board has the session.
+`outage` refuses now unless the board has the session. And the window is
+`exec claude`, never `claude; sleep 30` (the reader sweep's form): with a
+shell in between, the pane's pid is not the session's, and the host reads
+the window as an editor's (`window_id` null, `outside_pid` set). Neither
+a reconnect nor a notice goes to an editor's desk, so the second run read
+"no reconnect" for that reason. `window` waits for `held: floor` as well.
 `up` refuses 8787, 6724 and any port that answers, and the host's id is
 its own, never the hostname (the live host's row). Read without a
 script, `/mcp` itself on 2.1.328: bare, it opens the "MCP servers" panel
