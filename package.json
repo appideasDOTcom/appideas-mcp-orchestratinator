@@ -4,6 +4,7 @@
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
+  "protocol": 1,
   "description": "Shared MCP coordination server (mailbox + contracts + tasks + status dashboard) for coordinating Claude Code agents that live in separate VS Code windows.",
   "engines": {
     "node": ">=24"

@@ -89,6 +89,59 @@ behaviour, not a fault. The host pins its board with `url` in
 `~/.orchestratinator/host.json`; when desks disagree and nothing pins it, the
 host refuses to start rather than guess.
 
+## The live instance runs from its own clone, and this one is for development
+
+costmo's ruling, 2026-11-18, by AskUserQuestion through appideas-qa, when
+the desktop app's work went back to `develop`: **the operator's live
+instance (the board on `localhost:8787`, its host, and the plugin's
+marketplace) runs from a second clone pinned to `main`,**
+`…/appideas-site-dev/orchestratinator-live`. **This folder,
+`…/appideas-site-dev/appideas-mcp-orchestratinator`, is the development
+tree**, on `develop`, the 0.14.x line. His addition the same hour: "We'll be
+doing desktop development with another agent in another session, so that
+decision needs to survive." So it is written here, in the deploy skill, and
+in the desktop channel's contract (`orchestratinator.consumed`).
+
+Before it, one folder was both. The board's container was built from it,
+the host's LaunchAgent ran its `host/run.sh`, and the plugin's marketplace
+was a directory source pointing at it. With the folder on `develop`, the
+next host restart (a crash under `KeepAlive`, a reboot, an Update) would
+have started develop's host against main's board. Any `docker compose up`
+here would have replaced the live board with develop's, which refuses
+main's host for its protocol number.
+
+So, in this folder:
+- **Never `docker compose up`, `host/install.sh`, `launchctl kickstart` of
+  the host, or `claude plugin update`.** Each one acts on the live
+  instance. `container_name: appideas-orchestratinator` and port 8787 are
+  in `docker-compose.yml`, so a compose run here collides with the live
+  container rather than starting a second board beside it. That is a
+  refusal by accident; do not "fix" it.
+- **Development runs on its own ports**: the suites' defaults, a scratch
+  board (`PORT=89xx DB_PATH=<scratch> node src/server.js`), page checks on
+  private ports, and probes on their own tmux socket. A dev host started
+  by hand or by the app must not register with `localhost:8787` under the
+  live host's id: `ORCH_HOST_ID` defaults to the hostname, which is the
+  live host's row and work queue. Give a dev host its own board, or at
+  least its own `ORCH_HOST_ID`.
+- **A release reaches the live clone through `main`**: a PR, QA's release
+  check, costmo's merge, then in the live clone `git pull`, and the deploy
+  from there (**deploy-both-halves**), or the page's Update, which
+  fast-forwards the clone the host runs from. That is the live clone now.
+- **A maintenance fix to the live service is a branch off `main`** (0.12.x,
+  as 0.12.12 was), merged forward into `develop` after it ships. Both
+  times so far, the forward merge conflicted on the version line, and
+  taking main's side dropped develop's `"protocol": 1` beside it (bf8079d,
+  e54004b). The field now sits after `"type"`, away from `"version"`, so a
+  bump merges cleanly (measured with `git merge-file`). After any forward
+  merge, read `"protocol"` in both `package.json` files.
+
+The database moved with the board: it is the named volume of the live
+clone's compose project (`orchestratinator-live_orchestratinator-data`),
+copied from the old one (`appideas-mcp-orchestratinator_orchestratinator-data`)
+while both boards were stopped. The old volume is left as it was, as the
+backup from that moment.
+
 ## The host
 
 A launchd job (`com.appideas.orchestratinator-host`), not part of the Docker
