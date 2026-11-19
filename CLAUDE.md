@@ -515,7 +515,8 @@ Three consequences worth knowing before touching `host/window.js`:
   fix it in 0.12.12). So: when `claude --version` moves, run the
   probe over every reader (**measure-a-real-window**: the trust question,
   a permission menu, `form.mjs` with two questions, `send.mjs '/model …'`
-  on a conversation with a reply in it) before believing a report that the
+  on a conversation with a reply in it, and `/mcp reconnect` on a window
+  with a server) before believing a report that the
   floor "stopped working". The first sign in the host log is a `read a
   form of N` whose last question is Submit, or a change that ends "no
   longer in the composer".
@@ -988,10 +989,12 @@ the suite connects as a desk and drops the session, since the stand-in
 never connects), the slash menu and a notice's line in
 `check-chat-controls.mjs`. The 17 mutants are
 `mutants-mcp-rooms.suite.json` (**mutate-in-a-copy**), all red on their
-rows. Seen end to end once on a real window (2026-11-19, a scratch board
-and a dev host): a board down 5 s healed by itself and nothing was asked;
-a board down 90 s was not, and the host reconnected the window 25 s after
-the board came back. A room opened and ended put both notices in the
+rows. Seen end to end on a real window (2026-11-19, `probe-host.sh` in
+**measure-a-real-window**): a board down 5 s healed by itself and nothing
+was asked; a board down 90 s did not, and the host reconnected the window
+25 s after the board came back. In costmo's app the same evening, a 22 s
+relaunch healed by itself, and a 6-minute one was reconnected by the host
+30 s and 33 s after, on both desks. A room opened and ended put both notices in the
 window, filed as `meeting-room` lines.
 
 ## A file attached to a message

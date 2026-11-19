@@ -589,6 +589,38 @@ running**: one that hung on `up` carried on into its `hosts` and `down`
 when its pipe closed, on the same directory as the rerun, and the two
 scripts overwrote each other's pid files.
 
+## A board that goes away: the reconnect and a room's notices
+
+The rig that showed both features of 2026-11-19 working on a real window
+(CLAUDE.md, "/mcp from the floor, a reconnect the board asks for, and a
+room's notices"): a scratch board, the probe folder bound to it in local
+scope, a dev host on the probe's socket, and the probe window. All of it
+is in [`probe-host.sh`](probe-host.sh).
+
+```bash
+export PROBE_HOST_STATE=$SP/ph                           # its pids, logs and database
+H=.claude/skills/measure-a-real-window/probe-host.sh
+$H up "$SP/rig"                                          # board :8931, binding, host probe-rig-host
+bash -c 'for v in $(env | grep -oE "^CLAUDE[^=]*"); do unset "$v"; done
+         node .claude/skills/measure-a-real-window/probe.mjs up "$1" auto' _ "$SP/rig"
+$H outage 5        # 2.1.328: sessions=1 within seconds, no host line (it healed by itself)
+$H outage 90       # 2.1.328: the host's line "the desk's tools had lost the board, so the
+                   # host ran /mcp — Reconnected to orchestratinator", 25 s after the board
+$H room            # the window's two notes, filed as context/meeting-room
+$H down; node .claude/skills/measure-a-real-window/probe.mjs down
+```
+
+Bind before the window starts: a window reads its MCP servers at start.
+`up` refuses 8787, 6724 and any port that answers, and the host's id is
+its own, never the hostname (the live host's row). Read without a
+script, `/mcp` itself on 2.1.328: bare, it opens the "MCP servers" panel
+(an arrow list, `✘ orchestratinator` when dropped). `/mcp reconnect
+<name>` writes "Reconnected to <name>", "Couldn't reconnect to <name>"
+with the board down, or `MCP server "x" not found`, each as
+local-command-stdout. `reconnect all` adds "1 still not connected" for
+the disabled computer-use. Typed into a running turn, it vanished: no
+record, no queue entry.
+
 ## When `claude --version` moves: the reader sweep
 
 Claude Code 2.1.326 moved two screens the host reads by position, and the
@@ -627,7 +659,12 @@ tmux -L probe new-session -d -s p -n probe -c "$SP/p" -x 80 -y 24 'claude; sleep
 4. **Commands**: `send.mjs` with `/model <other>` on a conversation that
    has a reply cached (the "Switch model?" path), then `/btw …`, then
    `/cost` and a plain message after it (the message must reach the
-   composer).
+   composer). Then `send.mjs '/mcp reconnect orchestratinator'` on a
+   window started with an MCP server (`probe-host.sh up` first, or
+   `claude --mcp-config`): the receipt is "Reconnected to …" as the
+   window's stdout, and a bare `/mcp` from the floor depends on it
+   (`typedCommand`). The automatic reconnect depends on it as well:
+   `probe-host.sh outage 90`.
 5. Put the settings back: `restore-settings.py "$SP/settings.json.before"`,
    then `tmux -L probe kill-server`.
 

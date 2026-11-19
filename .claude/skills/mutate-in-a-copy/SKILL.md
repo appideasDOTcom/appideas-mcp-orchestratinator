@@ -253,6 +253,25 @@ control. A `grep -E "✗|PASS|FAIL"` over the suite's own output had printed
 nothing at all a minute earlier and was read as quiet success. No verdict
 line is a failure; look for the line, not for the absence of a ✗.
 
+**A row that throws hides its batch-mates.** In the /mcp and room-notice
+round (2026-11-19) a batch held two mutants, one of which took `/mcp`
+out of the page's command list. A row then read `.find(…).hint` on the
+missing entry, threw a TypeError, and the suite stopped at 546 rows of
+1579. The other mutant in that batch was never reached, and the batch
+read "4 failing" as if both had been seen. So: write rows so that a
+missing thing is a ✗, never an exception (`?.hint ?? ''`), and compare
+each batch's ✓ + ✗ with the control's count. A batch that ran fewer rows
+than its control proved only what it reached; run its mutants again
+alone.
+
+**A row that waits on a throttled look must wait out the throttle.** The
+same round's reload row (End, then Open) read green under the mutant
+that broke the very rule it named: the board's sweep runs at most once in
+2 s, so no sweep ran while the room stood ended, and the row never put
+the question to the code. It sleeps past the throttle and looks while
+the room is ended now. A row survived by a mutant of the line it is
+about is the cue to find the look it never made.
+
 ## Choosing the mutants
 
 One per behaviour the task names, each the smallest change that removes it:

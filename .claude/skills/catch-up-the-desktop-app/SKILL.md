@@ -90,6 +90,13 @@ better-sqlite3 (`. scripts/node-floor.sh`).
   a throwaway config dir with stdin closed, then `list --json`. Held on
   2.1.328. Run it when `claude --version` moves, before the contract's
   words are trusted again.
+- **`electron-focus-probe.cjs`**: what Electron does with a page's
+  `focus()` and `moveTo()` on a window it opened, run with the app's own
+  Electron, alone and with the app's handler (`FIX=1`). It is the
+  measurement behind contract `orchestratinator.window_moves`: on 45.2.3
+  `focus()` does nothing at all, and the move is the only signal main gets.
+  Run it when the app's Electron version moves. Its header says what to
+  read.
 - **`../diagnose-handoff/desk-step.sh <folder>`** — what another agent's
   window is doing and what its step is held on. The app's agent launches
   the app from tests; one that never quits holds the step's pipe open and
@@ -191,6 +198,19 @@ the one thing that did not:
   (2026-11-19, one refused ingest, nothing written): a suggested address
   of `localhost:8787` overwrote a typed test address. Anything in either
   repo that defaults to 8787 is a way onto the operator's board.
+- **In the app, a page cannot raise a window.** `window.focus()` from a
+  board page does nothing in Electron, minimized or covered (2026-11-19,
+  costmo's report on "In a meeting"). The page moves the window and the
+  app raises it on `content-bounds-updated`; the page promises to move a
+  window only to raise it (contract `orchestratinator.window_moves`). A
+  new page-driven move changes that entry first.
+- **An app relaunch is a board outage, and how long decides who heals
+  it.** Claude Code reconnected its MCP by itself after 5 s and 22 s down
+  (a probe, and costmo's relaunch), and not after 90 s or 6 minutes. Then
+  the board asks the host to `/mcp reconnect` each floor window whose
+  agent had used its tools: 25 s after the board came back on the probe,
+  30 s and 33 s in his app (CLAUDE.md, "/mcp from the floor…"). To see it
+  in his app, he quits and waits two minutes before relaunching.
 - **Load on this machine reaches 600.** A four-minute suite took fifteen;
   a 5 s limit on reading the login shell's PATH failed at 155. Run now,
   read reds against a control, and give the load beside the result
