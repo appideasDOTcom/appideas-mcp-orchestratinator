@@ -1501,6 +1501,26 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
    and a put-away floor is not in it: that one is a pill in #floor-away. */
 #floor-pick { margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
 #floor-pick:empty { display: none; }
+/* A floor chip is a link, and its ⧉ opens the floor in a new tab or window
+   (task 315). The two halves are drawn as one pill, split down the middle,
+   so the chip reads as one thing with a second door on its end. */
+#floor-pick a.chip { text-decoration: none; display: inline-block; }
+.fchip { display: inline-flex; align-items: stretch; }
+.fchip > a.chip { border-top-right-radius: 0; border-bottom-right-radius: 0; padding-right: 7px; }
+.fchip-pop {
+  border: 1px solid var(--border);
+  border-left: 0;
+  border-radius: 0 999px 999px 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 8px 0 5px;
+  cursor: pointer;
+}
+.fchip-pop:hover, .fchip-pop:focus-visible { color: var(--accent); }
+.fchip.on .fchip-pop { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
 /* The put-away floors, under the building. The same pills as the board's,
    inset to the panel's own margin like the picker above and the rooms. */
 #floor-away { padding: 0 14px 14px; }

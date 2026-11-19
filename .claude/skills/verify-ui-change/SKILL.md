@@ -1518,6 +1518,31 @@ check-popout's "send row in the window" step now measures `.p-compose`,
 not `.p-foot`. When wide, the foot is in the left column and no longer
 stands for the send row.
 
+### check-floor-windows.mjs — a tab per floor (task 315, 2026-11-19)
+
+```bash
+PORT=8948 CDP=9288 .claude/skills/verify-ui-change/run-check-floor-windows.sh "$PWD"   # about twenty seconds
+```
+
+On `seed-archive.mjs`'s three floors: the title and the address on the
+building, after a plain click, after another tab's stored pick and a
+reload, on the board view and after a reload of it, and after the floor is
+archived under the tab; the ⧉, ⌘-click and middle-click each opening a new
+tab on the right floor while the tab pressed in stays put; a bare address
+still meaning the stored choice. Every press is real input: `press()`
+takes `{ modifiers }` (CDP's mask: Alt 1, Ctrl 2, ⌘ 4, Shift 8) and
+`{ button: 'middle' }` for this check, because a browser follows a link
+elsewhere and opens a window only on real input. New tabs are found with
+`targets()` before and after, not by a window name, since the ⧉ uses
+none. `mutants-floor-windows.page.json` is the list: ten, all red, the
+control 23 of 23 (load 91, 2026-11-19). One red on the first run was the
+check's own: the all-floors chip's parent is the picker, which holds every
+⧉, so "has a ⧉ beside it" reads `.closest('.fchip')`.
+
+A plain click riding to a floor and a plain click *following the link* to
+it end on the same floor; only `window.__orchMark` surviving tells them
+apart. A check of anything that is now a link needs that row.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
@@ -1650,8 +1675,14 @@ whole question.
 | a meeting's box on the floor | `svg.room .meetBox[data-meeting="<room id>"]`: `.meetFrame` (the edge), `.meetLabel` ("In a meeting", `data-act="meet-raise"`), `.meetEnd` (`data-act="meet-end"`, `aria-disabled`). Read a placard's words from `.meetTabText`'s own text nodes: its `<title>` is a sibling in the same group |
 | Take a desk's floor and button | `#dlg #desk-channel` (its `value`), `#dlg [data-do="desk-take"]` (its words: Take desk / Move to <floor> / Bring onto the floor); wait for `#dlg [data-do="desk-pick"]` enabled before choosing a folder |
 
-Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true}))` — the
-handler is delegated and reads the event target.
+Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}))` — the
+handler is delegated and reads the event target. **Say `cancelable: true`.**
+A MouseEvent is not cancelable unless it is told so, a person's click
+always is, and on an event that is not, `preventDefault()` does nothing.
+Since the floor chips became links (task 315) that is the difference
+between riding to a floor and following the link: check-select's dispatched
+click on a chip reloaded the page and lost the room's selection, while the
+page was right and a real press was green. `page.click()` says it now.
 
 `app.js` is a classic script, so its top-level functions are already on `window`;
 `floor.js` is an IIFE and exposes only what it explicitly assigns. That is the

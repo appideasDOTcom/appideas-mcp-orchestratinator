@@ -377,6 +377,8 @@
     roomsSig: null,      // last drawn room signature, so a tick that changes nothing redraws nothing
     pickSig: null,
     floorFilter: null,   // a channel name, or null for every floor stacked
+    floorTab: false,     // this page is a floor tab, not a popout or a meeting room: it keeps its floor in its address
+    floorNames: null,    // the floors in the building at the last draw, for the title in the board view
     panelFor: null,      // which desk the panel skeleton was built for
     renderedTurn: 0,     // highest turn id already in the panel
     stick: true,         // auto-scroll follows only while the reader is at the bottom
@@ -5285,6 +5287,67 @@
     return d?.hosted?.session_id ?? null;
   }
 
+  /* ---------- floor windows: what the page decides ---------- */
+  // Several floors at once, each in a tab or window of its own (costmo,
+  // 2026-11-19, task 315; the desktop app opens each as a window or a macOS
+  // tab of its own). Pure, and lifted into test/floor.mjs by this marker and
+  // the popouts' below it.
+  //
+  // The floor a tab stands on is in its address, `?floor=<channel>`, because
+  // the only other place it was kept is localStorage, which every tab shares:
+  // a reload, or a second tab, landed on whatever floor was picked last
+  // anywhere. `?floor=` with nothing after it is all floors (the building),
+  // so a window can be opened on the building whatever was picked last. A
+  // bare address still means the stored choice, which is still written, so
+  // a fresh open lands where the operator last was. `view=board` is kept too,
+  // since the view is the same shared slot. The desktop app relies on these
+  // forms (contract orchestratinator.consumed, dashboard.floor).
+
+  /** What a floor tab's address says: `floor` is a channel, null for all floors, undefined when it does not say; `view` likewise. */
+  function addressOf(search) {
+    const q = new URLSearchParams(search ?? '');
+    const floor = q.has('floor') ? (q.get('floor') || null) : undefined;
+    const v = q.get('view');
+    // An address that names a floor is a floor view: that is what a chip's
+    // link and the ⧉ open, whatever the stored view.
+    const view = v === 'board' || v === 'floor' ? v : (floor === undefined ? undefined : 'floor');
+    return { floor, view };
+  }
+
+  /** The query string a floor tab keeps in its address, anything else in it left as it was. */
+  function addressFor(search, { floor, view }) {
+    const q = new URLSearchParams(search ?? '');
+    q.set('floor', floor ?? '');
+    if (view === 'board') q.set('view', 'board'); else q.delete('view');
+    return `?${q}`;
+  }
+
+  /** A floor chip's link: the floor, or '' / null for all floors. */
+  const floorHref = (floor) => `?${new URLSearchParams({ floor: floor ?? '' })}`;
+
+  /**
+   * The tab's title. The floor's name comes first, because a macOS tab, a
+   * Dock menu and a crowded browser strip cut a title from the end. One floor
+   * with no picker is that floor, not "All floors". Null before the first
+   * payload when nothing says which floor: index.html's title stands.
+   */
+  const TITLE_TAIL = 'orchestratinator';
+  function windowTitle({ view, floor, floors }) {
+    const head = view === 'board' ? 'Board'
+      : floor ? floor
+        : floors?.length === 1 ? floors[0]
+          : floors?.length ? 'All floors' : null;
+    return head ? `${head} · ${TITLE_TAIL}` : null;
+  }
+
+  /**
+   * Whether a click on a chip's link is the browser's own "open it elsewhere"
+   * (⌘ or Ctrl for a new tab, Shift for a new window, any button but the
+   * first), which the page leaves to the browser. Alt is not one: on a link
+   * it downloads, which is nothing anyone means here.
+   */
+  const opensElsewhere = (e) => (e.button ?? 0) !== 0 || !!e.metaKey || !!e.ctrlKey || !!e.shiftKey;
+
   /* ---------- popouts: what the page decides ---------- */
   // Issue #19. Pure, and lifted into test/floor.mjs by the two markers around
   // this section — see CLAUDE.md on page logic.
@@ -7562,14 +7625,26 @@
     // lands the page on all floors — a put-away floor is not somewhere to stand.
     const names = here.map((c) => c.channel);
     if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
+    ui.floorNames = names;
+    syncAddress();
     const pickSig = JSON.stringify([names, ui.floorFilter]);
     if (pickSig !== ui.pickSig) {
       ui.pickSig = pickSig;
-      const chip = (n) => `<button class="chip${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}">${esc(n)}</button>`;
+      // Each chip is a link to its floor, so ⌘-click, middle-click and the
+      // browser's own "Open Link in New Tab" open it elsewhere; a plain click
+      // stays in the page (the click handler). The ⧉ beside it opens the
+      // floor in a new tab, or a window of its own in the desktop app (task
+      // 315). A popout's page has no picker, so none of this is drawn there.
+      const chip = (n) => {
+        const on = ui.floorFilter === n ? ' on' : '';
+        const tip = `Open ${n} in a new window`;
+        return `<span class="fchip${on}"><a class="chip${on}" href="${esc(floorHref(n))}" data-floor="${esc(n)}">${esc(n)}</a>`
+          + `<button type="button" class="fchip-pop" data-floor-pop="${esc(n)}" title="${esc(tip)}" aria-label="${esc(tip)}">⧉</button></span>`;
+      };
       // A picker with one choice is furniture. A put-away floor is not a choice
       // here at all: it is a pill under the building, and only there.
       $('floor-pick').innerHTML = names.length < 2 ? '' : [
-        `<button class="chip${ui.floorFilter ? '' : ' on'}" data-floor="">all floors</button>`,
+        `<a class="chip${ui.floorFilter ? '' : ' on'}" href="${esc(floorHref(null))}" data-floor="">all floors</a>`,
         ...here.map((c) => chip(c.channel)),
       ].join('');
     }
@@ -7645,6 +7720,34 @@
     $('floor-totals').textContent =
       `${t.channels ?? 0} floor${t.channels === 1 ? '' : 's'} · ${t.desks ?? 0} desk${t.desks === 1 ? '' : 's'} · ${t.live ?? 0} here · ${t.awaiting ?? 0} need you`;
     renderPanel();
+  }
+
+  /**
+   * Keep a floor tab's address and title on what it shows (task 315): the
+   * address so a reload, or the desktop app reopening its windows at launch,
+   * lands each on its own floor; the title so a window, a tab or a Dock menu
+   * can be told apart by its floor. Called on every draw, and by setView,
+   * because a floor that is put away drops the tab to all floors with
+   * nothing clicked. replaceState only when it changed: the page draws every
+   * two seconds.
+   */
+  function syncAddress() {
+    if (!ui.floorTab) return;
+    const view = ui.on ? 'floor' : 'board';
+    const next = addressFor(location.search, { floor: ui.floorFilter, view });
+    if (next !== location.search) {
+      try { history.replaceState(history.state, '', `${location.pathname}${next}${location.hash}`); } catch { /* the address is only for a reload */ }
+    }
+    const title = windowTitle({ view, floor: ui.floorFilter, floors: ui.floorNames });
+    if (title && document.title !== title) document.title = title;
+  }
+
+  /** Open a floor in a tab of its own, or a window of its own in the desktop app (task 315). */
+  function openFloorElsewhere(name) {
+    // No features and no target name, so each press opens one more and the
+    // browser makes it a tab; noopener, because a floor is a peer of the one
+    // it was opened from, not its child.
+    try { window.open(`${location.pathname}${floorHref(name)}`, '_blank', 'noopener'); } catch { /* blocked: nothing to undo */ }
   }
 
   /** Ride to a floor, or back out to the building. */
@@ -8058,8 +8161,18 @@
       return;
     }
 
+    const pop = e.target.closest?.('#floor-pick [data-floor-pop]');
+    if (pop && ui.on) {
+      openFloorElsewhere(pop.dataset.floorPop);
+      return;
+    }
+
     const pick = e.target.closest?.('#floor-pick [data-floor]');
     if (pick && ui.on) {
+      // A chip is a link: ⌘-click and the rest are the browser's to open
+      // elsewhere. A plain click rides to the floor in this tab.
+      if (opensElsewhere(e)) return;
+      e.preventDefault();
       setFloor(pick.dataset.floor || null);
       return;
     }
@@ -9138,6 +9251,7 @@
     }
     try { localStorage.setItem('orch.view', view); } catch { /* not worth failing over */ }
     if (ui.on) start(); else stop();
+    syncAddress();
   }
 
   document.addEventListener('click', (e) => {
@@ -9184,12 +9298,17 @@
       say({ t: 'gone', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, open: !fateShown() });
     });
   } else {
-    try { ui.floorFilter = localStorage.getItem('orch.floor') || null; } catch { /* default: all floors */ }
+    // A floor tab. Its address says which floor and view it is on, when it
+    // says (a reload, a chip's link, the ⧉, the desktop app reopening its
+    // windows); otherwise the stored choice does (task 315).
+    ui.floorTab = true;
+    const said = addressOf(location.search);
+    try { ui.floorFilter = said.floor !== undefined ? said.floor : (localStorage.getItem('orch.floor') || null); } catch { /* default: all floors */ }
     /* First visit lands on the floor, all floors — the less technical face of the
        board. A stored choice (either one) always wins; only the absence of a
        choice defaults here. */
-    let initial = 'floor';
-    try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
+    let initial = said.view ?? 'floor';
+    if (!said.view) try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
     setView(initial);
     // Which desks are out, from the popouts themselves: a reloaded floor
     // knows within a moment, without any of them having to be reopened.

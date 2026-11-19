@@ -1058,7 +1058,7 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   `test:window`, `test:host` and the press route's in `test:floor`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the eleven release page checks, on the Node and the
+  Every suite and the release page checks (twelve since task 315), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
@@ -1868,6 +1868,53 @@ room's selection (#23: selection is the floor's, and the popout's desk is
 in no room). `check-popout.mjs` in **verify-ui-change** drives all of it,
 including a floor reload and close. A popup opens only on real input
 (`press()`), never on a dispatched click.
+
+**Several floors at once: a tab each, and each tab keeps its own floor**
+(costmo, 2026-11-19, task 315 from the desktop app's agent, his picks by
+AskUserQuestion to both of us). The floor a tab stands on used to live
+only in localStorage `orch.floor`, which every tab shares, so a reload or a
+second tab landed on whatever floor was picked last anywhere, and in the
+desktop app, which has no address bar and no "new tab", there was no way
+to have two floors up at all. Four parts, in "floor windows: what the page
+decides" in `src/ui/floor.js`:
+- **The address carries the floor**: `?floor=<channel>`, `?floor=` for all
+  floors, `&view=board` for the rows view. Read at load, where it outranks
+  the stored choice; kept current with `replaceState` on every draw
+  (`syncAddress`), not only on a pick, because a floor put away under a tab
+  drops it to all floors with nothing clicked. A bare `/` is still the
+  stored choice, and `setFloor` still writes it, so a fresh open lands
+  where the operator last was. All floors is written as `?floor=` and not
+  left out: left out, a reload fell back to another tab's floor. The
+  desktop app saves each window's address at quit and reopens it, so the
+  forms are in its contract (`orchestratinator.consumed`,
+  `dashboard.floor`). Only a floor tab writes it (`ui.floorTab`); a popout
+  and a meeting room keep their own addresses and titles.
+- **The title names the floor, first**: "lab · orchestratinator", "All
+  floors · orchestratinator", "Board · orchestratinator". First because a
+  macOS tab, a Dock or Window menu and a crowded browser strip cut a title
+  from the end. A board with one floor is titled by it. The app copies the
+  page's title to its window.
+- **Each floor chip is a link** (`<a href="?floor=lab">`), so ⌘-click,
+  middle-click and the browser's "Open Link in New Tab" work as on any
+  page. A plain click is still the page's (`preventDefault`, then
+  `setFloor`): followed, the link lands on the same floor by a reload,
+  which throws away an open panel and a draft. `opensElsewhere` decides;
+  Alt is not one of its keys, since Alt on a link downloads.
+- **⧉ on each floor's chip opens it in a new tab** ("Open lab in a new
+  window", costmo's pick over one button, a right-click menu, or the app's
+  menu alone): `window.open(…, '_blank', 'noopener')`, no features and no
+  target name, so each press opens one more and the new tab is a peer, not
+  the opener's child. In the desktop app it is a window of the app's own
+  (its agent maps Electron's disposition: the ⧉ to a window, a ⌘-click or
+  middle-click to a macOS tab behind), and the app adds File ▸ New Floor
+  Window ⌘N, macOS tabs and reopening at launch. The all-floors chip has
+  no ⧉ (his pick's picture), but is a link like the rest.
+Two floor tabs were already safe together before this: each asks `who`
+and holds its own record of which desks are out, and the hub is shared by
+every window of the origin. What two tabs on one desk do (both may open
+its panel) is as it was. `check-floor-windows.mjs` in **verify-ui-change**
+is the page, with ten page mutants beside it, and it runs at every
+release.
 
 **A meeting room is a popout of several desks, out the popout's way**
 (issue #44, 0.12.0). It is this page with `?meeting=<id>`, opened from a

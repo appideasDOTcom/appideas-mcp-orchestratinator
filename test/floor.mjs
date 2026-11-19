@@ -3528,6 +3528,47 @@ try {
       'the single-desk stream is as it was: its own desk, untagged, for a page older than the hub');
   }
 
+  console.log('\nfloor windows: the floor in the address, the title, the chip\'s link (task 315)');
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const a = src.indexOf('  /* ---------- floor windows: what the page decides ---------- */');
+    const b = src.indexOf('  /* ---------- popouts: what the page decides ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the floor windows section was not found in src/ui/floor.js between its two section comments');
+    const tmp = `./data/floorwin-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { addressOf, addressFor, floorHref, windowTitle, opensElsewhere };\n`);
+    let page;
+    try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    eq(page.addressOf(''), { floor: undefined, view: undefined }, 'a bare address says nothing, so the stored choice decides (a fresh open lands where the operator last was)');
+    eq(page.addressOf('?floor=lab'), { floor: 'lab', view: 'floor' }, 'an address naming a floor is that floor, on the floor view whatever view is stored');
+    eq(page.addressOf('?floor='), { floor: null, view: 'floor' }, '?floor= with nothing after it is all floors, said, not "not said"');
+    eq(page.addressOf('?floor=lab&view=board'), { floor: 'lab', view: 'board' }, 'and a tab on the board view keeps it across a reload');
+    eq(page.addressOf('?view=nonsense'), { floor: undefined, view: undefined }, 'a view it does not know is not a view');
+    const odd = 'a b&c?d#e';
+    eq(page.addressOf(page.floorHref(odd)).floor, odd, 'a chip\'s link reads back as its floor, whatever the name holds');
+    eq(page.addressOf(page.floorHref(null)).floor, null, 'and the all-floors chip\'s as all floors');
+    eq(page.addressFor('', { floor: 'lab', view: 'floor' }), '?floor=lab', 'the floor view writes only the floor');
+    eq(page.addressFor('?floor=lab&view=board', { floor: 'lab', view: 'floor' }), '?floor=lab', 'and takes view=board out when the tab goes back to the floor');
+    eq(page.addressFor('?floor=lab', { floor: null, view: 'board' }), '?floor=&view=board', 'all floors is written, so the tab does not fall back to another tab\'s choice on a reload');
+    eq(page.addressFor('?x=1&floor=a', { floor: 'b', view: 'floor' }), '?x=1&floor=b', 'anything else in the address is left as it was');
+    eq(page.addressFor(page.addressFor('', { floor: 'lab', view: 'floor' }), { floor: 'lab', view: 'floor' }), '?floor=lab',
+      'written twice it is the same string, so a draw that changes nothing replaces nothing');
+
+    const t = (x) => page.windowTitle(x);
+    eq(t({ view: 'floor', floor: 'lab', floors: ['lab', 'qa'] }), 'lab · orchestratinator', 'one floor of several: its name, first, so a cut-off tab still shows it');
+    eq(t({ view: 'floor', floor: null, floors: ['lab', 'qa'] }), 'All floors · orchestratinator', 'the building: All floors');
+    eq(t({ view: 'floor', floor: null, floors: ['lab'] }), 'lab · orchestratinator', 'a board with one floor shows that floor, not a building, and the title says which');
+    eq(t({ view: 'board', floor: 'lab', floors: ['lab', 'qa'] }), 'Board · orchestratinator', 'the rows view: Board, whatever floor the floor view was on');
+    eq(t({ view: 'floor', floor: 'lab', floors: null }), 'lab · orchestratinator', 'before the first payload, a floor the address named is the title already');
+    eq(t({ view: 'floor', floor: null, floors: null }), null, 'and with nothing said and nothing drawn, the page\'s own title stands');
+    eq(t({ view: 'floor', floor: null, floors: [] }), null, 'nor with no floors at all');
+
+    const click = (o) => page.opensElsewhere({ button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...o });
+    eq([click({}), click({ altKey: true })], [false, false], 'a plain click, and an Alt-click, ride to the floor in this tab');
+    eq([click({ metaKey: true }), click({ ctrlKey: true }), click({ shiftKey: true }), click({ button: 1 })], [true, true, true, true],
+      '⌘, Ctrl, Shift and any other button are the browser\'s to open elsewhere');
+  }
+
   console.log('\na desk\'s popout: what the page decides (issue #19)');
   {
     const src = readFileSync('src/ui/floor.js', 'utf8');

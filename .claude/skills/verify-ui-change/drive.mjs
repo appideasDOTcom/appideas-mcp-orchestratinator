@@ -303,7 +303,10 @@ async function connect(target) {
     click: async (selector) => evalJs(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) throw new Error('no element for ' + ${JSON.stringify(selector)});
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      // cancelable, as a person's click always is: without it preventDefault()
+      // does nothing, and a click on a link the page handles itself (the
+      // floor chips, task 315) followed the link and reloaded the page.
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       return true;
     })()`),
     /**
@@ -331,7 +334,7 @@ async function connect(target) {
      * through a layout shift. It is for asking whether an element survived
      * (issue #37's patch), apart from whether it moved; say the move too.
      */
-    press: async (from, to = from, { steps, held, follow = false } = {}) => {
+    press: async (from, to = from, { steps, held, follow = false, modifiers = 0, button = 'left' } = {}) => {
       const at = async (p) => (typeof p === 'string'
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(p)});
@@ -345,8 +348,12 @@ async function connect(target) {
       // turn the click into a short drag.
       const b = to === from ? a : await at(to);
       steps ??= a.x === b.x && a.y === b.y ? 0 : 6;
+      // `modifiers` is CDP's mask (Alt 1, Ctrl 2, Meta/⌘ 4, Shift 8) and
+      // `button` 'left' or 'middle': a ⌘-click or a middle-click on a link is
+      // the browser's own "open elsewhere" (task 315's floor chips).
+      const held1 = button === 'middle' ? 4 : 1;
       const mouse = (type, { x, y }, buttons) => cmd('Input.dispatchMouseEvent',
-        { type, x, y, button: 'left', buttons, clickCount: 1 });
+        { type, x, y, button: type === 'mouseMoved' ? 'none' : button, buttons: buttons ? held1 : 0, clickCount: 1, modifiers });
       await mouse('mouseMoved', a, 0);
       await mouse('mousePressed', a, 1);
       for (let i = 1; i <= steps; i++) {
