@@ -2317,6 +2317,19 @@ say, so they were costmo's to see on his screen, and neither was held for
 He reported the monitor case first, after trying it. He confirmed the
 minimized case later the same day, when asked what the window did.
 
+**In the desktop app the move is the raise** (costmo's report,
+2026-11-19: minimized, nothing; covered, moved but left behind). Electron
+ignores a page's `focus()` on a window completely: no restore, no focus,
+and nothing reaches the app's main. Measured on Electron 45.2.3 in a
+scratch script. A page's `moveTo` does reach main, as
+`content-bounds-updated`, in every case: covered, minimized, the room
+moving itself, and a move to the spot it already stands on. The app
+raises the window there. So the page moves a window only to raise it,
+and both raise paths always move. That is a contract,
+`orchestratinator.window_moves` on the orchestratinator-desktop channel.
+A page-driven move added for any other reason would raise that window in
+the app, so it changes that entry first.
+
 Riding along: a desk's open nameplate card now follows the desk when the
 rooms are redrawn, since desks move with nothing clicked. One thing not
 built, deliberate for now: the board view shows nothing of a meeting.

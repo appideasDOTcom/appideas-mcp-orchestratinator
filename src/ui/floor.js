@@ -7062,7 +7062,9 @@
     else if (msg.t === 'focus' && part) {
       // From a floor tab that holds no handle to this window
       // (raiseMeeting): the place to come to, which a window may take
-      // itself to.
+      // itself to. In the desktop app the move is what raises it, since
+      // Electron ignores `focus()` (raiseMeeting says why), so the move is
+      // made even when the window already stands there.
       if (msg.at && msg.area) {
         try {
           const place = meetingRaisePlace(msg.at, { width: window.outerWidth, height: window.outerHeight }, msg.area);
@@ -7493,6 +7495,15 @@
    * to itself (`focus`, carrying the place). A window may move itself, and
    * whether it may raise itself is the browser's to decide, so that path is
    * the best this tab can do and not a promise.
+   *
+   * In the desktop app the move is the raise. Electron ignores a page's
+   * `focus()` on a window entirely: no restore, no focus, no event in the
+   * app's main (measured on Electron 45.2.3, 2026-11-19; a minimized room
+   * was moved while minimized and nothing showed). A page's `moveTo` does
+   * reach main, as `content-bounds-updated`, and the app restores, shows and
+   * focuses the window there. So this and the room's `focus` handler are the
+   * only places the page moves a window, and a page-driven move added for
+   * anything else would raise that window in the app.
    */
   function raiseMeeting(channel, key, at) {
     const keys = [...ui.outs].filter(([k, o]) => k.startsWith(`${channel}|`) && meetBoxKey(o) === key && outsNow(new Map([[k, o]]), Date.now()).size).map(([k]) => k);
