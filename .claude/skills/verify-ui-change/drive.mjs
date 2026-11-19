@@ -301,6 +301,8 @@ async function connect(target) {
      * only works on one of them is otherwise never looked at.
      */
     scheme: async (value) => cmd('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: value ?? '' }] }),
+    /** Run `js` in every document this page loads from now on, before the page's own scripts (e.g. to make its first poll fail). */
+    beforeLoad: async (js) => (await cmd('Page.addScriptToEvaluateOnNewDocument', { source: js })).result?.identifier ?? null,
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
     /**

@@ -1058,7 +1058,7 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   `test:window`, `test:host` and the press route's in `test:floor`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the release page checks (twelve since task 315), on the Node and the
+  Every suite and the release page checks (thirteen since the app's tab and tray round), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
@@ -1930,7 +1930,53 @@ Two floor tabs were already safe together before this: each asks `who`
 and holds its own record of which desks are out, and the hub is shared by
 every window of the origin. What two tabs on one desk do (both may open
 its panel) is as it was. `check-floor-windows.mjs` in **verify-ui-change**
-is the page, with sixteen page mutants beside it, and it runs at every
+is the page, with seventeen page mutants beside it, and it runs at every
+release.
+
+**A floor in the address is dropped only once a payload says it is not
+there** (costmo, 2026-11-19: in the app every ⧉ opened all floors).
+render() puts a tab on all floors when its floor is not among the floors
+it has, which is right for a floor put away under it. Before the first
+`/api/floor` answer it has none, and any draw then dropped the address's
+floor for good: on his board a meeting room was open, it answered the new
+tab's `who` with `here`, and that redraw came first. A failed first poll
+does the same. The drop now waits for `floorRead`. The app's suite and
+check-floor-windows both passed before, because neither had a room open:
+desktop-dev found the mechanism from the app's side the same hour.
+
+**What each window reports to the desktop app, and its nudge all**
+(costmo, the same day). The app pulses a tab or window blue when it has
+desks waiting for a nudge and amber when one is asking (amber wins),
+badges counts over one, colours its tray bell and badges the Dock from
+the whole board, lists windows in its tray, and offers "nudge all" per
+window. All of that is drawn by the app; what a window *has* is the
+page's, because only the page knows which desks it shows. So every page
+window exposes `window.orchAttention` (`get`, `next(v)`, `nudgeAll`),
+which the app's main process calls with executeJavaScript: the board's
+pages have no preload, on purpose, so there is no event to send. The
+contract is `orchestratinator.attention` on the orchestratinator-desktop
+channel; the decisions are "window attention: what the page decides" in
+`src/ui/floor.js`. Four of them were the developers', agreed between the
+two agents in the room, and are open to his reversal:
+- **A nudge is a desk, not a message**: the count is how many desks a
+  nudge all would type into, which is desks with something waiting (the
+  meeting room's rule, `nudgeWaiting`) that the board would nudge now. A
+  desk with mail on an offline host is not counted. The room's own
+  "Nudge all (N)" counts messages and tasks, by his pick (0.12.9); this is
+  a different number on purpose, the badge on a button that nudges desks.
+- **Asking is a prompt**: a permission menu, a question form or a startup
+  question on a live desk. An error turn sets `awaiting_kind` too, and the
+  floor counts it in "need you", but nothing waits on an answer to it.
+- **A desk out in a popout or a room is that window's**, not the floor
+  tab's, so his tray list of windows counts it once. The board's values,
+  for the bell and the Dock, count every desk.
+- **A room's nudge all is every participant with something waiting**,
+  whatever its To chips choose, and goes through the room's own send so
+  the transcript records it.
+A floor tab on the rows view reads `/api/floor` for the report only inside
+the app (its user-agent token): the rows view polls nothing of the floor,
+and a browser's board tab is left as it was. `check-attention.mjs` in
+**verify-ui-change** drives the calls the app makes, and runs at every
 release.
 
 **A meeting room is a popout of several desks, out the popout's way**

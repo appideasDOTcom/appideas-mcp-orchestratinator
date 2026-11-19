@@ -3528,6 +3528,74 @@ try {
       'the single-desk stream is as it was: its own desk, untagged, for a page older than the hub');
   }
 
+  console.log('\nwindow attention: what each window reports to the desktop app (costmo, 2026-11-19)');
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const cut = (from, to) => {
+      const a = src.indexOf(from);
+      const b = src.indexOf(to);
+      if (a < 0 || b < 0 || b < a) throw new Error(`a section was not found in src/ui/floor.js between ${JSON.stringify(from)} and ${JSON.stringify(to)}`);
+      return src.slice(a, b);
+    };
+    const tmp = `./data/attention-${process.pid}.mjs`;
+    writeFileSync(tmp, [
+      'const SENDING_GRACE_MS = 30000;',
+      cut('  /* ---------- chat controls: what the page decides ---------- */', '  /* ---------- chat controls: the drawing ---------- */'),
+      cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
+      cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
+      cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- window attention: the decisions end ---------- */'),
+      'export { deskAsking, deskNudgeable, attentionDesks, attentionOf, attentionReport, attentionNudges };',
+    ].join('\n'));
+    let pg;
+    try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    const desk = (agent, { live = true, kind = null, startup = false, unread = 0, assigned = 0, claimed = 0, ok = true, opens = false, reason = null } = {}) => ({
+      agent, persona: agent.toUpperCase(), live,
+      session: kind ? { awaiting_kind: kind } : {},
+      permission: startup ? { startup: true } : null,
+      board: { unread, assigned_open: assigned, claimed },
+      nudge: ok ? { ok: true, opens } : { ok: false, reason: reason ?? 'its host is offline' },
+    });
+
+    eq(pg.deskAsking(desk('a', { kind: 'permission_request' })), true, 'a permission menu or a question form (permission_request) is asking');
+    eq(pg.deskAsking(desk('a', { kind: 'permission_prompt' })), true, 'and so is the notification\'s permission_prompt');
+    eq(pg.deskAsking(desk('a', { startup: true })), true, 'and a startup question before any session exists');
+    eq(pg.deskAsking(desk('a', { kind: 'error' })), false, 'an error turn is not a prompt: nothing waits on an answer');
+    eq(pg.deskAsking(desk('a', { kind: 'permission_request', live: false })), false, 'a desk that is not live is not asking, as the board counts "need you"');
+    eq(pg.deskNudgeable(desk('a', { unread: 2 })), true, 'unread mail is a nudge waiting');
+    eq(pg.deskNudgeable(desk('a', { assigned: 1 })), true, 'and so is an unclaimed task assigned to it');
+    eq(pg.deskNudgeable(desk('a', { claimed: 3 })), false, 'a claimed task is not: the desk already knows about it');
+    eq(pg.deskNudgeable(desk('a', { unread: 2, ok: false })), false, 'nor a desk the board would refuse to nudge: the count is what a click would send');
+
+    const here = [
+      { channel: 'lab', desks: [desk('bo', { unread: 1 }), desk('cy', { assigned: 2 }), desk('dee', { kind: 'permission_request' }), desk('ed', { unread: 1, ok: false })] },
+      { channel: 'qa', desks: [desk('fay', { unread: 4 }), desk('gus')] },
+    ];
+    const shelf = { channel: 'old', archived: true, desks: [desk('hal', { unread: 1, kind: 'permission_request' })] };
+    const all = [...here, shelf];
+    const rep = (scope, out = null, read = true) => pg.attentionReport({ read, here, all, scope, out });
+    const board = { nudges: 3, asking: true };
+    eq(rep({ kind: 'floor', floor: 'lab' }), { nudges: 2, asking: true, board },
+      'a floor tab counts its own floor: two desks a nudge would reach (not the refused one), one asking; the board is every floor not put away');
+    eq(rep({ kind: 'floor', floor: 'qa' }), { nudges: 1, asking: false, board }, 'another floor\'s tab, its own floor only');
+    eq(rep({ kind: 'floor', floor: null }), { nudges: 3, asking: true, board }, 'the all-floors tab is every floor not put away');
+    eq(rep({ kind: 'floor', floor: 'lab' }, new Set(['lab|dee', 'lab|bo'])), { nudges: 1, asking: false, board },
+      'a desk out in a popout or a meeting room is that window\'s, not the floor tab\'s, so a list of windows counts it once');
+    eq(rep({ kind: 'floor', floor: null }, new Set(['lab|dee'])).board, board, 'and the board\'s count, for the bell and the Dock, still has it');
+    eq(rep({ kind: 'popout', channel: 'lab', agent: 'dee' }), { nudges: 0, asking: true, board }, 'a popout reports its desk');
+    eq(rep({ kind: 'popout', channel: 'old', agent: 'hal' }), { nudges: 1, asking: true, board }, 'even one whose floor was put away while it was out');
+    eq(rep({ kind: 'meeting', channel: 'lab', agents: ['bo', 'cy'] }), { nudges: 2, asking: false, board }, 'a meeting room reports its participants');
+    eq(rep({ kind: 'meeting', channel: 'lab', agents: [] }), { nudges: 0, asking: false, board }, 'and a room not yet live, none');
+    eq(rep({ kind: 'floor', floor: 'lab' }, null, false), { nudges: 0, asking: false, board: { nudges: 0, asking: false } },
+      'before the first /api/floor answers it says nothing is pending, rather than guess');
+
+    const order = pg.attentionNudges(pg.attentionDesks({ here: [{ channel: 'lab', desks: [
+      desk('a', { unread: 1, opens: true }), desk('b', { unread: 1 }), desk('c'), desk('d', { assigned: 1, ok: false }), desk('e', { assigned: 1 }),
+    ] }], all: [], scope: { kind: 'floor', floor: null }, out: null }));
+    eq(order.map((x) => `${x.channel}/${x.agent}${x.opens ? '+opens' : ''}`), ['lab/b', 'lab/e', 'lab/a+opens'],
+      'nudge all types into the desks with something waiting, the open windows first, as the floor\'s bulk Nudge does');
+  }
+
   console.log('\nfloor windows: the floor in the address, the title, the chip\'s link (task 315)');
   {
     const src = readFileSync('src/ui/floor.js', 'utf8');

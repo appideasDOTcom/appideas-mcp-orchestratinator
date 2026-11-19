@@ -1,0 +1,62 @@
+[
+ [
+  "a draw does not publish: next() never wakes",
+  "src/ui/floor.js",
+  "    publishAttention();\n    // A meeting room is its desks' chat",
+  "    // A meeting room is its desks' chat"
+ ],
+ [
+  "the version moves on every draw, changed or not",
+  "src/ui/floor.js",
+  "    if (sig === attn.sig) return;\n    // The first report",
+  "    // The first report"
+ ],
+ [
+  "a floor tab counts desks out in a popout or a room",
+  "src/ui/floor.js",
+  "    out: ui.popout || ui.meeting ? null : outsNow(ui.outs, Date.now()),",
+  "    out: null,"
+ ],
+ [
+  "a second nudge all while the first is typing nudges again",
+  "src/ui/floor.js",
+  "      attn.nudging ??= nudgeAllHere().finally(() => { attn.nudging = null; });\n      return attn.nudging;",
+  "      return nudgeAllHere();"
+ ],
+ [
+  "the app's board-view tab polls nothing",
+  "src/ui/floor.js",
+  "    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }",
+  "    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); }"
+ ],
+ [
+  "a browser's board-view tab polls the floor too",
+  "src/ui/floor.js",
+  "    if (ui.attnTimer || !ui.floorTab || !APP_UA.test(navigator.userAgent)) return;",
+  "    if (ui.attnTimer || !ui.floorTab) return;"
+ ],
+ [
+  "a room's nudge all goes only where the chips point",
+  "src/ui/floor.js",
+  "    const chosen = all ? inRoom : named.to ?? meetingTo(inRoom, m.to);",
+  "    const chosen = named.to ?? meetingTo(inRoom, m.to);"
+ ],
+ [
+  "a room's nudge all says nothing was sent",
+  "src/ui/floor.js",
+  "    tick();\n    return s;\n  }",
+  "    tick();\n  }"
+ ],
+ [
+  "a floor tab's nudge all leaves out the desks the board refuses",
+  "src/ui/floor.js",
+  "    const refused = list.filter((x) => nudgeWaiting(x.d) > 0 && !x.d.nudge?.ok)",
+  "    const refused = [].filter((x) => nudgeWaiting(x.d) > 0 && !x.d.nudge?.ok)"
+ ],
+ [
+  "a floor tab's nudge all rings nothing on the page",
+  "src/ui/floor.js",
+  "        sent.push({ channel: e.channel, agent: e.agent });\n        nudged(e.channel, e.agent, NUDGE_WORD);",
+  "        sent.push({ channel: e.channel, agent: e.agent });"
+ ]
+]

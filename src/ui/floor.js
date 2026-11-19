@@ -470,6 +470,9 @@
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
   let floorRead = false;   // an /api/floor has answered at least once (loadTurns)
+  // What this window reports to the desktop app (window attention, below):
+  // the report, its version and the next() calls waiting on a change.
+  const attn = { version: 0, sig: null, report: null, waiters: [], nudging: null };
 
   /* ---------- small helpers ---------- */
 
@@ -6021,6 +6024,93 @@
 
   /* ---------- meeting rooms: the decisions end ---------- */
 
+  /* ---------- window attention: what the page decides ---------- */
+  // costmo, 2026-11-19: the desktop app pulses a tab or window blue when it
+  // has desks waiting for a nudge, amber when one is asking the operator
+  // something (amber wins), badges the count, colours its tray bell and
+  // badges the Dock from the whole board, and offers "nudge all" per window.
+  // The app draws all of that; what a window *has* is the page's, because
+  // only the page knows which desks it shows. Read by the app's main process
+  // through window.orchAttention (contract orchestratinator.consumed,
+  // dashboard.attention): the board's pages have no preload, on purpose, so
+  // main asks with executeJavaScript and long-polls on next().
+  //
+  // Pure, and lifted into test/floor.mjs with the meeting rooms' section
+  // (it uses nudgeWaiting from there) by this marker and its end twin.
+
+  /**
+   * A desk asking the operator something the floor shows as a prompt: a
+   * permission menu, a question form (also a permission_request, as the hook
+   * files it), or a startup question before a session exists. An error turn
+   * raises `awaiting_kind: 'error'` too, and is not a prompt: nothing waits
+   * on an answer. `live` as the board counts "need you" (buildFloor).
+   */
+  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup);
+
+  /**
+   * A desk a "nudge all" sends to, which is what a pending nudge is: something
+   * waiting for it on the board (unread messages plus unclaimed tasks, the
+   * meeting room's rule, nudgeWaiting) and the board's verdict that it can be
+   * nudged (`nudge.ok`, the bell's). A desk with mail whose host is offline is
+   * not counted: the badge is the number a click would send, nothing more.
+   */
+  const deskNudgeable = (d) => nudgeWaiting(d) > 0 && !!d?.nudge?.ok;
+
+  /**
+   * The desks a window shows, as { channel, d }. `scope` is the window's:
+   *   { kind: 'floor', floor }        a floor tab (floor null: all floors),
+   *                                   over `here`, the floors not put away,
+   *                                   less the desks out in another window
+   *                                   (`out`, keys `channel|agent`), which
+   *                                   that window reports, so a tray list
+   *                                   of windows does not count one twice;
+   *   { kind: 'popout', channel, agent }  its desk;
+   *   { kind: 'meeting', channel, agents } its participants.
+   * A popout and a room look their desks up in `all`, so one whose floor was
+   * put away while it was out still reports.
+   */
+  function attentionDesks({ here, all, scope, out }) {
+    const pick = (chs, keep) => chs.flatMap((c) => (c.desks ?? []).filter((d) => keep(c.channel, d)).map((d) => ({ channel: c.channel, d })));
+    if (scope?.kind === 'popout') return pick(all ?? [], (ch, d) => ch === scope.channel && d.agent === scope.agent);
+    if (scope?.kind === 'meeting') {
+      const set = new Set(scope.agents ?? []);
+      return pick(all ?? [], (ch, d) => ch === scope.channel && set.has(d.agent));
+    }
+    const floors = (here ?? []).filter((c) => !scope?.floor || c.channel === scope.floor);
+    return pick(floors, (ch, d) => !out?.has(`${ch}|${d.agent}`));
+  }
+
+  /** What a list of desks adds up to: how many a nudge all would send to, and whether any is asking. */
+  const attentionOf = (list) => ({ nudges: list.filter((x) => deskNudgeable(x.d)).length, asking: list.some((x) => deskAsking(x.d)) });
+
+  /**
+   * The report the app reads: this window's, and the whole board's for the
+   * tray bell and the Dock (every floor not put away, desks out included,
+   * because the bell is about the board, not about windows). Before the
+   * first /api/floor answers nothing is known, and it says nothing is
+   * pending rather than guess from an empty payload (`read` false).
+   */
+  function attentionReport({ read, here, all, scope, out }) {
+    if (!read) return { nudges: 0, asking: false, board: { nudges: 0, asking: false } };
+    return {
+      ...attentionOf(attentionDesks({ here, all, scope, out })),
+      board: attentionOf(attentionDesks({ here, all, scope: { kind: 'floor', floor: null }, out: null })),
+    };
+  }
+
+  /**
+   * Who a window's "nudge all" types into, in the order the floor's own bulk
+   * Nudge uses (nudgePlan): desks with a window first, then the ones a nudge
+   * opens a window for, so a window still coming up keeps only itself
+   * waiting. Order within each kept as drawn.
+   */
+  function attentionNudges(list) {
+    const go = list.filter((x) => deskNudgeable(x.d)).map((x) => ({ channel: x.channel, agent: x.d.agent, persona: x.d.persona, opens: !!x.d.nudge?.opens }));
+    return [...go.filter((x) => !x.opens), ...go.filter((x) => x.opens)];
+  }
+
+  /* ---------- window attention: the decisions end ---------- */
+
   /* ---------- popouts: the windows ---------- */
 
   /*
@@ -6877,7 +6967,10 @@
    * desk has them. Who hears is left as the chips have it: a send does not
    * put it back to everyone (meetingTo).
    */
-  async function sendMeeting(given = null, { nudge = false } = {}) {
+  // `all` (the desktop app's nudge all, window attention) is every
+  // participant with something waiting, whatever the chips choose. Returns
+  // the send's record, or nothing when nothing was sent.
+  async function sendMeeting(given = null, { nudge = false, all = false } = {}) {
     const m = ui.meeting;
     const box = $('p-text');
     const btn = document.querySelector('#floor-panel [data-act="send"]');
@@ -6894,7 +6987,7 @@
       : meetingMentions(text, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
     if (named.unknown.length) { flash(btn, `nobody here is @${named.unknown[0]}`); return; }
     if (named.to && !named.text.trim() && !att.ids.length) { flash(btn, 'nothing to send after the names'); return; }
-    const chosen = named.to ?? meetingTo(inRoom, m.to);
+    const chosen = all ? inRoom : named.to ?? meetingTo(inRoom, m.to);
     if (!chosen.length) { flash(btn, 'nobody is chosen to hear it'); return; }
     // The room's Nudge goes only to the chosen desks with something waiting
     // on the board (meetingNudgeChip), so the others are not sent to check
@@ -6943,6 +7036,7 @@
     render();
     box?.focus();
     tick();
+    return s;
   }
 
   /** A nudge struck on the floor for a participant: its pending line is drawn here, where its chat is. */
@@ -7644,6 +7738,9 @@
   /* ---------- render ---------- */
 
   function render() {
+    // Every draw is where what a window shows can change: a poll, a desk
+    // going out or coming back, a room's desks, a floor picked.
+    publishAttention();
     // A meeting room is its desks' chat: no rooms either (issue #44).
     if (ui.meeting) {
       renderDetails();
@@ -7670,7 +7767,11 @@
     // A floor this browser remembers standing on that has since been put away
     // lands the page on all floors — a put-away floor is not somewhere to stand.
     const names = here.map((c) => c.channel);
-    if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
+    // Only once a payload has said which floors there are (costmo,
+    // 2026-11-19: the ⧉ opened all floors). Before the first /api/floor
+    // answers there are none, and a draw then (a meeting room's `here`, a
+    // failed first poll) took ?floor=lab to ?floor= for good.
+    if (floorRead && ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
     ui.floorNames = names;
     syncAddress();
     const openMode = floorOpenNow();
@@ -8915,6 +9016,87 @@
   }
   window.floorNudged = (channel, agent, text) => nudged(channel, agent, text);
 
+  /* ---------- window attention: what the desktop app reads ----------
+     The decisions are in "window attention: what the page decides". Main
+     calls these through webContents.executeJavaScript (the board's pages
+     have no preload, on purpose): get() for the report now, next(v) to wait
+     for a version after v (it answers at once when there is one, so main
+     long-polls with no timer of its own), and nudgeAll() for the window's
+     "nudge all". Contract orchestratinator.consumed, dashboard.attention. */
+
+  /** Which desks this window shows, as attentionDesks takes it. */
+  function attentionScope() {
+    const m = ui.meeting;
+    if (m) return { kind: 'meeting', channel: m.channel, agents: m.phase === 'live' ? m.parts.map((p) => p.agent) : [] };
+    if (ui.popout) return { kind: 'popout', channel: ui.popout.channel, agent: ui.popout.agent };
+    return { kind: 'floor', floor: ui.floorFilter };
+  }
+  const attentionInputs = () => ({
+    read: floorRead,
+    here: onFloor(),
+    all: floor.channels ?? [],
+    scope: attentionScope(),
+    out: ui.popout || ui.meeting ? null : outsNow(ui.outs, Date.now()),
+  });
+
+  /** Work the report out again, and move its version only when it changed. */
+  function publishAttention() {
+    const report = attentionReport(attentionInputs());
+    const sig = JSON.stringify(report);
+    if (sig === attn.sig) return;
+    // The first report is version 0 and wakes nobody: nothing changed.
+    if (attn.sig !== null) attn.version++;
+    attn.sig = sig;
+    attn.report = report;
+    const now = { version: attn.version, ...report };
+    for (const w of attn.waiters.splice(0)) w(now);
+  }
+
+  /** Type the nudge into every desk this window shows that has something waiting, the way the floor's bulk Nudge does. */
+  async function nudgeAllHere() {
+    if (ui.meeting) {
+      // The room's own send, so its transcript records the nudge and each
+      // desk's delivery under it, as the room's Nudge button does; to every
+      // participant with something waiting, whatever the chips choose.
+      const s = await sendMeeting(NUDGE_WORD, { nudge: true, all: true });
+      const ch = ui.meeting.channel;
+      return {
+        sent: (s?.entries ?? []).filter((e) => e.state !== 'refused').map((e) => ({ channel: ch, agent: e.agent })),
+        refused: (s?.entries ?? []).filter((e) => e.state === 'refused').map((e) => ({ channel: ch, agent: e.agent, reason: e.words ?? '' })),
+      };
+    }
+    const list = attentionDesks(attentionInputs());
+    const sent = [];
+    const refused = list.filter((x) => nudgeWaiting(x.d) > 0 && !x.d.nudge?.ok)
+      .map((x) => ({ channel: x.channel, agent: x.d.agent, reason: x.d.nudge?.reason ?? 'Nothing is known about this desk yet.' }));
+    for (const e of attentionNudges(list)) {
+      try {
+        await post('./api/floor/chat', { channel: e.channel, agent: e.agent, text: NUDGE_WORD });
+        sent.push({ channel: e.channel, agent: e.agent });
+        nudged(e.channel, e.agent, NUDGE_WORD);
+      } catch (err) {
+        refused.push({ channel: e.channel, agent: e.agent, reason: String(err.message ?? err) });
+      }
+    }
+    tick();
+    return { sent, refused };
+  }
+
+  window.orchAttention = {
+    get: () => { publishAttention(); return { version: attn.version, ...attn.report }; },
+    next: (since) => {
+      publishAttention();
+      if (attn.version > Number(since ?? -1)) return Promise.resolve({ version: attn.version, ...attn.report });
+      return new Promise((resolve) => attn.waiters.push(resolve));
+    },
+    // One at a time: a second press while the first is still typing gets
+    // the same answer, not every desk nudged twice.
+    nudgeAll: () => {
+      attn.nudging ??= nudgeAllHere().finally(() => { attn.nudging = null; });
+      return attn.nudging;
+    },
+  };
+
   /**
    * Send: a user turn in the hosted session. The server refuses, with the
    * reason, if nothing is there to receive it — and the reason is shown, not a
@@ -9318,8 +9500,32 @@
       b.classList.toggle('on', b.dataset.view === view);
     }
     try { localStorage.setItem('orch.view', view); } catch { /* not worth failing over */ }
-    if (ui.on) start(); else stop();
+    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }
     syncAddress();
+  }
+
+  /**
+   * A tab on the board view draws nothing of the floor and polls none of
+   * it, but in the desktop app it is still a tab whose pulse and badge the
+   * app reads (window attention). So there, and only there, it reads
+   * /api/floor at the floor's pace for the report alone. A browser's board
+   * tab is as it was.
+   */
+  function startAttentionPoll() {
+    if (ui.attnTimer || !ui.floorTab || !APP_UA.test(navigator.userAgent)) return;
+    const read = async () => {
+      try {
+        const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+        if (r.ok && !ui.on) { floor = await r.json(); floorRead = true; }
+      } catch { /* the board's own dot already reports the connection */ }
+      publishAttention();
+    };
+    read();
+    ui.attnTimer = setInterval(read, POLL_MS);
+  }
+  function stopAttentionPoll() {
+    clearInterval(ui.attnTimer);
+    ui.attnTimer = null;
   }
 
   document.addEventListener('click', (e) => {

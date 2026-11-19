@@ -94,5 +94,11 @@
   "src/ui/floor.js",
   "    const pickSig = JSON.stringify([names, ui.floorFilter, openMode]);",
   "    const pickSig = JSON.stringify([names, ui.floorFilter]);"
+ ],
+ [
+  "a draw before the first /api/floor drops the address's floor (costmo, 2026-11-19: the ⧉ opened all floors)",
+  "src/ui/floor.js",
+  "    if (floorRead && ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;",
+  "    if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;"
  ]
 ]

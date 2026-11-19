@@ -141,6 +141,30 @@ await until(bare, `document.querySelectorAll('#floor-rooms svg.room').length ===
 const r = await read(bare);
 ok(r.rooms.join() === 'solo-only' && r.title === T('solo-only') && r.search === '?floor=solo-only', 'a bare address lands on the stored floor, and then names it', JSON.stringify(r));
 
+console.log('\na tab drawn before its first /api/floor keeps the floor its address names');
+// costmo, 2026-11-19, in the desktop app: the ⧉ opened a tab on all floors.
+// render() dropped a floor it could not find among the floors it had, and
+// before the first poll answers it has none: a failed first poll, or any
+// draw ahead of it (a popout's `here`, a resize), took ?floor=beta to
+// ?floor= for good. The fixture fails the first poll, which draws with an
+// empty payload the way all of those do.
+const flaky = await open({ base, view: 'floor', floor: '' });
+await flaky.beforeLoad(`(() => {
+  const real = window.fetch; let failed = false;
+  window.fetch = function (u, ...rest) {
+    if (!failed && /api\\/floor$/.test(String(u))) { failed = true; window.__orchFailedFirst = true; return Promise.reject(new TypeError('the fixture: the first poll fails')); }
+    return real.call(this, u, ...rest);
+  };
+})()`);
+await flaky.goto(`${base}/?floor=beta`);
+await until(flaky, `window.__orchFailedFirst === true && document.querySelectorAll('#floor-rooms svg.room').length > 0`, 'the second poll drew rooms');
+await sleep(2500); // one more poll, so a dropped floor would have been drawn
+const fl = await read(flaky);
+ok(await flaky.evalJs(`window.__orchFailedFirst === true`), 'the fixture: the first poll failed');
+ok(fl.rooms.join() === 'beta' && fl.search === '?floor=beta' && fl.title === T('beta'),
+  'it still stands on beta: the address, the title and the room', JSON.stringify(fl));
+await flaky.close();
+
 console.log('\nOpen new floors: In tabs | In windows, in Settings (costmo, 2026-11-19)');
 const settings = async (p) => {
   await p.press('#open-settings');

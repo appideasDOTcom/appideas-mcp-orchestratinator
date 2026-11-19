@@ -1554,6 +1554,44 @@ A plain click riding to a floor and a plain click *following the link* to
 it end on the same floor; only `window.__orchMark` surviving tells them
 apart. A check of anything that is now a link needs that row.
 
+**A tab drawn before its first `/api/floor`** (costmo, 2026-11-19: in the
+app the ⧉ opened all floors). The check's suite never had a meeting room
+open, and his board did: the room answered the new tab's `who` with
+`here`, that redraw ran on an empty payload, and render() dropped the
+floor it could not find. The row fails the tab's first poll instead,
+which draws on an empty payload the same way, and the mutant (the
+`floorRead` guard taken out) is the list's seventeenth, red with the
+control at 34 of 34. `page.beforeLoad(js)` in drive.mjs
+(`Page.addScriptToEvaluateOnNewDocument`) is how a row gets code in ahead
+of the page's own: here a `fetch` that fails once.
+
+### check-attention.mjs — what each window reports to the desktop app (2026-11-19)
+
+```bash
+PORT=8949 CDP=9289 .claude/skills/verify-ui-change/run-check-attention.sh "$PWD"   # about forty seconds
+```
+
+The app's tab pulse and badge, tray bell, Dock badge and per-window nudge
+all come from `window.orchAttention` (contract `orchestratinator.attention`
+on orchestratinator-desktop), which the app's main process calls with
+executeJavaScript. On `seed-select.mjs`'s floor and host, it drives the
+same calls: `get()` in two floor tabs, `next(v)` staying quiet with
+nothing changed and answering when mail lands on another floor, a
+permission prompt read as asking on its own floor and in the board's
+values only elsewhere, `nudgeAll()` from a floor tab (the host's work log
+says who was typed into, and the floor's bell rang) and from a meeting
+room whose To chips are narrowed (all participants with mail, not the
+chips'), a popout and a room taking their desks out of the floor tab's
+count, and a board-view tab that reports in the app and polls nothing in
+a browser. Seeded rows go into the scratch database directly (the
+check takes its path), which the board reads on its next poll.
+`mutants-attention.page.json` is the list (ten, all red with the control at
+27 of 27, load 8-20, 2026-11-19); the decisions' own rows are in
+`test:floor` ("window attention") with `mutants-attention.suite.json` in
+**mutate-in-a-copy** (six, all red, control 1,529 ✓). A count that grows as rows are added (the board's
+nudges) is read from another window's report, never written as a number:
+the first cut hard-coded 2 and went red when the room row added gil's mail.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
