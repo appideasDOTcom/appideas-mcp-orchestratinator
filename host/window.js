@@ -1586,9 +1586,20 @@ export function overlayOf(screen) {
  * title is a few lines above them. It used to be the words anywhere in the
  * capture, and a conversation that quotes "Switch model?" (this file's own
  * desk does) would have had a `1` typed into its composer.
+ *
+ * Since 2.1.327 the dialog ends in a line of its own under the choices,
+ * "Enter to confirm · Esc to cancel", and the choices are the two lines
+ * above it. Read as before, by the last two lines, the dialog was nothing:
+ * it stood unanswered, the change ended `not_delivered` after twenty
+ * seconds ("no longer in the composer. Check the window"), and the
+ * operator pressed it in the window (costmo's report, 2026-11-18, the day
+ * 2.1.327 arrived; reproduced on a probe through send(), and `1` still
+ * answers it). So that one line, exactly, is stepped over when it is the
+ * pane's last; nothing else under the choices is.
  */
 export function switchConfirmOf(screen) {
   const nonEmpty = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  if (/^\s*Enter to confirm · Esc to cancel\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) nonEmpty.pop();
   const yes = /^\s*❯?\s*1\.\s*(Yes, switch to .+)$/.exec(nonEmpty[nonEmpty.length - 2] ?? '');
   if (!yes || !/^\s*❯?\s*2\.\s*No, go back\s*$/.test(nonEmpty[nonEmpty.length - 1] ?? '')) return null;
   if (!nonEmpty.slice(-9, -2).some((l) => /^\s*(Switch model|Change effort level)\?\s*$/.test(l))) return null;
@@ -2901,7 +2912,11 @@ export function questionOf(screen) {
   const question = said[0]?.trim() ?? null;
 
   // The Submit tab shows what you are about to send rather than a question.
-  if (/ready to submit your answers/i.test(said.join('\n'))) {
+  // Its first line is its title, and since 2.1.326 the title is all that
+  // says so: "Ready to submit your answers?" is gone from under it
+  // (reviewingOf). Read as a question, its two rows became a last question
+  // called Submit, with "Submit answers" and "Cancel" for choices.
+  if (/ready to submit your answers/i.test(said.join('\n')) || /^Review your answers$/.test(question ?? '')) {
     return { tabs, strip, question: 'Review your answers', kind: 'review', options: [], cursor: -1, submit: false };
   }
 
@@ -3407,7 +3422,25 @@ const CONFIRMING = /ready to submit your answers/i;
  */
 export function reviewingOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
-  return CONFIRMING.test(lines.slice(-6).join('\n')) && /^\s*\d+\.\s*Cancel\s*$/i.test(lines[lines.length - 1] ?? '');
+  if (!/^\s*\d+\.\s*Cancel\s*$/i.test(lines[lines.length - 1] ?? '')) return false;
+  if (CONFIRMING.test(lines.slice(-6).join('\n'))) return true;
+  // Since 2.1.326 the screen has no "Ready to submit your answers?": under
+  // its title, "Review your answers", it lists each question with its
+  // answer and then the same two rows. Read by the old words alone it was
+  // no review screen, so the form stood on it unsubmitted while the host
+  // called it answered (the form was "gone": this screen has no status line
+  // for askingOf either), and the walk that reads a form took the Submit tab
+  // for one more question. Seen live on two desks, 2026-11-18 23:07Z and
+  // 23:09Z, the operator opening each window after; measured on a probe on
+  // 2.1.327 the same evening. Still positional: the pane's last two lines
+  // are the two rows, with the title above them and no rule in between
+  // (a composer's box, or a transcript that quotes the screen, has one).
+  if (!/^\s*❯?\s*1\.\s*Submit answers\s*$/i.test(lines[lines.length - 2] ?? '')) return false;
+  for (let i = lines.length - 3; i >= 0 && i >= lines.length - 40; i--) {
+    if (/^\s*Review your answers\s*$/.test(lines[i])) return true;
+    if (/^[\s─━▔]{20,}$/.test(lines[i])) return false;
+  }
+  return false;
 }
 
 /**

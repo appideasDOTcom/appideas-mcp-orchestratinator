@@ -1368,6 +1368,24 @@ async function main() {
     eq(W.switchConfirmOf(screenWith('❯ ').replace(RULE2, `${SWITCH}\n${RULE2}`)), null,
       'a conversation that quotes the warning above a composer is not one: it is read at the bottom of the pane');
     eq(W.switchConfirmOf(SWITCH.replace('   Switch model?\n', '')), null, 'nor are two such choices under any other title');
+    // As 2.1.327 draws it (a probe, 2026-11-18, at 150 columns): a line of
+    // its own under the choices. Read by the last two lines alone, this was
+    // no dialog, and a model change from the floor stood unanswered.
+    const SWITCH_327 = [
+      '⏺ PONG',
+      '✻ Brewed for 1s · done 3:24 PM',
+      '▔'.repeat(150),
+      '  Switch model?',
+      '  Your next response will be slower and use more tokens',
+      '  This conversation is cached for the current model. Switching to Fable 5.2 means the full history gets re-read.',
+      '  ❯ 1. Yes, switch to Fable 5.2',
+      '    2. No, go back',
+      '  Enter to confirm · Esc to cancel',
+      '',
+    ].join('\n');
+    eq(W.switchConfirmOf(SWITCH_327)?.yes, 'Yes, switch to Fable 5.2', 'the warning as 2.1.327 draws it, with "Enter to confirm · Esc to cancel" under its choices, is read');
+    eq(W.switchConfirmOf(SWITCH_327.replace('  Enter to confirm · Esc to cancel', '  ? for shortcuts')), null, 'and any other line under the choices is still not the dialog');
+    eq(W.switchConfirmOf(`${SWITCH_327}\n${RULE2}\n❯ \n${RULE2}\n  Enter to confirm · Esc to cancel`), null, 'nor is it one quoted above a composer, whatever the pane ends with');
     // The dialog's other title (QA, PR #55 finding 1): 2.1.325's own
     // strings, with the model's lines under it. Not seen on a window.
     const EFFORT_ASK = SWITCH.replace('Switch model?', 'Change effort level?').replace('current model. Switching to Haiku 5.5', 'current effort level. Switching to high').replace('Yes, switch to Haiku 5.5', 'Yes, switch to high');
@@ -2114,6 +2132,39 @@ async function main() {
       W.reviewingOf('  ←  ☒ One  ☐ Two  ✔ Submit  →\n  And which?\n  ❯ 1. Red\n    2. Green\n  Enter to select · Tab/Arrow keys to navigate · Esc to cancel\n'),
     ], [true, false, false],
       'reviewingOf: the review screen as 2.1.284 draws it is one; the same words above a composer are not; a question tab is not');
+    // As 2.1.327 draws it (a probe at 80x24, 2026-11-18): the title, each
+    // question with its answer, and the two rows. No "Ready to submit your
+    // answers?" any more, and no status line under the rows. Read by the old
+    // words it was no review screen: the form stood unsubmitted while the
+    // host said it was answered, live on two desks that day.
+    const REVIEW_327 = [
+      '  the single word done.',
+      '',
+      '─'.repeat(78),
+      '←  ☒ One  ☒ Two  ✔ Submit  →',
+      '',
+      'Review your answers',
+      '',
+      ' ● Which one?',
+      '   → Bravo',
+      ' ● And which?',
+      '   → Red',
+      '',
+      '❯ 1. Submit answers',
+      '  2. Cancel',
+      '',
+    ].join('\n');
+    eq([
+      W.reviewingOf(REVIEW_327),
+      W.reviewingOf(`${REVIEW_327}\n${RULE60}\n❯ \n${RULE60}\n  ⏸ manual mode on · ? for shortcuts\n`),
+      W.reviewingOf(REVIEW_327.replace('Review your answers', 'Pick one of these')),
+      W.reviewingOf(`Review your answers\n${RULE60}\n❯ 1. Submit answers\n  2. Cancel\n`),
+      W.reviewingOf(REVIEW_327.replace('❯ 1. Submit answers', '❯ 1. Start over')),
+    ], [true, false, false, false, false],
+      'reviewingOf: the review screen as 2.1.327 draws it is one; quoted above a composer it is not; nor the two rows under another title, with a rule between them and the title, or under other rows');
+    const reviewTab = W.questionOf(REVIEW_327);
+    eq([reviewTab?.kind, reviewTab?.options, reviewTab?.tabs.map((t) => [t.title, t.submit])], ['review', [], [['One', false], ['Two', false], ['Submit', true]]],
+      'and questionOf reads that tab as the review, not as one more question whose choices are "Submit answers" and "Cancel"');
 
     // A form too tall for its pane — issue #7, item 3.
     //

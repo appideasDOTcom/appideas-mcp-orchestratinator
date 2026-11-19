@@ -414,6 +414,38 @@ Three consequences worth knowing before touching `host/window.js`:
   the finished message when the box shows its end. Re-measured on the same
   pane: the same message typed and recorded verbatim, 2 runs of 2.
 
+- **A Claude Code update can move a line the host reads by position, and
+  the floor then fails in words that blame nothing.** 2.1.326 did, on
+  2026-11-18 (its notes: "Improved key hints in many dialogs"), and two
+  readers broke on every desk the same afternoon (0.12.12):
+  - **"Switch model?" gained a last line**, "Enter to confirm · Esc to
+    cancel", under its two choices. `switchConfirmOf` wanted the choices as
+    the pane's last two lines, read no dialog, and never pressed `1`: a
+    model or effort change from the floor ended "no sign of running it
+    within 20s … Check the window", with the dialog standing. It steps
+    over that one line now. `1` still answers it.
+  - **The form's review screen lost "Ready to submit your answers?"** It
+    is the title "Review your answers", each question with its answer, and
+    the two rows, with no status line under them. `reviewingOf` read it
+    false and `askingOf` read nothing, so the host called a form answered
+    that was standing unsubmitted, and the walk read the Submit tab as one
+    more question ("Submit[single,2]" in the host log is that). Both
+    readers take the new shape, still by position.
+  Measured the same evening on a probe on 2.1.327 and read correctly with
+  no change: the folder-trust question, a permission menu (it has a fourth
+  row now, "Yes, and switch to auto mode", and No is row 4: the floor finds
+  Approve and Deny by their words, `promptChoices`, so that held), a
+  question with previews, a multi-select, and `/btw`. Not fixed, and not
+  known to be the update's: `/cost` opens a Usage screen taller than the
+  pane, its closing line out of sight, so its send ends `not_delivered`
+  with the screen left standing. So: when `claude --version` moves, run the
+  probe over every reader (**measure-a-real-window**: the trust question,
+  a permission menu, `form.mjs` with two questions, `send.mjs '/model …'`
+  on a conversation with a reply in it) before believing a report that the
+  floor "stopped working". The first sign in the host log is a `read a
+  form of N` whose last question is Submit, or a change that ends "no
+  longer in the composer".
+
 `answer-the-form.mjs` in that skill answers a floor form and records the pane, so
 none of this needs the operator to sit and click.
 
