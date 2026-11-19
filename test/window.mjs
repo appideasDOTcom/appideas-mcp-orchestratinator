@@ -1420,6 +1420,31 @@ async function main() {
     const COST = ['❯ /cost', '▔'.repeat(80), '   Total cost:            $0.0066', '   Total duration (API):  12s', '   Esc to cancel'].join('\n');
     eq(W.overlayOf(COST), { foot: 'Esc to cancel', text: 'Total cost:            $0.0066\nTotal duration (API):  12s' }, "a screen a command opened: what is under the window's rule, above its footer");
     eq(W.overlayOf(COMPACTING), null, 'and a composer is not one');
+    // The settings screen /cost opens on 2.1.327, taller than its pane (a
+    // probe at 80x24, 2026-11-18): its last line, "… · Esc to close", is
+    // out of sight and the last row in view ends in a "↓". Read by the footer
+    // alone it was no screen, and a /cost from the floor ended not_delivered
+    // with the screen left standing.
+    const USAGE_TOP = [
+      '✻ Cogitated for 3s · done 7:18 PM',
+      '▔'.repeat(79),
+      '  Settings  Status   Config   Usage   Stats',
+      '',
+      '  Session',
+      '  Estimated cost:         $0.3532',
+      '  Total duration (API):   9s',
+      '',
+      '  Current week (all models)',
+      '  ████████████████████████████▉                      58% used',
+    ];
+    const USAGE_CUT = [...USAGE_TOP, '  Current week (Fable)', `  ${'█'.repeat(40)}           80% used                  ↓`, ''].join('\n');
+    const cut = W.overlayOf(USAGE_CUT);
+    eq([cut?.cut, cut?.foot, cut?.text.split('\n')[0], cut?.text.split('\n').at(-1)], [true, '', 'Settings  Status   Config   Usage   Stats', `${'█'.repeat(40)}           80% used`],
+      'the settings screen taller than its pane is a screen too, known by its row of tabs under the rule, its "↓" not part of what it says');
+    const whole = W.overlayOf([...USAGE_TOP, '  ←/→ to switch · r to retry · d to show day · w to show week · Esc to close', ''].join('\n'));
+    eq([whole?.cut ?? false, /Esc to close$/.test(whole?.foot ?? '')], [false, true], 'and with its last line in view it is read as it always was');
+    eq(W.overlayOf(USAGE_CUT.replace('  Settings  Status   Config   Usage   Stats', '  Something else entirely')), null, 'a pane with no closing line and no such tabs under its rule is still no screen');
+    eq(W.overlayOf(`${USAGE_CUT}\n${RULE2}\n❯ \n${RULE2}\n  ? for shortcuts`), null, 'nor is that screen quoted above a composer');
 
     /* ── a composer pane: the receipts, against a real pane ───────────────
      * A node stand-in on the alternate screen that draws what Claude Code

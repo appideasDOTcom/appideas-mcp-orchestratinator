@@ -435,10 +435,15 @@ Three consequences worth knowing before touching `host/window.js`:
   no change: the folder-trust question, a permission menu (it has a fourth
   row now, "Yes, and switch to auto mode", and No is row 4: the floor finds
   Approve and Deny by their words, `promptChoices`, so that held), a
-  question with previews, a multi-select, and `/btw`. Not fixed, and not
-  known to be the update's: `/cost` opens a Usage screen taller than the
-  pane, its closing line out of sight, so its send ends `not_delivered`
-  with the screen left standing. So: when `claude --version` moves, run the
+  question with previews, a multi-select, and `/btw`. One more, found by
+  the same probe and not known to be the update's: `/cost` opens the
+  settings screen on its Usage tab, 41 lines tall, so its closing line
+  ("… · Esc to close") is in view at 200x120 and not at 80x24 or 200x50.
+  `overlayOf` knew a screen by that line alone, so the send ended
+  `not_delivered` with the screen left standing to take the desk's next
+  message. It knows that screen by its row of tabs under the overlay's
+  rule now, and Escape closes it either way (costmo, the same evening:
+  fix it in 0.12.12). So: when `claude --version` moves, run the
   probe over every reader (**measure-a-real-window**: the trust question,
   a permission menu, `form.mjs` with two questions, `send.mjs '/model …'`
   on a conversation with a reply in it) before believing a report that the
