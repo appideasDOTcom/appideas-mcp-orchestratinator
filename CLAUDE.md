@@ -134,7 +134,10 @@ So, in this folder:
   taking main's side dropped develop's `"protocol": 1` beside it (bf8079d,
   e54004b). The field now sits after `"type"`, away from `"version"`, so a
   bump merges cleanly (measured with `git merge-file`). After any forward
-  merge, read `"protocol"` in both `package.json` files.
+  merge, read `"protocol"` in both `package.json` files. And keep
+  develop's version: develop is 0.14.0 from the same evening (costmo's
+  pick), so a 0.12.x bump merged forward conflicts on that line, and
+  main's number is the wrong side to take.
 
 The database moved with the board: it is the named volume of the live
 clone's compose project (`orchestratinator-live_orchestratinator-data`),

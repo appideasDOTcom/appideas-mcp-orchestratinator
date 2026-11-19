@@ -17,6 +17,44 @@ tree's `plugin/` (before that, from a cache the update copied into) — and
 it has its own step below; a deploy that skipped it (QA, PR #32) left every
 window on the old hooks.
 
+## Where a deploy runs: the live clone, never the development tree
+
+Since 2026-11-18 (costmo's ruling; CLAUDE.md, "The live instance runs from
+its own clone") the live instance is
+`/Users/costmo/Documents/dev/appideas/appideas.com/appideas-site-dev/orchestratinator-live`,
+a clone pinned to `main`. Every command on this page runs **there**: `cd`
+into it first, and `git pull` it to the merged release before the readings.
+The repo folder agents usually open,
+`…/appideas-site-dev/appideas-mcp-orchestratinator`, is the development
+tree on `develop`. From it, `docker compose up` collides with the live
+container's name and port, and `host/install.sh`, a host kickstart or
+`claude plugin update` would put develop's code on the live instance. So
+none of them is run there. `status.sh` and `settled.sh` read the tree
+they live in (each `cd`s to its own repo), not the directory they are
+started from, so run the live clone's copies:
+`…/orchestratinator-live/.claude/skills/deploy-both-halves/status.sh`.
+
+Three things the switch set up, each read when it was made:
+- **The board's compose project is `orchestratinator-live`**, its database
+  the named volume `orchestratinator-live_orchestratinator-data`. That
+  volume was copied from `appideas-mcp-orchestratinator_orchestratinator-data`
+  with both boards stopped, and every table matched (the new board's own
+  turns since its start aside). The old volume is the backup from that
+  moment: leave it.
+- **The plugin's marketplace is the live clone** (`claude plugin
+  marketplace list` → Folder …/orchestratinator-live). A version bump is
+  copied from there, and on 2.1.325+ an unchanged version is read from
+  that folder's `plugin/`.
+- **The host's LaunchAgent starts the live clone's `host/run.sh`**, set by
+  `host/install.sh` run from the live clone. A host whose plist names
+  another path, or a Node binary instead of `run.sh` (any plist written
+  before 0.12.11), needs `install.sh` run once from the live clone. That is
+  a new LaunchAgent install, so it is costmo's to run: give him the `!`
+  line with the same roots `host.json` has. The deploy's readings include
+  the plist (`/usr/libexec/PlistBuddy -c 'Print :ProgramArguments'
+  ~/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`) and the
+  host's `node -v`.
+
 ## Before touching anything
 
 ```bash
