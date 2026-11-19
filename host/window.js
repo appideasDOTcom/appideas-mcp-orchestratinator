@@ -1548,12 +1548,31 @@ export function btwOverlayOf(screen, question = '') {
  * what the window showed, since nothing writes it anywhere else (measured
  * 2026-11-03: /cost writes no record in any file).
  */
+/** The settings screen's row of tabs, as 2.1.327 draws it. */
+const SETTINGS_TABS = /^\s*Settings\s+Status\s+Config\s+Usage\s+Stats\s*$/;
 export function overlayOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
   if (composerOf(screen) !== null) return null;
   const nonEmpty = lines.filter((l) => l.trim());
   const foot = (nonEmpty[nonEmpty.length - 1] ?? '').trim();
-  if (!/Esc to (close|cancel)/i.test(foot)) return null;
+  if (!/Esc to (close|cancel)/i.test(foot)) {
+    // The settings screen (/cost and /usage open its Usage tab; /status,
+    // /config and /stats the others) when it is taller than the pane. Its
+    // last line, "… · Esc to close", is then out of sight: measured
+    // 2026-11-18 on 2.1.327, the Usage tab is 41 lines, so the line shows at
+    // 200x120 and not at 80x24 (where the last row ends in a "↓") or 200x50.
+    // Read by the footer alone it was no screen: a /cost from the floor
+    // ended "no sign of running it within 20s" with the screen left
+    // standing, to take the desk's next message. So it is known by its top:
+    // the row of its tabs, first under the rule that tops an overlay. Escape
+    // closes it whether or not its last line is in view (measured).
+    let top = -1;
+    for (let n = nonEmpty.length - 1; n >= 0; n--) {
+      if (/^\s*▔{20,}\s*$/.test(nonEmpty[n])) { top = n; break; }
+    }
+    if (top < 0 || !SETTINGS_TABS.test(nonEmpty[top + 1] ?? '')) return null;
+    return { foot: '', cut: true, text: nonEmpty.slice(top + 1).map((l) => l.replace(/\s+↓\s*$/, '').trim()).join('\n').trim() };
+  }
   let from = 0;
   for (let n = nonEmpty.length - 2; n >= 0; n--) {
     if (/^[\s▔─━]{20,}$/.test(nonEmpty[n])) { from = n + 1; break; }
