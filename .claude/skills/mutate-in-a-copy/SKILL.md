@@ -124,6 +124,17 @@ reworded, and a meeting-box page row that had not applied since 0.12.9. A
 row that does not apply is not red, it is unread, and the count in the
 notes goes on including it.
 
+Validated again on 2026-11-20, after four rounds that had not: thirteen
+entries in seven lists no longer applied (the sign-in round added a field
+beside five of them, the room notices moved `stillWatched` into
+`roomStillWatched` and `roomHolds`, develop's poll kept its own cursor
+line). Each was pointed at the line as it stands now, keeping its name and
+its fault, and all the lists validate. **None of the thirteen has been run
+since**, so each is owed a run before its red is quoted: in
+`mutants-attention`, `mutants-mcp-rooms` (3), `mutants-milestone`,
+`mutants-pr57` (4), `mutants-sessions` (2), and the page lists
+`mutants-floor-windows` and `mutants-settings` (1 each).
+
 **Lines of the seats work that no row reads, and why they are left**
 (QA's inversions on PR #57, Info 7; each stayed green there). Two were
 given rows in that round: a bind onto a name a seat carries (Q2) and the

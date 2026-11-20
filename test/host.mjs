@@ -1305,6 +1305,18 @@ try {
       if (!id) return null;
       try { return execFileSync('tmux', ['show-options', '-w', '-v', '-t', id, 'remain-on-exit']).toString().trim() === 'off' ? true : null; } catch { return null; }
     }, 20000), 'and the host saw it register');
+    // And the watch has seen it too, which is a different look. waitReady
+    // and the watch loop read the roster apart, and a reopen's intent is let
+    // go only by the watch, at the tick that finds the new window
+    // (Desk.watch). Killed before that tick, the window leaves an intent
+    // nothing can match for 45 s, and the desk adopts nothing else in its
+    // folder meanwhile: the other host's window below was never followed,
+    // the binding never read, and the two rows on it read red with nothing
+    // in the host's log. Read on 2026-11-20: red in 3 of 8 host runs in a
+    // copy, an unmutated control among them, and in each the message to
+    // rel-a below reached the host 100 ms after this reopen, so the pane
+    // was killed within a watch tick of registering.
+    await sleep(WATCH_SETTLE_MS);
 
     // And the other side of a release: this host as the one being left.
     // Another instance's host rebinds the folder, and this one learns of it
@@ -2265,6 +2277,10 @@ try {
    * it on the floor", and the floor had nothing to answer it with. */
   killTmux();
   writeFileSync(`${FIX}/roster.json`, '[]');
+  // Not before the host has seen the window go: a message sent while it
+  // still holds the old pane is typed at a pane that is not there, and the
+  // host's line waits out a paste on it (seen as six reds here, 2026-11-20).
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
   writeFileSync(`${FIX}/startup-ask.flag`, 'chrome');
   const crErrsBefore = ((await turns('free')).rows ?? []).filter((r) => r.role === 'error').length;
   eq((await chat('free', 'hello past the browser question')).status, 200, 'a message for the desk opens a window that registers and then asks about the browser extension');
@@ -2290,6 +2306,10 @@ try {
   console.log('\n  a window Claude Code has no record of');
   killTmux();
   writeFileSync(`${FIX}/roster.json`, '[]');
+  // The old window seen gone first, or "it registers" below is answered by
+  // the window before this one and the flag is taken away before the new
+  // window starts (this section's first run: no composer, so never idle).
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
   writeFileSync(`${FIX}/composer.flag`, '1');
   eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'a window is opened for the desk');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'and it registers, at its composer');
@@ -2336,7 +2356,14 @@ try {
   const soAuthLog = () => (existsSync(`${FIX}/auth.log`) ? readFileSync(`${FIX}/auth.log`, 'utf8') : '');
   // Started with USER and LOGNAME empty, as a parent other than launchd may
   // start it: Claude Code finds its sign-in by user, so the host fills them.
-  host = startHost('host-test-1', { USER: '', LOGNAME: '' });
+  // And with a short wait on a paste. The window here draws a composer
+  // that never changes, and the board asks for a /mcp reconnect of a floor
+  // window on its own clock (20 s, then two minutes): one that lands in
+  // this window waits out the paste, a minute by default, on the host's
+  // line, with the reopen below behind it. It landed there once a section
+  // was added above this one (2026-11-20): the reopen came at 66 s and the
+  // rows give it 60.
+  host = startHost('host-test-1', { USER: '', LOGNAME: '', ORCH_PASTE_TIMEOUT_MS: '4000' });
   const so = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && d?.signin ? d : null; }, 15000);
   assert(!!so, 'a host on a machine where Claude Code is signed out says so at registration, and its desk carries Sign in');
   eq([so?.signin?.ok, so?.signin?.host], [true, 'Test Mac'], 'which can be pressed, and names the machine');

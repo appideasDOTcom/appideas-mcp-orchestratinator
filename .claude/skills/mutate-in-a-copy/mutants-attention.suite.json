@@ -3,8 +3,8 @@
   "an error turn reads as asking",
   "floor",
   "src/ui/floor.js",
-  "  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup);",
-  "  const deskAsking = (d) => !!d?.live && (!!d.session?.awaiting_kind || !!d.permission?.startup);"
+  "  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup || !!d.signin);",
+  "  const deskAsking = (d) => !!d?.live && (!!d.session?.awaiting_kind || !!d.permission?.startup || !!d.signin);"
  ],
  [
   "a desk the board would refuse is counted as a nudge",

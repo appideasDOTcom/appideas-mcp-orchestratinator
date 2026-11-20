@@ -12,7 +12,7 @@
   "let autoRefresh = readAutoRefresh();",
   "let autoRefresh = true;"],
  ["Export is handled on the dialog only, as before", "src/ui/app.js",
-  "    case 'export': exportBackup(); break;\n    case 'restore': restoreBackup(); break;\n    default: break;\n  }\n});\n\nel.setBody.addEventListener('change'",
+  "    case 'export': exportBackup(); break;\n    case 'restore': restoreBackup(); break;\n    case 'restore-floor': restoreFloor(); break;\n    default: break;\n  }\n});\n\nel.setBody.addEventListener('change'",
   "    default: break;\n  }\n});\n\nel.setBody.addEventListener('change'"],
  ["the settings page is a floor tab too", "src/ui/floor.js",
   "  if (new URLSearchParams(location.search).get('settings') === '1') {",

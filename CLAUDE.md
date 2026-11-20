@@ -152,6 +152,14 @@ So, in this folder:
   pick), so a 0.12.x bump merged forward conflicts on that line, and
   main's number is the wrong side to take.
 
+**Two things since, both 2026-11-20.** The desktop app's releases do not
+go through `main` at all: they are tags on `develop` ("A new machine's
+first windows"). And the live instance has had no host on this machine
+since that afternoon's clear, which removed the launchd job, its plist and
+`host.json` ("The clear of 2026-11-20"). The container still runs. Until
+costmo has `host/install.sh` run from the live clone, a board on 8787 with
+no live host is that, not a fault to diagnose.
+
 The database moved with the board: it is the named volume of the live
 clone's compose project (`orchestratinator-live_orchestratinator-data`),
 copied from the old one (`appideas-mcp-orchestratinator_orchestratinator-data`)
@@ -1115,6 +1123,187 @@ out on a host"), `test:window` (the reader, on the captured screens), and
 **check-signin.mjs** in **verify-ui-change**, with
 `mutants-signin.page.json` beside it and `mutants-signin.suite.json` in
 **mutate-in-a-copy**.
+
+## A new machine's first windows (0.14.0 to 0.14.3)
+
+2026-11-20, the day the desktop app went out as a signed build and costmo
+installed it on a second Mac. Three things that machine showed, each fixed
+the same day. **This section was written afterwards from the code's own
+comments, the commits and the scratch logs of the session that did the
+work**: that session's history was lost the same afternoon (the next
+section), so nothing here is from memory, and where the record did not say,
+this says "not known".
+
+**A desktop release is a tag on `develop`** (costmo, 2026-11-19; recorded
+in the app repo's `docs/follow-ups.md`, "Pin a release tag"). The desktop
+and Docker releases are separate lines. A desktop release is not a merge to
+`main`: he tags `develop` after `npm run release-gate` passes at that
+commit, the app names the tag (`#v0.14.3`), and `main` stays on 0.12.x for
+the Docker instance. So "a release reaches the live clone through `main`"
+above is the Docker line's rule, and "the full chain runs before any merge
+to main" reads, for the desktop line, as the gate before the tag. **The
+app's version and this repo's are kept the same** (costmo, 2026-11-20). The
+app took 0.14.1 alone, which is why there is no `v0.14.1` here: v0.14.0 is
+b3127e4, v0.14.2 is d1fe63a, v0.14.3 is 5fcb0b8.
+
+- **The 0.14.0 gate, and its three reds.** At 6826bab it read EXIT=1 (3 ✗
+  in the suites, 13 of 15 pages, load 57 to 106). All three were fixed in
+  b3127e4, where it read EXIT=0: 3342 ✓, 15 of 15 pages, at load 73 to 139.
+  - `drive.mjs`'s drag sent `mouseMoved` with `button: 'none'` while the
+    button was held, and Chrome does not take that as a drag: a textarea's
+    resize handle stayed where it was (check-chatbox, check-pop-foot). A
+    move with the button held names the button.
+  - **`reopen()` wrote to `desk.intent` after its awaits, and the watch
+    loop had let the intent go.** The loop runs beside it and clears the
+    intent the moment a live session matches it, which for a known id can
+    be inside those awaits: a reopen after a sign-in threw on
+    `desk.intent.pid`. The intent is held in a local as well, and written
+    through that. Anything else that sets `desk.intent` and then awaits has
+    the same gap.
+  - The host suite's busy-window pick waited against the wrong list of
+    panes, and with the host's line held it took the next pick's window for
+    its own.
+- **The browser extension's question is a startup question, asked after
+  the window has registered** (0.14.2, `STARTUP_ASKS` kind `chrome`). On
+  the new machine a 2.1.318 window raised "Claude in Chrome extension
+  detected" (two rows, the cursor on No, "Enter to confirm · Esc to keep
+  browser tools off") once the trust question had been answered from the
+  floor. The host refused to type into it, said "answer it on the floor",
+  and the floor had nothing to answer it with. His ruling: shown to the
+  operator and answered by them, never by rule. The reader knew a startup
+  question only on a window that was still starting, so the tick now looks
+  on a registered window too, in three cases: while a question is already
+  standing (and "gone" is said only when the pane no longer shows it), when
+  a send has just been refused as `asking`, and once a heartbeat
+  (`Desk.lookStartup`). Not measured: whether a real window is in the
+  roster while that question stands. That is why all three looks exist.
+- **Inside the app the header shows the app's version** (0.14.2,
+  `headerVersion` in `src/ui/app.js`, lifted into `test:floor`). The app
+  was 0.14.1 on an Orchestratinator 0.14.0, the header said one and the
+  app's Settings the other, and to a person that is one screen
+  contradicting another. The number comes from the user-agent token the
+  app already sends (`OrchestratinatorDesktop/<version>`); this instance's
+  own number stays on the tooltip. In a browser nothing changed.
+- **A window Claude Code has no record of is reopened, once** (0.14.3; the
+  account is above `UNREGISTERED_MS` in `host/window.js`). On that machine
+  `~/.claude/sessions` was empty under a live window: it ran every command
+  and wrote its transcript, and the floor could not hear it. A model change
+  ended "gave no sign of running it within 20s", a message read "not
+  recorded, send again" while the agent worked on it, and no `/mcp`
+  reconnect was asked for, because the window read as starting. costmo
+  found it by opening the window: "we need to be able to auto-resolve
+  this. Another operator likely would not have been able to track that
+  down." Not reproduced in six tries. The likeliest cause is a Claude Code
+  profile deleted and remade under a tmux server that was left running,
+  and it is not proven. So the state is resolved, whatever makes it: a
+  window standing idle at its composer, nothing typed, for 30 s with no
+  record is reopened on the conversation last spoken in since it started
+  (a new one when nothing was said), on the host's line, and the desk says
+  so. A reopened window with no record either is said on the desk and left
+  alone, because a reopen is a kill. Three things about it:
+  - **Idle is read, never assumed**: no startup question, no prompt, no
+    overlay, not working, a composer on screen, and the cursor right behind
+    the `❯` (a typed draft is somebody's; a prompt suggestion is not).
+  - **The job reads everything again before it closes anything**, on the
+    whole roster and by pid: the tick's own check is against this desk's
+    sessions by folder. And since 2026-11-20 it leaves the window when the
+    roster could not be read at all. `roster()` gives an empty list with
+    `ok: false` then, and the first cut read that as "no record". No row
+    holds that line: the suites' stand-in always answers `agents`.
+  - **Known and left**: a seat is reopened on a new conversation, since
+    "the folder's newest" may be another desk's (`spokenSince` gives a seat
+    nothing), and the desk's line then says "as nothing had been said in
+    it", which may not be so. And if an editor in the same folder spoke
+    more recently than the window, the reopen names the editor's
+    conversation and is refused by `open()` with the window already
+    closed. Neither has been seen.
+- **The app's release checklist ends every window before it deletes
+  anything of Claude Code's** (`tmux kill-server` first; the app repo's
+  `docs/release-checklist.md`, "A fresh install from nothing").
+- **Backlog from that day, not built**: a meeting room should survive
+  closing the app or the floor it came from (`docs/backlog.md`, with what
+  each repo's half is).
+
+How it is tested: the reader on the captured screen and the verdicts in
+`test:window`; the question on a registered window and the reopen in
+`test:host` (`startup-ask.flag` takes `chrome`, `composer.flag` draws a
+window at its composer, and the host runs with `ORCH_UNREGISTERED_MS` at
+3 s); the header in `test:floor` and check-attention. The mutants are
+`mutants-first-run.suite.json`, ten of them, each red on its own rows.
+Two things from running them:
+- **"A refused send does not ask for a look" survived its first run and
+  was red on its second** (5 rows). The heartbeat asks for the same look,
+  so when a registration lands inside the row's wait the question reaches
+  the floor without the line. That is the likeliest second path and was
+  not watched happening. Run that mutant twice before reading it.
+- The five for the unrecorded window were cut off by the clear and run
+  again that afternoon: three on the window suite (control 482 ✓), two on
+  the host suite.
+
+## The clear of 2026-11-20, and what the record is since
+
+About 12:30 PST that day costmo ran the app's "A fresh install from
+nothing" on this machine, meaning it for the test Mac. Read afterwards.
+What it took, because each one explains something that will look wrong
+later:
+
+- **The launchd host of the live instance.** The job was booted out and
+  its plist and `~/.orchestratinator/host.json` deleted. The Docker board
+  on 8787 still runs (0.12.12, main) and has no host on this machine.
+  Putting it back is `host/install.sh` run from the live clone, with the
+  board's key, and it is costmo's to run or to ask for.
+- **`~/.claude` and `~/.claude.json`**: every session's transcript, every
+  folder's local-scope binding (so every desk that was not bound by a
+  `.mcp.json` is unbound until it is taken again), the settings, the
+  installed plugin, and each agent's memory directory.
+- **The app's profile, so the app's board.** It was restored at 20:46Z
+  from the newest whole backup in Downloads, which is the *Docker* board's
+  export of 2026-11-20 03:00Z. On it this floor and the
+  orchestratinator-desktop channel stop at 2026-11-19 05:11Z, the hour the
+  work moved to the app's board. So the board lost two days of these two
+  channels, not seventeen hours: every message and task written on them
+  after that hour, and the desktop channel's contracts. A message number
+  above 3525 cited in this file or the app's documents names a message
+  that no longer exists, or another floor's: the restored board's newest id
+  was 3700, and new messages count on from there.
+- **The contracts were written again that afternoon**, from this file, the
+  code and the app repo's documents, each with a `restated` line:
+  `orchestratinator.attention`, `orchestratinator.window_moves`,
+  `orchestratinator.app_setup`, and `orchestratinator.consumed` (v9 kept,
+  its later sections added, v10). The board counts versions from 1 again,
+  so "attention v3" in an older note is the content of today's v1.
+- **What survived**: both repos, the Docker board and its volume, and the
+  lost sessions' scratch directories under `/private/tmp/claude-501/`,
+  which is where the gate results above were read from. `/tmp` goes at a
+  reboot. No Time Machine backup exists (off since 2021), and no local
+  snapshot.
+
+**A window the app's host opens carries the host's own settings, and no
+`TMPDIR`** (found by the app's agent that afternoon, measured in this
+folder's window too). The host builds what it gives tmux from its whole
+environment (`TMUX_ENV` in `host/window.js`), a tmux server keeps the
+environment of the process that started it, and the app configures its
+host by environment where launchd's reads `host.json`. So after that day's
+`tmux kill-server` every window had `ORCH_URL`, `ORCH_AUTH_TOKEN`,
+`ORCH_HOST_ID`, `ORCH_HOST_SUPERVISOR=app`, `ORCH_FOLDER_DIALOG=parent`,
+`ORCH_HOST_CONFIG` and `ORCH_TMUX_SESSION`. A host, a board or a suite
+started by hand there takes them as its own. Measured: the full chain run
+from this window read one red, "and with nothing at all the host says so,
+and how to give it one", because the host meant to have no key had the
+app's; with the variables unset the host suite read 520 ✓. The suite's
+own hosts name their board and id, so the app's board was not touched. So,
+until the host stops handing them down:
+
+```
+for v in $(env | command grep -o -E '^ORCH_[A-Z_]+'); do unset "$v"; done
+export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
+```
+
+before any suite, scratch board or host from a window on the app's floor.
+The fix is open and is costmo's to rule on, because it changes what every
+window is given: the host hands tmux its environment without its own
+settings, and the app gives its host a `TMPDIR`. It is written in
+`orchestratinator.consumed`, `host.windows_inherit`.
 
 ## A file attached to a message
 
@@ -3146,6 +3335,13 @@ first for the shell, chosen by what it needs (Node-API 10), not by its
 number ("The host under the desktop app", above); every runner under
 `.claude/skills` sources it.
 
+**And from a window on the app's floor, the host's own `ORCH_` variables
+are unset first** (2026-11-20; the two lines and the red they cause are at
+the end of "The clear of 2026-11-20"). A suite's hosts are started with
+`...process.env`, so an inherited `ORCH_AUTH_TOKEN` or
+`ORCH_HOST_SUPERVISOR=app` is theirs too. `env | command grep -c '^ORCH_'`
+should print 0 before a run whose result will be quoted.
+
 **What ships is what is tested: one Node major and one lockfile**
 (costmo's ruling on the milestone audit's finding 5, 2026-11-17, in
 0.12.11). Before it the suites ran Node 24 with better-sqlite3 13.0.3 and
@@ -3559,6 +3755,25 @@ rows. QA's logs: `evidence/merge-develop-2026-11-18/` in the QA repo
   again: `last_seen` does not mark a heartbeat (the host registers after
   every bind and rescan too), and the heartbeat is not every 60 s on the
   dot (it is checked when the work poll returns, up to 25 s later).
+- **The same two release rows again, 2026-11-20, and a second race in
+  the case.** Red in 3 of 8 host runs made in a copy that day, an
+  unmutated control among them, at load 5 to 8, with nothing in the host's
+  log from the staging on: not the heartbeat this time. The lines that
+  named it were the host's own, set side by side for a red and a green
+  run (`run-mutants.mjs --logs`): in every red the message to `rel-a`
+  reached the host 100 ms after `rel-c`'s reopen, so the case went on to
+  kill `rel-c`'s new window within a watch tick of its registering. The
+  case waited for `waitReady` to see the window (`remain-on-exit` off),
+  and that is not the watch seeing it. A reopen's intent is let go only by
+  the watch, at the tick that finds the window. Killed before that tick,
+  the window leaves an intent nothing can match for 45 s, and the desk
+  adopts nothing else in its folder meanwhile, the other host's window
+  included. The case now lets the watch settle before it takes the window
+  down. **In the product that is a desk deaf to its folder for 45 s after
+  a window that died in its first third of a second**, ending in "the
+  reopened window did not register within 45s", which is not what
+  happened. Known and left: letting an intent go when its pid is dead is
+  the fix, and nobody has met it outside this fixture.
 - **Not seen in six runs on 2026-11-19:** "joined at its tail" (near
   981). If it comes back, read the host's log beside it first.
 - **Also owed, from QA's review of 0.12.12 (PR #60, review 5969322428,

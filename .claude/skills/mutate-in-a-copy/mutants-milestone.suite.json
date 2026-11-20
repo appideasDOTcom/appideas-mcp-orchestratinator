@@ -38,8 +38,8 @@
   "F1f the host never sends pending",
   "host",
   "host/index.js",
-  "dialog: D.hasDialog(), seats: true, uploads: true, pending, boot: this.boot, ...me },",
-  "dialog: D.hasDialog(), seats: true, uploads: true, boot: this.boot, ...me },"
+  "signed_out: this.signedOut(), pending, boot: this.boot, ...me },",
+  "signed_out: this.signedOut(), boot: this.boot, ...me },"
  ],
  [
   "F2 the stop sign sends Enter (QA A2)",

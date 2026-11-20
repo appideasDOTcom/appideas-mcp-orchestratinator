@@ -1864,6 +1864,10 @@ class Host {
       const pane = await W.paneFor(desk.where);
       if (!pane || pane.pid !== pid) return;
       const known = await W.roster();
+      // A roster that could not be read says nothing about this window: its
+      // sessions are an empty list then, which reads here as "no record".
+      // Leave the window, and count its idle time again from the next look.
+      if (!known.ok) { desk.unreg = null; return; }
       if ((known.sessions ?? []).some((x) => x.pid === pid)) return;
       if (verdict === 'say') {
         warn(`${desk.label}: the reopened window has no session record either; leaving it`);

@@ -44,8 +44,8 @@
  [
   "the board view does not sync (setView)",
   "src/ui/floor.js",
-  "    if (ui.on) start(); else stop();\n    syncAddress();",
-  "    if (ui.on) start(); else stop();"
+  "    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }\n    syncAddress();",
+  "    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }"
  ],
  [
   "all floors is not written, so a reload falls back to the stored choice",

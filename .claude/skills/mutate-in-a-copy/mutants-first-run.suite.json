@@ -33,5 +33,40 @@
   "src/ui/app.js",
   "  return app\n    ? { text: `v${app}`,",
   "  return !app\n    ? { text: `v${app}`,"
+ ],
+ [
+  "a window with no record is reopened again and again",
+  "window",
+  "host/window.js",
+  "  return tried === pid ? 'say' : 'reopen';",
+  "  return 'reopen';"
+ ],
+ [
+  "a window with no record is reopened at once, with no time to register",
+  "window",
+  "host/window.js",
+  "  if (now - since < after) return 'wait';\n",
+  ""
+ ],
+ [
+  "a working window counts as standing idle",
+  "window",
+  "host/window.js",
+  " || /esc to interrupt/i.test(footOf(text))) return false;\n  return composerOf(text) != null;",
+  ") return false;\n  return composerOf(text) != null;"
+ ],
+ [
+  "a window with no record is never handed to the host's line",
+  "host",
+  "host/index.js",
+  "        this.host.healUnregistered(this, paneHere.pid, verdict);\n",
+  ""
+ ],
+ [
+  "the reopened window forgets the conversation it was on",
+  "host",
+  "host/window.js",
+  "  return Number.isFinite(at) && at >= sinceMs - 1000 ? newest.id : null;",
+  "  return null;"
  ]
 ]

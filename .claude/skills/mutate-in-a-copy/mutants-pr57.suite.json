@@ -3,22 +3,22 @@
   "a silent open room loses its session at the first look (PR #57 finding 1)",
   "floor",
   "src/floor.js",
-  " || stillWatched(r));",
-  " );"
+  " && r.ended_s < TWIN_ENDED_S) || roomStillWatched(live, r, nowMs);",
+  " && r.ended_s < TWIN_ENDED_S);"
  ],
  [
   "a silent open room is never read as gone",
   "floor",
   "src/floor.js",
-  "    return nowMs - seen.at < TWIN_UNHEARD_MS;",
-  "    return true;"
+  "  return nowMs - seen.at < TWIN_UNHEARD_MS;",
+  "  return true;"
  ],
  [
   "the watch on a silent room is not started again once it is heard from",
   "floor",
   "src/floor.js",
-  "    if (!seen || seen.live_at !== r.live_at) {",
-  "    if (!seen) {"
+  "  if (!seen || seen.live_at !== r.live_at) {",
+  "  if (!seen) {"
  ],
  [
   "a second session's row starts at the floor's first message (PR #57 finding 2)",
@@ -31,8 +31,8 @@
   "a second session's poll with no since reads from the floor's first message",
   "floor",
   "src/tools.js",
-  "      const since = Math.max(args.since ?? 0, store.twinOf(channel, agent)?.start_cursor ?? 0);",
-  "      const since = args.since ?? 0;"
+  "      const since = Math.max(ahead ? store.pollCursorOf(channel, agent) : asked, store.twinOf(channel, agent)?.start_cursor ?? 0);",
+  "      const since = ahead ? store.pollCursorOf(channel, agent) : asked;"
  ],
  [
   "a name taken again starts at the newest, losing what was addressed to it",

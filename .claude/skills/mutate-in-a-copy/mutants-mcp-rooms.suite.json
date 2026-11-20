@@ -31,8 +31,8 @@
   "reconnect: the host does not say it takes the work",
   "host",
   "host/index.js",
-  "uploads: true, reconnect: true, pending,",
-  "uploads: true, pending,"
+  "uploads: true, reconnect: true, signin: true,",
+  "uploads: true, signin: true,"
  ],
  [
   "reconnect: the host's desk line left out",
@@ -66,8 +66,8 @@
   "reconnect: a host that never said it takes the work is handed it",
   "floor",
   "src/floor.js",
-  "req.body?.uploads === true, req.body?.reconnect === true);",
-  "req.body?.uploads === true, true);"
+  "req.body?.uploads === true, req.body?.reconnect === true,",
+  "req.body?.uploads === true, true,"
  ],
  [
   "notices: a desk already told is told again",
@@ -94,8 +94,8 @@
   "notices: sent to a window that is asking",
   "floor",
   "src/floor.js",
-  "      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent)))) continue;",
-  "      if (check.error) continue;"
+  "      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent))) || signedOutWhy(check.hosted)) continue;",
+  "      if (check.error || signedOutWhy(check.hosted)) continue;"
  ],
  [
   "notices: a new room is not swept at once",

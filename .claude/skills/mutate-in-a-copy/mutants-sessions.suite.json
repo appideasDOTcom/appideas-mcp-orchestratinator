@@ -66,7 +66,7 @@
   "a second session in a live room is closed",
   "floor",
   "src/floor.js",
-  "      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || stillWatched(r));",
+  "      .some((r) => roomHolds(live, r, nowMs, ended));",
   "      .some(() => false);"
  ],
  [
@@ -227,8 +227,8 @@
   "New desk here sends a plain take",
   "floor",
   "src/ui/app.js",
-  ", ...(seat ? { seat: true } : {}) };",
-  " };"
+  ", ...(seat ? { seat: true } : {}), ...(leaving",
+  ", ...(leaving"
  ],
  [
   "New desk here is offered whatever the host",
