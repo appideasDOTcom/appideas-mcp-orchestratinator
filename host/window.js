@@ -4297,6 +4297,30 @@ export async function busyAt(cwd) {
 }
 
 /**
+ * Whether a window says Claude Code is signed out: "Not logged in · run
+ * /login", which 2.1.329 draws at the right of the status rows under the
+ * composer, on a window that is otherwise an idle composer (measured
+ * 2026-11-19, a window with no credentials). Read from the rows under the
+ * composer's bottom rule only, rejoined because they wrap at 80 columns, so
+ * a conversation quoting the words above the composer cannot fake it.
+ */
+export function signedOutOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
+  let rule = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (/^\s*[─━]{8,}/.test(lines[i])) { rule = i; break; }
+  if (rule < 0) return false;
+  return /Not logged in\s*·\s*run \/login/i.test(lines.slice(rule + 1).map((l) => l.trim()).join(' '));
+}
+
+/** Whether this window, if there is one, says Claude Code is signed out (signedOutOf). */
+export async function signedOutAt(where) {
+  const pane = await paneFor(where);
+  if (!pane) return { pane: null, signedOut: false };
+  const r = await tmux(['capture-pane', '-p', '-t', pane.target]);
+  return { pane, signedOut: r.ok && signedOutOf(r.out) };
+}
+
+/**
  * How much of a transcript exists right now.
  *
  * Used as the starting offset when a desk begins following a conversation, so

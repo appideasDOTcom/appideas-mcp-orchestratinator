@@ -13,10 +13,11 @@
 #
 # The copy is taken once from the working tree (copy-repo.sh), so the tree
 # is never touched while it runs: a PR being closed must not move. Ports are
-# 8941-8954 and CDP 9311-9324, one pair per check (floor-windows, the
+# 8941-8955 and CDP 9311-9325, one pair per check (floor-windows, the
 # twelfth, from task 315; attention, the thirteenth, from the app's tab
 # and tray round, 2026-11-19; settings, the fourteenth, the same evening,
-# whose second board, the app's own, is on its PORT+40); a pair that is taken is
+# whose second board, the app's own, is on its PORT+40; signin, the
+# fifteenth, from the release-prep round, 2026-11-19); a pair that is taken is
 # refused by the runners, so read the channel for QA's ports first. Run it
 # after the full `npm test`, never beside it: two tmux-driving suites, or a
 # suite and these Chromes, on one machine is what made PR #57's Info 12.
@@ -29,7 +30,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 . "$REPO/scripts/node-floor.sh" || exit 2
-ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows attention settings"
+ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows attention settings signin"
 LIST="${*:-$ALL}"
 COPY="$("$REPO/.claude/skills/mutate-in-a-copy/copy-repo.sh" "${TMPDIR:-/tmp}/orch-release-pages")" || exit 2
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/release-pages-out.XXXXXX")"

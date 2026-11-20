@@ -1,0 +1,32 @@
+[
+ [
+  "the desk draws no sign-in box",
+  "src/ui/floor.js",
+  "    if (canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {",
+  "    if (false && canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {"
+ ],
+ [
+  "Send is not dimmed while signed out",
+  "src/ui/floor.js",
+  "    wrap.querySelector('[data-act=\"send\"]').disabled = !canChat || asking || signedOut;",
+  "    wrap.querySelector('[data-act=\"send\"]').disabled = !canChat || asking;"
+ ],
+ [
+  "a signed-out desk does not make the tab pulse",
+  "src/ui/floor.js",
+  "|| !!d.permission?.startup || !!d.signin);",
+  "|| !!d.permission?.startup);"
+ ],
+ [
+  "pressing Sign in shows no wait",
+  "src/ui/floor.js",
+  "        ui.signingIn.set(`${to.channel}|${to.agent}`, Date.now());",
+  "        void to;"
+ ],
+ [
+  "the board's sign-in verdict does not read the host's word that it takes the work",
+  "src/floor.js",
+  "  if (!h.host_signins) return { error:",
+  "  if (false) return { error:"
+ ]
+]

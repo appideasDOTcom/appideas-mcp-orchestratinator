@@ -12,10 +12,10 @@
   "    // The first report"
  ],
  [
-  "a floor tab counts desks out in a popout or a room",
+  "a floor tab leaves out the desks in a popout or a room (the rule before 2026-11-19)",
   "src/ui/floor.js",
-  "    out: ui.popout || ui.meeting ? null : outsNow(ui.outs, Date.now()),",
-  "    out: null,"
+  "    return pick(floors, () => true);",
+  "    return pick(floors, (ch, d) => !outsNow(ui.outs, Date.now()).has(`${ch}|${d.agent}`));"
  ],
  [
   "a second nudge all while the first is typing nudges again",

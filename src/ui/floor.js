@@ -49,6 +49,13 @@
      through an error event, which raises its own alert — this deadline is just
      what stops a silent one from turning for ever. */
   const ANSWER_SEND_MS = 25_000;
+  /* A desk's Sign in waits on a person in a browser on the host's machine. The
+     host gives the page 15 minutes (SIGNIN_TIMEOUT_MS in host/auth.js); past
+     that the box is the button again. A sign-in that failed says so in the
+     conversation in the host's words, so after SIGNIN_AGAIN_MS the button
+     stands beside the wait, to press again. */
+  const SIGNIN_WAIT_MS = 15 * 60_000;
+  const SIGNIN_AGAIN_MS = 20_000;
   /* Moving a conversation between apps is the host's work, not the POST's. It
      closes a tmux window and opens the editor, or opens a window and waits for
      Claude Code to come up — up to READY_TIMEOUT_MS (45s) on the host — and the
@@ -466,6 +473,9 @@
     // Answers on their way to a window, by desk (`channel|agent`): what the
     // prompt box shows a spinner for until the desk gains a turn.
     answering: new Map(),
+    // A desk's Sign in pressed, by `channel|agent`: when, so the box shows
+    // the browser waiting instead of the button (drawAlert).
+    signingIn: new Map(),
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
@@ -4563,15 +4573,20 @@
     // prompt, so the board refuses it (askingWhy, src/floor.js), and the box
     // says so before Send is pressed. The answer is the box above.
     const asking = canChat && d.nudge?.code === 'asking';
+    // Claude Code signed out on the desk's host: refused by the board in the
+    // same words (signedOutWhy), and the Sign in box is above.
+    const signedOut = canChat && d.nudge?.code === 'signed_out';
     $('p-text').placeholder = asking
       ? `${d.persona} is asking something — answer it above, then type here…`
+      : signedOut
+      ? `Claude Code is signed out on ${d.signin?.host ?? 'this desk\u2019s machine'} — sign in above, then type here…`
       : canChat
       ? `Message ${d.persona}…`
       : held
       ? `${d.persona}’s conversation is open in your editor…`
       : `${d.persona}’s machine isn’t reachable right now…`;
-    wrap.querySelector('[data-act="send"]').disabled = !canChat || asking;
-    gateAttach(canChat && !asking);
+    wrap.querySelector('[data-act="send"]').disabled = !canChat || asking || signedOut;
+    gateAttach(canChat && !asking && !signedOut);
     drawAttach();
     // Gated with Send, not with the stop sign: a prompt is something to send, so
     // offering the library for a box that cannot deliver is the same drift the
@@ -4935,6 +4950,32 @@
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
           `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
+    // Claude Code signed out on the desk's host (d.signin, src/floor.js):
+    // the window cannot answer, so the box says so and offers Sign in, which
+    // has the host run Claude Code's own sign-in (costmo, 2026-11-19). A
+    // prompt the window is showing outranks it: that is answered first.
+    if (canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {
+      const si = d.signin;
+      const pressed = ui.signingIn.get(answerKey);
+      if (pressed && Date.now() - pressed > SIGNIN_WAIT_MS) ui.signingIn.delete(answerKey);
+      const waiting = ui.signingIn.has(answerKey);
+      // After a while the button is back beside the spinner: a sign-in that
+      // failed says so in the conversation, and the remedy is pressing again.
+      const again = waiting && Date.now() - pressed > SIGNIN_AGAIN_MS;
+      const sig = `signin|${si.ok}|${si.reason ?? ''}|${si.host}|${waiting}|${again}`;
+      if (alertSlot.dataset.sig !== sig) {
+        alertSlot.dataset.sig = sig;
+        const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok ? '' : ' disabled'} title="Claude Code\u2019s own sign-in, run on ${esc(si.host)}: the browser opens there">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
+        alertSlot.innerHTML = `<div class="p-alert p-alert-ask p-signin">
+             <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 the window cannot answer until it is signed in again.</div>
+             ${waiting ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>finish signing in, in the browser that opened on ${esc(si.host)}\u2026</div>` : ''}
+             ${!waiting || again ? `<div class="p-decide">${button}</div>` : ''}
+             ${si.ok ? '' : `<div class="p-unknown-why">${esc(si.reason ?? '')}</div>`}
+           </div>`;
+      }
+      return;
+    }
+    ui.signingIn.delete(answerKey);
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
@@ -6044,9 +6085,13 @@
    * permission menu, a question form (also a permission_request, as the hook
    * files it), or a startup question before a session exists. An error turn
    * raises `awaiting_kind: 'error'` too, and is not a prompt: nothing waits
-   * on an answer. `live` as the board counts "need you" (buildFloor).
+   * on an answer. `live` as the board counts "need you" (buildFloor). And
+   * a desk whose host's Claude Code is signed out (`signin`, src/floor.js):
+   * nothing it is asked can be answered until the operator presses its Sign
+   * in, so the tab pulses for it as for a question (costmo, 2026-11-19: the
+   * pulse is for anything waiting on him).
    */
-  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup);
+  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup || !!d.signin);
 
   /**
    * A desk a "nudge all" sends to, which is what a pending nudge is: something
@@ -6061,16 +6106,24 @@
    * The desks a window shows, as { channel, d }. `scope` is the window's:
    *   { kind: 'floor', floor }        a floor tab (floor null: all floors),
    *                                   over `here`, the floors not put away,
-   *                                   less the desks out in another window
-   *                                   (`out`, keys `channel|agent`), which
-   *                                   that window reports, so a tray list
-   *                                   of windows does not count one twice;
+   *                                   every desk on them, a desk out in a
+   *                                   popout or a meeting room included;
    *   { kind: 'popout', channel, agent }  its desk;
    *   { kind: 'meeting', channel, agents } its participants.
    * A popout and a room look their desks up in `all`, so one whose floor was
    * put away while it was out still reports.
+   *
+   * A desk out in a popout or a room is counted by that window *and* by its
+   * floor's tab (costmo, 2026-11-19: "If there's a nudge or pending
+   * permission/decision prompt, I want for the tab background to have the
+   * animated background color effect ... even if the agent is in a room on
+   * the floor"). The first cut left such a desk out of the floor tab so a
+   * tray list of windows counted it once, and the floor tab then stopped
+   * pulsing for exactly the desks he was talking to in a room. A count
+   * summed over windows can now hold a desk twice; the board's own count
+   * (the bell, the Dock) is unchanged and counts each desk once.
    */
-  function attentionDesks({ here, all, scope, out }) {
+  function attentionDesks({ here, all, scope }) {
     const pick = (chs, keep) => chs.flatMap((c) => (c.desks ?? []).filter((d) => keep(c.channel, d)).map((d) => ({ channel: c.channel, d })));
     if (scope?.kind === 'popout') return pick(all ?? [], (ch, d) => ch === scope.channel && d.agent === scope.agent);
     if (scope?.kind === 'meeting') {
@@ -6078,7 +6131,7 @@
       return pick(all ?? [], (ch, d) => ch === scope.channel && set.has(d.agent));
     }
     const floors = (here ?? []).filter((c) => !scope?.floor || c.channel === scope.floor);
-    return pick(floors, (ch, d) => !out?.has(`${ch}|${d.agent}`));
+    return pick(floors, () => true);
   }
 
   /** What a list of desks adds up to: how many a nudge all would send to, and whether any is asking. */
@@ -6091,11 +6144,11 @@
    * first /api/floor answers nothing is known, and it says nothing is
    * pending rather than guess from an empty payload (`read` false).
    */
-  function attentionReport({ read, here, all, scope, out }) {
+  function attentionReport({ read, here, all, scope }) {
     if (!read) return { nudges: 0, asking: false, board: { nudges: 0, asking: false } };
     return {
-      ...attentionOf(attentionDesks({ here, all, scope, out })),
-      board: attentionOf(attentionDesks({ here, all, scope: { kind: 'floor', floor: null }, out: null })),
+      ...attentionOf(attentionDesks({ here, all, scope })),
+      board: attentionOf(attentionDesks({ here, all, scope: { kind: 'floor', floor: null } })),
     };
   }
 
@@ -8559,6 +8612,21 @@
       } finally {
         for (const b of all) b.disabled = false;
       }
+    } else if (act.dataset.act === 'signin') {
+      // The desk's Sign in: its host runs Claude Code's own sign-in, and the
+      // browser opens on that machine (POST /api/floor/signin). The box shows
+      // the wait until the host says Claude Code is signed in again.
+      const to = targetOf(act);
+      if (!to || act.disabled) return;
+      act.disabled = true;
+      try {
+        await post('./api/floor/signin', { channel: to.channel, agent: to.agent });
+        ui.signingIn.set(`${to.channel}|${to.agent}`, Date.now());
+        tick();
+      } catch (err) {
+        act.disabled = false;
+        flash(act, String(err.message).slice(0, 60));
+      }
     } else if (act.dataset.act === 'stop') {
       // Ask first. Nothing else in this panel throws work away, and a turn
       // three minutes in is worth a sentence of confirmation.
@@ -9048,7 +9116,6 @@
     here: onFloor(),
     all: floor.channels ?? [],
     scope: attentionScope(),
-    out: ui.popout || ui.meeting ? null : outsNow(ui.outs, Date.now()),
   });
 
   /** Work the report out again, and move its version only when it changed. */

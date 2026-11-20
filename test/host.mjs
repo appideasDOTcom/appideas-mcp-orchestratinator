@@ -24,6 +24,7 @@ import net from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { userInfo } from 'node:os';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale, parentPort, readParentAnswer, askParent, dialogBackend } from '../host/dialog.js';
 import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads, fetchUpload } from '../host/uploads.js';
 
@@ -216,6 +217,22 @@ function fixture() {
     `  }`,
     `  process.stderr.write('stand-in: unknown mcp subcommand\\n'); process.exit(2);`,
     `}`,
+    // `claude auth status --json` and `claude auth login`, as 2.1.329 answers
+    // them (host/auth.js): signed out while signed-out.flag exists; a login
+    // takes signin-delay.flag ms (300 by default) and signs in, or fails with
+    // signin-fail.flag's words on stderr. Each call is logged with the USER
+    // it was given, because without one Claude Code reads a signed-in Mac as
+    // signed out. Not a window, so before the argv log.
+    `if (process.argv[2] === 'auth') {`,
+    `  const OUT = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
+    `  fs.appendFileSync(${JSON.stringify(`${FIX}/auth.log`)}, process.argv.slice(3).join(' ') + ' USER=' + (process.env.USER || '') + '\\n');`,
+    `  if (process.argv[3] === 'status') { const out = fs.existsSync(OUT); process.stdout.write(JSON.stringify({ loggedIn: !out, authMethod: out ? 'none' : 'claude.ai' }) + '\\n'); process.exit(out ? 1 : 0); }`,
+    `  if (process.argv[3] !== 'login') process.exit(2);`,
+    `  let fail = ''; try { fail = fs.readFileSync(${JSON.stringify(`${FIX}/signin-fail.flag`)}, 'utf8').trim(); } catch {}`,
+    `  let delay = 300; try { delay = Number(fs.readFileSync(${JSON.stringify(`${FIX}/signin-delay.flag`)}, 'utf8').trim()) || 300; } catch {}`,
+    `  setTimeout(() => { if (fail) { process.stderr.write('Opening browser to sign in\u2026\\n' + fail + '\\n'); process.exit(1); } fs.rmSync(OUT, { force: true }); process.exit(0); }, delay);`,
+    `  return;`,
+    `}`,
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     // The one variable a placeholder desk's window is given (paneEnv in
     // host/window.js), one line per window started, as the pane has it.
@@ -313,6 +330,11 @@ function fixture() {
     // off the pane's bottom line. A reopen must refuse such a window.
     `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
     String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
+    // Started while Claude Code is signed out, the window says so where
+    // 2.1.329 does, at the right of the status row under the composer, and
+    // never redraws it: a sign-in made elsewhere is not taken by this one.
+    `const SIGNED_OUT_FLAG = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
+    String.raw`if (fs.existsSync(SIGNED_OUT_FLAG)) process.stdout.write('\n' + '\u2500'.repeat(60) + '\n\u276f \n' + '\u2500'.repeat(60) + '\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)          Not logged in \u00b7 run /login\n');`,
     // And a flag file that leaves the window asking something: a permission
     // menu (`bash`), a one-question form (`form`) or one with previews
     // (`preview`), drawn once at the bottom
@@ -2216,6 +2238,91 @@ try {
   eq((await pickAsk()).status, 200, 'a request for the folder dialog is queued for a host that will get it too late');
   assert(await until(() => (/not opening the folder dialog — it was asked for/.test(host.log) ? true : null), 8000), 'the host says it is not opening one, and why');
   eq([dialogLog().length, await pickAt()], [staleCalls, staleAt], 'and no dialog opened, and nothing was said to the board as if one had');
+
+  /* ── Claude Code signed out on this machine ─────────────────────────────────
+   * costmo, 2026-11-19: a desk on a machine where Claude Code is signed out
+   * says so, and its Sign in has the host run Claude Code's own sign-in
+   * (host/auth.js). The stand-in answers `auth status` and `auth login` from
+   * files, and a window started signed out draws the footer 2.1.329 draws. */
+  console.log('\n  Claude Code signed out on this machine');
+  host.kill('SIGTERM');
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+  host = null;
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  writeFileSync(`${FIX}/signed-out.flag`, '');
+  rmSync(`${FIX}/auth.log`, { force: true });
+  const soAuthLog = () => (existsSync(`${FIX}/auth.log`) ? readFileSync(`${FIX}/auth.log`, 'utf8') : '');
+  // Started with USER and LOGNAME empty, as a parent other than launchd may
+  // start it: Claude Code finds its sign-in by user, so the host fills them.
+  host = startHost('host-test-1', { USER: '', LOGNAME: '' });
+  const so = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && d?.signin ? d : null; }, 15000);
+  assert(!!so, 'a host on a machine where Claude Code is signed out says so at registration, and its desk carries Sign in');
+  eq([so?.signin?.ok, so?.signin?.host], [true, 'Test Mac'], 'which can be pressed, and names the machine');
+  eq(so?.nudge?.code, 'signed_out', 'the bell does not ring a desk that cannot answer');
+  eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, true, 'and the host is listed signed out');
+  assert(new RegExp(`^status --json USER=${userInfo().username}$`, 'm').test(soAuthLog()),
+    `Claude Code is asked with USER filled in, which this host was started without — ${JSON.stringify(soAuthLog())}`);
+  const soRefused = await chat('free', 'are you there?');
+  const soBody = await soRefused.json();
+  eq([soRefused.status, soBody.code], [409, 'signed_out'], 'a message is refused before it is queued');
+  assert(/signed out on Test Mac.*Sign in/.test(soBody.error ?? ''), `in words that name the machine and the remedy on the desk — ${soBody.error}`);
+  assert(!clean(received()).includes('are you there?'), 'and nothing is typed into the window');
+
+  // The desk's window, opened on its conversation while signed out: it draws
+  // the footer, and a sign-in made elsewhere leaves it standing.
+  const soSoArgv = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
+  const soSoOpenAt = soSoArgv().length;
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: the desk\'s window is opened on its conversation');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'the fixture: the window is up');
+  const soDeskTurns = async () => (await turns('free')).rows ?? [];
+  const soHostLines = async () => (await soDeskTurns()).filter((r) => r.tool_name === 'host').map((r) => r.text);
+
+  // A sign-in that does not finish: said on the desk, still signed out.
+  writeFileSync(`${FIX}/signin-fail.flag`, "Couldn't save your login.");
+  const soFailPress = await json('/api/floor/signin', { channel: CH, agent: 'free' });
+  eq(soFailPress.status, 200, 'Sign in is taken');
+  const soFailRows = await until(async () => { const rows = await soDeskTurns(); return rows.some((r) => r.role === 'error' && /not signed in/.test(r.text ?? '')) ? rows : null; }, 10000);
+  assert((soFailRows ?? []).some((r) => r.tool_name === 'host' && /sign-in is open in the browser on Test Mac/.test(r.text ?? '')), 'the desk says the sign-in is open in the browser, and on which machine');
+  assert((soFailRows ?? []).some((r) => r.role === 'error' && r.text === "not signed in: it ended with code 1: Couldn't save your login."),
+    `one that fails says so in Claude Code's own last words — ${JSON.stringify((soFailRows ?? []).filter((r) => r.role === 'error').map((r) => r.text))}`);
+  assert(/^login USER=\S+$/m.test(soAuthLog()), 'it ran Claude Code\'s own sign-in, with USER');
+  eq(deskOf(await floor(), 'free')?.signin?.ok, true, 'and the desk still offers Sign in');
+  rmSync(`${FIX}/signin-fail.flag`, { force: true });
+
+  // One that does, pressed twice while it is open.
+  writeFileSync(`${FIX}/signin-delay.flag`, '1500');
+  const soLogins = () => (soAuthLog().match(/^login /gm) ?? []).length;
+  const soLoginsBefore = soLogins();
+  eq((await json('/api/floor/signin', { channel: CH, agent: 'free' })).status, 200, 'Sign in again');
+  await until(() => (soLogins() > soLoginsBefore ? true : null), 5000);
+  eq((await json('/api/floor/signin', { channel: CH, agent: 'free' })).status, 200, 'and once more while the first is open');
+  const soSignedIn = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && !d.signin ? d : null; }, 20000);
+  assert(!!soSignedIn, 'once Claude Code is signed in again the desk stops offering Sign in');
+  eq(soLogins() - soLoginsBefore, 1, 'a press while a sign-in is open opens no second one');
+  const soLines = await soHostLines();
+  assert(soLines.some((t) => /already open in the browser on Test Mac/.test(t ?? '')), `and says the first is still open — ${JSON.stringify(soLines.slice(-6))}`);
+  assert(soLines.includes('signed in to Claude Code on Test Mac'), 'the desk says it is signed in');
+  const soReopened = soSoArgv().slice(soSoOpenAt).split('\n').filter((l) => l.includes(`--resume ${SESSION_ID}`));
+  eq(soReopened.length, 2, `the window that still said it was signed out was reopened on its own conversation — ${JSON.stringify(soSoArgv().slice(soSoOpenAt))}`);
+  assert(soLines.some((t) => /still said Claude Code was signed out, so the host reopened it on the same conversation/.test(t ?? '')), 'and the desk says why');
+  assert(soSignedIn.nudge?.ok === true, 'the bell rings again');
+  eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, false, 'the host is listed signed in');
+  eq((await chat('free', 'back again')).status, 200, 'a message is taken');
+  assert(await until(() => (clean(received()).includes('back again') ? true : null), 15000), 'and reaches the window');
+  rmSync(`${FIX}/signin-delay.flag`, { force: true });
+
+  // A window that records "Not logged in" is believed at once, not at the
+  // next heartbeat, even while `auth status` says signed in (a credential
+  // that is there and no longer taken); a reply from a window ends it.
+  appendTurn({ type: 'assistant', uuid: `nli-${Date.now()}`, timestamp: new Date().toISOString(), isApiErrorMessage: true,
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } });
+  const soSaidOut = await until(async () => (deskOf(await floor(), 'free')?.signin ? true : null), 8000);
+  assert(!!soSaidOut, 'a window that records "Not logged in" puts Sign in on the desk within seconds');
+  appendTurn({ type: 'assistant', uuid: `reply-${Date.now()}`, timestamp: new Date().toISOString(),
+    message: { role: 'assistant', content: [{ type: 'text', text: 'Hello again.' }] } });
+  assert(await until(async () => (deskOf(await floor(), 'free')?.signin ? null : true), 8000), 'and a reply from a window takes it away');
+  rmSync(`${FIX}/signed-out.flag`, { force: true });
 
   /* ── which board this host serves ───────────────────────────────────────────
    * This used to be `originOf(found[0].url)` — the first desk the filesystem

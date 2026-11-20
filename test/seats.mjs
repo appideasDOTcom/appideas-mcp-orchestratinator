@@ -117,6 +117,9 @@ function fixture() {
     `const STARTS = ${JSON.stringify(STARTS)};`,
     `const argv = process.argv.slice(2);`,
     `if (argv[0] === 'agents') { process.stdout.write('[]'); process.exit(0); }`,
+    // The host asks Claude Code whether it is signed in at every heartbeat
+    // (host/auth.js). Signed in, as 2.1.329 answers it, and not a window.
+    `if (argv[0] === 'auth') { process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) + '\\n'); process.exit(0); }`,
     // `claude mcp add|remove -s local`, as the host suite's stand-in does it.
     `if (argv[0] === 'mcp') {`,
     `  const CFG = path.join(HOME, '.claude.json');`,

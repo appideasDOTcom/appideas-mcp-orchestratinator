@@ -192,6 +192,10 @@ export function lostWorkWords(item) {
     // (reconnectDue), so a lost one is nothing to say.
     case 'reconnect':
       return null;
+    // A sign-in waits on a person in a browser; a host that restarted under
+    // it may have left the page open with nobody listening for it.
+    case 'signin':
+      return 'the sign-in may not have finished: the host restarted while it was open. If the desk still says Claude Code is signed out, press Sign in again';
     default:
       return `"${item?.kind}" may not have happened: the host restarted before it was done. Check the desk and do it again if it is needed`;
   }
@@ -417,6 +421,41 @@ export function askingWhy(pending) {
     error: `The window is asking ${what}. A message typed now would go into that, not the conversation: answer it, or cancel it, then send this.`,
     code: 'asking',
   };
+}
+
+/**
+ * A desk whose host's Claude Code is signed out takes no message: the window
+ * answers it with an API error, "Not logged in · Please run /login" (measured
+ * on 2.1.329, a window with no credentials), and the floor used to show that
+ * line, a command for the operator, as the desk's answer. So it is refused
+ * before it is queued, in words that name the remedy the floor runs itself:
+ * the desk's Sign in, which has its host run Claude Code's own sign-in
+ * (costmo, 2026-11-19). `h` is the hosted row with its host's columns.
+ */
+export function signedOutWhy(h) {
+  if (!h?.host_signed_out) return null;
+  return {
+    error: `Claude Code is signed out on ${h.host_name ?? h.host_id}, so the window cannot answer. Press Sign in on the desk, finish in the browser that opens there, then send this.`,
+    code: 'signed_out',
+  };
+}
+
+/**
+ * Whether the desk's Sign in can be pressed, and in what words not: a host to
+ * run it, live, that takes `signin` work (a host from before it would drop
+ * it), and on whose machine Claude Code is in fact signed out. Not
+ * deliverable(): an editor holding the conversation changes nothing about
+ * the machine's sign-in, so it is no reason to refuse one.
+ */
+export function signinWhyNot(h, nowMs = Date.now()) {
+  if (!h) return { error: 'No host on this board is running that repo, so there is nothing to sign in from.', code: 'not_hosted' };
+  const name = h.host_name ?? h.host_id;
+  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+    return { error: `The host for this desk (${name}) is offline.`, code: 'host_offline' };
+  }
+  if (!h.host_signins) return { error: `${name} runs a build from before Sign in. Update it, or sign in to Claude Code on that machine.`, code: 'host_no_signin' };
+  if (!h.host_signed_out) return { error: `Claude Code is signed in on ${name}.`, code: 'signed_in' };
+  return { hosted: h };
 }
 
 /**
@@ -2886,6 +2925,10 @@ export function buildFloor(store, live = null, sessions = null) {
       host_tmux: h.host_tmux ?? null,
       // Which file the binding lives in — see the column's note in db.js.
       scope: h.scope ?? null,
+      // Claude Code's sign-in on the host's machine (host/auth.js), read by
+      // the desk's `signin` and `nudge` below. Hand-picked like the rest.
+      host_signins: !!h.host_signins,
+      host_signed_out: !!h.host_signed_out,
     });
   }
   // One agent, several sessions: which desks are a second session of an
@@ -3131,12 +3174,24 @@ export function buildFloor(store, live = null, sessions = null) {
           // whose session had ended the day before. `opens` carries the
           // difference now: the bell rings on such a desk on purpose, and says
           // first that it will open the window — see nudgeable().
+          // Claude Code signed out on this desk's host: the desk says so and
+          // offers Sign in (the host runs `claude auth login`), decided here
+          // so the box and the route refuse the same things. Null while it
+          // is signed in, or with no host to say.
+          signin: h?.host_signed_out
+            ? (() => {
+              const v = signinWhyNot(h, nowMs);
+              return v.error
+                ? { ok: false, code: v.code, reason: v.error, host: h.host_name ?? h.host_id }
+                : { ok: true, host: h.host_name ?? h.host_id };
+            })()
+            : null,
           nudge: (() => {
             const v = nudgeable(h, nowMs);
             // A window asking something takes nothing typed: the chat route
             // refuses it in these words, so the bell, Nudge and a meeting
             // room read the same verdict before anything is sent.
-            const ask = v.error ? null : askingWhy(live?.pending.get(k));
+            const ask = v.error ? null : askingWhy(live?.pending.get(k)) ?? signedOutWhy(h);
             return v.error
               ? { ok: false, code: v.code, reason: v.error }
               : ask
@@ -3280,6 +3335,10 @@ export function buildFloor(store, live = null, sessions = null) {
     // Whether it fetches attachments (issue #31; hosts.uploads): the box
     // dims its paperclip, with why, for a desk whose host does not.
     uploads: !!h.uploads,
+    // Whether it runs Claude Code's sign-in for `signin` work, and whether
+    // Claude Code is signed out on its machine now (host/auth.js).
+    signin: !!h.signins,
+    signed_out: !!h.signed_out,
   }));
   for (const [hostId, r] of live?.refused ?? []) {
     if (hosts.some((h) => h.host_id === hostId)) continue;
@@ -3386,7 +3445,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // before them is refused files rather than handed ids it would ignore.
     // `reconnect`: it types `/mcp reconnect` into a floor window whose tools
     // dropped, when the board asks (reconnectDue).
-    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true);
+    // `signin`: it runs Claude Code's sign-in for `signin` work, and
+    // `signed_out` is its reading of Claude Code on its machine (host/auth.js).
+    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true,
+      { signins: req.body?.signin === true, signedOut: req.body?.signed_out === true });
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3734,7 +3796,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         if (n.kind === 'leave') store.clearRoomTold(n.channel, n.agent);
         continue;
       }
-      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent)))) continue;
+      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent))) || signedOutWhy(check.hosted)) continue;
       store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others) });
       live.wake(check.hosted.host_id);
       if (n.kind === 'enter') store.setRoomTold(n.channel, n.agent, n.room);
@@ -3936,7 +3998,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
     const check = hostedOrWhyNot(channel, agent);
     if (check.error) return res.status(409).json(check);
-    const asking = askingWhy(live.pending.get(deskKey(channel, agent)));
+    const asking = askingWhy(live.pending.get(deskKey(channel, agent))) ?? signedOutWhy(check.hosted);
     if (asking) return res.status(409).json(asking);
 
     const h = check.hosted;
@@ -5144,6 +5206,25 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     live.wake(check.hosted.host_id);
     store.logAdmin(channel, 'permission.pressed', { target: agent, detail: `${choice} at an unreadable prompt` });
     res.json({ ok: true, choice });
+  });
+
+  /**
+   * The desk's Sign in: its host runs Claude Code's own sign-in (`claude auth
+   * login`), which opens the browser on that machine and ends when the person
+   * has finished there (costmo, 2026-11-19: "Host signs in"). The host says
+   * on the desk that it opened, and how it ended; its next registration
+   * carries the new reading, which is what takes the box away.
+   */
+  router.post('/api/floor/signin', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const check = signinWhyNot(store.hostedDesk(channel, agent));
+    if (check.error) return res.status(409).json(check);
+    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'signin', {});
+    live.wake(check.hosted.host_id);
+    store.logAdmin(channel, 'claude.signin', { target: agent, detail: `on ${check.hosted.host_name ?? check.hosted.host_id}` });
+    res.json({ ok: true, host: check.hosted.host_name ?? check.hosted.host_id });
   });
 
   router.post('/api/floor/interrupt', auth.adminGuard, (req, res) => {

@@ -98,21 +98,27 @@ for (let i = 0; i < 40 && (nudgesTo('bo') < 1 || nudgesTo('fay') < 1); i++) awai
 ok(nudgesTo('bo') === 1 && nudgesTo('fay') === 1, 'the host was handed "nudge" once for bo and once for fay', JSON.stringify(work().map((w) => `${w.agent}:${w.payload?.text}`)));
 ok(nudgesTo('ann') + nudgesTo('cy') + nudgesTo('gil') === 0, 'and nothing for desks with nothing waiting');
 
-console.log('\na popout and a meeting room report their own desks, and the floor tab lets them go');
+console.log('\na popout and a meeting room report their own desks, and the floor tab still counts them (costmo, 2026-11-19)');
 const pop = await open({ base: `${base}/?popout=1&channel=alpha&agent=bo`, ready: `document.readyState === 'complete'` });
 await until(pop, `window.orchAttention?.get().nudges === 1`, 'the popout reports bo');
 const p = await get(pop);
 ok(p.nudges === 1 && p.asking === false && p.board.nudges === 2, 'bo\'s popout: its one desk, and the board', JSON.stringify(p));
-await until(alpha, `window.orchAttention.get().nudges === 0`, 'alpha let bo go');
+// The row below must read a floor tab that knows bo is out, not one that has
+// not heard the popout's `here` yet (which would count bo either way). bo's
+// panel on the floor offers "Bring chat back here" only once it has heard.
+await alpha.evalJs(`window.floorOpenDesk('alpha', 'bo')`);
+await until(alpha, `!!document.querySelector('[data-act="bring-back"][data-agent="bo"]')`, 'the floor tab knows bo is out in its popout');
 a = await get(alpha);
-ok(a.nudges === 0 && a.board.nudges === 2, 'the floor tab no longer counts bo, so a list of windows counts it once; the board still does', JSON.stringify(a));
+ok(a.nudges === 1 && a.board.nudges === 2, 'the floor tab still counts bo, out in its popout, so the tab pulses for it; the board counts it once', JSON.stringify(a));
 db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES ('alpha', 'cy', 'gil', '"for gil"')`).run();
 const room = await open({ base: `${base}/?meeting=new&channel=alpha&agents=ann,gil`, ready: `document.readyState === 'complete'` });
 await until(room, `window.orchAttention?.get().asking === true && window.orchAttention.get().nudges === 1`, 'the room reports ann asking and gil waiting');
 const m = await get(room);
 ok(m.asking === true && m.nudges === 1, 'a meeting room with ann and gil: ann asking, gil\'s mail waiting', JSON.stringify(m));
-await until(alpha, `window.orchAttention.get().asking === false`, 'alpha let ann go');
-ok(true, 'and the floor tab is no longer asking: ann is the room\'s');
+await alpha.evalJs(`window.floorOpenDesk('alpha', 'ann')`);
+await until(alpha, `/meeting room/.test(document.querySelector('[data-act="bring-back"][data-agent="ann"]')?.textContent ?? '')`, 'the floor tab knows ann is in the room');
+a = await get(alpha);
+ok(a.asking === true, 'and the floor tab is still asking for ann, who is in the room: the tab pulses amber for a prompt in a room', JSON.stringify(a));
 // The To chips narrowed to ann: the app's nudge all is still every
 // participant with something waiting, whatever the chips choose.
 await room.press('#floor-panel [data-act="m-to"][data-agent="ann"]');

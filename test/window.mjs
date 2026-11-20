@@ -272,6 +272,38 @@ async function main() {
     assert(/esc to interrupt/i.test(W.footOf(QUEUED_BOX)),
            'and one whose status line says it is, is');
 
+    // Claude Code signed out on the machine (costmo, 2026-11-19; host/auth.js).
+    // Captured from a real 2.1.329 window with no credentials, onboarding
+    // done, 120 columns: idle, then after a message was sent into it.
+    const R120 = '─'.repeat(120);
+    const SIGNED_OUT_IDLE = [
+      ' ▐▛███▛█   Claude Code v2.1.329',
+      '▝▜██████▀  Opus 5.5 · API Usage Billing',
+      R120,
+      '❯ ',
+      R120,
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents                                       Not logged in · run /login',
+      '                                                                                                    ◐ medium · /effort',
+    ].join('\n');
+    const SIGNED_OUT_SENT = [
+      '❯ say hi',
+      '  ⎿  Not logged in · Please run /login',
+      R120,
+      '❯ Once fixed, resend your message',
+      R120,
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+      '                                                                                            Not logged in · run /login',
+      '                  tmux focus-events off · add \'set -g focus-events on\' to ~/.tmux.conf and reattach for focus tracking',
+    ].join('\n');
+    assert(W.signedOutOf(SIGNED_OUT_IDLE), 'a window says Claude Code is signed out at the right of the status row under its composer');
+    assert(W.signedOutOf(SIGNED_OUT_SENT), 'and still says it after a message was sent into it, with another line under it');
+    // At 80 columns the row wraps: the words may break across two lines.
+    assert(W.signedOutOf([RULE, '❯ ', RULE, '  ⏵⏵ auto mode on (shift+tab to cycle)            Not logged in ·', 'run /login'].join('\n')),
+           'and when the status row wraps at 80 columns');
+    assert(!W.signedOutOf(QUOTES_BUSY), 'a signed-in window is not');
+    assert(!W.signedOutOf(['  ⏺ It said "Not logged in · run /login" earlier.', RULE, '❯ ', RULE, '  auto mode on (shift+tab to cycle)'].join('\n')),
+           'nor one whose conversation quotes the words above the composer');
+
     // Telling a live prompt from a conversation that is talking about one.
     //
     // Both of these are real captures of this repo's own window. The first is a

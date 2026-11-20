@@ -997,6 +997,72 @@ relaunch healed by itself, and a 6-minute one was reconnected by the host
 30 s and 33 s after, on both desks. A room opened and ended put both notices in the
 window, filed as `meeting-room` lines.
 
+## Claude Code signed out on a desk's machine
+
+costmo, 2026-11-19, in the release-prep round (meeting room 22 with
+orchestratinator-desktop-dev): "Host signs in". Measured first on 2.1.329, a
+window with no credentials and onboarding done, on a tmux socket of its own.
+Idle, it is an ordinary composer with "Not logged in · run /login" at the
+right of the status row under it, and nothing in the transcript. Sent a
+message, it writes one assistant record, `isApiErrorMessage: true`, with the
+text "Not logged in · Please run /login", and the composer reads "Once fixed,
+resend your message". So the floor drew the desk as idle, then showed the
+operator a command as its answer. Both are faults by this file's own rules.
+
+- **The host reads the machine, not each window** (host/auth.js).
+  `claude auth status --json` (`loggedIn`, about 0.25 s at load 67) at every
+  heartbeat, and at once when the relay sees that error record (`noteTurn`).
+  It says the result at registration (`signed_out`, kept on the host's row).
+  The window's record counts on its own (`auth.said`), because a credential
+  that is there and no longer accepted can still read as signed in to `auth
+  status`. A reply from any window ends that. A footer read on every window
+  at every tick was the other way, and was not taken: a capture per desk per
+  tick, for a fact about the machine.
+- **USER and LOGNAME are filled in when missing** (`claudeEnv`). With HOME
+  and PATH alone Claude Code says a signed-in Mac is signed out (the app's
+  agent, measured 2026-11-09). launchd gives a LaunchAgent both (read off the
+  running host); a host started by another parent may not have them, and
+  every desk on it would then read as signed out. `test:host` starts its host
+  with both empty for that row.
+- **The board refuses what would fail, in words** (`signedOutWhy`, beside
+  `askingWhy`): a message, the bell, a room's notice. The desk carries
+  `signin` (`signinWhyNot`), and the panel draws a box with **Sign in** in
+  the prompt box's place. A prompt the window shows outranks it. The tab
+  pulses for it as for a question (`deskAsking`), because nothing the desk is
+  asked can be answered until he presses it.
+- **Sign in is the host running Claude Code's own sign-in** (`signin` work,
+  `POST /api/floor/signin`, an audit row `claude.signin`). `claude auth login`
+  with no terminal opens the browser on that machine and waits on a local
+  port until the person finishes (the desktop app runs it the same way). It
+  waits on a person, so it is started and not awaited, one at a time: a
+  second press says the first is still open. A failure is an error turn in
+  Claude Code's own last words. The app's own `?signin=1` seam was offered
+  by desktop-dev and not used: the host's way is the same on the Docker
+  board and in the app.
+- **A window still signed out after the sign-in is reopened on its
+  conversation.** Whether a running window takes a sign-in made by another
+  process is not measured: it needs a real account, and an agent cannot sign
+  in. So the host reads each window (`signedOutOf`, the rows under the
+  composer's bottom rule, rejoined for an 80-column wrap) for up to 3 s, and
+  reopens only one that still says it. A signed-out window cannot be
+  working. The reopen runs on the host's line (`later`, drained before each
+  work poll), and the board hears "signed in" only after it, so nothing is
+  typed into a window while it is being reopened.
+- **A host says it can** (`signin: true` at registration, `hosts.signins`).
+  A host from before it would drop the work, so the box dims Sign in with
+  why. It is a field added, so the protocol number did not move.
+
+Not measured, and left: the reopen above on a real window (whether it is
+needed at all), and `claude auth login` started from a launchd host on a
+real desktop (the app's own run of it is measured). The first real sign-out
+on his machine answers both. How it is tested: `test:host` ("Claude Code
+signed out on this machine", the stand-in answers `auth status` and `auth
+login` from files and draws the footer), `test:floor` ("Claude Code signed
+out on a host"), `test:window` (the reader, on the captured screens), and
+**check-signin.mjs** in **verify-ui-change**, with
+`mutants-signin.page.json` beside it and `mutants-signin.suite.json` in
+**mutate-in-a-copy**.
+
 ## A file attached to a message
 
 Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file
@@ -1150,7 +1216,7 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   `test:window`, `test:host` and the press route's in `test:floor`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the release page checks (fourteen since the settings round, 2026-11-19), on the Node and the
+  Every suite and the release page checks (fifteen since the sign-in round, 2026-11-19), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
@@ -2059,9 +2125,22 @@ two agents in the room, and are open to his reversal:
 - **Asking is a prompt**: a permission menu, a question form or a startup
   question on a live desk. An error turn sets `awaiting_kind` too, and the
   floor counts it in "need you", but nothing waits on an answer to it.
-- **A desk out in a popout or a room is that window's**, not the floor
-  tab's, so his tray list of windows counts it once. The board's values,
-  for the bell and the Dock, count every desk.
+- **A desk out in a popout or a room counts on its floor's tab as well
+  as in that window** (costmo, the same evening, reversing the first cut:
+  "If there's a nudge or pending permission/decision prompt, I want for
+  the tab background to have the animated background color effect ...
+  even if the agent is in a room on the floor"). The first cut gave such
+  a desk to its window only, so the tray's list of windows counted it
+  once. But a room window has no tab strip, so the tab stopped pulsing
+  for exactly the desks he was talking to in a room. Now a sum over
+  windows can count a desk twice. The board's values (the bell, the
+  Dock) still count every desk once. A floor tab's nudge all reaches
+  such a desk too, because the badge is the number a click sends, and
+  the room folds that nudge into its transcript like any user turn it
+  did not send. Which desks are out is the page's (`ui.outs`), so
+  `test:floor` cannot see this rule: check-attention's page mutant (the
+  old rule put back) is what holds it. Do not bring back "counted
+  once".
 - **A room's nudge all is every participant with something waiting**,
   whatever its To chips choose, and goes through the room's own send so
   the transcript records it.
@@ -3672,6 +3751,7 @@ operator's live floor.
   | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
+  | `host/auth.js` | `test:host` |
   | `src/updates.js`, `host/update.js` | `test:update` |
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |

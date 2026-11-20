@@ -476,6 +476,14 @@ export function openDb(path) {
   // floor window whose tools dropped (reconnectDue in src/floor.js). On the
   // row for `seats`' reason. A host from before it would drop the work.
   addColumn(db, 'hosts', 'reconnects', 'INTEGER NOT NULL DEFAULT 0');
+  // Claude Code signed out on the host's machine (costmo, 2026-11-19: the
+  // host signs in on the click). `signins`: the host takes `signin` work and
+  // runs `claude auth login` for it; a host from before it would drop the
+  // work, so the board offers Sign in only on one that says so. `signed_out`:
+  // its own reading at its last registration (host/auth.js), on the row for
+  // `seats`' reason, so a restarted board still draws the desks that way.
+  addColumn(db, 'hosts', 'signins', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'hosts', 'signed_out', 'INTEGER NOT NULL DEFAULT 0');
   // A host's work, past being handed out (milestone audit 2026-11-17,
   // finding 4). `boot`: which run of the host took it, so the next run can
   // tell work it never finished from work it is doing. `done_at`: the host
@@ -1496,14 +1504,15 @@ export function makeStore(db) {
 
     // ─── Hosting ────────────────────────────────────────────────────────────
     upsertHost: db.prepare(
-      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, reconnects, last_seen)
-       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, @reconnects, datetime('now'))
+      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, reconnects, signins, signed_out, last_seen)
+       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, @reconnects, @signins, @signed_out, datetime('now'))
        ON CONFLICT(host_id) DO UPDATE SET
          name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats,
-         uploads = excluded.uploads, reconnects = excluded.reconnects, last_seen = datetime('now')`
+         uploads = excluded.uploads, reconnects = excluded.reconnects, signins = excluded.signins,
+         signed_out = excluded.signed_out, last_seen = datetime('now')`
     ),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, registered_at, last_seen FROM hosts ORDER BY name`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
     hostReconnects: db.prepare(`SELECT reconnects FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
@@ -1545,14 +1554,16 @@ export function makeStore(db) {
     listHostedDesks: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
-              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
+              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
+              h.signins AS host_signins, h.signed_out AS host_signed_out
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
     hostedDesk: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
-              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
+              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
+              h.signins AS host_signins, h.signed_out AS host_signed_out
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id
         WHERE d.channel = ? AND d.agent = ?`
@@ -2178,8 +2189,10 @@ export function makeStore(db) {
     // `seats`: whether it said it can put a second desk in a folder; a host
     // from before seats says nothing, and is not asked for one.
     // `uploads`: whether it fetches a message's attachments (issue #31).
-    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false, reconnects = false) =>
-      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0, reconnects: reconnects ? 1 : 0 }).changes,
+    // `signins` / `signedOut`: it runs Claude Code's sign-in for `signin`
+    // work, and whether Claude Code is signed out there now (host/auth.js).
+    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false, reconnects = false, { signins = false, signedOut = false } = {}) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0, reconnects: reconnects ? 1 : 0, signins: signins ? 1 : 0, signed_out: signedOut ? 1 : 0 }).changes,
     hostTakesUploads: (hostId) => !!q.hostUploads.get(hostId)?.uploads,
     hostReconnects: (hostId) => !!q.hostReconnects.get(hostId)?.reconnects,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,

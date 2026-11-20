@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 // The host<->board protocol this tree speaks: every registration a suite
@@ -3604,6 +3604,8 @@ try {
     eq(pg.deskAsking(desk('a', { kind: 'permission_prompt' })), true, 'and so is the notification\'s permission_prompt');
     eq(pg.deskAsking(desk('a', { startup: true })), true, 'and a startup question before any session exists');
     eq(pg.deskAsking(desk('a', { kind: 'error' })), false, 'an error turn is not a prompt: nothing waits on an answer');
+    eq(pg.deskAsking({ ...desk('a'), signin: { ok: true, host: 'box' } }), true, 'a desk whose host\'s Claude Code is signed out is waiting on the operator\'s Sign in, so the tab pulses for it (costmo, 2026-11-19)');
+    eq(pg.deskAsking({ ...desk('a', { live: false }), signin: { ok: true, host: 'box' } }), false, 'not when the desk is not live');
     eq(pg.deskAsking(desk('a', { kind: 'permission_request', live: false })), false, 'a desk that is not live is not asking, as the board counts "need you"');
     eq(pg.deskNudgeable(desk('a', { unread: 2 })), true, 'unread mail is a nudge waiting');
     eq(pg.deskNudgeable(desk('a', { assigned: 1 })), true, 'and so is an unclaimed task assigned to it');
@@ -3616,25 +3618,27 @@ try {
     ];
     const shelf = { channel: 'old', archived: true, desks: [desk('hal', { unread: 1, kind: 'permission_request' })] };
     const all = [...here, shelf];
-    const rep = (scope, out = null, read = true) => pg.attentionReport({ read, here, all, scope, out });
+    const rep = (scope, read = true) => pg.attentionReport({ read, here, all, scope });
     const board = { nudges: 3, asking: true };
     eq(rep({ kind: 'floor', floor: 'lab' }), { nudges: 2, asking: true, board },
       'a floor tab counts its own floor: two desks a nudge would reach (not the refused one), one asking; the board is every floor not put away');
     eq(rep({ kind: 'floor', floor: 'qa' }), { nudges: 1, asking: false, board }, 'another floor\'s tab, its own floor only');
     eq(rep({ kind: 'floor', floor: null }), { nudges: 3, asking: true, board }, 'the all-floors tab is every floor not put away');
-    eq(rep({ kind: 'floor', floor: 'lab' }, new Set(['lab|dee', 'lab|bo'])), { nudges: 1, asking: false, board },
-      'a desk out in a popout or a meeting room is that window\'s, not the floor tab\'s, so a list of windows counts it once');
-    eq(rep({ kind: 'floor', floor: null }, new Set(['lab|dee'])).board, board, 'and the board\'s count, for the bell and the Dock, still has it');
+    // A desk out in a popout or a meeting room counts on its floor's tab too
+    // (costmo, 2026-11-19), so the tab pulses for it wherever it is. Which
+    // desks are out is the page's (ui.outs) and these decisions no longer
+    // take it, so no row here can see that rule: check-attention.mjs is
+    // where it is held, and its page mutant is the old rule put back.
     eq(rep({ kind: 'popout', channel: 'lab', agent: 'dee' }), { nudges: 0, asking: true, board }, 'a popout reports its desk');
     eq(rep({ kind: 'popout', channel: 'old', agent: 'hal' }), { nudges: 1, asking: true, board }, 'even one whose floor was put away while it was out');
     eq(rep({ kind: 'meeting', channel: 'lab', agents: ['bo', 'cy'] }), { nudges: 2, asking: false, board }, 'a meeting room reports its participants');
     eq(rep({ kind: 'meeting', channel: 'lab', agents: [] }), { nudges: 0, asking: false, board }, 'and a room not yet live, none');
-    eq(rep({ kind: 'floor', floor: 'lab' }, null, false), { nudges: 0, asking: false, board: { nudges: 0, asking: false } },
+    eq(rep({ kind: 'floor', floor: 'lab' }, false), { nudges: 0, asking: false, board: { nudges: 0, asking: false } },
       'before the first /api/floor answers it says nothing is pending, rather than guess');
 
     const order = pg.attentionNudges(pg.attentionDesks({ here: [{ channel: 'lab', desks: [
       desk('a', { unread: 1, opens: true }), desk('b', { unread: 1 }), desk('c'), desk('d', { assigned: 1, ok: false }), desk('e', { assigned: 1 }),
-    ] }], all: [], scope: { kind: 'floor', floor: null }, out: null }));
+    ] }], all: [], scope: { kind: 'floor', floor: null } }));
     eq(order.map((x) => `${x.channel}/${x.agent}${x.opens ? '+opens' : ''}`), ['lab/b', 'lab/e', 'lab/a+opens'],
       'nudge all types into the desks with something waiting, the open windows first, as the floor\'s bulk Nudge does');
   }
@@ -4745,6 +4749,54 @@ try {
     await regR(false);
     await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh('rex'), 'mcp-session-id': await connect('rex') } }).then((x) => x.text());
     eq(await askedIn(12000, { all: true }), [], 'a host that has not said it takes the work is never handed it');
+  }
+
+  console.log('\nClaude Code signed out on a host (costmo, 2026-11-19)');
+  {
+    const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const row = (more = {}) => ({ host_id: 'h-so', host_name: 'sobox', host_seen: nowIso, state: 'idle', host_signins: 1, host_signed_out: 1, ...more });
+    eq(signedOutWhy(row({ host_signed_out: 0 })), null, 'a desk whose host is signed in is not refused for it');
+    eq(signedOutWhy(row())?.code, 'signed_out', 'one whose host is signed out is');
+    assert(/signed out on sobox.*Sign in/.test(signedOutWhy(row())?.error ?? ''), 'in words that name the machine and the desk\'s remedy, never a command');
+    eq(signinWhyNot(null)?.code, 'not_hosted', 'Sign in needs a host');
+    eq(signinWhyNot(row({ state: 'offline' }))?.code, 'host_offline', 'a live one');
+    eq(signinWhyNot(row({ host_signins: 0 }))?.code, 'host_no_signin', 'that takes the work: a host from before it would drop it');
+    eq(signinWhyNot(row({ host_signed_out: 0 }))?.code, 'signed_in', 'and on whose machine Claude Code is signed out');
+    eq(signinWhyNot(row({ outside_pid: 4242 }))?.hosted?.host_id, 'h-so', 'an editor holding the conversation is no reason to refuse it: the sign-in is the machine\'s');
+    assert(/press Sign in again/.test(lostWorkWords({ kind: 'signin' }) ?? ''), 'a sign-in lost to a host restart is said, with what to do');
+
+    // End to end, through the routes: a host that says it is signed out.
+    const OCH = 'so-ch';
+    const oHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const regO = (more) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: oHK, body: JSON.stringify({ host_id: 'h-so', name: 'sobox', tmux: 'orch', protocol: PROTOCOL,
+      desks: [{ channel: OCH, agent: 'oli', cwd: '/repo/oli', session_id: 'sdk-oli', window: '@50' }], ...more }) }).then((x) => x.json());
+    const oDesk = async () => (await (await fetch(`${HOST}/api/floor`)).json()).channels.find((c) => c.channel === OCH)?.desks.find((d) => d.agent === 'oli');
+    const oHost = async () => (await (await fetch(`${HOST}/api/floor`)).json()).hosts.find((h) => h.host_id === 'h-so');
+    const oOp = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const oWork = () => fetch(`${HOST}/api/host/work?host_id=h-so&wait=0`, { headers: oHK }).then((x) => x.json()).then((b) => (b.work ?? []).map((w) => `${w.kind}:${w.agent}`));
+
+    await regO({ signin: true, signed_out: false });
+    eq((await oDesk())?.signin ?? null, null, 'signed in, the desk offers nothing');
+    await oWork();
+    await regO({ signin: true, signed_out: true });
+    eq((await oDesk())?.signin, { ok: true, host: 'sobox' }, 'signed out, the desk offers Sign in, naming the machine');
+    eq([(await oHost())?.signed_out, (await oHost())?.signin], [true, true], 'and the host row says both, as the host last said them');
+    eq((await oDesk())?.nudge?.code, 'signed_out', 'the bell does not ring it');
+    const chatted = await oOp('/api/floor/chat', { channel: OCH, agent: 'oli', text: 'hello?' });
+    eq([chatted.status, chatted.body.code], [409, 'signed_out'], 'a message is refused before it is queued');
+    eq(await oWork(), [], 'and nothing is handed to the host');
+    const pressed = await oOp('/api/floor/signin', { channel: OCH, agent: 'oli' });
+    eq([pressed.status, pressed.body.host], [200, 'sobox'], 'Sign in is taken');
+    eq(await oWork(), ['signin:oli'], 'and the host is handed the sign-in, for that desk');
+    const audit = await (await fetch(`${HOST}/api/activity?channel=${OCH}&limit=20`)).json();
+    assert((audit.rows ?? []).some((r) => r.kind === 'admin.claude.signin' && r.target === 'oli'), `with an audit row naming the desk — ${JSON.stringify((audit.rows ?? []).map((r) => r.kind))}`);
+    await regO({ signin: false, signed_out: true });
+    eq((await oDesk())?.signin?.code, 'host_no_signin', 'a host that has not said it takes the work: the desk says why Sign in cannot be pressed');
+    eq((await oOp('/api/floor/signin', { channel: OCH, agent: 'oli' })).body.code, 'host_no_signin', 'and the route refuses it in the same words');
+    await regO({ signin: true, signed_out: false });
+    eq((await oOp('/api/floor/signin', { channel: OCH, agent: 'oli' })).body.code, 'signed_in', 'nothing to do once Claude Code is signed in');
+    eq((await oOp('/api/floor/chat', { channel: OCH, agent: 'oli', text: 'hello again' })).status, 200, 'and a message is taken again');
+    await oWork();
   }
 
   console.log('\none agent, several sessions');

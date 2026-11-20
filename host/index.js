@@ -54,6 +54,7 @@ import * as D from './dialog.js';
 import * as H from './history.js';
 import * as U from './update.js';
 import * as UP from './uploads.js';
+import * as A from './auth.js';
 import { log, warn, error, failureOf, requestFailed } from './log.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
@@ -438,6 +439,7 @@ class Desk {
         this.host.emit({ type: 'model', channel: this.channel, agent: this.agent, session_id: this.lastSessionId, model: turn.model }, true);
       }
       if (turn.role === 'model') continue;
+      this.host.noteTurn(turn);
       this.host.emit({
         type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,
         role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
@@ -665,6 +667,13 @@ class Host {
     this.current = null;
     // A move's reopen intent, keyed like `desks`, for the rescan to set on the desk it creates (bind).
     this.intents = new Map();
+    // Claude Code's sign-in on this machine (host/auth.js): `status` is what
+    // `claude auth status` last said (null: never asked, or it could not
+    // say), `said` that a window has recorded "Not logged in" since the last
+    // sign-in or reply, and `signing` the sign-in running now, if any. Work
+    // for the host's own line that a sign-in left behind goes in `later`.
+    this.auth = { status: null, said: false, signing: null };
+    this.later = [];
     // A window moved to a fresh tmux server says so on its desk, in the host's
     // words — see "a tmux server that can no longer read a desk's folder" in
     // window.js. A window that is no desk of this board's is only logged.
@@ -810,7 +819,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, pending, boot: this.boot, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), pending, boot: this.boot, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -1703,6 +1712,118 @@ class Host {
     return say('open', { start });
   }
 
+  /**
+   * Whether Claude Code is signed out on this machine, as the board is told
+   * it: `claude auth status` says so, or a window has recorded "Not logged
+   * in" since the last sign-in or reply. The window's word counts on its own
+   * because it is what the window believes: a credential that is present but
+   * no longer accepted may still read as signed in to `auth status`.
+   */
+  signedOut() {
+    return this.auth.status === false || this.auth.said;
+  }
+
+  /**
+   * Ask Claude Code whether it is signed in, and tell the board at once when
+   * the answer changes (a registration carries `signed_out`). An answer that
+   * could not be had leaves the last one standing.
+   */
+  async checkAuth(why, { register = true, was = this.signedOut() } = {}) {
+    const st = await A.signedIn();
+    if (st !== null) this.auth.status = st;
+    const now = this.signedOut();
+    if (now !== was) {
+      log(`Claude Code is ${now ? 'signed out' : 'signed in'} on this machine (${why})`);
+      if (register) await this.register().catch((err) => warn(`registering after the sign-in changed: ${err.message}`));
+    }
+    return now;
+  }
+
+  /**
+   * Every turn the relay posts passes here, for the one thing about the
+   * machine a turn can say: a window recorded "Not logged in" (its API error
+   * when a message reaches it signed out), or a reply came back, which a
+   * signed-out window cannot give.
+   */
+  noteTurn(turn) {
+    if (turn.role === 'error' && A.isNotLoggedIn(turn.text)) {
+      if (this.auth.said) return;
+      // What the board was last told, read before the window's word changes it.
+      const was = this.signedOut();
+      this.auth.said = true;
+      this.checkAuth('a window recorded "Not logged in"', { was }).catch((err) => warn(`sign-in check: ${err.message}`));
+    } else if (turn.role === 'assistant' && this.auth.said) {
+      const was = this.signedOut();
+      this.auth.said = false;
+      this.checkAuth('a window replied', { was }).catch((err) => warn(`sign-in check: ${err.message}`));
+    }
+  }
+
+  /**
+   * The desk's Sign in (POST /api/floor/signin): Claude Code's own sign-in,
+   * run here as the person, which opens the browser on this machine (costmo,
+   * 2026-11-19: the host signs in on the click, in the app and on the Docker
+   * board alike). Said on the desk as it opens and as it ends. One at a time:
+   * a second press while one is open says so and opens nothing.
+   *
+   * A window that still says it is signed out once Claude Code is signed in
+   * again is reopened on its conversation. Whether a running window takes a
+   * sign-in made by another process was not measured (it needs a real
+   * account), so the host reads each window instead of assuming: a window
+   * that took it is left alone, and one that did not is idle (a signed-out
+   * window cannot be working) and is resumed where it was. The board hears
+   * "signed in" only after that, so no message is typed into a window while
+   * it is being reopened: until then the board still refuses them.
+   */
+  async signIn(desk) {
+    if (this.auth.signing) {
+      desk.told(`Claude Code's sign-in is already open in the browser on ${this.cfg.name}: finish it there.`);
+      return;
+    }
+    desk.told(`Claude Code's sign-in is open in the browser on ${this.cfg.name}: finish it there, and this desk can answer again.`);
+    log(`${desk.label}: opened Claude Code's sign-in`);
+    this.auth.signing = A.signIn();
+    let r;
+    try { r = await this.auth.signing; } finally { this.auth.signing = null; }
+    if (!r.ok) {
+      warn(`${desk.label}: Claude Code's sign-in: ${r.error}`);
+      await this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'signin_failed', message: `not signed in: ${r.error}` }, true);
+      await this.checkAuth('after a sign-in that did not finish');
+      return;
+    }
+    this.auth.said = false;
+    const st = await A.signedIn();
+    if (st !== null) this.auth.status = st;
+    if (this.signedOut()) {
+      await this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'signin_failed', message: 'the sign-in ended, and Claude Code still says it is signed out here. Press Sign in to try again.' }, true);
+      return;
+    }
+    log(`${desk.label}: Claude Code is signed in again`);
+    desk.told(`signed in to Claude Code on ${this.cfg.name}`);
+    this.later.push(async () => {
+      await this.reopenSignedOut();
+      await this.register().catch((err) => warn(`registering after the sign-in: ${err.message}`));
+    });
+  }
+
+  /** Each window that still says it is signed out, reopened on its conversation (see signIn). */
+  async reopenSignedOut() {
+    for (const desk of this.desks.values()) {
+      let at = await W.signedOutAt(desk.where);
+      // A window redraws its status rows when it has something to redraw
+      // for; give one that took the sign-in a moment to say so.
+      for (let i = 0; i < 6 && at.signedOut; i++) {
+        await sleep(500);
+        at = await W.signedOutAt(desk.where);
+      }
+      if (!at.signedOut) continue;
+      const id = desk.sessionId ?? desk.lastSessionId ?? null;
+      log(`${desk.label}: its window still says it is signed out; reopening it on ${id ?? 'a new conversation'}`);
+      await this.reopen(desk, { sessionId: id, known: true });
+      desk.told('its window still said Claude Code was signed out, so the host reopened it on the same conversation', id);
+    }
+  }
+
   async handle(item) {
     if (item.kind === 'bind') {
       await this.bind(item);
@@ -1977,6 +2098,12 @@ class Host {
       case 'interrupt':
         await desk.interrupt();
         break;
+      case 'signin':
+        // Waits on a person in a browser for minutes, so it is started and
+        // not awaited: every desk's messages go on meanwhile (CLAUDE.md, "Work
+        // that waits on a person … is started and not awaited").
+        this.signIn(desk).catch((err) => warn(`${desk.label}: sign-in: ${err.message}`));
+        break;
       case 'reconnect':
         await desk.reconnect();
         break;
@@ -2153,6 +2280,9 @@ class Host {
           // so a desk bound since the last one is on the board a minute later
           // at the latest, with nothing restarted. See rescan().
           await this.rescan('heartbeat');
+          // And whether Claude Code is still signed in here, so the board can
+          // say a desk cannot answer before anybody types to it (host/auth.js).
+          await this.checkAuth('heartbeat', { register: false });
           await this.register();
           lastRegister = Date.now();
           // Attachments past Claude Code's own cleanupPeriodDays (host/uploads.js).
@@ -2188,6 +2318,13 @@ class Host {
         this.acks = this.acks.filter((id) => !saying.includes(id));
         // One at a time, and none started once a stop has begun: those go
         // back in line for the next run (stop()).
+        // What a sign-in left for this line: a window to reopen once Claude
+        // Code is signed in again (signIn). On the line, because it closes a
+        // window, and nothing else may be typing into it meanwhile.
+        while (this.later.length && !this.stopping) {
+          const job = this.later.shift();
+          await job().catch((err) => warn(`after the sign-in: ${err.message}`));
+        }
         this.inHand = (reply.work ?? []).slice();
         while (this.inHand.length && !this.stopping) {
           const item = this.inHand.shift();

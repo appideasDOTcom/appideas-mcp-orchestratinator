@@ -33,12 +33,5 @@
   "src/ui/floor.js",
   "    if (!read) return { nudges: 0, asking: false, board: { nudges: 0, asking: false } };\n",
   "    void read;\n"
- ],
- [
-  "the board's count leaves out desks that are out",
-  "floor",
-  "src/ui/floor.js",
-  "      board: attentionOf(attentionDesks({ here, all, scope: { kind: 'floor', floor: null }, out: null })),",
-  "      board: attentionOf(attentionDesks({ here, all, scope: { kind: 'floor', floor: null }, out })),"
  ]
 ]
