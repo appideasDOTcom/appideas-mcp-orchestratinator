@@ -1150,7 +1150,7 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   `test:window`, `test:host` and the press route's in `test:floor`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the release page checks (thirteen since the app's tab and tray round), on the Node and the
+  Every suite and the release page checks (fourteen since the settings round, 2026-11-19), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
@@ -2070,6 +2070,51 @@ the app (its user-agent token): the rows view polls nothing of the floor,
 and a browser's board tab is left as it was. `check-attention.mjs` in
 **verify-ui-change** drives the calls the app makes, and runs at every
 release.
+
+**Every setting is behind ⚙, and in the desktop app every setting is in
+its Settings pane, drawn by this page** (costmo, 2026-11-19, four picks by
+AskUserQuestion, with desktop-dev in meeting room 20; the contract is
+`dashboard.settings` on the orchestratinator-desktop channel). Four parts:
+- **`?settings=1` is the Settings dialog's sections as a page of their
+  own** (`SETTINGS_PAGE` in `src/ui/app.js`), titled "Settings", with no
+  header, floor or dialog around them; it polls `/api/state` like a popout
+  and nothing of the floor (floor.js leaves the address alone). The app's
+  pane shows it in a view under the app's own rows, on the floor windows'
+  session. **Embedded, not rebuilt in the app**, his pick: the update and
+  restore wording and rules exist once. The section's handlers sit on
+  `#set-body`, not the dialog, because the page moves that element out of
+  the dialog. The page is drawn whole once, on its first state, and patched
+  after (renderUpdate), so a chosen backup and a half-typed RESTORE survive
+  its polls.
+- **In the app the copy is labels and controls only** (his answer to
+  desktop-dev), plus what is a warning or a fact needed to act: the restore
+  warning, what the chosen file holds, type RESTORE, errors, the result.
+  `toolsPanel(compact)`; a browser keeps its paragraphs. Open new floors is
+  left out there, as before: the app's own row has it.
+- **The ⚙ in an app window opens the app's pane**, not a dialog (his
+  answer, asked twice because desktop-dev's round had read "hidden"): the
+  page `window.open`s `?settings=1` with no features and the app's open
+  handler turns any board address with `settings=1` into its pane.
+- **Auto-refresh is a setting**: a row in Settings, no longer a switch in
+  the header; ↻ stays there, being an action. It is localStorage
+  `orch.autoRefresh` (only `off` is off, so a fresh browser polls as the
+  switch did), and every window applies a change at once on the `storage`
+  event: a browser's tabs, and every app window, since the pane is a page
+  on the same origin and session.
+- **A board started with `ORCH_BOARD_SUPERVISOR=app` has no updates at
+  all** (his pick: Updates in the app's pane only for a Docker board). The
+  app sets it on its built-in board. `view()` is null, so the page draws no
+  Updates section and no Update button, in a browser too; the update routes
+  refuse in words (409); the timer and the tick both do nothing, so either
+  guard alone keeps GitHub uncontacted and a mutant removing one survives
+  by design. A Docker board seen from the app keeps its section, now in
+  the app's pane.
+Not covered by the check: a later change patched into the settings page's
+Updates section (Check now on a scratch board would ask the real GitHub).
+`check-settings.mjs` in **verify-ui-change** is the page, with
+`mutants-settings.page.json` beside it; the server's rows are in
+`test:update`, the stored value in `test:floor`
+(`mutants-settings.suite.json`).
 
 **A meeting room is a popout of several desks, out the popout's way**
 (issue #44, 0.12.0). It is this page with `?meeting=<id>`, opened from a

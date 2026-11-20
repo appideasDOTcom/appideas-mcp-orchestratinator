@@ -1163,6 +1163,25 @@ try {
   await takeWork();
   eq((await folders()).names?.fresh, 'Fresh Face', 'and leaves the saved name exactly as it was');
 
+  // Auto-refresh is a setting behind ⚙ now, kept in localStorage (costmo,
+  // 2026-11-19). The page is check-settings.mjs; this is the stored value.
+  console.log('\nauto-refresh, as kept');
+  {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- auto-refresh: what the page decides ---------- */');
+    const b = src.indexOf('/* ---------- auto-refresh: end ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the auto-refresh section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/auto-refresh-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { AUTO_REFRESH_KEY, autoRefreshOn, autoRefreshValue };\n`);
+    let m;
+    try { m = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    eq(m.AUTO_REFRESH_KEY, 'orch.autoRefresh', 'one key, which the desktop app\'s pane shares with its windows (contract dashboard.settings)');
+    eq([m.autoRefreshOn(null), m.autoRefreshOn(undefined), m.autoRefreshOn('')], [true, true, true], 'nothing stored is on: a fresh browser polls, as the header switch did');
+    eq([m.autoRefreshOn('off'), m.autoRefreshOn('on')], [false, true], 'only "off" is off');
+    eq([m.autoRefreshValue(false), m.autoRefreshValue(true)], ['off', 'on'], 'and a choice is stored as on or off');
+    eq([true, false].map((v) => m.autoRefreshOn(m.autoRefreshValue(v))), [true, false], 'which reads back as the choice');
+  }
+
   const lifted = await (async () => {
     const src = readFileSync('src/ui/app.js', 'utf8');
     const a = src.indexOf('/* ---------- take a desk: what the dialog reads ---------- */');

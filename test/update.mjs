@@ -414,6 +414,30 @@ try {
     assert(/not running in a Docker container/.test(r.body.update.refusal ?? ''), 'and an update would be refused, saying why');
   }
 
+  console.log('\na board the desktop app runs (ORCH_BOARD_SUPERVISOR=app) neither checks nor offers:');
+  {
+    // costmo, 2026-11-19: the board's Updates belong in the app's Settings
+    // only for a Docker board. The app's own board is the app's to update.
+    await stopServer();
+    rmSync(DB, { force: true });
+    const n = apiCalls();
+    // In a container and on a fast tick, so only the switch can be what keeps it quiet.
+    await startServer(C1, { ORCH_BOARD_SUPERVISOR: 'app', ORCH_UPDATE_TICK_MS: '300' });
+    await sleep(1500);
+    eq(apiCalls(), n, 'no request to GitHub, in a container with checking on and the tick at 300ms');
+    eq(await upd(), null, '/api/state carries no update, so the page draws no Updates section and no button');
+    for (const [path, body] of [['check', {}], ['settings', { check: false }], ['start', { commit: C2 }]]) {
+      const r = await admin(path, body);
+      eq([r.status, r.body.update], [409, null], `${path} is refused`);
+      assert(/run by the Orchestratinator app, which installs its updates/.test(r.body.error ?? ''), `and says why in words (${path})`);
+    }
+    eq(apiCalls(), n, 'and Check now asked GitHub nothing');
+    await stopServer();
+    rmSync(DB, { force: true });
+    await startServer(C1, { ORCH_BOARD_SUPERVISOR: '', ORCH_UPDATE_TICK_MS: '300000' });
+    assert((await upd())?.current?.commit === C1, 'without it, the same board draws its updates as before');
+  }
+
   /* ───────── 3. the host's steps, in this process ───────── */
 
   console.log('\nthe host\'s steps (host/update.js, against real git):');

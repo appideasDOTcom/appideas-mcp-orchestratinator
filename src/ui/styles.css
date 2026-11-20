@@ -663,6 +663,17 @@ pre.raw {
   line-height: 1.6;
 }
 .set-done b { display: block; margin-bottom: 3px; }
+.set-warn { color: var(--block) !important; }
+
+/* The settings page (?settings=1): the dialog's sections on a page of their
+   own, for the desktop app's Settings pane. Nothing else of the page shows;
+   the sections fill the view and scroll it, on the page's own background. */
+body.view-settings > :not(#set-page):not(script) { display: none !important; }
+.set-page.dlg {
+  width: auto; max-width: none; margin: 0; padding: 4px 20px 20px;
+  border: 0; border-radius: 0; box-shadow: none; background: var(--bg);
+}
+.set-page #set-body > .set-tool:first-child { border-top: 0; }
 
 /* ─── The floor ───────────────────────────────────────────────────────────────
    A second view of the same data. Everything here is scoped under #floor or

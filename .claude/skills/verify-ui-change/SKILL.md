@@ -807,7 +807,7 @@ and nothing for the two it can't reach. A message landing after the page
 drew stays unread. Outside selection, the bell, the card, its Hide desk and
 the backlog dialog still work. The dialog is opened from a pill **newer than
 the board half's /api/state copy** (Decided 5). The board half's poll is
-switched off with the `#autorefresh` box first, so the pill is newer for
+switched off first (`setAutoRefresh(false)`, the Settings row's setter since the header switch went, 2026-11-19), so the pill is newer for
 certain and not by luck: once with nothing in the copy, once with an older
 backlog of one against a pill reading two. Two red-then-green lessons came
 out of it:
@@ -1591,6 +1591,31 @@ check takes its path), which the board reads on its next poll.
 **mutate-in-a-copy** (six, all red, control 1,529 ✓). A count that grows as rows are added (the board's
 nudges) is read from another window's report, never written as a number:
 the first cut hard-coded 2 and went red when the room row added gil's mail.
+
+### check-settings.mjs — every setting behind ⚙, and the app's pane (2026-11-19)
+
+```bash
+PORT=8955 CDP=9295 .claude/skills/verify-ui-change/run-check-settings.sh "$PWD"   # about forty seconds
+```
+
+Two scratch boards, no seed: one as Docker runs it, and one on PORT+40
+started with `ORCH_BOARD_SUPERVISOR=app`, as the app runs its own. It
+reads the header (no auto-refresh switch, ↻ and ⚙ kept), the ⚙ dialog's
+sections and paragraphs, auto-refresh turned off and on in one tab
+stopping and starting the poll of another (counted by a `fetch` wrapper
+put in with `beforeLoad`), `?settings=1` as a page (title, nothing of the
+floor polled, its own address, Export and Restore through its own
+handlers, a chosen file surviving its polls), and under the app's
+user-agent token: ⚙ opening a `?settings=1` window and no dialog, the
+labels-only copy with the restore warning kept, the pane's change
+stopping an app window's poll, and the app's own board with no Updates
+anywhere. Two lessons from writing it: an earlier tab at the same address
+hides a new one from a filter of "addresses not there before", so it
+counts them; and `textContent` across a `<div>` break holds a newline,
+which `.` in a regex does not cross. `mutants-settings.page.json` is the
+list (thirteen); the server's rows are `test:update`'s and the stored
+value `test:floor`'s, with `mutants-settings.suite.json` in
+**mutate-in-a-copy**.
 
 ## Driving the page
 

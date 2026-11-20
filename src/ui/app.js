@@ -13,6 +13,17 @@ const POPOUT = new URLSearchParams(location.search).get('popout') === '1'
   // A meeting room's window (issue #44) is a popout of several desks, and
   // the same here: its dialogs, and nothing of the board.
   || new URLSearchParams(location.search).has('meeting');
+/* The settings on their own (costmo, 2026-11-19): `?settings=1` is the
+   Settings dialog's sections as a page, drawn by the same code, with no
+   header, floor or dialog around them. The desktop app shows it in its
+   Settings pane under its own rows, so the app's settings are all in one
+   place and none of the board's is written twice (contract
+   dashboard.settings on orchestratinator-desktop). Like a popout it polls
+   /api/state only. */
+const SETTINGS_PAGE = new URLSearchParams(location.search).get('settings') === '1';
+/* The desktop app says it is the app with a token of its own in the user
+   agent (floor.js's APP_UA, contract orchestratinator.consumed). */
+const IN_APP = /\bOrchestratinatorDesktop\//.test(navigator.userAgent);
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -28,7 +39,6 @@ const el = {
   filterKinds: $('filter-kinds'),
   filterText: $('filter-text'),
   loadMore: $('load-more'),
-  autorefresh: $('autorefresh'),
   refreshNow: $('refresh-now'),
   adminState: $('admin-state'),
   dlg: $('dlg'),
@@ -1341,6 +1351,7 @@ function channelDialog(channel) {
  * of it is coordination data: it is what you have chosen and not yet committed.
  */
 const set = {
+  drawn: false,       // the settings page has drawn its sections
   backup: null,       // a chosen file, parsed and vetted, awaiting confirmation
   backupName: null,
   restored: null,     // the report from a completed restore
@@ -1359,8 +1370,16 @@ const setNote = (msg) => {
   box.hidden = !msg;
 };
 
-function toolsPanel() {
+/**
+ * The sections, as the dialog and the settings page draw them. In the app
+ * the copy is labels and controls only, plus what is a warning or a fact
+ * needed to act (type RESTORE, what the chosen file holds, errors, the
+ * restore's result): costmo, 2026-11-19, through desktop-dev. The browser
+ * keeps its paragraphs.
+ */
+function toolsPanel(compact = IN_APP) {
   const t = ui.state?.totals;
+  const prose = (html) => (compact ? '' : html);
   const b = set.backup;
   const counted = b ? Object.entries(b.counts ?? {}).filter(([, n]) => n > 0) : [];
 
@@ -1393,17 +1412,18 @@ function toolsPanel() {
     : '';
 
   return `
+    ${autoRefreshSection(compact)}
     ${floorsSection()}
-    ${updatesSection(ui.state?.update)}
+    ${updatesSection(ui.state?.update, compact)}
     <div class="set-tool">
       <div>
         <h4 class="set-h">Export a backup</h4>
-        <p>Downloads this whole board as one JSON file: every message, task, contract with its history, agent,
+        ${prose(`<p>Downloads this whole board as one JSON file: every message, task, contract with its history, agent,
           channel flag, and operator-action record.
           ${t ? `Right now that is ${t.channels + t.archived_channels} channel(s) and ${t.agents + t.retired_agents} agent(s).` : ''}</p>
         <p><b>One thing is deliberately not in it:</b> the shared MCP secret — only a fingerprint of it, so you can
           check the new host has the same one. Everything else in the file is board data, and there are no
-          dashboard accounts to carry.</p>
+          dashboard accounts to carry.</p>`)}
       </div>
       <button type="button" class="btn primary" data-set="export">Export</button>
     </div>
@@ -1411,10 +1431,10 @@ function toolsPanel() {
     <div class="set-tool">
       <div>
         <h4 class="set-h risky">Recover from a backup</h4>
-        <p>Replaces everything on this board with the contents of a backup file. Not a merge: ids are per-board, so
+        ${compact ? '<p class="set-warn">Replaces everything on this board. Not a merge.</p>' : `<p>Replaces everything on this board with the contents of a backup file. Not a merge: ids are per-board, so
           blending two histories would give you one task <span class="mono">#14</span> that means two different things.</p>
         <p>Before overwriting, the current board is written to the data directory next to the database, so a restore
-          you regret is recoverable. Live agent sessions are closed and reconnect by themselves.</p>
+          you regret is recoverable. Live agent sessions are closed and reconnect by themselves.</p>`}
         <label class="set-picker">
           <input type="file" id="restore-file" accept=".json,application/json">
         </label>
@@ -1424,9 +1444,48 @@ function toolsPanel() {
     </div>
     <div class="set-err" hidden></div>
     <p class="set-note-live" hidden></p>
-    <p class="dlg-note">Moving to a new host: export here, start the new instance with the same
+    ${prose(`<p class="dlg-note">Moving to a new host: export here, start the new instance with the same
       <span class="mono">ORCH_AUTH_TOKEN</span> in its <span class="mono">.env</span> (that part does not travel in the
-      file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`;
+      file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`)}`;
+}
+
+/* ---------- auto-refresh: what the page decides ---------- */
+
+/*
+ * Auto-refresh is a setting (costmo, 2026-11-19): it was a switch in the
+ * header and is a row in Settings now, in the browser's dialog and in the
+ * desktop app's pane (the settings page). Kept in localStorage, so a
+ * browser's tabs share it and every window of the app does too: the app's
+ * pane is a page on the board's origin in the floor windows' own session,
+ * so a change there reaches each window as a `storage` event. ↻ stays in
+ * the header: it is an action, not a setting. Only "off" is stored as
+ * off, so a fresh browser polls, as the switch's `checked` did.
+ */
+const AUTO_REFRESH_KEY = 'orch.autoRefresh';
+/** Whether a stored value means on. */
+function autoRefreshOn(stored) { return stored !== 'off'; }
+/** What is stored for a choice. */
+function autoRefreshValue(on) { return on ? 'on' : 'off'; }
+
+/* ---------- auto-refresh: end ---------- */
+
+function readAutoRefresh() {
+  try { return autoRefreshOn(localStorage.getItem(AUTO_REFRESH_KEY)); } catch { return true; }
+}
+
+function autoRefreshSection(compact = IN_APP) {
+  const on = readAutoRefresh();
+  return `
+    <div class="set-tool set-auto" id="set-auto">
+      <div>
+        <h4 class="set-h">Auto-refresh</h4>
+        ${compact ? '' : `<p>Redraws the board view every few seconds. Off, the board view changes only when you
+          press <span class="mono">↻</span>; the floor's desks and chats stay live either way. Kept in this browser,
+          for all of its tabs.</p>`}
+      </div>
+      <label class="set-check"><input type="checkbox" id="autorefresh" data-set-auto ${on ? 'checked' : ''}>
+        <span>${compact ? 'Every window' : 'On'}</span></label>
+    </div>`;
 }
 
 /*
@@ -1460,6 +1519,14 @@ function renderSettings() {
 }
 
 function openSettings() {
+  // In the desktop app the board's settings are in the app's Settings pane
+  // (costmo, 2026-11-19: the ⚙ opens it). The page asks for the settings
+  // page as a new window, and the app opens its pane instead of a window
+  // (contract dashboard.settings). A browser keeps the dialog.
+  if (IN_APP && !SETTINGS_PAGE) {
+    try { window.open(`${location.pathname}?settings=1`, '_blank'); } catch { /* the app said no: nothing to undo */ }
+    return;
+  }
   set.restored = null;
   set.backup = null;
   set.backupName = null;
@@ -1561,11 +1628,15 @@ el.setDlg.addEventListener('click', (e) => {
     if (!holdsTyping(el.setBody.querySelectorAll('input, textarea'))) el.setDlg.close();
     return;
   }
+  if (e.target.closest('[data-set="close"]')) el.setDlg.close();
+});
+
+// The sections' own buttons are handled on their body, which the settings
+// page moves out of the dialog (SETTINGS_PAGE), so they work in both.
+el.setBody.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-set]');
   if (!btn) return;
-
   switch (btn.dataset.set) {
-    case 'close': el.setDlg.close(); break;
     case 'export': exportBackup(); break;
     case 'restore': restoreBackup(); break;
     default: break;
@@ -1573,6 +1644,8 @@ el.setDlg.addEventListener('click', (e) => {
 });
 
 el.setBody.addEventListener('change', (e) => {
+  const auto = e.target.closest('[data-set-auto]');
+  if (auto) { setAutoRefresh(auto.checked); return; }
   const open = e.target.closest('[data-set-floor-open]');
   if (open) { window.floorOpen?.set(open.value); return; }
   const input = e.target.closest('#restore-file');
@@ -1711,17 +1784,18 @@ const upd = {
   busy: false,
 };
 
-function updatesSection(u) {
+function updatesSection(u, compact = IN_APP) {
   if (!u) return '<div id="set-updates"></div>';
   const cur = u.current ?? {};
+  const hint = (html) => (compact ? '' : ` <span class="muted">— ${html}</span>`);
   return `
     <div class="set-tool set-updates" id="set-updates">
       <div>
         <h4 class="set-h">Updates</h4>
         <label class="set-check"><input type="checkbox" data-upd="check" ${u.check ? 'checked' : ''}>
-          <span><b>Check for updates</b> <span class="muted">— once a day, from GitHub. Off, the board contacts GitHub only when you press Check now.</span></span></label>
+          <span><b>Check for updates</b>${hint('once a day, from GitHub. Off, the board contacts GitHub only when you press Check now.')}</span></label>
         <label class="set-check"><input type="checkbox" data-upd="dev" ${u.dev ? 'checked' : ''}>
-          <span><b>Use the development version</b> <span class="muted">— follow <span class="mono">develop</span> instead of <span class="mono">main</span>.</span></span></label>
+          <span><b>Use the development version</b>${hint('follow <span class="mono">develop</span> instead of <span class="mono">main</span>.')}</span></label>
         <dl class="set-facts">
           <dt>Current</dt><dd class="mono">v${esc(cur.version ?? '?')} · ${esc(sha7(cur.commit) ?? 'commit unknown')}</dd>
           <dt>Latest on ${esc(u.branch)}</dt><dd>${u.latest?.url && u.standing?.state !== 'latest'
@@ -1805,7 +1879,7 @@ function renderUpdate(state) {
   el.updBtn.hidden = !b;
   if (b) { el.updBtn.textContent = b.label; el.updBtn.title = b.title; el.updBtn.classList.toggle('busy', updRunning(u.run)); }
   if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel(u));
-  const sec = el.setDlg.open ? el.setBody.querySelector('#set-updates') : null;
+  const sec = el.setDlg.open || SETTINGS_PAGE ? el.setBody.querySelector('#set-updates') : null;
   if (sec) {
     // Patched, for the same reason as the dialog (#37). It used to be
     // `sec.outerHTML = html` when `sec.outerHTML !== html`, and the two
@@ -1948,8 +2022,12 @@ async function tick({ background = false } = {}) {
   if (background && document.hidden) return; // don't poll a tab nobody is looking at
   inFlight = true;
   try {
-    if (POPOUT) {
+    if (POPOUT || SETTINGS_PAGE) {
       ui.state = await getJson('./api/state');
+      // The settings page is drawn whole once, on its first state, and
+      // patched after that like the dialog (renderUpdate), so a chosen
+      // backup file and a half-typed RESTORE survive every poll.
+      if (SETTINGS_PAGE && !set.drawn) { set.drawn = true; if (!set.backup && !set.restored) renderSettings(); }
       // A popout has no header, but it is a page on the old build too: it
       // watches an update and reloads onto the new one like the floor does
       // (issue #40). The reload keeps its ?popout= address, so it comes back
@@ -2387,15 +2465,43 @@ el.dlg.addEventListener('close', () => {
 });
 
 const poll = () => tick({ background: true });
-let timer = setInterval(poll, REFRESH_MS);
-el.autorefresh.addEventListener('change', () => {
+let autoRefresh = readAutoRefresh();
+let timer = autoRefresh ? setInterval(poll, REFRESH_MS) : null;
+/** Start or stop this window's poll, and show the choice wherever it is drawn here. */
+function applyAutoRefresh(on) {
+  const box = el.setBody.querySelector('[data-set-auto]');
+  if (box) box.checked = on;
+  if (on === autoRefresh) return;
+  autoRefresh = on;
   clearInterval(timer);
-  if (el.autorefresh.checked) { timer = setInterval(poll, REFRESH_MS); tick(); }
+  timer = on ? setInterval(poll, REFRESH_MS) : null;
+  if (on) tick();
+}
+/** The choice made here: kept, then applied. Other windows hear it as `storage`. */
+function setAutoRefresh(on) {
+  try { localStorage.setItem(AUTO_REFRESH_KEY, autoRefreshValue(on)); } catch { /* this window still follows it */ }
+  applyAutoRefresh(on);
+}
+// Another tab, or the app's Settings pane, changed it.
+window.addEventListener('storage', (e) => {
+  if (e.key === AUTO_REFRESH_KEY || e.key === null) applyAutoRefresh(readAutoRefresh());
 });
 // Catch up as soon as the tab is looked at again.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && el.autorefresh.checked) tick();
+  if (!document.hidden && autoRefresh) tick();
 });
+
+// The settings page: the dialog's body, moved onto a page of its own.
+if (SETTINGS_PAGE) {
+  document.body.classList.add('view-settings');
+  document.title = 'Settings';
+  const page = document.createElement('main');
+  page.className = 'dlg set-page';
+  page.id = 'set-page';
+  page.append(el.setBody);
+  document.body.append(page);
+  renderSettings();
+}
 
 tick();
 

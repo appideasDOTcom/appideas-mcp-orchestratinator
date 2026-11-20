@@ -149,6 +149,14 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
     return /^[0-9a-f]{12}$/.test(h) ? h : null;
   })();
   const self = { version, commit, container };
+  // A board the desktop app runs as a child process (its built-in board) is
+  // the app's to update, with the app (costmo, 2026-11-19: the board's
+  // Updates belong in the app's Settings only for a Docker board). So it
+  // checks nothing, offers nothing and draws no Updates section: view() is
+  // null, which the page reads as "no section", and the routes refuse in
+  // words. A Docker board seen from the app is untouched.
+  const appRun = (env.ORCH_BOARD_SUPERVISOR ?? '').trim() === 'app';
+  const APP_RUN_WORDS = 'This board is run by the Orchestratinator app, which installs its updates. It does not check for or offer any itself.';
   // What each host last said about itself: its build, its clone, the container
   // it found. In memory, like the folder lists: it is re-sent every minute and
   // a server rebuilt mid-update hears it again within seconds.
@@ -270,6 +278,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
 
   /** The daily check: only while checking is on, at most once a day per board. */
   async function tick(nowMs = Date.now()) {
+    if (appRun) return null;
     const { check: on, dev } = settings();
     if (!on) return null;
     const last = get('last', null);
@@ -443,6 +452,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
 
   /** Everything the page draws, on every /api/state. */
   function view(nowMs = Date.now()) {
+    if (appRun) return null;
     const s = settings();
     const branch = branchOf(s.dev);
     const last = get('last', null);
@@ -497,6 +507,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
   function router(auth) {
     const r = express.Router();
     r.use(auth.adminGuard);
+    r.use((_req, res, next) => (appRun ? res.status(409).json({ error: APP_RUN_WORDS, update: null }) : next()));
     r.post('/settings', async (req, res) => {
       const before = settings();
       const changed = [];
@@ -538,7 +549,7 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
    * suites depend on reaching GitHub. Check now works on any board.
    */
   function startTimer() {
-    if (!container) return false;
+    if (!container || appRun) return false;
     const go = () => tick().catch((err) => console.warn(`[orchestratinator] update check: ${err.message}`));
     // Soon after start, then on the tick. Due only once a day, so a rebuild
     // does not mean a check; the first look just catches a board that was off.
@@ -548,5 +559,5 @@ export function createUpdates({ store, sessions = {}, version, commit, env = pro
     return true;
   }
 
-  return { self, check, tick, start, applyEvent, noteHost, view, router, startTimer, settings, reports };
+  return { self, appRun, check, tick, start, applyEvent, noteHost, view, router, startTimer, settings, reports };
 }

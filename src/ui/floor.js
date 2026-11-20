@@ -9547,7 +9547,12 @@
 
   ui.popout = popoutOf(location.search);
   const meetingSpec = meetingOf(location.search);
-  if (meetingSpec) {
+  if (new URLSearchParams(location.search).get('settings') === '1') {
+    // The settings page (app.js's SETTINGS_PAGE): no floor, no popout, and
+    // none of a floor tab's choices or address. Only window.floorOpen, above,
+    // is used there, by the Open new floors row.
+    ui.popout = null;
+  } else if (meetingSpec) {
     // A meeting room's window (issue #44): the floor's view, like a
     // popout, and none of the floor tab's remembered choices.
     ui.popout = null;
