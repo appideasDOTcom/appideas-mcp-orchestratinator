@@ -194,6 +194,12 @@ class Desk {
     this.paneWindow = null;  // a tmux window in this repo, registered session or not
     this.startup = null;     // the startup question the window is sitting on, as last reported
     this.startupSaidAt = 0;
+    // Look for a startup question at the next tick although the window is
+    // registered: set when a send was refused as asking, and once a
+    // heartbeat. The tick reads the pane only while a window is starting,
+    // and a question Claude Code asks after it has registered (the browser
+    // extension's, 2026-11-20) would otherwise never reach the floor.
+    this.lookStartup = false;
     this.holders = 0;        // live processes claiming this conversation
     this.clients = 0;        // terminals attached to the tmux session
     this.offset = 0;         // bytes of that transcript already sent up
@@ -386,7 +392,12 @@ class Desk {
     // it stands, so a server that restarted meanwhile hears it too. Why the
     // host reads these and never answers them is beside startupQuestionOf.
     const booting = paneHere && !live.some((x) => x.pid === paneHere.pid);
-    const q = booting ? await W.startupQuestionAt(paneHere.target) : null;
+    // And while one is standing, or when a look was asked for (lookStartup):
+    // a question still up after its window registered is still a question,
+    // and "gone" is said only when the pane no longer shows it.
+    const look = paneHere && (booting || this.startup || this.lookStartup);
+    this.lookStartup = false;
+    const q = look ? await W.startupQuestionAt(paneHere.target) : null;
     if (q) {
       const said = `${q.kind}|${q.options.map((o) => o.text).join('|')}`;
       if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
@@ -533,6 +544,9 @@ class Desk {
     const r = await W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id });
     if (r.note) this.told(r.note, id);
     if (!r.ok) {
+      // Refused because the window is asking: if that is a startup question
+      // the floor has not been shown, the next tick reads it and offers it.
+      if (r.code === 'asking') this.lookStartup = true;
       // The command that was being typed, when it was one: a model or effort
       // change that ends here was not made, and the board stops showing it as
       // asked for (it used to stand on the select until the model next
@@ -776,6 +790,9 @@ class Host {
         // ("Enter to select · …" tells the operator nothing); the choices
         // come from the host's own read of the prompt, which the board asks for.
         if (asks) pending.push({ channel: d.channel, agent: d.agent, session_id: d.lastSessionId ?? null, summary: 'the window is waiting for a decision' });
+        // askingIn leaves a startup question to the watch loop, which reads
+        // one only on a window that is starting. Ask it to look once.
+        else d.lookStartup = true;
       }
       desks.push({
         // `scope` is 'seat' for an extra desk in a folder that is another

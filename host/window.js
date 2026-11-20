@@ -526,6 +526,26 @@ const optionText = (line) => String(line ?? '').replace(/^\s*[\u276f>]?\s*/, '')
 const STARTUP_ASKS = [
   { kind: 'trust', asks: /Is this a project you created or one you trust/i },
   { kind: 'mcp', asks: /New MCP server found in this project/i },
+  // The browser extension's question, the same arrow list with its own
+  // footer ("Enter to confirm · Esc to keep browser tools off") and the
+  // cursor starting on No. Read off costmo's screen on a new machine
+  // (2026-11-20, a 2.1.318 window, after the trust question was answered
+  // from the floor): the host refused to type into it, said "answer it on
+  // the floor", and the floor had nothing to answer it with. His ruling the
+  // same hour: shown to the operator and answered by them, never by rule.
+  //
+  //   Claude in Chrome extension detected
+  //   Claude will use your Chrome browser by default — navigating sites, …
+  //   This session is in Auto mode, … with /chrome.
+  //   ❯ No, keep browser tools off
+  //     Yes, use my browser
+  //   Enter to confirm · Esc to keep browser tools off
+  //
+  // Not measured: whether the window is in the roster while it stands. So
+  // the host looks for a startup question on a registered window too, when
+  // a send has just been refused as asking and once a heartbeat
+  // (Desk.lookStartup in index.js), not only while a window is starting.
+  { kind: 'chrome', asks: /Claude in Chrome extension detected/i },
 ];
 export function startupQuestionOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.replace(/\s+$/, ''));

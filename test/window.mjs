@@ -559,6 +559,31 @@ async function main() {
     eq(mcp?.options.map((o) => o.text), ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'],
        'its three rows are read, and the description sentence above them is not one');
     eq(mcp?.at, 2, 'with the cursor on "continue without" — Enter alone would disable the server');
+    // The browser extension's question, as costmo's screen showed it on a
+    // new machine (2026-11-20, a 2.1.318 window at 80 columns).
+    const RAW_CHROME = [
+      '',
+      '─'.repeat(80),
+      ' Claude in Chrome extension detected',
+      '',
+      ' Claude will use your Chrome browser by default — navigating sites, filling',
+      ' forms, and capturing screenshots in your existing session.',
+      '',
+      ' This session is in Auto mode, which checks routine browser actions — you are',
+      ' only prompted when it is unsure. Turn browser tools off for future sessions',
+      ' with /chrome.',
+      '',
+      ' ❯ No, keep browser tools off',
+      '   Yes, use my browser',
+      '',
+      ' Enter to confirm · Esc to keep browser tools off',
+      '',
+    ].join('\n');
+    const chrome = W.startupQuestionOf(RAW_CHROME);
+    eq(chrome?.kind, 'chrome', 'the browser extension’s question is recognised');
+    eq(chrome?.asks, 'Claude in Chrome extension detected', 'and named by its title');
+    eq(chrome?.options.map((o) => o.text), ['No, keep browser tools off', 'Yes, use my browser'], 'its two rows are read, and the paragraphs above the blank line are not');
+    eq(chrome?.at, 0, 'with the cursor on No, where the window puts it');
     eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
     eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
 

@@ -387,7 +387,9 @@ function renderChannels(state) {
 
 function renderServer(state) {
   const s = state.server;
-  el.version.textContent = `v${s.version}`;
+  const shown = headerVersion(navigator.userAgent, s.version);
+  el.version.textContent = shown.text;
+  el.version.title = shown.title;
   el.meta.textContent = `up ${duration(s.uptime_seconds)} · port ${s.port} · db ${s.db_path} · claim ttl ${s.claim_ttl_minutes}m · ${s.now.replace('T', ' ').slice(0, 19)}Z`;
   // Connection churn is a client trait, not a coordination fact — keep it out of
   // the way, but reachable when a session count looks surprising.
@@ -1461,6 +1463,29 @@ function toolsPanel(compact = IN_APP) {
       <span class="mono">ORCH_AUTH_TOKEN</span> in its <span class="mono">.env</span> (that part does not travel in the
       file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`)}`;
 }
+
+/* ---------- header version: what the page decides ---------- */
+
+/*
+ * The number in the header. In a browser it is this instance's, the build
+ * that answered. Inside the desktop app it is the app's own, the number the
+ * app's Settings shows (costmo's ruling, 2026-11-20, through the app's
+ * agent): the app was 0.14.1 on an Orchestratinator 0.14.0, the header said
+ * one and Settings the other, and to a person that is one screen
+ * contradicting another, so one of them is broken. The app's number is in
+ * the user-agent token it already sends, OrchestratinatorDesktop/<version>
+ * (contract orchestratinator.consumed, dashboard.floor), so nothing new is
+ * passed. This instance's own number is kept on the header's tooltip there,
+ * since it is still what a host's protocol and an update are about.
+ */
+function headerVersion(userAgent, instanceVersion) {
+  const app = /\bOrchestratinatorDesktop\/(\d+\.\d+\.\d+[\w.+-]*)/.exec(String(userAgent ?? ''))?.[1] ?? null;
+  return app
+    ? { text: `v${app}`, title: `Orchestratinator desktop app ${app} · its Orchestratinator is ${instanceVersion}` }
+    : { text: `v${instanceVersion}`, title: '' };
+}
+
+/* ---------- header version: end ---------- */
 
 /* ---------- auto-refresh: what the page decides ---------- */
 

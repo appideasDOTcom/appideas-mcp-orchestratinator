@@ -323,7 +323,20 @@ function fixture() {
     // ask-flag alone should be enough to say so.
     `  readyDelay = Math.max(readyDelay, 4000);`,
     `}`,
-    `if (readyDelay > 0) setTimeout(announce, readyDelay); else announce();`,
+    // The browser extension's question, on a window that HAS registered
+    // (costmo's new machine, 2026-11-20): announced at once, the dialog drawn
+    // after, raw so Enter reaches it as a key, and gone at that Enter, with a
+    // pane cleared, history too (tmux keeps a cleared screen in history, and
+    // the dialog's footer left among the pane's last lines had the next
+    // message refused as asking). No composer is drawn in its place: a drawn
+    // one never changes, and a paste waits a minute on a box that does not.
+    `let chromeUp = startupAsk === 'chrome';`,
+    `const CHROME = ['', ${JSON.stringify('─'.repeat(80))}, ' Claude in Chrome extension detected', '', ' Claude will use your Chrome browser by default — navigating sites, filling', ' forms, and capturing screenshots in your existing session.', '', ' This session is in Auto mode, which checks routine browser actions — you are', ' only prompted when it is unsure. Turn browser tools off for future sessions', ' with /chrome.', '', ' ❯ No, keep browser tools off', '   Yes, use my browser', '', ' Enter to confirm · Esc to keep browser tools off'];`,
+    // A window that has started draws its composer, so the dialog's footer is
+    // no longer the pane's last line: the host reads a question as gone by
+    // the pane no longer showing it, not by the window registering.
+    String.raw`const started = () => { if (startupAsk === 'mcp') process.stdout.write('\n❯ \n'); announce(); };`,
+    `if (readyDelay > 0) setTimeout(started, readyDelay); else started();`,
     String.raw`process.stdout.write('\u001b[?2004h');`,
     // A flag file makes the window look mid-turn: Claude Code's status line
     // says "esc to interrupt" exactly while it works, and the host reads that
@@ -354,10 +367,12 @@ function fixture() {
     // comes — so the key the host pressed never reached SINK. Raw while
     // asking, as the window suite's prompt panes are (`stty raw`).
     `if (PROMPTS[promptKind] && process.stdin.isTTY) process.stdin.setRawMode(true);`,
+    `if (chromeUp) { for (const l of CHROME) process.stdout.write(l + '\\n'); if (process.stdin.isTTY) process.stdin.setRawMode(true); }`,
     String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
     `let acc = '', composer = '', n = 0;`,
     `process.stdin.on('data', (chunk) => {`,
     `  fs.appendFileSync(SINK, chunk);`,
+    String.raw`  if (chromeUp) { if (/[\r\n]/.test(chunk.toString('utf8'))) { chromeUp = false; if (process.stdin.isTTY) process.stdin.setRawMode(false); process.stdout.write('\u001b[2J\u001b[3J\u001b[H'); } return; }`,
     `  acc += chunk.toString('utf8');`,
     `  for (;;) {`,
     `    const at = acc.indexOf(START);`,
@@ -2233,6 +2248,30 @@ try {
 
   assert(await until(async () => (deskOf(await floor(), 'free')?.permission == null ? true : null), 8000),
     'and once the window finishes starting — the forced delay elapsing, same as a real one registering — the prompt comes down on its own');
+  rmSync(`${FIX}/startup-ask.flag`, { force: true });
+
+  /* A question Claude Code asks after its window has registered: the browser
+   * extension's (costmo's new machine, 2026-11-20). The watch loop read the
+   * pane for a startup question only while a window was starting, and the
+   * reader did not know this one, so the host refused to type, said "answer
+   * it on the floor", and the floor had nothing to answer it with. */
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  writeFileSync(`${FIX}/startup-ask.flag`, 'chrome');
+  const crErrsBefore = ((await turns('free')).rows ?? []).filter((r) => r.role === 'error').length;
+  eq((await chat('free', 'hello past the browser question')).status, 200, 'a message for the desk opens a window that registers and then asks about the browser extension');
+  const crRefused = await until(async () => ((await turns('free')).rows ?? []).filter((r) => r.role === 'error').slice(crErrsBefore).find((r) => /the window is asking something, so nothing was typed/.test(r.text ?? '')) ?? null, 30000);
+  assert(!!crRefused, `the host types nothing into it and says so — ${crRefused?.text?.slice(0, 80)}`);
+  const crAsking = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.permission?.startup ? d : null; }, 8000);
+  assert(!!crAsking, 'and the floor is given the question to answer, though the window has registered');
+  eq(crAsking?.permission?.kind, 'chrome', 'read as the browser extension’s question');
+  eq(crAsking?.permission?.options?.map((o) => o.text), ['No, keep browser tools off', 'Yes, use my browser'], 'with its own two rows');
+  const crAnswer = await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: crAsking?.permission?.request_id, decision: '1' });
+  eq(crAnswer.status, 200, 'the operator’s choice is taken');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.permission == null ? true : null), 10000),
+    'the host presses that row, and the question leaves the floor when it leaves the window');
+  assert(await until(async () => ((await chat('free', 'after the browser question')).status === 200 ? true : null), 8000), 'and the desk takes a message again');
+  assert(await until(() => (clean(received()).includes('after the browser question') ? true : null), 20000), 'which reaches the window');
   rmSync(`${FIX}/startup-ask.flag`, { force: true });
 
   // A request for the folder dialog that reaches the host after the page has

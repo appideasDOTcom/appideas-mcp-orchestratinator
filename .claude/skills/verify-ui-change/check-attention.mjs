@@ -133,7 +133,7 @@ ok(nudgesTo('gil') === 1, 'and the host was handed it for gil', JSON.stringify(w
 
 console.log('\na tab on the board view');
 const appBoard = await open({ base, view: 'floor', floor: 'alpha' });
-await appBoard.beforeLoad(`Object.defineProperty(navigator, 'userAgent', { value: navigator.userAgent + ' Electron/45.2.3 OrchestratinatorDesktop/0.14.0', configurable: true })`);
+await appBoard.beforeLoad(`Object.defineProperty(navigator, 'userAgent', { value: navigator.userAgent + ' Electron/45.2.3 OrchestratinatorDesktop/9.8.7', configurable: true })`);
 await appBoard.goto(`${base}/?floor=beta&view=board`);
 await until(appBoard, `!document.body.classList.contains('view-floor') && window.orchAttention.get().nudges === 1`, 'the app\'s board-view tab reports beta');
 const ab = await get(appBoard);
@@ -144,6 +144,13 @@ await plain.goto(`${base}/?floor=beta&view=board`);
 await sleep(3000);
 const pb = await get(plain);
 ok(pb.nudges === 0 && pb.board.nudges === 0, 'in a browser it polls nothing of the floor, as before, and so reports nothing', JSON.stringify(pb));
+
+// The header's number (costmo, 2026-11-20): the app's own inside the app,
+// this instance's in a browser. The app's page here says it is 9.8.7.
+const boardVersion = JSON.parse(await (await fetch(`${base}/health`)).text()).version;
+const headerOf = (page) => page.evalJs(`document.getElementById('version').textContent`);
+ok(await headerOf(appBoard) === 'v9.8.7', 'in the app the header shows the app\'s version, not this instance\'s', `${await headerOf(appBoard)} (instance ${boardVersion})`);
+ok(await headerOf(plain) === `v${boardVersion}`, 'in a browser it shows this instance\'s', await headerOf(plain));
 
 const errs = [alpha, beta, pop, room, appBoard, plain].flatMap((x) => x.console()).filter((s) => /^error/.test(s) && !/Failed to load resource/.test(s));
 ok(errs.length === 0, 'no errors in any window\'s console', errs.join(' | '));

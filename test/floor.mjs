@@ -1182,6 +1182,26 @@ try {
     eq([true, false].map((v) => m.autoRefreshOn(m.autoRefreshValue(v))), [true, false], 'which reads back as the choice');
   }
 
+  // The header's number: this instance's in a browser, the app's own inside
+  // the desktop app (costmo, 2026-11-20). The page is check-attention.mjs.
+  console.log('\nthe version in the header');
+  {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- header version: what the page decides ---------- */');
+    const b = src.indexOf('/* ---------- header version: end ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the header version section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/header-version-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { headerVersion };\n`);
+    let m;
+    try { m = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    const CHROME_UA = 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36';
+    eq(m.headerVersion(CHROME_UA, '0.14.0'), { text: 'v0.14.0', title: '' }, 'in a browser the header shows this instance\'s version, as it always has');
+    eq(m.headerVersion(`${CHROME_UA} Electron/45.2.3 OrchestratinatorDesktop/0.14.1`, '0.14.0').text, 'v0.14.1', 'inside the desktop app it shows the app\'s own, the number the app\'s Settings shows');
+    assert(/0\.14\.0/.test(m.headerVersion(`${CHROME_UA} OrchestratinatorDesktop/0.14.1`, '0.14.0').title), 'with this instance\'s number kept on the tooltip');
+    eq(m.headerVersion(`${CHROME_UA} Electron/45.2.3`, '0.14.0').text, 'v0.14.0', 'another Electron browser is not the app');
+    eq(m.headerVersion(`${CHROME_UA} OrchestratinatorDesktop/`, '0.14.0').text, 'v0.14.0', 'and a token with no version shows this instance\'s');
+  }
+
   const lifted = await (async () => {
     const src = readFileSync('src/ui/app.js', 'utf8');
     const a = src.indexOf('/* ---------- take a desk: what the dialog reads ---------- */');
