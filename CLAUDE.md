@@ -1519,7 +1519,7 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   `test:window`, `test:host` and the press route's in `test:floor`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the release page checks (fifteen since the sign-in round, 2026-11-19), on the Node and the
+  Every suite and the release page checks (sixteen since 0.14.4, which added check-meeting-held), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
