@@ -567,6 +567,109 @@ export function startupQuestionOf(screen) {
   return { kind: known.kind, asks, options, at };
 }
 
+/* ───────────── a window Claude Code has no record of ─────────────
+ *
+ * The roster is how the host knows a window: which conversation it is on,
+ * and so which transcript to read. A window with no entry in it is one the
+ * host takes for still starting. Seen on costmo's second machine the day
+ * 0.14.0 was first installed there (2026-11-20): `~/.claude/sessions` was
+ * empty, and a 2.1.318 window stood at its composer, alive, running every
+ * command it was sent and writing its transcript. So the floor typed into a
+ * window it could not hear. A model change ended "gave no sign of running
+ * it within 20s" with the window's own line saying it was set. A message
+ * read "not recorded, send again" while the agent worked on it. And the
+ * board never asked for a /mcp reconnect after its restarts, because it asks
+ * only for a floor-held window and this one read as starting. He found it by
+ * opening the window; his word the same hour: "we need to be able to
+ * auto-resolve this. Another operator likely would not have been able to
+ * track that down."
+ *
+ * What removed that window's record was not found. Not reproduced here in
+ * six tries: a new conversation and a cold open through send() on 2.1.329
+ * and 2.1.318, a 2.1.318 window read by 2.1.329, and a 2.1.318 window on a
+ * brand-new profile, which wrote `sessions/<pid>.json` as soon as its folder
+ * was trusted and kept it through 2.1.329's `auth status` and `agents`. That
+ * machine's profile had been deleted and remade around a tmux server that
+ * was left running, which is the likeliest cause and is not proven.
+ *
+ * So the state is resolved, whatever makes it. A window that stands idle at
+ * its composer with no record for UNREGISTERED_MS is reopened on its own
+ * conversation, on the host's line, and the desk says so: a new process
+ * writes a new record, and connects its tools as it starts. Idle, because a
+ * window is never closed mid-turn, and a question, a menu or a typed draft
+ * is somebody's. Once: a reopened window with no record either is said on
+ * the desk in words and left alone, since reopening is a kill and a machine
+ * on which no window is recorded would otherwise be reopened for ever.
+ */
+export const UNREGISTERED_MS = Number(process.env.ORCH_UNREGISTERED_MS ?? 30_000);
+
+/** Whether a screen is a window standing at its composer: nothing asked, nothing running, nothing open over it. */
+export function standingIdleOf(screen) {
+  const text = String(screen ?? '');
+  if (!text.trim()) return false;
+  if (startupQuestionOf(text) || askingOf(text) || overlayOf(text) || /esc to interrupt/i.test(footOf(text))) return false;
+  return composerOf(text) != null;
+}
+
+/**
+ * The same, read off a pane, and with nothing typed in the box: the cursor
+ * right behind the prompt mark. Typed text has the cursor at its end; a
+ * prompt suggestion is drawn after a cursor that stays at column 2 (see
+ * composerOf's callers), so a suggestion is not somebody's draft. The answer
+ * carries the pane's own id, because tmux answers for another pane when the
+ * one named is gone.
+ */
+export async function standingIdleAt(target) {
+  if (!standingIdleOf(await screenOf(target, 30))) return false;
+  const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{cursor_x}']);
+  const m = /^(%\d+) (\d+)$/.exec((at.out ?? '').trim());
+  return !!m && at.ok && String(target).endsWith(m[1]) && Number(m[2]) <= 2;
+}
+
+/**
+ * What to do about a window with no record, from how long it has stood
+ * idle (`since`, null when it has not) and the window the host last
+ * reopened for this (`tried`, a pid):
+ *   none    not standing idle
+ *   wait    not for long enough yet
+ *   reopen  reopen it on its conversation
+ *   say     this is the window that reopen made, and it has no record either
+ */
+export function unregisteredVerdict({ since, now, pid, tried = null, after = UNREGISTERED_MS }) {
+  if (!since || !pid) return 'none';
+  if (now - since < after) return 'wait';
+  return tried === pid ? 'say' : 'reopen';
+}
+
+/** When a process started, in ms, from how long `ps` says it has run; null when it cannot say. */
+export async function startedAt(pid) {
+  if (!pid) return null;
+  const r = await new Promise((resolve) => {
+    execFile('ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 5000 }, (err, out) => resolve(err ? null : String(out).trim()));
+  });
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(r ?? '');
+  if (!m) return null;
+  const secs = (Number(m[1] ?? 0) * 86400) + (Number(m[2] ?? 0) * 3600) + (Number(m[3]) * 60) + Number(m[4]);
+  return Date.now() - (secs * 1000);
+}
+
+/**
+ * The conversation a window with no record is on: the one in its folder
+ * somebody last spoke in, when that was after the window started. Anything
+ * older is not this window's, and a folder just taken starts a new
+ * conversation rather than whichever old one is in it (resumable). Null
+ * when nothing was said in it: a new conversation loses nothing.
+ */
+export async function spokenSince(where, sinceMs) {
+  if (seatOf(where) || !sinceMs) return null;
+  const newest = await newestConversation(canonical(cwdOf(where)));
+  if (!newest) return null;
+  const at = Date.parse(newest.at);
+  // A second of grace: a turn's stamp is the window's clock at the write,
+  // and the start is `ps`, which counts whole seconds.
+  return Number.isFinite(at) && at >= sinceMs - 1000 ? newest.id : null;
+}
+
 /** The startup question on a pane, if one is up. Thirty lines: both dialogs
  *  fit in far fewer, and the footer is read positionally regardless. */
 export async function startupQuestionAt(target) {

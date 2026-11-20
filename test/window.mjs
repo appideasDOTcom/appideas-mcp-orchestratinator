@@ -584,6 +584,19 @@ async function main() {
     eq(chrome?.asks, 'Claude in Chrome extension detected', 'and named by its title');
     eq(chrome?.options.map((o) => o.text), ['No, keep browser tools off', 'Yes, use my browser'], 'its two rows are read, and the paragraphs above the blank line are not');
     eq(chrome?.at, 0, 'with the cursor on No, where the window puts it');
+    // A window Claude Code has no record of (costmo's second machine,
+    // 2026-11-20): what tells one standing idle from one that is starting,
+    // asking or working, and what is done about it, once.
+    eq(W.standingIdleOf(COMPOSER), true, 'a window at its composer is standing idle');
+    eq([W.standingIdleOf(RAW_TRUST), W.standingIdleOf(RAW_CHROME), W.standingIdleOf(Q_ONE)], [false, false, false], 'one asking something is not: a startup question, the browser’s, a form');
+    eq(W.standingIdleOf(['\u2500'.repeat(60), '\u276f ', '\u2500'.repeat(60), '  auto mode on · esc to interrupt'].join('\n')), false, 'nor one that is working');
+    eq([W.standingIdleOf(''), W.standingIdleOf('\n\n')], [false, false], 'nor a pane that has drawn nothing yet');
+    const NR0 = 1_000_000;
+    eq(W.unregisteredVerdict({ since: null, now: NR0, pid: 7 }), 'none', 'a window not standing idle is left alone');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 29_000, pid: 7, after: 30_000 }), 'wait', 'one idle with no record is given time: a window that is starting registers within it');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 7, after: 30_000 }), 'reopen', 'past that it is reopened');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 8, tried: 8, after: 30_000 }), 'say', 'the window that reopen made, with no record either, is said and not reopened again');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 9, tried: 8, after: 30_000 }), 'reopen', 'a later window, opened by somebody, gets its one reopen');
     eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
     eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
 

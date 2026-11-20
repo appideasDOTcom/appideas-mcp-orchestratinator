@@ -346,6 +346,11 @@ function fixture() {
     // Started while Claude Code is signed out, the window says so where
     // 2.1.329 does, at the right of the status row under the composer, and
     // never redraws it: a sign-in made elsewhere is not taken by this one.
+    // A window at its composer, as a real one stands: the box and its status
+    // row, drawn once. For the window Claude Code has no record of, which
+    // the host knows from a starting one by exactly this (standingIdleOf).
+    `const COMPOSER_FLAG = ${JSON.stringify(`${FIX}/composer.flag`)};`,
+    String.raw`if (fs.existsSync(COMPOSER_FLAG)) process.stdout.write('\n' + '─'.repeat(60) + '\n❯ \n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n');`,
     `const SIGNED_OUT_FLAG = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
     String.raw`if (fs.existsSync(SIGNED_OUT_FLAG)) process.stdout.write('\n' + '\u2500'.repeat(60) + '\n\u276f \n' + '\u2500'.repeat(60) + '\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)          Not logged in \u00b7 run /login\n');`,
     // And a flag file that leaves the window asking something: a permission
@@ -469,6 +474,9 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
       ORCH_HOST_ID: id, ORCH_HOST_NAME: 'Test Mac',
       ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION,
       ORCH_HOST_WATCH_MS: '300', ORCH_HOST_CONFIG: '/nonexistent/host.json',
+      // A window with no session record is reopened after this long idle
+      // (window.js, UNREGISTERED_MS): seconds here, not half a minute.
+      ORCH_UNREGISTERED_MS: '3000',
       // A message's attachments are written here (host/uploads.js), not
       // beside a host.json that does not exist.
       ORCH_HOST_UPLOADS: `${FIX}/uploads`,
@@ -2273,6 +2281,35 @@ try {
   assert(await until(async () => ((await chat('free', 'after the browser question')).status === 200 ? true : null), 8000), 'and the desk takes a message again');
   assert(await until(() => (clean(received()).includes('after the browser question') ? true : null), 20000), 'which reaches the window');
   rmSync(`${FIX}/startup-ask.flag`, { force: true });
+
+  /* A window Claude Code has no record of (costmo's second machine,
+   * 2026-11-20): alive, at its composer, running what it is sent, and not in
+   * the roster, so the floor types into a window it cannot hear. The host
+   * reopens it on its own conversation and says so. Staged as it was found:
+   * a window that registered, and its record gone from under it. */
+  console.log('\n  a window Claude Code has no record of');
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  writeFileSync(`${FIX}/composer.flag`, '1');
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'a window is opened for the desk');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'and it registers, at its composer');
+  rmSync(`${FIX}/composer.flag`, { force: true });
+  const nrPane = paneOf();
+  const nrLaunches = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '').split('\n').slice(0, -1);
+  const nrBefore = nrLaunches().length;
+  // Something said in it since it started, so there is a conversation to keep.
+  appendFileSync(transcript(), `${JSON.stringify({ type: 'user', uuid: 'nr-1', timestamp: new Date().toISOString(), message: { content: 'said in the window nobody could hear' } })}\n`);
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  assert(await until(() => (/is running with no session record; reopening it on /.test(host.log) ? true : null), 25000),
+    'its record gone, and the window still standing idle: the host reopens it');
+  const nrTold = await until(async () => ((await turns('free')).rows ?? []).find((r) => /Claude Code had no record of this desk’s window|Claude Code had no record of this desk's window/.test(r.text ?? '')) ?? null, 30000);
+  assert(!!nrTold, `and says so on the desk — ${nrTold?.text}`);
+  assert(/on the same conversation/.test(nrTold?.text ?? ''), 'on the conversation it was having');
+  eq(nrLaunches().slice(nrBefore), [`--resume ${SESSION_ID}`], 'one window started, resuming that conversation');
+  assert(!paneOf().some((p) => nrPane.includes(p)), 'in a new pane, the unrecorded one closed');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'and the floor holds the desk again: the new window has a record');
+  await sleep(5000);
+  eq(nrLaunches().length, nrBefore + 1, 'a window that has its record is left alone after that');
 
   // A request for the folder dialog that reaches the host after the page has
   // given up must not open one: a dialog appearing in front of somebody who

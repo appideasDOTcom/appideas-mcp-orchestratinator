@@ -200,6 +200,11 @@ class Desk {
     // and a question Claude Code asks after it has registered (the browser
     // extension's, 2026-11-20) would otherwise never reach the floor.
     this.lookStartup = false;
+    // A window of this desk that Claude Code has no record of (window.js,
+    // "a window Claude Code has no record of"): the pid and since when it
+    // has stood idle, and the window the host last reopened for it.
+    this.unreg = null;
+    this.unregTried = null;
     this.holders = 0;        // live processes claiming this conversation
     this.clients = 0;        // terminals attached to the tmux session
     this.offset = 0;         // bytes of that transcript already sent up
@@ -412,6 +417,22 @@ class Desk {
     } else if (this.startup) {
       this.host.emit({ type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id, gone: true }, true);
       this.startup = null;
+    }
+
+    // A window with no record that is not starting at all: standing idle
+    // at its composer. Counted from the tick that first finds it so, and
+    // handed to the host's line once it has stood UNREGISTERED_MS.
+    if (booting && !q && await W.standingIdleAt(paneHere.target)) {
+      if (this.unreg?.pid !== paneHere.pid) this.unreg = { pid: paneHere.pid, since: Date.now(), handed: false };
+      const verdict = W.unregisteredVerdict({ since: this.unreg.since, now: Date.now(), pid: paneHere.pid, tried: this.unregTried });
+      if ((verdict === 'reopen' || verdict === 'say') && !this.unreg.handed) {
+        this.unreg.handed = true;
+        this.host.healUnregistered(this, paneHere.pid, verdict);
+      }
+    } else {
+      this.unreg = null;
+      // Registered: whatever was tried for an earlier window is history.
+      if (paneHere && !booting) this.unregTried = null;
     }
 
     // Keep reading the desk's conversation even with no window open on it.
@@ -1829,6 +1850,42 @@ class Host {
     });
   }
 
+  /**
+   * A window Claude Code has no record of, reopened on its conversation, or
+   * said on its desk when the window that reopen made has none either
+   * (window.js, "a window Claude Code has no record of"). On the host's
+   * line, like the reopen after a sign-in: it closes a window, and nothing
+   * else may be typing into it meanwhile. Everything is read again here,
+   * since up to a poll has passed since the watch loop looked.
+   */
+  healUnregistered(desk, pid, verdict) {
+    this.later.push(async () => {
+      const { channel, agent } = desk;
+      const pane = await W.paneFor(desk.where);
+      if (!pane || pane.pid !== pid) return;
+      const known = await W.roster();
+      if ((known.sessions ?? []).some((x) => x.pid === pid)) return;
+      if (verdict === 'say') {
+        warn(`${desk.label}: the reopened window has no session record either; leaving it`);
+        await this.emit({
+          type: 'error', channel, agent, code: 'unregistered',
+          message: 'this desk\'s window is running, but Claude Code has no record of its session, so the floor cannot read what it says or confirm what it is sent. The host reopened it once and the new window is the same, so nothing more was done.',
+        }, true);
+        return;
+      }
+      if (!(await W.standingIdleAt(pane.target))) { desk.unreg = null; return; }
+      const id = await W.spokenSince(desk.where, await W.startedAt(pid));
+      log(`${desk.label}: its window (pid ${pid}) is running with no session record; reopening it on ${id ?? 'a new conversation'}`);
+      await this.reopen(desk, { sessionId: id, known: false });
+      const now = await W.paneFor(desk.where);
+      // The window reopen made: one that has no record either is said, not reopened again.
+      desk.unregTried = now && now.pid !== pid ? now.pid : pid;
+      if (now && now.pid !== pid) {
+        desk.told(`Claude Code had no record of this desk's window, so the floor could not read it; the host reopened it on ${id ? 'the same conversation' : 'a new conversation, as nothing had been said in it'}`, id);
+      }
+    });
+  }
+
   /** Each window that still says it is signed out, reopened on its conversation (see signIn). */
   async reopenSignedOut() {
     for (const desk of this.desks.values()) {
@@ -2346,7 +2403,7 @@ class Host {
         // window, and nothing else may be typing into it meanwhile.
         while (this.later.length && !this.stopping) {
           const job = this.later.shift();
-          await job().catch((err) => warn(`after the sign-in: ${err.message}`));
+          await job().catch((err) => warn(`a job left for the host's line: ${err.message}`));
         }
         this.inHand = (reply.work ?? []).slice();
         while (this.inHand.length && !this.stopping) {
