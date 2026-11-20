@@ -1295,7 +1295,7 @@ from this window read one red, "and with nothing at all the host says so,
 and how to give it one", because the host meant to have no key had the
 app's; with the variables unset the host suite read 520 ✓. The suite's
 own hosts name their board and id, so the app's board was not touched. So,
-until the host stops handing them down:
+until every window open on the machine was opened by a 0.14.4 host (below):
 
 ```
 for v in $(env | command grep -o -E '^ORCH_[A-Z_]+'); do unset "$v"; done
@@ -1304,12 +1304,12 @@ export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
 
 before any suite, scratch board or host from a window on the app's floor.
 
-**Decided 2026-11-20, not built: a window gets a person's environment and
-nothing of the host's.** costmo handed the call over that evening ("make
-the open decision based on what is going to be smoothest to the operator
-and end user experience. We'll pick that up in the next session"), so the
-pick is the developer's, and it is the first thing the next session
-builds, for the next version. What was picked, and why each part:
+**A window gets a person's environment and nothing of the host's: decided
+2026-11-20, built in 0.14.4.** costmo handed the call over that evening
+("make the open decision based on what is going to be smoothest to the
+operator and end user experience"), and again in the 0.14.4 round with the
+same caveat, so the pick is the developer's. What was picked, and why each
+part:
 
 1. **The host hands tmux its environment without its own settings**:
    every `ORCH_` variable the host reads as configuration, the key
@@ -1329,15 +1329,20 @@ builds, for the next version. What was picked, and why each part:
 3. **The host takes the same variables out of a running tmux server at
    its start** (`set-environment -g -u`), so the fix reaches windows
    opened after an update without the floor being closed. Windows already
-   open keep what they have until they are reopened. To be measured on a
-   socket of its own before it is believed, including what a `-u` of a
-   variable the server never had says.
+   open keep what they have until they are reopened. Measured on a socket
+   of its own (2026-11-20, tmux 3.7c): a server started with three `ORCH_`
+   variables and no `TMPDIR` lost all three, gained `TMPDIR`, and a window
+   opened after it carried none. A `-u` of a name the server never had
+   exits 0 and says nothing, and the host asks only for names the server
+   lists anyway (`serverEnvPlan`).
 4. **`TMPDIR` is filled when missing, by the host**, as `claudeEnv` fills
    `USER` and `LOGNAME`: on macOS the user's own (`getconf
    DARWIN_USER_TEMP_DIR`), elsewhere left alone. In the host and not only
    the app, because it is then right under every supervisor, and whether
    launchd gives a LaunchAgent one has not been read. The app's agent
-   gives its host one as well; that is its half and it has agreed.
+   gives its host one as well; that is its half and it has agreed. `USER`
+   and `LOGNAME` are filled the same way, because a window is a Claude
+   Code and with HOME and PATH alone it says a signed-in Mac is signed out.
 
 What was weighed and not picked: leaving the key in (it is one variable
 and every window's binding holds it anyway), because the red above was the
@@ -1346,11 +1351,20 @@ the surprise this removes. And fixing it in the suites alone (each drops
 inherited `ORCH_` variables at its top), because that leaves a hand-started
 host as it is. It changes what a launchd host's windows get only where
 that host was configured by environment and not by `host.json`, which
-`install.sh` does not do. Owed with the build: rows in `test:host` (its
-placeholder-key section already reads what a pane was given,
-`pane-env.log`) and `test:window`, their mutants, and a real window from
-the app's host read with `env`. It is written in
-`orchestratinator.consumed`, `host.windows_inherit`.
+`install.sh` does not do. Built as `windowEnv`, `serverEnvPlan` and
+`cleanServerEnv` in `host/window.js`, `paneEnv` and `keyVar`, and the call
+at the host's start. Tested: `test:window` ("what a window inherits from
+the host", including a live server on a socket of its own), `test:host`
+(the pane-env row, with a variable planted in the server before each host
+starts, because the default socket is shared and one clean run would
+otherwise leave every later run reading clean), and the mutants in
+`mutants-0-14-4.suite.json`. Not yet read: a real window opened by the
+app's host on 0.14.4, with `env`. It is written in
+`orchestratinator.consumed`, `host.windows_inherit`. **Running `test:host`
+cleans the operator's own tmux server** (its host runs on the default
+socket, and cleaning at the start is the rule): the `ORCH_` variables an
+older host left in the global environment are unset there, which is what
+the next 0.14.4 host would do anyway. Windows already open keep theirs.
 
 ## A file attached to a message
 
@@ -1910,6 +1924,28 @@ optional:
   named it, before any host had seated it (the browser check drew a desk
   for a session its host had refused). `unbound` for a seat ends its
   conversations.
+
+**On develop, every seat was read as a released folder until 0.14.4**
+(costmo's report, 2026-11-20: a second meeting room with two agents
+already in one, "everything about it failed miserably", and the `-2`
+desks could not be removed). A merge seam, not a fault in either half:
+develop's release check (`boundAt`, 0.12.7, 11-09) read a desk's binding
+off its folder, and main's seats (0.12.9, 11-16) are desks whose folder
+names *another* desk, by design. The 11-18 merge put them together with no
+conflict. So every piece of work for a seat (a room's message, its notice,
+its Leave) was refused with "not done: <folder> is <the folder's desk> on
+this instance now … The desk is let go here", and its window coming up did
+the same at every watch tick, after which the rescan found the seat again
+from its record: the app's host log carried four lines a second for every
+seat, a seat on another floor included. `boundAt` reads a seat's own
+record (`S.listSeats()`) now. Why 99 ✓ in `test:seats` never saw it: its
+fixture HOME had no `~/.claude.json`, so the local scope read as
+unreadable and `boundAt` concluded nothing. The fixture writes one now, as
+every real machine has, and the change taken out is 33 red there. **Two
+lessons for the next merge of main into develop**: a check that reads "the
+folder's binding" is wrong for a seat, so grep both sides' new readers of
+`readDesk`/`readLocalScope` against `desk.seat`; and a fixture that leaves
+out a file every machine has can switch a whole check off in silence.
 
 **How a new thing was asked of the host, for the next one.** Three parts,
 each of which has a failure behind it elsewhere in this file. A **work
@@ -2707,6 +2743,48 @@ window arrangement, like a popout, and popouts write none; the reopens a
 Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it names
 sessions on disks that may not be this machine's. `check-meeting.mjs` in
 **verify-ui-change** drives all of it.
+
+**A meeting outlives a quit of the desktop app, and closing its own window
+still ends it** (0.14.4; costmo, 2026-11-20, "a meeting room shouldn't
+disappear from a floor unless/until the meeting is ended", then three
+rulings by AskUserQuestion the same hour). A room's window closing ends its
+meeting because the page cannot tell a close from a reload, and that
+stays: **closing the room's own window ends it** (his pick over "only End
+meeting ends it"). What changed is that a close caused by the app quitting
+does not, and a floor closing never did, since a room no longer closes
+with the window that opened it (the app's half, `outlivesOpener`):
+- **The app's word is `window.orchMeeting.hold()`**, which the app calls
+  in every room's window before it quits and waits for (bounded at 3 s,
+  its half). It posts `/api/floor/meeting/hold`, which sets `held_at`, and
+  the window's pagehide then lets its desks go (`leaveHeld`) without
+  ending the record. A room already ended answers false, and its close ends
+  it as any close does. Contract `orchestratinator.consumed`,
+  `dashboard.meeting_hold`. A crash with no word lapses as before.
+- **A held meeting is a live one** wherever "live" is read
+  (`liveMeetings`, `meetingsOn`, `allMeetings`): it contains its desks'
+  broadcasts, its second sessions are not swept, its desks are still told
+  they are in it. A touch or an open clears the hold, End clears it.
+- **While no window shows it, its desks stay in it** (his pick over
+  "usable from the floor"). `/api/floor` lists `meetings_held`, the floor
+  writes each desk into `ui.outs` as `kept` (`heldPlan`, lifted into
+  `test:floor`), so the box stands, and a desk's panel offers **Open the
+  meeting room** in place of a message box and of Bring back, which asks a
+  window there is none of. "In a meeting" opens the room; End meeting
+  ends it on the board. Whether a meeting is held is read off the payload
+  first (`meetingKept`): a held window's `gone` carries `rejoin`, and End
+  pressed in that moment was sent to a window that was not there (the page
+  check's first run).
+- **In the app, a floor that loads with a held meeting no window shows
+  opens its room** (his pick over "never by itself"), once per page, behind
+  a Web Lock per meeting so two floor windows at a launch open it once, and
+  only after `HELD_OPEN_AFTER_MS` so an open room has answered `who`. The
+  app keeps no list of rooms. A browser opens nothing by itself (a popup
+  needs a click there), and its box is a click away. The app has no popup
+  blocker (desktop-dev, msg 3710), so the open needs no gesture.
+
+`check-meeting-held.mjs` in **verify-ui-change** is the page (with popups
+allowed, as in the app), `mutants-meeting-held.page.json` beside it, and
+the board's rows are in `test:floor` with `mutants-0-14-4.suite.json`.
 
 **A meeting's desks stand in a box of their own on the floor** (costmo,
 2026-11-16; "a meeting on the floor" in `src/ui/floor.js`). A 2.5px light

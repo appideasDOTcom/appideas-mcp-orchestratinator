@@ -857,14 +857,66 @@ async function main() {
     // 'unread' rather than false when the pane's environment never arrived,
     // so a row asserting "nothing" cannot pass on a file that was empty.
     const given = async (d) => { const e = await paneEnvOf(d); return e ? /=board-key-value$/m.test(e) : 'unread'; };
-    eq([await given(litDir), await given(compoundDir), await given(filledDir), await given(keylessDir)], [false, false, false, false],
-      'a literal key, a key with text around the placeholder, one the host filled, and a host with no key of its own give the pane nothing');
-    eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null)], [['-e', 'X=k'], [], []],
-      'paneEnv: the variable for a desk that names one, nothing otherwise');
+    eq([await given(litDir), await given(compoundDir), await given(keylessDir)], [false, false, false],
+      'a literal key, a key with text around the placeholder, and a host with no key of its own give the pane nothing');
+    // Since 0.14.4 a window gets none of the host's ORCH_ variables
+    // (windowEnv), so a placeholder the host could fill is given to the pane
+    // too, as what the host made of it. Before, it was left to the tmux
+    // server's environment, which was the host's own.
+    assert(/^ORCH_TEST_FILLED_KEY=host-filled$/m.test(await paneEnvOf(filledDir)),
+      "a placeholder the host filled from its own environment is given to the pane by -e, as the host filled it");
+    eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null), W.paneEnv({ keyVar: 'X', key: 'filled' }, 'k')],
+      [['-e', 'X=k'], [], [], ['-e', 'X=filled']],
+      'paneEnv: the variable for a desk that names one (as the host filled it, else the host\'s key), nothing otherwise');
     // tmux keeps a pane's start command and prints it (choose-tree,
     // #{pane_start_command}); `-e` is not part of it, so the key is not there.
     const starts = (await run('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_start_command}'])).stdout;
     assert(!starts.includes('board-key-value'), 'and the key is not in any pane\'s start command');
+
+    // A window gets a person's environment and nothing of the host's own
+    // settings (0.14.4, host.windows_inherit). The pure half first.
+    console.log('\n  what a window inherits from the host');
+    {
+      const host = { HOME: '/h', PATH: '/p', ORCH_URL: 'http://b', ORCH_AUTH_TOKEN: 'k', ORCH_HOST_SUPERVISOR: 'app', LANG: 'en_GB.UTF-8' };
+      const e = W.windowEnv(host, { platform: 'darwin', tempDir: () => '/var/folders/x/T/', user: () => 'pat' });
+      eq(Object.keys(e).filter((k) => k.startsWith('ORCH_')), [], 'windowEnv: none of the host\'s ORCH_ variables');
+      eq([e.HOME, e.PATH, e.LC_ALL], ['/h', '/p', 'en_GB.UTF-8'], 'and everything else, with the locale');
+      eq([e.TMPDIR, e.USER, e.LOGNAME], ['/var/folders/x/T/', 'pat', 'pat'], 'TMPDIR, USER and LOGNAME filled where the host has none (macOS)');
+      const own = W.windowEnv({ ...host, TMPDIR: '/mine/', USER: 'me', LOGNAME: 'me' }, { platform: 'darwin', tempDir: () => '/var/folders/x/T/', user: () => 'pat' });
+      eq([own.TMPDIR, own.USER, own.LOGNAME], ['/mine/', 'me', 'me'], 'and left as they are where it has them');
+      eq(W.windowEnv(host, { platform: 'linux', tempDir: () => '/var/folders/x/T/', user: () => 'pat' }).TMPDIR, undefined, 'TMPDIR is filled on macOS only');
+      eq(W.serverEnvPlan('HOME=/h\nORCH_URL=http://b\n-ORCH_GONE\nORCH_AUTH_TOKEN=k\nUSER=me\n', { TMPDIR: '/t/', USER: 'pat', LOGNAME: 'pat' }),
+        { unset: ['ORCH_URL', 'ORCH_AUTH_TOKEN'], set: [['TMPDIR', '/t/'], ['LOGNAME', 'pat']] },
+        'serverEnvPlan: unsets each ORCH_ variable the server lists (not one already removed), sets only what it lacks');
+    }
+    // Then a real server started the old way, with a host's settings and no
+    // TMPDIR, on a socket of its own: the default socket is the operator's.
+    // window.js reads ORCH_TMUX at load, so the host's side runs in a child.
+    {
+      const sock = `orch-envtest-${process.pid}`;
+      const wrap = `${FIX}/tmux-env-wrap`;
+      writeFileSync(wrap, `#!/bin/sh\nexec tmux -L ${sock} "$@"\n`);
+      chmodSync(wrap, 0o755);
+      const bare = { HOME: process.env.HOME, PATH: process.env.PATH };
+      await run('tmux', ['-L', sock, 'new-session', '-d', '-s', 'envtest', 'sleep 120'], { env: { ...bare, ORCH_URL: 'http://the-hosts-board', ORCH_AUTH_TOKEN: 'the-hosts-key', ORCH_HOST_SUPERVISOR: 'app' } });
+      try {
+        const child = await run(process.execPath, ['--input-type=module', '-e',
+          `const W = await import(${JSON.stringify(resolve('./host/window.js'))}); console.log(JSON.stringify(await W.cleanServerEnv()));`],
+          { env: { ...bare, ORCH_TMUX: wrap, ORCH_URL: 'http://the-hosts-board' } });
+        const did = JSON.parse(child.stdout.trim().split('\n').pop());
+        eq(did.unset.sort(), ['ORCH_AUTH_TOKEN', 'ORCH_HOST_SUPERVISOR', 'ORCH_URL'], 'cleanServerEnv unsets the host\'s variables in a server already running');
+        assert(did.set.includes('TMPDIR'), `and sets TMPDIR where the server had none — set ${did.set.join(', ')}`);
+        const out = `${FIX}/env-after.txt`;
+        await run('tmux', ['-L', sock, 'new-window', '-d', '-t', '=envtest:', `env > ${out}.tmp; mv ${out}.tmp ${out}; sleep 5`]);
+        for (let i = 0; i < 80 && !existsSync(out); i++) await sleep(100);
+        const env = existsSync(out) ? readFileSync(out, 'utf8') : '';
+        assert(env.includes('PATH='), 'the window opened after it wrote its environment');
+        eq(env.split('\n').filter((l) => l.startsWith('ORCH_')), [], 'and a window opened after it carries none of them');
+        assert(/^TMPDIR=\S/m.test(env), 'and has a TMPDIR');
+      } finally {
+        await run('tmux', ['-L', sock, 'kill-server']).catch(() => {});
+      }
+    }
 
     // A desk whose folder name begins with the tmux session's name. tmux
     // resolves new-window's `-t` against window names before session names,

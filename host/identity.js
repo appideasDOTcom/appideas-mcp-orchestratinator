@@ -117,11 +117,15 @@ function deskIn(servers, dir, extra) {
       const key = expandEnv(raw);
       const unset = key ? [] : unsetIn(raw);
       // `keyVar`: the one variable a key that is nothing but a placeholder
-      // names, when this host cannot fill it. A window the host opens for the
-      // desk is given that variable (paneEnv in window.js), because the pane
-      // has no better environment than the host's. A key with text around the
-      // placeholder gets none: the variable set to the board's key would make
-      // the key something else.
+      // names. A window the host opens for the desk is given that variable
+      // (paneEnv in window.js), because since 0.14.4 a window gets nothing
+      // of the host's own settings (TMUX_ENV in window.js): the variable the
+      // binding names is the one thing of them it needs. Before that it was
+      // given only when the host could not fill it, on the ground that one
+      // the host filled came from the environment the tmux server inherited
+      // (PR #52), which is no longer so. A key with text around the
+      // placeholder gets none: the variable set to the board's key would
+      // make the key something else.
       const whole = raw ? WHOLE_PLACEHOLDER.exec(raw)?.[1] : null;
       // `server`: the name the window knows this entry by, which is what
       // `/mcp reconnect <name>` takes (typedCommand in window.js). The host
@@ -129,7 +133,7 @@ function deskIn(servers, dir, extra) {
       return {
         channel, agent, cwd: dir, url: s.url, key, server,
         ...(unset.length ? { keyUnset: unset } : {}),
-        ...(whole && unset.includes(whole) ? { keyVar: whole } : {}),
+        ...(whole ? { keyVar: whole } : {}),
         ...extra,
       };
     }

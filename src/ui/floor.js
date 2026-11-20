@@ -462,6 +462,8 @@
     // Meetings the floor's End meeting was pressed for, by room id, with
     // when: the placard reads "Ending…" until the desks are back.
     meetEnding: new Map(),
+    // Kept meetings this page has opened a room for already (keepHeld): once each.
+    heldTried: new Set(),
     fate: null,
     mem: null,
     lastDesk: null,      // the popout's desk as last read, for a header after it is gone
@@ -2828,6 +2830,40 @@
     return cx < area.left || cx >= area.left + area.width || cy < area.top || cy >= area.top + area.height;
   }
 
+  /**
+   * A meeting kept with no window showing it (0.14.4): the desktop app quit
+   * with its room open, and the board kept it (`meetings_held` on
+   * /api/floor). costmo's rulings, 2026-11-20: a meeting does not disappear
+   * from its floor until it is ended; its desks stay in it while no window
+   * shows it; and in the app the floor opens its room again.
+   *
+   * So the floor writes such a desk into `ui.outs` as a room's window would,
+   * marked `kept` and with no window id, and it is boxed, its composer kept
+   * off the floor and its broadcasts in the room, as any desk out in a room.
+   * `held: true` keeps it there however long polls take; the payload is
+   * what takes it away. A desk a real window has (one that is not kept, and
+   * live within `ttl`) is that window's, and is left alone.
+   *
+   * Returns what to write (`set`), what to take out (`drop`: kept entries
+   * for a meeting no longer held, or for a desk no longer in it), and which
+   * held meetings no window shows at all (`open`), which the app's floor
+   * opens again.
+   */
+  function heldPlan(held, outs, now, ttl) {
+    const windowHas = (o) => !!o && !o.kept && (o.held || now - o.at < ttl);
+    const want = new Map();
+    const open = [];
+    for (const m of Array.isArray(held) ? held : []) {
+      const keys = (m.agents ?? []).map((a) => `${m.channel}|${a}`);
+      const free = keys.filter((k) => !windowHas(outs.get(k)));
+      for (const k of free) want.set(k, m.id);
+      if (keys.length && free.length === keys.length) open.push(m.id);
+    }
+    const set = [...want].map(([k, id]) => [k, { at: now, id: null, held: true, kept: true, meeting: id }]);
+    const drop = [...outs].filter(([k, o]) => o?.kept && want.get(k) !== o.meeting).map(([k]) => k);
+    return { set, drop, open };
+  }
+
   /* ---------- a meeting on the floor: the drawing ---------- */
 
   /** One meeting's box: the frame behind its desks, and the two placards on its top edge. */
@@ -4049,7 +4085,7 @@
    * popout (issue #19). The detach button in the header brings the popout to
    * the front.
    */
-  function outShell(wrap, channel, agent, meeting = false) {
+  function outShell(wrap, channel, agent, meeting = false, keptId = null) {
     stashDraft();
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
@@ -4065,7 +4101,7 @@
       <div class="p-meta mono muted"></div>
       <div class="p-out">
         <p class="muted p-out-why"></p>
-        <button class="btn primary" data-act="bring-back" data-channel="${esc(channel)}" data-agent="${esc(agent)}"${meeting ? ' title="Take this desk out of the meeting room; the room carries on with the others"' : ''}>${meeting ? 'Bring back from the meeting room' : 'Bring chat back here'}</button>
+        ${keptId ? `<button class="btn primary" data-act="open-held" data-meeting="${esc(String(keptId))}" title="Open this meeting's room in a window of its own; its desks join it again">Open the meeting room</button>` : `<button class="btn primary" data-act="bring-back" data-channel="${esc(channel)}" data-agent="${esc(agent)}"${meeting ? ' title="Take this desk out of the meeting room; the room carries on with the others"' : ''}>${meeting ? 'Bring back from the meeting room' : 'Bring chat back here'}</button>`}
       </div>`;
   }
 
@@ -4463,20 +4499,28 @@
     // way back. The floor holds no stream for it and draws no composer
     // (issue #19; #44 Decided 3).
     if (isOut(channel, agent)) {
-      const forOut = `${channel}|${agent}|out|${inMeeting ? 'meeting' : 'popout'}`;
+      // A meeting kept with no window (0.14.4): the desk is still in it, and
+      // the way to it is its room, opened again (costmo: "Open the meeting
+      // room" in place of a message box). Bring back asks a window, and
+      // there is none to ask.
+      const kept = !!inMeeting && !!ui.outs.get(outKey(channel, agent))?.kept;
+      const forOut = `${channel}|${agent}|out|${inMeeting ? (kept ? `kept:${inMeeting}` : 'meeting') : 'popout'}`;
       if (ui.panelFor !== forOut) {
         stopReading();
         closeStream();
         closePromptMenu();
-        outShell(wrap, channel, agent, !!inMeeting);
+        outShell(wrap, channel, agent, !!inMeeting, kept ? inMeeting : null);
         ui.panelFor = forOut;
       }
       wrap.classList.remove('hidden');
       wrap.querySelector('.p-persona').textContent = d.persona;
       wrap.querySelector('.p-meta').textContent = panelMeta(d);
-      wrap.querySelector('.p-out-why').textContent = inMeeting
+      wrap.querySelector('.p-out-why').textContent = kept
+        ? `${d.persona} is in a meeting that is still on, with no window open for it. Open the meeting room to talk to it there, or end the meeting from its box on the floor.`
+        : inMeeting
         ? `${d.persona} is in a meeting room. Its chat is there, in one transcript with the room\u2019s other desks; the desk on the floor works as it always does.`
         : `${d.persona}\u2019s chat is in a window of its own. Everything in the chat works there; the desk on the floor works as it always does.`;
+      if (kept) return;
       // One agent can be in several rooms at once, each a session of its
       // own, and Bring back takes it out of all of them.
       const back = wrap.querySelector('[data-act="bring-back"]');
@@ -6982,6 +7026,23 @@
     $('p-text')?.focus();
   }
 
+  /**
+   * The window going while its meeting is held (orchMeeting.hold): the
+   * desks are let go here, as a closing window lets them go, and nothing
+   * ends the record. The floor boxes them again from `meetings_held`.
+   */
+  function leaveHeld() {
+    const m = ui.meeting;
+    if (!m) return;
+    stashDraft();
+    for (const p of m.parts) {
+      say({ t: 'gone', channel: m.channel, agent: p.agent, id: POP_ID, open: false, rejoin: true });
+      p.release?.();
+      p.release = null;
+    }
+    closeStream();
+  }
+
   /** End the meeting: every desk back on the floor, the record kept for Resume, and the window closed. */
   function endMeeting({ closing = false } = {}) {
     // `closing` is pagehide: the window may be reloading, and then says
@@ -7560,6 +7621,9 @@
    * anything else would raise that window in the app.
    */
   function raiseMeeting(channel, key, at) {
+    // A meeting kept with no window: there is nothing to raise, so its room
+    // is opened (0.14.4). The click is the gesture a browser asks for.
+    if (meetingKept(channel, key)) { openHeldRoom(Number(key)); return; }
     const keys = [...ui.outs].filter(([k, o]) => k.startsWith(`${channel}|`) && meetBoxKey(o) === key && outsNow(new Map([[k, o]]), Date.now()).size).map(([k]) => k);
     if (!keys.length) return;
     const scr = window.screen;
@@ -7636,6 +7700,18 @@
   function endMeetingHere(channel, id) {
     const key = String(id);
     if (!key || meetEndingNow(key)) return;
+    // A meeting kept with no window (0.14.4) has no window to tell: the
+    // board ends it, as the room's End would, and the next payload no longer
+    // holds it, which is what takes the box away.
+    if (meetingKept(channel, key)) {
+      ui.meetEnding.set(key, Date.now());
+      render();
+      post('./api/floor/meeting/end', { id: Number(key), final: true })
+        .then(() => { for (const [k, o] of [...ui.outs]) if (o.kept && String(o.meeting) === key) ui.outs.delete(k); })
+        .catch(() => {})
+        .finally(() => { tick().then(() => { ui.meetEnding.delete(key); render(); }); });
+      return;
+    }
     ui.meetEnding.set(key, Date.now());
     say({ t: 'end', channel, meeting: id });
     render();
@@ -7649,6 +7725,75 @@
       if (!meetEndingNow(key)) ui.meetEnding.delete(key);
       render();
     }, MEET_END_MS + 50);
+  }
+
+  /**
+   * Meetings the board kept while no window showed them (heldPlan, in "a
+   * meeting on the floor: what the page decides"). Their desks are written
+   * into `ui.outs` as kept, and in the desktop app each meeting no window
+   * shows is opened again, once per page. The app keeps no list of rooms:
+   * this is how a room comes back after the app was quit with it open.
+   *
+   * Several floor windows load together at the app's launch, so the open is
+   * behind a Web Lock per meeting, held long enough for the room's own
+   * `/open` to clear `held_at`, after which no floor is told of it. And it
+   * waits until the page has been up HELD_OPEN_AFTER_MS, so a room window
+   * that is already open has answered `who` first.
+   */
+  const HELD_OPEN_AFTER_MS = 1500;
+  const HELD_LOCK_MS = 20_000;
+  const pageAt = Date.now();
+  function keepHeld() {
+    const plan = heldPlan(floor?.meetings_held, ui.outs, Date.now(), POP_TTL_MS);
+    let changed = plan.drop.length > 0;
+    // Dropped as an ordinary entry that lapses in POP_TTL_MS, not at once:
+    // a meeting stops being held the moment its room's window opens it, and
+    // that window says `here` for its desks a moment later. Deleted at once,
+    // the desks stood on the floor in between.
+    for (const k of plan.drop) {
+      const o = ui.outs.get(k);
+      // One ended from this floor goes at once: there is no window coming.
+      if (ui.meetEnding.has(String(o?.meeting))) ui.outs.delete(k);
+      else ui.outs.set(k, { at: Date.now(), id: null, held: false, meeting: o?.meeting ?? null });
+    }
+    for (const [k, o] of plan.set) {
+      const was = ui.outs.get(k);
+      if (!was?.kept || was.meeting !== o.meeting) changed = true;
+      ui.outs.set(k, o);
+    }
+    if (changed) { render(); if (ui.open) renderPanel(); }
+    if (!APP_UA.test(navigator.userAgent ?? '') || Date.now() - pageAt < HELD_OPEN_AFTER_MS) return;
+    for (const id of plan.open) {
+      if (ui.heldTried.has(id)) continue;
+      ui.heldTried.add(id);
+      if (LOCKS) {
+        navigator.locks.request(`orch.meeting-held:${id}`, { ifAvailable: true }, async (lock) => {
+          if (!lock) return;
+          openHeldRoom(id);
+          await new Promise((ok) => setTimeout(ok, HELD_LOCK_MS));
+        }).catch(() => {});
+      } else openHeldRoom(id);
+    }
+  }
+
+  /** A kept meeting's room, opened: its window opens the record and takes its desks back, as a reload does. */
+  function openHeldRoom(id) {
+    let w = null;
+    try { w = window.open(`${location.pathname}${meetingQuery({ id })}`, meetingName(id), popoutFeatures(meetingPlace(window.screen))); } catch { w = null; }
+    return !!w;
+  }
+
+  /**
+   * Is this meeting kept with no window showing it? The board says so
+   * (`meetings_held`), or every desk the floor has in it is a kept entry.
+   * The board first: a room's window closing on a hold says `gone` with
+   * `rejoin`, so for a moment its desks read as a window's that may come
+   * back, and End pressed then was sent to a window that was not there.
+   */
+  function meetingKept(channel, key) {
+    if ((floor?.meetings_held ?? []).some((m) => m.channel === channel && String(m.id) === String(key))) return true;
+    const mine = [...ui.outs].filter(([k, o]) => k.startsWith(`${channel}|`) && meetBoxKey(o) === key);
+    return mine.length > 0 && mine.every(([, o]) => o.kept);
   }
 
   /** The rooms open in a window now, by id: the Recent list leaves them out, and Resume of one brings it to the front. */
@@ -8019,6 +8164,8 @@
       const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       if (r.ok) { floor = await r.json(); floorRead = true; }
     } catch { /* the board's own dot already reports the connection */ }
+    // Meetings kept with no window (0.14.4): boxed as if a room had them.
+    if (ui.floorTab) keepHeld();
     // What happened to bulk nudges still in line, against the payload just read.
     if (ui.bulk.size) await followBulk();
 
@@ -8427,6 +8574,8 @@
       detach(act.dataset.channel, act.dataset.agent, act);
     } else if (act.dataset.act === 'bring-back') {
       bringBack(act.dataset.channel, act.dataset.agent);
+    } else if (act.dataset.act === 'open-held') {
+      openHeldRoom(Number(act.dataset.meeting));
     } else if (act.dataset.act === 'reattach') {
       endPopout(true);
     } else if (act.dataset.act === 'close-window') {
@@ -9631,8 +9780,32 @@
     if (!LOCKS) setInterval(() => meetingAnnounce(), POP_BEAT_MS);
     setInterval(meetingTouch, MEETING_TOUCH_MS);
     // Closing the window ends the meeting (the issue's 7), and so does a
-    // reload, which then opens the room again from its address.
-    window.addEventListener('pagehide', () => endMeeting({ closing: true }));
+    // reload, which then opens the room again from its address. Not when
+    // the desktop app said it is quitting (hold, below): then the meeting is
+    // kept, and the room comes back at the app's next launch.
+    window.addEventListener('pagehide', () => (ui.meeting?.held ? leaveHeld() : endMeeting({ closing: true })));
+    /*
+     * The desktop app's word, before it quits (0.14.4; costmo, 2026-11-20:
+     * a meeting outlives a quit of the app, and closing the room's own
+     * window still ends it). The app calls `window.orchMeeting.hold()` in
+     * every room's window and waits for it, then quits. The board keeps the
+     * meeting (`held_at`), and this window then goes without ending it.
+     * Resolves false when the room has no record to keep (still starting,
+     * failed, ended, or the board would not), and the close then ends it
+     * as any close does. Contract `orchestratinator.consumed`,
+     * `dashboard.meeting_hold`.
+     */
+    window.orchMeeting = {
+      hold: async () => {
+        const m = ui.meeting;
+        if (!m?.id || m.phase === 'ended' || m.phase === 'failed') return false;
+        try {
+          const got = await post('./api/floor/meeting/hold', { id: m.id });
+          m.held = got?.held === true;
+        } catch { m.held = false; }
+        return m.held;
+      },
+    };
   } else if (ui.popout) {
     // A desk's popout (issue #19): the floor's view, always, and none of the
     // floor's remembered choices — a popout writes neither the view nor the

@@ -4222,6 +4222,23 @@ try {
     eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, true, 'its window saying so again');
     said = await mcpCall('mia', 'send_message', { body: 'contained again' });
     eq(said.meeting_room?.reached, ['oli'], 'contains it again');
+    // Held (0.14.4): the desktop app quit with the room's window open. The
+    // meeting is kept however long no window touches it, and the floor is
+    // told so it can draw the box and open the room again.
+    const heldOf = async () => ((await floor()).meetings_held ?? []).filter((x) => x.id === room.id);
+    eq(await heldOf(), [], 'a room with its window open is not listed as held');
+    eq((await op('/api/floor/meeting/hold', { id: room.id })).body.held, true, 'the app quitting: the room\'s window asks the board to keep the meeting');
+    sql.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-10 minutes') WHERE id = ?`).run(room.id);
+    said = await mcpCall('mia', 'send_message', { body: 'while the app was closed' });
+    eq(said.meeting_room?.reached, ['oli'], 'a held meeting goes on containing its desks with no window touching it for minutes');
+    eq(await heldOf(), [{ id: room.id, channel: MCH, agents: ['mia', 'oli'] }], 'and /api/floor lists it, with the desks present in it, for the floor to box and reopen');
+    eq((await op('/api/floor/meeting/hold', { id: 999999 })).body.code, 'no_room', 'a hold for a room the board does not have is refused');
+    eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, true, 'its window back (the app relaunched, the floor opened the room)');
+    eq(await heldOf(), [], 'and it is no longer held');
+    sql.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-10 minutes') WHERE id = ?`).run(room.id);
+    said = await mcpCall('mia', 'send_message', { body: 'window gone again, unheld' });
+    assert(!said.meeting_room, 'so a window that then goes without a word lapses as any does: the hold is cleared, not kept');
+    eq((await op('/api/floor/meeting/open', { id: room.id })).status, 200, 'opened again');
     sql.close();
 
     // Oli goes absent (a Resume could not bring it back) and its desk moves
@@ -4240,6 +4257,8 @@ try {
     said = await mcpCall('mia', 'send_message', { body: 'after the meeting' });
     assert(!said.meeting_room && (await heard('noa', said.id - 1)).includes('mia:after the meeting'), 'an ended room contains nothing');
     eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, false, 'and a touch says it is ended, so a reloaded window opens it again');
+    eq((await op('/api/floor/meeting/hold', { id: room.id })).body.held, false, 'a hold for an ended room keeps nothing, so the closing window ends it as any close does');
+    eq(((await floor()).meetings_held ?? []).filter((x) => x.id === room.id), [], 'and nothing is listed as held');
     let list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
     const ended = list.find((x) => x.id === room.id);
     eq(ended.participants.map((p) => [p.agent, p.session_id, p.persona]), [['mia', 'sdk-mia-2', 'Mia'], ['oli', 'sdk-oli', 'Oli']],
@@ -4469,7 +4488,7 @@ try {
     writeFileSync(tmpBox, [
       ...[...decls, { at: bh.index, text: bh[0] }].sort((a, b) => a.at - b.at).map((d) => d.text),
       cut('  /* ---------- a meeting on the floor: what the page decides ---------- */', '  /* ---------- a meeting on the floor: the drawing ---------- */'),
-      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
+      `export { heldPlan, meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
     ].join('\n'));
     let fp;
     try { fp = await import(new URL(tmpBox, `file://${process.cwd()}/`)); } finally { rmSync(tmpBox, { force: true }); }
@@ -4478,6 +4497,27 @@ try {
     eq([fp.meetBoxKey(undefined), fp.meetBoxKey({ at: 1, id: 'w' }), fp.meetBoxKey({ meeting: null }), fp.meetBoxKey({ meeting: 7 }), fp.meetBoxKey({ meeting: 'new', batch: 'new-ab12' }), fp.meetBoxKey({ meeting: 'new' })],
       [null, null, null, '7', 'new:new-ab12', 'new:'],
       'a desk on the floor or out in its own popout is in no box; one in a room is boxed by the room\'s number, and before the window has one, by the click that opened it');
+
+    // A meeting held with no window (0.14.4): what the floor writes into
+    // its record of who is out, what it takes away, and which rooms to open.
+    {
+      const T = 7000;
+      const now = 100_000;
+      const held = [{ id: 7, channel: 'f', agents: ['bo', 'cy'] }, { id: 9, channel: 'f', agents: ['dee'] }];
+      const outs = new Map([
+        ['f|dee', { at: now - 100, id: 'win', held: true, meeting: 9 }],       // a real room window has it
+        ['f|ed', { at: now - 100, id: null, held: true, kept: true, meeting: 5 }], // kept for a meeting no longer held
+        ['f|fay', { at: now - 100, id: 'pop', held: true, meeting: null }],    // a popout: not the plan's
+      ]);
+      const plan = fp.heldPlan(held, outs, now, T);
+      eq(plan.set.map(([k, o]) => [k, o.meeting, o.kept, o.held, o.id]), [['f|bo', 7, true, true, null], ['f|cy', 7, true, true, null]],
+        'heldPlan: each desk of a held meeting is written as kept, held and with no window, so it stays boxed however long polls take');
+      eq(plan.open, [7], 'a held meeting no window shows is one to open; one a window has a desk of is not');
+      eq(plan.drop, ['f|ed'], 'a kept desk for a meeting no longer held is taken away, and nothing a window wrote is');
+      const stale = new Map([['f|bo', { at: now - T - 1, id: 'win', held: false, meeting: 7 }]]);
+      eq(fp.heldPlan(held.slice(0, 1), stale, now, T).open, [7], 'a window entry gone stale is no window');
+      eq(fp.heldPlan(undefined, new Map(), now, T), { set: [], drop: [], open: [] }, 'a board from before it sends no list, and nothing is done');
+    }
 
     const desksOf = (...names) => names.map((agent) => ({ agent }));
     const nine = desksOf('bo', 'cy', 'dee', 'ed', 'fay', 'gus', 'hal', 'ivy', 'jo');
@@ -5058,6 +5098,16 @@ try {
     // and a room ended that lately still holds its sessions (a reload). Aged,
     // so the only room these rows read is the silent one.
     await sql((db) => db.prepare(`UPDATE meeting_rooms SET ended_at = datetime('now', '-60 seconds') WHERE channel = ? AND ended_at IS NOT NULL`).run(SA));
+    // Held first (0.14.4): the app quit with the room open. Silent for as
+    // long as the watch takes and more, its second session stays.
+    eq((await op('/api/floor/meeting/hold', { id: rm.id })).body.held, true, 'a room the app quit with is held');
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [], 'and a held room keeps its second session however long no window touches it');
+    eq((await op('/api/floor/meeting/touch', { id: rm.id })).body.live, true, 'its window back clears the hold');
     await hush(rm.id);
     await sleep(2100);
     await floor();

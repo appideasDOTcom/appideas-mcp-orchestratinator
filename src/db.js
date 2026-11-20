@@ -397,6 +397,17 @@ export function openDb(path) {
   // (MEETING_LIVE_SECONDS): a window that crashed or was killed never sends
   // its end, and must not keep a floor's agents talking past each other.
   addColumn(db, 'meeting_rooms', 'live_at', 'TEXT');
+  // A meeting kept while no window shows it (0.14.4, costmo 2026-11-20:
+  // "a meeting room shouldn't disappear from a floor unless/until the
+  // meeting is ended"). Set when the desktop app, quitting, tells the room's
+  // window so (`window.orchMeeting.hold()` → /api/floor/meeting/hold), which
+  // then closes without ending the record. A held room is live whatever
+  // live_at says, so it goes on containing its desks' broadcasts and holding
+  // its second sessions, and the floor draws its box. Cleared when a window
+  // opens or touches the room again, and by End. Closing the room's own
+  // window still ends it (his ruling the same day), and a crash with no word
+  // still lapses after MEETING_LIVE_SECONDS, as before.
+  addColumn(db, 'meeting_rooms', 'held_at', 'TEXT');
   // Where a second session's mail starts (QA, PR #57 finding 2). Its
   // `agents` row is made when its window connects, and was made at cursor 0:
   // every broadcast the floor ever carried read as unread for it (7 of 7
@@ -922,14 +933,19 @@ export function makeStore(db) {
     setMeetingParticipants: db.prepare(
       `UPDATE meeting_rooms SET participants = ?, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`
     ),
-    openMeeting: db.prepare(`UPDATE meeting_rooms SET ended_at = NULL, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`),
-    touchMeeting: db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now') WHERE id = ? AND ended_at IS NULL`),
+    openMeeting: db.prepare(`UPDATE meeting_rooms SET ended_at = NULL, held_at = NULL, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`),
+    touchMeeting: db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now'), held_at = NULL WHERE id = ? AND ended_at IS NULL`),
+    holdMeeting: db.prepare(`UPDATE meeting_rooms SET held_at = datetime('now'), live_at = datetime('now') WHERE id = ? AND ended_at IS NULL`),
+    heldMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms
+        WHERE ended_at IS NULL AND held_at IS NOT NULL ORDER BY id`
+    ),
     liveMeetings: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms
-        WHERE channel = ? AND ended_at IS NULL AND live_at > datetime('now', ?) ORDER BY live_at DESC, id DESC`
+        WHERE channel = ? AND ended_at IS NULL AND (live_at > datetime('now', ?) OR held_at IS NOT NULL) ORDER BY live_at DESC, id DESC`
     ),
     endMeeting: db.prepare(
-      `UPDATE meeting_rooms SET participants = ?, ended_at = datetime('now'), updated_at = datetime('now'), live_at = NULL WHERE id = ?`
+      `UPDATE meeting_rooms SET participants = ?, ended_at = datetime('now'), updated_at = datetime('now'), live_at = NULL, held_at = NULL WHERE id = ?`
     ),
     recentMeetings: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?`
@@ -942,13 +958,13 @@ export function makeStore(db) {
     meetingsOn: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
               CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
-              (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
+              (ended_at IS NULL AND (live_at > datetime('now', ?) OR held_at IS NOT NULL)) AS live
          FROM meeting_rooms WHERE channel = ?`
     ),
     allMeetings: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
               CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
-              (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
+              (ended_at IS NULL AND (live_at > datetime('now', ?) OR held_at IS NOT NULL)) AS live
          FROM meeting_rooms ORDER BY id`
     ),
     listRoomTold: db.prepare(`SELECT channel, agent, meeting_id FROM room_told`),
@@ -2205,6 +2221,10 @@ export function makeStore(db) {
     familyOf,
     /** The window says the room is still open; false when the board has it ended (a reload's end landed after its open). */
     touchMeeting: (id) => q.touchMeeting.run(id).changes > 0,
+    /** The desktop app is quitting with this room's window open: keep the meeting (held_at). False when it has ended. */
+    holdMeeting: (id) => q.holdMeeting.run(id).changes > 0,
+    /** Open meetings no window shows, because the app quit with them open. */
+    heldMeetings: () => q.heldMeetings.all().map(meetingRow),
     /**
      * The open, live meeting room `agent` is in on `channel`, or null: whose
      * participants its broadcasts reach. In it, not absent: a desk Resume

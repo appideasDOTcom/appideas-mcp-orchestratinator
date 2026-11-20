@@ -1033,6 +1033,20 @@ class Host {
    * read that lands mid-write must not cost a desk.
    */
   boundAt(desk) {
+    // A seat is bound by this host's own record, never by the folder's
+    // entry: the folder names its own desk, which is the point of a seat
+    // (host/seats.js). Read against the folder, as it was from the merge of
+    // seats (main, 0.12.9) into a develop that had this check (0.12.7)
+    // until 0.14.4, every seat read as released: its window coming up and
+    // every piece of work for it, Leave included, let it go, and the rescan
+    // found it again from its record at once. The host log said so every
+    // watch tick; the floor showed "not done: … is <folder's desk> on this
+    // instance now" on every message, and a seat that could not be left.
+    if (desk.seat) {
+      const origin = originOf(this.cfg.url);
+      const still = S.listSeats().some((s) => s.channel === desk.channel && s.agent === desk.agent && s.board === origin);
+      return still ? null : { says: 'no longer a seat here' };
+    }
     const local = readLocalScope();
     if (!local.ok) return null;
     const now = readDesk(desk.cwd, local);
@@ -2489,6 +2503,16 @@ async function main() {
   if (!(await W.tmuxAvailable())) {
     error('tmux is not installed. The floor drives Claude Code through it — install it with `brew install tmux` (or your package manager) and start this again.');
     process.exit(1);
+  }
+  // A tmux server already running keeps the environment it was started
+  // with, which before 0.14.4 was a host's own settings (windowEnv in
+  // window.js). Taken out now, so windows opened from here on are a
+  // person's whatever started the server. Names only in the log.
+  {
+    const env = await W.cleanServerEnv().catch(() => ({ unset: [], set: [] }));
+    if (env.unset.length || env.set.length) {
+      log(`tmux server environment: ${[env.unset.length ? `unset ${env.unset.join(', ')}` : '', env.set.length ? `set ${env.set.join(', ')} where it had none` : ''].filter(Boolean).join('; ')} — windows opened from now get a person's environment, not this host's settings`);
+    }
   }
 
   const { desks: found, folders } = discover(cfg.roots);

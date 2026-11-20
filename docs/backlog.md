@@ -97,36 +97,3 @@ while a real pane asks and reads the question back on the floor.
 
 `host/dialog.js` has a native folder dialog for macOS only, so a Linux or Windows host gets the page's in-page list — issue #4 is held open as partially implemented until each backend is built and watched taking focus from the host's own service, or ruled out.
 
-## A meeting room survives closing the app or the floor it came from
-
-costmo, 2026-11-20, in meeting room 27: "meeting rooms should survive
-closing the app or closing the floor". What was seen: in the desktop app he
-closed a floor window and the room it had opened went with it, ending the
-meeting. He had not expected that. Not dug into then: distribution came first.
-
-Read, not measured: the app's open handler (`orchestratinator-desktop`,
-`src/main/security.ts`, `setWindowOpenHandler`) lets a room's and a popout's
-window open as a child of the page that asked. Electron closes a child with
-its parent, and the comment above `openFloorAt` says it was measured for
-floor windows, which are therefore opened as the app's own. And a room's window
-closing is its meeting ending (pagehide ends the record, because the page
-cannot tell a close from a reload): the desks are sent back to the floor
-with a notice, and a second session made for the room is closed
-(`sweepTwins`).
-
-Two halves:
-
-- **The app's:** open rooms and popouts as windows of its own, as floors
-  are, and reopen them at launch the way it reopens floor windows. The page
-  already works without a handle on the window: End goes to it as `end` on
-  `orch.popouts`, and the raise as `focus` with the place. Contract
-  `orchestratinator.window_moves` still holds.
-- **This repo's:** a window closed by an app quit must not end the meeting.
-  If it does, every desk is told it is back on the floor and then told
-  again that it is in the room, and its second sessions are closed and
-  reopened. The page needs a word from the app that it is quitting, so it
-  leaves the record open. Then the reopened room's `/meeting/open` and
-  `quiet` (the same others) send nothing. A crash with no word is still
-  the case the twin sweep's timings are for. How "closing the floor" in a
-  browser should treat a room is not decided: there a room already
-  outlives the tab that opened it.

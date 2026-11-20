@@ -236,7 +236,7 @@ function fixture() {
     `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
     // The one variable a placeholder desk's window is given (paneEnv in
     // host/window.js), one line per window started, as the pane has it.
-    `fs.appendFileSync(${JSON.stringify(`${FIX}/pane-env.log`)}, JSON.stringify({ cwd: process.cwd(), key: process.env.ORCH_TEST_PANE_KEY ?? null }) + '\\n');`,
+    `fs.appendFileSync(${JSON.stringify(`${FIX}/pane-env.log`)}, JSON.stringify({ cwd: process.cwd(), key: process.env.ORCH_TEST_PANE_KEY ?? null, orch: Object.keys(process.env).filter((k) => k.startsWith('ORCH_') && k !== 'ORCH_TEST_PANE_KEY') }) + '\\n');`,
     // Announcing late is how a real session behaves when something on screen
     // is waiting for an answer: the window is up, the pid is not in the roster
     // yet, and send() sits in waitReady. A ready-delay *file* makes that
@@ -466,6 +466,13 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
   // to the process that started it (Node's channel here, Electron's
   // parentPort there — host/dialog.js reads both). What the host says over
   // it is kept in `said`, and `h.send()` answers it.
+  // What an older host left in the tmux server it started: its own settings
+  // in the server's global environment, which every window then inherited
+  // (0.14.4, host.windows_inherit). Planted here, before each host starts,
+  // so the pane-env row below reads the cleanup at the host's start and not
+  // a server some earlier run already cleaned. The default socket is the
+  // operator's, and a leftover of this name is the suite's alone.
+  try { execFileSync('tmux', ['set-environment', '-g', 'ORCH_TEST_LEAKED', 'from-an-older-host'], { stdio: 'ignore' }); } catch { /* no server running: nothing to leak into */ }
   const h = spawn('node', ['host/index.js'], {
     env: {
       ...process.env,
@@ -916,6 +923,11 @@ try {
     return log.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.cwd.endsWith('/repo-pane')) ?? null;
   }, 20000);
   eq(paneEnvLine?.key ?? null, KEY, "the window the host opens for it has the variable, set to the host's key");
+  // 0.14.4 (host.windows_inherit): the host's own settings stay with the
+  // host. This host runs with ORCH_URL, ORCH_HOST_CLAUDE, ORCH_TMUX_SESSION
+  // and more, and the tmux server it shares may have been started by a host
+  // that handed them down; cleanServerEnv took them out at its start.
+  eq(paneEnvLine?.orch ?? 'unread', [], 'and nothing else of the host\'s ORCH_ settings');
   try {
     const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
     for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);

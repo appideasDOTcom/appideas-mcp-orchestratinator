@@ -28,9 +28,9 @@
  * `tmux attach -t orch` is a perfectly good front end to the whole board: the
  * windows are the desks, in the same order the floor shows them.
  */
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { basename, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
@@ -53,9 +53,13 @@ const run = promisify(execFile);
  * board refused both, for every placeholder desk opened from the floor.
  * costmo's ruling (PR #52, 2026-11-06): the pane is given that one variable,
  * set to the host's key, and nothing is written to disk. Only for a desk whose
- * key names a variable the host could not fill (`keyVar`, identity.js) — a
- * literal key needs nothing, and one the host filled came from the same
- * environment the host started the tmux server with.
+ * key names a variable (`keyVar`, identity.js) — a literal key needs
+ * nothing. Since 0.14.4 that is every such desk, not only one whose variable
+ * the host could not fill: a window gets nothing of the host's own settings
+ * (windowEnv, below), so "the host filled it, so the tmux server has it" no
+ * longer holds. The value is what the host made of the placeholder, which is
+ * what the window would make of it in the host's environment, else the key
+ * the host settled on.
  */
 let boardKey = null;
 export function useKey(key) { boardKey = key || null; }
@@ -67,7 +71,8 @@ export function useKey(key) { boardKey = key || null; }
  *  every listing of the session. `-e` is the window's environment and
  *  nothing else (tmux 3.0 and later). */
 export function paneEnv(desk, key = boardKey) {
-  return desk?.keyVar && key ? ['-e', `${desk.keyVar}=${key}`] : [];
+  const value = desk?.key || key;
+  return desk?.keyVar && value ? ['-e', `${desk.keyVar}=${value}`] : [];
 }
 
 /**
@@ -77,10 +82,106 @@ export function paneEnv(desk, key = boardKey) {
  * if they have one; otherwise say UTF-8, because a repo's name is not ours to
  * mangle.
  */
-const TMUX_ENV = {
-  ...process.env,
-  LC_ALL: process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || 'en_US.UTF-8',
-};
+const TMUX_ENV = windowEnv();
+
+/**
+ * The environment tmux is run with, which is what a tmux server this host
+ * starts keeps, and so what every window opened on it gets: a person's
+ * environment, and nothing of the host's own settings (0.14.4; decided
+ * 2026-11-20, costmo having handed the call over, recorded in CLAUDE.md, "The
+ * clear of 2026-11-20", and contract `orchestratinator.consumed`,
+ * `host.windows_inherit`).
+ *
+ * - **No `ORCH_` variable.** Those are how a host is configured, and the
+ *   desktop app configures its host by environment. Handed down, every
+ *   window carried the app's board address, its key, its host id and
+ *   `ORCH_HOST_SUPERVISOR=app`, so a board, a host or a suite started by
+ *   hand in an agent's window silently became the app's (measured that day:
+ *   a host suite run from such a window read one red, the host meant to
+ *   have no key having the app's). The one thing of them a window needs,
+ *   the key its binding names as a variable, it is given by `-e` (paneEnv),
+ *   and a seat's window its four by `-e` too (seatEnv). The suites reach
+ *   their stand-ins by flag files, for the same reason, so nothing rides on
+ *   this.
+ * - **`TMPDIR` filled when missing**, on macOS the person's own (`getconf
+ *   DARWIN_USER_TEMP_DIR`). A window the app's host opened had none, so
+ *   everything in it wrote to `/tmp`. Elsewhere it is left alone.
+ * - **`USER` and `LOGNAME` filled when missing**, as claudeEnv does for the
+ *   host's own Claude Code calls: with HOME and PATH alone Claude Code says a
+ *   signed-in Mac is signed out, and a window is a Claude Code.
+ * - **A locale**, below.
+ *
+ * tmux finds its socket by `TMUX_TMPDIR`, never `TMPDIR`, so filling it moves
+ * no server. A server already running keeps what it was started with:
+ * cleanServerEnv() takes the same variables out of it at the host's start.
+ *
+ * tmux escapes whatever it thinks the terminal cannot print, so a directory
+ * with a character outside ASCII comes back as octal escapes unless the locale
+ * says UTF-8 — and under launchd there is no locale at all. Take the person's
+ * if they have one; otherwise say UTF-8, because a repo's name is not ours to
+ * mangle.
+ */
+export function windowEnv(env = process.env, { platform = process.platform, tempDir = darwinTempDir, user = accountName } = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_')) out[k] = v;
+  out.LC_ALL = env.LC_ALL || env.LC_CTYPE || env.LANG || 'en_US.UTF-8';
+  if (!env.TMPDIR && platform === 'darwin') {
+    const t = tempDir();
+    if (t) out.TMPDIR = t;
+  }
+  if (!env.USER || !env.LOGNAME) {
+    const u = env.USER || env.LOGNAME || user();
+    if (u) { out.USER = env.USER || u; out.LOGNAME = env.LOGNAME || u; }
+  }
+  return out;
+}
+
+/** The person's own temporary directory on macOS, as their shell has it in
+ *  `TMPDIR`, or null. */
+function darwinTempDir() {
+  try { return execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8', timeout: 2000 }).trim() || null; } catch { return null; }
+}
+function accountName() {
+  try { return userInfo().username || null; } catch { return null; }
+}
+
+/**
+ * What to change in a running tmux server's global environment, from
+ * `show-environment -g`: every `ORCH_` variable it holds is unset, and
+ * `TMPDIR`, `USER` and `LOGNAME` are set where it has none and windowEnv has
+ * one. A line `-NAME` is a variable already marked removed, and is left.
+ * Only names the server lists are unset, so nothing is asked of tmux about a
+ * variable it never had.
+ */
+export function serverEnvPlan(shown, want = TMUX_ENV) {
+  const have = new Set();
+  const unset = [];
+  for (const line of String(shown ?? '').split('\n')) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(line);
+    if (!m) continue;
+    have.add(m[1]);
+    if (m[1].startsWith('ORCH_')) unset.push(m[1]);
+  }
+  const set = ['TMPDIR', 'USER', 'LOGNAME'].filter((k) => !have.has(k) && want[k]).map((k) => [k, want[k]]);
+  return { unset, set };
+}
+
+/**
+ * Bring a tmux server that is already running into line with windowEnv, at
+ * the host's start, so an update reaches the windows opened after it without
+ * the floor being closed. Windows already open keep what they have until they
+ * are reopened. No server running is nothing to do. Returns what it changed,
+ * names only (a value can be a key), for the host's log.
+ */
+export async function cleanServerEnv() {
+  const shown = await tmux(['show-environment', '-g']);
+  if (!shown.ok) return { unset: [], set: [] };
+  const plan = serverEnvPlan(shown.out);
+  const done = { unset: [], set: [] };
+  for (const k of plan.unset) if ((await tmux(['set-environment', '-g', '-u', k])).ok) done.unset.push(k);
+  for (const [k, v] of plan.set) if ((await tmux(['set-environment', '-g', k, v])).ok) done.set.push(k);
+  return done;
+}
 
 const TMUX = process.env.ORCH_TMUX ?? 'tmux';
 /**

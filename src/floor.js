@@ -3351,6 +3351,14 @@ export function buildFloor(store, live = null, sessions = null) {
     queue,
     hosts,
     cast: CAST,
+    // Meetings kept with no window showing them, because the desktop app
+    // quit with their rooms open (0.14.4, `held_at`). The page draws each
+    // one's box from this, where a room with a window is drawn from what the
+    // window says, and the app's floor opens its room again. Only the
+    // agents present: an absent one is on the floor either way.
+    meetings_held: (store.heldMeetings?.() ?? []).map((r) => ({
+      id: r.id, channel: r.channel, agents: r.participants.filter((p) => !p.absent).map((p) => p.agent),
+    })),
     // The totals line describes the building, so it counts the floors in it —
     // archived channels are excluded here exactly as they are from the board's
     // own totals. A footer reading "5 floors" over a building with four is the
@@ -4873,6 +4881,21 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // without End meeting is found here as well as from the floor's polls.
     sweep();
     res.json({ ok: true, live: alive });
+  });
+
+  /**
+   * The desktop app is quitting with this room's window open (0.14.4). The
+   * app calls `window.orchMeeting.hold()` in each room's window before it
+   * quits, and the window, having said this, closes without ending the
+   * record. The meeting stays: its box on the floor, its desks contained,
+   * its second sessions kept (`held_at`, src/db.js). The next window on the
+   * room (`/open`, or a touch) clears it; End ends it. `held: false` is a
+   * room that had already ended, which the window then ends as it closes.
+   */
+  router.post('/api/floor/meeting/hold', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    res.json({ ok: true, held: store.holdMeeting(room.id) });
   });
 
   /**
