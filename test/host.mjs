@@ -2297,7 +2297,14 @@ try {
   eq((await json('/api/floor/signin', { channel: CH, agent: 'free' })).status, 200, 'Sign in again');
   await until(() => (soLogins() > soLoginsBefore ? true : null), 5000);
   eq((await json('/api/floor/signin', { channel: CH, agent: 'free' })).status, 200, 'and once more while the first is open');
-  const soSignedIn = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && !d.signin ? d : null; }, 20000);
+  // What ends the sign-in is the host's own line: the window reopened (it
+  // still draws the footer), then the registration. The reopen waits for the
+  // window to come up, up to the host's READY_TIMEOUT_MS (45 s), and a
+  // `/mcp reconnect` the board asks for this window (the stand-in never
+  // connects) can be ahead of it on the host's line; so the wait is bound by
+  // that, and settles on the line, not on a count of seconds.
+  await until(async () => ((await soHostLines()).some((t) => /so the host reopened it on the same conversation/.test(t ?? '')) ? true : null), 60000);
+  const soSignedIn = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && !d.signin ? d : null; }, 10000);
   assert(!!soSignedIn, 'once Claude Code is signed in again the desk stops offering Sign in');
   eq(soLogins() - soLoginsBefore, 1, 'a press while a sign-in is open opens no second one');
   const soLines = await soHostLines();
@@ -2306,7 +2313,7 @@ try {
   const soReopened = soSoArgv().slice(soSoOpenAt).split('\n').filter((l) => l.includes(`--resume ${SESSION_ID}`));
   eq(soReopened.length, 2, `the window that still said it was signed out was reopened on its own conversation — ${JSON.stringify(soSoArgv().slice(soSoOpenAt))}`);
   assert(soLines.some((t) => /still said Claude Code was signed out, so the host reopened it on the same conversation/.test(t ?? '')), 'and the desk says why');
-  assert(soSignedIn.nudge?.ok === true, 'the bell rings again');
+  assert(soSignedIn?.nudge?.ok === true, 'the bell rings again');
   eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, false, 'the host is listed signed in');
   eq((await chat('free', 'back again')).status, 200, 'a message is taken');
   assert(await until(() => (clean(received()).includes('back again') ? true : null), 15000), 'and reaches the window');

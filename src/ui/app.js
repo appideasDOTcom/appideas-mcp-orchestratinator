@@ -1355,6 +1355,8 @@ const set = {
   backup: null,       // a chosen file, parsed and vetted, awaiting confirmation
   backupName: null,
   restored: null,     // the report from a completed restore
+  floors: null,       // the floors the chosen file holds, as the board read them
+  floorRestored: null, // the report from a completed one-floor restore
 };
 
 const setErr = (msg) => {
@@ -1398,9 +1400,19 @@ function toolsPanel(compact = IN_APP) {
        <div class="dlg-confirm">
          <input class="input mono" id="restore-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="type RESTORE">
          <button type="button" class="btn danger" data-set="restore">Restore</button>
-       </div>`
+       </div>
+       ${floorRestoreHtml(set.floors, compact)}`
     : '';
 
+  const floorDone = set.floorRestored
+    ? `<div class="set-done">
+         <b>Restored ${set.floorRestored.rows} rows of ${esc(set.floorRestored.channel)}.</b> Every other floor is as it was.
+         ${Object.entries(set.floorRestored.renumbered ?? {}).map(([t, r]) => `<div>${r.count} ${esc(t.replace(/_/g, ' '))} numbered differently here (from #${r.from} on the file's instance, #${r.to} here), because this board had used those numbers.</div>`).join('')}
+         <div>${set.floorRestored.snapshot?.saved
+           ? `The board as it was is saved at <span class="mono">${esc(set.floorRestored.snapshot.path)}</span>.`
+           : 'The pre-restore snapshot could not be written.'}</div>
+       </div>`
+    : '';
   const done = set.restored
     ? `<div class="set-done">
          <b>Restored ${set.restored.rows} rows.</b>
@@ -1440,6 +1452,7 @@ function toolsPanel(compact = IN_APP) {
         </label>
         ${chosen}
         ${done}
+        ${floorDone}
       </div>
     </div>
     <div class="set-err" hidden></div>
@@ -1575,6 +1588,8 @@ async function chooseBackupFile(file) {
   set.backup = null;
   set.backupName = null;
   set.restored = null;
+  set.floors = null;
+  set.floorRestored = null;
   setErr(null);
   setNote(null);
   try {
@@ -1588,7 +1603,71 @@ async function chooseBackupFile(file) {
     setErr(`could not read ${file.name}: ${e.message ?? e}`);
     return;
   }
+  // The floors it holds, as the board reads them, for "bring over one floor".
+  // A board from before it answers 404, and the page offers the whole-board
+  // restore alone.
+  try {
+    const res = await fetch('./api/admin/backup/floors', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ backup: set.backup }) });
+    if (res.ok) set.floors = (await res.json()).floors ?? null;
+  } catch { set.floors = null; }
   renderSettings();
+}
+
+/**
+ * One floor of the chosen file (costmo, 2026-11-19): the floors it holds, as
+ * the board read them (POST /api/admin/backup/floors), a pick, and the
+ * floor's name typed to confirm, as a floor's delete is. The board's rules
+ * are on restoreFloor in src/db.js: only that floor here is replaced, and
+ * only when it holds nothing the file does not.
+ */
+function floorRestoreHtml(floors, compact) {
+  if (!floors?.length) return '';
+  const when = (t) => (t ? new Date(`${String(t).replace(' ', 'T')}Z`).toLocaleString() : 'no messages');
+  return `<div class="set-floor-restore">
+    <h5 class="set-h">Or bring over one floor</h5>
+    ${compact ? '<p class="set-warn">Replaces that floor only. Every other floor stays.</p>' : `<p>Replaces only that floor on this board with the file's copy, and every other floor is left as it is.
+      Refused, with nothing changed, if this board has anything on that floor the file does not. A row this board already has
+      keeps its number; one whose number this board has used for something else is numbered after everything here.</p>`}
+    <div class="dlg-confirm">
+      <select class="input" id="restore-floor-pick">${floors.map((f) =>
+        `<option value="${esc(f.channel)}">${esc(f.channel)} \u2014 ${f.messages} message${f.messages === 1 ? '' : 's'}, newest ${esc(when(f.newest))}${f.here ? '' : ' \u00b7 not on this board'}</option>`).join('')}</select>
+    </div>
+    <div class="dlg-confirm">
+      <input class="input mono" id="restore-floor-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="type the floor's name">
+      <button type="button" class="btn danger" data-set="restore-floor">Restore floor</button>
+    </div>
+  </div>`;
+}
+
+async function restoreFloor() {
+  const channel = el.setBody.querySelector('#restore-floor-pick')?.value ?? '';
+  const typed = el.setBody.querySelector('#restore-floor-confirm')?.value.trim() ?? '';
+  setErr(null);
+  if (typed !== channel) { setErr(`type ${channel} to restore that floor`); return; }
+  setNote(`restoring ${channel}…`);
+  const buttons = [...el.setBody.querySelectorAll('button, input, select')];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const res = await fetch('./api/admin/backup/restore-floor', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel, confirm: typed, backup: set.backup }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    set.floorRestored = json;
+    set.backup = null;
+    set.backupName = null;
+    set.floors = null;
+    renderSettings();
+    ui.lastChannelSig = null;
+    ui.lastLogSig = null;
+    tick();
+  } catch (e) {
+    buttons.forEach((b) => { b.disabled = false; });
+    setNote(null);
+    setErr(e.message ?? e);
+  }
 }
 
 async function restoreBackup() {
@@ -1639,6 +1718,7 @@ el.setBody.addEventListener('click', (e) => {
   switch (btn.dataset.set) {
     case 'export': exportBackup(); break;
     case 'restore': restoreBackup(); break;
+    case 'restore-floor': restoreFloor(); break;
     default: break;
   }
 });
@@ -1653,7 +1733,7 @@ el.setBody.addEventListener('change', (e) => {
   chooseBackupFile(input.files[0]);
 });
 
-el.setDlg.addEventListener('close', () => { set.backup = null; set.backupName = null; });
+el.setDlg.addEventListener('close', () => { set.backup = null; set.backupName = null; set.floors = null; });
 
 /* ---------- updates: what the page decides ---------- */
 

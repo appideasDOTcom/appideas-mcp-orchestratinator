@@ -135,6 +135,47 @@ await until(sp, `/Restored \\d+ rows/.test(document.querySelector('.set-done')?.
 ok(true, `Restore works on the page: "${await sp.evalJs(`document.querySelector('.set-done b').textContent`)}"`);
 await sp.shot(`${shots}/settings-page.png`, null, { full: true });
 
+// One floor of a file (costmo, 2026-11-19): the floors it holds, a pick, the
+// floor's name typed, and only that floor replaced. The board's rules are in
+// test:auth ("one floor of a backup"); this is the page.
+console.log('\none floor of a backup');
+const doc = JSON.parse(await (await fetch(`${base}/api/admin/backup`)).text());
+const top = Math.max(0, ...doc.tables.messages.map((m) => m.id));
+const farRows = [1, 2].map((i) => ({ id: top + 1000 + i, channel: 'far-floor', from_agent: 'farb', to_agent: null, body: JSON.stringify(`far ${i}`), created_at: `2099-01-01 00:00:0${i}`, audience: null }));
+doc.tables.messages.push(...farRows);
+doc.tables.agents.push({ channel: 'far-floor', agent: 'farb', last_seen: '2099-01-01 00:00:02', poll_cursor: farRows[1].id });
+// A real board's file is 14 MB (2026-11-19) and the board takes 4 MB on other
+// routes: padded past that on a floor of its own, so the routes that take a
+// whole file are seen taking one this size.
+doc.tables.messages.push({ id: top + 5000, channel: 'pad-floor', from_agent: 'pad', to_agent: null, body: JSON.stringify('x'.repeat(5 * 1024 * 1024)), created_at: '2000-01-01 00:00:00', audience: null });
+const otherBefore = (await (await fetch(`${base}/api/admin/backup`)).json()).tables.messages.length;
+await sp.evalJs(`chooseBackupFile(new File([${JSON.stringify(JSON.stringify(doc))}], 'with-a-floor.json')); 1`);
+await until(sp, `!!document.querySelector('#restore-floor-pick')`, 'a chosen file offers one floor');
+const opts = JSON.parse(await sp.evalJs(`JSON.stringify([...document.querySelectorAll('#restore-floor-pick option')].map((o) => [o.value, o.textContent]))`));
+const farOpt = opts.find(([v]) => v === 'far-floor');
+ok(!!farOpt && /2 messages/.test(farOpt[1]) && /not on this board/.test(farOpt[1]), 'the file\'s floors are offered, each with its count, and one this board lacks says so', JSON.stringify(opts));
+ok(opts[0]?.[0] === 'far-floor', 'newest first', JSON.stringify(opts.map(([v]) => v)));
+await sp.evalJs(`document.querySelector('#restore-floor-pick').value = 'far-floor'; document.querySelector('#restore-floor-confirm').value = 'nope'; 1`);
+await sp.click('[data-set="restore-floor"]');
+await until(sp, `/type far-floor/.test(document.querySelector('.set-err')?.textContent ?? '')`, 'a wrong name is refused on the page');
+ok(true, 'the floor\'s name has to be typed');
+await sp.evalJs(`document.querySelector('#restore-floor-confirm').value = 'far-floor'; 1`);
+await sp.click('[data-set="restore-floor"]');
+await until(sp, `/Restored \\d+ rows of far-floor/.test(document.querySelector('.set-done')?.textContent ?? '')`, 'Restore floor restores');
+ok(/Every other floor is as it was/.test(await sp.evalJs(`document.querySelector('.set-done').textContent`)), `the page says only that floor changed: "${await sp.evalJs(`document.querySelector('.set-done b').textContent`)}"`);
+const afterFloor = (await (await fetch(`${base}/api/admin/backup`)).json()).tables.messages;
+ok(afterFloor.filter((m) => m.channel === 'far-floor').map((m) => JSON.parse(m.body)).join() === 'far 1,far 2', 'the floor is on the board');
+ok(afterFloor.length === otherBefore + 2, 'and nothing else was touched, the padded floor in the same file included', `${afterFloor.length} vs ${otherBefore} + 2`);
+// A file that lacks something the floor here has: refused, in the board's words.
+const older = structuredClone(doc);
+older.tables.messages = older.tables.messages.filter((m) => m.id !== farRows[1].id);
+await sp.evalJs(`chooseBackupFile(new File([${JSON.stringify(JSON.stringify(older))}], 'older.json')); 1`);
+await until(sp, `!!document.querySelector('#restore-floor-pick')`, 'the older file offers its floors');
+await sp.evalJs(`document.querySelector('#restore-floor-pick').value = 'far-floor'; document.querySelector('#restore-floor-confirm').value = 'far-floor'; 1`);
+await sp.click('[data-set="restore-floor"]');
+await until(sp, `/nothing was restored/.test(document.querySelector('.set-err')?.textContent ?? '')`, 'a floor here newer than the file is refused');
+ok(/1 thing on far-floor the file does not/.test(await sp.evalJs(`document.querySelector('.set-err').textContent`)), 'and the page says what would have been lost');
+
 console.log('\nthe desktop app: ⚙ and its pane');
 const fw = await open({ base });
 await fw.beforeLoad(APP_UA);

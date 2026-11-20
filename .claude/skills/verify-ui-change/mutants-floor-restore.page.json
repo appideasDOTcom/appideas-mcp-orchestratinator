@@ -1,0 +1,14 @@
+[
+ ["the file's floors are not asked for", "src/ui/app.js",
+  "    if (res.ok) set.floors = (await res.json()).floors ?? null;",
+  "    void res;"],
+ ["the one-floor routes keep the 4mb body limit", "src/server.js",
+  "const RESTORE_PATHS = new Set(['/api/admin/backup/restore', '/api/admin/backup/restore-floor', '/api/admin/backup/floors']);",
+  "const RESTORE_PATHS = new Set(['/api/admin/backup/restore']);"],
+ ["a wrong name is sent to the board", "src/ui/app.js",
+  "  if (typed !== channel) { setErr(`type ${channel} to restore that floor`); return; }",
+  ""],
+ ["the result does not say only that floor changed", "src/ui/app.js",
+  "</b> Every other floor is as it was.",
+  "</b>"]
+]

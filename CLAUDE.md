@@ -997,6 +997,59 @@ relaunch healed by itself, and a 6-minute one was reconnected by the host
 30 s and 33 s after, on both desks. A room opened and ended put both notices in the
 window, filed as `meeting-room` lines.
 
+## One floor of a backup
+
+costmo, 2026-11-19: after a full import from the Docker instance he kept
+working on one floor (`e3-roominator`) there, and wanted that floor in the
+app's instance without losing what was said on it since. A whole-board
+restore would have dropped everything done on the app since the import, and
+the restore route's own comment refuses a merge for a reason that still
+holds: ids count per instance. Read off the two real exports that evening:
+the floor's 175 new messages carried ids 3526 to 3700, and the app had
+given 3526 to 3620 to other floors' rows meanwhile. So **Settings → Recover
+from a backup → "Or bring over one floor"** (`POST /api/admin/backup/floors`
+lists a file's floors, `POST /api/admin/backup/restore-floor` confirmed by
+typing the floor's name), with the rules on `restoreFloor` in `src/db.js`:
+
+- **Nothing here is lost.** Refused, with nothing changed, when the floor
+  here holds a message, task or audit row the file does not, a task the file
+  has older, or a contract at a later version. Rows are matched by what they
+  are (author, time, text), not by number: a number is the instance's, and a
+  second import of the same floor would otherwise be refused over the rows
+  the first one renumbered. The floor restore's own audit rows are this
+  instance's and are kept across the next one.
+- **An id never means two things.** A row the floor already has here keeps
+  the number it has here. Any other keeps the file's number while that is
+  free and later than every number given so far; past the first clash, every
+  row is numbered above everything here, in the file's order, so the floor
+  still reads in the order it was written. A free number after a clash is
+  not kept, because it would sort before the renumbered rows.
+- **Read positions follow their messages** (`poll_cursor` to the new number
+  of the newest message it had read). An agent that remembers a number from
+  the other instance can be handed messages again, never fewer: its `since`
+  is from the other sequence and is below the renumbered rows.
+- **A remembered task number cannot touch another floor's task**: the task
+  tools are `WHERE channel = ? AND id = ?`. Renumbered tasks are said in the
+  report and the audit row, and an agent that asks for its old number finds
+  nothing and lists.
+- **A whole file's routes take a whole file's size.** The board parses 4 MB
+  everywhere but the restore paths (`RESTORE_PATHS` in server.js), and a real
+  export is 14 MB: the first rehearsal on real data was refused at the door,
+  which the suite's small fixture could not see. check-settings pads its
+  file past 4 MB for that.
+- **Names here win** (`agent_profile` is per agent): taken only for an agent
+  with none here.
+
+Rehearsed on the real exports (app 0.14.0 and Docker 0.12.12, 2026-11-19) on
+a scratch board: the floor arrived whole (372 messages, 28 tasks, 9
+contracts, 7 agents) in the order written, every other floor's rows were
+unchanged by id and text, 175 messages and 6 tasks were renumbered, cursors
+followed (3700 to 3875), and the same file restored a second time. Moving
+the agents after it is the release (Take a desk on each folder), which
+brings their conversations. Tested in `test:auth` ("one floor of a
+backup"), `check-settings.mjs` ("one floor of a backup"), with
+`mutants-floor-restore.suite.json` and `mutants-floor-restore.page.json`.
+
 ## Claude Code signed out on a desk's machine
 
 costmo, 2026-11-19, in the release-prep round (meeting room 22 with

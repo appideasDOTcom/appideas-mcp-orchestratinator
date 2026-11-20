@@ -663,6 +663,8 @@ pre.raw {
   line-height: 1.6;
 }
 .set-done b { display: block; margin-bottom: 3px; }
+.set-floor-restore { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.set-floor-restore select { width: 100%; }
 .set-warn { color: var(--block) !important; }
 
 /* The settings page (?settings=1): the dialog's sections on a page of their

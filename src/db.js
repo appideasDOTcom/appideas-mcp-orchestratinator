@@ -1718,6 +1718,170 @@ export function makeStore(db) {
     return report;
   });
 
+  /**
+   * One floor of a backup over the same floor here, and nothing else (costmo,
+   * 2026-11-19: bring the e3-roominator floor over from the Docker instance
+   * without losing what was said on it since the last full import). The
+   * reasons a whole-board merge was refused (web.js, "Load a backup over the
+   * top of this board") are about ids, so ids are what this is careful with:
+   *
+   * - **Nothing here is lost.** Refused, before any write, when this floor
+   *   here holds a message, task or audit row the file does not, a task the
+   *   file has older, or a contract at a later version. The floor here is
+   *   then not a stale copy of the file's, and replacing it would drop work.
+   * - **An id never means two things.** Message, task, contract-history and
+   *   audit ids count per instance. The file's ids are kept up to the first
+   *   one this instance has already given to a row of another floor; that row
+   *   and every one after it on the floor is numbered above everything here,
+   *   in the file's order. So the floor reads in the order it was written,
+   *   the rows already shared with the last import keep their numbers, and
+   *   the renumbered ones are said in the report.
+   * - **Read positions are carried.** An agent's poll_cursor is a message id
+   *   on the file's instance; it is moved to the new number of the newest
+   *   message it had read. An agent that remembers a number from the other
+   *   instance may be handed some messages again; it is never handed fewer.
+   * - **Names here win** (agent_profile is per agent, not per floor): a
+   *   profile from the file is taken only for an agent with none here.
+   *
+   * `tables` is the file's tables, already filtered to `channel`.
+   */
+  const ID_TABLES = ['messages', 'tasks', 'contract_history', 'admin_events'];
+  const FLOOR_TABLES = ['messages', 'contracts', 'contract_history', 'tasks', 'agents', 'channel_flags', 'desk_flags', 'admin_events', 'personas'];
+  // What a row is, apart from its number: how a row here is found in a file
+  // whose instance numbered it differently (or that this one renumbered on an
+  // earlier floor restore). A task is the same task whatever its status.
+  const ROW_IS = {
+    messages: (r) => `${r.from_agent}|${r.to_agent ?? ''}|${r.created_at}|${r.body}`,
+    tasks: (r) => `${r.created_by ?? ''}|${r.created_at}|${r.title}`,
+    contract_history: (r) => `${r.key}|${r.version}|${r.updated_at}`,
+    admin_events: (r) => `${r.action}|${r.actor ?? ''}|${r.target ?? ''}|${r.created_at}|${r.detail ?? ''}`,
+  };
+  const restoreFloor = db.transaction((channel, tables) => {
+    const rowsOf = (t) => (Array.isArray(tables[t]) ? tables[t] : []).filter((r) => r && r.channel === channel);
+    const hereOf = (t) => db.prepare(`SELECT * FROM ${t} WHERE channel = ?`).all(channel);
+
+    // What this floor here has that the file does not. A floor restore's own
+    // audit row is this instance's, and is kept across the restore below.
+    const lost = [];
+    const ownAudit = (r) => r.action === 'backup.restore_floor';
+    for (const t of ['messages', 'tasks', 'admin_events']) {
+      const file = new Map(rowsOf(t).map((r) => [ROW_IS[t](r), r]));
+      for (const h of hereOf(t)) {
+        if (t === 'admin_events' && ownAudit(h)) continue;
+        const f = file.get(ROW_IS[t](h));
+        if (!f) { lost.push(`${t === 'messages' ? 'message' : t === 'tasks' ? 'task' : 'audit row'} #${h.id} (${h.created_at})`); continue; }
+        if (t === 'tasks' && String(h.updated_at ?? '') > String(f.updated_at ?? '')) lost.push(`task #${h.id}, changed here at ${h.updated_at} after the file's copy`);
+      }
+    }
+    {
+      const file = new Map(rowsOf('contracts').map((r) => [r.key, r]));
+      for (const h of hereOf('contracts')) {
+        const f = file.get(h.key);
+        if (!f || Number(f.version) < Number(h.version)) lost.push(`contract ${h.key} v${h.version}`);
+      }
+    }
+    if (lost.length) {
+      const err = new Error(`this instance has ${lost.length} thing${lost.length === 1 ? '' : 's'} on ${channel} the file does not: ${lost.slice(0, 5).join('; ')}${lost.length > 5 ? '; …' : ''}. Nothing was changed.`);
+      err.code = 'floor_newer_here';
+      throw err;
+    }
+    // The numbers this floor's rows have here, by what each row is, and the
+    // floor restores' own audit rows, which stay.
+    const hereIds = {};
+    for (const t of ID_TABLES) hereIds[t] = new Map(hereOf(t).filter((r) => !(t === 'admin_events' && ownAudit(r))).map((r) => [ROW_IS[t](r), r.id]));
+    const keptAudit = hereOf('admin_events').filter(ownAudit);
+
+    const report = {};
+    const idMaps = {};
+    for (const t of FLOOR_TABLES) {
+      const { columns } = tableInfo(t);
+      const removed = db.prepare(`DELETE FROM ${t} WHERE channel = ?`).run(channel).changes;
+      let rows = rowsOf(t);
+      let renumbered = 0;
+      if (ID_TABLES.includes(t)) {
+        // A row this floor already has here keeps its number here. Any other
+        // keeps the file's number while that is free and later than every
+        // number given so far; else it is numbered above everything, in the
+        // file's order, so the floor still reads in the order it was written.
+        rows = rows.slice().sort((a, b) => Number(a.id) - Number(b.id));
+        if (t === 'admin_events') rows = rows.filter((r) => !ownAudit(r)).concat(keptAudit);
+        const taken = db.prepare(`SELECT 1 FROM ${t} WHERE id = ?`);
+        const seq = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`).get(t)?.seq ?? 0;
+        const top = db.prepare(`SELECT MAX(id) AS m FROM ${t}`).get().m ?? 0;
+        const reused = new Set(hereIds[t].values());
+        let next = Math.max(seq, top, ...reused, ...rows.map((r) => Number(r.id))) + 1;
+        let last = 0;
+        const map = new Map();
+        const given = new Set();
+        rows = rows.map((r) => {
+          const fileId = Number(r.id);
+          const mine = t === 'admin_events' && keptAudit.includes(r) ? r.id : hereIds[t].get(ROW_IS[t](r));
+          let id;
+          if (mine != null) id = mine;
+          else if (fileId > last && !taken.get(fileId) && !reused.has(fileId) && !given.has(fileId)) id = fileId;
+          else id = next++;
+          given.add(id);
+          if (mine == null || !(t === 'admin_events' && keptAudit.includes(r))) map.set(fileId, id);
+          if (id !== fileId) renumbered++;
+          last = Math.max(last, id);
+          return id === fileId ? r : { ...r, id };
+        });
+        idMaps[t] = { map };
+      }
+      if (t === 'agents') {
+        // A read position, moved to where its message now is: the new number
+        // of the newest message at or below it on the file's instance.
+        const m = idMaps.messages?.map ?? new Map();
+        const old = [...m.keys()].sort((a, b) => a - b);
+        rows = rows.map((r) => {
+          const c = Number(r.poll_cursor ?? 0);
+          if (!c) return r;
+          let at = null;
+          for (const id of old) { if (id <= c) at = id; else break; }
+          return at === null ? r : { ...r, poll_cursor: m.get(at) };
+        });
+      }
+      const present = [...new Set(rows.flatMap((r) => Object.keys(r ?? {})))];
+      const use = present.filter((c) => columns.includes(c));
+      let inserted = 0;
+      if (use.length && rows.length) {
+        const stmt = db.prepare(`INSERT INTO ${t} (${use.join(', ')}) VALUES (${use.map((c) => `@${c}`).join(', ')})`);
+        for (const row of rows) {
+          try {
+            stmt.run(Object.fromEntries(use.map((c) => [c, bindable(row?.[c])])));
+          } catch (err) {
+            err.message = `"${t}" row ${inserted + 1} of ${rows.length} on ${channel} was refused: ${err.message}`;
+            throw err;
+          }
+          inserted++;
+        }
+      }
+      report[t] = { removed, inserted, ...(renumbered ? { renumbered } : {}) };
+    }
+
+    // Profiles are per agent: taken only for an agent with none here.
+    const agentsHere = new Set(rowsOf('agents').map((r) => r.agent).concat(rowsOf('personas').map((r) => r.agent)));
+    const profiles = (Array.isArray(tables.agent_profile) ? tables.agent_profile : []).filter((r) => r && agentsHere.has(r.agent));
+    let adopted = 0, kept = 0;
+    if (profiles.length) {
+      const { columns } = tableInfo('agent_profile');
+      const has = db.prepare(`SELECT 1 FROM agent_profile WHERE agent = ?`);
+      for (const r of profiles) {
+        if (has.get(r.agent)) { kept++; continue; }
+        const use = Object.keys(r).filter((c) => columns.includes(c));
+        db.prepare(`INSERT INTO agent_profile (${use.join(', ')}) VALUES (${use.map((c) => `@${c}`).join(', ')})`)
+          .run(Object.fromEntries(use.map((c) => [c, bindable(r[c])])));
+        adopted++;
+      }
+    }
+    report.agent_profile = { adopted, kept };
+    const renumberedIds = Object.fromEntries(Object.entries(idMaps)
+      .map(([t, v]) => [t, [...v.map].filter(([a, b]) => a !== b)])
+      .filter(([, moved]) => moved.length)
+      .map(([t, moved]) => [t, { from: Math.min(...moved.map(([a]) => a)), to: Math.min(...moved.map(([, b]) => b)), count: moved.length }]));
+    return { report, renumbered: renumberedIds };
+  });
+
   const setContract = db.transaction((channel, key, value, by) => {
     const row = q.getContractVersion.get({ channel, key });
     const version = (row?.version ?? 0) + 1;
@@ -1964,6 +2128,7 @@ export function makeStore(db) {
     dumpTable: (table) => tableInfo(table).selectAll.all(),
     countTable: (table) => tableInfo(table).count.get().n,
     restoreBackup,
+    restoreFloor,
     /**
      * Take on names a legacy backup kept per desk — see applyBackup, which is
      * the only caller and holds the reasoning. A name already on this board

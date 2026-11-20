@@ -211,3 +211,39 @@ export function applyBackup({ store, doc }) {
     rows: Object.values(report).reduce((n, r) => n + (r.inserted ?? 0), 0),
   };
 }
+
+/**
+ * The floors a backup holds, for the page's one-floor restore: each with how
+ * many messages, tasks and contracts it carries, newest message time first.
+ */
+export function floorsIn(doc) {
+  const by = new Map();
+  const at = (c) => { if (!by.has(c)) by.set(c, { channel: c, messages: 0, tasks: 0, contracts: 0, newest: null }); return by.get(c); };
+  for (const r of doc?.tables?.messages ?? []) {
+    if (!r?.channel) continue;
+    const f = at(r.channel); f.messages++;
+    if (!f.newest || String(r.created_at ?? '') > f.newest) f.newest = r.created_at ?? f.newest;
+  }
+  for (const r of doc?.tables?.tasks ?? []) if (r?.channel) at(r.channel).tasks++;
+  for (const r of doc?.tables?.contracts ?? []) if (r?.channel) at(r.channel).contracts++;
+  for (const t of ['agents', 'personas']) for (const r of doc?.tables?.[t] ?? []) if (r?.channel) at(r.channel);
+  return [...by.values()].sort((a, b) => String(b.newest ?? '').localeCompare(String(a.newest ?? '')));
+}
+
+/**
+ * Load one floor of a validated backup over the same floor here, and leave
+ * every other floor as it is. The rules (nothing here lost, an id never two
+ * things, read positions carried) are on restoreFloor in db.js. Throws, with
+ * nothing changed, when the file has no such floor or the floor here holds
+ * something the file does not.
+ */
+export function applyFloor({ store, doc, channel }) {
+  if (!floorsIn(doc).some((f) => f.channel === channel)) {
+    const err = new Error(`that backup has no floor named ${channel}`);
+    err.code = 'no_such_floor';
+    throw err;
+  }
+  const tables = {};
+  for (const t of BACKUP_TABLES) if (Array.isArray(doc.tables[t])) tables[t] = doc.tables[t];
+  return store.restoreFloor(channel, tables);
+}

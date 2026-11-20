@@ -109,9 +109,14 @@ const jsonRestore = express.json({ limit: process.env.RESTORE_BODY_LIMIT ?? '128
 // route after adminGuard has run, so no parser may touch it: a .json file sent
 // as application/json would otherwise be parsed here, against the 4mb limit.
 const UPLOAD_PATH = '/api/floor/upload';
+// The routes that take a whole backup file: a restore, one floor of it, and
+// the read of which floors it holds (the page posts the file to ask). A real
+// board's file is 14 MB (2026-11-19), so each needs the restore's headroom;
+// the one-floor routes were refused at 4mb by the first real file.
+const RESTORE_PATHS = new Set(['/api/admin/backup/restore', '/api/admin/backup/restore-floor', '/api/admin/backup/floors']);
 app.use((req, res, next) => {
   if (req.path === UPLOAD_PATH) return next();
-  return (req.path === '/api/admin/backup/restore' ? jsonRestore : jsonBody)(req, res, next);
+  return (RESTORE_PATHS.has(req.path) ? jsonRestore : jsonBody)(req, res, next);
 });
 
 // One transport per MCP session (keyed by the mcp-session-id header).

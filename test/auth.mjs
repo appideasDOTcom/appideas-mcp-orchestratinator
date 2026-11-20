@@ -45,9 +45,9 @@ async function waitHealthy() {
   }
   return false;
 }
-async function makeClient(agent, key = KEY) {
+async function makeClient(agent, key = KEY, channel = CHANNEL) {
   const transport = new StreamableHTTPClientTransport(new URL(`${HOST}/mcp`), {
-    requestInit: { headers: { 'X-Channel': CHANNEL, 'X-Agent': agent, ...(key ? { [AUTH_HEADER]: key } : {}) } },
+    requestInit: { headers: { 'X-Channel': channel, 'X-Agent': agent, ...(key ? { [AUTH_HEADER]: key } : {}) } },
   });
   const client = new Client({ name: `auth-${agent}`, version: '0.0.0' });
   await client.connect(transport);
@@ -317,6 +317,98 @@ try {
     eq(names.gamma, 'Old Salt', "gamma's operator-chosen name was carried into the profile");
     eq(names.alpha, 'Captain Quirk', "alpha's standing name was not overwritten");
     assert(!('delta' in names), 'a cast name from arrival order is not mistaken for a choice');
+  }
+
+  console.log('\none floor of a backup (costmo, 2026-11-19)');
+  {
+    // The case it is for: a full import, then the floor goes on working on the
+    // other instance while this one goes on with its other floors. Both count
+    // message ids on, so the other instance's new rows on the floor carry ids
+    // this instance has since given to rows of its own.
+    const FAR = 'far-floor';
+    const far = await makeClient('fara', KEY, FAR);
+    await call(far.client, 'send_message', { body: 'far one' });
+    await call(far.client, 'send_message', { body: 'far two' });
+    const t1 = await call(far.client, 'open_task', { title: 'far task' });
+    const imported = await (await get('/api/admin/backup')).json();
+    await close(far.transport);
+    // This instance goes on, on another floor (a session of its own: the
+    // restores above closed every session open before them).
+    const here = await makeClient('alpha');
+    await call(here.client, 'send_message', { body: 'here, after the import, one' });
+    await call(here.client, 'send_message', { body: 'here, after the import, two' });
+    await close(here.transport);
+    const hereNow = await (await get('/api/admin/backup')).json();
+    const hereIds = hereNow.tables.messages.filter((m) => m.channel === CHANNEL).map((m) => m.id).slice(-2);
+    // The other instance went on, on the far floor, from the same ids.
+    const doc = structuredClone(imported);
+    const later = [0, 1, 2].map((i) => ({ id: hereIds[0] + i, channel: FAR, from_agent: 'farb', to_agent: null, body: JSON.stringify(`later ${i + 1}`), created_at: `2099-01-01 00:00:0${i}`, audience: null }));
+    doc.tables.messages.push(...later);
+    const task = doc.tables.tasks.find((t) => t.id === (t1.task?.id ?? t1.id));
+    if (task) Object.assign(task, { status: 'done', updated_at: '2099-01-01 00:00:09' });
+    doc.tables.contracts.push({ channel: FAR, key: 'far.k', value: '"v"', version: 1, updated_by: 'farb', updated_at: '2099-01-01 00:00:05' });
+    const fa = doc.tables.agents.find((a) => a.channel === FAR && a.agent === 'fara');
+    if (fa) fa.poll_cursor = later[1].id;
+    doc.tables.agents.push({ ...fa, agent: 'farb', poll_cursor: 0 });
+    doc.created_at = '2099-01-01T00:00:10.000Z';
+
+    const listed = await postAdmin('backup/floors', { backup: doc });
+    const farListed = listed.json.floors?.find((f) => f.channel === FAR);
+    eq([listed.status, farListed?.messages, farListed?.tasks, farListed?.contracts, farListed?.here], [200, 5, 1, 1, true],
+      'the page is told the floors a file holds, each with its counts and whether this instance has it');
+    eq(listed.json.floors?.[0]?.channel, FAR, 'newest first');
+    eq((await postAdmin('backup/restore-floor', { backup: doc, channel: FAR, confirm: 'RESTORE' })).status, 400, 'confirmed by typing the floor\'s name, not RESTORE');
+    const none = await postAdmin('backup/restore-floor', { backup: doc, channel: 'nowhere', confirm: 'nowhere' });
+    eq([none.status, none.json.code], [409, 'no_such_floor'], 'a floor the file does not hold is refused');
+
+    const done = await postAdmin('backup/restore-floor', { backup: doc, channel: FAR, confirm: FAR });
+    eq(done.status, 200, 'the floor restores');
+    if (done.json.snapshot?.path) snapshots.push(done.json.snapshot.path);
+    const after = await (await get('/api/admin/backup')).json();
+    const farMsgs = after.tables.messages.filter((m) => m.channel === FAR).sort((a, b) => a.id - b.id);
+    eq(farMsgs.map((m) => JSON.parse(m.body)), ['far one', 'far two', 'later 1', 'later 2', 'later 3'], 'every message on the floor, in the order it was written');
+    const imp = imported.tables.messages.filter((m) => m.channel === FAR).map((m) => m.id);
+    eq(farMsgs.slice(0, 2).map((m) => m.id), imp, 'the ones shared with the import keep their numbers');
+    const top = Math.max(...hereNow.tables.messages.map((m) => m.id));
+    assert(farMsgs.slice(2).every((m) => m.id > top), `and the ones whose numbers this instance had used are numbered above everything here — ${farMsgs.slice(2).map((m) => m.id)} over ${top}`);
+    eq(after.tables.messages.filter((m) => hereIds.includes(m.id)).map((m) => [m.channel, JSON.parse(m.body)]),
+      [[CHANNEL, 'here, after the import, one'], [CHANNEL, 'here, after the import, two']], 'this instance\'s own rows under those numbers are untouched');
+    // later 3's number was free here, but it comes after two that were not:
+    // kept, it would read before them.
+    eq(done.json.renumbered?.messages?.count, 3, 'and the report says how many were renumbered: the first clash and every message after it');
+    eq(after.tables.tasks.find((t) => t.channel === FAR)?.status, 'done', 'the task as the file has it');
+    eq(after.tables.contracts.filter((c) => c.channel === FAR).map((c) => c.key), ['far.k'], 'the contract made there');
+    eq(after.tables.agents.filter((a) => a.channel === FAR).map((a) => a.agent).sort(), ['fara', 'farb'], 'and the agent that joined there');
+    eq(after.tables.agents.find((a) => a.channel === FAR && a.agent === 'fara')?.poll_cursor, farMsgs[3].id,
+      'a read position follows its message to its new number: fara had read up to "later 2"');
+    eq(after.tables.messages.filter((m) => m.channel === CHANNEL).length, hereNow.tables.messages.filter((m) => m.channel === CHANNEL).length,
+      'every other floor is as it was');
+    const audit = (await (await get(`/api/activity?channel=${FAR}&limit=20`)).json()).rows ?? [];
+    assert(audit.some((r) => r.kind === 'admin.backup.restore_floor' && /renumbered/.test(r.detail ?? '')), 'with an audit row on the floor that says what was renumbered');
+
+    // The other instance goes on again, and its floor is brought over again:
+    // the rows this instance already has keep the numbers it gave them.
+    const doc2 = structuredClone(doc);
+    doc2.tables.messages.push({ id: later[2].id + 1, channel: FAR, from_agent: 'farb', to_agent: null, body: JSON.stringify('later 4'), created_at: '2099-01-01 00:00:20', audience: null });
+    doc2.created_at = '2099-01-01T00:00:30.000Z';
+    const again = await postAdmin('backup/restore-floor', { backup: doc2, channel: FAR, confirm: FAR });
+    eq(again.status, 200, 'a newer file of the same floor restores over the first');
+    if (again.json.snapshot?.path) snapshots.push(again.json.snapshot.path);
+    const after2 = await (await get('/api/admin/backup')).json();
+    const farMsgs2 = after2.tables.messages.filter((m) => m.channel === FAR).sort((a, b) => a.id - b.id);
+    eq(farMsgs2.slice(0, 5).map((m) => m.id), farMsgs.map((m) => m.id), 'every message it had keeps the number this instance gave it');
+    eq([JSON.parse(farMsgs2[5]?.body ?? 'null'), farMsgs2[5]?.id > farMsgs[4].id], ['later 4', true], 'and the new one comes after them');
+    eq(after2.tables.admin_events.filter((r) => r.channel === FAR && r.action === 'backup.restore_floor').length, 2, 'the first restore\'s audit row is kept beside the second\'s');
+
+    // The floor here now has something the file does not: refused, unchanged.
+    const far2 = await makeClient('fara', KEY, FAR);
+    await call(far2.client, 'send_message', { body: 'said here after the floor came over' });
+    await close(far2.transport);
+    const before = (await (await get('/api/admin/backup')).json()).tables.messages.filter((m) => m.channel === FAR).length;
+    const refused = await postAdmin('backup/restore-floor', { backup: doc2, channel: FAR, confirm: FAR });
+    eq([refused.status, refused.json.code], [409, 'floor_newer_here'], 'a floor here that holds something the file does not is refused');
+    assert(/nothing was restored.*1 thing on far-floor the file does not: message #\d+/.test(refused.json.error ?? ''), `in words that name what would be lost — ${refused.json.error}`);
+    eq((await (await get('/api/admin/backup')).json()).tables.messages.filter((m) => m.channel === FAR).length, before, 'and nothing changed');
   }
 
   console.log('\naudit trail');
