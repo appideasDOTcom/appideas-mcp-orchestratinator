@@ -111,6 +111,22 @@ person could have pressed. **Read `disabled` off the button before clicking
 it**, as part of the probe, and treat a disabled button you expected to
 press as the finding.
 
+**Removing a control from the page breaks the checks that drive it, and
+none of them runs until the release.** The settings round (2026-11-19)
+took the header's auto-refresh switch out; `check-select.mjs` switched the
+board's poll off with `#autorefresh` and would have thrown at the release
+run. Before removing or renaming an id, class or global the page has:
+`command grep -rn -e '<id>' .claude/skills test`. Fix every hit in the
+same change.
+
+**A new check's ports: read the ones in use first.** The defaults collide
+silently with another check's only when both run, and the runners refuse a
+taken port, so the clash shows up as a refusal at a bad time.
+`command grep -rhoe 'PORT:-89[0-9]*' -e 'CDP:-9[0-9]*' .claude/skills/*/*.sh | sort | uniq -c`
+lists them; the release runner hands out 8941+ and 9311+ in its own order
+(run-release-pages.sh). A check that needs a second board takes it at
+PORT+40 (run-check-settings.sh).
+
 ## A throwaway server
 
 Never seed `:8787`. Its pill counts are a deliberate demo fixture the operator

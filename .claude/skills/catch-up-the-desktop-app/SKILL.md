@@ -139,6 +139,16 @@ the one thing that did not:
   questions the same way. Please compare notes". Post what you mean to ask;
   if the other agent has asked already, read its answer instead. One
   question per decision, from whichever side owns it.
+- **Posting first is not enough: wait for the other agent's answer to the
+  post before asking** (the settings round, 2026-11-19). I posted the split
+  and my four questions, polled once, found nothing, and asked. The other
+  agent's own split, with its own questions, was already on its way, and it
+  asked him too. One decision came back two ways ("⚙ opens the app's pane"
+  to me, "⚙ goes away" to it), and he had to be asked a third time to
+  settle it. Post, then poll until the other agent has replied (it answers
+  within a couple of minutes when it is in the room), then ask. If the two
+  splits cross anyway, compare every answer the moment both are in and put
+  a conflict to him at once as one question naming both answers.
 - **The page is ours, the windows are the app's.** Anything drawn in the
   board page (a control, a title, a setting a browser also needs) is built
   here and reaches the app through its pin; anything about windows, tabs,
