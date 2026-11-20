@@ -1396,7 +1396,13 @@ class Host {
       log(`${desk.label}: closed its window to reopen on ${sessionId ?? 'a new conversation'}`);
     }
     const since = Date.now();
-    desk.intent = { sessionId, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
+    // Held here as well as on the desk: the watch loop runs beside this and
+    // lets the intent go the moment a live session matches it, which for a
+    // known id can be inside the awaits below (seen in the release gate,
+    // 2026-11-20: a reopen after a sign-in threw on `desk.intent.pid`).
+    // Written through this, a settled intent takes the pid harmlessly.
+    const intent = { sessionId, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
+    desk.intent = intent;
     await desk.follow(sessionId, known ? 'end' : 'tail');
     const r = await W.open(desk.where, { resume: sessionId });
     if (!r.ok) return fail(r.error);
@@ -1404,10 +1410,10 @@ class Host {
     if (r.resumed && r.resumed !== sessionId) {
       // resumable() found the chosen id gone from disk and opened the
       // folder's newest conversation instead; follow that one, from its tail.
-      desk.intent.sessionId = r.resumed;
+      intent.sessionId = r.resumed;
       await desk.follow(r.resumed, 'tail');
     }
-    desk.intent.pid = r.pid;
+    intent.pid = r.pid;
     log(`${desk.label}: reopened on ${r.resumed ?? 'a new conversation'} (${r.target})`);
     const up = await W.waitReady(desk.where, { pid: r.pid, target: r.target });
     for (const a of up.answered ?? []) log(`${desk.label}: answered the ${a.name} question with "${a.chose}"`);

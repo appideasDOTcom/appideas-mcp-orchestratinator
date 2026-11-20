@@ -1061,10 +1061,15 @@ try {
   // The flag is read when a window starts, so the pick that lands here opens
   // the window that then refuses the next one.
   writeFileSync(`${FIX}/busy.flag`, '1');
+  // Waited on against the panes before this pick, not panesAfter: the second
+  // pick's window is not in panesAfter either, so with the host's line held
+  // (a /mcp reconnect waiting out its 8 s, release gate 2026-11-20) that
+  // window read as this pick's, and the refusal below met the next one.
+  const panesBeforeBusy = paneOf();
   const busyOpen = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
   eq(busyOpen.status, 200, 'a pick is queued while the window is idle');
   const idBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
-  assert(await until(async () => { const p = paneOf(); return p.length === panesAfter.length && !p.some((x) => panesAfter.includes(x)) ? true : null; }, 25000),
+  assert(await until(async () => { const p = paneOf(); return p.length === panesAfter.length && !p.some((x) => panesBeforeBusy.includes(x)) ? true : null; }, 25000),
     'and lands in a new window — one that now says it is working');
   await sleep(WATCH_SETTLE_MS);
   const busyPanes = paneOf();

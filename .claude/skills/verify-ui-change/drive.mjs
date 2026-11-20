@@ -361,8 +361,12 @@ async function connect(target) {
       // `button` 'left' or 'middle': a ⌘-click or a middle-click on a link is
       // the browser's own "open elsewhere" (task 315's floor chips).
       const held1 = button === 'middle' ? 4 : 1;
+      // A move with the button held names that button: sent as 'none', Chrome
+      // does not take it as a drag, and a textarea's resize handle stayed
+      // where it was (check-chatbox and check-pop-foot red at the 0.14.0
+      // release gate, 2026-11-20, from this line's first cut).
       const mouse = (type, { x, y }, buttons) => cmd('Input.dispatchMouseEvent',
-        { type, x, y, button: type === 'mouseMoved' ? 'none' : button, buttons: buttons ? held1 : 0, clickCount: 1, modifiers });
+        { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : button, buttons: buttons ? held1 : 0, clickCount: 1, modifiers });
       await mouse('mouseMoved', a, 0);
       await mouse('mousePressed', a, 1);
       for (let i = 1; i <= steps; i++) {
