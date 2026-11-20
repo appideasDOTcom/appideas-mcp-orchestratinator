@@ -1278,6 +1278,9 @@ later:
   reboot. No Time Machine backup exists (off since 2021), and no local
   snapshot.
 
+How all of that was read, as three commands and the order they pay off
+in, is the **recover-a-lost-record** skill.
+
 **A window the app's host opens carries the host's own settings, and no
 `TMPDIR`** (found by the app's agent that afternoon, measured in this
 folder's window too). The host builds what it gives tmux from its whole
@@ -1300,9 +1303,53 @@ export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
 ```
 
 before any suite, scratch board or host from a window on the app's floor.
-The fix is open and is costmo's to rule on, because it changes what every
-window is given: the host hands tmux its environment without its own
-settings, and the app gives its host a `TMPDIR`. It is written in
+
+**Decided 2026-11-20, not built: a window gets a person's environment and
+nothing of the host's.** costmo handed the call over that evening ("make
+the open decision based on what is going to be smoothest to the operator
+and end user experience. We'll pick that up in the next session"), so the
+pick is the developer's, and it is the first thing the next session
+builds, for the next version. What was picked, and why each part:
+
+1. **The host hands tmux its environment without its own settings**:
+   every `ORCH_` variable the host reads as configuration, the key
+   included (`TMUX_ENV` in `host/window.js`). An agent's window is
+   somebody's terminal. A board, a host or a suite started in it should
+   behave as it would in any other terminal, and today it silently
+   becomes the app's host. The suites' own seams reach a stand-in by flag
+   files already, for this same reason, so nothing of theirs rides on it.
+2. **The key reaches a window only where its binding names a variable,
+   by `-e`, as PR #52 ruled.** That rule gave the variable only to a desk
+   whose placeholder the host could not fill, on the ground that one it
+   could fill "came from the same environment the host started the tmux
+   server with". With 1 that stops being true, so `paneEnv` gives it in
+   both cases (`keyVar` in `host/identity.js` has to say "names a
+   variable", not "could not be filled"). A desk with a literal key, which
+   is every desk the app binds, gets nothing: its key is in its binding.
+3. **The host takes the same variables out of a running tmux server at
+   its start** (`set-environment -g -u`), so the fix reaches windows
+   opened after an update without the floor being closed. Windows already
+   open keep what they have until they are reopened. To be measured on a
+   socket of its own before it is believed, including what a `-u` of a
+   variable the server never had says.
+4. **`TMPDIR` is filled when missing, by the host**, as `claudeEnv` fills
+   `USER` and `LOGNAME`: on macOS the user's own (`getconf
+   DARWIN_USER_TEMP_DIR`), elsewhere left alone. In the host and not only
+   the app, because it is then right under every supervisor, and whether
+   launchd gives a LaunchAgent one has not been read. The app's agent
+   gives its host one as well; that is its half and it has agreed.
+
+What was weighed and not picked: leaving the key in (it is one variable
+and every window's binding holds it anyway), because the red above was the
+key, and a host started by hand with the app's key and its own address is
+the surprise this removes. And fixing it in the suites alone (each drops
+inherited `ORCH_` variables at its top), because that leaves a hand-started
+host as it is. It changes what a launchd host's windows get only where
+that host was configured by environment and not by `host.json`, which
+`install.sh` does not do. Owed with the build: rows in `test:host` (its
+placeholder-key section already reads what a pane was given,
+`pane-env.log`) and `test:window`, their mutants, and a real window from
+the app's host read with `env`. It is written in
 `orchestratinator.consumed`, `host.windows_inherit`.
 
 ## A file attached to a message
