@@ -64,6 +64,21 @@ touched the same page script (here `src/ui/app.js`: #23's
 - **Read where the two meet.** Here that was the backlog dialog. It is
   async now and holds no text field, so #11's backdrop rule keeps
   closing it. Name the meeting point in the report.
+- **Read each side's new checks against the other side's new kinds of
+  thing.** A check one side added can be wrong for something the other
+  side added, with no conflict and every suite green. The 2026-11-18 merge
+  did that: develop's release check (`boundAt`, 0.12.7) read a desk's
+  binding off its folder, main's seats (0.12.9) are desks whose folder
+  names another desk, and every seat on develop read as a released folder
+  until 0.14.4. costmo found it by using it ("everything about it failed
+  miserably"). The greps that would have found it: `git diff
+  <base>..<develop> -- host/ src/ | grep -n 'readDesk\|readLocalScope\|boundAt'`
+  for a reader of the folder's binding, then whether it asks `desk.seat`
+  (or whatever the other side's new kind is). And **a suite that stays
+  green through such a seam may have switched the check off in its
+  fixture**: `test:seats` had no `~/.claude.json`, so the local scope read
+  as unreadable and the check concluded nothing. Look for the file every
+  real machine has and the fixture leaves out.
 - **Each side's suites, not `npm test` in full.** Since 2026-11-16 the
   full chain runs once, at the SHA that ships (CLAUDE.md, Conventions, and
   QA's decisions/0015). Run the suites every file either side changed

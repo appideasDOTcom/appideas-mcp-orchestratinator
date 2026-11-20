@@ -3,11 +3,13 @@ name: catch-up-the-desktop-app
 description: Bring the desktop app (orchestratinator-desktop, its own repo and agent) up to this repo's develop and prove it — what the app consumes, how a change reaches it, a scratch Docker board to test its connect against, the plugin commands on today's Claude Code, and the read that says which commit the running app really has. Use when costmo asks whether the app has the main app's changes, when the app's agent asks for something from this repo, and before telling anyone "the app is on <commit>".
 ---
 
-# The app follows a pushed develop commit, and nothing else
+# The app follows its pin, a pushed tag or commit on develop, and nothing else
 
 The desktop app is another repo with another agent
 (`orchestratinator-desktop-dev`). It installs this repo from GitHub's
-`develop` and runs `host/index.js` and `src/server.js` out of that copy. So
+`develop`, at whatever its package.json pins (a release tag, or a commit
+during a round: step 5 below), and runs `host/index.js` and `src/server.js`
+out of that copy. So
 "the app has it" is four separate facts, and each was wrong at least once:
 
 | The claim | What settles it |
@@ -119,13 +121,32 @@ better-sqlite3 (`. scripts/node-floor.sh`).
    session, environment); do not assume it.
 4. **Build the additive change with its row and its mutant**, run the
    suites the diff reaches, and say "in the tree, not pushed".
-5. **When costmo has pushed, name the commit** and bump the contract's
-   `state`. The app's agent takes it in a copy first; costmo's running app
-   takes it when he restarts.
-6. **Verify the restarted app from outside**: `app-pin-check.sh`, and one
-   real use of whatever changed (a History search through
+5. **When costmo has pushed, name the commit, and have the app pinned to
+   it before telling him anything is ready to try.** The app's package.json
+   names a release tag (`#v<x.y.z>`), and **costmo tags only after he has
+   tested in his running app** (`npm start` in the app repo). So between
+   his commit and his tag, nothing he runs has the round unless the app is
+   pinned to the commit itself (`#<sha>` or `#develop`; the contract's
+   `pin.how` allows it). 0.14.4 (2026-11-20) was reported "ready once you
+   commit and tag"; he tested on v0.14.3's code, three of six items
+   looked untouched, and he read the round as 1 of 6 working ("Are you
+   telling me that we have to tag the repo before we're done testing …
+   Snake eating its own tail much?"). So: the app's agent pins the sha,
+   bumps the app's own version, and reinstalls; `app-pin-check.sh <sha>`
+   reads **0 files differing**; only then is he told, with the steps:
+   quit, `npm run orchestratinator:update`, `npm start`, and the header
+   reads the new version before he tries anything.
+6. **Verify the restarted app from outside**: `app-pin-check.sh <sha>`
+   (its last lines are the app's board version and host row), and one real
+   use of whatever changed (a History search through
    `POST /api/floor/history/search` on the app's board is a read and moves
    nothing).
+7. **The tag is his, after his test**, and after `npm run release-gate`
+   at that commit when he calls a release (his rule of 2026-11-19; a QA
+   session runs it). Then the app's agent moves the pin from the sha to
+   `#v<x.y.z>`, reads `app-pin-check.sh` against the tag's commit, and
+   packages. Move the contract's `pin.what_is_where` when the build is
+   made.
 
 ## A feature both sides build (the floor windows round, 2026-11-19)
 

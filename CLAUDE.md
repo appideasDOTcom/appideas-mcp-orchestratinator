@@ -3465,7 +3465,11 @@ are unset first** (2026-11-20; the two lines and the red they cause are at
 the end of "The clear of 2026-11-20"). A suite's hosts are started with
 `...process.env`, so an inherited `ORCH_AUTH_TOKEN` or
 `ORCH_HOST_SUPERVISOR=app` is theirs too. `env | command grep -c '^ORCH_'`
-should print 0 before a run whose result will be quoted.
+should print 0 before a run whose result will be quoted. Since 0.14.4 a
+window a host opens carries none of them (a seat's window carries its own
+four, which a suite does not read), so the unset is for a window opened
+before that host started; the count says which you are in. And a suite run
+from any window still wants `TMPDIR` set if the count was not 0.
 
 **What ships is what is tested: one Node major and one lockfile**
 (costmo's ruling on the milestone audit's finding 5, 2026-11-17, in
