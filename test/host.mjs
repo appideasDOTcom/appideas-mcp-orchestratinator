@@ -2675,6 +2675,53 @@ try {
   try { install([], { ORCH_NODE: `${instBin}/node20` }); } catch (err) { refusal = String(err.stderr ?? ''); }
   assert(/^ORCH_NODE is .*node20, which is not Node 24/.test(refusal), `and a Node of another major is refused, in words, before anything is written — ${refusal.trim()}`);
 
+  /* ── Windows: the supervisor Task Scheduler starts ──────────────────────────
+   * Task Scheduler restarts nothing that exits and stops a task by killing it
+   * (pc-developer, Windows 11, 2026-11-20), so host/supervise.mjs restarts
+   * the host and stops it by asking over the IPC channel. Neither is
+   * Windows-only code, so both run here. Each host below serves a folder
+   * with no desks in it, so it touches nothing the suite's own host has. */
+  console.log('\n  the supervisor Windows runs the host under');
+  {
+    const supHome = `${inst}/sup-home`;
+    const empty = `${inst}/sup-empty`;
+    mkdirSync(`${supHome}/.orchestratinator`, { recursive: true });
+    mkdirSync(empty, { recursive: true });
+    const supLog = `${supHome}/.orchestratinator/log/host.log`;
+    const stopFile = `${supHome}/.orchestratinator/host.stop`;
+    const readLog = () => { try { return readFileSync(supLog, 'utf8'); } catch { return ''; } };
+    const supervise = (env) => spawn(process.execPath, ['host/supervise.mjs'], {
+      env: { PATH: process.env.PATH, HOME: supHome, TMPDIR: process.env.TMPDIR ?? '/tmp', ORCH_HOST_CONFIG: '/nonexistent/host.json', ORCH_SUPERVISE_RESTART_MS: '300', ...env },
+      stdio: 'ignore',
+    });
+
+    // A host that cannot start (no board named anywhere) exits, and is started again.
+    const crashing = supervise({ ORCH_HOST_ROOTS: empty });
+    const restarted = await until(() => ((readLog().match(/supervisor: started the host/g) ?? []).length >= 2 ? true : null), 15000);
+    assert(restarted, `a host that exits is started again (${(readLog().match(/supervisor: started the host/g) ?? []).length} starts)`);
+    assert(/supervisor: the host exited \(code \d+\); starting it again/.test(readLog()), 'and the log says it exited and is being started again');
+    writeFileSync(stopFile, 'stop');
+    const crashExit = await Promise.race([new Promise((d) => crashing.once('exit', (code) => d(code))), sleep(10000).then(() => 'still running')]);
+    eq(crashExit, 0, 'the stop file stops the supervisor, with exit 0');
+    eq(existsSync(stopFile), false, 'and it takes the stop file away, so the next start is not stopped by it');
+    if (crashExit === 'still running') crashing.kill('SIGKILL');
+
+    // A host that is running is asked, over IPC, and leaves on its own.
+    writeFileSync(supLog, '');
+    const running = supervise({ ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: empty, ORCH_HOST_ID: 'host-test-sup', ORCH_HOST_NAME: 'Supervised', ORCH_TMUX_SESSION: `${TMUX_SESSION}-sup` });
+    const up = await until(async () => ((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-sup')?.live ? true : null), 20000);
+    assert(up, 'the fixture: the supervised host registers with the board');
+    writeFileSync(stopFile, 'stop');
+    const t0 = Date.now();
+    const runExit = await Promise.race([new Promise((d) => running.once('exit', (code) => d(code))), sleep(30000).then(() => 'still running')]);
+    eq(runExit, 0, `asked to stop, the supervisor exits 0 (in ${Date.now() - t0}ms)`);
+    const said = readLog();
+    assert(/supervisor: asked to stop; telling the host/.test(said) && /supervisor: stopped/.test(said), 'having told the host and said it stopped');
+    assert(!/did not leave in time/.test(said), 'and the host left on its own, told over the channel, rather than being ended');
+    assert(!/the host exited \(code \d+\); starting it again/.test(said), 'and nothing was started again after the stop');
+    if (runExit === 'still running') running.kill('SIGKILL');
+  }
+
   /* ── what the host log says ─────────────────────────────────────────────────
    * Issue #5. The log is one append-only file under launchd, and on 2026-11-03
    * it held 7,379 failure lines without a time among them, each reading

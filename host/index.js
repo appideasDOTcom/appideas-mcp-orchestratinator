@@ -2610,9 +2610,15 @@ async function main() {
   for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope)`);
   log(`attach to any of them with:  tmux attach -t ${W.tmuxSession}`);
 
-  const stop = () => host.stop().finally(() => process.exit(0));
+  let stopped = null;
+  const stop = () => (stopped ??= host.stop().finally(() => process.exit(0)));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
+  // And when the process that started it says so, which is the only stop
+  // Windows has: Task Scheduler's own is a kill with no signal (measured), so
+  // host/supervise.mjs asks over the IPC channel and waits. Any parent may
+  // send it; none sent it before, so nothing else changes.
+  D.parentPort()?.on((m) => { if (m && typeof m === 'object' && m.type === 'stop') stop(); });
 
   await host.run();
 }

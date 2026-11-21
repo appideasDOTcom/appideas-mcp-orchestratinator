@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, sep } from 'node:path';
 import { listSeats } from './seats.js';
 import { projectDir } from './window.js';
 
@@ -463,7 +463,12 @@ export function listFolder(dir, { local = readLocalScope() } = {}) {
   children.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   // The picker's path runs from the top of the disk: anything the host's user
   // can read is a place an agent may live.
-  return { ok: true, path: here, root: '/', parent: here === '/' ? null : dirname(here), self: record(here), entries: children };
+  // The top of the tree is this machine's: `/`, or on Windows the folder's
+  // drive (`C:\`), which `path.parse` gives either way. It said `/` on
+  // Windows too (pc-developer, 2026-11-20), and the drive's own parent is
+  // itself, so it has none.
+  const top = parse(here).root || '/';
+  return { ok: true, path: here, root: top, parent: here === top ? null : dirname(here), self: record(here), entries: children };
 }
 
 /** The origin a desk's board lives on, for matching desks to this host's server. */
