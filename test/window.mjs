@@ -914,7 +914,7 @@ async function main() {
     console.log('\n  psmux, on Windows');
     eq([W.psmuxRefusal("ERROR: can't find window: =s1"), W.psmuxRefusal("psmux: no server running on session 'orchtest__orch'"), W.psmuxRefusal("psmux: can't find window: x")],
       [true, true, true], 'psmuxRefusal: its three exit-0 refusals are refusals');
-    eq([W.psmuxRefusal("❯ ok\nERROR: can't find window: y"), W.psmuxRefusal('orch:@2.%2|25236|0||C:\\x'), W.psmuxRefusal('')],
+    eq([W.psmuxRefusal("ERROR: can't find window: y\n❯ ok"), W.psmuxRefusal('orch:@2.%2|25236|0||C:\\x'), W.psmuxRefusal('')],
       [false, false, false], 'and a screen that quotes one, a pane line or nothing at all is an answer');
     // A seat rides in its window's name there: the tag is the session's.
     const seatMark = W.seatNameMark('lab/bo%2D2');
