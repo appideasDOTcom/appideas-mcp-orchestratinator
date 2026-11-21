@@ -102,7 +102,10 @@ function reserveDeadPort() {
 function fire(event, { home = FIX, env = {}, cwd } = {}) {
   return new Promise((done) => {
     const started = Date.now();
-    const child = execFile(process.execPath, [HOOK], { cwd, env: { ...process.env, HOME: home, ...env } },
+    // USERPROFILE beside HOME: on Windows Node's homedir() reads USERPROFILE
+    // and ignores HOME, so with HOME alone the hook read the real
+    // ~/.claude.json and memo there, and a binding in it reached a live board.
+    const child = execFile(process.execPath, [HOOK], { cwd, env: { ...process.env, HOME: home, USERPROFILE: home, ...env } },
       (err, stdout, stderr) => done({ code: err?.code ?? 0, stdout, stderr, ms: Date.now() - started }));
     child.stdin.end(typeof event === 'string' ? event : JSON.stringify(event));
   });
@@ -354,6 +357,35 @@ async function main() {
     await fire({ session_id: 'cfg-session', hook_event_name: 'SessionStart', cwd: `${FIX}/cfgrepo` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/cfg` } });
     await settle();
     eq(received[0]?.body?.agent, 'cfg-agent', 'a binding under CLAUDE_CONFIG_DIR is found there');
+
+    // ---- Windows: Claude Code and Node spell one folder two ways ----
+    // `claude mcp add -s local` on Windows keys the folder as C:/Users/…, and
+    // path.resolve gives C:\Users\…; the exact lookup missed and every hook
+    // there reported nothing (measured 2026-11-20). The key here is the
+    // folder with the *other* separator and its case changed: on Windows that
+    // is Claude Code's own spelling, and on a Mac it is a spelling only the
+    // Windows comparison can match. ORCH_HOOK_PLATFORM makes the hook compare
+    // as Windows does, on any machine.
+    received.length = 0;
+    mkdirSync(`${FIX}/winrepo/sub`, { recursive: true });
+    mkdirSync(`${FIX}/wincfg`, { recursive: true });
+    const winReal = realpathSync(`${FIX}/winrepo`);
+    const otherSpelling = (process.platform === 'win32' ? winReal.replace(/\\/g, '/') : winReal.replace(/\//g, '\\')).toUpperCase();
+    writeFileSync(`${FIX}/wincfg/.claude.json`, JSON.stringify(localScopeFile({ [otherSpelling]: 'win-agent' })));
+    await fire({ session_id: 'win-session', hook_event_name: 'SessionStart', cwd: `${FIX}/winrepo/sub` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/wincfg`, ORCH_HOOK_PLATFORM: 'win32' } });
+    await settle();
+    eq(received.length, 1, 'on Windows, a folder bound under another spelling of its path is reported');
+    eq(received[0]?.body?.agent, 'win-agent', 'as that binding');
+    eq(received[0]?.body?.cwd, resolve(`${FIX}/winrepo`), 'filed under the folder as Node spells it, not as the lowered key');
+
+    // Off Windows a backslash is a character in a file name and case matters,
+    // so the same spelling is a different folder there and stays unmatched.
+    if (process.platform !== 'win32') {
+      received.length = 0;
+      await fire({ session_id: 'win-session-posix', hook_event_name: 'SessionStart', cwd: `${FIX}/winrepo/sub` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/wincfg`, ORCH_HOOK_PLATFORM: undefined } });
+      await settle();
+      eq(received.length, 0, 'elsewhere that spelling is another folder, and nothing is reported');
+    }
 
     // ---- one agent, several sessions: a window started as a desk of its own ----
     // The host starts a second window in a folder that is already a desk with
@@ -738,7 +770,7 @@ async function main() {
     const CMD = commands[0].command;
     const runWrapper = (stdin, env = {}) => new Promise((done) => {
       const started = Date.now();
-      const child = execFile('/bin/sh', ['-c', CMD], { env: { ...process.env, HOME: FIX, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, ...env } },
+      const child = execFile('/bin/sh', ['-c', CMD], { env: { ...process.env, HOME: FIX, USERPROFILE: FIX, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, ...env } },
         (err, stdout, stderr) => done({ code: err?.code ?? 0, stdout, stderr, ms: Date.now() - started }));
       child.stdin.end(stdin);
     });
