@@ -4294,8 +4294,9 @@ export function wtAttachArgs(tmuxBin = TMUX, title = null) {
  * and brings it forward with the unlock measured for the folder dialog.
  * Started and not awaited: it waits up to FRONT_WAIT_MS for the window to
  * appear, and the host's line is the one that delivers messages. What it
- * reports goes to the host log. Not yet measured on Windows; until it is,
- * the window opening behind is the known outcome and this is the attempt.
+ * reports goes to the host log. Measured (pc-developer, 2026-11-20, 9e160cc):
+ * in front and focused 1.0 to 1.3 s after opening, 4 of 4, from both
+ * buttons; the table is in front-win.ps1's header.
  */
 const FRONT_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'front-win.ps1');
 const FRONT_WAIT_MS = 5000;

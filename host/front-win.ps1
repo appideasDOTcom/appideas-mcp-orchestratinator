@@ -20,8 +20,14 @@
   dialog (dialog-win.ps1) was made the foreground window from the same
   hidden process by an ALT tap and the front window's input queue attached
   before SetForegroundWindow. This applies that, to a window of another
-  process. Not yet measured: whether it works for Windows Terminal's window.
-  host/window.js's attachWindowsTerminal says so until it is.
+  process, and it works for Windows Terminal's: measured by pc-developer,
+  2026-11-20, at 9e160cc on the installed host, costmo clicking in Chrome
+  and the foreground window read every 0.5 s. Open in tmux three times and
+  Open in Claude on a desk with no window: Windows Terminal was the
+  foreground window 1.0 to 1.3 s after the host opened it, 4 of 4 ("In
+  front, focused"). --suppressApplicationTitle kept the window's title
+  exactly the given one while psmux and Claude Code drew in it, so the
+  exact match found each. No Alt was left held.
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Title,
