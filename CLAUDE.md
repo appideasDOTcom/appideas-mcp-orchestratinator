@@ -3778,6 +3778,19 @@ None is in code PR #57 touched. A fourth sighting of any of them is read
 with its log kept (`run-mutants.mjs --logs`, or the suite's own output),
 not rerun.
 
+**The same `test:renew` section, read again on 2026-11-20** (the Windows
+branch). A third row of it, "the agent whose turn was cut off is told so",
+fails the same way: nothing, or the wrong note, reaches that window after
+the move. Its two siblings above failed beside it. All three are older
+than the branch: on a quiet machine (load 4 to 6), 6 runs of `43fadc8`
+against 6 of the branch's head, in clean `git archive` copies, read 1 red
+in 6 on each side. An earlier reading of "0 of 4 before, 3 of 4 after" was
+an artefact: the branch's copy ran second in every pair, and the second
+run of a pair started straight after the first, under load from suites
+and page checks of its own. **An A/B of a flaky row alternates which side
+goes first, and runs with nothing else of yours beside it.** The cause of
+the reds is still not found.
+
 **Two `test:update` reds seen once, under load** (2026-11-19, the Open
 new floors round, load average 84–98): "finished: the board is not rebuilt
 again, the plugin is updated, the host restarts and comes back" (got

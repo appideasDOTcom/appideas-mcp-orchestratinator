@@ -31,7 +31,8 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { readDesk } from './identity.js';
@@ -4280,8 +4281,33 @@ function pickTerminal() {
  * window either way, and psmux's parsing of a `;` inside wt's arguments is
  * not measured.
  */
-export function wtAttachArgs(tmuxBin = TMUX) {
-  return ['-w', 'new', 'new-tab', tmuxBin, 'attach', '-t', EXACT];
+export function wtAttachArgs(tmuxBin = TMUX, title = null) {
+  // A title of its own, kept from the program in the tab, so front-win.ps1
+  // can find this window among every other Windows Terminal window.
+  return ['-w', 'new', 'new-tab', ...(title ? ['--title', title, '--suppressApplicationTitle'] : []), tmuxBin, 'attach', '-t', EXACT];
+}
+
+/**
+ * Windows Terminal opened by the host lands behind the window in front
+ * (pc-developer, 2026-11-20: "YES, BUT BEHIND"), because a hidden process may
+ * not take the front. host/front-win.ps1 finds the new window by its title
+ * and brings it forward with the unlock measured for the folder dialog.
+ * Started and not awaited: it waits up to FRONT_WAIT_MS for the window to
+ * appear, and the host's line is the one that delivers messages. What it
+ * reports goes to the host log. Not yet measured on Windows; until it is,
+ * the window opening behind is the known outcome and this is the attempt.
+ */
+const FRONT_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'front-win.ps1');
+const FRONT_WAIT_MS = 5000;
+function bringToFront(title) {
+  const ps = join(process.env.SystemRoot || process.env.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  execFile(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', FRONT_SCRIPT, title, String(FRONT_WAIT_MS)],
+    { timeout: FRONT_WAIT_MS + 10_000, encoding: 'utf8', windowsHide: true }, (err, stdout, stderr) => {
+      let said = null;
+      try { said = JSON.parse(String(stdout).trim()); } catch { /* reported below as it came */ }
+      if (said?.front) log(`brought the Windows Terminal window "${title}" to the front`);
+      else warn(`the Windows Terminal window "${title}" opened but was not brought to the front: ${said?.why ?? (String(stderr).trim() || err?.message || 'no answer')}`);
+    });
 }
 
 export async function attachTerminal({ target = null } = {}) {
@@ -4334,14 +4360,16 @@ async function attachWindowsTerminal(win) {
     };
   }
   if (win) await tmux(['select-window', '-t', win]);
+  const title = `${SESSION} · orchestratinator · ${Date.now().toString(36).slice(-4)}`;
   try {
     // Detached and not awaited past its start: wt.exe hands the tab to the
     // running Windows Terminal and may outlive this call or return at once.
     await new Promise((resolve, reject) => {
-      const child = spawn('wt.exe', wtAttachArgs(), { detached: true, stdio: 'ignore' });
+      const child = spawn('wt.exe', wtAttachArgs(TMUX, title), { detached: true, stdio: 'ignore' });
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
+    bringToFront(title);
     return { ok: true, app: 'Windows Terminal', cmd };
   } catch (err) {
     return { ok: false, cmd, error: `could not open Windows Terminal: ${err?.code === 'ENOENT' ? 'wt.exe is not installed' : err?.message ?? err}. Run \`${cmd}\` on this machine yourself.` };

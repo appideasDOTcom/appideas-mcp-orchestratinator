@@ -924,6 +924,9 @@ async function main() {
       'and a folder\'s own window, a folder that ends in --s and hex, or a mark that is not a seat\'s tag, is no seat');
     eq(W.wtAttachArgs('C:\\psmux\\tmux.exe'), ['-w', 'new', 'new-tab', 'C:\\psmux\\tmux.exe', 'attach', '-t', `=${W.tmuxSession}`],
       'wtAttachArgs: a Windows Terminal window of its own, attached to the floor\'s session by its exact name');
+    eq(W.wtAttachArgs('C:\\psmux\\tmux.exe', 'orch · orchestratinator · ab12'),
+      ['-w', 'new', 'new-tab', '--title', 'orch · orchestratinator · ab12', '--suppressApplicationTitle', 'C:\\psmux\\tmux.exe', 'attach', '-t', `=${W.tmuxSession}`],
+      'and with a title of its own that the program in it cannot change, which is how front-win.ps1 finds that window to bring it forward');
     // Then a real server started the old way, with a host's settings and no
     // TMPDIR, on a socket of its own: the default socket is the operator's.
     // window.js reads ORCH_TMUX at load, so the host's side runs in a child.
