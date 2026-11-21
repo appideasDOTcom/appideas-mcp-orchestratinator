@@ -2661,10 +2661,14 @@ const DESK_DIR_KEY = 'orch.desk.dir';
  * else's. Anything in the store that is not an absolute path is no memory at
  * all — the store is the browser's and can hold whatever was once put there.
  */
+/** Absolute on the host's machine: `/…`, or a drive on Windows (`C:\…`).
+ *  The board's own copy of the rule is isAbsPath in src/floor.js. */
+const hostAbsPath = (p) => typeof p === 'string' && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p));
+
 function rememberedDir(storage, hostId) {
   try {
     const dir = JSON.parse(storage.getItem(DESK_DIR_KEY) ?? '{}')?.[hostId];
-    return typeof dir === 'string' && dir.startsWith('/') ? dir : null;
+    return hostAbsPath(dir) ? dir : null;
   } catch { return null; }
 }
 
@@ -2677,7 +2681,7 @@ function rememberedDir(storage, hostId) {
  * a remembered folder that has since gone costs nothing but being wrong.
  */
 function rememberDir(storage, hostId, dir) {
-  if (!hostId || typeof dir !== 'string' || !dir.startsWith('/')) return;
+  if (!hostId || !hostAbsPath(dir)) return;
   try {
     let all = {};
     try { all = JSON.parse(storage.getItem(DESK_DIR_KEY) ?? '{}') ?? {}; } catch { /* unreadable: start again */ }
@@ -3151,12 +3155,15 @@ const agoText = (isoStr) => {
 
 /** The path from the root to here, one crumb per folder. */
 function crumbsOf(root, path) {
+  // A Windows host's paths are `C:\…`, joined with its own separator.
+  const sep = /^[A-Za-z]:[\\/]/.test(path) && path.includes('\\') ? '\\' : '/';
+  const split = sep === '\\' ? /[\\/]/ : '/';
   const base = root && path.startsWith(root) ? root : path;
-  const rest = path.slice(base.length).split('/').filter(Boolean);
-  const out = [{ name: base.split('/').filter(Boolean).pop() ?? base, path: base }];
+  const rest = path.slice(base.length).split(split).filter(Boolean);
+  const out = [{ name: base.split(split).filter(Boolean).pop() ?? base, path: base }];
   let p = base;
   for (const part of rest) {
-    p = `${p}/${part}`;
+    p = p.endsWith(sep) ? `${p}${part}` : `${p}${sep}${part}`;
     out.push({ name: part, path: p });
   }
   return out;

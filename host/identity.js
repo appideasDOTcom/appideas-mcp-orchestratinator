@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { listSeats } from './seats.js';
 import { projectDir } from './window.js';
 
@@ -321,7 +321,16 @@ function folderRecord(dir, depth, desk, local) {
  *  one from a dialog, and past a few hundred it is a search, not a list. */
 export const FOLDER_CAP = 300;
 
-const isUnder = (path, root) => path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
+/** Whether `path` is `root` or inside it, by this machine's own rules: on
+ *  Windows `\` and either case (`path.relative` compares a drive path that
+ *  way), elsewhere exactly as before. `startsWith(root + '/')` was the old
+ *  test, and no Windows path ever passed it (pc-developer, 2026-11-20). */
+export const isUnder = (path, root) => {
+  const r = relative(root, path);
+  return r === '' || (r.split(sep)[0] !== '..' && !isAbsolute(r));
+};
+/** How many folders `path` is below `root`. */
+const depthUnder = (path, root) => relative(root, path).split(sep).filter(Boolean).length;
 
 /**
  * Walk each root for desks, and for the folders that could become one.
@@ -391,7 +400,7 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope(), seats 
     const root = under.find((r) => isUnder(here, r));
     if (!root) continue;
     desks.set(k, desk);
-    offer(dir, here.slice(root.length).split('/').filter(Boolean).length, desk);
+    offer(dir, depthUnder(here, root), desk);
   }
   // And the seats: extra desks in a folder that is already a desk, which no
   // file of Claude Code's can name (host/seats.js). The host's own record
@@ -442,7 +451,7 @@ export function listFolder(dir, { local = readLocalScope() } = {}) {
   let stat;
   try { stat = statSync(here); } catch (err) { return { ok: false, error: `${dir} could not be opened: ${err.code === 'ENOENT' ? 'no such folder' : err.message}` }; }
   if (!stat.isDirectory()) return { ok: false, error: `${dir} is a file, not a folder` };
-  const depthOf = (p) => p.split('/').filter(Boolean).length;
+  const depthOf = (p) => p.split(sep).filter(Boolean).length;
   const record = (p) => folderRecord(p, depthOf(p), readDesk(p, local), local);
   let entries;
   try { entries = readdirSync(here, { withFileTypes: true }); } catch (err) { return { ok: false, error: `${dir} could not be read: ${err.code === 'EACCES' ? 'your account cannot read it' : err.message}` }; }

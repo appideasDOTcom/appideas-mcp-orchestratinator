@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 // The host<->board protocol this tree speaks: every registration a suite
@@ -787,6 +787,35 @@ try {
   assert(!('folders' in (fl.hosts.find((h) => h.host_id === 'h-open') ?? {})), 'the list itself stays off the payload every page polls');
   await registerWith({ roots: ['/repo'], folders: offered });
 
+  // A Windows host's paths are drive paths, and every check above was
+  // `startsWith('/')`: the board dropped its roots and folders, and Take a
+  // desk on it offered nothing (pc-developer, 2026-11-20). A drive path is
+  // absolute and compared with its separators and case folded, as Windows
+  // does; a POSIX one exactly as before.
+  {
+    const winHost = (extra) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-win', name: 'winbox', tmux: 'orch', protocol: PROTOCOL, desks: [], ...extra }),
+    });
+    await winHost({ roots: ['C:\\Users\\pat\\dev', 'relative\\nope'], folders: [
+      { path: 'C:\\Users\\pat\\dev\\scratch1', name: 'scratch1', depth: 5, bound: null },
+      { path: 'c:/users/PAT/dev/other', depth: 5, bound: null },
+      { path: 'C:\\Users\\pat\\devious', name: 'devious', depth: 4, bound: null },
+      { path: 'D:\\dev\\elsewhere', name: 'elsewhere', depth: 2, bound: null },
+    ] });
+    const win = (await folders()).hosts.find((h) => h.host_id === 'h-win');
+    eq(win?.roots, ['C:\\Users\\pat\\dev'], 'a Windows host\'s drive root is kept, and a relative one is still dropped');
+    eq(win?.folders.map((f) => [f.path, f.name]), [['C:\\Users\\pat\\dev\\scratch1', 'scratch1'], ['c:/users/PAT/dev/other', 'other']],
+      'its folders under that root are served, whatever their slashes or case, named by their last part; a sibling that only starts with the root\'s name, and another drive, are not');
+    const browse = await fetch(`${HOST}/api/floor/browse`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_id: 'h-win', path: 'C:/Users/pat/dev' }) });
+    assert(browse.status !== 400, `a drive path is a path to browse (got ${browse.status})`);
+    eq([isAbsPath('C:\\x'), isAbsPath('c:/x'), isAbsPath('/x'), isAbsPath('C:x'), isAbsPath('\\\\srv\\x'), isAbsPath('x/y')], [true, true, true, false, false, false],
+      'isAbsPath: a drive with its separator or a slash, and nothing else');
+    eq([underRoots('/repo/a', ['/repo']), underRoots('/Repo/a', ['/repo']), underRoots('/repo\\a', ['/repo']), underRoots('/repos', ['/repo'])], [true, false, false, false],
+      'underRoots: a POSIX path exactly as before, case and backslash being parts of a name there');
+    eq([baseName('C:\\a\\b'), baseName('/a/b\\c'), baseName('C:/a/b/')], ['b', 'b\\c', 'b'], 'baseName: by the path\'s own machine\'s separators');
+  }
+
   /* ── taking a desk ──────────────────────────────────────────────────────────
    * What the route checks is what the board knows; what the host does is the
    * host suite's. Every refusal must queue nothing. */
@@ -1456,6 +1485,9 @@ try {
   const browserStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, m }; };
   const st = browserStore();
   eq(rememberedDir(st, 'h1'), null, 'a browser that has chosen nothing remembers nothing, and the dialog opens at home');
+  rememberDir(st, 'hw', 'C:\\Users\\pat\\dev');
+  eq(rememberedDir(st, 'hw'), 'C:\\Users\\pat\\dev', 'a Windows host\'s folder is a folder to remember');
+  st.m.clear();
   rememberDir(st, 'h1', '/Users/me/dev/plugins');
   eq(rememberedDir(st, 'h1'), '/Users/me/dev/plugins', 'after a choice it remembers the folder the choice was made in');
   eq(rememberedDir(st, 'h2'), null, 'per host — a path on one machine means nothing on another');
@@ -3926,6 +3958,8 @@ try {
       { path: '/Users/x/.orchestratinator/uploads/def456def/build.log', name: 'build.log' },
     ] }, 'a message the host composed splits into the words and the files, a name with a space in it included');
     eq(pg.splitAttached(hostUp.withAttachments('', ['/u/abcdefgh/a.png'])), { text: '', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] }, 'files alone are files and no words');
+    eq(pg.splitAttached(hostUp.withAttachments('see', ['C:\\Users\\pat\\.orchestratinator\\uploads\\abcdefgh\\a.png'])).files,
+      [{ path: 'C:\\Users\\pat\\.orchestratinator\\uploads\\abcdefgh\\a.png', name: 'a.png' }], 'and a Windows host\'s path is a file, named by its last part');
     eq(pg.splitAttached(composed.replace(/\n/g, '\r\n')).files.length, 2, 'and a window that records CRLF reads the same');
     eq(pg.ATTACHED_HEADER, 'Attached by the operator:', 'the list is the operator\'s, wherever it was attached from: the panel, a popout or a meeting room (costmo, 2026-11-17)');
     eq(pg.splitAttached('see this\n\nAttached from the floor:\n- /u/abcdefgh/a.png'), { text: 'see this', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] },

@@ -922,6 +922,8 @@ async function main() {
       'seatNameMark: a name tmux targets plainly, and seatFromName reads the seat back');
     eq([W.seatFromName('quinn-repo'), W.seatFromName('build--sab'), W.seatFromName(`x${W.seatNameMark('no slash')}`), W.seatFromName(null)], [null, null, null, null],
       'and a folder\'s own window, a folder that ends in --s and hex, or a mark that is not a seat\'s tag, is no seat');
+    eq(W.wtAttachArgs('C:\\psmux\\tmux.exe'), ['-w', 'new', 'new-tab', 'C:\\psmux\\tmux.exe', 'attach', '-t', `=${W.tmuxSession}`],
+      'wtAttachArgs: a Windows Terminal window of its own, attached to the floor\'s session by its exact name');
     // Then a real server started the old way, with a host's settings and no
     // TMPDIR, on a socket of its own: the default socket is the operator's.
     // window.js reads ORCH_TMUX at load, so the host's side runs in a child.

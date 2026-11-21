@@ -58,7 +58,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { header, originOf } from './identity.js';
+import { header, isUnder, originOf } from './identity.js';
 import { canonical } from './window.js';
 
 const run = promisify(execFile);
@@ -164,5 +164,5 @@ export function dropProjectEntry(dir, { origin, channel = null, agent = null, al
  *  spelled either way. */
 export function insideRoots(dir, roots) {
   const here = canonical(dir);
-  return roots.map((r) => canonical(r)).some((r) => here === r || here.startsWith(r.endsWith('/') ? r : `${r}/`));
+  return roots.map((r) => canonical(r)).some((r) => isUnder(here, r));
 }

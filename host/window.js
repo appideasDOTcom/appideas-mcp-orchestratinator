@@ -28,7 +28,7 @@
  * `tmux attach -t orch` is a perfectly good front end to the whole board: the
  * windows are the desks, in the same order the floor shows them.
  */
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, join } from 'node:path';
@@ -227,7 +227,9 @@ export async function cleanServerEnv() {
 export const WINDOWS = (process.env.ORCH_HOST_PLATFORM ?? process.platform) === 'win32';
 function findExe(name, { extra = [] } = {}) {
   try {
-    const hit = execFileSync('where.exe', [name], { encoding: 'utf8', timeout: 3000, windowsHide: true })
+    // stderr ignored: where.exe says "INFO: Could not find files …" there on
+    // a miss, and that line read as the host's own in its log.
+    const hit = execFileSync('where.exe', [name], { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
       .split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l));
     if (hit) return hit;
   } catch { /* not on PATH */ }
@@ -4267,11 +4269,27 @@ function pickTerminal() {
  * That is the trade "open THIS desk" makes, and with the usual zero or one
  * other clients it is the right one.
  */
+/**
+ * On Windows the terminal is Windows Terminal, given the attach as a program
+ * and its arguments (pc-developer, 2026-11-20, psmux 3.4.0: `wt.exe -w new
+ * new-tab tmux attach -t =orch` attached, the attached client resized the
+ * pane, and closing the tab left the window running, as on the Mac). `-w new`
+ * so the operator gets a window of their own rather than a tab in whichever
+ * one is in front. The desk's window is chosen before, by select-window, and
+ * not chained after the attach: tmux clients on one session share a current
+ * window either way, and psmux's parsing of a `;` inside wt's arguments is
+ * not measured.
+ */
+export function wtAttachArgs(tmuxBin = TMUX) {
+  return ['-w', 'new', 'new-tab', tmuxBin, 'attach', '-t', EXACT];
+}
+
 export async function attachTerminal({ target = null } = {}) {
   // select-window wants a window, and open()'s targets name a pane. The pane
   // suffix is always tmux's own `%N` id here, never typed by anyone, so
   // stripping it is safe where parsing a human-named window would not be.
   const win = target ? String(target).replace(/\.%\d+$/, '') : null;
+  if (WINDOWS) return attachWindowsTerminal(win);
   const cmd = `${TMUX} attach -t ${SESSION}` + (win ? ` \\; select-window -t '${win}'` : '');
   const term = pickTerminal();
   if (!term) {
@@ -4300,6 +4318,33 @@ export async function attachTerminal({ target = null } = {}) {
   } catch (err) {
     const why = (err?.stderr || err?.message || String(err)).trim();
     return { ok: false, cmd, error: `could not open ${term.app}: ${why}. Run \`${cmd}\` on this machine yourself.` };
+  }
+}
+
+async function attachWindowsTerminal(win) {
+  const cmd = `tmux attach -t ${EXACT}`;
+  const has = await tmux(['has-session', '-t', EXACT]);
+  if (!has.ok) {
+    return {
+      ok: false,
+      cmd,
+      error: has.missing
+        ? 'psmux is not installed on this machine, so there is nothing to attach to.'
+        : `there is no session called ${SESSION} on this machine: ${has.error}`,
+    };
+  }
+  if (win) await tmux(['select-window', '-t', win]);
+  try {
+    // Detached and not awaited past its start: wt.exe hands the tab to the
+    // running Windows Terminal and may outlive this call or return at once.
+    await new Promise((resolve, reject) => {
+      const child = spawn('wt.exe', wtAttachArgs(), { detached: true, stdio: 'ignore' });
+      child.once('error', reject);
+      child.once('spawn', () => { child.unref(); resolve(); });
+    });
+    return { ok: true, app: 'Windows Terminal', cmd };
+  } catch (err) {
+    return { ok: false, cmd, error: `could not open Windows Terminal: ${err?.code === 'ENOENT' ? 'wt.exe is not installed' : err?.message ?? err}. Run \`${cmd}\` on this machine yourself.` };
   }
 }
 

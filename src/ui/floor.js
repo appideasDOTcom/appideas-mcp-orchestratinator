@@ -1290,10 +1290,11 @@
     if (at < 0) return { text: s, files: [] };
     const listAt = at === 0 ? 0 : at + 2;
     const lines = s.slice(listAt + header.length + 1).replace(/\n+$/, '').split('\n');
-    if (!lines.length || !lines.every((l) => /^- \/\S/.test(l))) return { text: s, files: [] };
+    // A Windows host writes `C:\Users\…\.orchestratinator\uploads\…`.
+    if (!lines.length || !lines.every((l) => /^- (?:\/|[A-Za-z]:[\\/])\S/.test(l))) return { text: s, files: [] };
     const files = lines.map((l) => {
       const path = l.slice(2);
-      return { path, name: path.split('/').pop() || path };
+      return { path, name: path.split(/[\\/]/).pop() || path };
     });
     return { text: s.slice(0, at).replace(/\s+$/, ''), files };
   }
@@ -1361,7 +1362,7 @@
     const t = String(text ?? '').trim();
     if (!t) return true;
     const names = new Set(files.map((f) => f.name));
-    return t.split(/\r?\n/).every((l) => names.has(l.trim()) || names.has(l.trim().split('/').pop()));
+    return t.split(/\r?\n/).every((l) => names.has(l.trim()) || names.has(l.trim().split(/[\\/]/).pop()));
   }
 
   /**
@@ -5136,7 +5137,10 @@
    * the window saying "this is in the conversation", and that is the only
    * thing that should retire the "sending" state.
    */
-  const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+  // Backslashes as slashes too, on both sides of every comparison: a Windows
+  // host types an attachment's path as `…\<id>\<name>`, and a pending
+  // message of files alone is matched by `<id>/<name>` (attachMatch).
+  const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').replace(/\\/g, '/').trim();
 
   /* ---------- chat controls: what the page decides ---------- */
   // Pure, and lifted into test/floor.mjs by the two markers around this

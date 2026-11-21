@@ -42,7 +42,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Worker } from 'node:worker_threads';
@@ -135,8 +135,11 @@ function loadConfig() {
   if (existsSync(CONFIG_FILE)) {
     try { file = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); } catch (e) { warn(`could not read ${CONFIG_FILE}: ${e.message}`); }
   }
-  const roots = (process.env.ORCH_HOST_ROOTS ? process.env.ORCH_HOST_ROOTS.split(':') : file.roots ?? [process.cwd()])
-    .map((r) => r.replace(/^~(?=$|\/)/, homedir()))
+  // Split on the platform's own list separator: ':' cuts a Windows root at
+  // its drive letter (`C:\Users\…`, pc-developer, 2026-11-20), and ';' is
+  // what PATH and every other list there uses.
+  const roots = (process.env.ORCH_HOST_ROOTS ? process.env.ORCH_HOST_ROOTS.split(delimiter) : file.roots ?? [process.cwd()])
+    .map((r) => r.replace(/^~(?=$|[\\/])/, homedir()))
     .filter(Boolean);
   return {
     roots,

@@ -77,7 +77,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 
 /** How long a dialog may sit open before the host closes it. Somebody who
  *  walked away has not chosen anything, and a dialog nobody remembers opening
@@ -189,7 +189,7 @@ export function hasDialog(opts) {
 /** What the parent said back, as one of three things — or what it sent,
  *  quoted, when it is none of them. The twin of readAnswer for a port. */
 export function readParentAnswer(m) {
-  if (m && typeof m.path === 'string' && m.path.startsWith('/')) return { ok: true, path: m.path };
+  if (m && typeof m.path === 'string' && isAbsolute(m.path)) return { ok: true, path: m.path };
   if (m && m.cancelled === true) return { ok: true, cancelled: true };
   if (m && typeof m.error === 'string' && m.error) return { ok: false, error: `the app's folder dialog failed: ${m.error}` };
   let said = '';
@@ -248,7 +248,7 @@ export function askParent(port, start, { timeoutMs = PICK_TIMEOUT_MS } = {}) {
  * level up is usually exactly where the person was working anyway.
  */
 export function startFor(path, home = homedir()) {
-  let p = typeof path === 'string' && path.startsWith('/') ? path : null;
+  let p = typeof path === 'string' && isAbsolute(path) ? path : null;
   while (p) {
     try { if (statSync(p).isDirectory()) return p; } catch { /* gone, or not this account's to read: try the folder above */ }
     const up = dirname(p);
@@ -281,7 +281,7 @@ export function readAnswer({ code, signal, stdout, stderr }) {
   const said = String(stdout ?? '').trim();
   let j = null;
   try { j = JSON.parse(said); } catch { /* not JSON: reported below as it came */ }
-  if (code === 0 && j && typeof j.path === 'string' && j.path.startsWith('/')) return { ok: true, path: j.path };
+  if (code === 0 && j && typeof j.path === 'string' && isAbsolute(j.path)) return { ok: true, path: j.path };
   if (code === 0 && j && j.cancelled === true) return { ok: true, cancelled: true };
   const tail = String(stderr ?? '').trim().split('\n').pop() || said.split('\n').pop() || '';
   return { ok: false, error: `the folder dialog ended ${signal ? `on ${signal}` : `with exit code ${code}`}${tail ? `: ${tail}` : ' and said nothing'}` };

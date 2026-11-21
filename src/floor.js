@@ -289,7 +289,26 @@ const iso = (s) => (s ? `${String(s).replace(' ', 'T').replace(/Z*$/, '')}Z` : n
 const FOLDER_CAP = 300;
 /** What a host can say about its folder dialog. See Host.pick in host/index.js. */
 const PICK_STATES = new Set(['open', 'chosen', 'cancelled', 'failed']);
-const underRoots = (p, roots) => roots.some((r) => p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`));
+/**
+ * A host's paths are its own machine's, and the board runs on Linux in a
+ * container, so it cannot ask `path` what they mean. A Windows host's paths
+ * are `C:\Users\…` (pc-developer, 2026-11-20): every check here was
+ * `startsWith('/')`, and the board dropped every Windows root and folder, so
+ * Take a desk on such a host offered nothing. So a path is absolute when it
+ * starts with `/` or a drive (`C:\` or `C:/`), and one is under another by a
+ * key that, for a drive path only, folds the separators and the case, as
+ * Windows does. A POSIX path is compared exactly as before: a backslash is a
+ * character in a file name there, and case matters.
+ */
+const DRIVE_PATH = /^[A-Za-z]:[\\/]/;
+export const isAbsPath = (p) => typeof p === 'string' && (p.startsWith('/') || DRIVE_PATH.test(p));
+const pathKey = (p) => (DRIVE_PATH.test(p) ? p.replace(/\\/g, '/').toLowerCase() : p);
+/** A folder's last name, by its own machine's separators. */
+export const baseName = (p) => String(p ?? '').split(DRIVE_PATH.test(p) ? /[\\/]/ : '/').filter(Boolean).pop() ?? null;
+export const underRoots = (p, roots) => {
+  const k = pathKey(p);
+  return roots.some((r) => { const rk = pathKey(r); return k === rk || k.startsWith(rk.endsWith('/') ? rk : `${rk}/`); });
+};
 /**
  * A host's folder list, field by field, in the shape the page reads. Anything
  * not under the host's own roots is dropped rather than served: the roots are
@@ -310,14 +329,14 @@ function cleanFolders(list, roots) {
 /** One folder as a host described it, field by field, or null without a path. */
 function folderRecordOf(f) {
   const path = str(f?.path);
-  if (!path || !path.startsWith('/')) return null;
+  if (!path || !isAbsPath(path)) return null;
   const b = f?.bound && typeof f.bound === 'object' ? f.bound : null;
   const bound = b && str(b.channel) && str(b.agent)
     ? { channel: str(b.channel), agent: str(b.agent), scope: str(b.scope) === 'local' ? 'local' : 'project', board: str(b.board) }
     : null;
   return {
     path,
-    name: str(f?.name) ?? path.split('/').pop(),
+    name: str(f?.name) ?? baseName(path),
     depth: Number.isInteger(f?.depth) ? f.depth : null,
     bound,
     has_mcp_json: f?.has_mcp_json === true,
@@ -935,7 +954,7 @@ export function meetingSeat(agent, h, prev, lastTurnId, base = null) {
     ...(base ?? prev?.base ? { base: base ?? prev.base } : {}),
     session_id: sid ?? prev?.session_id ?? null,
     host: h?.host_name ?? prev?.host ?? null,
-    window: (h?.cwd ? h.cwd.split('/').filter(Boolean).pop() : null) ?? prev?.window ?? null,
+    window: (h?.cwd ? baseName(h.cwd) : null) ?? prev?.window ?? null,
     since: Number.isInteger(prev?.since) ? prev.since : (Number(lastTurnId) || 0),
   };
 }
@@ -3070,7 +3089,7 @@ export function buildFloor(store, live = null, sessions = null) {
             cwd: s?.cwd ?? h?.cwd ?? null,
             // The name of the window to go to. A full path is correct and
             // unreadable; the last segment is what the tab actually says.
-            window: (s?.cwd ?? h?.cwd) ? (s?.cwd ?? h.cwd).split('/').filter(Boolean).pop() : null,
+            window: (s?.cwd ?? h?.cwd) ? baseName(s?.cwd ?? h.cwd) : null,
             session_id: s?.session_id ?? null,
             // A hosted prompt can be answered right here — but only if the
             // floor can reach the window that is asking. Answering means
@@ -3119,7 +3138,7 @@ export function buildFloor(store, live = null, sessions = null) {
                 host_id: h.host_id,
                 live: h.live,
                 state: h.state,
-                window: h.cwd ? h.cwd.split('/').filter(Boolean).pop() : null,
+                window: h.cwd ? baseName(h.cwd) : null,
                 // The conversation the panel is scoped to — whichever one is
                 // live in that repo. Before a window has opened, the
                 // placeholder the first message is filed under, so the panel is
@@ -3244,7 +3263,7 @@ export function buildFloor(store, live = null, sessions = null) {
             ? {
                 session_id: s.session_id,
                 cwd: s.cwd,
-                window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
+                window: s.cwd ? baseName(s.cwd) : null,
                 model: s.model,
                 // The chat controls' state (issue #10): asked-for stands
                 // beside confirmed until the window confirms or the hook
@@ -3467,7 +3486,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // arbitrary path in front of the operator as one of theirs. A host that
     // sends no list (an older one) simply has none to serve.
     if (Array.isArray(req.body?.folders)) {
-      const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && r.startsWith('/'));
+      const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && isAbsPath(r));
       // And whether it can show its own folder dialog. Only `true` counts: a
       // host that predates the dialog says nothing, and gets the page's list.
       // And whether it can release a folder from another instance (seatDesk).
@@ -4466,7 +4485,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const path = str(req.body?.path);
-    if (path && !path.startsWith('/')) return res.status(400).json({ error: 'path must be absolute', code: 'bad_path' });
+    if (path && !isAbsPath(path)) return res.status(400).json({ error: 'path must be absolute', code: 'bad_path' });
     const nowMs = Date.now();
     const hostRow = store.listHosts().find((h) => h.host_id === hostId);
     if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
@@ -4511,7 +4530,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const start = str(req.body?.start);
-    if (start && !start.startsWith('/')) return res.status(400).json({ error: 'start must be absolute', code: 'bad_path' });
+    if (start && !isAbsPath(start)) return res.status(400).json({ error: 'start must be absolute', code: 'bad_path' });
     const nowMs = Date.now();
     const hostRow = store.listHosts().find((h) => h.host_id === hostId);
     if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
