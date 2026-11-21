@@ -2590,7 +2590,7 @@ try {
       'the control: asked with no shell around it, as before, the same machine reads signed out');
     eq(A.statusCommand?.({ claude: '/x/claude', shell: null }), { cmd: '/x/claude', args: ['auth', 'status', '--json'] }, 'with no shell (Windows), the command runs as it is, as a window does there');
     eq(A.statusCommand?.({ claude: "/it's/claude", shell: '/bin/zsh' }), { cmd: '/bin/zsh', args: ['-c', `exec '/it'\\''s/claude' 'auth' 'status' '--json'`] }, 'with one, it is one line for that shell, quoted as a window\'s is');
-    eq([A.readSignedIn('Welcome back!\n{\n  "loggedIn": true\n}\n'), A.readSignedIn('{"loggedIn": false}'), A.readSignedIn('no json here'), A.readSignedIn('')], [true, false, null, null],
+    eq([A.readSignedIn('Welcome back!\n{\n  "loggedIn": true\n}\n'), A.readSignedIn('welcome {to} my shell\n{\n  "loggedIn": true\n}\n'), A.readSignedIn('{"loggedIn": false}'), A.readSignedIn('no json here'), A.readSignedIn('')], [true, true, false, null, null],
       'a profile that prints a line of its own does not hide the answer');
     // A `claude` that never answers and ignores SIGTERM (QA, 0.14.5 review
     // 3800: the limit did not bound the wait): the reading comes back as
@@ -2602,6 +2602,18 @@ try {
     const hangMs = Date.now() - hangAt;
     eq(hung, null, 'a Claude Code that never answers is "could not say"');
     assert(hangMs < 2000, `within its limit, not when its children let go of the pipe (${hangMs} ms for a 300 ms limit)`);
+    // QA's two edges (0.14.5 review 3819): a profile line with a brace of its
+    // own, and a profile that leaves a process holding the pipe.
+    const zb = `${FIX}/zdotdir-brace`; mkdirSync(zb, { recursive: true });
+    writeFileSync(`${zb}/.zshenv`, 'echo "welcome {to} my shell"\nexport TEST_ZSHENV_SIGNIN=1\n');
+    const zg = `${FIX}/zdotdir-bg`; mkdirSync(zg, { recursive: true });
+    writeFileSync(`${zg}/.zshenv`, 'sleep 12 &\nexport TEST_ZSHENV_SIGNIN=1\n');
+    eq(await A.signedIn({ claude: `${FIX}/claude`, shell: '/bin/zsh', env: { ...base, ZDOTDIR: zb } }), true, 'a profile whose own line holds a brace does not hide the answer');
+    const bgAt = Date.now();
+    const bgRead = await A.signedIn({ claude: `${FIX}/claude`, shell: '/bin/zsh', env: { ...base, ZDOTDIR: zg } });
+    const bgMs = Date.now() - bgAt;
+    eq(bgRead, true, 'a profile that leaves a process behind still reads');
+    assert(bgMs < 2000, `when Claude Code is done, not when that process lets go of the pipe (${bgMs} ms against a 5 s limit)`);
     const real = (p) => ['/bin/zsh', '/bin/bash', '/bin/sh'].includes(p);
     eq([W.shellFor({ told: '/bin/bash', env: { SHELL: '/bin/zsh' }, account: () => '/bin/sh', exists: real }),
       W.shellFor({ told: '', env: { SHELL: '/bin/zsh' }, account: () => '/bin/sh', exists: real }),

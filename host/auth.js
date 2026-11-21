@@ -22,7 +22,7 @@
  * until the person finishes there (the desktop app's agent, 2026-11-09, which
  * runs it the same way for its own Sign in).
  */
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { userInfo } from 'node:os';
 
 const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
@@ -52,16 +52,21 @@ export function claudeEnv(env = process.env) {
 /**
  * What `claude auth status --json` printed, as true / false, or null when it
  * is not that. Asked through a shell (statusCommand), a profile that prints
- * a line of its own puts it ahead of the answer, so the object is read from
- * its first brace to its last when the whole is not one.
+ * a line of its own puts it ahead of the answer, and that line may hold a
+ * brace of its own (QA's `welcome {to} my shell`, 0.14.5 review 3819). The
+ * answer is an object that begins a line, so each line that opens with `{`
+ * is tried, the last first, up to the last `}`.
  */
 export function readSignedIn(output) {
   const s = String(output ?? '');
-  for (const text of [s, s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]) {
+  const starts = [0];
+  for (let at = s.indexOf('\n{'); at >= 0; at = s.indexOf('\n{', at + 1)) starts.push(at + 1);
+  const end = s.lastIndexOf('}') + 1;
+  for (const from of [...starts].reverse()) {
     try {
-      const v = JSON.parse(text)?.loggedIn;
+      const v = JSON.parse(from === 0 ? s : s.slice(from, end))?.loggedIn;
       if (typeof v === 'boolean') return v;
-    } catch { /* the next reading, or none */ }
+    } catch { /* the next start, or none */ }
   }
   return null;
 }
@@ -105,16 +110,29 @@ export function statusCommand({ claude = CLAUDE, shell = null } = {}) {
 export function signedIn({ claude = CLAUDE, shell = null, env = process.env, timeoutMs = STATUS_TIMEOUT_MS } = {}) {
   const { cmd, args } = statusCommand({ claude, shell });
   return new Promise((resolve) => {
-    // Its answer is what counts, whatever it exits with (signed out exits 1).
-    //
-    // SIGKILL at the limit, not execFile's default SIGTERM. execFile answers
-    // once the child is gone and its pipes are closed, and a child that
-    // ignores SIGTERM keeps both: measured on Node 24.22.2, `zsh -c 'exec <a
-    // script that traps TERM and sleeps 30>'` with a 300 ms limit answered
-    // after 30,135 ms with SIGTERM and after 303 ms with SIGKILL. The
-    // heartbeat asks this on the host's line, so a wait like that held every
-    // desk's work behind it (QA, 0.14.5 review 3800, saw the limit not hold).
-    execFile(cmd, args, { env: claudeEnv(env), timeout: timeoutMs, killSignal: 'SIGKILL' }, (_err, stdout) => resolve(readSignedIn(stdout)));
+    let out = '';
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
+    let child;
+    try {
+      child = spawn(cmd, args, { env: claudeEnv(env), stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { finish(null); return; }
+    child.stdout.on('data', (c) => { out += c; });
+    // The answer when Claude Code itself is done, not when its pipe closes.
+    // A profile that leaves a process of its own (QA's `sleep 12 &` in
+    // ~/.zshenv, 0.14.5 review 3819) keeps the pipe open after the answer is
+    // written, and waiting for the close held every heartbeat to the limit.
+    // `exit` comes once the process is gone; what it wrote is in by then or
+    // a moment after, so the stream is read until it ends or 100 ms pass.
+    child.on('exit', () => {
+      const t = setTimeout(() => finish(readSignedIn(out)), 100);
+      child.stdout.on('end', () => { clearTimeout(t); finish(readSignedIn(out)); });
+    });
+    child.on('error', () => finish(null));
+    // And a limit on it all, with SIGKILL: measured on Node 24.22.2, a child
+    // that ignores SIGTERM kept execFile's answer 30,135 ms where SIGKILL
+    // ended it at 303 ms (QA, 0.14.5 review 3800, saw the limit not hold).
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } finish(null); }, timeoutMs);
   });
 }
 

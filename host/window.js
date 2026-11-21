@@ -844,33 +844,76 @@ export async function standingIdleAt(target) {
  * sent" and a reconnect became one user record, the agent took a turn on it,
  * and the reconnect never ran.
  *
- * A draft is text in the box with the cursor anywhere but right behind the
- * prompt mark. A prompt suggestion is text drawn after a cursor that stays at
- * column 2 of the `❯` row (composerOf's callers, standingIdleAt), so it is
- * not one; typed text puts the cursor at its end, on that row or below it,
- * and a box taller than its frame has scrolled its `❯` row out of view
- * (scrolledComposerOf), where the cursor is on no `❯` row at all.
- * `cursorRow` is the text of the row the cursor is on.
+ * A draft is text in the box that is not drawn dim. A prompt suggestion is
+ * drawn dim (SGR 2, CLAUDE.md "a line in the composer that nobody typed",
+ * measured on 2.1.300), typed text in the terminal's colours. Where the
+ * cursor stands is not the test: the first cut of this said "cursor right
+ * behind the `❯`" meant no draft, and QA's F2-b showed what that misses,
+ * measured on the rig the same afternoon: a draft with Ctrl-A pressed has
+ * its cursor there, the reconnect was typed in front of it, and the window
+ * ran `/mcp reconnect orchestratinatorF2-b draft that nobody sent`, a server
+ * not found, the draft gone. Text on a row under the `❯`, or a box scrolled
+ * past its `❯` row, is typed by definition.
+ *
+ * `promptRow` is the `❯` row as tmux draws it, with its escape codes
+ * (capture-pane -e), or null when that row is not in view. Read wrong, this
+ * errs one way: a suggestion that came undimmed would read as a draft, and
+ * the host would wait with what it owes rather than type over a person.
  */
-export function draftOf(screen, cursorX, cursorRow) {
+export function dimOnly(row) {
+  const text = String(row ?? '');
+  const at = text.indexOf('❯');
+  if (at < 0) return false;
+  let dim = false;
+  let seen = false;
+  // eslint-disable-next-line no-control-regex
+  const parts = text.slice(at + 1).split(/(\u001b\[[0-9;:]*m)/);
+  for (const part of parts) {
+    const sgr = /^\u001b\[([0-9;:]*)m$/.exec(part);
+    if (sgr) {
+      const codes = sgr[1] === '' ? ['0'] : sgr[1].split(/[;:]/);
+      for (const c of codes) { if (c === '2') dim = true; else if (c === '0' || c === '22') dim = false; }
+      continue;
+    }
+    // eslint-disable-next-line no-control-regex
+    const visible = part.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+/g, '');
+    if (!visible) continue;
+    if (!dim) return false;
+    seen = true;
+  }
+  return seen;
+}
+export function draftOf(screen, promptRow) {
   const text = composerOf(String(screen ?? ''));
   if (text == null || !String(text).trim()) return false;
-  return !(/^\s*❯/.test(String(cursorRow ?? '')) && Number(cursorX) <= 2);
+  if (promptRow == null) return true;
+  // A box of more than its `❯` row holds typed lines below it.
+  const rows = String(screen ?? '').split('\n');
+  let at = -1;
+  for (let n = rows.length - 1; n >= 0; n--) if (/^\s*❯/.test(rows[n])) { at = n; break; }
+  const below = at >= 0 ? rows.slice(at + 1).findIndex((r) => /^[\s│|]*[─━—-]{20,}/.test(r)) : -1;
+  if (below > 0) return true;
+  return !dimOnly(promptRow);
 }
 
 /**
- * The same, read off a pane. A pane that cannot be read, or an answer for
- * another pane (tmux answers for its session's current pane when the one
- * named is gone), reads as a draft: for something nobody asked to have
- * typed, "type nothing" is the safe side.
+ * The same, read off a pane. The `❯` row is captured with its attributes; a
+ * pane that cannot be read reads as a draft: for something nobody asked to
+ * have typed, "type nothing" is the safe side.
  */
 export async function draftAt(target) {
-  const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{cursor_x} #{cursor_y}']);
-  const m = /^(%\d+) (\d+) (\d+)$/.exec((at.out ?? '').trim());
-  if (!at.ok || !m || !String(target).endsWith(m[1])) return true;
-  const row = await tmux(['capture-pane', '-p', '-t', target, '-S', m[3], '-E', m[3]]);
-  if (!row.ok) return true;
-  return draftOf(await screenOf(target, 30), Number(m[2]), row.out);
+  const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id}']);
+  if (!at.ok || !String(target).endsWith(at.out.trim())) return true;
+  const screen = await screenOf(target, 30);
+  const vis = await tmux(['capture-pane', '-p', '-e', '-t', target]);
+  if (!vis.ok) return true;
+  const rows = vis.out.split('\n');
+  let row = null;
+  for (let n = rows.length - 1; n >= 0; n--) {
+    // eslint-disable-next-line no-control-regex
+    if (/^\s*❯/.test(rows[n].replace(/\u001b\[[0-9;:?]*[A-Za-z]/g, ''))) { row = rows[n]; break; }
+  }
+  return draftOf(screen, row);
 }
 
 /**

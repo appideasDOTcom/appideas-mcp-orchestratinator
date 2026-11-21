@@ -1809,9 +1809,21 @@ async function main() {
     // and the reconnect never ran.
     {
       const box = (row) => ['⏺ ok', '─'.repeat(80), row, '─'.repeat(80), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
-      eq([W.draftOf?.(box('❯ '), 2, '❯ '), W.draftOf?.(box('❯ Try "fix lint errors"'), 2, '❯ Try "fix lint errors"'),
-        W.draftOf?.(box('❯ half typed'), 14, '❯ half typed'), W.draftOf?.(box('❯ first line\n  second'), 8, '  second')],
-        [false, false, true, true], 'an empty box and a suggestion are not a draft; text with the cursor at its end is, on its first row or below it');
+      const DIM = '\u001b[2m', UNDIM = '\u001b[22m', GREY = '\u001b[38;5;246m', WHITE = '\u001b[38;5;231m', RESET = '\u001b[39m';
+      eq([W.draftOf?.(box('❯ '), GREY + '❯' + RESET + ' '),
+        W.draftOf?.(box('❯ Try "fix lint errors"'), GREY + '❯' + RESET + ' ' + DIM + 'Try "fix lint errors"' + UNDIM),
+        W.draftOf?.(box('❯ half typed'), GREY + '❯' + RESET + ' ' + WHITE + 'half typed' + RESET),
+        W.draftOf?.(box('❯ first line\n  second'), '❯ first line'),
+        W.draftOf?.(box('❯ half typed'), null)],
+        [false, false, true, true, true], 'an empty box and a dim suggestion are not a draft; typed text is, on its first row or below it, and a `❯` row out of view counts as one');
+      // F2-b (QA, measured on the rig, 2.1.330): a draft with Ctrl-A pressed
+      // has its cursor right behind the `❯`, where the first cut read "no
+      // draft", and the reconnect was typed in front of it. The cursor is not
+      // the test; how the text is drawn is.
+      eq(W.draftOf?.(box('❯ F2-b draft that nobody sent'), GREY + '❯' + RESET + ' ' + WHITE + 'F2-b draft that nobody sent' + RESET), true,
+        'a draft is a draft wherever the cursor stands (F2-b: Ctrl-A put it at the start)');
+      eq([W.dimOnly?.(`❯ ${DIM}one ${UNDIM}${DIM}two${UNDIM}`), W.dimOnly?.(`❯ ${DIM}dim${UNDIM} typed`), W.dimOnly?.('❯ '), W.dimOnly?.(`❯ \u001b[0;2mdim\u001b[0m`)], [true, false, false, true],
+        'a row is a suggestion only when every visible character after the mark is dim');
       writeFileSync(`${CP_DIR}/cursor.flag`, '1');
       await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
       await run('tmux', ['send-keys', '-t', cpTarget, '-l', 'half a sentence nobody sent']).catch(() => {});
