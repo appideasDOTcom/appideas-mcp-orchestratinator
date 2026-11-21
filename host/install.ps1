@@ -148,4 +148,6 @@ Write-Host ''
 Write-Host 'To sit at a desk yourself:   tmux attach -t =orch'
 Write-Host '  (each desk is a window in it, the same session the floor types into)'
 Write-Host 'To stop and remove the host: powershell -ExecutionPolicy Bypass -File host\install.ps1 -Uninstall'
-Write-Host "To see it:                   Get-Content -Wait '$(Join-Path $LogDir 'host.log')'"
+# -Encoding UTF8: the log is UTF-8 with no BOM, and Windows PowerShell 5.1
+# reads such a file as the ANSI code page ("·" came out as "Â·", measured).
+Write-Host "To see it:                   Get-Content -Encoding UTF8 -Wait '$(Join-Path $LogDir 'host.log')'"

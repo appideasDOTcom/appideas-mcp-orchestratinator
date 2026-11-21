@@ -61,7 +61,9 @@ function start() {
   me.on('exit', (code, signal) => {
     if (child === me) child = null;
     if (stopping) return;
-    say(`the host exited (${signal ?? `code ${code}`}); starting it again in ${RESTART_MS / 1000}s`);
+    // Signed: Windows reports a process ended by TerminateProcess (Task
+    // Manager's End task) as 4294967295, which is -1 (measured).
+    say(`the host exited (${signal ?? `code ${code | 0}`}); starting it again in ${RESTART_MS / 1000}s`);
     setTimeout(start, RESTART_MS);
   });
   me.on('error', (err) => say(`could not start the host: ${err.message}`));
