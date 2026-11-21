@@ -10,8 +10,8 @@
   "a window inherits the host's ORCH_ settings",
   "window",
   "host/window.js",
-  "  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_')) out[k] = v;",
-  "  for (const [k, v] of Object.entries(env)) out[k] = v;"
+  "  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_') && !PARENT_SESSION.has(k)) out[k] = v;",
+  "  for (const [k, v] of Object.entries(env)) if (!PARENT_SESSION.has(k)) out[k] = v;"
  ],
  [
   "TMPDIR is not filled for a window",

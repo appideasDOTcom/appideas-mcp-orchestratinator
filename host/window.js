@@ -414,6 +414,27 @@ export function psmuxRefusal(out) {
   return !out.includes('\n') && /^(?:ERROR: can't find |psmux: (?:no server running|can't find ))/.test(out);
 }
 
+/**
+ * The shell a window's command runs in, for the host's sign-in reading
+ * (statusCommand in host/auth.js): a window is `exec env … claude …` run by
+ * tmux through its `default-shell -c` (launchArgs), so that shell's startup
+ * files are part of what a window has. The floor's server says which shell
+ * it uses; with no server running, tmux would start one with SHELL, then the
+ * account's shell, then /bin/sh (tmux(1), default-shell), and so does this.
+ * Null on Windows, where a window is the program with no shell around it.
+ */
+export function shellFor({ told = '', env = process.env, account = () => userInfo().shell, exists = existsSync } = {}) {
+  let own = '';
+  try { own = account() || ''; } catch { /* no passwd entry */ }
+  for (const s of [told, env.SHELL, own]) if (s && s.startsWith('/') && exists(s)) return s;
+  return '/bin/sh';
+}
+export async function windowShell() {
+  if (WINDOWS) return null;
+  const r = await tmux(['show-options', '-gv', 'default-shell']);
+  return shellFor({ told: r.ok ? r.out.trim() : '' });
+}
+
 /** Whether tmux is usable at all. The floor degrades honestly if it isn't. */
 export async function tmuxAvailable() {
   const r = await tmux(['-V']);
@@ -812,6 +833,80 @@ export async function standingIdleAt(target) {
   const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{cursor_x}']);
   const m = /^(%\d+) (\d+)$/.exec((at.out ?? '').trim());
   return !!m && at.ok && String(target).endsWith(m[1]) && Number(m[2]) <= 2;
+}
+
+/**
+ * Whether somebody has typed into the window's message box and not sent it
+ * (F2 of the 0.14.5 review). For what the host types that nobody asked for
+ * at that moment (a `/mcp reconnect` after the board came back, a meeting
+ * room's notice): typed onto a draft, the two go in as one message. Measured
+ * on the rig on 2.1.330: the draft "this is a half-typed draft that nobody
+ * sent" and a reconnect became one user record, the agent took a turn on it,
+ * and the reconnect never ran.
+ *
+ * A draft is text in the box with the cursor anywhere but right behind the
+ * prompt mark. A prompt suggestion is text drawn after a cursor that stays at
+ * column 2 of the `❯` row (composerOf's callers, standingIdleAt), so it is
+ * not one; typed text puts the cursor at its end, on that row or below it,
+ * and a box taller than its frame has scrolled its `❯` row out of view
+ * (scrolledComposerOf), where the cursor is on no `❯` row at all.
+ * `cursorRow` is the text of the row the cursor is on.
+ */
+export function draftOf(screen, cursorX, cursorRow) {
+  const text = composerOf(String(screen ?? ''));
+  if (text == null || !String(text).trim()) return false;
+  return !(/^\s*❯/.test(String(cursorRow ?? '')) && Number(cursorX) <= 2);
+}
+
+/**
+ * The same, read off a pane. A pane that cannot be read, or an answer for
+ * another pane (tmux answers for its session's current pane when the one
+ * named is gone), reads as a draft: for something nobody asked to have
+ * typed, "type nothing" is the safe side.
+ */
+export async function draftAt(target) {
+  const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{cursor_x} #{cursor_y}']);
+  const m = /^(%\d+) (\d+) (\d+)$/.exec((at.out ?? '').trim());
+  if (!at.ok || !m || !String(target).endsWith(m[1])) return true;
+  const row = await tmux(['capture-pane', '-p', '-t', target, '-S', m[3], '-E', m[3]]);
+  if (!row.ok) return true;
+  return draftOf(await screenOf(target, 30), Number(m[2]), row.out);
+}
+
+/**
+ * Whether any of `pids` runs under `ancestor`, from a table of each pid's
+ * parent (F3 of the 0.14.5 review). A Claude Code a person starts by hand in
+ * a window of the host's session is the child of the window's shell: the
+ * pane's pid is the shell's and the roster's is Claude Code's, so the two
+ * never match, and the window read as one with no record. Measured on the
+ * rig: `claude` typed into a zsh there, in a desk's folder with the desk's
+ * own window closed, was closed by the 30 s rule and replaced by a new
+ * conversation, while the roster held it (pid 19396 under pane pid 18792).
+ */
+export function underIn(parent, ancestor, pids) {
+  const top = Number(ancestor);
+  for (const p of pids ?? []) {
+    let x = Number(p);
+    for (let n = 0; n < 64 && x > 1; n++) {
+      x = parent.get(x);
+      if (x === top) return true;
+    }
+  }
+  return false;
+}
+
+/** The same, read off `ps`. On Windows a window is its program, with no shell to stand between. */
+export async function runsUnder(ancestor, pids) {
+  if (WINDOWS || !ancestor || !pids?.length) return false;
+  const out = await new Promise((resolve) => {
+    execFile('ps', ['-A', '-o', 'pid=,ppid='], { timeout: 5000 }, (err, o) => resolve(err ? '' : String(o)));
+  });
+  const parent = new Map();
+  for (const l of out.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)/.exec(l);
+    if (m) parent.set(Number(m[1]), Number(m[2]));
+  }
+  return underIn(parent, ancestor, pids);
 }
 
 /**
@@ -2798,7 +2893,7 @@ async function windowFor(where, { open: autoOpen = false, resume = null } = {}) 
  *  closes the overlay, for a person who happens to be looking at it. */
 const BTW_LINGER_MS = Number(process.env.ORCH_BTW_LINGER_MS ?? 3000);
 
-export async function send(cwd, text, { open: autoOpen = false, resume = null } = {}) {
+export async function send(cwd, text, { open: autoOpen = false, resume = null, unasked = false } = {}) {
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
   const cmd = commandOf(text);
   // A bare /model opens a picker in the window, and a picker is not something
@@ -2848,6 +2943,17 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
         error: `the window is asking something, so nothing was typed. Answer it on the floor, then send this again. The window is showing: ${onScreen}`,
       };
     }
+  }
+
+  // Something nobody asked to have typed now (`unasked`: a reconnect the
+  // board asked for, a meeting room's notice) is not typed onto a draft:
+  // the two would go in as one message (draftOf). Refused in a second, and
+  // the caller keeps it until the box is empty.
+  if (unasked && await draftAt(pane.target)) {
+    return {
+      ok: false, code: 'draft', target: pane.target,
+      error: 'somebody has typed into the window\'s message box and not sent it, so nothing was typed over it',
+    };
   }
 
   // A working window is typed into, not waited for.

@@ -226,7 +226,10 @@ function fixture() {
     `if (process.argv[2] === 'auth') {`,
     `  const OUT = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
     `  fs.appendFileSync(${JSON.stringify(`${FIX}/auth.log`)}, process.argv.slice(3).join(' ') + ' USER=' + (process.env.USER || '') + '\\n');`,
-    `  if (process.argv[3] === 'status') { const out = fs.existsSync(OUT); process.stdout.write(JSON.stringify({ loggedIn: !out, authMethod: out ? 'none' : 'claude.ai' }) + '\\n'); process.exit(out ? 1 : 0); }`,
+    // TEST_ZSHENV_SIGNIN stands for a credential that only a shell's startup
+    // file gives (F1 of the 0.14.5 review): set, it is signed in whatever
+    // the flag says, the way an exported API key is.
+    `  if (process.argv[3] === 'status') { const out = fs.existsSync(OUT) && !process.env.TEST_ZSHENV_SIGNIN; process.stdout.write(JSON.stringify({ loggedIn: !out, authMethod: out ? 'none' : 'claude.ai' }) + '\\n'); process.exit(out ? 1 : 0); }`,
     `  if (process.argv[3] !== 'login') process.exit(2);`,
     `  let fail = ''; try { fail = fs.readFileSync(${JSON.stringify(`${FIX}/signin-fail.flag`)}, 'utf8').trim(); } catch {}`,
     `  let delay = 300; try { delay = Number(fs.readFileSync(${JSON.stringify(`${FIX}/signin-delay.flag`)}, 'utf8').trim()) || 300; } catch {}`,
@@ -351,6 +354,11 @@ function fixture() {
     // the host knows from a starting one by exactly this (standingIdleOf).
     `const COMPOSER_FLAG = ${JSON.stringify(`${FIX}/composer.flag`)};`,
     String.raw`if (fs.existsSync(COMPOSER_FLAG)) process.stdout.write('\n' + '─'.repeat(60) + '\n❯ \n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n');`,
+    // draft.flag: a box somebody has typed into and not sent (F2, 0.14.5
+    // review), the cursor at the end of the words as Claude Code leaves it.
+    // Drawn once and never changed: nothing typed after it reaches the box.
+    `const DRAFT_FLAG = ${JSON.stringify(`${FIX}/draft.flag`)};`,
+    String.raw`if (fs.existsSync(DRAFT_FLAG)) { const d = fs.readFileSync(DRAFT_FLAG, 'utf8').trim(); process.stdout.write('\n' + '─'.repeat(60) + '\n❯ ' + d + '\n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n' + '\u001b[3A\u001b[' + (d.length + 3) + 'G'); }`,
     `const SIGNED_OUT_FLAG = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
     String.raw`if (fs.existsSync(SIGNED_OUT_FLAG)) process.stdout.write('\n' + '\u2500'.repeat(60) + '\n\u276f \n' + '\u2500'.repeat(60) + '\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)          Not logged in \u00b7 run /login\n');`,
     // And a flag file that leaves the window asking something: a permission
@@ -685,6 +693,38 @@ try {
   assert(clean(received()).split('/mcp reconnect team-board').length > sentBefore, 'with nothing typed by anybody, the window is sent a reconnect of its own server');
   assert((rcRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === "the desk's tools had lost the board, so the host ran /mcp — Reconnected to team-board"),
     `and the desk says why the host did it, and what the window said — ${JSON.stringify((rcRows ?? []).filter((r) => r.tool_name === 'host').map((r) => r.text).slice(-3))}`);
+
+  // F2 (0.14.5 review, measured on a rig on 2.1.330): a reconnect the board
+  // asked for, typed onto a draft somebody had left in the box, went in as
+  // one message with it; the agent took a turn on it and the reconnect never
+  // ran. It is owed instead, and typed once the box is empty, with nobody
+  // asking again.
+  {
+    writeFileSync(`${FIX}/draft.flag`, 'half typed and not sent');
+    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: the desk\'s window is reopened, a draft standing in its box');
+    // On the pane, not the desk's `held`: that was already 'floor' from the
+    // window being replaced, and read alone it let the flag go before the
+    // new window drew it (this row's first run).
+    const shown = (t) => { try { return execFileSync('tmux', ['list-panes', '-s', '-t', `=${TMUX_SESSION}:`, '-F', '#{pane_id}'], { encoding: 'utf8' }).trim().split('\n').some((p) => execFileSync('tmux', ['capture-pane', '-p', '-t', p], { encoding: 'utf8' }).includes(t)); } catch { return false; } };
+    assert(await until(() => (shown('half typed and not sent') ? true : null), 20000), 'the fixture: the new window is up, the draft in its box');
+    rmSync(`${FIX}/draft.flag`, { force: true });
+    const dInit = await fetch(`${HOST}/mcp`, { method: 'POST', headers: mh, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'host-test', version: '0' } } }) });
+    await dInit.text();
+    // Held connected past one of the board's 5 s looks, which is what resets
+    // the desk's reconnect count (reconnectDue forgets a desk it sees
+    // present). Dropped at once, the count left by the rows above stood,
+    // with its two-minute retry, and the board asked nothing for 45 s.
+    await sleep(6500);
+    await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh, 'mcp-session-id': dInit.headers.get('mcp-session-id') } }).then((x) => x.text());
+    const dBefore = clean(received()).split('/mcp reconnect team-board').length;
+    assert(await until(() => (/somebody is typing in its window; reconnecting once the box is empty/.test(host.log) ? true : null), 45000),
+      'the board asks again, and the host says it waits: somebody has typed into the window');
+    await sleep(1500);
+    eq(clean(received()).split('/mcp reconnect team-board').length, dBefore, 'nothing was typed onto the draft');
+    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: the window reopened, its box empty');
+    assert(await until(() => (clean(received()).split('/mcp reconnect team-board').length > dBefore ? true : null), 40000),
+      'the reconnect it was owed is typed once the box is empty, with nobody asking again');
+  }
 
 
   /* Issue #31: a file attached on the floor. The board stages it, the host
@@ -2357,6 +2397,32 @@ try {
   await sleep(5000);
   eq(nrLaunches().length, nrBefore + 1, 'a window that has its record is left alone after that');
 
+  // F3 (0.14.5 review, measured on a rig): a Claude Code a person started by
+  // hand from a shell in a window of the host's own session, in the desk's
+  // folder, with the desk's own window closed. The pane's pid is the shell's
+  // and the roster's is Claude Code's, so the window read as one with no
+  // record, and the 30 s rule closed it and opened a new conversation in its
+  // place. It has a record: under its shell.
+  {
+    killTmux();
+    writeFileSync(`${FIX}/roster.json`, '[]');
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
+    writeFileSync(`${FIX}/composer.flag`, '1');
+    const f3Mark = host.log.length;
+    execFileSync('tmux', ['new-session', '-d', '-s', TMUX_SESSION, '-n', 'byhand', '-c', REPO, `/bin/sh -c '${FIX}/claude; :'`]);
+    const shPid = Number(execFileSync('tmux', ['list-panes', '-t', `=${TMUX_SESSION}:`, '-F', '#{pane_pid}'], { encoding: 'utf8' }).trim().split('\n')[0]);
+    const kidPid = await until(() => { try { const r = JSON.parse(readFileSync(`${FIX}/roster.json`, 'utf8')); return r[0]?.pid ?? null; } catch { return null; } }, 8000);
+    assert(!!kidPid && kidPid !== shPid, `the fixture: the window's shell (${shPid}) runs a Claude Code (${kidPid}) that is in the roster under its own pid`);
+    rmSync(`${FIX}/composer.flag`, { force: true });
+    const f3Launches = nrLaunches().length;   // the hand-started one included
+    await sleep(10000);
+    assert(!/is running with no session record/.test(host.log.slice(f3Mark)), `the 30 s rule leaves it alone — ${host.log.slice(f3Mark).split('\n').filter((l) => /record/.test(l)).join(' | ')}`);
+    eq([nrLaunches().length - f3Launches, execFileSync('tmux', ['list-panes', '-t', `=${TMUX_SESSION}:`, '-F', '#{pane_pid}'], { encoding: 'utf8' }).trim().split('\n').map(Number).includes(shPid)],
+      [0, true], 'no window was started in its place, and the person\'s window is still there');
+    killTmux();
+    writeFileSync(`${FIX}/roster.json`, '[]');
+  }
+
   // A request for the folder dialog that reaches the host after the page has
   // given up must not open one: a dialog appearing in front of somebody who
   // stopped waiting is a surprise, and nothing would read its answer.
@@ -2464,6 +2530,106 @@ try {
     message: { role: 'assistant', content: [{ type: 'text', text: 'Hello again.' }] } });
   assert(await until(async () => (deskOf(await floor(), 'free')?.signin ? null : true), 8000), 'and a reply from a window takes it away');
   rmSync(`${FIX}/signed-out.flag`, { force: true });
+
+  /* A credential only a shell's startup file gives (F1, 0.14.5 review). A
+   * window is `exec env … claude …` run through tmux's default-shell -c, and
+   * zsh -c reads $ZDOTDIR/.zshenv (~/.zshenv), so a key exported there is
+   * the window's. The host asked `auth status` with no shell around it, read
+   * "signed out" on such a machine, and the board refused every message to
+   * its desks. The host's reading has to be the window's reading. */
+  // F5 (0.14.5 review, measured on a rig): a conversation that ended on
+  // "Not logged in", resumed on a machine that is signed in, replays its last
+  // turns to the floor, and the replayed error muted every desk on the host
+  // until a window replied, which nothing on the floor could make it do. A
+  // turn written before the desk joined is history and mutes nothing; one a
+  // window writes now still does (the row above it).
+  console.log('\n  an old "Not logged in" in a resumed conversation');
+  {
+    const OLD_ID = '22222222-3333-4444-5555-666666666666';
+    const t0 = Date.now() - 120000;
+    writeFileSync(transcript().replace(SESSION_ID, OLD_ID), [
+      { type: 'user', uuid: 'o1', timestamp: new Date(t0).toISOString(), message: { role: 'user', content: 'an old question' } },
+      { type: 'assistant', uuid: 'o2', timestamp: new Date(t0 + 1000).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'an old answer' }] } },
+      { type: 'assistant', uuid: 'o3', timestamp: new Date(t0 + 2000).toISOString(), isApiErrorMessage: true, message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: OLD_ID })).status, 200, 'the fixture: the desk is reopened on a conversation that ended signed out two minutes ago');
+    assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => r.session_id === OLD_ID && r.role === 'error' && /Not logged in/.test(r.text ?? '')) ? true : null), 15000),
+      'the fixture: its last turns are replayed to the floor, the old error the last of them');
+    await sleep(2500);
+    const f5 = await floor();
+    eq([f5.hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, !!deskOf(f5, 'free')?.signin, deskOf(f5, 'free')?.nudge?.ok], [false, false, true],
+      'history mutes nothing: the host is not listed signed out, the desk offers no Sign in, the bell rings');
+    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: back on the conversation the sections below expect');
+    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'the fixture: its window is up');
+  }
+
+  console.log('\n  the host reads the sign-in a window would have');
+  {
+    const A = await import('../host/auth.js');
+    const W = await import('../host/window.js');
+    const zd = `${FIX}/zdotdir`;
+    mkdirSync(zd, { recursive: true });
+    writeFileSync(`${zd}/.zshenv`, 'export TEST_ZSHENV_SIGNIN=1\n');
+    writeFileSync(`${FIX}/signed-out.flag`, '');
+    const base = { ...process.env };
+    delete base.TEST_ZSHENV_SIGNIN;
+    const withKey = { ...base, ZDOTDIR: zd };          // the key is in .zshenv
+    const noKey = { ...base, ZDOTDIR: `${FIX}/zdotdir-none` };   // nowhere
+    // What a window reads: the window's own command line, run as tmux runs it.
+    const windowReads = (env) => {
+      let out = '';
+      try { out = execFileSync('/bin/zsh', ['-c', W.launchArgs([`${FIX}/claude`, 'auth', 'status', '--json'], { windows: false })[0]], { env, encoding: 'utf8' }); }
+      catch (e) { out = String(e.stdout ?? ''); }
+      return A.readSignedIn(out);
+    };
+    eq([windowReads(withKey), windowReads(noKey)], [true, false], 'the fixture: a window reads signed in with the key in .zshenv, and signed out with no key anywhere');
+    eq(typeof A.signedIn, 'function', 'the fixture: the host has a sign-in reading');
+    eq([await A.signedIn({ claude: `${FIX}/claude`, shell: '/bin/zsh', env: withKey }), await A.signedIn({ claude: `${FIX}/claude`, shell: '/bin/zsh', env: noKey })],
+      [windowReads(withKey), windowReads(noKey)], 'the host reads what a window reads: signed in for a key in .zshenv, signed out for none');
+    eq(await A.signedIn({ claude: `${FIX}/claude`, shell: null, env: withKey }), false,
+      'the control: asked with no shell around it, as before, the same machine reads signed out');
+    eq(A.statusCommand?.({ claude: '/x/claude', shell: null }), { cmd: '/x/claude', args: ['auth', 'status', '--json'] }, 'with no shell (Windows), the command runs as it is, as a window does there');
+    eq(A.statusCommand?.({ claude: "/it's/claude", shell: '/bin/zsh' }), { cmd: '/bin/zsh', args: ['-c', `exec '/it'\\''s/claude' 'auth' 'status' '--json'`] }, 'with one, it is one line for that shell, quoted as a window\'s is');
+    eq([A.readSignedIn('Welcome back!\n{\n  "loggedIn": true\n}\n'), A.readSignedIn('{"loggedIn": false}'), A.readSignedIn('no json here'), A.readSignedIn('')], [true, false, null, null],
+      'a profile that prints a line of its own does not hide the answer');
+    // A `claude` that never answers and ignores SIGTERM (QA, 0.14.5 review
+    // 3800: the limit did not bound the wait): the reading comes back as
+    // "could not say", at the limit, not when the child lets go.
+    writeFileSync(`${FIX}/claude-hang`, '#!/bin/sh\ntrap "" TERM\nsleep 30 &\nsleep 30\n');
+    chmodSync(`${FIX}/claude-hang`, 0o755);
+    const hangAt = Date.now();
+    const hung = await A.signedIn({ claude: `${FIX}/claude-hang`, shell: '/bin/zsh', env: noKey, timeoutMs: 300 });
+    const hangMs = Date.now() - hangAt;
+    eq(hung, null, 'a Claude Code that never answers is "could not say"');
+    assert(hangMs < 2000, `within its limit, not when its children let go of the pipe (${hangMs} ms for a 300 ms limit)`);
+    const real = (p) => ['/bin/zsh', '/bin/bash', '/bin/sh'].includes(p);
+    eq([W.shellFor({ told: '/bin/bash', env: { SHELL: '/bin/zsh' }, account: () => '/bin/sh', exists: real }),
+      W.shellFor({ told: '', env: { SHELL: '/bin/zsh' }, account: () => '/bin/sh', exists: real }),
+      W.shellFor({ told: '', env: {}, account: () => '/bin/bash', exists: real }),
+      W.shellFor({ told: 'zsh', env: { SHELL: '/opt/gone/fish' }, account: () => { throw new Error('no passwd'); }, exists: real })],
+      ['/bin/bash', '/bin/zsh', '/bin/bash', '/bin/sh'], 'the shell is the floor\'s default-shell, else SHELL, else the account\'s, else /bin/sh; a relative or missing one is passed over');
+
+    // And the host itself, started on that machine: signed in, so nothing is
+    // refused, where a460afd listed it signed out and refused the desk.
+    host.kill('SIGTERM');
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+    host = null;
+    killTmux();
+    host = startHost('host-test-1', { ZDOTDIR: zd });
+    const zl = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live ? d : null; }, 15000);
+    assert(!!zl, 'the fixture: a host started with the key only in .zshenv registers');
+    await sleep(1500);
+    eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, false, 'a host whose windows are signed in through .zshenv is listed signed in');
+    const zd2 = deskOf(await floor(), 'free');
+    eq([!!zd2?.signin, zd2?.nudge?.code ?? null], [false, null], 'and its desk offers no Sign in and refuses no nudge for it');
+    host.kill('SIGTERM');
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+    host = null;
+    killTmux();
+    rmSync(`${FIX}/signed-out.flag`, { force: true });
+    host = startHost('host-test-1');
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000);
+  }
 
   /* ── which board this host serves ───────────────────────────────────────────
    * This used to be `originOf(found[0].url)` — the first desk the filesystem

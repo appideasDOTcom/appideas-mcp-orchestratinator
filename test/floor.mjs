@@ -707,7 +707,11 @@ try {
     eq(protocolRefusal({ board: B, host: { protocol: '2' } }), null, 'however it was typed');
     const behind = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 1, version: '0.12.9' } });
     assert(/^The host "Mac" is behind this board: it speaks protocol 1 \(build 0\.12\.9\) and the board speaks protocol 2 \(build 0\.13\.0\)\. The two must match\./.test(behind), `a host behind the board is told so, with both builds ("${behind}")`);
-    assert(/Restart the host so it runs the clone's current code, or update it from the page\.$/.test(behind), 'and, for launchd\'s host, what to do: the clone has the code, the host has not restarted');
+    assert(/Restart the host so it runs the clone's current code\.$/.test(behind), 'and, for launchd\'s host, what to do: the clone has the code, the host has not restarted');
+    // F4 (0.14.5 review): "or update it from the page" cannot work for the
+    // host it is said about. The page's update is carried out by the host
+    // beside the board's container, and a refused host is not on the board.
+    assert(!/from the page/i.test(behind), 'and only that: no remedy is offered that the refused host cannot carry out');
     const app = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 1, version: '0.12.9', supervisor: 'app' } });
     assert(/Update the Orchestratinator app, which carries the host\.$/.test(app), `an app-run host behind the board is sent to the app ("${app}")`);
     const ahead = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 3, version: '0.14.0' } });
@@ -744,6 +748,33 @@ try {
     const noNum = await regAs({});
     assert(noNum.status === 409 && /sends no protocol version/.test(noNum.body.error), 'a registration with no number at all is refused as a host from before there was one');
     eq((await regAs({ protocol: PROTOCOL })).status, 200, 'restored');
+
+    // F4 (0.14.5 review, measured on a rig): after a deploy that rebuilt the
+    // board and left a 0.12.12 host running, that host was refused, and its
+    // desk still read live for HOST_STALE_SECONDS, took chats into the
+    // host's outbox that nobody would take, then said only "is offline". A
+    // desk whose host is refused says so in the refusal's words from the
+    // first refused registration, and takes nothing.
+    const refDesk = { channel: 'ref-ch', agent: 'refd', cwd: '/repo/refd', session_id: 'sdk-refd' };
+    const regRef = (body) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-ref', name: 'refbox', tmux: 'orch', desks: [refDesk], ...body }) })
+      .then(async (r) => ({ status: r.status, body: await r.json() }));
+    eq((await regRef({ protocol: PROTOCOL })).status, 200, 'the fixture: a host with one desk registers');
+    const refOf = async () => (await fetch(`${HOST}/api/floor`).then((r) => r.json())).channels.flatMap((c) => c.desks).find((x) => x.agent === 'refd' && x.hosted?.host_id === 'h-ref');
+    eq((await refOf())?.hosted?.live, true, 'the fixture: its desk is live');
+    const refused = await regRef({});
+    eq(refused.status, 409, 'the fixture: the same host, from before there was a protocol, is refused');
+    const rd = await refOf();
+    eq([rd?.hosted?.live, rd?.hosted?.refused, rd?.nudge?.code, rd?.nudge?.reason], [false, refused.body.error, 'host_refused', refused.body.error],
+      'its desk is not live at once (its last_seen is seconds old), says why in the refusal\'s words, and the bell is refused in them');
+    const rc = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: 'ref-ch', agent: 'refd', text: 'are you there?' }) });
+    const rcb = await rc.json();
+    eq([rc.status, rcb.code, rcb.error], [409, 'host_refused', refused.body.error], 'a message to it is refused in those words, not queued for a host that will not take it');
+    eq((await regRef({ protocol: PROTOCOL })).status, 200, 'the fixture: the host, restarted on the clone\'s code, registers');
+    const back = await refOf();
+    eq([back?.hosted?.live, back?.hosted?.refused, back?.nudge?.ok], [true, null, true], 'and its desk is live again, the words gone, the bell rings');
+    // A board restarted meanwhile still knows: the words are on the host's
+    // row, not only in this process (the PR #57 finding 5 rule).
+    eq((await regRef({})).status, 409, 'the fixture: refused again');
   }
 
   console.log('\nthe folders a host offers');
@@ -2995,8 +3026,12 @@ try {
     eq([d('waiter').live, d('waiter').session?.awaiting_kind != null], [true, true], 'a desk waiting on a person is live, however long it waits');
     eq([deskEmpty(d('warm')), deskEmpty(d('present')), deskEmpty(d('waiter'))], [false, false, false],
       'and none of those is empty — the readings are the whole of the rule, and nothing else makes a desk empty');
-    eq(fl.channels.every((c) => c.desks.every((x) => deskEmpty(x) === (!x.live && !x.hosted?.live))), true,
-      'over every desk the server built: empty is exactly !live && !hosted.live');
+    eq(fl.channels.every((c) => c.desks.every((x) => deskEmpty(x) === (!x.live && !x.hosted?.live && !x.hosted?.refused))), true,
+      'over every desk the server built: empty is exactly !live && !hosted.live, and not refused');
+    // F4: a desk whose host was refused for its protocol is drawn, so the page
+    // can say why it takes nothing; hidden, it vanished after a deploy.
+    eq([deskEmpty({ live: false, hosted: { live: false, refused: 'The host "x" is behind this board' } }), deskEmpty({ live: false, hosted: { live: false, refused: null } })], [false, true],
+      'a desk whose host was refused is not empty; one whose host is merely offline still is');
 
     // What a storey draws, off those same desks.
     let rows = deskRows(channelOf(fl));

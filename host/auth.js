@@ -49,12 +49,21 @@ export function claudeEnv(env = process.env) {
   return user ? { ...env, USER: env.USER || user, LOGNAME: env.LOGNAME || user } : env;
 }
 
-/** What `claude auth status --json` printed, as true / false, or null when it is not that. */
+/**
+ * What `claude auth status --json` printed, as true / false, or null when it
+ * is not that. Asked through a shell (statusCommand), a profile that prints
+ * a line of its own puts it ahead of the answer, so the object is read from
+ * its first brace to its last when the whole is not one.
+ */
 export function readSignedIn(output) {
-  try {
-    const v = JSON.parse(String(output ?? ''))?.loggedIn;
-    return typeof v === 'boolean' ? v : null;
-  } catch { return null; }
+  const s = String(output ?? '');
+  for (const text of [s, s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]) {
+    try {
+      const v = JSON.parse(text)?.loggedIn;
+      if (typeof v === 'boolean') return v;
+    } catch { /* the next reading, or none */ }
+  }
+  return null;
 }
 
 /**
@@ -64,11 +73,48 @@ export function readSignedIn(output) {
  */
 export const isNotLoggedIn = (text) => /^\s*Not logged in\b/i.test(String(text ?? ''));
 
+/**
+ * How `auth status` is asked: the way a window the host opens starts Claude
+ * Code, so that the host reads the sign-in its windows will have (F1 of the
+ * 0.14.5 review, 2026-11-21).
+ *
+ * A window's command is one shell line that tmux runs through its
+ * `default-shell -c` (launchArgs in host/window.js), and zsh -c reads
+ * ~/.zshenv. Asked with execFile and no shell, as it was, a credential
+ * exported there was invisible to the host and visible to every window, so
+ * a LaunchAgent host read "signed out" on a machine whose windows worked,
+ * and the board refused every message to its desks (signedOutWhy). 0.12.12
+ * had no such reading and delivered them. QA measured the split on 2.1.330:
+ * loggedIn false under env -i for a key exported only in ~/.zshenv or
+ * ~/.zshrc, true through `zsh -c`. (A key only in ~/.zshrc reaches no window
+ * either: zsh -c reads no .zshrc, so there the host and its windows agree on
+ * "signed out", which is the truth about them.)
+ *
+ * `shell` is the floor's (W.windowShell). With none, as on Windows, where a
+ * window is the program itself with no shell around it, the command runs as
+ * it is, which is again what a window does. The words are quoted the way
+ * launchArgs quotes a window's, so fish reads them as sh does.
+ */
+export function statusCommand({ claude = CLAUDE, shell = null } = {}) {
+  const argv = [claude, 'auth', 'status', '--json'];
+  if (!shell) return { cmd: argv[0], args: argv.slice(1) };
+  return { cmd: shell, args: ['-c', `exec ${argv.map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ')}`] };
+}
+
 /** Whether Claude Code is signed in here: true, false, or null when it could not say. */
-export function signedIn() {
+export function signedIn({ claude = CLAUDE, shell = null, env = process.env, timeoutMs = STATUS_TIMEOUT_MS } = {}) {
+  const { cmd, args } = statusCommand({ claude, shell });
   return new Promise((resolve) => {
     // Its answer is what counts, whatever it exits with (signed out exits 1).
-    execFile(CLAUDE, ['auth', 'status', '--json'], { env: claudeEnv(), timeout: STATUS_TIMEOUT_MS }, (_err, stdout) => resolve(readSignedIn(stdout)));
+    //
+    // SIGKILL at the limit, not execFile's default SIGTERM. execFile answers
+    // once the child is gone and its pipes are closed, and a child that
+    // ignores SIGTERM keeps both: measured on Node 24.22.2, `zsh -c 'exec <a
+    // script that traps TERM and sleeps 30>'` with a 300 ms limit answered
+    // after 30,135 ms with SIGTERM and after 303 ms with SIGKILL. The
+    // heartbeat asks this on the host's line, so a wait like that held every
+    // desk's work behind it (QA, 0.14.5 review 3800, saw the limit not hold).
+    execFile(cmd, args, { env: claudeEnv(env), timeout: timeoutMs, killSignal: 'SIGKILL' }, (_err, stdout) => resolve(readSignedIn(stdout)));
   });
 }
 

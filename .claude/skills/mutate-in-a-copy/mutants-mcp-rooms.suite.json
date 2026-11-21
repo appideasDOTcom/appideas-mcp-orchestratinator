@@ -17,8 +17,8 @@
   "/mcp: the desk's say() types the operator's words untranslated",
   "host",
   "host/index.js",
-  "W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id })",
-  "W.send(this.where, text, { open: true, resume: id })"
+  "W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id, unasked })",
+  "W.send(this.where, text, { open: true, resume: id, unasked })"
  ],
  [
   "/mcp: the binding's own server name not read",

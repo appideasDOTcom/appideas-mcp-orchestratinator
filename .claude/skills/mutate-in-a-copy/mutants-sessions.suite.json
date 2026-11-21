@@ -255,7 +255,7 @@
   "a seat's window is not tagged",
   "seats",
   "host/window.js",
-  "  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];",
+  "  const tag = seat && !WINDOWS ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];",
   "  const tag = [];"
  ],
  [

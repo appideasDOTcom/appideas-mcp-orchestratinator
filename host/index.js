@@ -268,6 +268,14 @@ class Desk {
     this.lastSessionId = id;
     this.subOffsets = new Map();
     this.model = null;
+    // A turn written before this desk joined is history, replayed for the
+    // panel ('tail'), not something a window says now (F5, 0.14.5 review): a
+    // conversation that ended on "Not logged in" muted every desk on the
+    // host when it was resumed, on a machine that was signed in, until a
+    // window replied, which nothing on the floor could make it do. So the
+    // relay hands noteTurn only turns written after this moment. 'start'
+    // reads a conversation that began after the desk did, all of it new.
+    this.joinedAt = mode === 'start' ? 0 : Date.now();
     if (!id) { this.offset = 0; return; }
     const path = W.transcriptPath(this.cwd, id);
     const size = await W.transcriptSize(path);
@@ -399,7 +407,12 @@ class Desk {
     // it wants and answer from where they are. Said again once a minute while
     // it stands, so a server that restarted meanwhile hears it too. Why the
     // host reads these and never answers them is beside startupQuestionOf.
-    const booting = paneHere && !live.some((x) => x.pid === paneHere.pid);
+    // Registered also when the roster's Claude Code runs under the pane's
+    // process: one a person started by hand from the window's shell (F3,
+    // 0.14.5 review). Asked only when the pid alone does not match, which is
+    // the rare case, so the common tick runs no `ps`.
+    const booting = paneHere && !live.some((x) => x.pid === paneHere.pid)
+      && !(await W.runsUnder(paneHere.pid, live.map((x) => x.pid)));
     // And while one is standing, or when a look was asked for (lookStartup):
     // a question still up after its window registered is still a question,
     // and "gone" is said only when the pane no longer shows it.
@@ -474,7 +487,7 @@ class Desk {
         this.host.emit({ type: 'model', channel: this.channel, agent: this.agent, session_id: this.lastSessionId, model: turn.model }, true);
       }
       if (turn.role === 'model') continue;
-      this.host.noteTurn(turn);
+      if (!(this.joinedAt && Date.parse(turn.at) < this.joinedAt)) this.host.noteTurn(turn);
       this.host.emit({
         type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,
         role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
@@ -544,14 +557,44 @@ class Desk {
     const at = await W.busyAt(this.where);
     if (!at.pane) return;
     if (at.busy) { log(`${this.label}: its tools have dropped, but it is working; reconnecting when the board asks again`); return; }
-    const r = await W.send(this.where, W.typedCommand('/mcp', this.server));
+    // Unasked (draftOf): typed onto somebody's draft, the two went in as one
+    // message and the reconnect never ran (F2, 0.14.5 review). Owed instead,
+    // and run once the box is empty (payOwed), as well as when the board
+    // asks again.
+    const r = await W.send(this.where, W.typedCommand('/mcp', this.server), { unasked: true });
+    if (r.code === 'draft') {
+      if (!this.owedReconnect) log(`${this.label}: its tools have dropped, but somebody is typing in its window; reconnecting once the box is empty`);
+      this.owedReconnect = true;
+      return;
+    }
+    this.owedReconnect = false;
     const id = this.sessionId ?? this.lastSessionId;
     if (r.ok && r.said) this.told(`the desk's tools had lost the board, so the host ran /mcp — ${r.said}`, id);
     else warn(`${this.label}: reconnecting its tools: ${r.error ?? r.code ?? 'no receipt from the window'}`);
   }
 
+  /**
+   * What this desk is owed that was not typed because somebody was typing
+   * in its window (F2): a reconnect, and meeting-room notices, in order.
+   * Run on the host's line before each work poll, so within a poll of the
+   * box being emptied. Each one is tried only while the box holds nothing,
+   * which is read first, so a draft that stays costs one read a poll.
+   */
+  async payOwed() {
+    if (!this.owedReconnect && !this.owedNotices?.length) return;
+    const pane = await W.paneFor(this.where);
+    if (!pane) { this.owedReconnect = false; this.owedNotices = []; return; }
+    if (await W.draftAt(pane.target)) return;
+    if (this.owedReconnect) await this.reconnect();
+    while (this.owedNotices?.length && !this.owedReconnect) {
+      const text = this.owedNotices.shift();
+      await this.say(text, { unasked: true });
+      if (this.owedNotices.includes(text)) break;
+    }
+  }
+
   /** Type into this repo's window, opening one if there isn't one. */
-  async say(text) {
+  async say(text, { unasked = false } = {}) {
     // Resume the conversation this desk is, not merely the one that happens to
     // have a window open — those differ for exactly as long as it takes to
     // switch apps, which is when the floor is used.
@@ -565,8 +608,16 @@ class Desk {
     // command means something else in the window than it does on the floor:
     // a bare /mcp opens a panel there, and reconnects here (typedCommand).
     // The line on the desk still says what the operator typed.
-    const r = await W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id });
+    const r = await W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id, unasked });
     if (r.note) this.told(r.note, id);
+    // A meeting room's notice that met a draft (F2): owed, typed once the
+    // box is empty (payOwed). Not an error: nothing failed, and an error turn
+    // would hand the board's own words back to the operator's box.
+    if (!r.ok && r.code === 'draft' && unasked) {
+      if (!(this.owedNotices ??= []).includes(text)) this.owedNotices.push(text);
+      log(`${this.label}: a meeting room's notice waits: somebody is typing in its window`);
+      return;
+    }
     if (!r.ok) {
       // Refused because the window is asking: if that is a startup question
       // the floor has not been shown, the next tick reads it and offers it.
@@ -1792,7 +1843,7 @@ class Host {
    * could not be had leaves the last one standing.
    */
   async checkAuth(why, { register = true, was = this.signedOut() } = {}) {
-    const st = await A.signedIn();
+    const st = await A.signedIn({ shell: await W.windowShell() });
     if (st !== null) this.auth.status = st;
     const now = this.signedOut();
     if (now !== was) {
@@ -1855,7 +1906,7 @@ class Host {
       return;
     }
     this.auth.said = false;
-    const st = await A.signedIn();
+    const st = await A.signedIn({ shell: await W.windowShell() });
     if (st !== null) this.auth.status = st;
     if (this.signedOut()) {
       await this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'signin_failed', message: 'the sign-in ended, and Claude Code still says it is signed out here. Press Sign in to try again.' }, true);
@@ -1888,6 +1939,14 @@ class Host {
       // Leave the window, and count its idle time again from the next look.
       if (!known.ok) { desk.unreg = null; return; }
       if ((known.sessions ?? []).some((x) => x.pid === pid)) return;
+      // A Claude Code under the window's shell is recorded under its own pid
+      // (F3): the window has a record, and a person's conversation is in it.
+      // The watch asked the same before handing the window here; this is the
+      // second look, against the roster read again on the host's line. Each
+      // covers the other, so a mutant taking out either alone survives by
+      // design: the proof is the one on W.runsUnder, which both call
+      // (mutants-0-14-5.suite.json).
+      if (await W.runsUnder(pid, (known.sessions ?? []).map((x) => x.pid))) { desk.unreg = null; return; }
       if (verdict === 'say') {
         warn(`${desk.label}: the reopened window has no session record either; leaving it`);
         await this.emit({
@@ -1921,6 +1980,13 @@ class Host {
       }
       if (!at.signedOut) continue;
       const id = desk.sessionId ?? desk.lastSessionId ?? null;
+      // A reopen closes the window, and a draft in its box would go with it
+      // (F2's question, asked of every window the host acts on unasked).
+      const pane = await W.paneFor(desk.where);
+      if (pane && await W.draftAt(pane.target)) {
+        desk.told('its window still says Claude Code is signed out, but somebody has typed into its message box, so the host left it as it is', id);
+        continue;
+      }
       log(`${desk.label}: its window still says it is signed out; reopening it on ${id ?? 'a new conversation'}`);
       await this.reopen(desk, { sessionId: id, known: true });
       desk.told('its window still said Claude Code was signed out, so the host reopened it on the same conversation', id);
@@ -2013,7 +2079,11 @@ class Host {
           text = UP.withAttachments(text, paths);
           log(`${desk.label}: ${paths.length} attachment${paths.length === 1 ? '' : 's'} in ${UP.uploadsDir()}`);
         }
-        if (text.trim()) await desk.say(text);
+        // A meeting room's notice is the board's, typed nobody asked for at
+        // this moment: `notice` on the work, or (from a board before it) the
+        // text being one <meeting-room> block, as the relay files it.
+        const notice = item.payload?.notice === true || /^<meeting-room>[\s\S]*<\/meeting-room>$/.test(text.trim());
+        if (text.trim()) await desk.say(text, { unasked: notice && !files.length });
         break;
       }
       case 'permission': {
@@ -2427,6 +2497,11 @@ class Host {
         while (this.later.length && !this.stopping) {
           const job = this.later.shift();
           await job().catch((err) => warn(`a job left for the host's line: ${err.message}`));
+        }
+        // What desks are owed because somebody was typing (Desk.payOwed).
+        for (const desk of this.desks.values()) {
+          if (this.stopping) break;
+          await desk.payOwed().catch((err) => warn(`${desk.label}: what it was owed: ${err.message}`));
         }
         this.inHand = (reply.work ?? []).slice();
         while (this.inHand.length && !this.stopping) {

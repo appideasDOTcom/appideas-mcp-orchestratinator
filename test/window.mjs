@@ -1677,6 +1677,11 @@ async function main() {
       `    const rows = lines.flatMap((l) => l.length ? l.match(/.{1,70}/g) : ['']);`,
       `    const top = cap && rows.length > cap ? '\\u2500\\u2500\\u2500 \\u2191 ' + (rows.length - cap) + ' more ' + '\\u2500'.repeat(60) + '\\r\\n' + rows.slice(-cap).map((l) => '  ' + l).join('\\r\\n') : rule + '\\r\\n\\u276f ' + (ghost || lines[0]) + lines.slice(1).map((l) => '\\r\\n  ' + l).join('');`,
       `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + top + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
+      // cursor.flag: the cursor where Claude Code leaves it (F2, 0.14.5
+      // review): at column 2 of the `❯` row in an empty box, a suggestion
+      // drawn after it; at the end of what was typed otherwise. Without the
+      // flag it stays where the drawing ends, as every older row expects.
+      `    if (fs.existsSync(${JSON.stringify(`${CP_DIR}/cursor.flag`)}) && !(cap && rows.length > cap)) { const r = (busy ? 2 : 1) + 2 + (lines.length - 1); const c = composer ? 3 + lines[lines.length - 1].length : 3; out += '\\x1b[' + r + ';' + c + 'H'; }`,
       `  }`,
       `  process.stdout.write(out);`,
       `}`,
@@ -1796,6 +1801,58 @@ async function main() {
     assert(ghostSent.ok && ghostSent.confirmed, `a message typed over a prompt suggestion is delivered${ghostSent.ok ? '' : ` — ${ghostSent.error}`}`);
     eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, overGhost, 'as itself, the suggestion not in it');
     assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'and typed, not pasted after all: a suggestion is not text somebody left in the box');
+
+    // F2 (0.14.5 review). What the host types that nobody asked for at that
+    // moment (a /mcp reconnect the board asked for, a meeting room's notice)
+    // is not typed onto a draft. Measured on the rig on 2.1.330: a draft and
+    // a reconnect went in as one user record, the agent took a turn on it,
+    // and the reconnect never ran.
+    {
+      const box = (row) => ['⏺ ok', '─'.repeat(80), row, '─'.repeat(80), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+      eq([W.draftOf?.(box('❯ '), 2, '❯ '), W.draftOf?.(box('❯ Try "fix lint errors"'), 2, '❯ Try "fix lint errors"'),
+        W.draftOf?.(box('❯ half typed'), 14, '❯ half typed'), W.draftOf?.(box('❯ first line\n  second'), 8, '  second')],
+        [false, false, true, true], 'an empty box and a suggestion are not a draft; text with the cursor at its end is, on its first row or below it');
+      writeFileSync(`${CP_DIR}/cursor.flag`, '1');
+      await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+      await run('tmux', ['send-keys', '-t', cpTarget, '-l', 'half a sentence nobody sent']).catch(() => {});
+      assert(await until(async () => (await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout.includes('half a sentence nobody sent'), 4000),
+        'the fixture: somebody has typed half a sentence into the box');
+      eq(await W.draftAt?.(cpTarget), true, 'it is read off the pane as a draft');
+      mark = cpKeyLog().length;
+      const recsBefore = cpRecords().length;
+      const overDraft = await W.send(CP_DIR, W.typedCommand('/mcp', 'orchestratinator'), { unasked: true });
+      eq([overDraft.ok, overDraft.code], [false, 'draft'], `a reconnect nobody asked for is not typed onto it — ${overDraft.error ?? ''}`);
+      await sleep(800);
+      eq([keysSince(mark).length, cpRecords().length], [0, recsBefore], 'not a key reached the window, and nothing reached the conversation');
+      await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+      assert(await until(async () => ((await W.draftAt?.(cpTarget)) === false ? true : null), 4000), 'the box emptied, it is no longer a draft');
+      const intoEmpty = await W.send(CP_DIR, 'a notice into an empty box', { unasked: true });
+      assert(intoEmpty.ok, `then the same goes in${intoEmpty.ok ? '' : ` — ${intoEmpty.error}`}`);
+      eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, 'a notice into an empty box', 'as itself');
+      writeFileSync(`${CP_DIR}/suggest.flag`, 'Run the tests and tell me what failed.');
+      await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+      assert(await until(async () => (await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout.includes('Run the tests and tell me'), 4000),
+        'the fixture: a suggestion stands in the box');
+      eq(await W.draftAt?.(cpTarget), false, 'a prompt suggestion is not a draft (the rig\'s control)');
+      const overSuggestion = await W.send(CP_DIR, 'a notice over a suggestion', { unasked: true });
+      assert(overSuggestion.ok, `so what is owed goes in over it${overSuggestion.ok ? '' : ` — ${overSuggestion.error}`}`);
+      eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, 'a notice over a suggestion', 'as itself, the suggestion not in it');
+      rmSync(`${CP_DIR}/suggest.flag`, { force: true });
+      rmSync(`${CP_DIR}/cursor.flag`, { force: true });
+    }
+
+    // F3 (0.14.5 review): a Claude Code started by hand from a window's shell
+    // is that shell's child, so the pane's pid is not the roster's.
+    {
+      const parent = new Map([[100, 1], [200, 100], [300, 200], [400, 1], [5, 6], [6, 5]]);
+      eq([W.underIn?.(parent, 100, [300]), W.underIn?.(parent, 100, [400]), W.underIn?.(parent, 300, [100]), W.underIn?.(parent, 7, [5])], [true, false, false, false],
+        'a process two levels under the pane runs under it; a sibling, a parent, and a loop in the table do not');
+      const { spawn } = await import('node:child_process');
+      const kid = spawn('/bin/sh', ['-c', 'sleep 5; :'], { stdio: 'ignore' });
+      await sleep(200);
+      eq([await W.runsUnder?.(process.pid, [kid.pid]), await W.runsUnder?.(kid.pid, [process.pid])], [true, false], 'and read off ps: this suite\'s child runs under it, not the other way round');
+      kid.kill();
+    }
 
     // And into a composer Claude Code has scrolled (issue #31's second live
     // test, 2026-11-17): a five-line message with two attachments, typed

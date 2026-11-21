@@ -2421,7 +2421,7 @@
     // installed the plugin", and only one of those is something to go fix.
     const role = el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' });
     role.textContent = d.hosted
-      ? `${d.agent} · ${d.hosted.live ? 'ready' : 'host offline'}`
+      ? `${d.agent} · ${d.hosted.live ? 'ready' : d.hosted.refused ? 'host refused' : 'host offline'}`
       : d.reporting ? d.agent : `${d.agent} · not reporting`;
     plate.appendChild(role);
     // The pad goes LAST, so it lies over the words rather than behind them.
@@ -2917,7 +2917,11 @@
    * the payload): the reminder of who still needs the plugin was fifteen
    * nameplates on the live board that nobody could type into.
    */
-  const deskEmpty = (d) => !d.live && !d.hosted?.live;
+  // A desk whose host was refused for its protocol is not empty: its host
+  // is running, and the desk says why it takes nothing (hostAway on the
+  // board, F4 of the 0.14.5 review). Hidden, the operator would see the
+  // desk vanish after a deploy with no word anywhere on the page.
+  const deskEmpty = (d) => !d.live && !d.hosted?.live && !d.hosted?.refused;
 
   /**
    * How a storey draws its desks: the ones on it, and the ones the operator

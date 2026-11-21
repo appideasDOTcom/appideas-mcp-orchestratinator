@@ -402,11 +402,31 @@ const STREAM_DESKS_MAX = 50;
  * The one rule underneath all three refusals is the one this whole repo is built
  * on: a conversation is one process, and only the app holding it can type.
  */
+/**
+ * Why a desk's host cannot take work now, or null when it can: refused at
+ * its last registration for its protocol (in protocolRefusal's words), or
+ * offline. One answer for every check that asks, so the bell, the box, a
+ * room's notice, a model change and Sign in all say the same thing.
+ *
+ * Refused comes first and does not wait for the host to go stale (F4, 0.14.5
+ * review, measured on the rig): after a deploy that rebuilt the board and
+ * left a 0.12.12 host running, the host kept its row's last_seen fresh for
+ * HOST_STALE_SECONDS, so its desk read live and took chats into the host's
+ * outbox that nobody would take, then said only "is offline". The words it
+ * was refused in name what to do; "offline" names nothing.
+ */
+export function hostAway(h, nowMs = Date.now(), { more = '' } = {}) {
+  if (h.host_refused) return { error: h.host_refused, code: 'host_refused' };
+  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline${more}.`, code: 'host_offline' };
+  }
+  return null;
+}
+
 export function deliverable(h, nowMs = Date.now()) {
   if (!h) return { error: 'No host on this board is running that repo, so there is nowhere to send this.', code: 'not_hosted' };
-  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
-  }
+  const away = hostAway(h, nowMs);
+  if (away) return away;
   // A conversation is one process, and right now an editor has it. Nothing can
   // be typed into it from here — so say that before a message is taken, rather
   // than accepting one and failing to deliver it.
@@ -469,9 +489,8 @@ export function signedOutWhy(h) {
 export function signinWhyNot(h, nowMs = Date.now()) {
   if (!h) return { error: 'No host on this board is running that repo, so there is nothing to sign in from.', code: 'not_hosted' };
   const name = h.host_name ?? h.host_id;
-  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-    return { error: `The host for this desk (${name}) is offline.`, code: 'host_offline' };
-  }
+  const away = hostAway(h, nowMs);
+  if (away) return away;
   if (!h.host_signins) return { error: `${name} runs a build from before Sign in. Update it, or sign in to Claude Code on that machine.`, code: 'host_no_signin' };
   if (!h.host_signed_out) return { error: `Claude Code is signed in on ${name}.`, code: 'signed_in' };
   return { hosted: h };
@@ -907,9 +926,8 @@ export function noHostWords(hostName) {
 
 export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false } = {}) {
   if (!h) return { error: 'No host on this board is running that repo, so there is no binding here to change.', code: 'not_hosted' };
-  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
-  }
+  const away = hostAway(h, nowMs);
+  if (away) return away;
   if (!editorOk && h.outside_pid) {
     return { error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
   }
@@ -1860,8 +1878,14 @@ export function protocolRefusal({ board, host }) {
   const speaks = h == null ? `sends no protocol version (${hv}, from before there was one)` : `speaks protocol ${h} (${hv})`;
   const which = h == null || h < b ? 'behind' : 'ahead of';
   const by = host?.supervisor === 'app' ? 'app' : 'launchd';
+  // Only remedies that work for the host refused. "Or update it from the
+  // page" was offered to launchd's host here until the 0.14.5 review (F4),
+  // and cannot work: the page's update is carried out by the host beside the
+  // board's container, and a refused host is not on the board to do it (its
+  // registration is refused before noteHost hears it, so Update answers "No
+  // host on this board's machine has reported in"; measured on the rig).
   const fix = which === 'behind'
-    ? (by === 'app' ? 'Update the Orchestratinator app, which carries the host.' : 'Restart the host so it runs the clone\'s current code, or update it from the page.')
+    ? (by === 'app' ? 'Update the Orchestratinator app, which carries the host.' : 'Restart the host so it runs the clone\'s current code.')
     : (by === 'app' ? 'Update the board to the app\'s build, or install the app build that matches it.' : 'Rebuild the board from the clone the host runs from.');
   return `${name} is ${which} this board: it ${speaks} and the board speaks protocol ${b} (${bv}). The two must match. ${fix}`;
 }
@@ -2923,7 +2947,14 @@ export function buildFloor(store, live = null, sessions = null) {
       host_id: h.host_id,
       host_name: h.host_name ?? h.host_id,
       host_seen: seen,
-      live: h.state !== 'offline' && secondsSince(seen, nowMs) < HOST_STALE_SECONDS,
+      live: !h.host_refused && h.state !== 'offline' && secondsSince(seen, nowMs) < HOST_STALE_SECONDS,
+      // The words its host was refused in (hostAway), so the page keeps the
+      // desk drawn and says why it takes nothing, rather than hiding it as
+      // empty (deskEmpty) while the host is still running. Under the
+      // store's name as well, because nudgeable() and its siblings are
+      // handed this entry and read the row's field (hostAway).
+      refused: h.host_refused ?? null,
+      host_refused: h.host_refused ?? null,
       state: h.state,
       cwd: h.cwd,
       sdk_session_id: h.sdk_session_id,
@@ -3137,6 +3168,9 @@ export function buildFloor(store, live = null, sessions = null) {
                 // `uploads` to offer a paperclip or say why not (issue #31).
                 host_id: h.host_id,
                 live: h.live,
+                // Refused at its host's last registration, in those words, or
+                // null (hostAway). The page draws the desk and says why.
+                refused: h.refused ?? null,
                 state: h.state,
                 window: h.cwd ? baseName(h.cwd) : null,
                 // The conversation the panel is scoped to — whichever one is
@@ -3461,6 +3495,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       const why = protocolRefusal({ board: { protocol: boardProtocol, version: boardVersion }, host: said });
       if (why) {
         live.refused.set(hostId, { ...said, protocol: said.protocol == null ? null : Number(said.protocol), at: new Date().toISOString(), why });
+        // And on its row, where every "can this desk take work" reads it
+        // (hostAway), from this first refusal on. The next accepted
+        // registration clears it (upsertHost).
+        store.setHostRefused(hostId, why);
         return res.status(409).json({ error: why, code: 'protocol_mismatch', board: { protocol: boardProtocol, version: boardVersion }, host: { protocol: said.protocol ?? null, version: said.version ?? null } });
       }
       live.refused.delete(hostId);
@@ -3824,7 +3862,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         continue;
       }
       if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent))) || signedOutWhy(check.hosted)) continue;
-      store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others) });
+      // `notice`: the host types it only into an empty box (F2, 0.14.5 review).
+      store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others), notice: true });
       live.wake(check.hosted.host_id);
       if (n.kind === 'enter') store.setRoomTold(n.channel, n.agent, n.room);
       else store.clearRoomTold(n.channel, n.agent);
@@ -4577,9 +4616,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const h = store.hostedDesk(channel, agent);
     const nowMs = Date.now();
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo, so there is no folder to list conversations from.', code: 'not_hosted' });
-    if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-      return res.status(409).json({ error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' });
-    }
+    const away = hostAway(h, nowMs);
+    if (away) return res.status(409).json(away);
     const key = deskKey(channel, agent);
     const held = live.sessions.get(key) ?? null;
     if (nowMs - (live.sessionsAsked.get(key) ?? 0) < SESSIONS_MIN_MS) {
@@ -4731,9 +4769,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const h = store.hostedDesk(channel, agent);
     const nowMs = Date.now();
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo, so there is nobody to read its conversations.', code: 'not_hosted' });
-    if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-      return res.status(409).json({ error: `The host for this desk (${h.host_name ?? h.host_id}) is offline, and the conversation is on its disk.`, code: 'host_offline' });
-    }
+    const away = hostAway(h, nowMs, { more: ', and the conversation is on its disk' });
+    if (away) return res.status(409).json(away);
     const key = readKey(channel, agent, sessionId);
     const requestId = `${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     live.reads.delete(key);

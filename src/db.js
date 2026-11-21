@@ -495,6 +495,13 @@ export function openDb(path) {
   // `seats`' reason, so a restarted board still draws the desks that way.
   addColumn(db, 'hosts', 'signins', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'hosts', 'signed_out', 'INTEGER NOT NULL DEFAULT 0');
+  // `refused`: the words a host was refused in at its last registration,
+  // for its protocol (protocolRefusal), and null once one is accepted. On
+  // the row, for `seats`' reason: every check of "can this desk be typed
+  // into" reads the desk's row joined to its host's, and a refused host's
+  // desks used to read live for up to HOST_STALE_SECONDS and take messages
+  // nobody would deliver, then say only "offline" (F4, 0.14.5 review).
+  addColumn(db, 'hosts', 'refused', 'TEXT');
   // A host's work, past being handed out (milestone audit 2026-11-17,
   // finding 4). `boot`: which run of the host took it, so the next run can
   // tell work it never finished from work it is doing. `done_at`: the host
@@ -1525,8 +1532,9 @@ export function makeStore(db) {
        ON CONFLICT(host_id) DO UPDATE SET
          name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats,
          uploads = excluded.uploads, reconnects = excluded.reconnects, signins = excluded.signins,
-         signed_out = excluded.signed_out, last_seen = datetime('now')`
+         signed_out = excluded.signed_out, refused = NULL, last_seen = datetime('now')`
     ),
+    setHostRefused: db.prepare(`UPDATE hosts SET refused = ? WHERE host_id = ?`),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
     listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
@@ -1571,7 +1579,7 @@ export function makeStore(db) {
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
-              h.signins AS host_signins, h.signed_out AS host_signed_out
+              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
@@ -1579,7 +1587,7 @@ export function makeStore(db) {
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
-              h.signins AS host_signins, h.signed_out AS host_signed_out
+              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id
         WHERE d.channel = ? AND d.agent = ?`
@@ -2381,6 +2389,8 @@ export function makeStore(db) {
     hostTakesUploads: (hostId) => !!q.hostUploads.get(hostId)?.uploads,
     hostReconnects: (hostId) => !!q.hostReconnects.get(hostId)?.reconnects,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
+    /** The words a host was refused in at registration (F4), or null to clear them. A host with no row has no desks to say them on. */
+    setHostRefused: (hostId, why) => q.setHostRefused.run(why ?? null, hostId).changes,
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>
       q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid, window_open: windowOpen, holders, clients }).changes,

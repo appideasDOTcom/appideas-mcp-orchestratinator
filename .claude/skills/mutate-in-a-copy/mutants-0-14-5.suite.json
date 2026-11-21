@@ -1,0 +1,121 @@
+[
+ [
+  "the host asks for its sign-in with no shell around it (F1)",
+  "host",
+  "host/index.js",
+  "    const st = await A.signedIn({ shell: await W.windowShell() });\n    if (st !== null) this.auth.status = st;\n    const now",
+  "    const st = await A.signedIn();\n    if (st !== null) this.auth.status = st;\n    const now"
+ ],
+ [
+  "the sign-in reading ignores the window's shell (F1)",
+  "host",
+  "host/auth.js",
+  "  if (!shell) return { cmd: argv[0], args: argv.slice(1) };",
+  "  return { cmd: argv[0], args: argv.slice(1) };"
+ ],
+ [
+  "a profile's own line hides the sign-in answer (F1)",
+  "host",
+  "host/auth.js",
+  "  for (const text of [s, s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)]) {",
+  "  for (const text of [s]) {"
+ ],
+ [
+  "the floor's default-shell is passed over for SHELL (F1)",
+  "host",
+  "host/window.js",
+  "  for (const s of [told, env.SHELL, own]) if (s && s.startsWith('/') && exists(s)) return s;",
+  "  for (const s of [env.SHELL, own]) if (s && s.startsWith('/') && exists(s)) return s;"
+ ],
+ [
+  "the host types a reconnect onto a draft (F2)",
+  "window",
+  "host/window.js",
+  "  if (unasked && await draftAt(pane.target)) {",
+  "  if (false) {"
+ ],
+ [
+  "a suggestion reads as a draft (F2)",
+  "window",
+  "host/window.js",
+  "  return !(/^\\s*❯/.test(String(cursorRow ?? '')) && Number(cursorX) <= 2);",
+  "  return true;"
+ ],
+ [
+  "a Claude Code under its window's shell is never found (F3: both guards, the watch's and the healer's, call this)",
+  "host",
+  "host/window.js",
+  "  if (WINDOWS || !ancestor || !pids?.length) return false;",
+  "  return false;"
+ ],
+ [
+  "what a desk is owed is never typed once the box empties (F2)",
+  "host",
+  "host/index.js",
+  "          await desk.payOwed().catch(",
+  "          if (false) await desk.payOwed().catch("
+ ],
+ [
+  "a reconnect over a draft is dropped, not owed (F2)",
+  "host",
+  "host/index.js",
+  "      this.owedReconnect = true;\n      return;",
+  "      return;"
+ ],
+ [
+  "the process table walk stops at the first parent (F3)",
+  "window",
+  "host/window.js",
+  "    for (let n = 0; n < 64 && x > 1; n++) {",
+  "    for (let n = 0; n < 1 && x > 1; n++) {"
+ ],
+ [
+  "a refused host's desk takes work until it goes stale (F4)",
+  "floor",
+  "src/floor.js",
+  "  if (h.host_refused) return { error: h.host_refused, code: 'host_refused' };",
+  ""
+ ],
+ [
+  "the refusal is not written on the host's row (F4)",
+  "floor",
+  "src/floor.js",
+  "        store.setHostRefused(hostId, why);",
+  ""
+ ],
+ [
+  "a registration accepted keeps the old refusal (F4)",
+  "floor",
+  "src/db.js",
+  "         signed_out = excluded.signed_out, refused = NULL, last_seen = datetime('now')",
+  "         signed_out = excluded.signed_out, last_seen = datetime('now')"
+ ],
+ [
+  "the page hides a refused host's desk as empty (F4)",
+  "floor",
+  "src/ui/floor.js",
+  "  const deskEmpty = (d) => !d.live && !d.hosted?.live && !d.hosted?.refused;",
+  "  const deskEmpty = (d) => !d.live && !d.hosted?.live;"
+ ],
+ [
+  "launchd's refused host is offered the page's update again (F4)",
+  "floor",
+  "src/floor.js",
+  ": 'Restart the host so it runs the clone\\'s current code.')",
+  ": 'Restart the host so it runs the clone\\'s current code, or update it from the page.')"
+ ],
+ [
+  "a replayed turn is the machine's word now (F5)",
+  "host",
+  "host/index.js",
+  "      if (!(this.joinedAt && Date.parse(turn.at) < this.joinedAt)) this.host.noteTurn(turn);",
+  "      this.host.noteTurn(turn);"
+ ],
+ [
+  "the sign-in reading waits on the child's pipes (QA 3800)",
+  "host",
+  "host/auth.js",
+  "{ env: claudeEnv(env), timeout: timeoutMs, killSignal: 'SIGKILL' }",
+  "{ env: claudeEnv(env), timeout: timeoutMs }"
+ ]
+]
