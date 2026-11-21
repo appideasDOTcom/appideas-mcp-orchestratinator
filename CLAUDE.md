@@ -3449,6 +3449,98 @@ which commit the app really runs (`app-pin-check.sh`), the plugin commands
 on today's Claude Code (`plugin-install-probe.sh`), and how a round with
 the app's agent goes.
 
+## A host on Windows (feature/windows-implementation)
+
+2026-11-20, costmo's scope: the Docker install working on Windows, the
+desktop app later. Built from this folder and measured on his Windows 11 PC
+by **pc-developer**, a Claude Code desk on this floor running there (it
+reaches costmo's app board over an SSH tunnel and has a Docker board of its
+own on that PC's 8787). Nothing here can be seen from the Mac: **a claim
+about Windows is believed when pc-developer has measured it there**, by the
+same rule as the folder dialog's. Ask it with send_message and say what to
+read; costmo nudges it. Every step below was measured, and the code beside
+each says how, so this is the map, not the record.
+
+- **The multiplexer is psmux** (`winget install marlocarlo.psmux`, 3.4.0),
+  which answers tmux's commands. MSYS2's tmux and `arndawg.tmux-windows`
+  were measured and fail the one join that matters (a pane's pid is a
+  shell's, never the pid `claude agents` reports). psmux's differences, each
+  handled on `WINDOWS` only in [`host/window.js`](host/window.js): a window's
+  program is an argument list after `--` (`launchArgs`; Windows has no
+  `exec`, and a shell line leaves the shell as the pane's process);
+  binaries are found by path (`findExe`: winget's Links folder is on PATH
+  only for processes started after the install); a window target is
+  `=orch:name`, never `=orch:=name` (psmux drops the keys silently);
+  `@orch_seat` is session-wide there, so **a seat rides in its window's
+  name** (`seatNameMark`, `--s<hex>`); some refusals exit 0 with the error
+  on stdout (`psmuxRefusal`); `run-shell` runs under **Windows PowerShell
+  5.1** whatever SHELL says, so the macOS folder-read check is off there
+  (`NO_READ_CHECK`); `-J` does not join, and `pane_dead_status` is not
+  filled.
+- **Paths are a machine's own.** The board (Linux, in a container) takes
+  `/…` or a drive (`C:\` or `C:/`) as absolute and compares a drive path
+  with separators and case folded (`isAbsPath`, `underRoots`, `baseName` in
+  [`src/floor.js`](src/floor.js)); the host uses `node:path`, which is
+  native (`isUnder` in [`host/identity.js`](host/identity.js)); the page
+  has its own copies. `claude mcp add -s local` keys `~/.claude.json` as
+  `C:/Users/…` while Node gives `C:\Users\…`: the hook (`localAt`) and the
+  host (`atFolder`) fold the two. `ORCH_HOST_ROOTS` splits on
+  `path.delimiter`. A test that expects a path spells it with `resolve()`,
+  and one that checks a Windows answer uses a path absolute on the machine
+  running it (`readAnswer` is native; a drive path is not absolute on a Mac).
+- **The supervisor is Task Scheduler, and it does neither of launchd's two
+  jobs.** It does not restart a task that exits, and Stop-ScheduledTask is a
+  kill with no signal. So the task runs [`host/supervise.mjs`](host/supervise.mjs)
+  (restarts after any exit; on a stop file it sends the host `{type:'stop'}`
+  over IPC, which index.js treats as SIGTERM), started by
+  `conhost.exe --headless node.exe …`, the only way measured to put nothing
+  on screen. [`host/install.ps1`](host/install.ps1) writes `host.json`,
+  stops a running host through the stop file before the task, and registers
+  an AtLogOn task (Interactive, Limited, IgnoreNew). `-Uninstall` removes it.
+- **A hidden process may not take the front** (the foreground lock): a
+  dialog or a Windows Terminal it opens lands behind. The unlock that was
+  measured to work is an invisible always-on-top owner (for a dialog), an
+  ALT tap, AttachThreadInput to the front window's thread, then
+  SetForegroundWindow. It is in [`host/dialog-win.ps1`](host/dialog-win.ps1)
+  (the folder dialog, #28) and [`host/front-win.ps1`](host/front-win.ps1)
+  (Open in tmux / Open in Claude, which titles its window with
+  `--suppressApplicationTitle` so the script can find it). Both were 4 of 4
+  in front and focused. Not measured: a locked screen, two monitors.
+- **Windows PowerShell 5.1, which every Windows has, has three traps.** It
+  refuses `&&`. It does not escape a `"` inside an argument handed to a
+  program, so values go to `node -e` through the environment
+  (`install.ps1`). And without `[Console]::OutputEncoding` set to UTF-8, a
+  path with an accent is mangled on its way to node; `Get-Content` of the
+  UTF-8 log needs `-Encoding UTF8`. Run a script with `-File` (arguments
+  arrive whole), never `-Command`.
+- **A host started from inside a Claude Code window hands that session's
+  markers to every window** (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, …),
+  and a Claude Code that inherits them writes no transcript ("Transcript
+  saving is off"). `windowEnv` leaves them out (`PARENT_SESSION`) on every
+  platform, a person's own Claude Code settings kept.
+- **What runs on Windows, and what does not.** `test:plugin` runs there
+  (from PowerShell too: its wrapper finds the bash beside `git.exe`). The
+  suites that drive tmux panes do not. Node refuses to spawn a `.cmd` or
+  `.bat` without a shell (the CVE-2024-27980 fix), so an `ORCH_FOLDER_DIALOG`
+  stand-in there must be an `.exe` (`node.exe` with `NODE_OPTIONS=--import`
+  worked). Hooks run under Git Bash; a `node` installed after the terminal
+  that started Claude Code is not on its PATH until a new terminal.
+
+Measured working there at 9e160cc: the README's Docker install (with
+`/plugin marketplace add ./`), the installed host (silent start, restart
+after a kill, clean stop, AtLogOn, uninstall), messages, permissions and
+questions from the floor, `/mcp` reconnect, Take a desk with the native
+dialog, seats, History, attachments, and both terminal buttons in front.
+How to measure a window or a dialog there is **measure-the-desktop**'s
+Windows section.
+
+**Scope is costmo's, and a relay can widen it.** A "host-side native file
+picker for attachments" was built across the board and page on a relayed
+reading of "native file/folder pickers", and removed the same hour: the
+paperclip already opens Windows' own dialog through the browser. Something
+new that crosses board and page is confirmed with him before it is built,
+however it arrived.
+
 ## Tests
 
 **Every suite, check and scratch board on this machine needs a newer Node
@@ -4164,6 +4256,8 @@ operator's live floor.
   | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
   | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
   | `host/dialog-win.ps1` | `test:host` (the command rows); what it does on a screen only by hand on Windows, from a hidden scheduled task, with somebody watching (the header of `host/dialog.js`) |
+  | `host/front-win.ps1`, `host/install.ps1` | no suite: by hand on Windows through pc-developer (**measure-the-desktop**, Windows); `test:window` holds the Terminal's arguments (`wtAttachArgs`) |
+  | `host/supervise.mjs` | `test:host` ("the supervisor Windows runs the host under") |
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `host/auth.js` | `test:host` |
