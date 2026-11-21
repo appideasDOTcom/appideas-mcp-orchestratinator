@@ -2,6 +2,7 @@ import express from 'express';
 import { CAST } from './db.js';
 import { agentBoard, agentLoadIndex, channelCounts, mcpSessionCounts, ZERO_COUNTS } from './agent-state.js';
 import { PALETTE, DEFAULT_HAIR, DEFAULT_SKIN, shirtForSeat } from './palette.js';
+import { UPLOAD_MAX_FILES } from './uploads.js';
 
 /**
  * The floor: what each agent's own Claude Code session is doing — and, for
@@ -196,6 +197,9 @@ export function lostWorkWords(item) {
     // it may have left the page open with nobody listening for it.
     case 'signin':
       return 'the sign-in may not have finished: the host restarted while it was open. If the desk still says Claude Code is signed out, press Sign in again';
+    // A file dialog the host was showing went with it; nothing was chosen.
+    case 'pickfiles':
+      return 'the file dialog closed: the host restarted while it was open. Choose the files again';
     default:
       return `"${item?.kind}" may not have happened: the host restarted before it was done. Check the desk and do it again if it is needed`;
   }
@@ -305,6 +309,35 @@ export const isAbsPath = (p) => typeof p === 'string' && (p.startsWith('/') || D
 const pathKey = (p) => (DRIVE_PATH.test(p) ? p.replace(/\\/g, '/').toLowerCase() : p);
 /** A folder's last name, by its own machine's separators. */
 export const baseName = (p) => String(p ?? '').split(DRIVE_PATH.test(p) ? /[\\/]/ : '/').filter(Boolean).pop() ?? null;
+/** How long a path the host's file dialog chose for a desk may be sent to
+ *  it: the hour an upload is staged for (UPLOAD_TTL_MS), for the same person
+ *  attaching and then writing the message. */
+export const HOST_FILE_OFFER_MS = 60 * 60 * 1000;
+
+/**
+ * Why a message may not carry these files that are already on its desk's
+ * machine (`host_files`), or null when it may. Each one must be a path that
+ * desk's host's file dialog chose for that desk within HOST_FILE_OFFER_MS
+ * (`offered`, path -> ms): a path from another machine means nothing on this
+ * one, and a chip carried over from another desk's box would otherwise be
+ * typed into the wrong window. Not a guard on what the operator may name,
+ * since they could type any path as words; it keeps a file chip true to the
+ * machine it came from. Files of both kinds count to UPLOAD_MAX_FILES.
+ */
+export function hostFilesWhyNot(paths, offered, { nowMs = Date.now(), uploaded = 0, max = UPLOAD_MAX_FILES } = {}) {
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string' && isAbsPath(p))) {
+    return { error: 'host_files must be a list of absolute paths', code: 'bad_host_files' };
+  }
+  if (paths.length + uploaded > max) {
+    return { error: `A message carries at most ${max} files; this one has ${paths.length + uploaded}.`, code: 'too_many_files' };
+  }
+  const stale = paths.filter((p) => !(nowMs - (offered?.get(p) ?? -Infinity) <= HOST_FILE_OFFER_MS));
+  if (stale.length) {
+    return { error: `${baseName(stale[0])}${stale.length > 1 ? ` and ${stale.length - 1} more` : ''} ${stale.length > 1 ? 'were' : 'was'} not chosen in this desk's host's file dialog in the last hour. Choose ${stale.length > 1 ? 'them' : 'it'} again.`, code: 'host_files_unoffered' };
+  }
+  return null;
+}
+
 export const underRoots = (p, roots) => {
   const k = pathKey(p);
   return roots.some((r) => { const rk = pathKey(r); return k === rk || k.startsWith(rk.endsWith('/') ? rk : `${rk}/`); });
@@ -1936,6 +1969,8 @@ export function createLive() {
    *  chosen, closed without a choice, or failed. In memory like the rest: it
    *  is the answer to a click made seconds ago, and worth nothing after. */
   const pick = new Map();          // host_id -> { at, state, start, path, parent, error, why }
+  const pickFiles = new Map();     // deskKey -> { at, state, paths, error, why }: the host's file dialog for a desk
+  const offered = new Map();       // deskKey -> Map(path -> ms): files its host's dialog chose for that desk (hostFilesWhyNot)
   /** Conversations read whole off a host's disk, for reading — see READS_MAX.
    *  Keyed by desk and session; the newest few, the oldest dropped. */
   const reads = new Map();         // readKey -> { request_id, session_id, asked_at, at, rows, done, error }
@@ -1984,6 +2019,8 @@ export function createLive() {
     sessionsAsked,
     browse,
     pick,
+    pickFiles,
+    offered,
     reads,
     pending,
     answered,
@@ -2255,6 +2292,32 @@ function applyHostEvent(store, live, hostId, ev) {
   }
   const desk = store.hostedDesk(channel, agent);
   if (!desk || desk.host_id !== hostId) return tookWord;
+
+  // The host's own file dialog, opened for this desk: where it has got to,
+  // for the page waiting on it, and the paths it chose, which are the only
+  // ones a message to this desk may then carry as files on that machine
+  // (hostFilesWhyNot). About a desk, unlike `pick`, because the files are
+  // for one desk's message and the dialog starts in its folder.
+  if (str(ev.type) === 'pickfiles') {
+    const st = str(ev.state);
+    if (!PICK_STATES.has(st)) return false;
+    const paths = st === 'chosen' && Array.isArray(ev.paths) ? ev.paths.map(str).filter((p) => p && isAbsPath(p)) : [];
+    if (st === 'chosen' && !paths.length) return false;
+    live.pickFiles.set(key, {
+      at: str(ev.at) ?? new Date().toISOString(),
+      state: st,
+      paths,
+      error: st === 'failed' ? str(ev.error) ?? 'the file dialog failed and the host did not say how' : null,
+      why: str(ev.why),
+    });
+    if (paths.length) {
+      const mine = live.offered.get(key) ?? new Map();
+      const now = Date.now();
+      for (const p of paths) mine.set(p, now);
+      live.offered.set(key, mine);
+    }
+    return true;
+  }
 
   const placeholder = placeholderSession(hostId, channel, agent);
   const sessionId = str(ev.session_id) ?? desk.sdk_session_id ?? placeholder;
@@ -3354,6 +3417,9 @@ export function buildFloor(store, live = null, sessions = null) {
     // Whether it fetches attachments (issue #31; hosts.uploads): the box
     // dims its paperclip, with why, for a desk whose host does not.
     uploads: !!h.uploads,
+    // Whether it opens its machine's own file dialog for a desk, so the box
+    // can offer files already on that machine (hosts.file_dialog).
+    file_dialog: !!h.file_dialog,
     // Whether it runs Claude Code's sign-in for `signin` work, and whether
     // Claude Code is signed out on its machine now (host/auth.js).
     signin: !!h.signins,
@@ -3474,8 +3540,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // dropped, when the board asks (reconnectDue).
     // `signin`: it runs Claude Code's sign-in for `signin` work, and
     // `signed_out` is its reading of Claude Code on its machine (host/auth.js).
+    // `file_dialog`: it opens its machine's own file dialog for a desk
+    // (`pickfiles`), and types the files chosen there by path.
     store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true,
-      { signins: req.body?.signin === true, signedOut: req.body?.signed_out === true });
+      { signins: req.body?.signin === true, signedOut: req.body?.signed_out === true, fileDialog: req.body?.file_dialog === true });
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3998,7 +4066,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // message may be files alone, as in every other chat client.
     const ids = req.body?.files ?? null;
     const hasFiles = Array.isArray(ids) && ids.length > 0;
-    if (!channel || !agent || (!text && !hasFiles)) return res.status(400).json({ error: 'channel, agent and text are required' });
+    // And files already on the desk's machine, chosen in its host's own file
+    // dialog (`pickfiles`): typed by path, never uploaded.
+    const hostFiles = req.body?.host_files ?? null;
+    if (hostFiles !== null && !Array.isArray(hostFiles)) return res.status(400).json({ error: 'host_files must be a list of absolute paths', code: 'bad_host_files' });
+    const hasHostFiles = Array.isArray(hostFiles) && hostFiles.length > 0;
+    if (!channel || !agent || (!text && !hasFiles && !hasHostFiles)) return res.status(400).json({ error: 'channel, agent and text are required' });
     if (text.length > CHAT_MAX) return res.status(400).json({ error: `text must be ${CHAT_MAX} characters or fewer` });
     let files = [];
     if (hasFiles) {
@@ -4009,6 +4082,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       const r = uploads.resolve(ids);
       if (r.error) return res.status(r.code === 'upload_gone' ? 410 : 400).json(r);
       files = r.files;
+    }
+    if (hasHostFiles) {
+      if (commandOf(text)) return res.status(400).json({ error: 'A command cannot carry files. Send the files as a message of their own.', code: 'command_files' });
+      const why = hostFilesWhyNot(hostFiles, live.offered.get(deskKey(channel, agent)), { uploaded: files.length });
+      if (why) return res.status(400).json(why);
     }
     // A slash command goes to the window as typed, and the host confirms it
     // on the command's own receipt (FLOOR_COMMANDS). Two are checked here,
@@ -4040,6 +4118,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       }
       uploads.grant(files.map((f) => f.id), h.host_id);
     }
+    // A host that never said it has a file dialog could not have offered the
+    // paths, and one from before it would type the words and drop them.
+    if (hasHostFiles && !store.hostFileDialog?.(h.host_id)) {
+      return res.status(409).json({ error: `${h.host_name ?? 'This desk’s host'} cannot open a file dialog of its own. Attach the files with the paperclip.`, code: 'host_no_file_dialog' });
+    }
     // What the floor asked for, shown apart from what the window confirms —
     // the window's own line or the hook clears it.
     // On the window's session — the roster's, which the host reports on the
@@ -4067,9 +4150,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // Mark where the conversation stood, so the delivery report can tell this
     // message's turn from an older one that says the same words — see sentAfter.
     live.sentAfter.set(deskKey(channel, agent), store.deskLastUserTurn(channel, agent)?.id ?? 0);
-    store.enqueueHostWork(h.host_id, channel, agent, 'chat', files.length ? { text, files } : { text });
+    store.enqueueHostWork(h.host_id, channel, agent, 'chat', { text, ...(files.length ? { files } : {}), ...(hasHostFiles ? { host_files: hostFiles } : {}) });
     live.wake(h.host_id);
-    res.json({ ok: true, host: h.host_name ?? h.host_id, ...(files.length ? { files: files.length } : {}) });
+    res.json({ ok: true, host: h.host_name ?? h.host_id, ...(files.length ? { files: files.length } : {}), ...(hasHostFiles ? { host_files: hostFiles.length } : {}) });
   });
 
   /**
@@ -4550,6 +4633,37 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const held = live.pick.get(hostId) ?? null;
     if (!held) return res.json({ host_id: hostId, at: null });
     res.json({ host_id: hostId, ...held });
+  });
+
+  /**
+   * The desk's host opens its machine's own file dialog, started in the
+   * desk's folder, so a message can carry files that are already there:
+   * named by path, never uploaded. Two routes, as with `pick`: the POST
+   * queues `pickfiles` work and returns at once, and the page reads where the
+   * dialog has got to, and what it chose, from the GET. A host that has not
+   * said it has a file dialog is not asked; the paperclip is the way there.
+   */
+  router.post('/api/floor/pick-files', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const check = hostedOrWhyNot(channel, agent);
+    if (check.error) return res.status(409).json(check);
+    const h = check.hosted;
+    if (!store.hostFileDialog?.(h.host_id)) {
+      return res.status(409).json({ error: `${h.host_name ?? 'This desk’s host'} cannot open a file dialog of its own. Attach the files with the paperclip.`, code: 'no_file_dialog' });
+    }
+    store.enqueueHostWork(h.host_id, channel, agent, 'pickfiles', {});
+    live.wake(h.host_id);
+    res.json({ ok: true, host: h.host_name ?? h.host_id });
+  });
+
+  router.get('/api/floor/pick-files', (req, res) => {
+    const channel = str(req.query.channel);
+    const agent = str(req.query.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const held = live.pickFiles.get(deskKey(channel, agent)) ?? null;
+    res.json({ channel, agent, ...(held ?? { at: null }) });
   });
 
   /**

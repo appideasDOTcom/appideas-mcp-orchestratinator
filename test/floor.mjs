@@ -3916,6 +3916,65 @@ try {
     r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'again', files: [json] });
     eq([r.status, r.body.code], [410, 'upload_gone'], 'and a message naming it afterwards is refused');
 
+    // Files already on the desk's machine (issue #28's companion, 2026-11-20):
+    // the host opens its own file dialog for a desk (`pickfiles`), and a
+    // message carries what it chose as paths there, never uploaded. The
+    // board's half: who may be asked, what the host's answer is taken from,
+    // and which paths a message may then carry.
+    {
+      const fdDesk = { channel: ACH, agent: 'fay', cwd: 'C:\\Users\\pat\\fay', session_id: 'sdk-fay' };
+      await fetch(`${HOST}/api/host/register`, { method: 'POST', headers: aHK, body: JSON.stringify({ host_id: 'h-fd', name: 'winbox', tmux: 'orch', protocol: PROTOCOL, desks: [fdDesk], uploads: true, file_dialog: true }) });
+      await post({ channel: ACH, agent: 'fay', session_id: 'sdk-fay', hook_event_name: 'SessionStart', cwd: fdDesk.cwd });
+      const hs = (await floor()).hosts ?? [];
+      eq([hs.find((h) => h.host_id === 'h-fd')?.file_dialog, hs.find((h) => h.host_id === 'h-att')?.file_dialog], [true, false],
+        'the payload says which hosts open a file dialog of their own, from what each said at registration');
+      const hev = (hostId, ev) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: aHK, body: JSON.stringify({ host_id: hostId, events: [{ type: 'pickfiles', ...ev }] }) }).then((x) => x.json());
+      const pickedFor = (agent) => fetch(`${HOST}/api/floor/pick-files?channel=${ACH}&agent=${agent}`).then((x) => x.json());
+
+      r = await op('/api/floor/pick-files', { channel: ACH, agent: 'ada' });
+      eq([r.status, r.body.code], [409, 'no_file_dialog'], 'a desk whose host has no file dialog of its own is not asked for one');
+      assert(/^attbox cannot open a file dialog of its own\. Attach the files with the paperclip\./.test(r.body.error ?? ''), `in words that name the host and the other way — ${r.body.error}`);
+      eq(await work('h-att'), [], 'and nothing is queued for it');
+      r = await op('/api/floor/pick-files', { channel: ACH, agent: 'fay' });
+      eq(r.status, 200, 'a desk whose host has one can ask it to open');
+      eq((await work('h-fd')).map((w) => `${w.kind} ${w.channel}/${w.agent}`), [`pickfiles ${ACH}/fay`], 'and its host is handed pickfiles for that desk');
+
+      eq((await pickedFor('fay')).at, null, 'before the host answers, there is nothing to read');
+      const chosen = ['C:\\Users\\pat\\fay\\notes.md', 'D:\\logs\\build one.log'];
+      eq((await hev('h-fd', { channel: ACH, agent: 'fay', state: 'open', at: new Date().toISOString() })).applied, 1, 'the host says the dialog is open');
+      eq((await hev('h-fd', { channel: ACH, agent: 'fay', state: 'chosen', paths: [...chosen, 'relative\\nope'], at: new Date().toISOString() })).applied, 1, 'and then what was chosen');
+      const got = await pickedFor('fay');
+      eq([got.state, got.paths], ['chosen', chosen], 'which the page reads back, the paths as the host wrote them and anything not absolute left out');
+      eq((await hev('h-att', { channel: ACH, agent: 'fay', state: 'chosen', paths: ['C:\\evil.txt'] })).applied, 0, 'another host cannot answer for a desk it does not run');
+      eq((await hev('h-fd', { channel: ACH, agent: 'fay', state: 'chosen', paths: [] })).applied, 0, 'and a choice of nothing is no answer');
+
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'fay', text: 'read these', host_files: chosen });
+      eq(r.status, 200, 'a message to that desk carries the files its host chose');
+      let fw = await work('h-fd');
+      eq(fw.map((x) => [x.kind, x.payload.text, x.payload.host_files]), [['chat', 'read these', chosen]], 'and its host is handed them as paths, in order, with nothing to fetch');
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'fay', text: '', host_files: [chosen[0]] });
+      fw = await work('h-fd');
+      eq([r.status, fw[0]?.payload.text, fw[0]?.payload.host_files], [200, '', [chosen[0]]], 'files on the host alone are a message');
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'fay', text: 'x', host_files: ['C:\\Users\\pat\\other.txt'] });
+      eq([r.status, r.body.code], [400, 'host_files_unoffered'], 'a path its host did not choose for it is refused, in words');
+      assert(/^other\.txt was not chosen in this desk's host's file dialog/.test(r.body.error ?? ''), `naming the file — ${r.body.error}`);
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'ada', text: 'x', host_files: [chosen[0]] });
+      eq([r.status, r.body.code], [400, 'host_files_unoffered'], 'and so is one chosen for another desk: a chip carried to the wrong box is not typed into the wrong window');
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'fay', text: '/compact', host_files: [chosen[0]] });
+      eq([r.status, r.body.code], [400, 'command_files'], 'a command cannot carry them either');
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'fay', text: 'x', host_files: Array.from({ length: 21 }, (_, i) => `C:\\f${i}.txt`) });
+      eq([r.status, r.body.code], [400, 'too_many_files'], 'and both kinds together are twenty a message');
+      r = await op('/api/floor/chat', { channel: ACH, agent: 'fay', text: 'x', host_files: 'C:\\x.txt' });
+      eq(r.status, 400, 'host_files is a list');
+      eq((await work('h-fd')).length, 0, 'and none of those refusals queued anything');
+
+      const { hostFilesWhyNot, HOST_FILE_OFFER_MS } = await import('../src/floor.js');
+      const offeredAt = new Map([['C:\\a.txt', 1_000_000]]);
+      eq([hostFilesWhyNot(['C:\\a.txt'], offeredAt, { nowMs: 1_000_000 + HOST_FILE_OFFER_MS }), hostFilesWhyNot(['C:\\a.txt'], offeredAt, { nowMs: 1_000_001 + HOST_FILE_OFFER_MS })?.code],
+        [null, 'host_files_unoffered'], 'hostFilesWhyNot: a path stays sendable for the hour after its host chose it, and not past it');
+      eq(hostFilesWhyNot(['C:\\a.txt'], offeredAt, { nowMs: 1_000_000, uploaded: 20 })?.code, 'too_many_files', 'and uploads in the same message count toward the twenty');
+    }
+
     // The staging store's clock and names, in-process: an hour is not waited.
     const { createUploads, safeName } = await import('../src/uploads.js');
     const tdir = `./data/floor-${process.pid}-stage-unit`;
@@ -3958,6 +4017,10 @@ try {
       { path: '/Users/x/.orchestratinator/uploads/def456def/build.log', name: 'build.log' },
     ] }, 'a message the host composed splits into the words and the files, a name with a space in it included');
     eq(pg.splitAttached(hostUp.withAttachments('', ['/u/abcdefgh/a.png'])), { text: '', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] }, 'files alone are files and no words');
+    eq(pg.attachSendable('see', [{ state: 'ready', id: 'up1' }, { state: 'ready', host: true, path: 'C:\\x\\a.md' }]), { ok: true, ids: ['up1'], paths: ['C:\\x\\a.md'] },
+      'attachSendable: an uploaded file goes as its id and a file on the host as its path');
+    eq(pg.attachSendable('/compact', [{ state: 'ready', host: true, path: 'C:\\x\\a.md' }]).why, 'a command cannot carry files', 'and a command carries neither');
+    eq(pg.attachMatch('', [{ host: true, path: 'C:\\x\\a.md', name: 'a.md' }]), 'C:\\x\\a.md', 'attachMatch: a message of host files alone is matched by the first one\'s whole path, which only its own turn holds');
     eq(pg.splitAttached(hostUp.withAttachments('see', ['C:\\Users\\pat\\.orchestratinator\\uploads\\abcdefgh\\a.png'])).files,
       [{ path: 'C:\\Users\\pat\\.orchestratinator\\uploads\\abcdefgh\\a.png', name: 'a.png' }], 'and a Windows host\'s path is a file, named by its last part');
     eq(pg.splitAttached(composed.replace(/\n/g, '\r\n')).files.length, 2, 'and a window that records CRLF reads the same');
@@ -3984,7 +4047,7 @@ try {
       [true, true, false, false], 'a paste attaches a screenshot, and a file copied in Finder, but not the picture a spreadsheet puts beside its words');
     const chip = (state, id = 'x1') => ({ state, id });
     eq([pg.attachSendable('hi', []), pg.attachSendable('', [chip('ready')]), pg.attachSendable('hi', [chip('uploading')]).why, pg.attachSendable('hi', [chip('failed')]).why, pg.attachSendable('/compact', [chip('ready')]).why, pg.attachSendable('  ', [])],
-      [{ ok: true, ids: [] }, { ok: true, ids: ['x1'] }, 'still uploading', 'remove the file that failed', 'a command cannot carry files', { ok: false, why: null }],
+      [{ ok: true, ids: [], paths: [] }, { ok: true, ids: ['x1'], paths: [] }, 'still uploading', 'remove the file that failed', 'a command cannot carry files', { ok: false, why: null }],
       'Send takes words, files or both; waits for an upload; says what stops it');
     // One rule on both sides (QA, PR #58 finding 1): the page reads a
     // command as the board's commandOf does, so a message that opens with a

@@ -626,7 +626,9 @@ class Desk {
           tool_name: `/${r.command}`, tool_input: null, via: null,
         }, true);
       }
-      log(`${this.label}: /${r.command} — ${r.said}`);
+      // No log line of its own here: told() above logs the same words, and
+      // every command from the floor was in the host log twice, in the same
+      // millisecond (pc-developer, 2026-11-20, a floor /mcp).
     } else if (r.held === 'compacting') {
       // The window took the message and went off to compact under it. The
       // enqueue record carries no text on 2.1.300, so the only receipt is the
