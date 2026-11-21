@@ -351,14 +351,18 @@ is what brought it back.
 
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
-[`host/dialog.js`](host/dialog.js), with a backend per platform and only
-macOS filled in. Its header is the record: four ways of opening a dialog
-from a LaunchAgent were watched, three are *drawn and never focused* (or
-outlive their process), and a cross-platform npm library was tried and is
-one of the three. So: do not swap it for a library, and do not write a Linux
-or Windows backend from first principles — a backend goes in after it has
-been watched taking focus from the host's own service, which is what the
-**measure-the-desktop** skill is for. A host with no backend says so on
+[`host/dialog.js`](host/dialog.js), with a backend per platform: macOS, and
+Windows since issue #28 (`host/dialog-win.ps1`). Its header is the record:
+four ways of opening a dialog from a LaunchAgent were watched, three are
+*drawn and never focused* (or outlive their process), and a cross-platform
+npm library was tried and is one of the three. On Windows, from the hidden
+Task Scheduler process, the dialog alone opened behind the window in front,
+an always-on-top owner made it drawn but not focused, and that owner brought
+to the front first (an ALT tap and AttachThreadInput) made it the foreground
+window (pc-developer, 2026-11-20, costmo watching). So: do not swap it for a
+library, and do not write a Linux backend from first principles — a backend
+goes in after it has been watched taking focus from the host's own service,
+which is what the **measure-the-desktop** skill is for. A host with no backend says so on
 registration (`dialog`) and the page draws its own list for it; that list is
 the fallback, not leftover code.
 
@@ -4146,6 +4150,7 @@ operator's live floor.
   | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:markdown` also reads `floor.js` (the renderer), `test:window` only its `LINK_LABEL.attach` (read 2026-11-19), `test:update` reads `app.js` |
   | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
   | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
+  | `host/dialog-win.ps1` | `test:host` (the command rows); what it does on a screen only by hand on Windows, from a hidden scheduled task, with somebody watching (the header of `host/dialog.js`) |
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `host/auth.js` | `test:host` |

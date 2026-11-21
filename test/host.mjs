@@ -1901,9 +1901,19 @@ try {
     'with the two lines measured to bring it to the front: the activation policy, and the activate call');
   eq(mac.args[4], `/tmp/it's "here"`, 'the start folder is handed over as an argument');
   assert(!mac.args[3].includes('here'), 'never written into the script — a path with a quote in it is a path, not source');
-  eq([dialogCommand('/x', { platform: 'linux', env: {} }), dialogCommand('/x', { platform: 'win32', env: {} })], [null, null],
-    'Linux and Windows have no backend until one has been watched taking focus');
-  eq([hasDialog({ platform: 'darwin', env: {} }), hasDialog({ platform: 'linux', env: {} })], [true, false], 'which is what the host tells the board, so such a host gets the page\'s list');
+  eq(dialogCommand('/x', { platform: 'linux', env: {} }), null, 'Linux has no backend until one has been watched taking focus');
+  eq([hasDialog({ platform: 'darwin', env: {} }), hasDialog({ platform: 'win32', env: {} }), hasDialog({ platform: 'linux', env: {} })], [true, true, false], 'which is what the host tells the board, so such a host gets the page\'s list');
+  // Windows (issue #28): Windows PowerShell running dialog-win.ps1 with -File,
+  // the start folder an argument of its own, as the macOS one is.
+  const win = dialogCommand(`C:\\Users\\me\\it's "here"`, { platform: 'win32', env: { SystemRoot: 'C:\\Windows' } });
+  eq(win?.cmd.replace(/\\/g, '/'), 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe', 'on Windows the dialog is Windows PowerShell, which every Windows has');
+  eq(win?.args.slice(0, 6), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-STA', '-File'], 'run with -File (arguments arrive whole) and -STA (the dialog is COM)');
+  assert(/dialog-win\.ps1$/.test(win?.args[6] ?? ''), 'the script beside dialog.js');
+  eq(win?.args.slice(7, 9), [`C:\\Users\\me\\it's "here"`, 'Choose the folder your agent lives in'], 'the start folder handed over as an argument, then the title');
+  eq([dialogBackend({ platform: 'win32', env: {} })], ['win32'], 'and the backend is named for it');
+  eq(readAnswer({ code: 0, signal: null, stdout: '{"path":"C:\\\\Users\\\\me\\\\café ünïcode"}\r\n', stderr: '' }), { ok: true, path: 'C:\\Users\\me\\café ünïcode' },
+    'a Windows path is a path (lines end in \\r\\n there), with its accents');
+  eq(readAnswer({ code: 2, signal: null, stdout: '', stderr: 'Exception calling "Show"\r\n' }).error, 'the folder dialog ended with exit code 2: Exception calling "Show"', 'and a failure is quoted from its last line, without the \\r');
   eq(dialogCommand('/x', { platform: 'linux', env: { ORCH_FOLDER_DIALOG: '/bin/stand-in' } }), { cmd: '/bin/stand-in', args: ['/x'] }, 'the suite\'s stand-in takes the place of any of them');
   eq([startFor(REPO, '/home'), startFor(`${REPO}/gone/deeper`, '/home'), startFor(`${REPO}/.mcp.json`, '/home'), startFor('relative/path', '/home'), startFor(undefined, '/home'), startFor('/no-such-top-level-folder-here', '/home')],
     [REPO, REPO, REPO, '/home', '/home', '/'],

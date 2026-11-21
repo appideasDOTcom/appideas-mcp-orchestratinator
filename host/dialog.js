@@ -39,13 +39,36 @@
  * for 20 s; the rest ship no macOS binary, no folder picker, or do not load.
  * So this is a switch per platform, by ruling, with no dependency.
  *
- * Linux and Windows have no backend yet, on purpose. Each is a few lines in
- * dialogCommand() — and each has to be watched for focus from this host's own
- * service before it is believed, because that is exactly the check three of
- * the four macOS ways failed. A backend written without that watch is a
- * dialog that may open behind the browser, which reads as a button that does
- * nothing. Until one is measured, such a host says it has no dialog
- * (`hasDialog()`), and the page draws its own list for it.
+ * Windows is the second backend (issue #28), measured the same way
+ * (pc-developer, 2026-11-20, Windows 11 26200, Windows PowerShell 5.1, the
+ * dialog started from a hidden `conhost --headless` scheduled task exactly as
+ * the installed host runs, the foreground window read every 0.5 s, costmo
+ * watching the screen and clicking into the browser first):
+ *
+ *   - Windows' own IFileOpenDialog with no owner: drawn, and behind the
+ *     window in front ("behind the terminal this chat is in") for 3 minutes.
+ *   - Owned by an invisible always-on-top window: drawn above everything,
+ *     and the window in front kept the keyboard. Visible, not focused.
+ *   - That owner brought to the front first (an ALT tap and the front
+ *     window's input queue attached, then SetForegroundWindow): the dialog
+ *     was the foreground window 1.5 s after the start, from Chrome, and
+ *     Chrome had the focus back when it closed. "In front and active".
+ *   - A path with a space and non-ASCII letters came back whole once the
+ *     script's output is UTF-8. Killing the PowerShell process took the
+ *     dialog off the screen within 0.7 s.
+ *   - Not measured: a locked screen (no window in front to take the focus
+ *     from), and two monitors (which screen it opens on).
+ *
+ * The last is host/dialog-win.ps1, run with -File so its arguments arrive
+ * whole.
+ *
+ * Linux has no backend yet, on purpose. It is a few lines in dialogCommand()
+ * — and it has to be watched for focus from this host's own service before
+ * it is believed, because that is exactly the check three of the four macOS
+ * ways failed, and two of the three Windows ones. A backend written without
+ * that watch is a dialog that may open behind the browser, which reads as a
+ * button that does nothing. Until one is measured, such a host says it has no
+ * dialog (`hasDialog()`), and the page draws its own list for it.
  *
  * The one backend that is not a command is the parent process
  * (`ORCH_FOLDER_DIALOG=parent`, task #290 on the desktop channel). The
@@ -77,7 +100,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** How long a dialog may sit open before the host closes it. Somebody who
  *  walked away has not chosen anything, and a dialog nobody remembers opening
@@ -85,6 +109,16 @@ import { dirname, isAbsolute } from 'node:path';
 export const PICK_TIMEOUT_MS = Number(process.env.ORCH_PICK_TIMEOUT_MS ?? 10 * 60_000);
 
 const MESSAGE = 'Choose the folder your agent lives in';
+
+/* The Windows backend: a script beside this file, run by Windows PowerShell
+   (always present, unlike pwsh) with -File, so the start folder reaches it as
+   an argument and never as source. -STA because the dialog is COM. */
+const WIN_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'dialog-win.ps1');
+const winPowerShell = (env) => join(env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const winDialog = (env, start) => ({
+  cmd: winPowerShell(env),
+  args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-STA', '-File', WIN_SCRIPT, start, MESSAGE],
+});
 
 /* argv, not interpolation: the start folder and the message reach the script
    as arguments, so a path with a quote in it is a path and never source.
@@ -157,6 +191,7 @@ export function dialogBackend({ platform = process.platform, env = process.env }
   if (env.ORCH_FOLDER_DIALOG === 'parent') return 'parent';
   if (env.ORCH_FOLDER_DIALOG) return 'program';
   if (platform === 'darwin') return 'darwin';
+  if (platform === 'win32') return 'win32';
   return null;
 }
 
@@ -176,6 +211,7 @@ export function dialogCommand(start, { platform = process.platform, env = proces
   if (env.ORCH_FOLDER_DIALOG === 'parent') return port ? { parent: true } : null;
   if (env.ORCH_FOLDER_DIALOG) return { cmd: env.ORCH_FOLDER_DIALOG, args: [start] };
   if (platform === 'darwin') return { cmd: 'osascript', args: ['-l', 'JavaScript', '-e', JXA, start, MESSAGE] };
+  if (platform === 'win32') return winDialog(env, start);
   return null;
 }
 
@@ -276,14 +312,15 @@ export function pickIsStale(item, ttlMs) {
 }
 
 /** What the dialog said, as one of three things — or what it printed, quoted,
- *  when it is none of them. Never a guess at why. */
+ *  when it is none of them. Never a guess at why. Windows ends its lines with
+ *  \r\n, which the trims take. */
 export function readAnswer({ code, signal, stdout, stderr }) {
   const said = String(stdout ?? '').trim();
   let j = null;
   try { j = JSON.parse(said); } catch { /* not JSON: reported below as it came */ }
   if (code === 0 && j && typeof j.path === 'string' && isAbsolute(j.path)) return { ok: true, path: j.path };
   if (code === 0 && j && j.cancelled === true) return { ok: true, cancelled: true };
-  const tail = String(stderr ?? '').trim().split('\n').pop() || said.split('\n').pop() || '';
+  const tail = String(stderr ?? '').trim().split('\n').pop()?.trim() || said.split('\n').pop()?.trim() || '';
   return { ok: false, error: `the folder dialog ended ${signal ? `on ${signal}` : `with exit code ${code}`}${tail ? `: ${tail}` : ' and said nothing'}` };
 }
 
@@ -301,24 +338,37 @@ export function openFolderDialog(start, { timeoutMs = PICK_TIMEOUT_MS, platform,
   const c = dialogCommand(start, { platform, env, port });
   if (!c) return { ok: false, error: dialogBackend({ platform, env }) === 'parent' ? 'this host was told to ask the process that started it for the folder dialog, and nothing started it with a port' : `this host has no folder dialog on ${platform ?? process.platform}` };
   if (c.parent) return askParent(port, start, { timeoutMs });
+  return runDialog(c, { timeoutMs });
+}
+
+/** The dialog as a process of its own: started, read when it closes, and
+ *  ended to close it. */
+function runDialog(c, { timeoutMs }) {
+  const name = 'folder dialog';
   let child;
   try {
-    child = spawn(c.cmd, c.args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // windowsHide is what the Windows measurement ran with: the PowerShell
+    // console is not shown, and the dialog and its owner still are (they are
+    // windows of their own, not the console's).
+    child = spawn(c.cmd, c.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   } catch (err) {
-    return { ok: false, error: `could not start the folder dialog (${c.cmd}): ${err.message}` };
+    return { ok: false, error: `could not start the ${name} (${c.cmd}): ${err.message}` };
   }
   let stdout = '';
   let stderr = '';
   let leftOpen = false;
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
   child.stdout.on('data', (d) => { stdout += d; });
   child.stderr.on('data', (d) => { stderr += d; });
   const timer = setTimeout(() => { leftOpen = true; child.kill('SIGTERM'); }, timeoutMs);
   const done = new Promise((resolve) => {
-    child.on('error', (err) => { clearTimeout(timer); resolve({ ok: false, error: `could not start the folder dialog (${c.cmd}): ${err.message}` }); });
+    child.on('error', (err) => { clearTimeout(timer); resolve({ ok: false, error: `could not start the ${name} (${c.cmd}): ${err.message}` }); });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      // Ending the process is how the dialog is closed (measured: the window
-      // goes with it), so a dialog this host closed is not a failure.
+      // Ending the process is how the dialog is closed (measured on macOS and
+      // on Windows: the window goes with it), so a dialog this host closed is
+      // not a failure.
       if (leftOpen) return resolve({ ok: true, cancelled: true, why: `left open for ${Math.round(timeoutMs / 1000)}s` });
       return resolve(readAnswer({ code, signal, stdout, stderr }));
     });
