@@ -182,59 +182,6 @@ ok(room.panelBottom <= Math.max(bare.panelBottom, room.vh), 'and the panel reach
 await page.shot(`${out}/attach-many.png`, '#floor-panel');
 await page.resize(1500, 1000);
 
-// 10b. Files already on the desk's machine (issue #28's companion): the
-// button stands only for a host that says it has a file dialog of its own; a
-// press asks that host; what its dialog chose becomes chips with no bytes
-// here; Send hands the host the paths. The dialog itself is the host's and
-// is not driven: its answer is posted as the host would post it.
-if (DB) {
-  const require = createRequire(`${REPO}/package.json`);
-  const Database = require('better-sqlite3');
-  const setFd = (v) => { const db = new Database(DB); db.prepare('UPDATE hosts SET file_dialog = ? WHERE host_id = ?').run(v, HOSTID); db.close(); };
-  const hb = () => page.evalJs(`(() => { const b = document.querySelector('#floor-panel [data-act="attach-host"]'); return b ? { hidden: b.classList.contains('hidden'), disabled: b.disabled, title: b.title } : null; })()`);
-  // One at a time: each ✕ redraws the strip, so a button found before the
-  // first click is no longer in the page by the second.
-  await page.evalJs(`(() => { let b, n = 0; while ((b = document.querySelector('#floor-panel .att-x')) && n++ < 50) b.click(); return n; })()`);
-  ok((await chips()).length === 0, 'the fixture: the box holds no files before this part', await chips());
-  ok((await hb())?.hidden === true, 'on a host with no file dialog of its own, no button for files on its machine is drawn', await hb());
-  setFd(1);
-  await page.waitFor(`!document.querySelector('#floor-panel [data-act="attach-host"]').classList.contains('hidden')`, { timeout: 8000 }).catch(() => {});
-  const shown = await hb();
-  ok(shown && !shown.hidden && !shown.disabled && /^Choose files on /.test(shown.title), 'once the host says it has one, the button stands beside the paperclip, live, naming the machine', shown);
-  await work();
-  await page.press('#floor-panel [data-act="attach-host"]');
-  let asked = [];
-  for (let i = 0; i < 20 && !asked.length; i++) { asked = (await work()).filter((x) => x.kind === 'pickfiles'); if (!asked.length) await new Promise((r) => setTimeout(r, 250)); }
-  ok(asked.length === 1 && asked[0].channel === CH && asked[0].agent === AG, 'a press asks the desk\'s host to open its file dialog', asked.map((x) => `${x.kind} ${x.channel}/${x.agent}`));
-  const waiting = await hb();
-  ok(waiting?.disabled && /is open on/.test(waiting.title), 'and the button waits while that dialog is open, saying so', waiting);
-  const picked = ['C:\\Users\\pat\\lab\\notes.md', 'C:\\Users\\pat\\lab\\run 2.log'];
-  await hostEvents([{ type: 'pickfiles', channel: CH, agent: AG, state: 'open', at: new Date().toISOString() }]);
-  await hostEvents([{ type: 'pickfiles', channel: CH, agent: AG, state: 'chosen', paths: picked, at: new Date().toISOString() }]);
-  await page.waitFor(`document.querySelectorAll('#floor-panel .att-chip.on-host').length === 2`, { timeout: 8000 }).catch(() => {});
-  const hc = await page.evalJs(`[...document.querySelectorAll('#floor-panel .att-chip.on-host')].map((c) => ({ name: c.querySelector('.att-name')?.textContent, under: c.querySelector('.att-size')?.textContent, title: c.title, thumb: !!c.querySelector('img') }))`);
-  console.log('== chips for files on the host:', JSON.stringify(hc));
-  ok(hc.length === 2 && hc[0].name === 'notes.md' && /^on /.test(hc[0].under) && hc[1].title.startsWith(picked[1]) && !hc[0].thumb && !hc[1].thumb,
-    'what it chose stands above the box: each file by name, "on" its machine, the path on hover, and no thumbnail', hc);
-  await page.waitFor(`!document.querySelector('#floor-panel [data-act="attach-host"]').disabled`, { timeout: 4000 }).catch(() => {});
-  ok((await hb())?.disabled === false, 'and the button is live again for another pick', await hb());
-  await page.evalJs(`(() => { const ta = document.querySelector('#p-text'); ta.value = 'read these'; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); return 1; })()`);
-  await page.waitFor(`document.querySelectorAll('#p-turns .t-pending').length === 1`, { timeout: 8000 }).catch(() => {});
-  const hp = (await work()).find((x) => x.kind === 'chat')?.payload;
-  console.log('== the host is handed:', JSON.stringify(hp));
-  ok(hp?.text === 'read these' && JSON.stringify(hp.host_files) === JSON.stringify(picked) && !hp.files, 'Send hands the host the words and the paths, in order, with nothing uploaded', hp);
-  ok((await chips()).length === 0, 'and the box is empty of them', await chips());
-  await hostEvents([{ type: 'turn', channel: CH, agent: AG, session_id: SID, role: 'user', at: new Date().toISOString(), uuid: 'att-h1',
-    text: `read these\n\nAttached by the operator:\n${picked.map((p) => `- ${p}`).join('\n')}` }]);
-  await page.waitFor(`document.querySelectorAll('#p-turns .t-pending').length === 0`, { timeout: 8000 }).catch(() => {});
-  const hrec = await page.evalJs(`(() => { const t = [...document.querySelectorAll('#p-turns .t-user')].pop(); return t ? { pending: t.classList.contains('t-pending'), body: t.querySelector('.t-body')?.textContent, files: [...t.querySelectorAll('.t-file')].map((f) => ({ name: f.textContent.trim(), title: f.title })) } : null; })()`);
-  ok(hrec && !hrec.pending && hrec.body === 'read these' && hrec.files.length === 2 && hrec.files[0].title === picked[0] && hrec.files[1].name.endsWith('run 2.log'),
-    'the recorded message retires the pending one, its Windows paths drawn as files', hrec);
-  setFd(0);
-  await page.waitFor(`document.querySelector('#floor-panel [data-act="attach-host"]').classList.contains('hidden')`, { timeout: 8000 }).catch(() => {});
-  ok((await hb())?.hidden === true, 'and a host that stops saying it has one loses the button', await hb());
-}
-
 // 11. A host from before attachments: dimmed, with why.
 if (DB) {
   const require = createRequire(`${REPO}/package.json`);

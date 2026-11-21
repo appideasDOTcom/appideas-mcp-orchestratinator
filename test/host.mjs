@@ -1911,8 +1911,12 @@ try {
   assert(/dialog-win\.ps1$/.test(win?.args[6] ?? ''), 'the script beside dialog.js');
   eq(win?.args.slice(7, 9), [`C:\\Users\\me\\it's "here"`, 'Choose the folder your agent lives in'], 'the start folder handed over as an argument, then the title');
   eq([dialogBackend({ platform: 'win32', env: {} })], ['win32'], 'and the backend is named for it');
-  eq(readAnswer({ code: 0, signal: null, stdout: '{"path":"C:\\\\Users\\\\me\\\\café ünïcode"}\r\n', stderr: '' }), { ok: true, path: 'C:\\Users\\me\\café ünïcode' },
-    'a Windows path is a path (lines end in \\r\\n there), with its accents');
+  // readAnswer judges a path by the machine it runs on, as the dialog answers
+  // in that machine's paths, so the row uses one absolute here: a drive path
+  // on Windows, where it was first run, and a POSIX one on the Mac.
+  const winAnswer = process.platform === 'win32' ? 'C:\\Users\\me\\café ünïcode' : '/Users/me/café ünïcode';
+  eq(readAnswer({ code: 0, signal: null, stdout: `${JSON.stringify({ path: winAnswer })}\r\n`, stderr: '' }), { ok: true, path: winAnswer },
+    'an answer whose line ends in \\r\\n, as Windows writes it, is read whole, its accents included');
   eq(readAnswer({ code: 2, signal: null, stdout: '', stderr: 'Exception calling "Show"\r\n' }).error, 'the folder dialog ended with exit code 2: Exception calling "Show"', 'and a failure is quoted from its last line, without the \\r');
   eq(dialogCommand('/x', { platform: 'linux', env: { ORCH_FOLDER_DIALOG: '/bin/stand-in' } }), { cmd: '/bin/stand-in', args: ['/x'] }, 'the suite\'s stand-in takes the place of any of them');
   eq([startFor(REPO, '/home'), startFor(`${REPO}/gone/deeper`, '/home'), startFor(`${REPO}/.mcp.json`, '/home'), startFor('relative/path', '/home'), startFor(undefined, '/home'), startFor('/no-such-top-level-folder-here', '/home')],

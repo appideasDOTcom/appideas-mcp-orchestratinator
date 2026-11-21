@@ -495,12 +495,6 @@ export function openDb(path) {
   // `seats`' reason, so a restarted board still draws the desks that way.
   addColumn(db, 'hosts', 'signins', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'hosts', 'signed_out', 'INTEGER NOT NULL DEFAULT 0');
-  // Whether the host opens its machine's own file dialog for a desk
-  // (`pickfiles` work), so a message can carry files that are already on that
-  // machine, named by path and never uploaded. On the row for `seats`'
-  // reason: a host from before it would drop the work, so the page offers the
-  // button only for a host that says so, after a board restart too.
-  addColumn(db, 'hosts', 'file_dialog', 'INTEGER NOT NULL DEFAULT 0');
   // A host's work, past being handed out (milestone audit 2026-11-17,
   // finding 4). `boot`: which run of the host took it, so the next run can
   // tell work it never finished from work it is doing. `done_at`: the host
@@ -1526,16 +1520,15 @@ export function makeStore(db) {
 
     // ─── Hosting ────────────────────────────────────────────────────────────
     upsertHost: db.prepare(
-      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, reconnects, signins, signed_out, file_dialog, last_seen)
-       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, @reconnects, @signins, @signed_out, @file_dialog, datetime('now'))
+      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, reconnects, signins, signed_out, last_seen)
+       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, @reconnects, @signins, @signed_out, datetime('now'))
        ON CONFLICT(host_id) DO UPDATE SET
          name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats,
          uploads = excluded.uploads, reconnects = excluded.reconnects, signins = excluded.signins,
-         signed_out = excluded.signed_out, file_dialog = excluded.file_dialog, last_seen = datetime('now')`
+         signed_out = excluded.signed_out, last_seen = datetime('now')`
     ),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, file_dialog, registered_at, last_seen FROM hosts ORDER BY name`),
-    hostFileDialog: db.prepare(`SELECT file_dialog FROM hosts WHERE host_id = ?`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
     hostReconnects: db.prepare(`SELECT reconnects FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
@@ -2383,11 +2376,9 @@ export function makeStore(db) {
     // `uploads`: whether it fetches a message's attachments (issue #31).
     // `signins` / `signedOut`: it runs Claude Code's sign-in for `signin`
     // work, and whether Claude Code is signed out there now (host/auth.js).
-    // `fileDialog`: it opens its machine's file dialog for `pickfiles` work.
-    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false, reconnects = false, { signins = false, signedOut = false, fileDialog = false } = {}) =>
-      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0, reconnects: reconnects ? 1 : 0, signins: signins ? 1 : 0, signed_out: signedOut ? 1 : 0, file_dialog: fileDialog ? 1 : 0 }).changes,
+    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false, reconnects = false, { signins = false, signedOut = false } = {}) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0, reconnects: reconnects ? 1 : 0, signins: signins ? 1 : 0, signed_out: signedOut ? 1 : 0 }).changes,
     hostTakesUploads: (hostId) => !!q.hostUploads.get(hostId)?.uploads,
-    hostFileDialog: (hostId) => !!q.hostFileDialog.get(hostId)?.file_dialog,
     hostReconnects: (hostId) => !!q.hostReconnects.get(hostId)?.reconnects,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
     listHosts: () => q.listHosts.all(),

@@ -1314,9 +1314,7 @@
     if (words) return words;
     const f = files?.[0];
     if (!f) return '';
-    // A file on the host is matched by its whole path, which only its own
-    // turn holds (squash reads its backslashes as slashes on both sides).
-    return f.id ? `${f.id}/${f.name}` : f.path ?? f.name;
+    return f.id ? `${f.id}/${f.name}` : f.name;
   }
 
   /** What kind of chip a file gets: a thumbnail only for an image the browser can draw. */
@@ -1398,9 +1396,7 @@
     // where the operator chooses which to take out, never dropped.
     if (ready.length > ATTACH_MAX_FILES) return { ok: false, why: `${ATTACH_MAX_FILES} files a message: take ${ready.length - ATTACH_MAX_FILES} out` };
     if (!String(text ?? '').trim() && !ready.length) return { ok: false, why: null };
-    // A file chosen in the desk's host's own file dialog is a path on that
-    // machine (`host`), sent as one and never uploaded; the rest are ids.
-    return { ok: true, ids: ready.filter((c) => !c.host).map((c) => c.id), paths: ready.filter((c) => c.host).map((c) => c.path) };
+    return { ok: true, ids: ready.map((c) => c.id) };
   }
 
   /**
@@ -1417,11 +1413,6 @@
   /* Above the box, under the question slot, and the paperclip beside the
      saved prompts: the same two pieces in the panel and in a meeting room. */
   const ATTACH_SLOT = '<div class="p-attach hidden" aria-label="Attached files"></div>';
-  /* Files already on the desk's machine, chosen in its host's own file
-     dialog (`pickfiles`): drawn only for a desk whose host says it can
-     (hosts[].file_dialog), and never in a meeting room, whose one box
-     speaks to desks that may be on several machines. */
-  const ATTACH_HOST_BUTTON = '<button class="btn attachbtn hidden" data-act="attach-host" aria-label="Choose files on the desk\'s machine"><svg class="attachGlyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v11H3z M8 20h8 M12 16v4"/></svg></button>';
   const ATTACH_BUTTON = '<button class="btn attachbtn" data-act="attach-file" aria-label="Attach files"><svg class="attachGlyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg></button><input type="file" class="p-file" multiple hidden>';
 
   /** The box's attachments: per desk on the floor, per room in a meeting, like a draft. */
@@ -1443,13 +1434,10 @@
       ? `<img class="att-thumb" src="${esc(c.url)}" alt="">`
       : `<span class="att-thumb att-generic" aria-hidden="true">${esc((c.ext || c.kind || 'file').slice(0, 4).toUpperCase())}</span>`;
     const state = c.state === 'uploading' ? '<span class="pspin att-spin" aria-hidden="true"></span>' : '';
-    // A file on the host: its bytes never come here, so no thumbnail and no
-    // size, and the line under the name says whose machine it is on.
-    const under = c.state === 'failed' ? c.error : c.host ? `on ${c.hostName ?? 'the host'}` : sizeLabel(c.size);
-    const title = c.state === 'failed' ? `${c.name} — not attached: ${c.error}` : c.host ? `${c.path} — on ${c.hostName ?? 'the desk’s machine'}, sent as its path` : `${c.name} · ${sizeLabel(c.size)}`;
-    return `<div class="att-chip ${esc(c.state)}${c.host ? ' on-host' : ''}" data-key="${esc(c.key)}" data-kind="${esc(c.kind)}" title="${esc(title)}" tabindex="0">
+    const title = c.state === 'failed' ? `${c.name} — not attached: ${c.error}` : `${c.name} · ${sizeLabel(c.size)}`;
+    return `<div class="att-chip ${esc(c.state)}" data-key="${esc(c.key)}" data-kind="${esc(c.kind)}" title="${esc(title)}" tabindex="0">
       ${thumb}${state}
-      <span class="att-meta"><span class="att-name">${esc(c.name)}</span><span class="att-size mono">${esc(under)}</span></span>
+      <span class="att-meta"><span class="att-name">${esc(c.name)}</span><span class="att-size mono">${esc(c.state === 'failed' ? c.error : sizeLabel(c.size))}</span></span>
       <button class="att-x" data-act="attach-remove" data-key="${esc(c.key)}" aria-label="Remove ${esc(c.name)}" title="Remove">✕</button>
     </div>`;
   }
@@ -1477,85 +1465,6 @@
     const why = canChat ? attachRefusal(openHostRow()) : 'Nothing typed here can be delivered right now.';
     btn.disabled = !!why;
     btn.title = why ?? `Attach files — or drop them here, or paste a screenshot (up to ${ATTACH_MAX_FILES}, ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB each)`;
-    const hostBtn = document.querySelector('#floor-panel [data-act="attach-host"]');
-    if (hostBtn) {
-      const row = openHostRow();
-      hostBtn.classList.toggle('hidden', !row?.file_dialog);
-      const busy = ui.hostPick && ui.hostPick.key === attachKey();
-      hostBtn.disabled = !canChat || !!busy;
-      hostBtn.classList.toggle('busy', !!busy);
-      hostBtn.title = !canChat ? 'Nothing typed here can be delivered right now.'
-        : busy ? `The file dialog is open on ${row?.name ?? 'the desk’s machine'}`
-          : `Choose files on ${row?.name ?? 'the desk’s machine'} — sent as their paths there, not uploaded`;
-    }
-  }
-
-  /**
-   * Ask the desk's host to open its machine's file dialog, in the desk's
-   * folder, and wait for what it chose. The dialog is on the host's screen
-   * and takes as long as the person takes; the page reads where it has got
-   * to from the board (GET /api/floor/pick-files), and gives up only on a
-   * host that has not opened it at all within PICK_FILES_ANSWER_MS.
-   */
-  const PICK_FILES_ANSWER_MS = 10_000;
-  async function pickHostFiles() {
-    const key = attachKey();
-    const desk = ui.open && !ui.meeting ? { ...ui.open } : null;
-    const btn = document.querySelector('#floor-panel [data-act="attach-host"]');
-    if (!key || !desk || ui.hostPick) return;
-    const asked = Date.now();
-    const hostName = openHostRow()?.name ?? null;
-    // Waiting from the press, not from the board's answer: a second press in
-    // between would ask the host twice (the page check read the button live
-    // in that gap).
-    ui.hostPick = { key, asked };
-    gateAttach(true);
-    try {
-      await post('./api/floor/pick-files', desk);
-    } catch (err) {
-      ui.hostPick = null;
-      gateAttach(true);
-      if (btn) flash(btn, String(err.message ?? err).slice(0, 60));
-      return;
-    }
-    const q = `./api/floor/pick-files?channel=${encodeURIComponent(desk.channel)}&agent=${encodeURIComponent(desk.agent)}`;
-    let seenOpen = false;
-    try {
-      for (;;) {
-        await new Promise((r) => setTimeout(r, 700));
-        const st = await fetch(q).then((r) => r.json()).catch(() => null);
-        const fresh = st?.at && Date.parse(st.at) >= asked - 2000;
-        if (fresh && st.state === 'open') seenOpen = true;
-        if (fresh && st.state === 'chosen') { addHostFiles(key, st.paths ?? [], hostName); return; }
-        if (fresh && (st.state === 'cancelled' || st.state === 'failed')) {
-          if (st.state === 'failed' && btn) flash(btn, String(st.error ?? 'the file dialog failed').slice(0, 60));
-          return;
-        }
-        if (!seenOpen && Date.now() - asked > PICK_FILES_ANSWER_MS) {
-          if (btn) flash(btn, `${hostName ?? 'the host'} did not open its file dialog`);
-          return;
-        }
-      }
-    } finally {
-      ui.hostPick = null;
-      gateAttach(true);
-    }
-  }
-
-  /** Files the host's dialog chose, into the box as chips, past the cap said. */
-  function addHostFiles(key, paths, hostName) {
-    const held = attachList(key);
-    const have = new Set(held.filter((c) => c.host).map((c) => c.path));
-    const offered = paths.filter((p) => !have.has(p)).map((p) => ({ name: p.split(/[\\/]/).pop() || p, size: 0, path: p }));
-    const { take, refused } = attachAdmit(held, offered);
-    const chips = take.map((f) => {
-      const { kind, ext } = fileKind(f.name, '');
-      return { key: `a${++attachSeq}`, host: true, path: f.path, hostName, name: f.name, size: null, type: '', kind: kind === 'image' ? 'file' : kind, ext, url: null, id: null, state: 'ready', error: null };
-    });
-    ui.attach.set(key, held.concat(chips));
-    drawAttach();
-    const btn = document.querySelector('#floor-panel [data-act="attach-host"]');
-    if (refused.length && btn) flash(btn, `${refused[0].name}: ${refused[0].why}`.slice(0, 60));
   }
 
   /** Take files into the box and start each one on its way to the board. */
@@ -1619,21 +1528,15 @@
    * kept by the pending message. Only those: a file attached while the
    * request was on its way stays in the box for the next message.
    */
-  function takeChips(ids, key = attachKey(), paths = []) {
+  function takeChips(ids, key = attachKey()) {
     const sent = new Set(ids);
-    const sentPaths = new Set(paths);
     const list = attachList(key);
-    const taken = [
-      ...ids.map((id) => list.find((c) => !c.host && c.id === id)),
-      ...paths.map((p) => list.find((c) => c.host && c.path === p)),
-    ].filter(Boolean);
-    const left = list.filter((c) => (c.host ? !sentPaths.has(c.path) : !sent.has(c.id)));
+    const taken = ids.map((id) => list.find((c) => c.id === id)).filter(Boolean);
+    const left = list.filter((c) => !sent.has(c.id));
     if (left.length) ui.attach.set(key, left); else ui.attach.delete(key);
     for (const c of taken) if (c.url) { URL.revokeObjectURL(c.url); c.url = null; }
     drawAttach();
-    return taken.map((c) => (c.host
-      ? { host: true, path: c.path, hostName: c.hostName, name: c.name, size: null, type: '', kind: c.kind, ext: c.ext }
-      : { id: c.id, name: c.name, size: c.size, type: c.type, kind: c.kind, ext: c.ext, file: c.file }));
+    return taken.map((c) => ({ id: c.id, name: c.name, size: c.size, type: c.type, kind: c.kind, ext: c.ext, file: c.file }));
   }
 
   /** A send the window lost: its files back in the box, beside whatever is there now. */
@@ -4306,7 +4209,6 @@
         <div class="p-actions">
           <span class="muted p-hint"></span>
           <button class="btn stopbtn" data-act="stop" aria-label="Stop this turn"><svg class="stopGlyph" viewBox="${STOP_BOX}" aria-hidden="true"><polygon points="${STOP_PTS}" /></svg></button>
-          ${ATTACH_HOST_BUTTON}
           ${ATTACH_BUTTON}
           <button class="btn promptbtn" data-act="prompts" aria-label="Saved prompts" aria-haspopup="menu" aria-expanded="false"><svg class="promptGlyph" viewBox="${PROMPT_BOX}" aria-hidden="true">${PROMPT_GLYPH}</svg></button>
           <button class="btn primary" data-act="send">Send</button>
@@ -8739,8 +8641,6 @@
       // The picker is the hidden input beside the button; its change event
       // takes the files (below).
       act.closest('.p-compose')?.querySelector('.p-file')?.click();
-    } else if (act.dataset.act === 'attach-host') {
-      pickHostFiles();
     } else if (act.dataset.act === 'attach-remove') {
       removeChip(act.dataset.key);
     } else if (act.dataset.act === 'ask-tab') {
@@ -9444,10 +9344,9 @@
     const fromBox = typeof given !== 'string';
     // The box's files go with what is typed in it, never with a pick or a
     // nudge (issue #31). Said on Send when they cannot go yet.
-    const att = fromBox ? attachSendable(text, attachList()) : { ok: !!text.trim(), ids: [], paths: [] };
+    const att = fromBox ? attachSendable(text, attachList()) : { ok: !!text.trim(), ids: [] };
     if (!att.ok) { if (att.why && btn) flash(btn, att.why); return; }
     if (!btn || !ui.open || btn.disabled) return;
-    const paths = att.paths ?? [];
     // Whose box the files are in, before the await: the panel may be on
     // another desk by the time the board answers.
     const akey = attachKey();
@@ -9456,7 +9355,7 @@
       const r = await fetch('./api/floor/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...ui.open, text, ...(att.ids.length ? { files: att.ids } : {}), ...(paths.length ? { host_files: paths } : {}) }),
+        body: JSON.stringify({ ...ui.open, text, ...(att.ids.length ? { files: att.ids } : {}) }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error ?? `send failed (${r.status})`);
@@ -9464,7 +9363,7 @@
       // shows as sending until the window itself reports it.
       // A select's choice is marked: an error turn hands typed words back to
       // the box, and this was never in it.
-      const files = att.ids.length || paths.length ? takeChips(att.ids, akey, paths) : [];
+      const files = att.ids.length ? takeChips(att.ids, akey) : [];
       ui.sending = ui.sending.concat([{ text, at: Date.now(), ...(pick ? { pick: true } : {}),
         ...(files.length ? { files, match: attachMatch(text, files), key: akey } : {}) }]);
       if (fromBox) {
