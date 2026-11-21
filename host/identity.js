@@ -158,6 +158,38 @@ function real(dir) {
 }
 
 /**
+ * Windows spells one folder several ways, and Claude Code and Node pick
+ * different ones: `claude mcp add -s local` keys `projects` as `C:/Users/…`,
+ * while `path.resolve` and `realpathSync` give `C:\Users\…` (measured by
+ * pc-developer, 2026-11-20, Windows 11, Claude Code 2.1.330, Node 26). The
+ * plugin's hook missed every binding that way until 9e59853 (`localAt` in
+ * plugin/hooks/report.mjs), and these lookups are the same lookup on the
+ * host's side. So on Windows a folder is compared by one key, slashes one way
+ * and lower case (the file system is case-insensitive there, and nothing
+ * promises the two writers agree on case). Elsewhere a path is compared
+ * exactly as before: a backslash is an ordinary character in a POSIX file
+ * name, and case matters. The exact spellings are always tried first, so a
+ * POSIX host does no more work than it did.
+ *
+ * `ORCH_HOST_PLATFORM` stands in for `process.platform`, for the suites alone,
+ * as `ORCH_HOOK_PLATFORM` does for the hook.
+ */
+const WINDOWS = (process.env.ORCH_HOST_PLATFORM ?? process.platform) === 'win32';
+const folderKey = (dir) => dir.replace(/\\/g, '/').toLowerCase();
+
+/** What `map` (a Map, or a plain object such as `projects`) holds for `dir`,
+ *  under its own spelling, its resolved one, or on Windows either folded. */
+export function atFolder(map, dir) {
+  if (!map) return undefined;
+  const get = map instanceof Map ? (k) => map.get(k) : (k) => (Object.hasOwn(map, k) ? map[k] : undefined);
+  const exact = get(dir) ?? get(real(dir));
+  if (exact !== undefined || !WINDOWS) return exact;
+  const want = new Set([folderKey(dir), folderKey(real(dir))]);
+  for (const [known, v] of map instanceof Map ? map : Object.entries(map)) if (want.has(folderKey(known))) return v;
+  return undefined;
+}
+
+/**
  * Every local-scope desk on this machine, keyed by directory, plus which
  * directories Claude Code has been told to trust (the folder-trust question a
  * fresh window asks — surfaced on the floor, never pressed here).
@@ -205,7 +237,7 @@ export function localEntries(dir, file = claudeConfigPath()) {
   } catch {
     return { ok: false, entries: [] };
   }
-  const servers = (projects?.[dir] ?? projects?.[real(dir)])?.mcpServers;
+  const servers = atFolder(projects, dir)?.mcpServers;
   const entries = [];
   for (const [name, s] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
     const channel = header(s?.headers, 'X-Channel');
@@ -221,14 +253,14 @@ export function localEntries(dir, file = claudeConfigPath()) {
  * the file once for a whole walk.
  */
 export function readDesk(dir, local = readLocalScope()) {
-  const mine = local.desks.get(dir) ?? local.desks.get(real(dir));
+  const mine = atFolder(local.desks, dir);
   if (mine) return { ...mine, cwd: dir };
   const file = join(dir, '.mcp.json');
   if (!existsSync(file)) return null;
   try {
     const desk = deskIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers, dir, { scope: 'project' });
     if (!desk) return null;
-    desk.trusted = local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false;
+    desk.trusted = atFolder(local.trusted, dir) ?? false;
     return desk;
   } catch {
     // A malformed .mcp.json is already breaking this repo's MCP connection and
@@ -277,7 +309,7 @@ function folderRecord(dir, depth, desk, local) {
     depth,
     bound: desk ? { channel: desk.channel, agent: desk.agent, scope: desk.scope, board: originOf(desk.url) } : null,
     has_mcp_json: hasMcpEntry(dir),
-    trusted: desk?.trusted ?? local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false,
+    trusted: desk?.trusted ?? atFolder(local.trusted, dir) ?? false,
     git: existsSync(join(dir, '.git')),
     opened: act.opened,
     last_active: act.last_active,
@@ -374,7 +406,7 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope(), seats 
     desks.set(k, {
       channel: s.channel, agent: s.agent, cwd: s.cwd, url: s.board, key: null,
       scope: 'seat', seat: s.seat,
-      trusted: local.trusted.get(s.cwd) ?? local.trusted.get(real(s.cwd)) ?? false,
+      trusted: atFolder(local.trusted, s.cwd) ?? false,
     });
   }
   // Newest first, never-opened last, then by name — the order a person

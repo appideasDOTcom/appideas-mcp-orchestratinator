@@ -888,7 +888,27 @@ async function main() {
       eq(W.serverEnvPlan('HOME=/h\nORCH_URL=http://b\n-ORCH_GONE\nORCH_AUTH_TOKEN=k\nUSER=me\n', { TMPDIR: '/t/', USER: 'pat', LOGNAME: 'pat' }),
         { unset: ['ORCH_URL', 'ORCH_AUTH_TOKEN'], set: [['TMPDIR', '/t/'], ['LOGNAME', 'pat']] },
         'serverEnvPlan: unsets each ORCH_ variable the server lists (not one already removed), sets only what it lacks');
+      // A host started from inside a Claude Code window carries that
+      // session's markers, and a window that inherits them writes no
+      // transcript (pc-developer, Windows, 2026-11-20). Only the markers go.
+      const parent = { ...host, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_SESSION_ID: 's', CLAUDE_EFFORT: 'max',
+        CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_API_KEY: 'sk' };
+      const pe = W.windowEnv(parent, { platform: 'darwin', tempDir: () => '/t/', user: () => 'pat' });
+      eq(Object.keys(pe).filter((k) => /^(CLAUDE|ANTHROPIC)/.test(k)).sort(), ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CONFIG_DIR'],
+        'windowEnv: none of a parent Claude Code session\'s markers, and every setting a person gives Claude Code');
+      eq(W.serverEnvPlan('CLAUDECODE=1\nCLAUDE_CONFIG_DIR=/cfg\nCLAUDE_CODE_CHILD_SESSION=1\nTMPDIR=/t/\nUSER=a\nLOGNAME=a\n', {}).unset, ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION'],
+        'serverEnvPlan: and takes those markers out of a running server, leaving the settings');
     }
+
+    // What a window runs. On Windows there is no exec, so a shell line leaves
+    // the shell as the pane's process and the pane's pid never meets the
+    // roster's (pc-developer, psmux 3.4.0, 2026-11-20): an argument list.
+    console.log('\n  what a window runs');
+    eq(W.launchArgs(['claude', '--resume', "it's"], { windows: false }), [`exec 'env' 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1' 'claude' '--resume' 'it'\\''s'`],
+      'elsewhere: the one exec line it has always been, quoted for the shell');
+    eq(W.launchArgs(['C:\\Users\\p\\.local\\bin\\claude.exe', '--resume', 'abc'], { windows: true }),
+      ['-e', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', '--', 'C:\\Users\\p\\.local\\bin\\claude.exe', '--resume', 'abc'],
+      'on Windows: the variable by -e, then the program and its arguments after --, unquoted');
     // Then a real server started the old way, with a host's settings and no
     // TMPDIR, on a socket of its own: the default socket is the operator's.
     // window.js reads ORCH_TMUX at load, so the host's side runs in a child.

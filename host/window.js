@@ -82,6 +82,13 @@ export function paneEnv(desk, key = boardKey) {
  * if they have one; otherwise say UTF-8, because a repo's name is not ours to
  * mangle.
  */
+/** The markers a Claude Code session sets for its children; see windowEnv. */
+export const PARENT_SESSION = new Set([
+  'CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_EFFORT',
+  'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_CHILD_NOTES_DIR',
+  'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SSE_PORT',
+]);
 const TMUX_ENV = windowEnv();
 
 /**
@@ -109,6 +116,18 @@ const TMUX_ENV = windowEnv();
  * - **`USER` and `LOGNAME` filled when missing**, as claudeEnv does for the
  *   host's own Claude Code calls: with HOME and PATH alone Claude Code says a
  *   signed-in Mac is signed out, and a window is a Claude Code.
+ * - **None of the markers a Claude Code session sets for its own children**
+ *   (`PARENT_SESSION`). A host started from inside a Claude Code window, by
+ *   hand or by an app launched from one, hands them on, and a Claude Code
+ *   that inherits them believes it is that session's child. Measured by
+ *   pc-developer on Windows, 2026-11-20, Claude Code 2.1.330: a window under
+ *   a multiplexer started from an agent's window showed "⚠ Transcript saving
+ *   is off — inherited CLAUDE_CODE_CHILD_SESSION marker" and wrote no
+ *   transcript, which is a desk the floor can never hear. Only the markers
+ *   go: `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_API_KEY`
+ *   and the rest are how a person configures Claude Code, and a window needs
+ *   them. `CLAUDE_EFFORT` is the parent's effort level, and would set the
+ *   window's.
  * - **A locale**, below.
  *
  * tmux finds its socket by `TMUX_TMPDIR`, never `TMPDIR`, so filling it moves
@@ -123,7 +142,7 @@ const TMUX_ENV = windowEnv();
  */
 export function windowEnv(env = process.env, { platform = process.platform, tempDir = darwinTempDir, user = accountName } = {}) {
   const out = {};
-  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_')) out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_') && !PARENT_SESSION.has(k)) out[k] = v;
   out.LC_ALL = env.LC_ALL || env.LC_CTYPE || env.LANG || 'en_US.UTF-8';
   if (!env.TMPDIR && platform === 'darwin') {
     const t = tempDir();
@@ -160,7 +179,7 @@ export function serverEnvPlan(shown, want = TMUX_ENV) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(line);
     if (!m) continue;
     have.add(m[1]);
-    if (m[1].startsWith('ORCH_')) unset.push(m[1]);
+    if (m[1].startsWith('ORCH_') || PARENT_SESSION.has(m[1])) unset.push(m[1]);
   }
   const set = ['TMPDIR', 'USER', 'LOGNAME'].filter((k) => !have.has(k) && want[k]).map((k) => [k, want[k]]);
   return { unset, set };
@@ -183,7 +202,39 @@ export async function cleanServerEnv() {
   return done;
 }
 
-const TMUX = process.env.ORCH_TMUX ?? 'tmux';
+/**
+ * Windows, where the multiplexer is not tmux itself but a tool that answers
+ * tmux's commands (psmux 3.4.0 measured by pc-developer, 2026-11-20, against
+ * Claude Code 2.1.330: drawing, typing, keys, bracketed paste, `=name`, `-e`,
+ * `-c`, attach and detach all as on the Mac). Two things differ, and both are
+ * about how a program is found and started, not about what tmux is asked:
+ *
+ * - **A binary is found by its path.** winget puts psmux's `tmux.exe` in
+ *   `%LOCALAPPDATA%\Microsoft\WinGet\Links` and adds that to the user's
+ *   PATH, which only processes started after the install see. So the name
+ *   is resolved once with `where.exe`, then that folder, and `ORCH_TMUX` /
+ *   `ORCH_HOST_CLAUDE` still win.
+ * - **A window's program is started as an argument list, never a shell
+ *   line** (`launchArgs`). Windows has no `exec`, so a shell line leaves the
+ *   shell as the pane's process and Claude Code as its child: the pane's pid
+ *   is then `bash.exe` or `powershell.exe`, never the pid `claude agents`
+ *   reports, and the host finds a desk's window by exactly that join
+ *   (holderOf). Given after `--`, the pane's pid is claude.exe's, and its
+ *   folder is spelled as the roster spells it (both measured).
+ *
+ * `ORCH_HOST_PLATFORM` stands in for the platform, for the suites alone.
+ */
+export const WINDOWS = (process.env.ORCH_HOST_PLATFORM ?? process.platform) === 'win32';
+function findExe(name, { extra = [] } = {}) {
+  try {
+    const hit = execFileSync('where.exe', [name], { encoding: 'utf8', timeout: 3000, windowsHide: true })
+      .split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l));
+    if (hit) return hit;
+  } catch { /* not on PATH */ }
+  return extra.find((p) => existsSync(p)) ?? name;
+}
+const WINGET_LINKS = join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Microsoft', 'WinGet', 'Links');
+const TMUX = process.env.ORCH_TMUX ?? (WINDOWS && process.platform === 'win32' ? findExe('tmux', { extra: [join(WINGET_LINKS, 'tmux.exe')] }) : 'tmux');
 /**
  * The field separator for `-F` formats.
  *
@@ -229,7 +280,23 @@ const SESSION = (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._
  * beside it has passed, when the exact name is what tmux prefers.
  */
 const EXACT = `=${SESSION}`;
-const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
+const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? (WINDOWS && process.platform === 'win32' ? findExe('claude', { extra: [join(homedir(), '.local', 'bin', 'claude.exe')] }) : 'claude');
+
+/**
+ * The words that end a `new-window` or `new-session`: what the window runs.
+ *
+ * On the Mac and Linux, one shell line, `exec env … claude …`, exactly as it
+ * has been: `exec` makes Claude Code the pane's process. On Windows, the
+ * program and its arguments after `--`, with the one variable by `-e`, for
+ * the reason above WINDOWS. `-e` and not an `env` word there, as paneEnv
+ * already does for the key: there is no `env` to run.
+ */
+export function launchArgs(argv, { windows = WINDOWS } = {}) {
+  const SURVEY = 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1';
+  if (windows) return ['-e', SURVEY, '--', ...argv.map(String)];
+  const line = ['env', SURVEY, ...argv].map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ');
+  return [`exec ${line}`];
+}
 /** Long enough for a cold `claude agents --json`, short enough not to stall a poll. */
 const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
 // `claude stop` answers from the daemon at once — 0s measured on 2.1.258 — so
@@ -2505,12 +2572,10 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // entry's place in this window (host/seats.js). The file's path and not
   // its contents, because tmux keeps and prints a pane's start command and
   // the contents hold the board's key.
-  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE,
+  const cmd = launchArgs([CLAUDE,
     ...(pick.id ? ['--resume', pick.id] : []),
     ...(model ? ['--model', model] : []),
-    ...(seatFile ? ['--mcp-config', seatFile] : [])]
-    .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
-    .join(' ');
+    ...(seatFile ? ['--mcp-config', seatFile] : [])]);
 
   // Take the target tmux hands back rather than looking the new pane up again.
   //
@@ -2547,10 +2612,14 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // `=name` is an exact window name. Measured on tmux 3.7c: `set-option -w`
   // with no target after a detached new-window tags the *current* window,
   // and a name with a dot in it is "no such window".
+  // On Windows the tag follows the program's argument list (launchArgs),
+  // and whether psmux ends that list at a `;` word is not yet measured
+  // (pc-developer's item 10); a window made with the tag refused is tagged
+  // or closed just below, so the worst case is the second command.
   const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
   let made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag])
-    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag]);
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, ...cmd, ...tag])
+    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, ...cmd, ...tag]);
   // The window made and the tag refused: tmux printed the new pane and then
   // failed. Tagged by the pane it named, or closed, never left untagged.
   if (!made.ok && seat && made.out?.includes(SEP)) {

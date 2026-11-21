@@ -184,11 +184,13 @@ this from whichever you work in.
 **From Claude Code** (a terminal session), from the clone:
 
 ```
-/plugin marketplace add .
+/plugin marketplace add ./
 /plugin install orchestratinator-floor
 ```
 
-From any other directory, give the full path to the clone instead of `.`.
+From any other directory, give the full path to the clone instead of `./`.
+Write it with the slash: on Windows a bare `.` is refused ("Invalid
+marketplace source format. Try: owner/repo, https://..., or ./path").
 
 **From VS Code**, the `/plugin` command doesn't take arguments — it answers
 *"/plugin isn't available in this environment."* Type `/plugin` on its own and
