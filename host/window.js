@@ -384,14 +384,31 @@ export function defaultModel(cwd) {
  */
 async function tmux(args, { timeout = 5000 } = {}) {
   try {
-    const { stdout } = await run(TMUX, args, { timeout, encoding: 'utf8', env: TMUX_ENV });
-    return { ok: true, out: stdout.trim() };
+    const { stdout } = await run(TMUX, args, { timeout, encoding: 'utf8', env: TMUX_ENV, windowsHide: true });
+    const out = stdout.trim();
+    if (WINDOWS && psmuxRefusal(out)) return { ok: false, error: out, out: '' };
+    return { ok: true, out };
   } catch (err) {
     if (err?.code === 'ENOENT') return { ok: false, missing: true, error: 'tmux is not installed' };
     // What it printed before it failed is kept: two commands in one call can
     // have the first succeed and say so (open(), a seat's tag).
     return { ok: false, error: (err?.stderr || err?.message || String(err)).trim(), out: String(err?.stdout ?? '').trim() };
   }
+}
+
+/**
+ * psmux exits 0 for some refusals and says them on stdout, measured by
+ * pc-developer on 3.4.0 (2026-11-20): `capture-pane` of a window it cannot
+ * find prints "ERROR: can't find window: …" and exits 0, and `list-panes`
+ * against a session with no server prints "psmux: no server running on
+ * session '…'" and exits 0. Read as answers, the first is a screen that
+ * reads as one line of text and the second a pane list of one line. Only
+ * the whole answer being one such line counts, so a screen whose
+ * conversation quotes the words is still a screen. The "no server running"
+ * words are kept in `error`, which paneGone reads.
+ */
+export function psmuxRefusal(out) {
+  return !out.includes('\n') && /^(?:ERROR: can't find |psmux: (?:no server running|can't find ))/.test(out);
 }
 
 /** Whether tmux is usable at all. The floor degrades honestly if it isn't. */
@@ -1164,6 +1181,29 @@ export function seatWindowName(cwd, seat) {
   return `${basename(cwd)}-${who}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 60) || 'seat';
 }
 
+/**
+ * On Windows a seat is told by its window's name, not by `@orch_seat`.
+ * psmux 3.4.0 keeps a user option for the whole session whatever window is
+ * named (pc-developer, 2026-11-20: `set-option -w -t =orch:b @orch_seat B`
+ * read B on windows a, b and c alike, by name, window id or pane id), so the
+ * tag cannot tell a seat's window from its folder's own there. A window
+ * named with `-n` keeps its name (measured, automatic-rename on or off, after
+ * Claude Code drew and answered), and a 200-character name comes back whole
+ * and is targeted exactly. So a seat's window name ends in `--s` and the
+ * seat's tag in hex: no character a target parses, decoded only when it is a
+ * seat's tag (`channel/agent`), so a folder that happens to end in `--sab`
+ * is still a folder.
+ */
+export function seatNameMark(seat) {
+  return `--s${Buffer.from(String(seat), 'utf8').toString('hex')}`;
+}
+export function seatFromName(name) {
+  const m = /--s((?:[0-9a-f]{2})+)$/.exec(String(name ?? ''));
+  if (!m) return null;
+  const seat = Buffer.from(m[1], 'hex').toString('utf8');
+  return /^[^/\s]+\/[^/\s]+$/.test(seat) ? seat : null;
+}
+
 /** The variable a seat's window carries: the path of its binding file. */
 export const SEAT_ENV = 'ORCH_DESK_CONFIG';
 
@@ -1215,7 +1255,9 @@ export async function panes() {
   // to contain a '|'. The four before it are tmux's own ids, a flag and a tag.
   // The seat's tag is the host's own (seatTag in seats.js: percent-encoded,
   // so it holds no separator) and empty on every window but a seat's.
-  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
+  // On Windows the fourth field is the window's name, which carries the
+  // seat there (seatFromName); the tag is the session's on psmux.
+  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', WINDOWS ? '#{window_name}' : `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
   const r = await tmux(['list-panes', '-t', `${EXACT}:`, '-s', '-F', fields.join(SEP)]);
   if (!r.ok || !r.out) return [];
   return r.out.split('\n')
@@ -1227,7 +1269,7 @@ export async function panes() {
       // a person needs to be given to sit down at this desk, and pulling it
       // out of a string we already have beats another tmux call.
       const window = target.match(/@\d+/)?.[0] ?? null;
-      return { target, window, dead: dead === '1', pid: Number(pid) || null, seat: seat || null, cwd: parts.slice(4).join(SEP) };
+      return { target, window, dead: dead === '1', pid: Number(pid) || null, seat: (WINDOWS ? seatFromName(seat) : seat) || null, cwd: parts.slice(4).join(SEP) };
     })
     .filter((p) => p && p.target && p.cwd && !p.dead);
 }
@@ -2265,6 +2307,19 @@ async function clearComposer(target) {
 const RENEW_WAIT_MS = Number(process.env.ORCH_RENEW_WAIT_MS ?? 10 * 60_000);
 
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+/**
+ * Not on Windows. The refusal these reads catch is macOS's (a tmux server
+ * denied `~/Documents` by the kernel's policy, above), and the read is a
+ * POSIX shell line, while psmux runs `run-shell` under Windows PowerShell 5.1
+ * whatever SHELL says (pc-developer, 2026-11-20). PowerShell 5.1 refuses
+ * `&&` outright, so every folder would read as refused, and open() would
+ * then answer "macOS will not let anything the host starts read …" for the
+ * second window of every session. A PowerShell read that works was measured
+ * (Get-ChildItem in a try), but no folder that denies a read was, and there
+ * is no Windows refusal known that a fresh server clears. So null, which is
+ * "no server to ask": open() goes on and checkServer moves nothing.
+ */
+const NO_READ_CHECK = WINDOWS;
 const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
 
 /** Whether a process this host's tmux server starts can read `dir`. Null when
@@ -2282,6 +2337,7 @@ const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
  *  the pane's path. The `has-session` stays: with no server at all,
  *  `run-shell` fails too, and that is not a refusal. */
 export async function serverReads(dir) {
+  if (NO_READ_CHECK) return null;
   if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;
   return (await tmux(['run-shell', readsCmd(dir)])).ok;
 }
@@ -2289,6 +2345,7 @@ export async function serverReads(dir) {
 /** The same question put to a tmux server started now, on a private socket and
  *  gone straight after. Null if one could not be started. */
 export async function freshReads(dir) {
+  if (NO_READ_CHECK) return null;
   const sock = `orch-check-${process.pid}-${Date.now().toString(36)}`;
   const made = await tmux(['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', 'check', 'sleep 30']);
   if (!made.ok) return null;
@@ -2529,7 +2586,8 @@ export async function open(where, { resume = null, moving = false } = {}) {
   const names = await windowNames();
   const plain = seat ? seatWindowName(here, seat) : windowName(here);
   const taken = names.includes(plain);
-  const name = taken ? `${plain}-${(Math.abs(hash(seat ? `${here}|${seat}` : here)) % 65536).toString(16).padStart(4, '0')}` : plain;
+  const unique = taken ? `${plain}-${(Math.abs(hash(seat ? `${here}|${seat}` : here)) % 65536).toString(16).padStart(4, '0')}` : plain;
+  const name = WINDOWS && seat ? `${unique}${seatNameMark(seat)}` : unique;
   // `claude` is exec'd rather than run from a shell so the pane dies with the
   // session instead of dropping to a prompt that looks like a live window.
   //
@@ -2612,11 +2670,8 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // `=name` is an exact window name. Measured on tmux 3.7c: `set-option -w`
   // with no target after a detached new-window tags the *current* window,
   // and a name with a dot in it is "no such window".
-  // On Windows the tag follows the program's argument list (launchArgs),
-  // and whether psmux ends that list at a `;` word is not yet measured
-  // (pc-developer's item 10); a window made with the tag refused is tagged
-  // or closed just below, so the worst case is the second command.
-  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
+  // On Windows the name carries the seat (seatNameMark) and no tag is set.
+  const tag = seat && !WINDOWS ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
   let made = has.ok
     ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, ...cmd, ...tag])
     : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, ...cmd, ...tag]);

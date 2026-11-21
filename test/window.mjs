@@ -909,6 +909,19 @@ async function main() {
     eq(W.launchArgs(['C:\\Users\\p\\.local\\bin\\claude.exe', '--resume', 'abc'], { windows: true }),
       ['-e', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', '--', 'C:\\Users\\p\\.local\\bin\\claude.exe', '--resume', 'abc'],
       'on Windows: the variable by -e, then the program and its arguments after --, unquoted');
+
+    // psmux answers some refusals on stdout with exit 0 (pc-developer, 3.4.0).
+    console.log('\n  psmux, on Windows');
+    eq([W.psmuxRefusal("ERROR: can't find window: =s1"), W.psmuxRefusal("psmux: no server running on session 'orchtest__orch'"), W.psmuxRefusal("psmux: can't find window: x")],
+      [true, true, true], 'psmuxRefusal: its three exit-0 refusals are refusals');
+    eq([W.psmuxRefusal("❯ ok\nERROR: can't find window: y"), W.psmuxRefusal('orch:@2.%2|25236|0||C:\\x'), W.psmuxRefusal('')],
+      [false, false, false], 'and a screen that quotes one, a pane line or nothing at all is an answer');
+    // A seat rides in its window's name there: the tag is the session's.
+    const seatMark = W.seatNameMark('lab/bo%2D2');
+    eq([seatMark.startsWith('--s'), /^[A-Za-z0-9_-]+$/.test(seatMark), W.seatFromName(`quinn-repo-lab-bo-2${seatMark}`)], [true, true, 'lab/bo%2D2'],
+      'seatNameMark: a name tmux targets plainly, and seatFromName reads the seat back');
+    eq([W.seatFromName('quinn-repo'), W.seatFromName('build--sab'), W.seatFromName(`x${W.seatNameMark('no slash')}`), W.seatFromName(null)], [null, null, null, null],
+      'and a folder\'s own window, a folder that ends in --s and hex, or a mark that is not a seat\'s tag, is no seat');
     // Then a real server started the old way, with a host's settings and no
     // TMPDIR, on a socket of its own: the default socket is the operator's.
     // window.js reads ORCH_TMUX at load, so the host's side runs in a child.

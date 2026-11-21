@@ -786,9 +786,18 @@ async function main() {
     // Run that line under a real shell, exactly as Claude Code would. On
     // Windows that is Git Bash, which Claude Code runs every hook under
     // (pc-developer, 2026-11-20): there is no /bin/sh to name, so the suite
-    // takes the one Claude Code is told to use, else `sh` on PATH.
+    // takes the one Claude Code is told to use, else the bash beside git.exe
+    // (Git for Windows puts only Git\cmd on PATH, so from PowerShell `sh` is
+    // not found by name: measured), else `sh` on PATH.
     const CMD = commands[0].command;
-    const SH = process.platform === 'win32' ? (process.env.CLAUDE_CODE_GIT_BASH_PATH || 'sh') : '/bin/sh';
+    const gitBash = () => {
+      try {
+        const git = execFileSync('where.exe', ['git'], { encoding: 'utf8' }).split(/\r?\n/).find((l) => /git\.exe$/i.test(l.trim()))?.trim();
+        const bash = git && join(git, '..', '..', 'bin', 'bash.exe');
+        return bash && existsSync(bash) ? bash : null;
+      } catch { return null; }
+    };
+    const SH = process.platform === 'win32' ? (process.env.CLAUDE_CODE_GIT_BASH_PATH || gitBash() || 'sh') : '/bin/sh';
     const runWrapper = (stdin, env = {}) => new Promise((done) => {
       const started = Date.now();
       const child = execFile(SH, ['-c', CMD], { env: { ...process.env, HOME: FIX, USERPROFILE: FIX, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, ...env } },
