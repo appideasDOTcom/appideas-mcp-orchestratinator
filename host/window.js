@@ -1009,6 +1009,22 @@ export async function runsUnder(ancestor, pids, { windows = WINDOWS, read = () =
 }
 
 /**
+ * runsUnder, asked once per window shape and remembered (task 334's
+ * follow-up, QA 3898). The watch asks it at every tick (WATCH_MS, 700 ms) for
+ * as long as a window's pid is not the roster's, which a hand-started window
+ * is for as long as it stands; on Windows each ask is a 0.33–0.44 s
+ * PowerShell read (pc-developer, 3891), so asked every tick it was a process
+ * running nearly all the time. A process's parent does not change for its
+ * life, so the answer for one pane pid and one set of roster pids is the
+ * answer until either changes: `memo` holds the last key and its answer.
+ */
+export async function runsUnderOnce(memo, ancestor, pids, opts) {
+  const key = `${ancestor}|${[...(pids ?? [])].map(Number).sort((a, b) => a - b).join(',')}`;
+  if (memo.key !== key) { memo.key = key; memo.value = await runsUnder(ancestor, pids, opts); }
+  return memo.value;
+}
+
+/**
  * What to do about a window with no record, from how long it has stood
  * idle (`since`, null when it has not) and the window the host last
  * reopened for this (`tried`, a pid):

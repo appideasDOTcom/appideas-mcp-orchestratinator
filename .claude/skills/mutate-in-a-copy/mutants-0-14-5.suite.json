@@ -152,5 +152,12 @@
   "host/window.js",
   "  if (!windows) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };",
   "  if (true) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };"
+ ],
+ [
+  "the process table is read at every tick, not once per window (task 334, QA 3898)",
+  "window",
+  "host/window.js",
+  "  if (memo.key !== key) { memo.key = key; memo.value = await runsUnder(ancestor, pids, opts); }",
+  "  { memo.key = key; memo.value = await runsUnder(ancestor, pids, opts); }"
  ]
 ]

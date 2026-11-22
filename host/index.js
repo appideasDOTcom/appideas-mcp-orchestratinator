@@ -412,7 +412,7 @@ class Desk {
     // 0.14.5 review). Asked only when the pid alone does not match, which is
     // the rare case, so the common tick runs no `ps`.
     const booting = paneHere && !live.some((x) => x.pid === paneHere.pid)
-      && !(await W.runsUnder(paneHere.pid, live.map((x) => x.pid)));
+      && !(await W.runsUnderOnce(this.underMemo ??= {}, paneHere.pid, live.map((x) => x.pid)));
     // And while one is standing, or when a look was asked for (lookStartup):
     // a question still up after its window registered is still a question,
     // and "gone" is said only when the pane no longer shows it.

@@ -1886,6 +1886,16 @@ async function main() {
       const winCmd = W.parentsCommand?.({ windows: true, env: { SystemRoot: 'C:\\Windows' } });
       eq([/powershell\.exe$/.test(winCmd?.cmd ?? ''), /Get-CimInstance Win32_Process/.test(winCmd?.args?.at(-1) ?? ''), W.parentsCommand?.({ windows: false })?.cmd], [true, true, 'ps'],
         'the table is read from Win32_Process through Windows PowerShell there, and from ps elsewhere');
+      // Asked at every watch tick, so remembered per window shape (QA 3898:
+      // on Windows each read is 0.33–0.44 s of PowerShell).
+      let reads = 0;
+      const counted = { windows: true, read: async () => { reads++; return pcTable; } };
+      const memo = {};
+      const asks = [await W.runsUnderOnce?.(memo, 4292, [4884], counted), await W.runsUnderOnce?.(memo, 4292, [4884], counted), await W.runsUnderOnce?.(memo, 4292, [4884], counted)];
+      eq([asks, reads], [[true, true, true], 1], 'the same window asked three times reads the process table once');
+      await W.runsUnderOnce?.(memo, 4292, [4884, 8532], counted);
+      await W.runsUnderOnce?.(memo, 10992, [4884], counted);
+      eq(reads, 3, 'and again when the window or the roster changes');
       kid.kill();
     }
 
