@@ -632,7 +632,7 @@
 
     const s = d.session ?? {};
     const where = d.hosted
-      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : `host ${d.hosted.host} offline`)
+      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : d.hosted.refused ? `host ${d.hosted.host} refused` : `host ${d.hosted.host} offline`)
       : d.live ? 'reporting' : d.reporting ? 'away' : 'never reported';
     row('window', `${esc(s.window ?? d.hosted?.window ?? '—')} <span class="dp-dim">· ${esc(where)}</span>`);
     if (s.git_branch) row('branch', `<span class="dp-dim">${esc(s.git_branch)}</span>`);
@@ -4406,7 +4406,7 @@
     const h = d.hosted;
     const compacting = compactingLine(s.compacting);
     const presence = h
-      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
+      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : h.refused ? `host ${h.host} refused` : `host ${h.host} offline`)
       : d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
     const models = modelLine(s);
     return `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${models ? ` · ${models}` : ''}` +
@@ -4633,6 +4633,8 @@
       ? `Message ${d.persona}…`
       : held
       ? `${d.persona}’s conversation is open in your editor…`
+      : h?.refused
+      ? `${d.persona}’s host was refused by this board, so nothing can be sent…`
       : `${d.persona}’s machine isn’t reachable right now…`;
     wrap.querySelector('[data-act="send"]').disabled = !canChat || asking || signedOut;
     gateAttach(canChat && !asking && !signedOut);
@@ -4854,6 +4856,11 @@
       ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the link below — one app holds a conversation at a time.`
       : canChat
       ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
+      // A host refused for its protocol is running, so "start it" is the
+      // wrong remedy: the board's own words say what is wrong and what to do
+      // (hostAway; F4 of the 0.14.5 review, seen on the rig at C, task 336).
+      : h?.refused
+        ? esc(h.refused)
       : h
         ? `The host for this desk (${esc(h.host)}) is offline, so nothing sent here can reach it. Start it on that machine and this works again.`
         // Hosts look for a newly bound repo on their own — before each

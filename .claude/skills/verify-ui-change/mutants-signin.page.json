@@ -28,5 +28,29 @@
   "src/floor.js",
   "  if (!h.host_signins) return { error:",
   "  if (false) return { error:"
+ ],
+ [
+  "a refused host's card row says offline (task 337)",
+  "src/ui/floor.js",
+  "      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : d.hosted.refused ? `host ${d.hosted.host} refused` : `host ${d.hosted.host} offline`)",
+  "      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : `host ${d.hosted.host} offline`)"
+ ],
+ [
+  "a refused host's panel header says offline (task 337)",
+  "src/ui/floor.js",
+  "`on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : h.refused ? `host ${h.host} refused` : `host ${h.host} offline`)",
+  "`on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)"
+ ],
+ [
+  "a refused host's box says the machine is unreachable (task 337)",
+  "src/ui/floor.js",
+  "      : h?.refused\n      ? `${d.persona}’s host was refused by this board, so nothing can be sent…`\n",
+  ""
+ ],
+ [
+  "a refused host's hint says start it (task 337)",
+  "src/ui/floor.js",
+  "      : h?.refused\n        ? esc(h.refused)\n",
+  ""
  ]
 ]

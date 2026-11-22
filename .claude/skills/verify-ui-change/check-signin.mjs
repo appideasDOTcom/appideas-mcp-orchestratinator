@@ -4,7 +4,9 @@
  * in"). The desk's panel says so with a Sign in that has the host run Claude
  * Code's own sign-in; Send is dimmed with the reason; the tab pulses as for a
  * question (window.orchAttention's `asking`); a host from before Sign in gets
- * the button dimmed with why. The board's rules are in test:floor ("Claude
+ * the button dimmed with why. And a host refused for its protocol (task
+ * 337): every place the desk names its host says "refused", in the board's
+ * words where there is room for them. The board's rules are in test:floor ("Claude
  * Code signed out on a host"), the host's in test:host; this is the page.
  *
  *   run-check-signin.sh <dir>       # the whole fixture; see there
@@ -83,6 +85,36 @@ s = await box(alpha);
 ok(s.button?.disabled === true && s.button.label === 'Sign in', 'its Sign in is dimmed', JSON.stringify(s.button));
 ok(/runs a build from before Sign in/.test(s.text), 'with why under it', s.text);
 setHost(0, 0);
+
+console.log('\na host refused for its protocol (F4, task 337)');
+// What a registration refused for its protocol leaves on the host's row
+// (hosts.refused, src/db.js), set here as check-signin sets its own two
+// columns: the seed's host only touches last_seen, so nothing clears it. The
+// words are protocolRefusal's for a 0.12.12 host. Measured on the rig at
+// 8d769cb (task 336): the nameplate said "host refused" and the panel said
+// "offline… Start it on that machine", which is the wrong remedy for a host
+// that is running.
+const REFUSED = 'The host "testbox" is behind this board: it sends no protocol version (build 0.12.12, from before there was one) and the board speaks protocol 1 (build 0.14.5). The two must match. Restart the host so it runs the clone\'s current code.';
+db.prepare(`UPDATE hosts SET refused = ? WHERE host_id = 'h1'`).run(REFUSED);
+await alpha.waitFor(`document.querySelector('#floor-rooms .desk[data-agent="bo"] .plateRole')?.textContent === 'bo · host refused'`, { timeout: 12000 }).catch(() => {});
+const r = JSON.parse(await alpha.evalJs(`JSON.stringify({
+  plate: document.querySelector('#floor-rooms .desk[data-agent="bo"] .plateRole')?.textContent ?? '',
+  meta: document.querySelector('#floor-panel .p-meta')?.textContent ?? '',
+  placeholder: document.getElementById('p-text')?.placeholder ?? '',
+  hint: document.querySelector('#floor-panel .p-hint')?.textContent.replace(/\\s+/g, ' ').trim() ?? '',
+  send: document.querySelector('#floor-panel [data-act="send"]')?.disabled ?? null })`));
+ok(r.plate === 'bo · host refused', 'the nameplate says the host was refused', r.plate);
+ok(/host testbox refused/.test(r.meta) && !/offline/.test(r.meta), 'and so does the panel\'s header, not "offline"', r.meta);
+ok(/host was refused by this board/.test(r.placeholder), 'the box says why nothing can be sent', r.placeholder);
+ok(r.hint === REFUSED, 'the hint is the board\'s own words, with the remedy that works', r.hint);
+ok(!/Start it on that machine/.test(r.hint) && r.send === true, 'never "start it" for a host that is running, and Send is dimmed', JSON.stringify([r.hint.slice(0, 60), r.send]));
+await alpha.click('#floor-rooms .desk[data-agent="bo"] .plate[data-act="details"]');
+await alpha.waitFor(`!!document.getElementById('desk-pop')?.textContent`, { timeout: 8000 }).catch(() => {});
+const card = await alpha.evalJs(`[...document.querySelectorAll('#desk-pop .dp-row')].map((n) => n.textContent.replace(/\\s+/g, ' ').trim()).find((t) => /^window/.test(t)) ?? ''`);
+ok(/host testbox refused/.test(card) && !/offline/.test(card), 'the nameplate card\'s window row says it too', card);
+db.prepare(`UPDATE hosts SET refused = NULL WHERE host_id = 'h1'`).run();
+await alpha.waitFor(`!/refused/.test(document.querySelector('#floor-panel .p-meta')?.textContent ?? '')`, { timeout: 12000 })
+  .then(() => ok(true, 'the refusal cleared, the panel reads as before'), () => ok(false, 'the refusal cleared, the panel reads as before'));
 
 const errs = alpha.console().filter((x) => /^error/.test(x) && !/Failed to load resource/.test(x));
 ok(errs.length === 0, 'no errors in the console', errs.join(' | '));
