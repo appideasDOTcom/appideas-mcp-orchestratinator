@@ -3596,6 +3596,45 @@ try {
     'and says so, rather than leaving the operator wondering where the dialog went');
   await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
 
+  console.log('\na dialog read by its shape, and a screen the floor does not know (0.14.6)');
+  {
+    // A dialog the host read by its shape (review item 3): its title, its
+    // sentence and its rows stand on the desk like any startup question.
+    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:dialog', kind: 'dialog',
+      asks: 'Teach auto mode about your environment?', detail: 'Auto mode works better when it knows your environment.',
+      options: [{ n: 1, text: 'Yes' }, { n: 2, text: 'Not now' }, { n: 3, text: "Don't show again" }], window: '@9' }]);
+    let d = await moverDesk();
+    eq([d.permission?.kind, d.permission?.summary, d.permission?.detail, d.permission?.options.length], ['dialog', 'Teach auto mode about your environment?', 'Auto mode works better when it knows your environment.', 3],
+      'a dialog read by its shape stands on the desk with its title, its sentence and its rows');
+    const refusedD = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) });
+    eq([refusedD.status, (await refusedD.json()).code], [409, 'asking'], 'and a message to the desk is refused while it stands');
+    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:dialog', gone: true }]);
+    // A screen nobody knows (review item 1): no rows, its lines instead.
+    const LINES = ['  Plugins', '  ❯ ✔ floor', '  ↑/↓ to navigate · Space to toggle · Esc to close'];
+    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', kind: 'screen',
+      asks: 'the window is showing something the floor does not know', screen: LINES, options: [], window: '@9' }]);
+    d = await moverDesk();
+    eq([d.permission?.kind, d.permission?.screen, d.permission?.options], ['screen', LINES, []], 'a screen with no rows still stands on the desk, carrying its lines');
+    eq((await floor()).queue.some((q) => q.agent === 'mover-a'), true, 'and puts the desk in the queue of desks that need the operator');
+    const refusedS = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) });
+    const rs = await refusedS.json();
+    assert(refusedS.status === 409 && /a screen the floor does not know/.test(rs.error) && /press Escape/.test(rs.error), `a message is refused in words that say what to do (${rs.error})`);
+    const esc = await fetch(`${HOST}/api/floor/permission`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', decision: 'cancel' }) });
+    eq(esc.status, 200, 'Escape is pressed from the floor through the same route');
+    const wk = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
+    // The section above leaves its own two answers in this host's line; only this request's is read.
+    eq(wk.work.filter((w) => w.payload?.request_id === 'startup:@9:screen').map((w) => `${w.kind}:${w.payload.decision}`), ['permission:cancel'], 'and reaches the host as cancel on that request, which the host presses as Escape');
+    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', kind: 'screen', screen: [], options: [] }]);
+    eq((await moverDesk()).permission ?? null, null, 'a screen with no lines and no rows says nothing');
+    // A prompt a hook raised outranks anything read off the screen.
+    await post(ev('mover-a', 'sdk-mover-dialog', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }));
+    const hooked = (await moverDesk()).permission;
+    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', kind: 'screen', screen: LINES, options: [], window: '@9' }]);
+    d = await moverDesk();
+    assert(!!hooked && !hooked.startup && d.permission?.request_id === hooked.request_id, `and a permission prompt a hook raised is not replaced by a screen the host read (${hooked?.request_id} → ${d.permission?.request_id})`);
+    await post(ev('mover-a', 'sdk-mover-dialog', 'SessionEnd', {}));
+  }
+
   console.log('\none stream for several desks (issue #19)');
   {
     // A browser holds six connections to the board, shared by all its
@@ -4221,6 +4260,8 @@ try {
     eq(asked.status, 200, 'once the window works again, the prompt is gone and a message goes');
     eq([askingWhy(null), askingWhy({ questions: [{}] })?.code, /asking a question\./.test(askingWhy({ questions: [{}] })?.error), /before it can start/.test(askingWhy({ startup: true })?.error)],
       [null, 'asking', true, true], 'askingWhy names what the window is asking: a question, permission, or a question before it can start');
+    eq([/asking something\./.test(askingWhy({ startup: true, kind: 'dialog' })?.error), /a screen the floor does not know/.test(askingWhy({ startup: true, kind: 'screen' })?.error)],
+      [true, true], 'and a dialog read by its shape, or a screen the floor does not know, in words of their own');
 
     let r = await op('/api/floor/meeting', { channel: MCH, agents: ['mia', 'noa'] });
     eq(r.status, 200, 'a room is created from desks on one floor');
@@ -4458,6 +4499,7 @@ try {
     let nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 1), U('dee', 0)], true);
     eq([nc.text, nc.disabled, nc.waiting], ['Nudge all (3)', false, true], 'the room\'s Nudge says a nudge is needed, and how much is waiting: "Nudge all (3)" (costmo, 2026-11-16)');
     eq(nc.agents, ['bo', 'cy'], 'and it goes to the desks with something waiting, not to the one with nothing');
+    eq([nc.label, nc.count], ['Nudge all', ' (3)'], 'the label comes in two parts, the names and the count, so the page can cut the names and keep the count (costmo, 2026-11-22)');
     assert(/^Types “nudge” into 2 desks with something waiting.* The others have nothing waiting and are left alone\.$/m.test(nc.title), 'which its hover says', nc.title);
     assert(/Bo: 2 unread messages/.test(nc.title) && /Cy: 1 unread message$/m.test(nc.title), 'and whose, on hover');
     nc = pg.meetingNudgeChip([U('bo', 1, undefined, 2), U('cy', 0, undefined, 1), U('dee', 0)], true);
@@ -4468,6 +4510,7 @@ try {
     assert(/^Nobody chosen has anything waiting on the board/.test(nc.title) && /The bell on a desk’s box nudges that one desk anyway\.$/m.test(nc.title), 'saying why, and what still nudges one desk on purpose', nc.title);
     nc = pg.meetingNudgeChip([U('bo', 0)], false);
     eq([nc.text, nc.waiting, nc.disabled], ['Nudge Bo', false, true], 'narrowed to one desk with nothing waiting: its name, and nothing to call for');
+    eq(nc.count, '', 'and no count to keep');
     nc = pg.meetingNudgeChip([U('bo', 2), U('cy', 0)], false);
     eq([nc.text, nc.agents], ['Nudge Bo, Cy (2)', ['bo']], 'narrowed to some, the names with the same count, and still only the one with something waiting');
     nc = pg.meetingNudgeChip([U('bo', 3)], true);
@@ -5341,7 +5384,7 @@ try {
       cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
       cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
       cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- meeting rooms: the decisions end ---------- */'),
-      'export { moveBlockedWords, leaveBlockedWords, cardRefusal, plateName, meetingQuery, meetingOf, meetingChip, seatAgain, agentDesks, meetingResumePlan, deskFate, boundTo };',
+      'export { moveBlockedWords, leaveBlockedWords, cardRefusal, plateName, plateRole, plateState, clampLine, meetingQuery, meetingOf, meetingChip, seatAgain, agentDesks, meetingResumePlan, deskFate, boundTo };',
     ].join('\n'));
     let pg;
     try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
@@ -5356,6 +5399,32 @@ try {
     assert(/to use these\. It was hidden before it joined: .*is its pill again when the meeting ends\.$/.test(pg.cardRefusal(true, true) ?? ''), 'a desk hidden before it joined is told, in the same reason, that it is its pill again when the meeting ends');
     eq(pg.cardRefusal(false, true), null, 'and a hidden desk in no meeting room has nothing to be told');
     eq([pg.plateName({ persona: 'Quinn', twin: null }), pg.plateName({ persona: 'Quinn', twin: { of: 'quinn', n: 2 } })], ['Quinn', 'Quinn · 2'], 'a second session\'s nameplate is the agent\'s name with its number');
+
+    // A nameplate's line is one line, cut to fit (costmo, 2026-11-22: a long
+    // agent id ran past its desk and out of a meeting's box). The measure here
+    // is a monospace one, 6 units a character, which is what the drawing's
+    // browser measure is for the role line's 10px mono.
+    const mono = (s) => Array.from(s).length * 6;
+    eq(pg.clampLine('bo · ready', 180, mono), { text: 'bo · ready', cut: false }, 'a line that fits is drawn whole, and not marked cut');
+    const long = 'orchestratinator-desktop-dev · ready';
+    const cutLong = pg.clampLine(long, 180, mono);
+    eq(cutLong, { text: 'orchestratinator-desktop-dev…', cut: true }, 'the live board\'s overflowing line is cut to fit with an ellipsis at its end, and marked cut (so the plate carries its hover)');
+    assert(mono(cutLong.text) <= 180 && mono(pg.clampLine(long, 180 + 6, mono).text) <= 186, 'the cut line is never wider than it may be');
+    eq(pg.clampLine(long, 181, mono).text.length, cutLong.text.length, 'and it is the longest start that fits: a unit more room adds no character a character\'s width wide');
+    eq(pg.clampLine('Ab cdef', 4 * 6, mono).text, 'Ab…', 'the space before the ellipsis is dropped, so it does not read as a word left off');
+    // A half of a pair measures nothing here, as in a renderer that drops it:
+    // so a cut by UTF-16 unit could end on a half and still "fit".
+    const halves = (s) => Array.from(s).filter((c) => c.length === 2 || !/[\uD800-\uDFFF]/.test(c)).length * 6;
+    eq(pg.clampLine('x😀😀😀😀😀😀', 3 * 6, halves).text, 'x😀…', 'a character outside the BMP is never split in half');
+    eq(pg.clampLine('anything at all', 2, mono).text, '…', 'with no room at all, the ellipsis alone');
+    const kept = pg.clampLine('orchestratinator-desktop-dev', 180, mono, ' · ready');
+    eq(kept, { text: 'orchestratinator-desk… · ready', cut: true }, 'the role line cuts the id and keeps its state whole after the ellipsis, so a long id never hides "ready" or "host offline"');
+    assert(mono(kept.text) <= 180, 'and is still no wider than it may be');
+    eq(pg.clampLine('bo', 180, mono, ' · ready'), { text: 'bo · ready', cut: false }, 'a short id with its state is drawn whole');
+    eq([pg.plateState({ agent: 'bo', hosted: { live: true } }), pg.plateState({ agent: 'bo', reporting: true })], [' · ready', ''], 'the state is the part after the id, and a desk reporting with no host has none');
+    eq([pg.plateRole({ agent: 'bo', hosted: { live: true } }), pg.plateRole({ agent: 'bo', hosted: { live: false, refused: true } }), pg.plateRole({ agent: 'bo', hosted: { live: false } }),
+      pg.plateRole({ agent: 'bo', reporting: true }), pg.plateRole({ agent: 'bo' })],
+    ['bo · ready', 'bo · host refused', 'bo · host offline', 'bo', 'bo · not reporting'], 'the role line reads as it did before it could be cut');
 
     const D = (agent, extra = {}) => ({ agent, persona: agent[0].toUpperCase() + agent.slice(1), nudge: { ok: true, host: 'h' }, last_turn: { id: 10 }, hosted: { host: 'seatbox', window: agent, live: true }, ...extra });
     const hostsCan = [{ name: 'seatbox', seats: true }];

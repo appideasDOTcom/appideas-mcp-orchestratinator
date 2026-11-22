@@ -1454,6 +1454,14 @@ svg.room { width: 100%; height: auto; display: block; border-radius: 12px; margi
 
 @media (max-width: 900px) {
   .floor-body { flex-direction: column; }
+  /* The rooms keep the full width here (costmo, 2026-11-22). In a column the
+     body's `align-items: flex-start` sizes .rooms to its contents, and its
+     contents are an SVG at `width: 100%` of .rooms: a cycle the browser
+     settles at the SVG's default 300px, so the floor was drawn as a
+     thumbnail in any window under 900px. The panel is on its own row here,
+     so nothing beside the rooms needs the room. A width, not `stretch`:
+     the building centres itself with auto margins, which stretch ignores. */
+  .floor-body > .rooms { width: 100%; }
   .deskpanel { flex: 1 1 auto; width: 100%; max-height: 60vh; }
 }
 /* Invisible, but the reason a whole desk is clickable and not just its pixels. */
@@ -1965,6 +1973,17 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .m-part.has-unread { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); border-left-color: var(--m-c); }
 .m-bell .m-bellGlyph { width: 12px; height: 12px; fill: currentColor; display: block; }
 .m-nudge-all.waiting { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* One line, whatever the names (costmo, 2026-11-22). The box is a fixed
+   height (.p-actions .btn), so a label that wrapped ran out of it. The names
+   are cut with an ellipsis and the count after them is kept whole: "Nudge
+   Coordinator, Orchestr… (4)". The whole label is the first line of its
+   hover. */
+.m-nudge-all {
+  display: inline-flex; align-items: center; min-width: 0; flex: 0 1 auto;
+  max-width: min(240px, 45%); white-space: nowrap; overflow: hidden;
+}
+.m-nudge-all .m-nudge-who { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.m-nudge-all .m-nudge-n { flex: none; white-space: pre; }
 /* A participant is two rows: its name, state and ✕, then its badges. */
 .m-row { display: flex; align-items: center; gap: 6px; }
 .m-row-name .m-remove { margin-left: auto; }
@@ -2036,3 +2055,13 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .t-file .att-generic { width: 22px; height: 18px; font-size: 8px; flex: none; }
+
+/* A screen the floor does not know (0.14.6): the window's own last lines, as
+   the pane drew them, so the operator can read what it wants before opening
+   it. Monospace and unwrapped, scrolled sideways, as a pane is. */
+.p-screen-lines {
+  margin: 6px 0; padding: 6px 8px; max-height: 14em; overflow: auto;
+  font-size: 11px; line-height: 1.35; white-space: pre;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+}
+.p-startup-detail { margin: 4px 0 6px; font-size: 12px; }

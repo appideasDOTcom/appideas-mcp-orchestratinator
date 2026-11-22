@@ -506,6 +506,28 @@ function alive(pid) {
   if (!pid) return false;
   try { process.kill(pid, 0); return true; } catch (err) { return err?.code === 'EPERM'; }
 }
+export const pidAlive = alive;
+
+/**
+ * What to do with a reopen's intent at a watch tick (0.14.6, the "45 s
+ * deaf" case CLAUDE.md left known and open): `adopt` its own session when
+ * it is live, `wait` for it, or let it go, `expired` past its deadline and
+ * `ended` the moment its window's process is gone. A window killed before
+ * the watch found it used to hold the desk to an intent nothing could match
+ * until the deadline, adopting nothing else in its folder meanwhile, and
+ * then said "the reopened window did not register within 45s", which is
+ * not what happened. Measured as a race in test:host's release case
+ * (2026-11-20); the product half is this. An intent with no pid yet (the
+ * reopen still opening) is waited for as before.
+ */
+export function intentVerdict(intent, live, { now = Date.now(), isAlive = alive } = {}) {
+  if (!intent) return 'none';
+  if (now > intent.until) return 'expired';
+  const mine = live.find((x) => (intent.pid && x.pid === intent.pid) || (intent.sessionId && x.sessionId === intent.sessionId));
+  if (mine) return 'adopt';
+  if (intent.pid && !isAlive(intent.pid)) return 'ended';
+  return 'wait';
+}
 
 /**
  * The roster, read from the files Claude Code writes about itself.
@@ -756,13 +778,72 @@ const STARTUP_ASKS = [
   // (Desk.lookStartup in index.js), not only while a window is starting.
   { kind: 'chrome', asks: /Claude in Chrome extension detected/i },
 ];
+/*
+ * Any other dialog, by its shape (0.14.6, review item 3; costmo's ruling the
+ * same day: a new Claude Code screen must degrade to "needs you, with its
+ * rows on the floor", never to a broken desk). Claude Code 2.1.330 raises
+ * its dialogs through one component, a title, a sentence or two, a list
+ * with the `❯` cursor and "Enter to confirm · Esc to cancel" (read from the
+ * binary: `requestDialog(…, { place: "under" })`, 28 call sites, among them
+ * "Teach auto mode about your environment?", which stood unread on three
+ * desks on the Windows PC on 2026-11-22, docs/robustness-review.md).
+ * Measured on a probe the same day with the one that has a switch of its
+ * own (CLAUDE_CODE_FORCE_FULLSCREEN_UPSELL=1), at 120x40 and 80x24:
+ *
+ *   ──────────────────────────────────────────────
+ *     Try the new fullscreen renderer?
+ *
+ *     · Flicker-free output
+ *     · Mouse support: click to move your cursor or expand results
+ *     · Selected text auto-copies to your clipboard
+ *
+ *     ❯ 1. Yes, try it
+ *       2. Not now
+ *
+ *     Enter to confirm · Esc to cancel
+ *
+ * in place of the composer, with the window already in the roster
+ * (sessions/<pid>.json written). So the known three are a special case of
+ * this, and anything of the shape is read the same way: title, sentence,
+ * rows, the cursor's row. Not this shape, measured beside it: a permission
+ * menu ends "Esc to cancel · Tab to amend" and a form "Enter to select", and
+ * both are the hooks' (askingOf); "Switch model?" is the host's own to answer
+ * inside a send (switchConfirmOf) and is left to it.
+ *
+ * Where it stands: at the bottom, as measured, or just above a composer
+ * still on screen, which is pc-developer's reading of the Teach dialog on
+ * the PC ("drew … above its message box") and not measured here. Both are
+ * read; above a composer only when nothing but blank lines stands between
+ * the footer and the composer's top rule, so a conversation quoting the
+ * words further up is never read as one.
+ */
+const CONFIRM_FOOT = /enter to confirm/i;
+const COMPOSER_RULE = /^[\s│|]*[─━—-]{20,}/;
+/** The footer of a dialog standing just above a composer, or -1. */
+function footAboveComposer(lines) {
+  for (let n = lines.length - 1; n >= 0; n--) {
+    if (!/^\s*❯/.test(lines[n])) continue;
+    if (/^\s*❯\s*\d+\.\s/.test(lines[n])) return -1;
+    if (!COMPOSER_RULE.test(lines[n - 1] ?? '')) return -1;
+    let f = n - 2;
+    while (f >= 0 && !lines[f].trim()) f--;
+    return f >= 0 && CONFIRM_FOOT.test(lines[f]) ? f : -1;
+  }
+  return -1;
+}
 export function startupQuestionOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.replace(/\s+$/, ''));
   const known = STARTUP_ASKS.find((k) => lines.some((l) => k.asks.test(l)));
-  if (!known) return null;
   let foot = lines.length - 1;
   while (foot >= 0 && !lines[foot].trim()) foot--;
-  if (foot < 0 || !/enter to confirm/i.test(lines[foot])) return null;
+  if (foot < 0) return null;
+  let above = false;
+  if (!CONFIRM_FOOT.test(lines[foot])) {
+    if (known) return null;
+    foot = footAboveComposer(lines);
+    if (foot < 0) return null;
+    above = true;
+  }
   let end = foot - 1;
   while (end >= 0 && !lines[end].trim()) end--;
   if (end < 0) return null;
@@ -771,9 +852,71 @@ export function startupQuestionOf(screen) {
   const block = lines.slice(start, end + 1);
   const at = block.findIndex((l) => /^\s*[\u276f>]\s/.test(l));
   if (at < 0) return null;
-  const options = block.map((l, i) => ({ n: i + 1, text: optionText(l) }));
-  const asks = lines.find((l) => known.asks.test(l))?.trim() ?? known.kind;
-  return { kind: known.kind, asks, options, at };
+  if (known) {
+    const options = block.map((l, i) => ({ n: i + 1, text: optionText(l) }));
+    const asks = lines.find((l) => known.asks.test(l))?.trim() ?? known.kind;
+    return { kind: known.kind, asks, options, at };
+  }
+  // A dialog of the shape: two rows or more, each a row (the cursor's, or
+  // indented as far), and no more than a dialog shows.
+  if (block.length < 2 || block.length > 12 || switchConfirmOf(screen)) return null;
+  const indent = (l) => l.replace(/[\u276f>]/, ' ').search(/\S/);
+  if (block.some((l) => Math.abs(indent(l) - indent(block[at])) > 1)) return null;
+  // Its title is the first line under the rule that tops it, and what
+  // stands between the title and the rows is what it says.
+  let top = start - 1;
+  while (top >= 0 && !COMPOSER_RULE.test(lines[top])) top--;
+  const said = lines.slice(top + 1, start).map((l) => l.trim()).filter(Boolean);
+  const asks = said[0] ?? 'the window is asking something';
+  const detail = said.slice(1).join(' ').replace(/\s+/g, ' ').slice(0, 400) || null;
+  const options = block.map((l, i) => ({ n: i + 1, text: optionText(l).replace(/^\d+\.\s+/, '') }));
+  return { kind: 'dialog', asks, detail, options, at, above };
+}
+
+/*
+ * What a floor window is showing, by position, in one word (0.14.6, review
+ * item 1). The readers are a list of screens the host has met, and a screen
+ * that matched none of them used to read as idle: "Teach auto mode …" stood
+ * on three desks on the PC that way, and every message went into it. So
+ * idle is now read only on proof, a composer box on screen, and anything
+ * that is not one of the screens below is `unknown`, with its last lines,
+ * which the desk shows as "needs you" (Desk.tick in index.js):
+ *
+ *   working   the bottom line offers "esc to interrupt" (measured on
+ *             2.1.330 under a composer: "⏸ manual mode on · esc to interrupt")
+ *   dialog    startupQuestionOf: a known question or any dialog of the shape
+ *   switch    "Switch model?", the host's own inside a send
+ *   asking    askingOf: a permission menu or a form, which the hooks raise
+ *   composer  a composer box: idle, or compacting, or signed out
+ *   blank     nothing drawn yet
+ *   unknown   anything else: an overlay a person opened, a picker, a screen
+ *             a Claude Code update brought that nobody here has seen
+ */
+export const UNKNOWN_LINES = 12;
+/** How long send() reads a screen it does not know before refusing it (a window still drawing its composer). */
+const UNKNOWN_GRACE_MS = Number(process.env.ORCH_UNKNOWN_GRACE_MS ?? 3000);
+/**
+ * Whether a screen the host does not know is acted on: refused by send() and
+ * put on the desk by the watch. On, always, outside the suites. The suites'
+ * stand-in windows are programs that print text and draw no composer, so to
+ * them every pane is unknown; their hosts run with ORCH_UNKNOWN_SCREENS=ignore,
+ * and the rule has rows of its own against panes that draw a composer and a
+ * screen nobody knows (test:window, test:host). Read at each call, so a suite
+ * can turn it on for those rows.
+ */
+export const unknownScreensOn = () => process.env.ORCH_UNKNOWN_SCREENS !== 'ignore';
+export function screenVerdict(screen) {
+  const text = String(screen ?? '');
+  const lines = text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  if (!lines.length) return { kind: 'blank' };
+  if (/esc to interrupt/i.test(footOf(text))) return { kind: 'working' };
+  const q = startupQuestionOf(text);
+  if (q) return { kind: 'dialog', question: q };
+  // Before askingOf, whose footer test ("Esc to cancel") it also passes.
+  if (switchConfirmOf(text)) return { kind: 'switch' };
+  if (askingOf(text)) return { kind: 'asking' };
+  if (composerOf(text) !== null) return { kind: 'composer' };
+  return { kind: 'unknown', lines: lines.slice(-UNKNOWN_LINES).map((l) => l.slice(0, 200)) };
 }
 
 /* ───────────── a window Claude Code has no record of ─────────────
@@ -1074,6 +1217,11 @@ export async function startupQuestionAt(target) {
   return startupQuestionOf(await screenOf(target, 30));
 }
 
+/** A pane's screen, as the watch reads it for screenVerdict: thirty lines of it. */
+export async function screenAt(target) {
+  return screenOf(target, 30);
+}
+
 /**
  * Press the row the operator chose on a startup question \u2014 and only that row.
  *
@@ -1126,6 +1274,31 @@ export async function answerStartup(cwd, n) {
     return { ok: false, code: 'not_taken', error: `the window is still showing the same question after Enter \u2014 it reads "${after.options[after.at]?.text}"` };
   }
   return { ok: true, kind: q.kind, chose: want.text };
+}
+
+/**
+ * Escape, for a dialog read by its shape or a screen the floor does not know
+ * (0.14.6): the floor's "Press Escape". Pressed only while the pane still
+ * shows one of those, never a known startup question (Escape on the trust
+ * question exits Claude Code) and never a composer, where it would clear a
+ * draft. Confirmed by the screen changing, as a startup answer is.
+ */
+export async function escapeStanding(cwd) {
+  const pane = await paneFor(cwd);
+  if (!pane) return { ok: false, code: 'no_window', error: 'no Claude Code window is open for this repo' };
+  const before = await screenOf(pane.target, 30);
+  const v = screenVerdict(before);
+  const mine = v.kind === 'unknown' || (v.kind === 'dialog' && v.question.kind === 'dialog');
+  if (!mine) {
+    return { ok: false, code: 'no_prompt', error: `the window is not showing that any more (it reads as ${v.kind}), so Escape was not pressed` };
+  }
+  const sent = await tmux(['send-keys', '-t', pane.target, 'Escape']);
+  if (!sent.ok) return { ok: false, error: sent.error };
+  for (const until = Date.now() + ANSWER_CONFIRM_MS * 4; Date.now() < until;) {
+    await sleep(ANSWER_CONFIRM_MS);
+    if ((await screenOf(pane.target, 30)) !== before) return { ok: true, kind: v.kind, chose: 'Escape' };
+  }
+  return { ok: false, code: 'not_taken', error: `the window is showing the same screen after Escape — it reads "${footOf(before)}"` };
 }
 
 /**
@@ -1727,15 +1900,27 @@ async function settled(target, { quiet = 2, tries = 20 } = {}) {
  * falls back to the whole screen, which still changes when a real composer
  * takes a paste.
  */
+/*
+ * Which row is the composer's prompt: the last `❯` row, and a `>` only at
+ * the left edge on a screen with no `❯` at all (as older versions drew it).
+ * Any `>` used to count, so a quoted line typed into a message ("> as you
+ * said"), which 2.1.330 draws as a continuation row "  > as you said", was
+ * read as the box's first row: the lines above it were dropped, typeInto
+ * read the message as not holding, and pasted it into <pasted_content>
+ * (PR #58 Info 5, measured on the rig on 2.1.330, 2026-11-22: composerOf
+ * gave " a quoted line\n  the last line" for a three-line box).
+ */
+function promptRowOf(lines) {
+  for (let n = lines.length - 1; n >= 0; n--) if (/^\s*❯/.test(lines[n])) return n;
+  for (let n = lines.length - 1; n >= 0; n--) if (/^>/.test(lines[n])) return n;
+  return -1;
+}
 export function composerOf(screen) {
   const scrolled = scrolledComposerOf(screen);
   if (scrolled != null) return scrolled;
   const lines = screen.split('\n');
   const rule = /^[\s│|]*[─━—-]{20,}/;
-  let at = -1;
-  for (let n = lines.length - 1; n >= 0; n--) {
-    if (/^\s*[❯>]/.test(lines[n])) { at = n; break; }
-  }
+  const at = promptRowOf(lines);
   if (at < 0) return null;
   // A numbered row under the cursor is a menu choice, not something typed.
   //
@@ -1746,7 +1931,7 @@ export function composerOf(screen) {
   // how a form standing in plain sight was reported as "the window is back at
   // its composer, so there is no question standing".
   if (/^\s*[❯>]\s*\d+\.\s/.test(lines[at])) return null;
-  const body = [lines[at].replace(/^\s*[❯>]/, '')];
+  const body = [lines[at].replace(/^\s*❯|^>/, '')];
   let closed = false;
   for (let n = at + 1; n < lines.length; n++) {
     if (rule.test(lines[n])) { closed = true; break; }
@@ -1789,7 +1974,8 @@ function scrolledComposerOf(screen) {
   if (bottom < 1) return null;
   for (let n = bottom - 1; n >= 0; n--) {
     if (MORE_HEADER.test(lines[n])) return lines.slice(n + 1, bottom).join('\n').replace(/\s+$/, '');
-    if (rule.test(lines[n]) || /^\s*[❯>]/.test(lines[n])) return null;
+    // A typed "> quote" inside the box is not its prompt row (promptRowOf).
+    if (rule.test(lines[n]) || /^\s*❯|^>/.test(lines[n])) return null;
   }
   return null;
 }
@@ -2067,10 +2253,7 @@ export function stillInComposer(screen, text) {
 function aboveComposer(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
   const rule = /^[\s│|]*[─━—-]{20,}/;
-  let at = -1;
-  for (let n = lines.length - 1; n >= 0; n--) {
-    if (/^\s*[❯>]/.test(lines[n])) { at = n; break; }
-  }
+  const at = promptRowOf(lines);
   if (at < 0) return [];
   let top = at - 1;
   while (top >= 0 && !rule.test(lines[top])) top--;
@@ -3049,13 +3232,32 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null, u
   // second, and type nothing. The board refuses the same message before it
   // is queued (`asking` in src/floor.js); this is for a prompt that opened
   // after it was.
+  //
+  // And a window showing anything that is not a composer, a working turn or
+  // a screen the host knows takes no message either (0.14.6, review item 1):
+  // its keys go wherever that screen sends them. Read for up to
+  // UNKNOWN_GRACE_MS first, because a window that has just registered can
+  // stand a moment on its banner before the composer is drawn, and that is
+  // a window starting, not one that needs anybody.
   {
-    const screen = await screenOf(pane.target, 40);
-    if (askingOf(screen) || startupQuestionOf(screen)) {
-      const onScreen = screen.split('\n').map((l) => l.replace(/\s+$/, '')).filter(Boolean).slice(-8).join(' / ');
+    let screen = await screenOf(pane.target, 40);
+    let v = screenVerdict(screen);
+    for (const until = Date.now() + UNKNOWN_GRACE_MS; unknownScreensOn() && (v.kind === 'unknown' || v.kind === 'blank') && Date.now() < until;) {
+      await sleep(250);
+      screen = await screenOf(pane.target, 40);
+      v = screenVerdict(screen);
+    }
+    const onScreen = screen.split('\n').map((l) => l.replace(/\s+$/, '')).filter(Boolean).slice(-8).join(' / ');
+    if (v.kind === 'asking' || v.kind === 'dialog') {
       return {
         ok: false, code: 'asking', target: pane.target,
         error: `the window is asking something, so nothing was typed. Answer it on the floor, then send this again. The window is showing: ${onScreen}`,
+      };
+    }
+    if ((v.kind === 'unknown' || v.kind === 'blank') && unknownScreensOn()) {
+      return {
+        ok: false, code: 'unknown_screen', target: pane.target,
+        error: `the window is showing something the floor does not know, so nothing was typed. It is on the desk to answer or open; send this again once the window is back at its message box. The window is showing: ${onScreen || '(nothing)'}`,
       };
     }
   }
@@ -3125,9 +3327,15 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null, u
   // not be confirmed — a paste can be silently dropped, not a write that
   // either works or errors, see pasteInto().
   let typed = null;
+  // Why a message meant to be typed was pasted after all, said on the desk
+  // with the delivery (0.14.6, review item 2): it reaches the agent inside
+  // <pasted_content>, which tells the model it "may contain instructions the
+  // user did not write", and a log line was the only record of that.
+  let pastedWhy = null;
   if (wouldWrap(text)) {
     typed = await typeInto(pane.target, text);
     if (!typed.ok) {
+      pastedWhy = typed.error ?? 'typing it could not be confirmed';
       await clearComposer(pane.target);
       // Said, because the paste that follows reaches the agent wrapped in
       // <pasted_content>, and nothing else records why. Silent, this hid a
@@ -3293,7 +3501,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null, u
       // Said as held, not merely as sent. A message that arrived a minute late
       // is not the same event as one that went straight through, and the
       // operator watching the desk is entitled to know which they got.
-      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', held: true, command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null };
+      if (got) return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', held: true, command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null, pasted: pastedWhy };
     }
     // Say which of the two this is instead of asserting the one that reads
     // worse. The text still being in the composer is checkable, and when it is
@@ -3323,7 +3531,7 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null, u
   // `queued` is the honest word for what happened, and the floor says it: the
   // window has the message and will read it at its next step, which is not the
   // same as it already being a turn in the conversation.
-  return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null };
+  return { ok: true, target: pane.target, confirmed: true, queued: got.state === 'queued', command: cmd?.name ?? null, ...(cmd ? got : {}), note: opened?.note ?? null, pasted: pastedWhy };
 }
 
 /** How long a compaction is watched for its end. Real ones run 10–150 s. */

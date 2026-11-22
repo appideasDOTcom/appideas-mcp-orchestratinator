@@ -25,6 +25,10 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { standingOf, refusalOf, branchOf, isNewer } from '../src/updates.js';
 import { gitHeadOf } from '../src/build-info.js';
+// The stand-in windows here print text and draw no composer, so every
+// pane would read as a screen the floor does not know (host/window.js,
+// unknownScreensOn). Rows that are about that rule turn it back on.
+process.env.ORCH_UNKNOWN_SCREENS ??= 'ignore';
 
 // What every hand-rolled registration below says it speaks: the board refuses
 // a host with another number, or none (protocolRefusal in src/floor.js).
@@ -112,6 +116,7 @@ const fs = require('fs'); const F = ${JSON.stringify(FIX)};
 const mode = fs.existsSync(F + '/plugin.mode') ? fs.readFileSync(F + '/plugin.mode', 'utf8').trim() : 'ok';
 const a = process.argv.slice(2);
 if (a[0] === 'agents') { process.stdout.write('[]'); process.exit(0); }
+if (a[0] === '--version') { process.stdout.write('2.1.330 (Claude Code)\\n'); process.exit(0); }
 if (a[0] === 'plugin') {
   fs.appendFileSync(F + '/claude.log', JSON.stringify({ cwd: process.cwd(), args: a }) + '\\n');
   if (mode === 'missing') { process.stderr.write('Plugin "' + a[2] + '" is not installed\\n'); process.exit(1); }

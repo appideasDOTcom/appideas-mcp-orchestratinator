@@ -331,6 +331,17 @@ try {
     rmSync(p, { recursive: true, force: true });
     const tree = (() => { try { return { rc: 0, out: execFileSync('node', ['scripts/check-lock.mjs']).toString() }; } catch (err) { return { rc: err.status, out: String(err.stdout) }; } })();
     assert(tree.rc === 0, `this tree's node_modules is its lock's (${tree.out.trim().split('\n')[0]})`);
+    // What runs is exact, and is the lock's (0.14.6, desktop-dev's reading of
+    // QA's 0.14.5 OK): the desktop app installs this package as a dependency,
+    // npm ignores a dependency's lock, and a caret range let the app's board
+    // resolve MCP SDK 1.32.2 where every chain here ran 1.29.0. Exact versions
+    // equal to the lock make the app ship what was tested; the image is
+    // unchanged (it installs the lock with npm ci).
+    const pkgJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const lockJson = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+    const loose = Object.entries(pkgJson.dependencies ?? {}).filter(([k, v]) => v !== lockJson.packages?.[`node_modules/${k}`]?.version);
+    assert(Object.keys(pkgJson.dependencies ?? {}).length > 0 && !loose.length, `every runtime dependency is an exact version, the lock's own (${loose.map(([k, v]) => `${k} ${v}`).join(', ') || 'all exact'})`);
+    assert(JSON.stringify(lockJson.packages?.['']?.dependencies) === JSON.stringify(pkgJson.dependencies), 'and the lock records the same, so npm ci takes it as in step');
   }
 
   const health = await (await fetch(`http://localhost:${PORT}/health`)).json();

@@ -1,0 +1,23 @@
+[
+ ["a nameplate's line is drawn whole, however wide", "src/ui/floor.js",
+  "    const fit = clampLine(text, PLATE_MAX_W, (s) => textWidth(cls, s), keep);",
+  "    const fit = { text: text + keep, cut: false };"],
+ ["the role line's state is cut with the id", "src/ui/floor.js",
+  "    const role = plateLine('plateRole', String(d.agent), 15, plateState(d));",
+  "    const role = plateLine('plateRole', plateRole(d), 15);"],
+ ["a cut plate carries no hover", "src/ui/floor.js",
+  "    if (name.cut || role.cut) {",
+  "    if (false) {"],
+ ["the room's Nudge label is one run of text", "src/ui/floor.js",
+  "      nudgeBtn.replaceChildren(names, count);",
+  "      nudgeBtn.textContent = nudgeChip.text;"],
+ ["the room's Nudge names are not cut", "src/ui/styles.css",
+  ".m-nudge-all .m-nudge-who { overflow: hidden; text-overflow: ellipsis; min-width: 0; }",
+  ".m-nudge-all .m-nudge-who { }"],
+ ["a cut Nudge's hover does not lead with its label", "src/ui/floor.js",
+  "    nudgeBtn.title = namesCut ? `${nudgeChip.text}\\n${nudgeChip.title}` : nudgeChip.title;",
+  "    nudgeBtn.title = nudgeChip.title;"],
+ ["under 900px the rooms are as wide as their contents again", "src/ui/styles.css",
+  "  .floor-body > .rooms { width: 100%; }",
+  ""]
+]

@@ -455,7 +455,15 @@ export function deliverable(h, nowMs = Date.now()) {
  */
 export function askingWhy(pending) {
   if (!pending) return null;
-  const what = pending.questions?.length || pending.reading ? 'a question' : pending.startup ? 'a question before it can start' : 'for permission';
+  if (pending.startup && pending.kind === 'screen') {
+    return {
+      error: 'The window is showing a screen the floor does not know. A message typed now would go into that, not the conversation: open the window or press Escape on the desk, then send this.',
+      code: 'asking',
+    };
+  }
+  const what = pending.questions?.length || pending.reading ? 'a question'
+    : pending.startup && pending.kind === 'dialog' ? 'something'
+      : pending.startup ? 'a question before it can start' : 'for permission';
   return {
     error: `The window is asking ${what}. A message typed now would go into that, not the conversation: answer it, or cancel it, then send this.`,
     code: 'asking',
@@ -2760,7 +2768,18 @@ function applyHostEvent(store, live, hostId, ev) {
       const options = Array.isArray(ev.options)
         ? ev.options.filter((o) => o && Number.isInteger(o.n) && typeof o.text === 'string').map((o) => ({ n: o.n, text: clip(o.text, 200) }))
         : [];
-      if (!options.length) break;
+      // A screen the host does not know (0.14.6, review item 1) has no rows:
+      // it comes with its last lines instead, which the desk shows, and is
+      // answered by opening the window or by Escape.
+      const kind = str(ev.kind) ?? null;
+      const screen = kind === 'screen' && Array.isArray(ev.screen)
+        ? ev.screen.filter((l) => typeof l === 'string').slice(-12).map((l) => clip(l, 200))
+        : null;
+      if (!options.length && !screen?.length) break;
+      // A prompt a hook raised (a permission menu, a form) is the session's
+      // own word and outranks anything read off the screen: the host's look
+      // can land while one stands.
+      if (open && !open.startup) break;
       const asks = clip(str(ev.asks) ?? 'the window is asking something before it starts', 300);
       // The desk needs a session row to be marked as waiting on, and a window
       // that has not registered has none of its own yet. The conversation it
@@ -2783,8 +2802,8 @@ function applyHostEvent(store, live, hostId, ev) {
         // the host's `gone` (above). docs/backlog.md carried this as open
         // from PR #2 until the milestone audit's finding 1 (2026-11-17).
         session_id: sessionId,
-        request_id: rid, tool: 'startup', startup: true, kind: str(ev.kind) ?? null,
-        summary: asks, options, read: true, reading: false, at,
+        request_id: rid, tool: 'startup', startup: true, kind,
+        summary: asks, detail: clip(str(ev.detail), 400) ?? null, screen, options, read: true, reading: false, at,
       });
       // Marked on that row by id, not on "the desk's newest session": a live
       // editor session in the same repo is newer every time its hooks fire,

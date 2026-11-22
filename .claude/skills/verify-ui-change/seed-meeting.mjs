@@ -3,7 +3,7 @@
  * A floor to hold a meeting room on (issue #44), with a host that does what
  * a room asks of it, on a throwaway server.
  *
- *   seed-meeting.mjs <base-url> --db <scratch.db> [--key k] [--more] > work.jsonl
+ *   seed-meeting.mjs <base-url> --db <scratch.db> [--key k] [--more] [--long] > work.jsonl
  *
  * Desks, all on host h1 ("testbox"):
  *   lab/bo, lab/cy, lab/dee   live, idle, a conversation each (sess-<agent>)
@@ -12,6 +12,9 @@
  *   lab2/zed                  another floor, so Add offers nothing from it
  *   lab/fay … lab/jo          with `--more` only: five more live desks, so
  *                             one floor holds two meetings and desks besides
+ *   lab/orchestratinator-desktop-dev
+ *                             with `--long` only: the live board's longest
+ *                             id and name, one unread message
  *
  * And mail on the board: two unread messages for bo, one for cy.
  *
@@ -77,6 +80,10 @@ const DESKS = [
   // meetings and desks left over (check-meeting-box.mjs). After the others,
   // so the desks check-meeting.mjs reads keep their seats.
   ...(args.includes('--more') ? ['fay', 'gus', 'hal', 'ivy', 'jo'].map((agent) => ({ channel: 'lab', agent })) : []),
+  // `--long`: a desk whose id and name are the live board's longest
+  // (check-plate-fit.mjs: a nameplate line cut to fit, and a room's Nudge
+  // naming it on one line). Last, so every other desk keeps its seat.
+  ...(args.includes('--long') ? [{ channel: 'lab', agent: 'orchestratinator-desktop-dev' }] : []),
 ];
 db.prepare(`INSERT OR REPLACE INTO hosts (host_id, name, last_seen) VALUES (?, ?, datetime('now'))`).run(HOST, 'testbox');
 // A host as current as the tree: it fetches attachments (issue #31). Skipped
@@ -102,6 +109,7 @@ const put = db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, bod
 put.run('cy', 'bo', JSON.stringify('bo, the build went red after your merge'));
 put.run('dee', 'bo', JSON.stringify('bo, lint is failing too'));
 put.run('bo', 'cy', JSON.stringify('cy, the contract for /api/x changed'));
+if (args.includes('--long')) put.run('bo', 'orchestratinator-desktop-dev', JSON.stringify('the pin moved'));
 
 const sessionOf = (channel, agent) => db.prepare(`SELECT sdk_session_id FROM hosted_desks WHERE channel = ? AND agent = ?`).get(channel, agent)?.sdk_session_id;
 let uuid = 0;

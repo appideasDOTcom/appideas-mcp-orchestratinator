@@ -668,6 +668,102 @@ reads it both ways, and answers it through the host's own code. `raise.sh`
 beside it raises one and leaves it standing, for pressing keys by hand
 before there is a rule to play.
 
+## A screen the floor does not know (0.14.6)
+
+costmo, 2026-11-22, after pc-developer's `docs/robustness-review.md`
+(three desks on the PC stood dead behind "Teach auto mode about your
+environment?", read as idle, every message going into the dialog). His
+rulings, through orchestratinator-desktop-dev in meeting room 15: the
+review's items 1 to 4 ship in 0.14.6; item 5 is a spike only
+(`docs/stream-json-spike.md`, measured, his decision); Claude Code stays on
+Anthropic's stable channel with nobody held to a version the floor was
+checked against; and **a screen the floor has never seen degrades to "needs
+you, with its rows or its lines on the desk", never to a broken desk.** Do
+not re-propose a pin, or a reader per new dialog as the answer to the next
+one.
+
+- **Idle is read only on proof** (`screenVerdict` in `host/window.js`). A
+  window is one of: `working` (the bottom line offers "esc to interrupt",
+  still so on 2.1.330), `dialog`, `switch` ("Switch model?", the host's
+  own), `asking` (a permission menu or a form, the hooks'), `composer`, or
+  `blank`. **Anything else is `unknown`**, carrying its last twelve lines.
+  The readers used to be a list of screens met, and a screen that matched
+  none of them fell through to idle.
+- **A dialog is read by its shape** (`startupQuestionOf`, made generic). On
+  2.1.330 Claude Code raises its dialogs through one component
+  (`requestDialog(…, { place: "under" })`, 28 call sites in the binary,
+  the Teach dialog among them): a title under a rule, a sentence, a `❯`
+  list, and "Enter to confirm · Esc to cancel". Measured on a probe with
+  the one that has a switch of its own, `CLAUDE_CODE_FORCE_FULLSCREEN_UPSELL=1`
+  ("Try the new fullscreen renderer?"), which is the way to raise such a
+  dialog on purpose. It stands **in place of the composer, on a window
+  already in the roster**, so the old startup reader (three known titles)
+  read nothing, and the floor heard of it only through the heartbeat's
+  generic "waiting for a decision", up to a minute late. The known three
+  are read as before; anything else of the shape is `kind: 'dialog'`
+  with its title (`asks`), its sentence (`detail`) and its rows, numbers
+  stripped. Not that shape, measured beside it: a permission menu ends
+  "Esc to cancel · Tab to amend" and a form "Enter to select". One
+  standing just above a live composer is read too (pc-developer's reading
+  of the Teach dialog; not measured here, because its gate is server-side
+  and needs the operator's own config), but only when nothing but blank
+  lines stands between its footer and the composer's top rule.
+- **Registered floor windows are looked at every `SCREEN_LOOK_MS` (3 s)**,
+  not only while starting or at the heartbeat (`Desk.watch`). An unknown
+  screen is said once it has stood unchanged for `UNKNOWN_SETTLE_MS`
+  (2.5 s), never while the window is starting (its banner stands before
+  its composer) and never while the host is carrying out work on that desk
+  (`host.acting`: its own `/btw` or `/cost` screen is its to read and
+  close). **The first cut never said anything**, because the "unknown
+  since" record was reset on every tick that did not look. Only the real
+  window on the rig showed it; `test:host` has the row now, with a mutant
+  ("the watch forgets an unknown screen between looks").
+- **Both go to the board as `startup` events** (`kind: 'dialog'` with rows,
+  `kind: 'screen'` with `screen` lines and no rows), so they stand in
+  `live.pending`, put the desk in the queue, pulse its tab, and refuse a
+  message in words (`askingWhy`). **A prompt a hook raised outranks a
+  screen read**: the host's look can land while one stands. The panel draws
+  a dialog as "The window asks — <title>" with its sentence, a button per
+  row and Escape, and a screen as "The window is showing something the
+  floor does not know" with its lines, **Open the window** and **Press
+  Escape**. Escape is `cancel` on the permission route, which the host
+  presses only while the pane still shows a dialog read by its shape or an
+  unknown screen (`escapeStanding`): never a known startup question, where
+  Escape on the trust question exits Claude Code, and never a composer.
+- **`send()` refuses before typing** on anything that is not a composer, a
+  working window or a known screen (`unknown_screen`, quoting the pane),
+  after reading for up to `UNKNOWN_GRACE_MS` in case the window is still
+  drawing its box. And a message meant to be typed that went in as a paste
+  is now said on the desk, because the agent reads it as pasted content.
+- **The suites run with `ORCH_UNKNOWN_SCREENS=ignore`**, set at the top of
+  host, window, seats, renew and update: their stand-in windows print text
+  and draw no composer, so every pane would read as unknown. It is read at
+  each call, and the rows about the rule turn it on: `test:window` (the
+  verdicts, `send()` and Escape against real panes), `test:host` ("a
+  dialog the window draws, and a screen the floor does not know", with the
+  stand-in's `prompt.flag` kinds `dialog` and `odd`, which close on
+  Escape), `test:floor` (the board's half), and **check-screen-prompt.mjs**
+  in **verify-ui-change**. Nothing installed sets it.
+- **A new Claude Code is said on the floor** (`host/version.js`, review
+  item 4, report only): `claude --version` at each heartbeat (about 10 ms),
+  the last reading kept in `~/.orchestratinator/claude-version.json` per
+  host, and a change said on every desk the host runs, with the version
+  before it. No probe window re-measures the readers at an update: that is
+  a model turn on the operator's account at every release, and `/model` in
+  a probe writes the machine's default. The unknown-screen rule is what
+  stands in for it.
+
+How it was proven end to end, for next time: `probe-host.sh up <dir>
+<port>` in **measure-a-real-window** (a scratch board and the tree's host
+on the probe socket), then the window started by hand with the switch:
+`exec env CLAUDE_CODE_FORCE_FULLSCREEN_UPSELL=1 claude`. On 2.1.330: the
+trust question answered from the floor, the upsell on the floor 1 s later
+with its rows, a message refused, "Not now" pressed, the composer back. The
+`/mcp` panel opened by hand reached the desk as a screen nobody knows,
+Escape from the floor closed it, and the next message was answered. The
+mutants are `mutants-0-14-6.suite.json` (**mutate-in-a-copy**) and
+`mutants-screen-prompt.page.json`.
+
 ## A message to a desk that is working
 
 **Type into it. Do not wait for the turn to end.** This is the one place the
@@ -1502,12 +1598,14 @@ Two items were left for a later branch, and the reasons are what stop them
 being re-proposed as gaps:
 
 - **A visible row starting with `>` is read as the prompt** (Info 5,
-  older than #31). A quoted line in a message with attachments can then
-  fail the scrolled check and be pasted after all, and the host log says
-  so. The fix is a new reading of what marks a composer's first row, in
-  both the scrolled and the unscrolled reader, and it wants a real window
-  measured with a quoted line first (`typing.mjs --text-file` in
-  **measure-a-real-window**). Not a release check's change.
+  older than #31). **Fixed in 0.14.6**, after measuring a real window: on
+  2.1.330 a quoted line typed into the box is drawn as a continuation row
+  (`  > a quoted line`), and the readers took it for the box's prompt row,
+  dropping every line above it. So a four-line message with a quote read
+  as "not holding" and went in as `<pasted_content>`. The prompt row is
+  now the last `❯` row, and a `>` only at the left edge where no `❯` is
+  drawn (`promptRowOf`, in all three readers). Re-measured on the rig:
+  the same message typed and recorded verbatim, and answered.
 - **A fetch may outlast the board's 90 s host-live window** (Info 8). It
   takes a board on another machine at about 9 Mbit/s or less to fetch
   100 MB that slowly; locally it is a second. The two fixes behave
@@ -3157,6 +3255,24 @@ different things by "the desk". Before claiming any UI change works, use the
 **verify-ui-change** skill; the page is the only honest test, and it lists the
 ways a green result has lied here.
 
+**A line on the floor is one line** (costmo, 2026-11-22, 0.14.6, three
+screenshots from the 0.14.5 app). A nameplate's two lines are cut to
+`PLATE_MAX_W` (180 room units: inside a meeting's box, clear of the next
+desk) with "…", measured in their own font by a hidden SVG
+(`textWidth`, `clampLine`). The role line cuts the **id** and keeps its
+state whole after the "…" ("orchestratinator-des… · ready"), the way the
+room's Nudge keeps its count, because the state is the part that changes.
+A cut plate carries both lines whole as its hover. A meeting room's Nudge
+is one line at most `min(240px, 45%)` wide: the names in a span cut with
+an ellipsis, the count in its own span, and the whole label first on the
+hover when the names are cut. And **under 900px the rooms keep the full
+width**: there the body is a column with `align-items: flex-start`, so
+`.rooms` sized to its contents, an SVG at `width: 100%` of it, and the
+browser settled the cycle at the SVG's default 300px, a thumbnail of the
+floor (his third screenshot; the page mutant reproduces it exactly). A
+width, not `stretch`, because the building centres itself with auto
+margins. **check-plate-fit.mjs** in **verify-ui-change** is the page.
+
 ## Updating from the page
 
 Issue #40, 0.10.19. The board checks GitHub for a newer build and says so
@@ -3568,17 +3684,15 @@ each says how, so this is the map, not the record.
   read through Win32_Process in PowerShell 5.1 (`parentsCommand`, about a
   second there), and only when no roster pid matches the pane's, so a
   window the host started never pays for it (`runsUnderOnce`).
-- **Open: on 2.1.330 a new window can draw "Teach auto mode about your
-  environment?"**, and the host has no reader for it. It reads as idle,
-  and the floor's messages go into the dialog. Three desks on the PC
-  stood dead that way on 2026-11-22. It is the old class (an unknown
-  screen reads as idle), not a regression. It is named open in QA's OK
-  for 0.14.5, and it heads `docs/robustness-review.md`, pc-developer's
-  write-up of that day with the class's history and five proposed
-  changes. It has not been raised on the Mac yet. The next step is a
-  probe on its own socket and config dir, never `/model` on the
-  operator's config, then a reader in the way 0.14.2 did the browser
-  extension's question.
+- **On 2.1.330 a new window can draw "Teach auto mode about your
+  environment?"**, and three desks on the PC stood dead on it on
+  2026-11-22: read as idle, the floor's messages going into the dialog.
+  It was the old class (an unknown screen reads as idle), and
+  `docs/robustness-review.md` is pc-developer's write-up of it. 0.14.6
+  answers the class rather than the dialog: "A screen the floor does not
+  know", above. The dialog is read by its shape; it was not raised on
+  the Mac, because its gate is server-side and needs the operator's own
+  config.
 
 Measured working there at 9e160cc: the README's Docker install (with
 `/plugin marketplace add ./`), the installed host (silent start, restart
@@ -3645,6 +3759,15 @@ day), and the host ran under launchd on the shell's Node 20. Now:
   build. The versions locked are the ones the suites had run on all along.
   `npm run set-version` writes the lock's two version fields too, and
   smoke holds all four files to one number.
+- **The runtime dependencies are exact versions, the lock's own**
+  (0.14.6, desktop-dev's reading of QA's 0.14.5 OK). The desktop app
+  installs this package as a dependency, and npm ignores a dependency's
+  lock, so a caret range let the app's board resolve MCP SDK 1.32.2 where
+  every chain here ran 1.29.0. Exact versions make the app ship what was
+  tested; the image is unchanged (it installs the lock with `npm ci`).
+  Smoke holds `dependencies` to the lock's versions, and the lock's own
+  record of them to `package.json`. A bump is `npm install --save-exact`
+  and a chain run, never an edit to one file.
 - **c8 10.1.3 is the one dev dependency**, pinned exactly, for
   `npm run coverage`. The image installs `--omit=dev` and ships none of it.
 - npm 11 warns that better-sqlite3's install script is "not yet covered by
@@ -4085,8 +4208,10 @@ rows. QA's logs: `evidence/merge-develop-2026-11-18/` in the QA repo
   down. **In the product that is a desk deaf to its folder for 45 s after
   a window that died in its first third of a second**, ending in "the
   reopened window did not register within 45s", which is not what
-  happened. Known and left: letting an intent go when its pid is dead is
-  the fix, and nobody has met it outside this fixture.
+  happened. **Fixed in 0.14.6**: the intent is let go the moment its pid
+  is gone (`intentVerdict` in `host/window.js`, with a row in
+  `test:window`), said as "the reopened window ended before it
+  registered". The case's settle wait stays.
 - **Not seen in six runs on 2026-11-19:** "joined at its tail" (near
   981). If it comes back, read the host's log beside it first.
 - **Also owed, from QA's review of 0.12.12 (PR #60, review 5969322428,
@@ -4336,6 +4461,7 @@ operator's live floor.
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `host/auth.js` | `test:host` |
+  | `host/version.js` | `test:host` (its unit rows and the version line on a desk) |
   | `src/updates.js`, `host/update.js` | `test:update` |
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |

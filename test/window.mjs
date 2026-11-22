@@ -18,6 +18,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+// The stand-in windows here print text and draw no composer, so every
+// pane would read as a screen the floor does not know (host/window.js,
+// unknownScreensOn). Rows that are about that rule turn it back on.
+process.env.ORCH_UNKNOWN_SCREENS ??= 'ignore';
 
 const run = promisify(execFile);
 const FIX = resolve(`./data/window-fixture-${process.pid}`);
@@ -599,6 +603,74 @@ async function main() {
     eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 9, tried: 8, after: 30_000 }), 'reopen', 'a later window, opened by somebody, gets its one reopen');
     eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
     eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
+
+    /* Any dialog, by its shape, and a screen nobody here knows (0.14.6,
+     * docs/robustness-review.md items 1 and 3). The upsell is a real 2.1.330
+     * capture, raised on a probe with CLAUDE_CODE_FORCE_FULLSCREEN_UPSELL=1
+     * (80x24; 120x40 drew the same rows); the permission menu is a real
+     * capture from the same probe; the Teach dialog is built from 2.1.330's
+     * own strings, in the component the upsell uses. */
+    console.log('\n  a dialog the window draws, and a screen the floor does not know');
+    const UPSELL = [
+      '', ' ▐▛███▛█   Claude Code v2.1.330', '▝▜██████▀  Opus 5.5 with high effort · Claude Ultra', ' ▝▝   ▝▝   /…/scratchpad/upsell', '', '',
+      '─'.repeat(80),
+      '  Try the new fullscreen renderer?',
+      '',
+      '  · Flicker-free output',
+      '  · Mouse support: click to move your cursor or expand results',
+      '  · Selected text auto-copies to your clipboard',
+      '',
+      '  ❯ 1. Yes, try it',
+      '    2. Not now',
+      '',
+      '  Enter to confirm · Esc to cancel',
+      '', '', '', '', '', '', '',
+    ].join('\n');
+    const up = W.startupQuestionOf(UPSELL);
+    eq([up?.kind, up?.asks, up?.options.map((o) => o.text), up?.at], ['dialog', 'Try the new fullscreen renderer?', ['Yes, try it', 'Not now'], 0],
+      'a dialog no reader knows is read by its shape: its title, its rows without their numbers, the cursor on the first');
+    assert(/^· Flicker-free output · Mouse support/.test(up?.detail ?? ''), `and what it says between the title and the rows (${up?.detail})`);
+    const TEACH_ROWS = ['  Teach auto mode about your environment?', '', '  Auto mode works better when it knows your environment. Takes about a minute.', '',
+      '  ❯ 1. Yes', '    2. Not now', "    3. Don't show again", '', '  Enter to confirm · Esc to cancel'];
+    const teach = W.startupQuestionOf(['', '─'.repeat(80), ...TEACH_ROWS, ''].join('\n'));
+    eq([teach?.kind, teach?.asks, teach?.options.map((o) => o.text)], ['dialog', 'Teach auto mode about your environment?', ['Yes', 'Not now', "Don't show again"]],
+      'the dialog that stood unread on three desks on the PC is read the same way, all three rows');
+    const ABOVE = ['  ⎿  Done.', '', '─'.repeat(80), ...TEACH_ROWS, '', '─'.repeat(80), '❯ ', '─'.repeat(80), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+    const above = W.startupQuestionOf(ABOVE);
+    eq([above?.kind, above?.above, above?.options.length], ['dialog', true, 3], 'and so is one standing just above a composer still on screen, where the PC read it');
+    const QUOTED = ['  The window showed:', ...TEACH_ROWS, '  and then I answered it.', '', '─'.repeat(80), '❯ ', '─'.repeat(80), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+    eq(W.startupQuestionOf(QUOTED), null, 'but the same words quoted in the conversation, with anything but blank lines between them and the composer, are not a dialog');
+    const PERMISSION = [
+      '  ⎿  $ touch probe-file-a.txt', '─'.repeat(120), ' Bash command', ' Tip: auto mode handles these prompts for you — choose "switch to auto mode" below',
+      ' Create empty file probe-file-a.txt', '╌'.repeat(120), ' touch probe-file-a.txt', '╌'.repeat(120), ' Do you want to proceed?',
+      ' ❯ 1. Yes', '   2. Yes, and don’t ask again for: touch *', '   3. Yes, and switch to auto mode · auto mode handles these prompts for you', '   4. No',
+      ' Esc to cancel · Tab to amend',
+    ].join('\n');
+    eq(W.startupQuestionOf(PERMISSION), null, 'a permission menu (2.1.330, "Esc to cancel · Tab to amend") is not one: the hooks raise it');
+    const SWITCH_ASK = ['─'.repeat(60), '  Switch model?', '  This conversation is cached for the current model.', '', '  ❯ 1. Yes, switch to Haiku 5.5', '    2. No, go back', '', '  Enter to confirm · Esc to cancel'].join('\n');
+    eq(W.startupQuestionOf(SWITCH_ASK), null, 'nor is "Switch model?": the host answers it inside its own /model');
+    const WORKING = ['─'.repeat(60), '❯ ', '─'.repeat(60), '  ⏸ manual mode on · esc to interrupt'].join('\n');
+    const PANEL = ['', '▔'.repeat(60), '  MCP servers', '  1 server', '  ❯ ✘ team-board', '  ↑/↓ to navigate · Enter to view · Esc to close'].join('\n');
+    const verdicts = [COMPOSER, WORKING, '', '\n\n', RAW_TRUST, UPSELL, PERMISSION, Q_ONE, SWITCH_ASK, PANEL, 'some program that is not Claude Code\n$ '].map((x) => W.screenVerdict(x).kind);
+    eq(verdicts, ['composer', 'working', 'blank', 'blank', 'dialog', 'dialog', 'asking', 'asking', 'switch', 'unknown', 'unknown'],
+      'every screen is one word: a composer, working, blank, a dialog, asking (the hooks\' own), the host\'s switch, and anything else unknown — a panel a person opened, a program that is not Claude Code');
+    // PR #58 Info 5, measured on the rig on 2.1.330: a quoted line typed into
+    // a message is drawn as a continuation row, and is not the box's prompt.
+    const QUOTED_BOX = ['  ⎿  Done.', '', '─'.repeat(120), '❯ first line of a message', '  > a quoted line', '  the last line', '─'.repeat(120), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+    eq(W.composerOf(QUOTED_BOX), ' first line of a message\n  > a quoted line\n  the last line', 'a box holding a quoted line is read from its `❯` row, every line of it');
+    eq(W.composerOf(['─'.repeat(60), '> an older window\'s prompt', '─'.repeat(60)].join('\n')), ' an older window\'s prompt', 'and a `>` at the left edge is still a prompt where no `❯` is drawn');
+    eq(W.composerOf(['─'.repeat(60), '  > only a quote, no prompt', '─'.repeat(60)].join('\n')), null, 'but an indented `>` on its own is nobody\'s prompt');
+    // A reopen's intent (0.14.6): let go the moment its window has ended, not at its deadline.
+    const IT = { sessionId: 'S1', pid: 4242, since: 1000, until: 46_000 };
+    const pidGone = () => false;
+    const pidHere = () => true;
+    eq([W.intentVerdict(null, []), W.intentVerdict(IT, [{ pid: 4242, sessionId: 'S1' }], { now: 2000, isAlive: pidHere }), W.intentVerdict(IT, [], { now: 2000, isAlive: pidHere }),
+      W.intentVerdict(IT, [], { now: 2000, isAlive: pidGone }), W.intentVerdict(IT, [], { now: 47_000, isAlive: pidHere }), W.intentVerdict({ ...IT, pid: null }, [], { now: 2000, isAlive: pidGone })],
+    ['none', 'adopt', 'wait', 'ended', 'expired', 'wait'],
+    'a reopen is adopted when its window is live, waited for while it starts, let go at once when its process has ended, and at its deadline otherwise; one with no pid yet is still opening');
+    const odd = W.screenVerdict(['line 1', ...Array.from({ length: 20 }, (_, i) => `row ${i + 2}`), 'the last line'].join('\n'));
+    eq([odd.lines.length, odd.lines[0], odd.lines.at(-1)], [12, 'row 11', 'the last line'], 'an unknown screen carries its last twelve lines, which the desk shows');
+    eq(W.screenVerdict(PANEL).lines.at(-1), '  ↑/↓ to navigate · Enter to view · Esc to close', 'as the pane drew them');
 
     /* answerIsStale: the TTL drop that used to apply to a startup answer too,
      * on a premise that is false for one — the dialog stands until it is
@@ -1896,6 +1968,15 @@ async function main() {
       await W.runsUnderOnce?.(memo, 4292, [4884, 8532], counted);
       await W.runsUnderOnce?.(memo, 10992, [4884], counted);
       eq(reads, 3, 'and again when the window or the roster changes');
+      // N1 of the 0.14.5 review: the memo is only worth something if the
+      // watch asks through it, once per desk (Desk.watch's `booting`). The
+      // read happens inside the host, where no suite can count it, so the
+      // call site is held in the text, the way test:floor holds index.js's.
+      const indexSrc = readFileSync(new URL('../host/index.js', import.meta.url), 'utf8');
+      // (The job for a window with no record asks runsUnder directly, once,
+      // by design; it is the watch's every-tick ask that must go through the memo.)
+      assert(/const booting = paneHere && .*\n.*await W\.runsUnderOnce\(this\.underMemo \?\?= \{\}, paneHere\.pid,/.test(indexSrc),
+        'and the watch asks through the memo, its own per desk');
       kid.kill();
     }
 
@@ -2261,6 +2342,39 @@ async function main() {
       `and says so, quoting the pane — ${intoPrompt.error}`);
     const deafNow = await run('tmux', ['capture-pane', '-p', '-t', (await W.paneFor(deaf)).target]).then((r) => r.stdout, () => '');
     assert(!deafNow.includes('a message while it asks'), 'not one character of it reached the window');
+
+    // And a window showing a screen nobody here knows (0.14.6, review items
+    // 1 and 2): refused, quoting the pane, nothing typed; and the same pane
+    // with the rule off (the suites' stand-ins) is typed into as before.
+    // A dialog of Claude Code's shape is refused as asking.
+    {
+      const oddLines = ['\u2594'.repeat(40), '  Plugins', '  \u276f \u2714 floor', '  \u2191/\u2193 to navigate \u00b7 Space to toggle \u00b7 Esc to close'].map((l) => `printf '%s\\n' ${JSON.stringify(l)}`);
+      // No echo, as a real TUI: a cooked tty would echo Escape as ^[ and
+      // the screen would change under a panel that ignored the key.
+      const odd = await pane('oddpanel', 'stty -echo', ...oddLines, 'sleep 60');
+      const was = process.env.ORCH_UNKNOWN_SCREENS;
+      process.env.ORCH_UNKNOWN_SCREENS = 'on';
+      try {
+        const oddT0 = Date.now();
+        const intoOdd = await W.send(odd, 'a message while it shows a panel');
+        eq(intoOdd.code, 'unknown_screen', 'a message to a window showing a screen nobody here knows is refused as unknown_screen');
+        assert(/^the window is showing something the floor does not know, so nothing was typed\./.test(intoOdd.error ?? '') && /Esc to close/.test(intoOdd.error ?? ''),
+          `and says so, quoting the pane — ${intoOdd.error}`);
+        assert(Date.now() - oddT0 < 8000, `after a short look in case it is a window still drawing its box, not a minute — ${Date.now() - oddT0}ms`);
+        const oddNow = await run('tmux', ['capture-pane', '-p', '-t', (await W.paneFor(odd)).target]).then((r) => r.stdout, () => '');
+        assert(!oddNow.includes('a message while it shows a panel'), 'not one character of it reached the window');
+        const dialogLines = ['\u2500'.repeat(40), '  Teach auto mode about your environment?', '', '  \u276f 1. Yes', '    2. Not now', '', '  Enter to confirm \u00b7 Esc to cancel'].map((l) => `printf '%s\\n' ${JSON.stringify(l)}`);
+        const dlg = await pane('shapedialog', ...dialogLines, 'sleep 60');
+        const intoDialog = await W.send(dlg, 'a message while it asks by shape');
+        eq(intoDialog.code, 'asking', 'and one showing a dialog of Claude Code\'s shape is refused as asking');
+        const esc = await W.escapeStanding(odd);
+        eq([esc.ok, esc.code ?? null], [false, 'not_taken'], 'Escape into a panel that ignores it is said as not taken, not as done');
+        const escTrust = await W.escapeStanding(deaf);
+        eq(escTrust.code, 'no_prompt', 'and Escape is not pressed into a screen that is not one of those two (here, a permission menu)');
+      } finally {
+        if (was === undefined) delete process.env.ORCH_UNKNOWN_SCREENS; else process.env.ORCH_UNKNOWN_SCREENS = was;
+      }
+    }
 
     // Takes the key and moves on.
     //

@@ -26,6 +26,10 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, 
 import { resolve } from 'node:path';
 import { cwdOf, seatOf, paneIn, sessionsAt, seatWindowName, seatEnv, SEAT_ENV } from '../host/window.js';
 import { seatTag, configPath } from '../host/seats.js';
+// The stand-in windows here print text and draw no composer, so every
+// pane would read as a screen the floor does not know (host/window.js,
+// unknownScreensOn). Rows that are about that rule turn it back on.
+process.env.ORCH_UNKNOWN_SCREENS ??= 'ignore';
 
 const PORT = Number(process.env.SEATS_TEST_PORT ?? 8902);
 const DB_PATH = `./data/seats-${process.pid}.db`;
@@ -123,6 +127,7 @@ function fixture() {
     `const STARTS = ${JSON.stringify(STARTS)};`,
     `const argv = process.argv.slice(2);`,
     `if (argv[0] === 'agents') { process.stdout.write('[]'); process.exit(0); }`,
+    `if (argv[0] === '--version') { process.stdout.write('2.1.330 (Claude Code)\\n'); process.exit(0); }`,
     // The host asks Claude Code whether it is signed in at every heartbeat
     // (host/auth.js). Signed in, as 2.1.329 answers it, and not a window.
     `if (argv[0] === 'auth') { process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) + '\\n'); process.exit(0); }`,

@@ -2413,17 +2413,18 @@
       role: 'button',
       tabindex: '0',
     });
-    const name = el('text', { x: 0, y: 0, class: 'plateName', 'text-anchor': 'middle' });
-    name.textContent = plateName(d);
-    plate.appendChild(name);
-    // A desk the board knows but no window has ever reported from says so on
-    // its nameplate — it is the difference between "stepped away" and "never
-    // installed the plugin", and only one of those is something to go fix.
-    const role = el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' });
-    role.textContent = d.hosted
-      ? `${d.agent} · ${d.hosted.live ? 'ready' : d.hosted.refused ? 'host refused' : 'host offline'}`
-      : d.reporting ? d.agent : `${d.agent} · not reporting`;
-    plate.appendChild(role);
+    // Each line is one line, cut to fit with "…" (plateLine), and a cut
+    // plate carries both lines whole as its hover: the browser's own
+    // tooltip, which is all costmo asked for to read the rest.
+    const name = plateLine('plateName', plateName(d), 0);
+    plate.appendChild(name.node);
+    const role = plateLine('plateRole', String(d.agent), 15, plateState(d));
+    plate.appendChild(role.node);
+    if (name.cut || role.cut) {
+      const tip = el('title');
+      tip.textContent = `${plateName(d)}\n${plateRole(d)}`;
+      plate.appendChild(tip);
+    }
     // The pad goes LAST, so it lies over the words rather than behind them.
     //
     // Behind them, every click had to be routed by walking up from whatever it
@@ -3033,7 +3034,93 @@
     return d?.twin ? `${d.persona} · ${d.twin.n}` : (d?.persona ?? '');
   }
 
+  /**
+   * The line under the name: the agent id, and what the desk's window is.
+   * A desk the board knows but no window has ever reported from says so —
+   * it is the difference between "stepped away" and "never installed the
+   * plugin", and only one of those is something to go fix.
+   */
+  function plateRole(d) {
+    return `${d?.agent}${plateState(d)}`;
+  }
+  /** The part of that line after the id, which a cut never takes. */
+  function plateState(d) {
+    return d?.hosted
+      ? ` · ${d.hosted.live ? 'ready' : d.hosted.refused ? 'host refused' : 'host offline'}`
+      : d?.reporting ? '' : ' · not reporting';
+  }
+
+  /**
+   * One line of a nameplate, cut to fit (costmo, 2026-11-22: a long agent id
+   * ran past the desk and out of a meeting's box). SVG text has no
+   * `text-overflow`, so the page measures and cuts: the longest start of the
+   * line that, with "…" after it, is no wider than `maxW`. `widthOf` is the
+   * measure (the drawing's is the browser's own, in the line's font); a pure
+   * function of it, so test:floor can hold the cut with a measure of its own.
+   * Cut by character, never inside a surrogate pair, and with the space
+   * before the "…" dropped so it does not read as a word left off. `keep`
+   * goes after the cut whole: the role line keeps its " · ready" and cuts
+   * the id, the way a room's Nudge keeps its count, because the state is
+   * the part of that line that changes and the id is the part already on
+   * the name above it.
+   */
+  function clampLine(text, maxW, widthOf, keep = '') {
+    const s = String(text ?? '');
+    const k = String(keep ?? '');
+    if (widthOf(s + k) <= maxW) return { text: s + k, cut: false };
+    const chars = Array.from(s);
+    const at = (n) => `${chars.slice(0, n).join('').trimEnd()}…${k}`;
+    let lo = 0;
+    let hi = chars.length - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (widthOf(at(mid)) <= maxW) lo = mid; else hi = mid - 1;
+    }
+    return { text: at(lo), cut: true };
+  }
+
   /* ---------- a desk's place on the floor: the drawing ---------- */
+
+  /* How wide a nameplate's line may be, in room units. Centred on the desk,
+     so this is DESK_W with MEET_PAD_X - 3 on each side: inside a meeting's
+     box by three units, and clear of the next desk's line by more than its
+     GAP's worth of air. "Orchestratinator Desktop Dev", the longest name on
+     the live board, fits uncut. */
+  const PLATE_MAX_W = DESK_W + (MEET_PAD_X - 3) * 2;
+
+  /* What a line of text measures in a class's font. One hidden <svg> in the
+     page, so the class's own CSS applies exactly as it does on the floor; a
+     room's units are CSS pixels before its viewBox scales them, so the
+     length is in room units. Kept by class and text: the floor is redrawn
+     every poll, and a nameplate's words rarely change. */
+  const measured = new Map();
+  let measureSvg = null;
+  function textWidth(cls, text) {
+    const key = `${cls}\n${text}`;
+    if (measured.has(key)) return measured.get(key);
+    if (!measureSvg?.isConnected) {
+      measureSvg = el('svg', { class: 'measure', 'aria-hidden': 'true', width: 0, height: 0 });
+      measureSvg.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;overflow:hidden';
+      measureSvg.appendChild(el('text', { x: 0, y: 0 }));
+      document.body.appendChild(measureSvg);
+    }
+    const t = measureSvg.firstChild;
+    t.setAttribute('class', cls);
+    t.textContent = text;
+    const w = t.getComputedTextLength();
+    // Nothing measured is a page with no layout yet (a hidden tab's first
+    // draw can be): not kept, so the next draw measures again.
+    if (w > 0 || !text) measured.set(key, w);
+    return w;
+  }
+
+  /** A nameplate's line: cut to PLATE_MAX_W in its own font, `keep` kept whole after the cut. */
+  function plateLine(cls, text, y, keep = '') {
+    const t = el('text', { x: 0, y, class: cls, 'text-anchor': 'middle' });
+    const fit = clampLine(text, PLATE_MAX_W, (s) => textWidth(cls, s), keep);
+    t.textContent = fit.text;
+    return { node: t, cut: fit.cut };
+  }
 
   /** A desk pill's width, by the same estimate the sign's pills use. */
   const deskPillWidth = (d) => d.agent.length * 6 + 16 + (d.board?.unread ? String(d.board.unread).length * 6 + 14 : 0);
@@ -5005,7 +5092,7 @@
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.startup ? `startup:${req.request_id}:${req.summary ?? ''}:${req.detail ?? ''}:${(req.options ?? []).map((o) => o.text).join(',')}:${(req.screen ?? []).join('\n')}` : ''}`;
     // Claude Code signed out on the desk's host (d.signin, src/floor.js):
     // the window cannot answer, so the box says so and offers Sign in, which
     // has the host run Claude Code's own sign-in (costmo, 2026-11-19). A
@@ -5055,6 +5142,13 @@
                // A window that has not started yet, asking whether it may. The
                // question is the dialog's own sentence; the rows below are its
                // own rows. See startupQuestionOf in host/window.js.
+               // A dialog read by its shape is the window's own title; a screen
+               // nobody here knows is said as that, with its lines below
+               // (0.14.6, review items 1 and 3).
+               : req?.startup && req.kind === 'screen'
+               ? `<b>The window is showing something the floor does not know</b>`
+               : req?.startup && req.kind === 'dialog'
+               ? `<b>The window asks</b> — ${esc(clip(req.summary, 220))}`
                : req?.startup
                ? `<b>Before it can start, the window asks</b> — ${esc(clip(req.summary, 220))}`
                : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
@@ -5079,10 +5173,19 @@
                  <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel the question</button>
                </div>
              </div>` : ''}
-             ${req?.startup ? `<div class="p-startup">
+             ${req?.startup && req.kind === 'screen' ? `<div class="p-startup p-screen">
+               <pre class="p-screen-lines mono">${esc((req.screen ?? []).join('\n'))}</pre>
+               <div class="p-unknown-why">Messages wait until the window is back at its message box. Open the window to answer it there, or press Escape, which closes most screens.</div>
+               <div class="p-decide">
+                 <button class="btn primary" data-act="ask-open" title="A terminal on this desk\u2019s own window">Open the window</button>
+                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Press Escape</button>
+               </div>
+             </div>` : req?.startup ? `<div class="p-startup">
+               ${req.detail ? `<div class="p-startup-detail">${esc(clip(req.detail, 400))}</div>` : ''}
                <div class="p-unknown-why">Nothing here is answered for you. Pick a row and that row is chosen in the window, the same as pressing it there.</div>
                <div class="p-more">${req.options.map((o) =>
-                 `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(o.text)}</span></button>`).join('')}</div>
+                 `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(o.text)}</span></button>`).join('')}${req.kind === 'dialog'
+                 ? `<button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Escape</button>` : ''}</div>
              </div>` : ''}
              ${offer === 'menu' ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
@@ -6004,8 +6107,15 @@
       d.board?.unread ? plural(d.board.unread, 'unread message') : null,
       d.board?.assigned_open ? plural(d.board.assigned_open, 'unclaimed task') : null,
     ].filter(Boolean).join(', ');
+    // The label is two parts so the page can cut the names and keep the
+    // count (costmo, 2026-11-22: "Nudge Coordinator, Orchestratinator
+    // Desktop Dev (4)" wrapped onto a second line). `text` is both, whole.
+    const label = `Nudge ${who || 'nobody'}`;
+    const count = n ? ` (${n})` : '';
     return {
-      text: `Nudge ${who || 'nobody'}${n ? ` (${n})` : ''}`,
+      text: `${label}${count}`,
+      label,
+      count,
       title: [
         !waiting.length
           ? 'Nobody chosen has anything waiting on the board: no unread messages and no unclaimed tasks. The bell on a desk’s box nudges that one desk anyway.'
@@ -7513,8 +7623,22 @@
     drawAttach();
     const nudgeBtn = wrap.querySelector('[data-act="m-nudge-all"]');
     const nudgeChip = meetingNudgeChip(to.map((a) => deskIn(m.channel, a)).filter(Boolean), everyone);
-    nudgeBtn.textContent = nudgeChip.text;
-    nudgeBtn.title = nudgeChip.title;
+    // One line, at most the button's max-width: the names cut with "…" in
+    // a span of their own, the count after them in another, so "(4)" is
+    // never what is lost. When the names are cut, the whole label leads the
+    // hover, which is where they are read; uncut, the hover is as it was.
+    if (nudgeBtn.textContent !== nudgeChip.text) {
+      const names = document.createElement('span');
+      names.className = 'm-nudge-who';
+      names.textContent = nudgeChip.label;
+      const count = document.createElement('span');
+      count.className = 'm-nudge-n';
+      count.textContent = nudgeChip.count;
+      nudgeBtn.replaceChildren(names, count);
+    }
+    const nudgeWho = nudgeBtn.querySelector('.m-nudge-who');
+    const namesCut = !!nudgeWho && nudgeWho.scrollWidth > nudgeWho.clientWidth + 1;
+    nudgeBtn.title = namesCut ? `${nudgeChip.text}\n${nudgeChip.title}` : nudgeChip.title;
     nudgeBtn.disabled = nudgeChip.disabled || m.phase !== 'live';
     nudgeBtn.classList.toggle('waiting', nudgeChip.waiting);
     // Hiding a desk's conversation does not stop it hearing: say so while

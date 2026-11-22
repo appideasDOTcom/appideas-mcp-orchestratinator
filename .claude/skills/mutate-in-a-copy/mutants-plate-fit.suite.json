@@ -1,0 +1,17 @@
+[
+ ["the space before a cut's ellipsis is kept", "floor", "src/ui/floor.js",
+  "    const at = (n) => `${chars.slice(0, n).join('').trimEnd()}…${k}`;",
+  "    const at = (n) => `${chars.slice(0, n).join('')}…${k}`;"],
+ ["a cut drops what it was told to keep", "floor", "src/ui/floor.js",
+  "    const at = (n) => `${chars.slice(0, n).join('').trimEnd()}…${k}`;",
+  "    const at = (n) => `${chars.slice(0, n).join('').trimEnd()}…`;"],
+ ["a cut is by UTF-16 unit, splitting a surrogate pair", "floor", "src/ui/floor.js",
+  "    const chars = Array.from(s);\n    const at = (n)",
+  "    const chars = s.split('');\n    const at = (n)"],
+ ["a cut is one character shorter than the room allows", "floor", "src/ui/floor.js",
+  "      if (widthOf(at(mid)) <= maxW) lo = mid; else hi = mid - 1;",
+  "      if (widthOf(at(mid)) < maxW - 6) lo = mid; else hi = mid - 1;"],
+ ["the room's Nudge carries its count only in the whole text", "floor", "src/ui/floor.js",
+  "    const count = n ? ` (${n})` : '';",
+  "    const count = '';"]
+]
