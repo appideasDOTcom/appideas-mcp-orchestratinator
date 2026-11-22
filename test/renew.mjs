@@ -18,6 +18,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+// The stand-in windows here print text and draw no composer, so every
+// pane would read as a screen the floor does not know (host/window.js,
+// unknownScreensOn). Rows that are about that rule turn it back on.
+process.env.ORCH_UNKNOWN_SCREENS ??= 'ignore';
 
 const run = promisify(execFile);
 const FIX = resolve(`./data/renew-fixture-${process.pid}`);

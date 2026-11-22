@@ -55,6 +55,7 @@ import * as H from './history.js';
 import * as U from './update.js';
 import * as UP from './uploads.js';
 import * as A from './auth.js';
+import * as V from './version.js';
 import { log, warn, error, failureOf, requestFailed } from './log.js';
 
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
@@ -63,6 +64,10 @@ const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
 /** How often a startup question still on screen is said to the board again. */
 const STARTUP_RESAY_MS = Number(process.env.ORCH_STARTUP_RESAY_MS ?? 60_000);
+/** How often a registered floor window's screen is read for a dialog or a screen the floor does not know (Desk.tick). */
+const SCREEN_LOOK_MS = Math.max(500, Number(process.env.ORCH_SCREEN_LOOK_MS ?? 3000));
+/** How long a screen the floor does not know must stand unchanged before the desk says so. */
+const UNKNOWN_SETTLE_MS = Math.max(0, Number(process.env.ORCH_UNKNOWN_SETTLE_MS ?? 2500));
 /** How long a host told to stop waits for the item in hand to finish (stop()). */
 const STOP_DRAIN_MS = Number(process.env.ORCH_STOP_DRAIN_MS ?? 15_000);
 const WORK_WAIT_S = Math.max(1, Number(process.env.ORCH_HOST_POLL_WAIT ?? 25));
@@ -316,8 +321,15 @@ class Desk {
     // go and said so, and newest-wins resumes.
     if (this.intent) {
       const it = this.intent;
-      if (Date.now() > it.until) {
+      const verdict = W.intentVerdict(it, live);
+      if (verdict === 'expired') {
         warn(`${this.label}: the reopened window did not register within ${Math.round((it.until - it.since) / 1000)}s — following whatever is live here now`);
+        this.intent = null;
+      } else if (verdict === 'ended') {
+        // Its window is gone before it registered: nothing can match the
+        // intent any more, and holding it kept the desk from its folder
+        // until the deadline (W.intentVerdict).
+        warn(`${this.label}: the reopened window ended before it registered — following whatever is live here now`);
         this.intent = null;
       } else {
         const mine = live.find((x) => (it.pid && x.pid === it.pid) || (it.sessionId && x.sessionId === it.sessionId)) ?? null;
@@ -416,21 +428,58 @@ class Desk {
     // And while one is standing, or when a look was asked for (lookStartup):
     // a question still up after its window registered is still a question,
     // and "gone" is said only when the pane no longer shows it.
-    const look = paneHere && (booting || this.startup || this.lookStartup);
+    //
+    // And a registered floor window is read every SCREEN_LOOK_MS besides
+    // (0.14.6, review items 1 and 3): a dialog Claude Code raises after it
+    // has registered ("Teach auto mode about your environment?", the
+    // fullscreen upsell, whatever the next update brings) is on the floor
+    // within seconds, rows and all, and so is any screen the host does not
+    // know, as "needs you" with its last lines, rather than a desk that
+    // reads idle while its keys go somewhere else. One 30-line capture per
+    // window every three seconds (a few ms each); the per-tick capture that
+    // was refused for the signed-out footer is one every 700 ms.
+    const acting = this.host.acting?.channel === this.channel && this.host.acting?.agent === this.agent;
+    const due = paneHere && !booting && W.unknownScreensOn() && Date.now() - (this.lookedAt ?? 0) >= SCREEN_LOOK_MS;
+    const look = paneHere && (booting || this.startup || this.lookStartup || due);
     this.lookStartup = false;
-    const q = look ? await W.startupQuestionAt(paneHere.target) : null;
+    const verdict = look ? W.screenVerdict(await W.screenAt(paneHere.target)) : null;
+    if (look) this.lookedAt = Date.now();
+    const q = verdict?.kind === 'dialog' ? verdict.question : null;
+    // A screen nobody here knows, said once it has stood still for
+    // UNKNOWN_SETTLE_MS (a window between two of its own screens is not
+    // one), never while the window is starting (its banner stands before its
+    // composer) and never while this host is carrying out work on the desk
+    // (its own /btw or /cost screen is its to read and close).
+    const odd = verdict?.kind === 'unknown' && !booting && !acting && W.unknownScreensOn() ? verdict.lines : null;
+    const oddText = odd ? odd.join('\n') : null;
+    // Kept between looks: a tick that read nothing says nothing about it.
+    if (look && oddText !== this.oddSeen?.text) this.oddSeen = oddText ? { text: oddText, at: Date.now() } : null;
+    const oddStood = !!odd && !!this.oddSeen && Date.now() - this.oddSeen.at >= UNKNOWN_SETTLE_MS;
     if (q) {
-      const said = `${q.kind}|${q.options.map((o) => o.text).join('|')}`;
+      const said = `${q.kind}|${q.asks}|${q.options.map((o) => o.text).join('|')}`;
       if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
         this.startup = { said, request_id: `startup:${paneHere.window}:${q.kind}` };
         this.startupSaidAt = Date.now();
         this.host.emit({
           type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id,
-          kind: q.kind, asks: q.asks, options: q.options, window: paneHere.window,
+          kind: q.kind, asks: q.asks, detail: q.detail ?? null, options: q.options, window: paneHere.window,
         }, true);
-        log(`${this.label}: the window is asking on its way up (${q.kind}): ${q.options.map((o) => o.text).join(' / ')}`);
+        log(`${this.label}: the window is asking${booting ? ' on its way up' : ''} (${q.kind}): ${q.kind === 'dialog' ? `${q.asks} — ` : ''}${q.options.map((o) => o.text).join(' / ')}`);
       }
-    } else if (this.startup) {
+    } else if (oddStood) {
+      const said = `screen|${oddText}`;
+      if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
+        this.startup = { said, request_id: `startup:${paneHere.window}:screen` };
+        this.startupSaidAt = Date.now();
+        this.host.emit({
+          type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id,
+          kind: 'screen', asks: 'the window is showing something the floor does not know', screen: odd, options: [], window: paneHere.window,
+        }, true);
+        log(`${this.label}: the window is showing a screen the floor does not know (Claude Code ${this.host.claudeVersion ?? 'version not read'}); its last line reads "${odd[odd.length - 1]}"`);
+      }
+    } else if (this.startup && !(odd && this.startup.request_id.endsWith(':screen'))) {
+      // Gone, except for a screen nobody knows that is still on the pane
+      // and has changed since it was said: it is said again once it stands.
       this.host.emit({ type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id, gone: true }, true);
       this.startup = null;
     }
@@ -610,6 +659,9 @@ class Desk {
     // The line on the desk still says what the operator typed.
     const r = await W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id, unasked });
     if (r.note) this.told(r.note, id);
+    // Delivered, but not as typed (review item 2): said beside it, because
+    // the agent reads such a message as pasted content.
+    if (r.ok && r.pasted) this.told(`this message reached the agent as pasted content, not typed words, because typing it did not hold (${r.pasted})`, id);
     // A meeting room's notice that met a draft (F2): owed, typed once the
     // box is empty (payOwed). Not an error: nothing failed, and an error turn
     // would hand the board's own words back to the operator's box.
@@ -621,7 +673,7 @@ class Desk {
     if (!r.ok) {
       // Refused because the window is asking: if that is a startup question
       // the floor has not been shown, the next tick reads it and offers it.
-      if (r.code === 'asking') this.lookStartup = true;
+      if (r.code === 'asking' || r.code === 'unknown_screen') this.lookStartup = true;
       // The command that was being typed, when it was one: a model or effort
       // change that ends here was not made, and the board stops showing it as
       // asked for (it used to stand on the select until the model next
@@ -731,8 +783,11 @@ class Desk {
   }
 
   /** A startup question is answered by one of its own rows, by number, and
-   *  nothing else: there is no approve or deny on a trust dialog. */
+   *  nothing else: there is no approve or deny on a trust dialog. A dialog
+   *  read by its shape, or a screen the floor does not know, also takes
+   *  `cancel`: Escape, pressed only while the pane still shows it. */
   async answerStartup(decision) {
+    if (decision === 'cancel') return W.escapeStanding(this.where);
     const n = Number(decision);
     if (!Number.isInteger(n) || n < 1) return { ok: false, error: `a startup question is answered by choosing one of its rows, not "${decision}"` };
     return W.answerStartup(this.where, n);
@@ -850,6 +905,19 @@ class Host {
   }
 
   async register() {
+    // Which Claude Code runs here, and a change said on every desk this host
+    // runs (host/version.js: report only, never a gate). Read before the
+    // desks, so the line reaches the board in this heartbeat's events.
+    const cv = await V.claudeVersion();
+    if (cv) {
+      const change = V.versionChange(V.lastVersion(this.cfg.hostId), cv);
+      if (change) {
+        log(`Claude Code is now ${change.to} on this machine (it was ${change.from})`);
+        for (const d of this.desks.values()) d.told(V.versionWords(this.cfg.name, change));
+      }
+      V.keepVersion(this.cfg.hostId, cv);
+      this.claudeVersion = cv;
+    }
     // Where each desk can be sat at, reported every time rather than once: a
     // window opens, closes and moves, and a stale address is worse than none.
     const desks = [];
@@ -913,7 +981,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), pending, boot: this.boot, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), pending, boot: this.boot, claude_version: this.claudeVersion ?? null, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -2506,9 +2574,13 @@ class Host {
         this.inHand = (reply.work ?? []).slice();
         while (this.inHand.length && !this.stopping) {
           const item = this.inHand.shift();
+          // Which desk the host is acting on, so the watch does not put the
+          // host's own passing screens on the floor as unknown (Desk.tick).
+          this.acting = { channel: item.channel, agent: item.agent };
           this.current = this.handle(item).catch((err) => warn(`${item.kind} for ${item.channel}/${item.agent}: ${err.message}`));
           await this.current;
           this.current = null;
+          this.acting = null;
           this.acks.push(item.id);
           // Said now when more of the batch is still to go, not on the next
           // poll: that poll comes only after the whole batch, and a host

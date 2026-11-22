@@ -27,6 +27,10 @@ import { resolve } from 'node:path';
 import { userInfo } from 'node:os';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale, parentPort, readParentAnswer, askParent, dialogBackend } from '../host/dialog.js';
 import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads, fetchUpload } from '../host/uploads.js';
+// The stand-in windows here print text and draw no composer, so every
+// pane would read as a screen the floor does not know (host/window.js,
+// unknownScreensOn). Rows that are about that rule turn it back on.
+process.env.ORCH_UNKNOWN_SCREENS ??= 'ignore';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -187,6 +191,8 @@ function fixture() {
     `const SESSION_ID = ${JSON.stringify(SESSION_ID)};`,
     `const ARGV = ${JSON.stringify(`${FIX}/argv.log`)};`,
     `if (process.argv[2] === 'agents') { process.stdout.write(fs.readFileSync(ROSTER, 'utf8')); process.exit(0); }`,
+    // The host reads the version at every heartbeat (host/version.js); a file says which, so a row can move it.
+    `if (process.argv[2] === '--version') { let v = '2.1.330'; try { v = fs.readFileSync(${JSON.stringify(`${FIX}/version.flag`)}, 'utf8').trim() || v; } catch {} process.stdout.write(v + ' (Claude Code)\\n'); process.exit(0); }`,
     // `claude mcp add -s local …` and `claude mcp remove -s local …`, as the
     // real CLI behaves (measured 2026-09-08/09): a read-modify-write of
     // $HOME/.claude.json under projects[cwd].mcpServers, "already exists" on
@@ -374,6 +380,12 @@ function fixture() {
       // "n to add notes" on its status line. Never redrawn, so a digit moves
       // nothing here (QA, PR #55 Info 8).
       preview: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Where", "", "Where should it go?", "", "❯ 1. Alpha                        ┌────────┐", "  2. Bravo                        │ AAA box│", "  3. Charlie                      └────────┘", "                                  Notes: press n to add notes", "────────────────────────────────────────────────────────────────────────────────", "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"] })};`,
+    // Two more (0.14.6): `dialog`, the fullscreen upsell as 2.1.330 drew it
+    // on a probe, and `odd`, a panel no reader here knows. Both close on
+    // Escape and leave the composer, as Claude Code's do (oddUp below).
+    `PROMPTS.dialog = ${JSON.stringify(['', '─'.repeat(80), '  Try the new fullscreen renderer?', '', '  · Flicker-free output', '', '  ❯ 1. Yes, try it', '    2. Not now', '', '  Enter to confirm · Esc to cancel'])};`,
+    `PROMPTS.odd = ${JSON.stringify(['', '▔'.repeat(60), '  Plugins', '  2 installed', '  ❯ ✔ floor', '    ✔ easel', '  ↑/↓ to navigate · Space to toggle · Esc to close'])};`,
+    `let oddUp = promptKind === 'dialog' || promptKind === 'odd';`,
     `for (const l of PROMPTS[promptKind] ?? []) process.stdout.write(l + '\\n');`,
     // A prompt takes a bare key with no Enter, as a person pressing one
     // would, and a tty in canonical mode holds it until a newline that never
@@ -386,6 +398,7 @@ function fixture() {
     `process.stdin.on('data', (chunk) => {`,
     `  fs.appendFileSync(SINK, chunk);`,
     String.raw`  if (chromeUp) { if (/[\r\n]/.test(chunk.toString('utf8'))) { chromeUp = false; if (process.stdin.isTTY) process.stdin.setRawMode(false); process.stdout.write('\u001b[2J\u001b[3J\u001b[H'); } return; }`,
+    String.raw`  if (oddUp) { if (chunk.includes(0x1b)) { oddUp = false; if (process.stdin.isTTY) process.stdin.setRawMode(false); process.stdout.write('\u001b[2J\u001b[3J\u001b[H' + '─'.repeat(60) + '\n❯ \n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n'); } return; }`,
     `  acc += chunk.toString('utf8');`,
     `  for (;;) {`,
     `    const at = acc.indexOf(START);`,
@@ -2431,6 +2444,73 @@ try {
   eq((await pickAsk()).status, 200, 'a request for the folder dialog is queued for a host that will get it too late');
   assert(await until(() => (/not opening the folder dialog — it was asked for/.test(host.log) ? true : null), 8000), 'the host says it is not opening one, and why');
   eq([dialogLog().length, await pickAt()], [staleCalls, staleAt], 'and no dialog opened, and nothing was said to the board as if one had');
+
+  /* ── a dialog the window draws, and a screen the floor does not know ───────
+   * 0.14.6, docs/robustness-review.md items 1–3. A host with the rule on (the
+   * rest of this suite runs it off, because its stand-in draws no composer).
+   * prompt.flag's `dialog` is the 2.1.330 upsell as a probe drew it, and
+   * `odd` a panel no reader knows; each closes on Escape, as Claude Code's do,
+   * and the key reaches SINK. What a real window did with the same is in
+   * CLAUDE.md ("A screen the floor does not know"). */
+  console.log('\n  a dialog the window draws, and a screen the floor does not know');
+  host.kill('SIGTERM');
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+  killTmux();
+  writeFileSync(`${FIX}/roster.json`, '[]');
+  // And Claude Code moves under it (host/version.js, review item 4): the
+  // stand-in answers --version from version.flag, and the host restarted
+  // here reads a version it has not seen at its first heartbeat.
+  {
+    const V = await import('../host/version.js');
+    eq([V.versionOf('2.1.330 (Claude Code)\n'), V.versionOf('claude v2.2.0-beta.1'), V.versionOf('command not found')], ['2.1.330', '2.2.0-beta.1', null],
+      'the version is read out of what `claude --version` prints, and nothing out of anything else');
+    eq([V.versionChange(null, '2.1.330'), V.versionChange('2.1.330', '2.1.330'), V.versionChange('2.1.330', null), V.versionChange('2.1.330', '2.1.331')],
+      [null, null, null, { from: '2.1.330', to: '2.1.331' }], 'a change is two readings that differ: a first reading, the same one, or none is not one');
+    const vf = `${FIX}/version-state.json`;
+    V.keepVersion('a', '2.1.330', vf); V.keepVersion('b', '2.1.329', vf);
+    eq([V.lastVersion('a', vf), V.lastVersion('b', vf), V.lastVersion('c', vf)], ['2.1.330', '2.1.329', null], 'each host keeps its own reading');
+  }
+  assert(await until(() => (existsSync(`${HOME}/.orchestratinator/claude-version.json`) ? true : null), 1000), 'the fixture: the host has been keeping its reading in its own folder');
+  writeFileSync(`${FIX}/version.flag`, '2.1.331');
+  // By id, and from the whole list: the route returns a page, so a count of
+  // rows read before is not where the new ones start (this row's first run).
+  const allTurns = async () => (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
+  const versionMark = Math.max(0, ...(await allTurns()).map((r) => r.id));
+  host = startHost('host-test-1', { ORCH_UNKNOWN_SCREENS: 'on', ORCH_SCREEN_LOOK_MS: '500', ORCH_UNKNOWN_SETTLE_MS: '600', ORCH_UNKNOWN_GRACE_MS: '800' });
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'the fixture: a host with the rule on, and the desk live');
+  const versionLine = await until(async () => (await allTurns()).filter((r) => r.id > versionMark).find((r) => r.tool_name === 'host' && /Claude Code on .* is now 2\.1\.331 \(it was 2\.1\.330\)/.test(r.text ?? '')) ?? null, 8000);
+  assert(!!versionLine, `a new Claude Code is said on the desk, with the one before it — ${versionLine?.text}`);
+  // Left at 2.1.331 for the rest of the run: taken away, the next host would
+  // say a change back on every desk, a line the sections after this one do
+  // not expect.
+  for (const [kind, want] of [
+    ['dialog', { kind: 'dialog', summary: 'Try the new fullscreen renderer?', rows: ['Yes, try it', 'Not now'], refusal: /The window is asking something/ }],
+    ['odd', { kind: 'screen', summary: 'the window is showing something the floor does not know', rows: [], refusal: /a screen the floor does not know/ }],
+  ]) {
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
+    writeFileSync(`${FIX}/prompt.flag`, kind);
+    const sinkAt = received().length;
+    eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, `${kind}: a window is opened for the desk, and stands on it`);
+    const p = await until(async () => {
+      const q = deskOf(await floor(), 'free')?.permission;
+      return q?.startup && q.kind === want.kind ? q : null;
+    }, 15000);
+    eq([p?.kind, p?.summary, (p?.options ?? []).map((o) => o.text)], [want.kind, want.summary, want.rows],
+      kind === 'dialog' ? 'a dialog no reader knows reaches the desk by its shape: its title and its rows, to be picked from the floor'
+        : 'a screen nobody here knows reaches the desk as that, never as idle');
+    if (kind === 'odd') eq(p?.screen?.at(-1), '  ↑/↓ to navigate · Space to toggle · Esc to close', 'with the pane\'s last lines, as it drew them');
+    if (kind === 'dialog') assert(/Flicker-free output/.test(p?.detail ?? ''), `and what it says above the rows (${p?.detail})`);
+    const refused = await chat('free', `a message while it shows ${kind}`);
+    const rbody = await refused.json().catch(() => ({}));
+    assert(refused.status === 409 && want.refusal.test(rbody.error ?? ''), `a message to the desk is refused, in words, before anything is typed (${refused.status} ${rbody.error})`);
+    eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'cancel' })).status, 200, 'Escape is pressed from the floor');
+    assert(await until(() => (received().slice(sinkAt).includes('\u001b') ? true : null), 8000), 'and reaches the window as Escape');
+    assert(await until(async () => (deskOf(await floor(), 'free')?.permission ? null : true), 8000), 'and once the window is back at its composer, the desk asks nothing');
+    assert(!received().slice(sinkAt).includes(`a message while it shows ${kind}`), 'and the refused message was never typed into the window');
+    rmSync(`${FIX}/prompt.flag`, { force: true });
+    killTmux();
+    writeFileSync(`${FIX}/roster.json`, '[]');
+  }
 
   /* ── Claude Code signed out on this machine ─────────────────────────────────
    * costmo, 2026-11-19: a desk on a machine where Claude Code is signed out
