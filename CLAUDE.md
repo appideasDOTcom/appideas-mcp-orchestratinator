@@ -160,6 +160,33 @@ since that afternoon's clear, which removed the launchd job, its plist and
 costmo has `host/install.sh` run from the live clone, a board on 8787 with
 no live host is that, not a fault to diagnose.
 
+**Since 2026-11-22, `main` is the 0.14 line, and both releases meet
+there.** For 0.14.5, costmo merged PR #61 (develop into main, 82a2dad,
+whose tree is the candidate 154e5cc's exactly) and tagged `v0.14.5` on
+main. The desktop app pins that tag, and its own `main` took the pin move
+(ae2ef9e). So "`main` stays on 0.12.x" in "A new machine's first windows"
+and the 0.12.x maintenance branch above are history. A maintenance fix now
+branches off main at 0.14.x. The forward-merge rule about `"protocol"`
+still holds. The order the round used, each step checked by QA before the
+next:
+1. Both release chains EXIT=0 at the candidate.
+2. The PR merged, and the tag on main.
+3. QA's identity check: the tag's tree object equals the candidate's.
+4. The desktop pin moves to the tag, and the app's `check` passes at its
+   own pin.
+5. costmo commits and merges the desktop app.
+6. The signed and notarized build, and QA's read of the artefact.
+7. `publish:release` on costmo's word, and QA's read-back of the public
+   bytes against the artefact's hashes.
+
+There was no desktop tag. **The live clone has not moved**: read the same
+day, it is on main at 5caf3b5, so the board on 8787 is still 0.12.12. Its
+next `git pull` and deploy (**deploy-both-halves**) moves it to 0.14.5,
+which refuses any host that does not send protocol 1. So a live host put
+back afterwards has to be installed from the same pulled clone. The page's
+Update cannot make this move: it needs a launchd host, and there has been
+none since the 11-20 clear.
+
 The database moved with the board: it is the named volume of the live
 clone's compose project (`orchestratinator-live_orchestratinator-data`),
 copied from the old one (`appideas-mcp-orchestratinator_orchestratinator-data`)
@@ -1148,7 +1175,9 @@ above is the Docker line's rule, and "the full chain runs before any merge
 to main" reads, for the desktop line, as the gate before the tag. **The
 app's version and this repo's are kept the same** (costmo, 2026-11-20). The
 app took 0.14.1 alone, which is why there is no `v0.14.1` here: v0.14.0 is
-b3127e4, v0.14.2 is d1fe63a, v0.14.3 is 5fcb0b8.
+b3127e4, v0.14.2 is d1fe63a, v0.14.3 is 5fcb0b8, v0.14.4 is 58a648f.
+**From v0.14.5 (82a2dad) the tag is on `main`**, so the rest of this
+paragraph describes 0.14.0 to 0.14.4 ("Since 2026-11-22", near the top).
 
 - **The 0.14.0 gate, and its three reds.** At 6826bab it read EXIT=1 (3 ✗
   in the suites, 13 of 15 pages, load 57 to 106). All three were fixed in
@@ -3286,7 +3315,12 @@ one number, one word and one process came apart:
   change to what the board demands of a host is not done until `grep -rl
   api/host/register .claude/skills test` has been read. A refused host keeps
   trying on its backoff, logs the words once, tells its parent over its
-  port, and is on `/api/floor`'s `hosts` as `refused`. On this machine the
+  port, and is on `/api/floor`'s `hosts` as `refused`. Its desks say
+  "refused", never "offline": on the card's window row, the nameplate, the
+  panel's header, the composer's placeholder and its hint, which carries
+  the board's words (0.14.5, task 337; the panel said "offline" with
+  "Start it" until then; **check-signin.mjs** and
+  `mutants-signin.page.json` hold it). On this machine the
   mismatch it catches is a deploy that rebuilt the board and left the host
   running: the board now says so instead of a desk quietly taking no
   message. Do not widen it to a range until there is code that reads an
@@ -3525,6 +3559,26 @@ each says how, so this is the map, not the record.
   stand-in there must be an `.exe` (`node.exe` with `NODE_OPTIONS=--import`
   worked). Hooks run under Git Bash; a `node` installed after the terminal
   that started Claude Code is not on its PATH until a new terminal.
+- **A Claude Code a person types into a psmux window runs one hop
+  under that window's PowerShell** (0.14.5, task 334, measured by
+  pc-developer on 2.1.330). The pane's pid is powershell.exe, and the
+  roster's is claude.exe with that as its parent. `runsUnder` used to
+  answer false on Windows, so the 30 s rule for a window with no record
+  closed that person's window 32 s after they typed `claude`. Parents are
+  read through Win32_Process in PowerShell 5.1 (`parentsCommand`, about a
+  second there), and only when no roster pid matches the pane's, so a
+  window the host started never pays for it (`runsUnderOnce`).
+- **Open: on 2.1.330 a new window can draw "Teach auto mode about your
+  environment?"**, and the host has no reader for it. It reads as idle,
+  and the floor's messages go into the dialog. Three desks on the PC
+  stood dead that way on 2026-11-22. It is the old class (an unknown
+  screen reads as idle), not a regression. It is named open in QA's OK
+  for 0.14.5, and it heads `docs/robustness-review.md`, pc-developer's
+  write-up of that day with the class's history and five proposed
+  changes. It has not been raised on the Mac yet. The next step is a
+  probe on its own socket and config dir, never `/model` on the
+  operator's config, then a reader in the way 0.14.2 did the browser
+  extension's question.
 
 Measured working there at 9e160cc: the README's Docker install (with
 `/plugin marketplace add ./`), the installed host (silent start, restart
@@ -3699,6 +3753,27 @@ example is "the fixture held: Resume landed N ms after the End" in
 check-meeting-box. Give the load beside the result. Do not widen a timeout
 to make a load red go away: that is how a row stops seeing its fault, as
 Info 5's 8 s wait did.
+
+**He ruled it again on 2026-11-22, three times in one morning**, during
+the 0.14.5 round's whole mutation runs at loads of 250 to 580. The last
+one was after QA had set "GO when the load is under 30 for two minutes"
+and the coordinator had passed that on without objecting: "this system
+does more than just your work. You need to work around system resource
+issues caused by other development projects that run at the same time."
+So a proposal from any agent to wait for the load, ask for the machine,
+or bring another project's load to him is refused on the spot, citing
+this paragraph (QA's decisions/0016 is the same rule). Under that load,
+whole suites went red once each on rows that were green alone. Read them
+the rules' way:
+- Rerun the row alone, with `uptime` beside it.
+- A runner that cannot get past a red baseline restarts unchanged.
+- After three red baselines, change the instrument (a mutant's own row
+  as its control, `--quick`), never the timing.
+- A mutant "caught" only by a timeout is listed apart from one caught by
+  an assertion.
+- Four such rows in the app's suite were each a test reading something
+  before it was there or mid-write, and each fix waited on the thing
+  itself, never on a longer timeout.
 
 **Seven take-a-desk reds in `test:host` were a race in the case before
 them, not load** (2026-11-07). "and within seconds the host has bound it"
@@ -4321,7 +4396,11 @@ operator's live floor.
   it. So call `whoami` first after a reset, and pass no `channel` or
   `agent` unless you mean another one. List with `status: "open"`: with
   `mine: true` the done tasks come back too, and on this channel that
-  ran past the tool's output limit.
+  ran past the tool's output limit. **And pass `since` after a reset**:
+  the last message id the summary names. `poll_messages` with no `since`
+  starts at 0, and on 2026-11-22 it returned the floor's oldest hundred
+  (from id 2220, three weeks old), past the output limit, while the new
+  messages sat above them.
 - **The board keeps each agent's cursor, and another machine's board
   keeps its own.** `agents.poll_cursor` (one row per channel and agent)
   is the last message delivered to that agent. That row, against

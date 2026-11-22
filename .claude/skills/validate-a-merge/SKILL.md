@@ -136,7 +136,9 @@ files. What it took, for the next one:
   that drops it. Both forward merges of 2026-11 did: the version line
   conflicted, main's side was taken, and develop's `"protocol": 1` beside
   it went too. It now sits away from `"version"`. A forward merge keeps
-  develop's version (0.14.x) over main's (0.12.x).
+  develop's version over main's (0.14.x over 0.12.x until 2026-11-22;
+  main has been on the 0.14 line since v0.14.5, so develop's is the
+  newer number or the same one).
 - **Run the scripts on Node 24.** `check-merge.sh` calls `node -e`, and on
   this machine's default Node 20 that is a different Node from the one
   that runs the tree.

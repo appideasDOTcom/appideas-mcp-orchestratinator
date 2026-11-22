@@ -52,7 +52,7 @@ this folder's window is bound to is the app's**:
 | | Address | What it is |
 |---|---|---|
 | the app's own board | `http://127.0.0.1:6724` | where `coordinator` and `orchestratinator-desktop-dev` are bound (local scope in `~/.claude.json`); its host is `<hostname> (app)`. `whoami`, the meeting room and every poll are here |
-| the Docker board | `http://localhost:8787` | the live clone's (`orchestratinator-live`, main, 0.12.x) with the launchd host. Never built, restarted or tested against from here |
+| the Docker board | `http://localhost:8787` | the live clone's (`orchestratinator-live`, on main; still 0.12.12 at 5caf3b5 on 2026-11-22, though main is v0.14.5 since that day, until it is pulled and deployed). No launchd host since the 2026-11-20 clear. Never built, restarted or tested against from here |
 | a scratch board | `127.0.0.1:89xx` | yours, for a test, from `scratch-docker-board.sh` |
 
 Read the binding before believing any of that on another day:
@@ -146,7 +146,13 @@ better-sqlite3 (`. scripts/node-floor.sh`).
    session runs it). Then the app's agent moves the pin from the sha to
    `#v<x.y.z>`, reads `app-pin-check.sh` against the tag's commit, and
    packages. Move the contract's `pin.what_is_where` when the build is
-   made.
+   made. **Since 0.14.5 (2026-11-22) the tag is on `main`**: the release
+   PR merges develop into main, the tag goes there, and the desktop
+   app's own `main` takes the pin move. The whole order, with QA's check
+   between each step, is "Since 2026-11-22" in CLAUDE.md. The pin move
+   also rewrites the `#v<x.y.z>` that two of the app's kept mutations
+   quote (`scripts/mutations.mjs`), so `mutate.mjs --check` and `--quick`
+   on those two go with it.
 
 ## A feature both sides build (the floor windows round, 2026-11-19)
 
