@@ -1,0 +1,104 @@
+[
+ [
+  "the address is not read at load: the stored choice wins, as before task 315",
+  "src/ui/floor.js",
+  "ui.floorFilter = said.floor !== undefined ? said.floor : (localStorage.getItem('orch.floor') || null);",
+  "ui.floorFilter = localStorage.getItem('orch.floor') || null;"
+ ],
+ [
+  "the title is never set",
+  "src/ui/floor.js",
+  "    if (title && document.title !== title) document.title = title;",
+  "    void title;"
+ ],
+ [
+  "a plain click on a chip follows the link (a reload) instead of riding there",
+  "src/ui/floor.js",
+  "      if (opensElsewhere(e)) return;\n      e.preventDefault();",
+  "      if (opensElsewhere(e)) return;"
+ ],
+ [
+  "a ⌘-click is taken by the page, as a plain click",
+  "src/ui/floor.js",
+  "      if (opensElsewhere(e)) return;\n      e.preventDefault();",
+  "      e.preventDefault();"
+ ],
+ [
+  "the ⧉ opens the floor as the opener's child",
+  "src/ui/floor.js",
+  "    if (mode !== 'window') return 'noopener';",
+  "    if (mode !== 'window') return '';"
+ ],
+ [
+  "the ⧉ does nothing",
+  "src/ui/floor.js",
+  "      openFloorElsewhere(pop.dataset.floorPop);\n      return;",
+  "      return;"
+ ],
+ [
+  "only a pick syncs the address and title, not a draw (a floor put away under the tab)",
+  "src/ui/floor.js",
+  "    ui.floorNames = names;\n    syncAddress();",
+  "    ui.floorNames = names;"
+ ],
+ [
+  "the board view does not sync (setView)",
+  "src/ui/floor.js",
+  "    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }\n    syncAddress();",
+  "    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }"
+ ],
+ [
+  "all floors is not written, so a reload falls back to the stored choice",
+  "src/ui/floor.js",
+  "    q.set('floor', floor ?? '');\n    if (view === 'board')",
+  "    if (floor) q.set('floor', floor); else q.delete('floor');\n    if (view === 'board')"
+ ],
+ [
+  "a chip is a button, not a link",
+  "src/ui/floor.js",
+  "<a class=\"chip${on}\" href=\"${esc(floorHref(n))}\" data-floor=\"${esc(n)}\">${esc(n)}</a>",
+  "<button class=\"chip${on}\" data-floor=\"${esc(n)}\">${esc(n)}</button>"
+ ],
+ [
+  "Open new floors defaults to In windows",
+  "src/ui/floor.js",
+  "    return stored === 'window' ? 'window' : 'tab';",
+  "    return stored === 'tab' ? 'tab' : 'window';"
+ ],
+ [
+  "In windows opens a tab anyway (the features are dropped)",
+  "src/ui/floor.js",
+  "    const features = floorOpenFeatures(floorOpenNow(), window, window.screen);",
+  "    const features = 'noopener';"
+ ],
+ [
+  "the app's token is not read: the page's own choice applies inside the app",
+  "src/ui/floor.js",
+  "    if (APP_UA.test(ua ?? '')) return 'app';",
+  "    void APP_UA;"
+ ],
+ [
+  "Settings shows the choice inside the app too",
+  "src/ui/app.js",
+  "  if (!fo || fo.inApp()) return '';",
+  "  if (!fo) return '';"
+ ],
+ [
+  "the choice in Settings is not kept",
+  "src/ui/app.js",
+  "  if (open) { window.floorOpen?.set(open.value); return; }",
+  "  if (open) return;"
+ ],
+ [
+  "the picker is not redrawn when the choice changes (the ⧉'s words go stale)",
+  "src/ui/floor.js",
+  "    const pickSig = JSON.stringify([names, ui.floorFilter, openMode]);",
+  "    const pickSig = JSON.stringify([names, ui.floorFilter]);"
+ ],
+ [
+  "a draw before the first /api/floor drops the address's floor (costmo, 2026-11-19: the ⧉ opened all floors)",
+  "src/ui/floor.js",
+  "    if (floorRead && ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;",
+  "    if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;"
+ ]
+]

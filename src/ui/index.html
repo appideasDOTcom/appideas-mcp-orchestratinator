@@ -27,16 +27,14 @@
         <button class="chip" data-view="floor" title="The floor — one room per channel, one desk per agent">floor</button>
       </div>
       <span id="admin-state" class="admin-locked mono hidden"></span>
-      <label class="switch">
-        <input type="checkbox" id="autorefresh" checked>
-        <span>auto-refresh</span>
-      </label>
+      <!-- Auto-refresh is a row in Settings (costmo, 2026-11-19); ↻ is an
+           action and stays here. -->
       <button id="refresh-now" class="btn" title="Refresh now">↻</button>
       <!-- Shown only while checking for updates is on and the followed branch
            has a commit this build lacks, or while an update runs (issue #40).
            The one place an update is offered. -->
       <button id="update-btn" class="btn update" type="button" hidden>Update available</button>
-      <button id="open-settings" class="btn" title="Settings — updates, export and restore">⚙</button>
+      <button id="open-settings" class="btn" title="Settings — auto-refresh, how new floors open, updates, export and restore">⚙</button>
     </div>
   </header>
 

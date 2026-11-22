@@ -21,9 +21,9 @@
 // hook is spawned as a real child process against a stub server, with HOME
 // pointed at a fixture so the session memo it writes cannot touch the real one.
 //   npm run test:plugin
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync, symlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -102,7 +102,10 @@ function reserveDeadPort() {
 function fire(event, { home = FIX, env = {}, cwd } = {}) {
   return new Promise((done) => {
     const started = Date.now();
-    const child = execFile(process.execPath, [HOOK], { cwd, env: { ...process.env, HOME: home, ...env } },
+    // USERPROFILE beside HOME: on Windows Node's homedir() reads USERPROFILE
+    // and ignores HOME, so with HOME alone the hook read the real
+    // ~/.claude.json and memo there, and a binding in it reached a live board.
+    const child = execFile(process.execPath, [HOOK], { cwd, env: { ...process.env, HOME: home, USERPROFILE: home, ...env } },
       (err, stdout, stderr) => done({ code: err?.code ?? 0, stdout, stderr, ms: Date.now() - started }));
     child.stdin.end(typeof event === 'string' ? event : JSON.stringify(event));
   });
@@ -250,7 +253,7 @@ async function main() {
     // ---- the memo remembers where, and only where ----
     const memo = readMemo();
     assert(memo && memo[SID]?.root, 'the session is remembered against the repo it was seen in');
-    eq(memo[SID].root, `${FIX}/repo`, 'by path');
+    eq(memo[SID].root, resolve(`${FIX}/repo`), 'by path');
     // The key is deliberately not stored: it is re-read from .mcp.json every
     // time, so this file never becomes a second copy of a credential.
     assert(!JSON.stringify(memo).includes(KEY), 'and the memo holds no credential — only the path');
@@ -263,7 +266,7 @@ async function main() {
     eq(received[0].body?.channel, CH, 'as the same desk');
     // A desk is a checkout, not a cursor. Sending the raw cwd would file the
     // session under /private/tmp the moment its agent used a scratch directory.
-    eq(received[0].body?.cwd, `${FIX}/repo`, 'filed under the repo, not under wherever it was standing');
+    eq(received[0].body?.cwd, resolve(`${FIX}/repo`), 'filed under the repo, not under wherever it was standing');
     eq(received[0].body?.tool_name, 'Bash', 'with the event’s own fields intact');
 
     // ---- a session standing in another desk's repo is still its own ----
@@ -281,8 +284,8 @@ async function main() {
     await settle();
     eq(received.length, 1, 'a prompt raised while standing in another desk\'s repo is reported');
     eq(received[0].body?.agent, AGENT, 'as the desk the session started in, not the one it is standing in');
-    eq(received[0].body?.cwd, `${FIX}/repo`, 'and filed under its own repo');
-    eq(readMemo()?.['qa-session']?.root, `${FIX}/repo`, 'and its memo still says its own repo — never overwritten by where it stood');
+    eq(received[0].body?.cwd, resolve(`${FIX}/repo`), 'and filed under its own repo');
+    eq(readMemo()?.['qa-session']?.root, resolve(`${FIX}/repo`), 'and its memo still says its own repo — never overwritten by where it stood');
     received.length = 0;
     await fire({ session_id: 'local-qa', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: `${FIX}/repo`, transcript_path: transcriptFor(`${FIX}/localrepo`, 'local-qa') });
     await settle();
@@ -338,7 +341,7 @@ async function main() {
     await settle();
     eq(received.length, 1, 'a session in a repo bound only in ~/.claude.json is reported');
     eq(received[0]?.body?.agent, 'local-agent', 'as the local-scope identity');
-    eq(received[0]?.body?.cwd, `${FIX}/localrepo`, 'filed under the bound directory, found by walking up');
+    eq(received[0]?.body?.cwd, resolve(`${FIX}/localrepo`), 'filed under the bound directory, found by walking up');
     eq(received[0]?.headers['x-orchestratinator-key'], KEY, 'with the key from that entry');
 
     received.length = 0;
@@ -354,6 +357,52 @@ async function main() {
     await fire({ session_id: 'cfg-session', hook_event_name: 'SessionStart', cwd: `${FIX}/cfgrepo` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/cfg` } });
     await settle();
     eq(received[0]?.body?.agent, 'cfg-agent', 'a binding under CLAUDE_CONFIG_DIR is found there');
+
+    // ---- Windows: Claude Code and Node spell one folder two ways ----
+    // `claude mcp add -s local` on Windows keys the folder as C:/Users/…, and
+    // path.resolve gives C:\Users\…; the exact lookup missed and every hook
+    // there reported nothing (measured 2026-11-20). The key here is the
+    // folder with the *other* separator and its case changed: on Windows that
+    // is Claude Code's own spelling, and on a Mac it is a spelling only the
+    // Windows comparison can match. ORCH_HOOK_PLATFORM makes the hook compare
+    // as Windows does, on any machine.
+    received.length = 0;
+    mkdirSync(`${FIX}/winrepo/sub`, { recursive: true });
+    mkdirSync(`${FIX}/wincfg`, { recursive: true });
+    const winReal = realpathSync(`${FIX}/winrepo`);
+    const otherSpelling = (process.platform === 'win32' ? winReal.replace(/\\/g, '/') : winReal.replace(/\//g, '\\')).toUpperCase();
+    writeFileSync(`${FIX}/wincfg/.claude.json`, JSON.stringify(localScopeFile({ [otherSpelling]: 'win-agent' })));
+    await fire({ session_id: 'win-session', hook_event_name: 'SessionStart', cwd: `${FIX}/winrepo/sub` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/wincfg`, ORCH_HOOK_PLATFORM: 'win32' } });
+    await settle();
+    eq(received.length, 1, 'on Windows, a folder bound under another spelling of its path is reported');
+    eq(received[0]?.body?.agent, 'win-agent', 'as that binding');
+    eq(received[0]?.body?.cwd, resolve(`${FIX}/winrepo`), 'filed under the folder as Node spells it, not as the lowered key');
+
+    // Off Windows a backslash is a character in a file name and case matters,
+    // so the same spelling is a different folder there and stays unmatched.
+    if (process.platform !== 'win32') {
+      received.length = 0;
+      await fire({ session_id: 'win-session-posix', hook_event_name: 'SessionStart', cwd: `${FIX}/winrepo/sub` }, { env: { CLAUDE_CONFIG_DIR: `${FIX}/wincfg`, ORCH_HOOK_PLATFORM: undefined } });
+      await settle();
+      eq(received.length, 0, 'elsewhere that spelling is another folder, and nothing is reported');
+    }
+
+    // The host reads the same file the same way (host/identity.js: readDesk,
+    // localEntries), so a Windows host would miss the binding the hook now
+    // finds and never take the desk up. Its twin rule, on the same fixture.
+    // A child process, because the platform is read when the module loads.
+    const hostReads = (platform) => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import { readDesk, localEntries } from ${JSON.stringify(new URL('../host/identity.js', import.meta.url).href)};
+      const dir = process.argv.at(-1);
+      process.stdout.write(JSON.stringify({ desk: readDesk(dir)?.agent ?? null, entries: localEntries(dir).entries.map((e) => e.agent) }));
+    `, resolve(`${FIX}/winrepo`)], { env: { ...process.env, CLAUDE_CONFIG_DIR: `${FIX}/wincfg`, ORCH_HOST_PLATFORM: platform ?? '' } }).toString());
+    const winHost = hostReads('win32');
+    eq(winHost.desk, 'win-agent', 'on Windows, the host finds that folder\'s desk under the other spelling too');
+    eq(winHost.entries, ['win-agent'], 'and names its local-scope entry, which a release removes by name');
+    if (process.platform !== 'win32') {
+      const posixHost = hostReads(process.platform);
+      eq([posixHost.desk, posixHost.entries], [null, []], 'elsewhere the host leaves that spelling unmatched, as the hook does');
+    }
 
     // ---- one agent, several sessions: a window started as a desk of its own ----
     // The host starts a second window in a folder that is already a desk with
@@ -610,7 +659,7 @@ async function main() {
     await fire({ session_id: 'vendor-session', hook_event_name: 'SessionStart', cwd: `${FIX}/repo/vendor` });
     await settle();
     eq(received.length, 1, 'a malformed .mcp.json below a healthy one does not stop the walk');
-    eq(received[0].body?.cwd, `${FIX}/repo`, 'which resolves to the healthy repo above it');
+    eq(received[0].body?.cwd, resolve(`${FIX}/repo`), 'which resolves to the healthy repo above it');
 
     // Six levels: the starting directory plus five parents. l5 sees the repo,
     // l6 does not — and a fresh session at l6 has no memo to fall back on.
@@ -734,11 +783,24 @@ async function main() {
     assert(commands.every((c) => c?.type === 'command' && c?.timeout === 5), 'every event runs a command with the same short timeout');
     eq(new Set(commands.map((c) => c?.command)).size, 1, 'and every event runs the identical line — editing one and not the rest is drift');
 
-    // Run that line under a real shell, exactly as Claude Code would.
+    // Run that line under a real shell, exactly as Claude Code would. On
+    // Windows that is Git Bash, which Claude Code runs every hook under
+    // (pc-developer, 2026-11-20): there is no /bin/sh to name, so the suite
+    // takes the one Claude Code is told to use, else the bash beside git.exe
+    // (Git for Windows puts only Git\cmd on PATH, so from PowerShell `sh` is
+    // not found by name: measured), else `sh` on PATH.
     const CMD = commands[0].command;
+    const gitBash = () => {
+      try {
+        const git = execFileSync('where.exe', ['git'], { encoding: 'utf8' }).split(/\r?\n/).find((l) => /git\.exe$/i.test(l.trim()))?.trim();
+        const bash = git && join(git, '..', '..', 'bin', 'bash.exe');
+        return bash && existsSync(bash) ? bash : null;
+      } catch { return null; }
+    };
+    const SH = process.platform === 'win32' ? (process.env.CLAUDE_CODE_GIT_BASH_PATH || gitBash() || 'sh') : '/bin/sh';
     const runWrapper = (stdin, env = {}) => new Promise((done) => {
       const started = Date.now();
-      const child = execFile('/bin/sh', ['-c', CMD], { env: { ...process.env, HOME: FIX, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, ...env } },
+      const child = execFile(SH, ['-c', CMD], { env: { ...process.env, HOME: FIX, USERPROFILE: FIX, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, ...env } },
         (err, stdout, stderr) => done({ code: err?.code ?? 0, stdout, stderr, ms: Date.now() - started }));
       child.stdin.end(stdin);
     });
@@ -760,6 +822,40 @@ async function main() {
     eq(wrappedBroken.stdout + wrappedBroken.stderr, '', 'in silence — node’s own crash goes to /dev/null with everything else');
     await settle();
     eq(received.length, 0, 'and neither case reached the board');
+
+    // Which node runs it. A Mac whose only Claude Code is Anthropic's native
+    // install has no node on PATH, and the line used to die there in silence
+    // on every event: no prompt, question or stop ever reached the floor. The
+    // desktop app keeps ~/.orchestratinator/bin/node linked to the Node it
+    // carries, and the line falls back to it. node on PATH still comes first.
+    // The fallback is the desktop app's, which runs on macOS only so far, and
+    // the rows below build a POSIX PATH and a symlink: off Windows only.
+    if (process.platform !== 'win32') {
+    const NO_NODE_PATH = '/usr/bin:/bin';
+    assert(!execFileSync('/bin/sh', ['-c', 'command -v node || true'], { env: { PATH: NO_NODE_PATH } }).toString().trim(), `the fixture's bare PATH (${NO_NODE_PATH}) has no node`);
+    const event = (n) => JSON.stringify({ session_id: 'wrapper-session', hook_event_name: 'UserPromptSubmit', cwd: `${FIX}/repo`, message: n });
+    received.length = 0;
+    const noNode = await runWrapper(event('no node anywhere'), { PATH: NO_NODE_PATH });
+    eq([noNode.code, noNode.stdout + noNode.stderr], [0, ''], 'with no node on PATH and no fallback, the line still exits 0 in silence');
+    await settle();
+    eq(received.length, 0, 'and nothing reaches the board');
+    const binDir = join(FIX, '.orchestratinator', 'bin');
+    mkdirSync(binDir, { recursive: true });
+    symlinkSync(process.execPath, join(binDir, 'node'));
+    received.length = 0;
+    const viaFallback = await runWrapper(event('through the app\'s node'), { PATH: NO_NODE_PATH });
+    eq([viaFallback.code, viaFallback.stdout + viaFallback.stderr], [0, ''], 'with no node on PATH and the app\'s link in place, it exits 0 in silence');
+    await settle();
+    eq(received.map((r) => r.body?.message), ['through the app\'s node'], 'and the report arrives, run by the linked node');
+    // A fallback that is not node, to see which one ran.
+    rmSync(join(binDir, 'node'));
+    writeFileSync(join(binDir, 'node'), `#!/bin/sh\ntouch "${FIX}/fallback-ran"\n`, { mode: 0o755 });
+    received.length = 0;
+    await runWrapper(event('node on PATH first'));
+    await settle();
+    eq([received.map((r) => r.body?.message), existsSync(join(FIX, 'fallback-ran'))], [['node on PATH first'], false], 'a node on PATH outranks the link: the line is what it was wherever node is installed');
+    rmSync(join(FIX, '.orchestratinator'), { recursive: true, force: true });
+    }
   } finally {
     server?.closeAllConnections?.();
     server?.close();

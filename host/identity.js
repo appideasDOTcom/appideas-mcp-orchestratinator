@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, sep } from 'node:path';
 import { listSeats } from './seats.js';
 import { projectDir } from './window.js';
 
@@ -109,7 +109,7 @@ export function unsetIn(value, env = process.env) {
 /** The orchestratinator entry in a set of MCP servers, as a desk, or null. The
  *  signature is the pair of headers, never the entry's name. */
 function deskIn(servers, dir, extra) {
-  for (const s of Object.values(servers && typeof servers === 'object' ? servers : {})) {
+  for (const [server, s] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
     const channel = header(s?.headers, 'X-Channel');
     const agent = header(s?.headers, 'X-Agent');
     if (channel && agent && typeof s?.url === 'string') {
@@ -117,16 +117,23 @@ function deskIn(servers, dir, extra) {
       const key = expandEnv(raw);
       const unset = key ? [] : unsetIn(raw);
       // `keyVar`: the one variable a key that is nothing but a placeholder
-      // names, when this host cannot fill it. A window the host opens for the
-      // desk is given that variable (paneEnv in window.js), because the pane
-      // has no better environment than the host's. A key with text around the
-      // placeholder gets none: the variable set to the board's key would make
-      // the key something else.
+      // names. A window the host opens for the desk is given that variable
+      // (paneEnv in window.js), because since 0.14.4 a window gets nothing
+      // of the host's own settings (TMUX_ENV in window.js): the variable the
+      // binding names is the one thing of them it needs. Before that it was
+      // given only when the host could not fill it, on the ground that one
+      // the host filled came from the environment the tmux server inherited
+      // (PR #52), which is no longer so. A key with text around the
+      // placeholder gets none: the variable set to the board's key would
+      // make the key something else.
       const whole = raw ? WHOLE_PLACEHOLDER.exec(raw)?.[1] : null;
+      // `server`: the name the window knows this entry by, which is what
+      // `/mcp reconnect <name>` takes (typedCommand in window.js). The host
+      // writes `orchestratinator`; one added by hand may be called anything.
       return {
-        channel, agent, cwd: dir, url: s.url, key,
+        channel, agent, cwd: dir, url: s.url, key, server,
         ...(unset.length ? { keyUnset: unset } : {}),
-        ...(whole && unset.includes(whole) ? { keyVar: whole } : {}),
+        ...(whole ? { keyVar: whole } : {}),
         ...extra,
       };
     }
@@ -148,6 +155,38 @@ export function claudeConfigPath() {
  *  way, so every lookup tries both. */
 function real(dir) {
   try { return realpathSync(dir); } catch { return dir; }
+}
+
+/**
+ * Windows spells one folder several ways, and Claude Code and Node pick
+ * different ones: `claude mcp add -s local` keys `projects` as `C:/Users/…`,
+ * while `path.resolve` and `realpathSync` give `C:\Users\…` (measured by
+ * pc-developer, 2026-11-20, Windows 11, Claude Code 2.1.330, Node 26). The
+ * plugin's hook missed every binding that way until 9e59853 (`localAt` in
+ * plugin/hooks/report.mjs), and these lookups are the same lookup on the
+ * host's side. So on Windows a folder is compared by one key, slashes one way
+ * and lower case (the file system is case-insensitive there, and nothing
+ * promises the two writers agree on case). Elsewhere a path is compared
+ * exactly as before: a backslash is an ordinary character in a POSIX file
+ * name, and case matters. The exact spellings are always tried first, so a
+ * POSIX host does no more work than it did.
+ *
+ * `ORCH_HOST_PLATFORM` stands in for `process.platform`, for the suites alone,
+ * as `ORCH_HOOK_PLATFORM` does for the hook.
+ */
+const WINDOWS = (process.env.ORCH_HOST_PLATFORM ?? process.platform) === 'win32';
+const folderKey = (dir) => dir.replace(/\\/g, '/').toLowerCase();
+
+/** What `map` (a Map, or a plain object such as `projects`) holds for `dir`,
+ *  under its own spelling, its resolved one, or on Windows either folded. */
+export function atFolder(map, dir) {
+  if (!map) return undefined;
+  const get = map instanceof Map ? (k) => map.get(k) : (k) => (Object.hasOwn(map, k) ? map[k] : undefined);
+  const exact = get(dir) ?? get(real(dir));
+  if (exact !== undefined || !WINDOWS) return exact;
+  const want = new Set([folderKey(dir), folderKey(real(dir))]);
+  for (const [known, v] of map instanceof Map ? map : Object.entries(map)) if (want.has(folderKey(known))) return v;
+  return undefined;
 }
 
 /**
@@ -183,19 +222,45 @@ export function readLocalScope(file = claudeConfigPath()) {
 }
 
 /**
+ * Every orchestratinator entry Claude Code holds for `dir` in local scope, by
+ * the name it was written under and the instance it points at.
+ *
+ * For a release (host/mcp.js): `claude mcp remove` takes a name, and an entry
+ * somebody added by hand need not be called what this host calls its own.
+ * `ok: false` when the file could not be read — the caller then knows nothing
+ * about the names, which is not the same as there being none.
+ */
+export function localEntries(dir, file = claudeConfigPath()) {
+  let projects;
+  try {
+    projects = JSON.parse(readFileSync(file, 'utf8'))?.projects;
+  } catch {
+    return { ok: false, entries: [] };
+  }
+  const servers = atFolder(projects, dir)?.mcpServers;
+  const entries = [];
+  for (const [name, s] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
+    const channel = header(s?.headers, 'X-Channel');
+    const agent = header(s?.headers, 'X-Agent');
+    if (channel && agent && typeof s?.url === 'string') entries.push({ name, board: originOf(s.url), channel, agent });
+  }
+  return { ok: true, entries };
+}
+
+/**
  * The desk a directory is bound as, or null: its local-scope entry first, then
  * its `.mcp.json`. `local` is a `readLocalScope()` result — pass one in to read
  * the file once for a whole walk.
  */
 export function readDesk(dir, local = readLocalScope()) {
-  const mine = local.desks.get(dir) ?? local.desks.get(real(dir));
+  const mine = atFolder(local.desks, dir);
   if (mine) return { ...mine, cwd: dir };
   const file = join(dir, '.mcp.json');
   if (!existsSync(file)) return null;
   try {
     const desk = deskIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers, dir, { scope: 'project' });
     if (!desk) return null;
-    desk.trusted = local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false;
+    desk.trusted = atFolder(local.trusted, dir) ?? false;
     return desk;
   } catch {
     // A malformed .mcp.json is already breaking this repo's MCP connection and
@@ -244,7 +309,7 @@ function folderRecord(dir, depth, desk, local) {
     depth,
     bound: desk ? { channel: desk.channel, agent: desk.agent, scope: desk.scope, board: originOf(desk.url) } : null,
     has_mcp_json: hasMcpEntry(dir),
-    trusted: desk?.trusted ?? local.trusted.get(dir) ?? local.trusted.get(real(dir)) ?? false,
+    trusted: desk?.trusted ?? atFolder(local.trusted, dir) ?? false,
     git: existsSync(join(dir, '.git')),
     opened: act.opened,
     last_active: act.last_active,
@@ -256,7 +321,16 @@ function folderRecord(dir, depth, desk, local) {
  *  one from a dialog, and past a few hundred it is a search, not a list. */
 export const FOLDER_CAP = 300;
 
-const isUnder = (path, root) => path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
+/** Whether `path` is `root` or inside it, by this machine's own rules: on
+ *  Windows `\` and either case (`path.relative` compares a drive path that
+ *  way), elsewhere exactly as before. `startsWith(root + '/')` was the old
+ *  test, and no Windows path ever passed it (pc-developer, 2026-11-20). */
+export const isUnder = (path, root) => {
+  const r = relative(root, path);
+  return r === '' || (r.split(sep)[0] !== '..' && !isAbsolute(r));
+};
+/** How many folders `path` is below `root`. */
+const depthUnder = (path, root) => relative(root, path).split(sep).filter(Boolean).length;
 
 /**
  * Walk each root for desks, and for the folders that could become one.
@@ -326,7 +400,7 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope(), seats 
     const root = under.find((r) => isUnder(here, r));
     if (!root) continue;
     desks.set(k, desk);
-    offer(dir, here.slice(root.length).split('/').filter(Boolean).length, desk);
+    offer(dir, depthUnder(here, root), desk);
   }
   // And the seats: extra desks in a folder that is already a desk, which no
   // file of Claude Code's can name (host/seats.js). The host's own record
@@ -341,7 +415,7 @@ export function discover(roots, { maxDepth = 4, local = readLocalScope(), seats 
     desks.set(k, {
       channel: s.channel, agent: s.agent, cwd: s.cwd, url: s.board, key: null,
       scope: 'seat', seat: s.seat,
-      trusted: local.trusted.get(s.cwd) ?? local.trusted.get(real(s.cwd)) ?? false,
+      trusted: atFolder(local.trusted, s.cwd) ?? false,
     });
   }
   // Newest first, never-opened last, then by name — the order a person
@@ -377,7 +451,7 @@ export function listFolder(dir, { local = readLocalScope() } = {}) {
   let stat;
   try { stat = statSync(here); } catch (err) { return { ok: false, error: `${dir} could not be opened: ${err.code === 'ENOENT' ? 'no such folder' : err.message}` }; }
   if (!stat.isDirectory()) return { ok: false, error: `${dir} is a file, not a folder` };
-  const depthOf = (p) => p.split('/').filter(Boolean).length;
+  const depthOf = (p) => p.split(sep).filter(Boolean).length;
   const record = (p) => folderRecord(p, depthOf(p), readDesk(p, local), local);
   let entries;
   try { entries = readdirSync(here, { withFileTypes: true }); } catch (err) { return { ok: false, error: `${dir} could not be read: ${err.code === 'EACCES' ? 'your account cannot read it' : err.message}` }; }
@@ -389,7 +463,12 @@ export function listFolder(dir, { local = readLocalScope() } = {}) {
   children.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   // The picker's path runs from the top of the disk: anything the host's user
   // can read is a place an agent may live.
-  return { ok: true, path: here, root: '/', parent: here === '/' ? null : dirname(here), self: record(here), entries: children };
+  // The top of the tree is this machine's: `/`, or on Windows the folder's
+  // drive (`C:\`), which `path.parse` gives either way. It said `/` on
+  // Windows too (pc-developer, 2026-11-20), and the drive's own parent is
+  // itself, so it has none.
+  const top = parse(here).root || '/';
+  return { ok: true, path: here, root: top, parent: here === top ? null : dirname(here), self: record(here), entries: children };
 }
 
 /** The origin a desk's board lives on, for matching desks to this host's server. */

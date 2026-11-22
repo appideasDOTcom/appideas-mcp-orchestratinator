@@ -108,6 +108,37 @@ function real(dir) {
 }
 
 /**
+ * Windows spells one folder several ways, and Claude Code and Node pick
+ * different ones. Measured 2026-11-20 on Windows 11, Claude Code 2.1.330,
+ * Node 26: `claude mcp add -s local` keys the folder in `~/.claude.json` as
+ * `C:/Users/…` (forward slashes), while `path.resolve` and `realpathSync`
+ * give `C:\Users\…`. The exact lookup below never matched, so every hook
+ * on Windows found no binding and reported nothing, and the floor drew no
+ * desk for a window that was connected to the board.
+ *
+ * So on Windows a folder is compared by one key: slashes one way, and lower
+ * case, because the drive letter and the rest are case-insensitive there and
+ * nothing promises the two writers agree on case either. Elsewhere a path is
+ * compared exactly as before: a backslash is an ordinary character in a
+ * POSIX file name, and case matters.
+ *
+ * `ORCH_HOOK_PLATFORM` stands in for `process.platform`, for the test suite
+ * alone: it lets test:plugin drive the Windows comparison on a Mac, the way
+ * ORCH_FLOOR_URL lets it point the hook at a stub.
+ */
+const WINDOWS = (process.env.ORCH_HOOK_PLATFORM ?? process.platform) === 'win32';
+const folderKey = (dir) => dir.replace(/\\/g, '/').toLowerCase();
+
+/** The local-scope desk bound at exactly `dir`, however the two sides spell it. */
+function localAt(local, dir) {
+  const exact = local.get(dir) ?? local.get(real(dir));
+  if (exact || !WINDOWS) return exact;
+  const want = new Set([folderKey(dir), folderKey(real(dir))]);
+  for (const [known, id] of local) if (want.has(folderKey(known))) return id;
+  return undefined;
+}
+
+/**
  * Every directory bound in Claude Code's local scope — `~/.claude.json` →
  * `projects[dir].mcpServers`, which is what `claude mcp add -s local` writes
  * and what the floor binds a desk with (docs/desk-from-the-floor.md).
@@ -143,7 +174,7 @@ function readLocalScope() {
 function findIdentity(startDir, local = readLocalScope()) {
   let dir = resolve(startDir);
   for (let i = 0; i < MAX_LEVELS; i++) {
-    const mine = local.get(dir) ?? local.get(real(dir));
+    const mine = localAt(local, dir);
     if (mine) return { ...mine, root: dir };
     const file = join(dir, '.mcp.json');
     if (existsSync(file)) {

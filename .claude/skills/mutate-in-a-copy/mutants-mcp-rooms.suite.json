@@ -1,0 +1,142 @@
+[
+ [
+  "/mcp: a bare /mcp typed as it is (the panel nobody drives)",
+  "window",
+  "host/window.js",
+  "  if (c?.name === 'mcp' && !c.args) return `/mcp reconnect ${server}`;\n",
+  ""
+ ],
+ [
+  "/mcp: typed into a working window, where the window drops it",
+  "window",
+  "host/window.js",
+  "  if (cmd?.name === 'mcp' && wasBusy) {",
+  "  if (false && cmd?.name === 'mcp' && wasBusy) {"
+ ],
+ [
+  "/mcp: the desk's say() types the operator's words untranslated",
+  "host",
+  "host/index.js",
+  "W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id, unasked })",
+  "W.send(this.where, text, { open: true, resume: id, unasked })"
+ ],
+ [
+  "/mcp: the binding's own server name not read",
+  "host",
+  "host/identity.js",
+  "        channel, agent, cwd: dir, url: s.url, key, server,",
+  "        channel, agent, cwd: dir, url: s.url, key,"
+ ],
+ [
+  "reconnect: the host does not say it takes the work",
+  "host",
+  "host/index.js",
+  "uploads: true, reconnect: true, signin: true,",
+  "uploads: true, signin: true,"
+ ],
+ [
+  "reconnect: the host's desk line left out",
+  "host",
+  "host/index.js",
+  "    if (r.ok && r.said) this.told(`the desk's tools had lost the board, so the host ran /mcp — ${r.said}`, id);",
+  "    if (false) this.told('', id);"
+ ],
+ [
+  "reconnect: an agent that never used its tools is asked too",
+  "floor",
+  "src/floor.js",
+  "    if (present.has(k) || !used.has(k) || !d.window_id || d.outside_pid) { state.delete(k); continue; }",
+  "    if (present.has(k) || !d.window_id || d.outside_pid) { state.delete(k); continue; }"
+ ],
+ [
+  "reconnect: a working or asking window is asked",
+  "floor",
+  "src/floor.js",
+  "    if (d.state === 'offline' || isWorking(d, lastTurnOf(k)) || pending.get(k)) continue;",
+  "    if (d.state === 'offline') continue;"
+ ],
+ [
+  "reconnect: asked for ever",
+  "floor",
+  "src/floor.js",
+  "    if (nowMs - s.since < after || s.tries >= tries || (s.tries && nowMs - s.at < retry)) continue;",
+  "    if (nowMs - s.since < after || (s.tries && nowMs - s.at < retry)) continue;"
+ ],
+ [
+  "reconnect: a host that never said it takes the work is handed it",
+  "floor",
+  "src/floor.js",
+  "req.body?.uploads === true, req.body?.reconnect === true,",
+  "req.body?.uploads === true, true,"
+ ],
+ [
+  "notices: a desk already told is told again",
+  "floor",
+  "src/floor.js",
+  "    if (was?.meeting_id === r.id) continue;\n",
+  ""
+ ],
+ [
+  "notices: a room that still holds its desks is read as left (a reload tells everybody)",
+  "floor",
+  "src/floor.js",
+  "    if (inOpen.has(k) || held.has(`${t.meeting_id}|${k}`)) continue;",
+  "    if (inOpen.has(k)) continue;"
+ ],
+ [
+  "notices: a second session made for a room is told it is back on the floor",
+  "floor",
+  "src/floor.js",
+  "    out.push({ kind: twins.has(k) ? 'forget' : 'leave',",
+  "    out.push({ kind: 'leave',"
+ ],
+ [
+  "notices: sent to a window that is asking",
+  "floor",
+  "src/floor.js",
+  "      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent))) || signedOutWhy(check.hosted)) continue;",
+  "      if (check.error || signedOutWhy(check.hosted)) continue;"
+ ],
+ [
+  "notices: a new room is not swept at once",
+  "floor",
+  "src/floor.js",
+  "    // Each desk is told it is in a room now (roomNoticePlan).\n    sweep(true);\n",
+  ""
+ ],
+ [
+  "notices: what was told kept nowhere",
+  "floor",
+  "src/floor.js",
+  "      if (n.kind === 'enter') store.setRoomTold(n.channel, n.agent, n.room);",
+  "      if (false) store.setRoomTold(n.channel, n.agent, n.room);"
+ ],
+ [
+  "/mcp: the page's command list without it",
+  "floor",
+  "src/ui/floor.js",
+  "    { name: 'mcp', args: '', hint: 'reconnect this desk\\u2019s tools to the board' },\n",
+  ""
+ ],
+ [
+  "notices: the same company in a new room is told again",
+  "floor",
+  "src/floor.js",
+  "    if (before && same(before.present.filter((a) => a !== agent), others)) {",
+  "    if (false) {"
+ ],
+ [
+  "notices: a notice queued behind a turn is noted as the operator's message",
+  "floor",
+  "src/floor.js",
+  "      if (WHOLE_TAG.test(text)) return false;\n",
+  ""
+ ],
+ [
+  "notices: only a user turn retires a queued note",
+  "floor",
+  "src/floor.js",
+  "      if (role === 'user' || role === 'context') {\n        const q = live.delivery.get(key);",
+  "      if (role === 'user') {\n        const q = live.delivery.get(key);"
+ ]
+]

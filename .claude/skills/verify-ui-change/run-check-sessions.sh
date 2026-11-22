@@ -12,6 +12,7 @@
 # its port), and the pkill matches the port exactly. Announce PORT and CDP on
 # the channel first. Run it with a Node the board can start on (22.14+).
 set -u
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; PORT="${PORT:-8949}"; CDP="${CDP:-9289}"
 S="$(mktemp -d "${TMPDIR:-/tmp}/check-sessions.XXXXXX")"; mkdir -p "$S/shots"
 taken() { curl -s -m 1 -o /dev/null "localhost:$1/$2"; [ $? -ne 7 ]; }

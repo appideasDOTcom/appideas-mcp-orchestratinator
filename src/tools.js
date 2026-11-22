@@ -142,7 +142,7 @@ export function registerTools(server, { store, context }) {
 
   server.tool(
     'poll_messages',
-    'Fetch messages addressed to you (direct messages, plus broadcasts from others) newer than "since". Pass the returned "cursor" as "since" next time so you never re-read the same message.',
+    'Fetch messages addressed to you (direct messages, plus broadcasts from others) newer than "since". Pass the returned "cursor" as "since" next time so you never re-read the same message. A "since" above the newest id this instance has issued is a cursor from another instance: the reply says so (since_ahead) and reads from this instance\'s own record of what you were given.',
     {
       since: z.number().int().optional().describe('Highest message id you have already seen. Defaults to 0 (everything).'),
       limit: z.number().int().min(1).max(500).optional(),
@@ -152,18 +152,39 @@ export function registerTools(server, { store, context }) {
     async (args) => {
       const { channel, agent } = resolve(args, context);
       touch(channel, agent, 'poll_messages');
-      // A second session reads nothing from before it was made, whatever
+      // A cursor from another instance. Ids count up on each instance
+      // separately, so a `since` above the highest id this one has ever
+      // issued was never one of its cursors — it is what an agent remembers
+      // from the instance its folder was released from. Taken at its word
+      // it returned nothing, for ever and without a word, and worse: the
+      // empty poll handed the number back as the cursor and the line below
+      // wrote it down, so this instance then showed the agent as having read
+      // everything it would ever be sent. So it is not taken at its word:
+      // the poll reads from this instance's own record of what the agent has
+      // been given, and says so.
+      const asked = args.since ?? 0;
+      const newest = store.messageHighWater();
+      const ahead = asked > newest;
+      // And a second session reads nothing from before it was made, whatever
       // `since` it sends: its first poll, with none, used to hand it the
       // floor's oldest hundred broadcasts, which its agent's first desk has
       // (QA, PR #57 finding 2; desk_twins.start_cursor in src/db.js).
-      const since = Math.max(args.since ?? 0, store.twinOf(channel, agent)?.start_cursor ?? 0);
+      const since = Math.max(ahead ? store.pollCursorOf(channel, agent) : asked, store.twinOf(channel, agent)?.start_cursor ?? 0);
       const rows = store.pollMessages(channel, agent, since, args.limit ?? 100);
       const messages = rows.map((r) => ({ ...r, body: safeParse(r.body) }));
       const cursor = messages.length ? messages[messages.length - 1].id : since;
       // Remember how far this agent has read so the dashboard can show a
       // meaningful unread count. Best-effort — never fail the poll over it.
       try { store.advancePollCursor(channel, agent, cursor); } catch { /* ignore */ }
-      return ok({ channel, agent, count: messages.length, cursor, messages });
+      return ok({
+        channel, agent, count: messages.length, cursor, messages,
+        ...(ahead ? {
+          since_ahead: {
+            asked, newest, read_from: since,
+            note: `"since" ${asked} is above the newest message id this instance has issued (${newest}), so it is a cursor from another instance. Read from this instance's own record of what ${agent} has been given (${since}) instead. Use the cursor returned here from now on.`,
+          },
+        } : {}),
+      });
     }
   );
 

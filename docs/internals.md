@@ -32,7 +32,18 @@ through compose, or add `--build-context gitmeta=./.git`.
 
 ## Run locally without Docker (for hacking on it)
 
+Node 24, the major the board's image ships and the release gate tests
+(`engines` says `>=24`). The hard minimum is Node 22.14: better-sqlite3 13
+is a Node-API 10 binary, and a Node
+that offers Node-API 9 (20.x, 22.x before 22.14) dies on loading it with no
+words at all — exit 139 — so `src/node-floor.js` says so first. The board's
+image is node:24, and the host runs on Node 24 too (`host/run.sh` picks it
+at every start). `. scripts/node-floor.sh` puts a suitable Node first on PATH for the
+shell it is sourced in (the oldest one nvm has that will do), or says there
+is none.
+
 ```bash
+. scripts/node-floor.sh   # only if `node -p process.versions.napi` is under 10
 npm install
 npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinator.db
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
@@ -63,6 +74,25 @@ drift. The other half is enforced: `npm run smoke` asserts all three files
 agree and that `/health` and `/api/state` report the same number. Bump one on
 its own — the plugin used to be bumped alone every time a hook changed — and
 the suite goes red instead of the board quietly advertising a build nobody has.
+
+**The protocol number is separate from the version, and is checked.**
+`protocol` in `package.json` and `host/package.json` (one integer, `1` since
+0.12.5) is the host↔board protocol: what crosses `/api/host/*` — the
+register body and reply, the work items, the events. The board reads its
+own off `package.json` (`/health` and `/api/state` carry it), the host
+reads its own off `host/package.json` and sends it on every registration,
+and a host whose number is not the board's is refused in words
+(`protocolRefusal` in `src/floor.js`): the host logs them once, tells the
+process that started it over its port if it has one, keeps trying on its
+usual backoff, and `/api/floor`'s `hosts` rows carry them as `refused`. A
+host that sends no number is one from before there was one and is refused
+the same way. The version still moves in lockstep; the protocol moves only
+when one side would read the other's words wrongly — a field renamed, a
+kind dropped, a reply reshaped — never for a field added. It exists for
+the desktop app, whose packaged host updates on its own schedule
+(docs/desktop-app.md); on a launchd install the mismatch it catches is a
+board rebuilt beside a host nobody restarted, which the board then says
+instead of a desk quietly taking no message.
 
 ## Environment variables
 
@@ -99,6 +129,20 @@ exist for the suites:
   `ORCH_HOST_DOCKER`, `ORCH_UPDATE_FETCH_URL`, `ORCH_UPDATE_BUILD_TIMEOUT_MS`
   (15 min), `ORCH_UPDATE_HEALTH_TIMEOUT_MS` (3 min), and
   `ORCH_HOST_SUPERVISED=1`, which stands in for launchd.
+
+The host under the desktop app (tasks #288–#290 on the desktop channel):
+
+- `ORCH_HOST_SUPERVISOR` — who starts the host again after it exits: `app`
+  for the desktop app. launchd is read from `XPC_SERVICE_NAME` and needs
+  nothing set. Reported as `supervisor` on every registration; the page
+  offers no update for an app-run host (the app updates it), and the host
+  refuses one at preflight in the same words.
+- `ORCH_FOLDER_DIALOG=parent` — the folder dialog is the process that started
+  the host, asked over Electron's `process.parentPort` or Node's IPC
+  channel; the messages are in the header of `host/dialog.js`. Any other
+  value is a program to run in the dialog's place (the suites' stand-in).
+- `ORCH_HOST_PROTOCOL` — the suites only: stand in for a host from another
+  build. Nothing installed sets it.
 
 `curl -s localhost:8787/health` reports the live session count and lifetime
 connection churn (`opened` / `superseded` / `expired`) — a large `superseded`
@@ -191,6 +235,16 @@ just means a client opens a session per turn, which is normal and handled.
   claimed a task, then its turn died) can't sit invisibly in `claimed`.
   `status=claimed` inspections never trigger this — only actionable open-task
   listings do.
+- **What became of a take:** `POST /api/floor/desk` answers when the board
+  has handed the bind to a host, not when the host has made it. The board
+  keeps each take in memory (`live.takes`, by host, floor and agent) and
+  `GET /api/floor/take?host_id=&channel=&agent=` reads it: `state` is
+  `asked`, then `seated` (the host's `bound`) or `refused` with the host's
+  `error` and `code`. Null after a restart. A take of a folder bound to
+  another instance needs `from_board` and is mode `release`; without it
+  the refusal is `other_board` and carries the address, with a stale one
+  `board_changed`, and from a host that has not said `release: true`,
+  `old_host`.
 - **The folder list:** each host reports, on every registration, the folders
   under its roots that could become a desk — bound or not, and from which
   file, with the time of the newest transcript Claude Code wrote there. It is

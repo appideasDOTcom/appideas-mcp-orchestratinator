@@ -17,6 +17,44 @@ tree's `plugin/` (before that, from a cache the update copied into) — and
 it has its own step below; a deploy that skipped it (QA, PR #32) left every
 window on the old hooks.
 
+## Where a deploy runs: the live clone, never the development tree
+
+Since 2026-11-18 (costmo's ruling; CLAUDE.md, "The live instance runs from
+its own clone") the live instance is
+`/Users/costmo/Documents/dev/appideas/appideas.com/appideas-site-dev/orchestratinator-live`,
+a clone pinned to `main`. Every command on this page runs **there**: `cd`
+into it first, and `git pull` it to the merged release before the readings.
+The repo folder agents usually open,
+`…/appideas-site-dev/appideas-mcp-orchestratinator`, is the development
+tree on `develop`. From it, `docker compose up` collides with the live
+container's name and port, and `host/install.sh`, a host kickstart or
+`claude plugin update` would put develop's code on the live instance. So
+none of them is run there. `status.sh` and `settled.sh` read the tree
+they live in (each `cd`s to its own repo), not the directory they are
+started from, so run the live clone's copies:
+`…/orchestratinator-live/.claude/skills/deploy-both-halves/status.sh`.
+
+Three things the switch set up, each read when it was made:
+- **The board's compose project is `orchestratinator-live`**, its database
+  the named volume `orchestratinator-live_orchestratinator-data`. That
+  volume was copied from `appideas-mcp-orchestratinator_orchestratinator-data`
+  with both boards stopped, and every table matched (the new board's own
+  turns since its start aside). The old volume is the backup from that
+  moment: leave it.
+- **The plugin's marketplace is the live clone** (`claude plugin
+  marketplace list` → Folder …/orchestratinator-live). A version bump is
+  copied from there, and on 2.1.325+ an unchanged version is read from
+  that folder's `plugin/`.
+- **The host's LaunchAgent starts the live clone's `host/run.sh`**, set by
+  `host/install.sh` run from the live clone. A host whose plist names
+  another path, or a Node binary instead of `run.sh` (any plist written
+  before 0.12.11), needs `install.sh` run once from the live clone. That is
+  a new LaunchAgent install, so it is costmo's to run: give him the `!`
+  line with the same roots `host.json` has. The deploy's readings include
+  the plist (`/usr/libexec/PlistBuddy -c 'Print :ProgramArguments'
+  ~/Library/LaunchAgents/com.appideas.orchestratinator-host.plist`) and the
+  host's `node -v`.
+
 ## Before touching anything
 
 ```bash
@@ -178,6 +216,36 @@ sha256 against the tree's (`/floor.js`, `/app.js`, `/styles.css`), and
 the host's start time against the last change under `host/`. Three
 deploys went that way on 2026-11-16: each time one page file differed,
 the host and the plugin were already current, and the note said so.
+
+## When the deploy moves the protocol, or a dependency
+
+Since 0.12.5 the board refuses a host that does not speak its protocol
+number, and a host that sends none (CLAUDE.md, "The host under the desktop
+app"). `status.sh` prints the three numbers and what the board says of each
+host:
+
+```
+protocol: board=None  tree=1  tree host=1
+host on the board: costmo4.local live=True last_seen=… refused=None
+```
+
+`board=None` is a board from before there was a number, which takes any
+host. Read it before the deploy so the order is no surprise. Once the board
+is rebuilt onto a build that has the number, a host still running older
+code is refused until it is restarted: its log says `registration refused:`
+once and then one short line a try, and the floor shows its desks as
+offline. That is expected between the two restarts and a fault after both.
+The deploy is closed with `refused=None` and `live=True` for the host, and
+with `board` equal to `tree`.
+
+A deploy that changes `package.json`'s dependencies reinstalls them in the
+image, and the rebuild takes about a minute longer. 0.12.6 moves
+better-sqlite3 from 11 to 13: the image's Node (22.23.4) loads it and the
+live database was read through it, read-only, before the tree had it
+(**try-a-dependency**, 2026-11-08: 19 tables, `quick_check: ok`). The host
+half needs nothing for it; the host has no dependencies. Since 0.12.11 the
+image is `node:24` and installs the committed lockfile with `npm ci` (the
+milestone audit's finding 5), so a dependency change is a lockfile change.
 
 ## The third half: the plugin
 

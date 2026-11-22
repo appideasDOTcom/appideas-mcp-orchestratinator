@@ -99,6 +99,12 @@ function fixture() {
   mkdirSync(REPO, { recursive: true });
   mkdirSync(OTHER, { recursive: true });
   mkdirSync(CLAUDE_HOME, { recursive: true });
+  // Claude Code's own config file, which every real machine has. Without it
+  // the host's local scope reads as unreadable, and a host concludes nothing
+  // from that (Host.boundAt), so this suite never ran the check that read
+  // every seat as a released folder (0.14.4, issue: a second meeting room's
+  // sessions refused every message and could not be left).
+  writeFileSync(`${HOME}/.claude.json`, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
   const bind = (dir, channel, agent) => writeFileSync(`${dir}/.mcp.json`, JSON.stringify({
     mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': channel, 'X-Agent': agent, 'X-Orchestratinator-Key': KEY } } },
   }, null, 2));
@@ -117,6 +123,9 @@ function fixture() {
     `const STARTS = ${JSON.stringify(STARTS)};`,
     `const argv = process.argv.slice(2);`,
     `if (argv[0] === 'agents') { process.stdout.write('[]'); process.exit(0); }`,
+    // The host asks Claude Code whether it is signed in at every heartbeat
+    // (host/auth.js). Signed in, as 2.1.329 answers it, and not a window.
+    `if (argv[0] === 'auth') { process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) + '\\n'); process.exit(0); }`,
     // `claude mcp add|remove -s local`, as the host suite's stand-in does it.
     `if (argv[0] === 'mcp') {`,
     `  const CFG = path.join(HOME, '.claude.json');`,

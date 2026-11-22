@@ -188,6 +188,14 @@ export function lostWorkWords(item) {
       return 'the stop may not have reached the window: the host restarted while it was in line. If the desk is still working, press stop again';
     case 'update':
       return null;
+    // The board asks again while the window still has no MCP session
+    // (reconnectDue), so a lost one is nothing to say.
+    case 'reconnect':
+      return null;
+    // A sign-in waits on a person in a browser; a host that restarted under
+    // it may have left the page open with nobody listening for it.
+    case 'signin':
+      return 'the sign-in may not have finished: the host restarted while it was open. If the desk still says Claude Code is signed out, press Sign in again';
     default:
       return `"${item?.kind}" may not have happened: the host restarted before it was done. Check the desk and do it again if it is needed`;
   }
@@ -233,6 +241,10 @@ export function commandOf(text) {
  * session's only and the host drove the window's picker to make it so; the
  * reasoning for the commands over the picker is beside send() in
  * host/window.js.
+ *
+ * A bare `/mcp` reconnects the desk's own server: the host types it as
+ * `/mcp reconnect <name>`, because in the window `/mcp` alone opens a panel
+ * nobody on the floor is driving (typedCommand in host/window.js).
  */
 export const FLOOR_COMMANDS = [
   { name: 'clear', args: false, hint: 'start a new conversation on this desk', receipt: 'the new conversation\u2019s first record' },
@@ -240,6 +252,7 @@ export const FLOOR_COMMANDS = [
   { name: 'model', args: 'name', hint: 'change the model, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'effort', args: 'level', hint: 'change the effort level, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
+  { name: 'mcp', args: false, hint: 'reconnect this desk\u2019s tools to the board', receipt: 'the window\u2019s own line' },
 ];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -276,7 +289,26 @@ const iso = (s) => (s ? `${String(s).replace(' ', 'T').replace(/Z*$/, '')}Z` : n
 const FOLDER_CAP = 300;
 /** What a host can say about its folder dialog. See Host.pick in host/index.js. */
 const PICK_STATES = new Set(['open', 'chosen', 'cancelled', 'failed']);
-const underRoots = (p, roots) => roots.some((r) => p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`));
+/**
+ * A host's paths are its own machine's, and the board runs on Linux in a
+ * container, so it cannot ask `path` what they mean. A Windows host's paths
+ * are `C:\Users\…` (pc-developer, 2026-11-20): every check here was
+ * `startsWith('/')`, and the board dropped every Windows root and folder, so
+ * Take a desk on such a host offered nothing. So a path is absolute when it
+ * starts with `/` or a drive (`C:\` or `C:/`), and one is under another by a
+ * key that, for a drive path only, folds the separators and the case, as
+ * Windows does. A POSIX path is compared exactly as before: a backslash is a
+ * character in a file name there, and case matters.
+ */
+const DRIVE_PATH = /^[A-Za-z]:[\\/]/;
+export const isAbsPath = (p) => typeof p === 'string' && (p.startsWith('/') || DRIVE_PATH.test(p));
+const pathKey = (p) => (DRIVE_PATH.test(p) ? p.replace(/\\/g, '/').toLowerCase() : p);
+/** A folder's last name, by its own machine's separators. */
+export const baseName = (p) => String(p ?? '').split(DRIVE_PATH.test(p) ? /[\\/]/ : '/').filter(Boolean).pop() ?? null;
+export const underRoots = (p, roots) => {
+  const k = pathKey(p);
+  return roots.some((r) => { const rk = pathKey(r); return k === rk || k.startsWith(rk.endsWith('/') ? rk : `${rk}/`); });
+};
 /**
  * A host's folder list, field by field, in the shape the page reads. Anything
  * not under the host's own roots is dropped rather than served: the roots are
@@ -297,14 +329,14 @@ function cleanFolders(list, roots) {
 /** One folder as a host described it, field by field, or null without a path. */
 function folderRecordOf(f) {
   const path = str(f?.path);
-  if (!path || !path.startsWith('/')) return null;
+  if (!path || !isAbsPath(path)) return null;
   const b = f?.bound && typeof f.bound === 'object' ? f.bound : null;
   const bound = b && str(b.channel) && str(b.agent)
     ? { channel: str(b.channel), agent: str(b.agent), scope: str(b.scope) === 'local' ? 'local' : 'project', board: str(b.board) }
     : null;
   return {
     path,
-    name: str(f?.name) ?? path.split('/').pop(),
+    name: str(f?.name) ?? baseName(path),
     depth: Number.isInteger(f?.depth) ? f.depth : null,
     bound,
     has_mcp_json: f?.has_mcp_json === true,
@@ -314,6 +346,32 @@ function folderRecordOf(f) {
     last_active: str(f?.last_active),
     sessions: Number(f?.sessions) || 0,
   };
+}
+
+/** How many takes are remembered: the answer to a click made seconds ago, or
+ *  to a caller working through a list of folders. The oldest go first. */
+const TAKES_MAX = 400;
+const takeKey = (hostId, channel, agent) => `${hostId}|${deskKey(channel, agent)}`;
+
+/** A take the board has just handed to a host. Replaces what is known about
+ *  an earlier take of the same names on that host: this is the one in flight. */
+function noteTake(live, hostId, { path, channel, agent, mode, from_board = null }) {
+  const key = takeKey(hostId, channel, agent);
+  live.takes.delete(key);
+  const at = new Date().toISOString();
+  live.takes.set(key, { host_id: hostId, path, channel, agent, mode, from_board, asked_at: at, state: 'asked', at, error: null, code: null });
+  while (live.takes.size > TAKES_MAX) live.takes.delete(live.takes.keys().next().value);
+}
+
+/** The host's word on a take: seated, or refused with what it said. Only a
+ *  take still waiting is settled, so a late word about an older take of the
+ *  same names cannot overwrite the one in flight, and a board that restarted
+ *  in between (and so remembers no take) makes nothing up. */
+function settleTake(live, hostId, channel, agent, word) {
+  const take = live.takes.get(takeKey(hostId, channel, agent));
+  if (!take || take.state !== 'asked') return false;
+  Object.assign(take, word, { at: new Date().toISOString() });
+  return true;
 }
 
 const secondsSince = (isoStr, nowMs) => {
@@ -344,11 +402,31 @@ const STREAM_DESKS_MAX = 50;
  * The one rule underneath all three refusals is the one this whole repo is built
  * on: a conversation is one process, and only the app holding it can type.
  */
+/**
+ * Why a desk's host cannot take work now, or null when it can: refused at
+ * its last registration for its protocol (in protocolRefusal's words), or
+ * offline. One answer for every check that asks, so the bell, the box, a
+ * room's notice, a model change and Sign in all say the same thing.
+ *
+ * Refused comes first and does not wait for the host to go stale (F4, 0.14.5
+ * review, measured on the rig): after a deploy that rebuilt the board and
+ * left a 0.12.12 host running, the host kept its row's last_seen fresh for
+ * HOST_STALE_SECONDS, so its desk read live and took chats into the host's
+ * outbox that nobody would take, then said only "is offline". The words it
+ * was refused in name what to do; "offline" names nothing.
+ */
+export function hostAway(h, nowMs = Date.now(), { more = '' } = {}) {
+  if (h.host_refused) return { error: h.host_refused, code: 'host_refused' };
+  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
+    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline${more}.`, code: 'host_offline' };
+  }
+  return null;
+}
+
 export function deliverable(h, nowMs = Date.now()) {
   if (!h) return { error: 'No host on this board is running that repo, so there is nowhere to send this.', code: 'not_hosted' };
-  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
-  }
+  const away = hostAway(h, nowMs);
+  if (away) return away;
   // A conversation is one process, and right now an editor has it. Nothing can
   // be typed into it from here — so say that before a message is taken, rather
   // than accepting one and failing to deliver it.
@@ -382,6 +460,40 @@ export function askingWhy(pending) {
     error: `The window is asking ${what}. A message typed now would go into that, not the conversation: answer it, or cancel it, then send this.`,
     code: 'asking',
   };
+}
+
+/**
+ * A desk whose host's Claude Code is signed out takes no message: the window
+ * answers it with an API error, "Not logged in · Please run /login" (measured
+ * on 2.1.329, a window with no credentials), and the floor used to show that
+ * line, a command for the operator, as the desk's answer. So it is refused
+ * before it is queued, in words that name the remedy the floor runs itself:
+ * the desk's Sign in, which has its host run Claude Code's own sign-in
+ * (costmo, 2026-11-19). `h` is the hosted row with its host's columns.
+ */
+export function signedOutWhy(h) {
+  if (!h?.host_signed_out) return null;
+  return {
+    error: `Claude Code is signed out on ${h.host_name ?? h.host_id}, so the window cannot answer. Press Sign in on the desk, finish in the browser that opens there, then send this.`,
+    code: 'signed_out',
+  };
+}
+
+/**
+ * Whether the desk's Sign in can be pressed, and in what words not: a host to
+ * run it, live, that takes `signin` work (a host from before it would drop
+ * it), and on whose machine Claude Code is in fact signed out. Not
+ * deliverable(): an editor holding the conversation changes nothing about
+ * the machine's sign-in, so it is no reason to refuse one.
+ */
+export function signinWhyNot(h, nowMs = Date.now()) {
+  if (!h) return { error: 'No host on this board is running that repo, so there is nothing to sign in from.', code: 'not_hosted' };
+  const name = h.host_name ?? h.host_id;
+  const away = hostAway(h, nowMs);
+  if (away) return away;
+  if (!h.host_signins) return { error: `${name} runs a build from before Sign in. Update it, or sign in to Claude Code on that machine.`, code: 'host_no_signin' };
+  if (!h.host_signed_out) return { error: `Claude Code is signed in on ${name}.`, code: 'signed_in' };
+  return { hosted: h };
 }
 
 /**
@@ -589,21 +701,34 @@ const TWIN_UNHEARD_MS = Math.max(0, Number(process.env.ORCH_TWIN_UNHEARD_MS ?? 9
  * on a timer of the board's own: with no page open nobody is looking at the
  * floor, and the next page to open runs it.
  */
+/**
+ * An open room that is not live: held while the board has not yet watched
+ * it stay silent for TWIN_UNHEARD_MS. The watch is kept by the room's last
+ * touch, so one heard from and silent again later is watched afresh, with
+ * no look needed in between to notice it was live. Shared by the twin sweep
+ * and the room notices, which ask the same question of the same room.
+ */
+function roomStillWatched(live, r, nowMs) {
+  if (r.ended_at) return false;
+  const seen = live.unheard.get(r.id);
+  if (!seen || seen.live_at !== r.live_at) {
+    live.unheard.set(r.id, { at: nowMs, live_at: r.live_at });
+    return TWIN_UNHEARD_MS > 0;
+  }
+  return nowMs - seen.at < TWIN_UNHEARD_MS;
+}
+
+/**
+ * Whether a room still holds the desks in it: live, or ended a moment ago
+ * by a window that may be reloading (not by End meeting, `ended`), or open
+ * and silent but not yet watched long enough to call its window gone.
+ */
+function roomHolds(live, r, nowMs, ended = null) {
+  return r.live || (!!r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || roomStillWatched(live, r, nowMs);
+}
+
 export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {}) {
   const closed = [];
-  // An open room that is not live: held while the board has not yet watched
-  // it stay silent for TWIN_UNHEARD_MS. The watch is kept by the room's last
-  // touch, so one heard from and silent again later is watched afresh, with
-  // no look needed in between to notice it was live.
-  const stillWatched = (r) => {
-    if (r.ended_at) return false;
-    const seen = live.unheard.get(r.id);
-    if (!seen || seen.live_at !== r.live_at) {
-      live.unheard.set(r.id, { at: nowMs, live_at: r.live_at });
-      return TWIN_UNHEARD_MS > 0;
-    }
-    return nowMs - seen.at < TWIN_UNHEARD_MS;
-  };
   for (const t of store.listTwins()) {
     if (!t.for_meeting) continue;
     const k = deskKey(t.channel, t.agent);
@@ -624,7 +749,7 @@ export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {
     // final — the moment's grace is for a window that may be reloading.
     const held = store.meetingsOn(t.channel)
       .filter((r) => r.participants.some((p) => p.agent === t.agent && !p.absent))
-      .some((r) => r.live || (r.ended_at && r.id !== ended && r.ended_s != null && r.ended_s < TWIN_ENDED_S) || stillWatched(r));
+      .some((r) => roomHolds(live, r, nowMs, ended));
     if (held) continue;
     const last = store.lastTurns().find((x) => x.channel === t.channel && x.agent === t.agent) ?? null;
     if (switchable(h, last, nowMs, { editorOk: true }).error) continue;
@@ -636,6 +761,145 @@ export function sweepTwins(store, live, nowMs = Date.now(), { ended = null } = {
     closed.push(k);
   }
   return closed;
+}
+
+/*
+ * When a floor window's tools have dropped and the board asks its host to
+ * reconnect them (costmo, 2026-11-19, by AskUserQuestion: "Yes,
+ * automatically"). The desktop app runs the board as a process of its own,
+ * so every launch starts a fresh board, and an MCP session lives in the
+ * board's memory: every window's tools were gone after each launch, and
+ * Claude Code does not connect again by itself (measured on 2.1.328: a
+ * window whose board went away reads "MCP server … disconnected · open /mcp
+ * to reconnect" and stays so). He reconnected each by hand with /mcp.
+ *
+ * AFTER: how long a window must stand with no MCP session first. A window
+ * that is starting connects within seconds; this is well past that.
+ * RETRY and TRIES: a window that does not come back from one reconnect (a
+ * folder whose server was declined, a board refusing its key) is asked
+ * once more two minutes later and then left alone, so a desk that will not
+ * connect is not given a `host` line every half-minute. A session arriving
+ * resets all of it.
+ */
+export const RECONNECT_AFTER_MS = Math.max(0, Number(process.env.ORCH_RECONNECT_AFTER_MS ?? 20_000));
+export const RECONNECT_RETRY_MS = Math.max(0, Number(process.env.ORCH_RECONNECT_RETRY_MS ?? 120_000));
+export const RECONNECT_TRIES = 2;
+
+/**
+ * Which of a host's desks to reconnect now. Pure, over what the board
+ * already knows; `state` (deskKey -> { since, tries, at }) is kept between
+ * looks and updated here.
+ *
+ * Only a desk with a floor window (`window_id`, and no editor holding it:
+ * an editor's tab is not something the host can type into), no MCP session,
+ * and an agent that has used its tools on this board before (`used`: an
+ * agents row, which only an MCP connect or a tool call makes). That is what
+ * "its tools dropped" means. A window that never connected (its server
+ * declined at the folder's question, a stand-in in a suite) has nothing to
+ * get back. A Claude Code that is connected holds a stream open, and the
+ * board never expires a streaming session (sweepIdleSessions in
+ * src/server.js), so an idle window keeps its session for as long as it is
+ * idle and is never taken for one that dropped. Its silence is counted while it works or asks too, but it is
+ * asked only while idle and not asking: `/mcp reconnect` typed into a turn
+ * is dropped by the window without a trace (measured, see typedCommand in
+ * host/window.js), and into a prompt it would answer the prompt.
+ */
+export function reconnectDue(desks, { present, used, state, pending = new Map(), lastTurnOf = () => null, nowMs = Date.now(), after = RECONNECT_AFTER_MS, retry = RECONNECT_RETRY_MS, tries = RECONNECT_TRIES } = {}) {
+  const due = [];
+  for (const d of desks) {
+    const k = deskKey(d.channel, d.agent);
+    if (present.has(k) || !used.has(k) || !d.window_id || d.outside_pid) { state.delete(k); continue; }
+    let s = state.get(k);
+    if (!s) { s = { since: nowMs, tries: 0, at: 0 }; state.set(k, s); }
+    if (d.state === 'offline' || isWorking(d, lastTurnOf(k)) || pending.get(k)) continue;
+    if (nowMs - s.since < after || s.tries >= tries || (s.tries && nowMs - s.at < retry)) continue;
+    s.tries += 1;
+    s.at = nowMs;
+    due.push(d);
+  }
+  return due;
+}
+
+/**
+ * What a desk is told as it enters a meeting room, and as it is back on the
+ * floor (costmo, 2026-11-19: he prefixed his first message in every room
+ * with this by hand, so that agents stop relaying what he says to the room
+ * and answering what was not meant for them). His pick of three, by
+ * AskUserQuestion: a message of its own at each change, over the note
+ * riding on the next message and over hidden context from the plugin's
+ * hook. Do not re-propose either.
+ *
+ * The words are one tagged block, so the relay files the message as a
+ * `context` turn labeled `meeting-room` (contextTagOf in host/window.js),
+ * drawn as a quiet line and never as the operator's bubble: the board sent
+ * it, not he. One line, so the host pastes it rather than types it.
+ */
+export const ROOM_NOTICE_TAG = 'meeting-room';
+/** Text that is wholly one tagged block: what the relay files as `context` (contextTagOf in host/window.js). */
+const WHOLE_TAG = /^\s*<([A-Za-z][\w-]*)>[\s\S]*<\/[A-Za-z][\w-]*>\s*$/;
+export function roomNoticeText(kind, others = []) {
+  const wrap = (t) => `<${ROOM_NOTICE_TAG}>${t}</${ROOM_NOTICE_TAG}>`;
+  if (kind === 'leave') {
+    return wrap('You have left the meeting room and are back on the floor. The operator\'s messages are addressed to you again, and your broadcasts reach the whole floor. This note needs no reply.');
+  }
+  const names = others.length ? `${others.length === 1 ? others[0] : `${others.slice(0, -1).join(', ')} and ${others.at(-1)}`} and the operator` : 'the operator';
+  return wrap(`You are now in a meeting room with ${names}. Messages the operator sends to the room go to every agent in it, so they are not necessarily addressed to you, and there is no need to relay them to the others. Answer only what is meant for you. Your broadcasts reach only the room. This note needs no reply.`);
+}
+
+/**
+ * Who is owed a room notice now. Pure, so the suite can run it over the
+ * cases that matter without a window.
+ *
+ * `rooms`: every room, each { id, channel, open (live now), holding
+ * (roomHolds), present: [agents in it, not absent] }. `told`: the
+ * room_told rows. `twins`: deskKeys of second sessions made for a room.
+ *
+ * - A desk present in a live room it was not told of is sent `enter`
+ *   (from the floor, or straight from another room).
+ * - A desk told of a room it is no longer held by is sent `leave`. Held is
+ *   the twin sweep's rule (roomHolds): a reload ends the room and opens it
+ *   again within a second or two, and End meeting is final. So a reload
+ *   sends neither notice, and End meeting sends `leave` at once.
+ * - A second session made for a room is closed when it is in none
+ *   (sweepTwins), so it is `forget`: told nothing, its row cleared.
+ * - A desk that goes straight into another room with the same others is
+ *   `quiet`: its row names the new room, and nothing is sent.
+ */
+export function roomNoticePlan(rooms, told, twins = new Set()) {
+  const out = [];
+  const inOpen = new Map();
+  const held = new Set();
+  for (const r of rooms) {
+    for (const a of r.present) {
+      const k = deskKey(r.channel, a);
+      if (r.open && !inOpen.has(k)) inOpen.set(k, r);
+      if (r.holding) held.add(`${r.id}|${k}`);
+    }
+  }
+  const toldBy = new Map(told.map((t) => [deskKey(t.channel, t.agent), t]));
+  const byId = new Map(rooms.map((r) => [r.id, r]));
+  const same = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+  for (const [k, r] of inOpen) {
+    const agent = k.slice(r.channel.length + 1);
+    const was = toldBy.get(k);
+    if (was?.meeting_id === r.id) continue;
+    const others = r.present.filter((a) => a !== agent);
+    // Straight from one room into another with the same company: nothing
+    // it was told has changed, so the record moves and nothing is sent
+    // (costmo, 2026-11-19, after a stale room the app reopened and the room
+    // he opened beside it, with the same two desks, sent the note twice).
+    const before = was ? byId.get(was.meeting_id) : null;
+    if (before && same(before.present.filter((a) => a !== agent), others)) {
+      out.push({ kind: 'quiet', channel: r.channel, agent, room: r.id });
+      continue;
+    }
+    out.push({ kind: 'enter', channel: r.channel, agent, room: r.id, others });
+  }
+  for (const [k, t] of toldBy) {
+    if (inOpen.has(k) || held.has(`${t.meeting_id}|${k}`)) continue;
+    out.push({ kind: twins.has(k) ? 'forget' : 'leave', channel: t.channel, agent: t.agent, room: t.meeting_id });
+  }
+  return out;
 }
 
 /** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
@@ -662,9 +926,8 @@ export function noHostWords(hostName) {
 
 export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false } = {}) {
   if (!h) return { error: 'No host on this board is running that repo, so there is no binding here to change.', code: 'not_hosted' };
-  if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-    return { error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' };
-  }
+  const away = hostAway(h, nowMs);
+  if (away) return away;
   if (!editorOk && h.outside_pid) {
     return { error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
   }
@@ -709,7 +972,7 @@ export function meetingSeat(agent, h, prev, lastTurnId, base = null) {
     ...(base ?? prev?.base ? { base: base ?? prev.base } : {}),
     session_id: sid ?? prev?.session_id ?? null,
     host: h?.host_name ?? prev?.host ?? null,
-    window: (h?.cwd ? h.cwd.split('/').filter(Boolean).pop() : null) ?? prev?.window ?? null,
+    window: (h?.cwd ? baseName(h.cwd) : null) ?? prev?.window ?? null,
     since: Number.isInteger(prev?.since) ? prev.since : (Number(lastTurnId) || 0),
   };
 }
@@ -1577,6 +1840,56 @@ export function ingestHookEvent(store, body, live = null) {
  * minute of a restart — they re-register and re-announce anything pending — so
  * a table would be a table of things that are about to be wrong.
  */
+/**
+ * The host<->board protocol version, and the words a host is refused in when
+ * its number is not the board's (task #288 on the desktop channel).
+ *
+ * The number is `protocol` in package.json and host/package.json, read off
+ * each build (the board's is on /health and /api/state, the host's is sent
+ * on every registration). It covers what crosses /api/host/*: the register
+ * body and reply, the work items and their payloads, the events. It moves
+ * when one side would read the other's words wrongly — a field renamed, a
+ * kind dropped, a reply's shape changed — and not for a field added, which
+ * each side already reads as absent. Until now the server, the host and the
+ * plugin moved in lockstep (`npm run set-version`) and nothing checked; a
+ * host packaged in the desktop app updates on its own schedule, and the
+ * first sign of a mismatch must be a sentence, not a desk that quietly
+ * takes no message.
+ *
+ * Equal or refused, with no range: a host behind the board and a host ahead
+ * of it are both refused, because "the board reads a newer host's events"
+ * is a claim about code that does not exist yet. A host that sends no
+ * number is one from before there was one, and is refused the same way,
+ * naming the build it is on.
+ *
+ * The words say what to do, and that depends on who runs the host: the
+ * desktop app updates its own host, and launchd's host is the clone's code
+ * once it restarts (a deploy that rebuilt the board and left the host
+ * running is exactly this). Said by the board on the refused registration,
+ * in the host's log, to the app through its port, and on /api/floor's hosts.
+ */
+export function protocolRefusal({ board, host }) {
+  const b = Number(board?.protocol);
+  const h = host?.protocol == null ? null : Number(host.protocol);
+  if (Number.isFinite(h) && h === b) return null;
+  const name = host?.name ? `The host "${host.name}"` : 'This host';
+  const hv = host?.version ? `build ${host.version}` : 'an unknown build';
+  const bv = board?.version ? `build ${board.version}` : 'an unknown build';
+  const speaks = h == null ? `sends no protocol version (${hv}, from before there was one)` : `speaks protocol ${h} (${hv})`;
+  const which = h == null || h < b ? 'behind' : 'ahead of';
+  const by = host?.supervisor === 'app' ? 'app' : 'launchd';
+  // Only remedies that work for the host refused. "Or update it from the
+  // page" was offered to launchd's host here until the 0.14.5 review (F4),
+  // and cannot work: the page's update is carried out by the host beside the
+  // board's container, and a refused host is not on the board to do it (its
+  // registration is refused before noteHost hears it, so Update answers "No
+  // host on this board's machine has reported in"; measured on the rig).
+  const fix = which === 'behind'
+    ? (by === 'app' ? 'Update the Orchestratinator app, which carries the host.' : 'Restart the host so it runs the clone\'s current code.')
+    : (by === 'app' ? 'Update the board to the app\'s build, or install the app build that matches it.' : 'Rebuild the board from the clone the host runs from.');
+  return `${name} is ${which} this board: it ${speaks} and the board speaks protocol ${b} (${bv}). The two must match. ${fix}`;
+}
+
 export function createLive() {
   const partial = new Map();   // deskKey -> text of the reply so far
   const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
@@ -1625,6 +1938,11 @@ export function createLive() {
    * which every open page polls every couple of seconds.
    */
   const folders = new Map(); // host_id -> { at, roots, folders, dialog }
+  /** Hosts refused at registration for their protocol (protocolRefusal), by
+   *  id: the words, and what the host said it was. In memory like the rest —
+   *  a refused host keeps trying, so it is said again within a minute, and
+   *  it is dropped the moment the host registers. */
+  const refused = new Map();       // host_id -> { name, at, why, protocol, version, supervisor }
   /**
    * Each desk's conversations as its host last listed them, for the session
    * picker — in memory for the same reason the folder list is: the host
@@ -1650,6 +1968,19 @@ export function createLive() {
    *  people can be searching for different things at once. */
   const recent = new Map();        // host_id -> { request_id, asked_ms, at, rows, error }
   const searches = new Map();      // search id -> { id, query, deep, asked_ms, hosts: Map(host_id -> { name, at, rows, files, ms, error }) }
+  /**
+   * What became of each take the board accepted and handed to a host: asked,
+   * then seated or refused in the host's words. See TAKES_MAX and noteTake.
+   *
+   * The board accepting a take is not the take, and until this there was one
+   * place a host's refusal could be read: an error turn on a desk the board
+   * has a hosted row for. A move between floors has such a desk, the one it
+   * is leaving. A plain take has none until the host says `bound`, and a
+   * release never has one, because the desk being released sits on another
+   * instance. Both refusals were dropped by the ownership check below and
+   * reached no floor at all (the gap PR #33 closed for a move only).
+   */
+  const takes = new Map();         // takeKey -> { host_id, path, channel, agent, mode, from_board, asked_at, state, at, error, code }
   /** A second session being closed because it is in no meeting room now:
    *  when the host was asked, so it is asked once and not at every poll. */
   const closing = new Map();       // deskKey -> ms
@@ -1659,12 +1990,18 @@ export function createLive() {
   /** Seats that were just left: when, so their closed windows' last hooks
    *  do not seat them again (ingestHookEvent). */
   const left = new Map();          // deskKey -> ms
+  /** Floor windows with no MCP session: since when, and the reconnects the
+   *  board has asked of their host since (reconnectDue). */
+  const reconnect = new Map();     // deskKey -> { since, tries, at }
   return {
+    takes,
+    reconnect,
     closing,
     unheard,
     left,
     recent,
     searches,
+    refused,
     partial,
     folders,
     sessions,
@@ -1903,6 +2240,11 @@ function applyHostEvent(store, live, hostId, ev) {
       // 253). The move is the operator seating the agent here (#24 Decided 1).
       store.unretireAgent(channel, agent);
     }
+    // Released from another instance: the operator seating the agent here,
+    // like a move (#24 Decided 1), so a row retired on this instance before
+    // it left is the agent's again without waiting for its window to connect.
+    const releasedFrom = str(ev.released_from);
+    if (releasedFrom) store.unretireAgent(channel, agent);
     // A seat (one agent, several sessions: host/seats.js) that closed was
     // retired as it went, so that a second session's row does not stand on
     // the board after it. One made again under the same name is the
@@ -1912,7 +2254,8 @@ function applyHostEvent(store, live, hostId, ev) {
     live.left.delete(key);
     store.hostDesk(channel, agent, hostId, cwd, { scope: str(ev.scope) ?? 'local' });
     store.ensurePersona(channel, agent);
-    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: `${cwd}${str(ev.scope) === 'seat' ? ' — a desk beside the folder\'s own' : ''}` });
+    store.logAdmin(channel, ev.from ? 'desk.moved' : 'desk.bound', { target: agent, detail: `${cwd}${str(ev.scope) === 'seat' ? ' — a desk beside the folder\'s own' : ''}${releasedFrom ? ` — released from ${releasedFrom}` : ''}` });
+    settleTake(live, hostId, channel, agent, { state: 'seated' });
     // Something starting on an archived floor brings it back (Decided 6).
     store.wakeChannel(channel, `${ev.from ? 'a desk moved onto it' : 'a host bound a desk on it'}: ${agent}`, agent);
     const sid = str(ev.session_id);
@@ -1922,8 +2265,20 @@ function applyHostEvent(store, live, hostId, ev) {
     else live.publish(key, { type: 'state', state: 'idle' });
     return true;
   }
+  // A host refusing a take says which take (`taking`), and that is recorded
+  // before the ownership check, which drops the error itself whenever the
+  // desk being taken has no row here yet. See `takes` in createLive.
+  let tookWord = false;
+  if (str(ev.type) === 'error' && ev.taking && typeof ev.taking === 'object') {
+    const t = { channel: str(ev.taking.channel), agent: str(ev.taking.agent) };
+    if (t.channel && t.agent) {
+      tookWord = settleTake(live, hostId, t.channel, t.agent, {
+        state: 'refused', error: str(ev.message) ?? 'the host refused and did not say why', code: str(ev.code),
+      });
+    }
+  }
   const desk = store.hostedDesk(channel, agent);
-  if (!desk || desk.host_id !== hostId) return false;
+  if (!desk || desk.host_id !== hostId) return tookWord;
 
   const placeholder = placeholderSession(hostId, channel, agent);
   const sessionId = str(ev.session_id) ?? desk.sdk_session_id ?? placeholder;
@@ -2146,7 +2501,9 @@ function applyHostEvent(store, live, hostId, ev) {
       // the conversation now", and that is the only thing that should end the
       // wait. Anything else — a timer, the desk going idle — would clear the
       // note while the message was still sitting in the queue.
-      if (role === 'user') {
+      // A context turn carrying the queued words is that message too (one
+      // wholly tagged, typed by the board), and retires it the same way.
+      if (role === 'user' || role === 'context') {
         const q = live.delivery.get(key);
         if (q && squash(ev.text).includes(squash(q.text))) {
           live.delivery.delete(key);
@@ -2168,6 +2525,14 @@ function applyHostEvent(store, live, hostId, ev) {
     case 'delivery': {
       const text = str(ev.text);
       if (!text) return false;
+      // Text that is wholly one tagged block (a room's notice, which the
+      // board typed) is filed by the relay as a `context` turn, never a user
+      // one, so a note for it would never be retired: the page drew it as the
+      // operator's bubble, "queued — the desk is working", and it stayed
+      // (desktop-dev, from costmo's screenshot, 2026-11-19: a notice that met
+      // a working window). It is not the operator's message, and the page has
+      // no pending bubble to settle for it.
+      if (WHOLE_TAG.test(text)) return false;
       // The turn may already have beaten this here, and often does.
       //
       // Two loops run in the host and neither waits for the other: the relay
@@ -2582,7 +2947,14 @@ export function buildFloor(store, live = null, sessions = null) {
       host_id: h.host_id,
       host_name: h.host_name ?? h.host_id,
       host_seen: seen,
-      live: h.state !== 'offline' && secondsSince(seen, nowMs) < HOST_STALE_SECONDS,
+      live: !h.host_refused && h.state !== 'offline' && secondsSince(seen, nowMs) < HOST_STALE_SECONDS,
+      // The words its host was refused in (hostAway), so the page keeps the
+      // desk drawn and says why it takes nothing, rather than hiding it as
+      // empty (deskEmpty) while the host is still running. Under the
+      // store's name as well, because nudgeable() and its siblings are
+      // handed this entry and read the row's field (hostAway).
+      refused: h.host_refused ?? null,
+      host_refused: h.host_refused ?? null,
       state: h.state,
       cwd: h.cwd,
       sdk_session_id: h.sdk_session_id,
@@ -2603,6 +2975,10 @@ export function buildFloor(store, live = null, sessions = null) {
       host_tmux: h.host_tmux ?? null,
       // Which file the binding lives in — see the column's note in db.js.
       scope: h.scope ?? null,
+      // Claude Code's sign-in on the host's machine (host/auth.js), read by
+      // the desk's `signin` and `nudge` below. Hand-picked like the rest.
+      host_signins: !!h.host_signins,
+      host_signed_out: !!h.host_signed_out,
     });
   }
   // One agent, several sessions: which desks are a second session of an
@@ -2744,7 +3120,7 @@ export function buildFloor(store, live = null, sessions = null) {
             cwd: s?.cwd ?? h?.cwd ?? null,
             // The name of the window to go to. A full path is correct and
             // unreadable; the last segment is what the tab actually says.
-            window: (s?.cwd ?? h?.cwd) ? (s?.cwd ?? h.cwd).split('/').filter(Boolean).pop() : null,
+            window: (s?.cwd ?? h?.cwd) ? baseName(s?.cwd ?? h.cwd) : null,
             session_id: s?.session_id ?? null,
             // A hosted prompt can be answered right here — but only if the
             // floor can reach the window that is asking. Answering means
@@ -2792,8 +3168,11 @@ export function buildFloor(store, live = null, sessions = null) {
                 // `uploads` to offer a paperclip or say why not (issue #31).
                 host_id: h.host_id,
                 live: h.live,
+                // Refused at its host's last registration, in those words, or
+                // null (hostAway). The page draws the desk and says why.
+                refused: h.refused ?? null,
                 state: h.state,
-                window: h.cwd ? h.cwd.split('/').filter(Boolean).pop() : null,
+                window: h.cwd ? baseName(h.cwd) : null,
                 // The conversation the panel is scoped to — whichever one is
                 // live in that repo. Before a window has opened, the
                 // placeholder the first message is filed under, so the panel is
@@ -2848,12 +3227,24 @@ export function buildFloor(store, live = null, sessions = null) {
           // whose session had ended the day before. `opens` carries the
           // difference now: the bell rings on such a desk on purpose, and says
           // first that it will open the window — see nudgeable().
+          // Claude Code signed out on this desk's host: the desk says so and
+          // offers Sign in (the host runs `claude auth login`), decided here
+          // so the box and the route refuse the same things. Null while it
+          // is signed in, or with no host to say.
+          signin: h?.host_signed_out
+            ? (() => {
+              const v = signinWhyNot(h, nowMs);
+              return v.error
+                ? { ok: false, code: v.code, reason: v.error, host: h.host_name ?? h.host_id }
+                : { ok: true, host: h.host_name ?? h.host_id };
+            })()
+            : null,
           nudge: (() => {
             const v = nudgeable(h, nowMs);
             // A window asking something takes nothing typed: the chat route
             // refuses it in these words, so the bell, Nudge and a meeting
             // room read the same verdict before anything is sent.
-            const ask = v.error ? null : askingWhy(live?.pending.get(k));
+            const ask = v.error ? null : askingWhy(live?.pending.get(k)) ?? signedOutWhy(h);
             return v.error
               ? { ok: false, code: v.code, reason: v.error }
               : ask
@@ -2906,7 +3297,7 @@ export function buildFloor(store, live = null, sessions = null) {
             ? {
                 session_id: s.session_id,
                 cwd: s.cwd,
-                window: s.cwd ? s.cwd.split('/').filter(Boolean).pop() : null,
+                window: s.cwd ? baseName(s.cwd) : null,
                 model: s.model,
                 // The chat controls' state (issue #10): asked-for stands
                 // beside confirmed until the window confirms or the hook
@@ -2977,11 +3368,19 @@ export function buildFloor(store, live = null, sessions = null) {
     host_id: h.host_id,
     name: h.name,
     last_seen: iso(h.last_seen),
-    live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+    // Seen within the window, and not refused since: a refused host is
+    // heard from on every try, which touches nothing, and its row's
+    // last_seen is the registration before the refusal — recent for a
+    // minute after a host comes back on the wrong build, and not live.
+    live: !live?.refused?.has(h.host_id) && secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
     // Only *when* the folder list was reported — the list itself is served by
     // GET /api/floor/folders, on demand. Enough for the page to tell "never
     // reported" from "reported empty" before it opens the dialog.
     folders_at: live?.folders?.get(h.host_id)?.at ?? null,
+    // Refused at its last registration for its protocol (protocolRefusal):
+    // the words, or null. A host refused before it ever registered has no
+    // row and is listed below from the refusal alone.
+    refused: live?.refused?.get(h.host_id)?.why ?? null,
     // Whether it can put a second desk in a folder (host/seats.js).
     // Its own word at its last registration, kept on its row: a board that
     // restarted still knows it (hosts.seats in src/db.js).
@@ -2989,7 +3388,15 @@ export function buildFloor(store, live = null, sessions = null) {
     // Whether it fetches attachments (issue #31; hosts.uploads): the box
     // dims its paperclip, with why, for a desk whose host does not.
     uploads: !!h.uploads,
+    // Whether it runs Claude Code's sign-in for `signin` work, and whether
+    // Claude Code is signed out on its machine now (host/auth.js).
+    signin: !!h.signins,
+    signed_out: !!h.signed_out,
   }));
+  for (const [hostId, r] of live?.refused ?? []) {
+    if (hosts.some((h) => h.host_id === hostId)) continue;
+    hosts.push({ host_id: hostId, name: r.name ?? hostId, last_seen: null, live: false, folders_at: null, refused: r.why });
+  }
 
   return {
     now: new Date(nowMs).toISOString(),
@@ -2997,6 +3404,14 @@ export function buildFloor(store, live = null, sessions = null) {
     queue,
     hosts,
     cast: CAST,
+    // Meetings kept with no window showing them, because the desktop app
+    // quit with their rooms open (0.14.4, `held_at`). The page draws each
+    // one's box from this, where a room with a window is drawn from what the
+    // window says, and the app's floor opens its room again. Only the
+    // agents present: an absent one is on the floor either way.
+    meetings_held: (store.heldMeetings?.() ?? []).map((r) => ({
+      id: r.id, channel: r.channel, agents: r.participants.filter((p) => !p.absent).map((p) => p.agent),
+    })),
     // The totals line describes the building, so it counts the floors in it —
     // archived channels are excluded here exactly as they are from the board's
     // own totals. A footer reading "5 floors" over a building with four is the
@@ -3018,9 +3433,13 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null, updates = null, uploads = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null, uploads = null }) {
   const router = express.Router();
   const live = createLive();
+  // What this board speaks, for the registration check below. Null only in a
+  // test that builds the router by hand; the server always names it.
+  const boardProtocol = protocol != null && Number.isFinite(Number(protocol)) ? Number(protocol) : null;
+  const boardVersion = version ?? null;
   // An update's steps arrive as host events (src/updates.js).
   live.updates = updates;
 
@@ -3068,12 +3487,33 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const name = str(req.body?.name) ?? hostId;
+    // The protocol check, before anything is written: a host that would
+    // read this board's work wrongly is told so and given nothing. See
+    // protocolRefusal for the number and the words.
+    if (boardProtocol !== null) {
+      const said = { name, protocol: req.body?.protocol, version: str(req.body?.build?.version), supervisor: str(req.body?.supervisor) };
+      const why = protocolRefusal({ board: { protocol: boardProtocol, version: boardVersion }, host: said });
+      if (why) {
+        live.refused.set(hostId, { ...said, protocol: said.protocol == null ? null : Number(said.protocol), at: new Date().toISOString(), why });
+        // And on its row, where every "can this desk take work" reads it
+        // (hostAway), from this first refusal on. The next accepted
+        // registration clears it (upsertHost).
+        store.setHostRefused(hostId, why);
+        return res.status(409).json({ error: why, code: 'protocol_mismatch', board: { protocol: boardProtocol, version: boardVersion }, host: { protocol: said.protocol ?? null, version: said.version ?? null } });
+      }
+      live.refused.delete(hostId);
+    }
     // `seats`: it can put a second desk in a folder (host/seats.js). A host
     // from before seats says nothing, and is not asked: it would not know
     // the work.
     // `uploads`: it fetches a message's attachments (issue #31); a host from
     // before them is refused files rather than handed ids it would ignore.
-    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true);
+    // `reconnect`: it types `/mcp reconnect` into a floor window whose tools
+    // dropped, when the board asks (reconnectDue).
+    // `signin`: it runs Claude Code's sign-in for `signin` work, and
+    // `signed_out` is its reading of Claude Code on its machine (host/auth.js).
+    store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true,
+      { signins: req.body?.signin === true, signedOut: req.body?.signed_out === true });
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3084,10 +3524,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // arbitrary path in front of the operator as one of theirs. A host that
     // sends no list (an older one) simply has none to serve.
     if (Array.isArray(req.body?.folders)) {
-      const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && r.startsWith('/'));
+      const roots = (Array.isArray(req.body.roots) ? req.body.roots : []).map(str).filter((r) => r && isAbsPath(r));
       // And whether it can show its own folder dialog. Only `true` counts: a
       // host that predates the dialog says nothing, and gets the page's list.
-      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots), dialog: req.body.dialog === true });
+      // And whether it can release a folder from another instance (seatDesk).
+      // Only `true`, for the same reason.
+      live.folders.set(hostId, { at: new Date().toISOString(), roots, folders: cleanFolders(req.body.folders, roots), dialog: req.body.dialog === true, release: req.body.release === true });
     }
 
     const desks = Array.isArray(req.body?.desks) ? req.body.desks : [];
@@ -3225,6 +3667,41 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * message within milliseconds of it being typed without polling in a tight
    * loop, and without this server ever connecting *to* a workstation.
    */
+  /**
+   * Ask a host to reconnect its floor windows whose tools dropped
+   * (reconnectDue), at its work poll: a host polls at least every
+   * WORK_WAIT_MAX_MS whether or not a page is open, which is what the
+   * desktop app's fresh board needs, since nobody may be looking. Only a host
+   * that said it takes the work; at most once in five seconds a host.
+   */
+  const reconnectLooked = new Map();
+  const askReconnects = (hostId) => {
+    const now = Date.now();
+    if (now - (reconnectLooked.get(hostId) ?? 0) < 5000) return false;
+    reconnectLooked.set(hostId, now);
+    if (!store.hostReconnects?.(hostId)) return false;
+    let asked = false;
+    try {
+      const present = new Set(mcpSessionCounts(sessions, deskKey).keys());
+      const used = new Set(store.agentKeys().map((a) => deskKey(a.channel, a.agent)));
+      const last = new Map(store.lastTurns().map((t) => [deskKey(t.channel, t.agent), t]));
+      const desks = store.listHostedDesks().filter((d) => d.host_id === hostId);
+      for (const d of reconnectDue(desks, { present, used, state: live.reconnect, pending: live.pending, lastTurnOf: (k) => last.get(k) ?? null, nowMs: now })) {
+        store.enqueueHostWork(hostId, d.channel, d.agent, 'reconnect', {});
+        asked = true;
+      }
+    } catch (err) { console.error(`[floor] reconnect check: ${err.message}`); }
+    return asked;
+  };
+  // And every five seconds, waking the host's poll when there is work: a
+  // host's poll can sit in its wait for WORK_WAIT_MAX_MS, and a desk whose
+  // tools dropped should not wait that long again after RECONNECT_AFTER_MS.
+  setInterval(() => {
+    try {
+      for (const hostId of new Set(store.listHostedDesks().map((d) => d.host_id))) if (askReconnects(hostId)) live.wake(hostId);
+    } catch { /* the next tick looks again */ }
+  }, 5000).unref();
+
   router.get('/api/host/work', auth.ingestGuard, async (req, res) => {
     const hostId = str(req.query.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
@@ -3236,6 +3713,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const done = String(req.query.done ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
     if (done.length) store.doneHostWork(hostId, done);
 
+    askReconnects(hostId);
     let items = store.takeHostWork(hostId, boot);
     if (!items.length && waitMs > 0) {
       let gone = false;
@@ -3327,12 +3805,14 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       return {
         host_id: h.host_id,
         name: h.name,
-        live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
+        live: !live.refused.has(h.host_id) && secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
         tmux: h.tmux_session ?? null,
         at: f?.at ?? null,
         roots: f?.roots ?? [],
         folders: f?.folders ?? [],
         dialog: f?.dialog === true,
+        release: f?.release === true,
+        refused: live.refused.get(h.host_id)?.why ?? null,
         // Whether it can put a second desk in a folder: Take a desk offers
         // "New desk here" only on a host that can.
         seats: !!h.seats,
@@ -3355,6 +3835,39 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!force && now - sweptAt < 2000) return;
     sweptAt = now;
     try { sweepTwins(store, live, now, opts); } catch { /* the floor is still served */ }
+    try { noticeRooms(now, opts.ended ?? null); } catch (err) { console.error(`[floor] room notices: ${err.message}`); }
+  };
+
+  /**
+   * Send each desk the notice it is owed (roomNoticePlan): one as it enters
+   * a meeting room, one as it is back on the floor. Run with the sweep, so
+   * from the routes a page polls and every route a room's window calls.
+   * Through the chat route's own checks, as a message the board types:
+   * a desk that cannot take one now (host offline, held by an editor, its
+   * window asking) is not marked told, and is tried again at a later look.
+   * A desk with no hosted row any more has nobody to tell: its row goes.
+   */
+  const noticeRooms = (nowMs, ended) => {
+    const rooms = store.allMeetings().map((r) => ({
+      id: r.id, channel: r.channel, open: r.live, holding: roomHolds(live, r, nowMs, ended),
+      present: r.participants.filter((p) => !p.absent).map((p) => p.agent),
+    }));
+    const twins = new Set(store.listTwins().filter((t) => t.for_meeting).map((t) => deskKey(t.channel, t.agent)));
+    for (const n of roomNoticePlan(rooms, store.listRoomTold(), twins)) {
+      if (n.kind === 'forget') { store.clearRoomTold(n.channel, n.agent); continue; }
+      if (n.kind === 'quiet') { store.setRoomTold(n.channel, n.agent, n.room); continue; }
+      const check = hostedOrWhyNot(n.channel, n.agent);
+      if (check.code === 'not_hosted') {
+        if (n.kind === 'leave') store.clearRoomTold(n.channel, n.agent);
+        continue;
+      }
+      if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent))) || signedOutWhy(check.hosted)) continue;
+      // `notice`: the host types it only into an empty box (F2, 0.14.5 review).
+      store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others), notice: true });
+      live.wake(check.hosted.host_id);
+      if (n.kind === 'enter') store.setRoomTold(n.channel, n.agent, n.room);
+      else store.clearRoomTold(n.channel, n.agent);
+    }
   };
 
   router.get('/api/floor', (_req, res) => {
@@ -3551,7 +4064,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
     const check = hostedOrWhyNot(channel, agent);
     if (check.error) return res.status(409).json(check);
-    const asking = askingWhy(live.pending.get(deskKey(channel, agent)));
+    const asking = askingWhy(live.pending.get(deskKey(channel, agent))) ?? signedOutWhy(check.hosted);
     if (asking) return res.status(409).json(asking);
 
     const h = check.hosted;
@@ -3697,12 +4210,17 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * decided by what the folder is bound as already: `take` (unbound),
    * `import` (bound as these same names in its .mcp.json — the host moves
    * the entry into local scope), and `move` (bound as some other desk).
+   * And a fourth that has to be asked for: `release`, for a folder bound to
+   * another instance, when the request names that instance in `from_board`
+   * (seatDesk has the rule).
    *
    * What is checked here is what the board knows: that the folder is one the
    * host offered (the board never sends a path the host did not name), that
-   * it is on this board, that the names are names, and that the desk is not
-   * already sitting somewhere else. The key is never in the request — the
-   * host binds with its own.
+   * it is on this instance or named as leaving another, that the names are
+   * names, and that the desk is not already sitting somewhere else. The key
+   * is never in the request — the host binds with its own.
+   *
+   * What the host then did is read from `GET /api/floor/take`.
    */
   router.post('/api/floor/desk', auth.adminGuard, (req, res) => {
     const hostId = str(req.body?.host_id);
@@ -3738,8 +4256,24 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
     // `seat`: "New desk here" — a second desk for the folder's agent, on this
     // floor, with a session of its own; the folder's own desk is left as it is.
-    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false, seat: req.body?.seat === true });
+    return seatDesk(res, { hostRow, folder, path, channel, agent, persona, nowMs, open: req.body?.open !== false, fromBoard: str(req.body?.from_board), seat: req.body?.seat === true });
   });
+
+  /**
+   * What became of a take: `asked` while the host has it, then `seated` or
+   * `refused` with the host's own words and code. Null when this instance
+   * remembers no such take (it keeps them in memory, so a restart forgets).
+   * For the dialog, which waits on a release here, and for anything that
+   * takes desks without a person watching each one come up.
+   */
+  router.get('/api/floor/take', (req, res) => {
+    const hostId = str(req.query.host_id);
+    const channel = str(req.query.channel);
+    const agent = str(req.query.agent);
+    if (!hostId || !channel || !agent) return res.status(400).json({ error: 'host_id, channel and agent are required' });
+    return res.json({ take: live.takes.get(takeKey(hostId, channel, agent)) ?? null });
+  });
+
 
   /**
    * Another session of an agent, on the floor it is already on: a second
@@ -3835,9 +4369,34 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * `desk.take` row, the archived-floor wake and the host's bind work are
    * all here, so the card cannot drift from Take a desk (#18 Decided 2).
    */
-  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null, seat = false }) {
-    if (folder.other_board) {
-      return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, not this board. Change it there.`, code: 'other_board' });
+  function seatDesk(res, { hostRow, folder, path, channel, agent, persona = null, nowMs, open = true, via = null, fromBoard = null, seat = false }) {
+    // A folder bound to another instance is released from it and seated
+    // here, when the request says which instance it is leaving. It used to
+    // be refused outright ("Change it there"); costmo reversed that
+    // (2026-11-08, host/mcp.js has the ruling and what keeps it narrow).
+    // Naming the instance is what makes the click mean what the dialog
+    // said: the address in the request must be the one the host last read
+    // off the folder, and the host reads the disk again before it touches
+    // anything. Without it this is still a refusal, with the address in the
+    // body for a caller to confirm and send back.
+    if (folder.other_board && !fromBoard) {
+      return res.status(409).json({
+        error: `That folder is bound to ${folder.other_board}, not this instance. Taking it here releases it from there, and that has to be asked for by name (from_board).`,
+        code: 'other_board', other_board: folder.other_board,
+      });
+    }
+    if (fromBoard && fromBoard !== folder.other_board) {
+      return res.status(409).json({
+        error: folder.other_board
+          ? `That folder is bound to ${folder.other_board} now, not ${fromBoard}. Look at it again before releasing it.`
+          : `That folder is not bound to ${fromBoard} any more. Look at it again.`,
+        code: 'board_changed', other_board: folder.other_board ?? null,
+      });
+    }
+    // Only a host that says it can: one from before this reads the work as a
+    // plain take and leaves the old binding standing beside the new one.
+    if (folder.other_board && live.folders.get(hostRow.host_id)?.release !== true) {
+      return res.status(409).json({ error: `${hostRow.name} runs a build from before a folder could be released from another instance, so it is not asked. It can once it is updated.`, code: 'old_host' });
     }
     // A folder that names its agent names it: the person picks the floor,
     // never a new name for an agent that already has one. The dialog locks
@@ -3852,6 +4411,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // nobody answers to it, and takes it with a number (qa-2) on one where
     // somebody does, its own floor included.
     if (seat) {
+      // A folder bound to another instance is released here (below), never
+      // given a second desk beside the one it has there: that desk is on
+      // the other instance, and nothing here could run it.
+      if (folder.other_board) return res.status(409).json({ error: `That folder is bound to ${folder.other_board}, so it has no desk on this instance to sit beside. Take it here to release it from there.`, code: 'other_board', other_board: folder.other_board });
       if (!folder.bound) {
         return res.status(400).json({ error: 'That folder is not a desk yet, so there is no agent to seat a second time. Take the desk first.', code: 'not_bound' });
       }
@@ -3874,7 +4437,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       live.wake(hostRow.host_id);
       return res.json({ ok: true, mode: 'seat', host: hostRow.name, channel, agent: id, base });
     }
-    const mode = !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
+    // A release is never a move, whatever floor it lands on: `from` names a
+    // desk on THIS instance for the `bound` handler to unseat and retire,
+    // and the names a folder carries on another instance are either nobody
+    // here or, after a restore, a real row that is not going anywhere.
+    const mode = folder.other_board ? 'release' : !folder.bound ? 'take' : folder.bound.channel === channel ? 'import' : 'move';
     let from = null;
     if (mode === 'move') {
       // The old desk's window is closed by the host and a new conversation
@@ -3912,7 +4479,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // while the host works, and the name it was given is on it when it comes.
     store.ensurePersona(channel, agent);
     if (persona) store.setProfile(channel, agent, { persona });
-    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}${via ? ` — ${via}` : ''}` });
+    store.logAdmin(channel, 'desk.take', { target: agent, detail: `${mode} ${path}${mode === 'release' ? ` from ${folder.other_board}` : ''}${via ? ` — ${via}` : ''}` });
     // Naming an archived floor in Take a desk brings it back (Decided 6): the
     // operator typed its name, which is the plainest "I want this floor" there is.
     store.wakeChannel(channel, `a desk was taken on it: ${agent}`, 'operator');
@@ -3920,12 +4487,14 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // Decided 2), and an import keeps the one it has — the host decides both
     // from `from` and the window it finds, never from a flag here. The flag
     // this used to send said "resume" on every move and nothing read it.
+    const release = mode === 'release' ? { board: folder.other_board } : null;
     store.enqueueHostWork(hostRow.host_id, channel, agent, 'bind', {
-      path, channel, agent, import: mode !== 'take', from,
+      path, channel, agent, import: mode === 'import' || mode === 'move', from, release,
       open, queued_at: new Date(nowMs).toISOString(),
     });
+    noteTake(live, hostRow.host_id, { path, channel, agent, mode, from_board: release?.board ?? null });
     live.wake(hostRow.host_id);
-    return res.json({ ok: true, mode, host: hostRow.name, channel, agent });
+    return res.json({ ok: true, mode, host: hostRow.name, host_id: hostRow.host_id, channel, agent, ...(release ? { from_board: release.board } : {}) });
   }
 
   /** Leave a desk: the reverse of taking one. See the host's unbind. */
@@ -3955,7 +4524,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const path = str(req.body?.path);
-    if (path && !path.startsWith('/')) return res.status(400).json({ error: 'path must be absolute', code: 'bad_path' });
+    if (path && !isAbsPath(path)) return res.status(400).json({ error: 'path must be absolute', code: 'bad_path' });
     const nowMs = Date.now();
     const hostRow = store.listHosts().find((h) => h.host_id === hostId);
     if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
@@ -4000,7 +4569,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     const start = str(req.body?.start);
-    if (start && !start.startsWith('/')) return res.status(400).json({ error: 'start must be absolute', code: 'bad_path' });
+    if (start && !isAbsPath(start)) return res.status(400).json({ error: 'start must be absolute', code: 'bad_path' });
     const nowMs = Date.now();
     const hostRow = store.listHosts().find((h) => h.host_id === hostId);
     if (!hostRow || secondsSince(iso(hostRow.last_seen), nowMs) >= HOST_STALE_SECONDS) {
@@ -4047,9 +4616,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const h = store.hostedDesk(channel, agent);
     const nowMs = Date.now();
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo, so there is no folder to list conversations from.', code: 'not_hosted' });
-    if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-      return res.status(409).json({ error: `The host for this desk (${h.host_name ?? h.host_id}) is offline.`, code: 'host_offline' });
-    }
+    const away = hostAway(h, nowMs);
+    if (away) return res.status(409).json(away);
     const key = deskKey(channel, agent);
     const held = live.sessions.get(key) ?? null;
     if (nowMs - (live.sessionsAsked.get(key) ?? 0) < SESSIONS_MIN_MS) {
@@ -4201,9 +4769,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const h = store.hostedDesk(channel, agent);
     const nowMs = Date.now();
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo, so there is nobody to read its conversations.', code: 'not_hosted' });
-    if (h.state === 'offline' || secondsSince(iso(h.host_seen), nowMs) >= HOST_STALE_SECONDS) {
-      return res.status(409).json({ error: `The host for this desk (${h.host_name ?? h.host_id}) is offline, and the conversation is on its disk.`, code: 'host_offline' });
-    }
+    const away = hostAway(h, nowMs, { more: ', and the conversation is on its disk' });
+    if (away) return res.status(409).json(away);
     const key = readKey(channel, agent, sessionId);
     const requestId = `${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     live.reads.delete(key);
@@ -4324,6 +4891,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const ok = req.body?.empty === true && Array.isArray(req.body?.agents) && !req.body.agents.length ? { names: [] } : seatedOn(channel, req.body?.agents);
     if (ok.error) return res.status(400).json(ok);
     const id = store.createMeeting(channel, seatsNow(channel, ok.names), MEETINGS_KEEP);
+    // Each desk is told it is in a room now (roomNoticePlan).
+    sweep(true);
     res.json({ ok: true, room: roomOut(store.meeting(id)) });
   });
 
@@ -4347,6 +4916,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const room = roomOr404(req, res);
     if (!room) return;
     store.openMeeting(room.id);
+    // A Resume tells its desks they are in a room again; a reload's open
+    // tells nobody, because the room still held them (roomNoticePlan).
+    sweep(true);
     res.json({ ok: true, room: roomOut(store.meeting(room.id)) });
   });
 
@@ -4360,7 +4932,26 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   router.post('/api/floor/meeting/touch', auth.adminGuard, (req, res) => {
     const room = roomOr404(req, res);
     if (!room) return;
-    res.json({ ok: true, live: store.touchMeeting(room.id) });
+    const alive = store.touchMeeting(room.id);
+    // A window is looking, even when no floor tab is: a room that ended
+    // without End meeting is found here as well as from the floor's polls.
+    sweep();
+    res.json({ ok: true, live: alive });
+  });
+
+  /**
+   * The desktop app is quitting with this room's window open (0.14.4). The
+   * app calls `window.orchMeeting.hold()` in each room's window before it
+   * quits, and the window, having said this, closes without ending the
+   * record. The meeting stays: its box on the floor, its desks contained,
+   * its second sessions kept (`held_at`, src/db.js). The next window on the
+   * room (`/open`, or a touch) clears it; End ends it. `held: false` is a
+   * room that had already ended, which the window then ends as it closes.
+   */
+  router.post('/api/floor/meeting/hold', auth.adminGuard, (req, res) => {
+    const room = roomOr404(req, res);
+    if (!room) return;
+    res.json({ ok: true, held: store.holdMeeting(room.id) });
   });
 
   /**
@@ -4694,6 +5285,25 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     live.wake(check.hosted.host_id);
     store.logAdmin(channel, 'permission.pressed', { target: agent, detail: `${choice} at an unreadable prompt` });
     res.json({ ok: true, choice });
+  });
+
+  /**
+   * The desk's Sign in: its host runs Claude Code's own sign-in (`claude auth
+   * login`), which opens the browser on that machine and ends when the person
+   * has finished there (costmo, 2026-11-19: "Host signs in"). The host says
+   * on the desk that it opened, and how it ended; its next registration
+   * carries the new reading, which is what takes the box away.
+   */
+  router.post('/api/floor/signin', auth.adminGuard, (req, res) => {
+    const channel = str(req.body?.channel);
+    const agent = str(req.body?.agent);
+    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
+    const check = signinWhyNot(store.hostedDesk(channel, agent));
+    if (check.error) return res.status(409).json(check);
+    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'signin', {});
+    live.wake(check.hosted.host_id);
+    store.logAdmin(channel, 'claude.signin', { target: agent, detail: `on ${check.hosted.host_name ?? check.hosted.host_id}` });
+    res.json({ ok: true, host: check.hosted.host_name ?? check.hosted.host_id });
   });
 
   router.post('/api/floor/interrupt', auth.adminGuard, (req, res) => {

@@ -44,6 +44,24 @@ tmux list-panes -a -F '#{window_name} seat=#{@orch_seat} pid=#{pane_pid} #{pane_
 cat ~/.orchestratinator/seats/seats.json            # each extra desk: channel, agent, folder, board
 ```
 
+**Which host, and so which files.** The launchd host keeps its log in
+`~/.orchestratinator/log/host.log` and its seats in
+`~/.orchestratinator/seats/`. The desktop app's host keeps both in the
+app's profile: `~/Library/Application Support/Orchestratinator/logs/host.log`
+(the board's beside it, `board.log`) and `…/Orchestratinator/seats/`. Every
+grep in this skill that names `~/.orchestratinator/log/host.log` means the
+app's file when the desk is on the app's board (6724). And before reading
+behaviour off either, read which code the app runs:
+`../catch-up-the-desktop-app/app-pin-check.sh <commit>` (0.14.4's whole
+report from costmo was the app still on v0.14.3).
+
+**What a window was given** (its environment, 0.14.4): `ps eww -o command=
+-p <pane_pid> | tr ' ' '\n' | grep -E '^(ORCH_|TMPDIR)'`. A window a 0.14.4+
+host opened carries no `ORCH_` setting of the host's, only a seat's four
+(`ORCH_DESK_CONFIG`, `ORCH_DESK_ROOT`, `ORCH_CHANNEL`, `ORCH_AGENT`) and
+the key variable its binding names; one opened before keeps the host's
+until reopened.
+
 The folder's own desk is the window with **no** tag; a seat is the window
 tagged `<channel>/<agent>` (percent-encoded), started with `--mcp-config
 ~/.orchestratinator/seats/<name>.mcp.json`. Three readings that look like
@@ -65,6 +83,7 @@ What a second session (a seat) says when it does not behave, and where:
 | `<agent>-2` still there and never closing | it was made by **New desk here**, which no room closes (`for_meeting` 0): Leave room on its card | `desk_twins` |
 | a second session came back under the next number (`-3` for `-2`) | the old name was not free: a desk, a working agent or an open conversation still answers to it. Before 0.12.9's fix it was the closed window's SessionEnd re-seating it | `personas`, `agents.retired_at`, `agent_sessions.ended_at` for that name |
 | "open in the window of another desk in this folder" | the conversation asked for is running in a sibling desk's window; one window holds a conversation | `tmux list-panes` with the tag, the roster |
+| every message, notice and Leave to a seat ends "not done: <folder> is <the folder's desk> on this instance now, not <the seat> on this instance. The desk is let go here", and the seat cannot be left | a host before 0.14.4 on develop: its release check read the seat against its folder's binding (the 11-18 merge seam, CLAUDE.md "One agent, several sessions"). The host log says "letting the desk go" for each seat at every watch tick | `grep -c 'letting the desk go' <host.log>`, then `app-pin-check.sh`; a 0.14.4 host, and Leave works |
 | "this desk's binding file is missing" | `~/.orchestratinator/seats/<name>.mcp.json` is gone; the host writes it at every heartbeat, so it is back within a minute, or the seat's record is gone too | `ls ~/.orchestratinator/seats/` |
 
 `two-rooms-fixture.sh rows` in **measure-a-real-window** prints most of
@@ -538,6 +557,40 @@ problem is macOS's grant to the host's process tree, not the server, and
 `open()` says `unreadable`. The agent's own diagnosis will be wrong: on the
 day, it blamed its own `cd` and saved that as a memory. Its process cannot
 lose a grant by changing directory.
+
+## Another agent's step has run past its own estimate
+
+A desk that says "about two minutes" and has run seven is either slow or
+held, and the pane alone does not say which. One read does:
+
+```bash
+.claude/skills/diagnose-handoff/desk-step.sh orchestratinator-desktop   # any part of the desk's folder
+```
+
+It prints the bottom of the pane (the turn's elapsed time, the step's own
+label and time) and every process under the pane with how long each has
+run. Reads only. What it showed the day it was written (2026-11-19):
+
+- **Held.** The step was `node rehearse.mjs | tail -110`. The script had
+  finished, but the packaged app it launched never quit, so node could not
+  exit and `tail` never saw the end of its input: seven minutes on a
+  two-minute step, with the output unread. The sign is a leaf process as
+  old as the step whose work is plainly over (its scratch folder was
+  already deleted, its ports closed). It was a real fault in the app's
+  quit, found because the hang was read and not just waited out.
+- **Slow.** A full suite at a load average of 600: twelve minutes on a
+  four-minute step, and the leaves were two seconds old. Leave it alone.
+
+Then: **message the agent with what you read, and kill nothing.** Its
+processes are its evidence and its lane, and the permission check refuses
+the kill anyway. If the operator wants the step freed now, hand him the one
+line (`! kill -9 <pid>`). A step also frees itself at the Bash tool's
+limit, ten minutes at most, with its output lost.
+
+For a wait he is watching, a loop does this every five minutes
+(`CronCreate */5`): poll and list tasks, `desk-step.sh`, two to four lines
+to him with times in Pacific, deleted at the final report. The loop fires
+only while your own session is idle.
 
 ## What not to do
 

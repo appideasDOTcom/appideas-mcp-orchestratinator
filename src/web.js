@@ -2,7 +2,7 @@ import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { SERVER_CHANNEL } from './auth.js';
 import {
-  applyBackup, backupFilename, buildBackup, snapshotBeforeRestore, validateBackup,
+  applyBackup, applyFloor, backupFilename, buildBackup, floorsIn, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
 import { createFloorRouter, deliverable, nudgeable } from './floor.js';
 // The same derivation the store uses, so a row for an agent with no persona row
@@ -201,6 +201,7 @@ function buildState(store, sessions, sessionStats, meta) {
     server: {
       name: meta.name,
       version: meta.version,
+      protocol: meta.protocol ?? null,
       commit: meta.commit ?? null,
       port: meta.port,
       db_path: meta.dbPath,
@@ -553,6 +554,55 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     });
   });
 
+  /**
+   * The floors a backup file holds, for the page to offer one: read only, the
+   * file is posted and nothing on this board changes.
+   */
+  router.post('/backup/floors', (req, res) => {
+    const doc = req.body?.backup;
+    const problem = validateBackup(doc);
+    if (problem) return bad(res, problem);
+    const here = new Set(store.listAllChannels?.() ?? []);
+    res.json({ created_at: doc.created_at ?? null, floors: floorsIn(doc).map((f) => ({ ...f, here: here.has(f.channel) })) });
+  });
+
+  /**
+   * One floor of a backup over the same floor here, every other floor left as
+   * it is (costmo, 2026-11-19: a floor that went on working on the Docker
+   * instance after the full import, brought into the app's). Not the merge
+   * the restore above refuses: the floor here is replaced, and only when it
+   * is a stale copy of the file's (restoreFloor in db.js has the rules, and
+   * refuses with nothing changed otherwise). Guarded like a floor's delete,
+   * by typing its name; the board is written next to the database first, as
+   * a full restore does. The floor's MCP sessions are closed so its windows
+   * rejoin it as it now is.
+   */
+  router.post('/backup/restore-floor', (req, res) => {
+    const channel = str(req.body?.channel);
+    if (!channel) return bad(res, 'name the floor to restore');
+    if (str(req.body?.confirm) !== channel) {
+      return bad(res, `confirm must be the floor's name, ${channel}: its board record here is replaced by the file's`);
+    }
+    const doc = req.body?.backup;
+    const problem = validateBackup(doc);
+    if (problem) return bad(res, problem);
+    const snapshot = snapshotBeforeRestore({ store, meta: { ...meta, authMode: auth.mode } });
+    let applied;
+    try {
+      applied = applyFloor({ store, doc, channel });
+    } catch (e) {
+      return res.status(e.code === 'floor_newer_here' || e.code === 'no_such_floor' ? 409 : 400)
+        .json({ error: `nothing was restored — ${String(e.message ?? e)}`, code: e.code ?? 'refused' });
+    }
+    const closed = closeSessionsFor({ channel });
+    const rows = Object.values(applied.report).reduce((n, r) => n + (r.inserted ?? 0), 0);
+    const moved = Object.entries(applied.renumbered).map(([t, r]) => `${r.count} ${t} renumbered from #${r.from} to #${r.to} on`).join('; ');
+    store.logAdmin(channel, 'backup.restore_floor', { actor: 'operator', target: channel,
+      detail: `restored ${rows} rows of ${channel} from a backup taken ${doc.created_at ?? 'at an unrecorded time'}${moved ? `; ${moved}` : ''}` +
+        (snapshot.saved ? `; previous board saved to ${snapshot.path}` : '; the pre-restore snapshot could not be written') });
+    res.json({ ok: true, channel, restored_from: doc.created_at ?? null, rows, tables: applied.report, renumbered: applied.renumbered, sessions_closed: closed, snapshot });
+  });
+
   return router;
 }
 
@@ -596,7 +646,7 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth, sessions, updates, uploads }));
+  router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version }));
 
   router.get('/api/state', (_req, res) => {
     const state = buildState(store, sessions, sessionStats, meta);

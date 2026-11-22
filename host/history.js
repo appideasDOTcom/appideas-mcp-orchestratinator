@@ -30,6 +30,7 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import * as W from './window.js';
 
 /** How many conversations a recent list or a search answers with, at most. */
@@ -152,22 +153,45 @@ export async function searchAcross(desks, query, { deep = false, max = HISTORY_M
   return { rows: rows.sort(byLastSpoken).slice(0, max), files, ms: Date.now() - started };
 }
 
+/** One question, as the script and the worker below both take it. */
+async function answer(ask) {
+  const desks = Array.isArray(ask.desks) ? ask.desks : [];
+  const max = Number.isInteger(ask.max) && ask.max > 0 ? ask.max : HISTORY_MAX;
+  return ask.op === 'recent'
+    ? { rows: await recentAcross(desks, { max }) }
+    : searchAcross(desks, ask.query, { deep: ask.deep === true, max });
+}
+
+/* Run as a worker thread: the same question in workerData, the answer posted
+   back as { out } or { error }. This is the desktop app's way in, not the
+   launchd host's. The app runs the host under Electron's utility process,
+   where process.execPath is the app's own binary, not node, and the app's
+   RunAsNode fuse is off, so the script below cannot be started there. A
+   worker keeps what the process was for: its own event loop, so a 70 MB
+   JSON.parse does not hold the relay, and terminate() when a newer search
+   replaces it. Host.search picks the worker only under Electron (or when the
+   suite asks for it), so the host QA measured under launchd runs the script
+   exactly as before. */
+if (!isMainThread && workerData?.historyAsk) {
+  answer(workerData.historyAsk).then(
+    (out) => parentPort.postMessage({ out }),
+    (err) => parentPort.postMessage({ error: `${err?.message ?? err}` }),
+  );
+}
+
 /* Run as a script: one question, asked on stdin as JSON, answered on stdout
    as JSON. The host starts this for every search — see Host.search — and
    `{"op":"recent"}` answers with the recent list instead, which is how the
    host suite asks the module about a list longer than its limit. */
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// isMainThread: a worker's process.argv[1] is this file too, so without it
+// the worker also ran this and failed on an empty stdin (measured, Node 24).
+if (isMainThread && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   let input = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (d) => { input += d; });
   process.stdin.on('end', async () => {
     try {
-      const ask = JSON.parse(input);
-      const desks = Array.isArray(ask.desks) ? ask.desks : [];
-      const max = Number.isInteger(ask.max) && ask.max > 0 ? ask.max : HISTORY_MAX;
-      const out = ask.op === 'recent'
-        ? { rows: await recentAcross(desks, { max }) }
-        : await searchAcross(desks, ask.query, { deep: ask.deep === true, max });
+      const out = await answer(JSON.parse(input));
       process.stdout.write(`${JSON.stringify(out)}\n`);
     } catch (err) {
       process.stderr.write(`${err?.message ?? err}\n`);

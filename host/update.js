@@ -8,7 +8,8 @@
  * host/index.js inside it), and Docker and Claude Code are on this machine.
  *
  * The steps, in order, each reported to the board as it starts and ends:
- *   preflight  supervised by launchd, the clone clean and on the followed branch
+ *   preflight  supervised by launchd (not the desktop app, which updates its
+ *              own host), the clone clean and on the followed branch
  *   fetch      the branch from GitHub over HTTPS (public: no key, no ssh agent,
  *              which a LaunchAgent does not have), and the commit an
  *              ancestor-or-equal of nothing local: HEAD must be behind it
@@ -73,9 +74,16 @@ export function tail(r, n = 3) {
   return `${r.stderr}\n${r.stdout}`.split('\n').map((l) => l.trim()).filter(Boolean).slice(-n).join(' · ') || `exit ${r.code}`;
 }
 
-/** The commit and version of the code this process is running — read once, at start. */
+/** The commit, version and protocol of the code this process is running — read once, at start. */
+const PKG = (() => { try { return JSON.parse(readFileSync(resolve(HERE, 'package.json'), 'utf8')); } catch { return {}; } })();
 export const BUILD = {
-  version: (() => { try { return JSON.parse(readFileSync(resolve(HERE, 'package.json'), 'utf8')).version; } catch { return null; } })(),
+  version: PKG.version ?? null,
+  // The host<->board protocol this code speaks: `protocol` in host/package.json,
+  // compared by the board at every registration and refused in words when it
+  // is not the board's (protocolRefusal in src/floor.js says what the number
+  // covers). ORCH_HOST_PROTOCOL is the suites' stand-in for a host from
+  // another build; nothing installed sets it.
+  protocol: process.env.ORCH_HOST_PROTOCOL != null && process.env.ORCH_HOST_PROTOCOL !== '' ? Number(process.env.ORCH_HOST_PROTOCOL) : PKG.protocol ?? null,
   commit: null,
 };
 export async function readBuild() {
@@ -84,8 +92,33 @@ export async function readBuild() {
   return BUILD;
 }
 
-/** Is a restart something that will come back: launchd's job, or a suite saying so. */
-export const supervised = () => process.env.XPC_SERVICE_NAME === LAUNCH_LABEL || process.env.ORCH_HOST_SUPERVISED === '1';
+/**
+ * Who starts this host again after it exits, or null for nobody.
+ *
+ *   'launchd'  the LaunchAgent (XPC_SERVICE_NAME is its label), or a suite
+ *              saying so with ORCH_HOST_SUPERVISED=1
+ *   'app'      the desktop app, which runs host/index.js as a child it keeps
+ *              running (ORCH_HOST_SUPERVISOR=app)
+ *   <word>     anything else named in ORCH_HOST_SUPERVISOR — letters, digits
+ *              and dashes, so the board can say it back
+ *
+ * Reported on every registration as `supervisor` (and `supervised`, which
+ * older boards read). The page's update (issue #40) is for launchd's host
+ * only: it moves a git clone and restarts through launchd's KeepAlive. An
+ * app-run host has no clone to move — the app carries the host's code and
+ * updates it itself — so the board offers no update for it and this code
+ * refuses one at preflight, in the same words (task #289 on the desktop
+ * channel). A host nobody restarts is refused as before.
+ */
+export const supervisor = () => {
+  if (process.env.XPC_SERVICE_NAME === LAUNCH_LABEL || process.env.ORCH_HOST_SUPERVISED === '1') return 'launchd';
+  const named = String(process.env.ORCH_HOST_SUPERVISOR ?? '').trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9-]{0,39}$/.test(named) ? named : null;
+};
+/** Is a restart something that will come back. */
+export const supervised = () => supervisor() !== null;
+/** The words an app-run host is refused an update in, at the board and at preflight. */
+export const APP_UPDATES_ITSELF = 'this host is run by the Orchestratinator app, which carries its code and updates it; the board does not update it';
 
 /** The clone as it stands: branch, HEAD, and anything uncommitted (untracked files included). */
 export async function cloneState() {
@@ -121,7 +154,7 @@ export async function selfReport() {
   // What this code can do for an update, so the board does not ask a host
   // for something its code would get quietly wrong (PR #42 N1: a Finish
   // carried out by a host from before Finish existed).
-  return { build: { ...BUILD }, clone, board_container: container, supervised: supervised(), capabilities: CAPABILITIES };
+  return { build: { ...BUILD }, protocol: BUILD.protocol, clone, board_container: container, supervised: supervised(), supervisor: supervisor(), capabilities: CAPABILITIES };
 }
 
 /**
@@ -138,7 +171,8 @@ export async function runUpdate({ commit, branch, repo, from: startedFrom = null
   // preflight
   await say('preflight', 'running', null);
   if (!/^[0-9a-f]{40}$/.test(String(commit))) return refuse('preflight', `"${commit}" is not a commit`);
-  if (!supervised()) return refuse('preflight', 'this host is not running as its LaunchAgent, so nothing would start it again after the update');
+  if (supervisor() === 'app') return refuse('preflight', APP_UPDATES_ITSELF);
+  if (supervisor() !== 'launchd') return refuse('preflight', 'this host is not running as its LaunchAgent, so nothing would start it again after the update');
   const clone = await cloneState();
   if (clone.error) return refuse('preflight', clone.error);
   if (clone.dirty) return refuse('preflight', `the clone at ${CLONE} has local changes (${clone.changes.slice(0, 3).join(', ')}${clone.changes.length > 3 ? `, +${clone.changes.length - 3} more` : ''})`);

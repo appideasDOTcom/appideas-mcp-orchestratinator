@@ -124,6 +124,17 @@ reworded, and a meeting-box page row that had not applied since 0.12.9. A
 row that does not apply is not red, it is unread, and the count in the
 notes goes on including it.
 
+Validated again on 2026-11-20, after four rounds that had not: thirteen
+entries in seven lists no longer applied (the sign-in round added a field
+beside five of them, the room notices moved `stillWatched` into
+`roomStillWatched` and `roomHolds`, develop's poll kept its own cursor
+line). Each was pointed at the line as it stands now, keeping its name and
+its fault, and all the lists validate. **None of the thirteen has been run
+since**, so each is owed a run before its red is quoted: in
+`mutants-attention`, `mutants-mcp-rooms` (3), `mutants-milestone`,
+`mutants-pr57` (4), `mutants-sessions` (2), and the page lists
+`mutants-floor-windows` and `mutants-settings` (1 each).
+
 **Lines of the seats work that no row reads, and why they are left**
 (QA's inversions on PR #57, Info 7; each stayed green there). Two were
 given rows in that round: a bind onto a name a seat carries (Q2) and the
@@ -252,6 +263,25 @@ read "SURVIVED (0 ✓)" with "the run threw: SyntaxError", and so did the
 control. A `grep -E "✗|PASS|FAIL"` over the suite's own output had printed
 nothing at all a minute earlier and was read as quiet success. No verdict
 line is a failure; look for the line, not for the absence of a ✗.
+
+**A row that throws hides its batch-mates.** In the /mcp and room-notice
+round (2026-11-19) a batch held two mutants, one of which took `/mcp`
+out of the page's command list. A row then read `.find(…).hint` on the
+missing entry, threw a TypeError, and the suite stopped at 546 rows of
+1579. The other mutant in that batch was never reached, and the batch
+read "4 failing" as if both had been seen. So: write rows so that a
+missing thing is a ✗, never an exception (`?.hint ?? ''`), and compare
+each batch's ✓ + ✗ with the control's count. A batch that ran fewer rows
+than its control proved only what it reached; run its mutants again
+alone.
+
+**A row that waits on a throttled look must wait out the throttle.** The
+same round's reload row (End, then Open) read green under the mutant
+that broke the very rule it named: the board's sweep runs at most once in
+2 s, so no sweep ran while the room stood ended, and the row never put
+the question to the code. It sleeps past the throttle and looks while
+the room is ended now. A row survived by a mutant of the line it is
+about is the cue to find the look it never made.
 
 ## Choosing the mutants
 
@@ -407,6 +437,30 @@ the suites' own ports (host 8896, floor 8897, page checks wherever you put
 them) decide what can share the CPU, and the host and window suites should
 still run alone — under load their pane cases go red on timing (CLAUDE.md,
 Tests).
+
+## The Node the copy runs on
+
+A suite that cannot load better-sqlite3 prints no ✗. On this machine's
+default `node` (20.20.1) the server stops on its first import with the
+floor's sentence, and a script that opens better-sqlite3 itself segfaults
+with no words at all (0.12.6, better-sqlite3 13). Neither is a ✗, so a
+mutant run there counts 0 failing and reads as a **survivor**. `run-mutant.sh` and
+`run-page-mutant.sh` source `scripts/node-floor.sh`, and `run-mutants.mjs`
+and `run-batches.mjs` start each suite through it. Start them from any
+shell.
+
+**A run with no ✗ and no ✓ is not a survivor, and every runner says so**
+("THE SUITE DID NOT RUN — not a result", with its last lines). Two causes
+were met on 2026-11-08, packaging the above: the Node, and the suite's
+name. Every suite is `test:<name>` in package.json but smoke, which is
+`smoke`, so `run-mutant.sh … smoke …` ran `npm run test:smoke`, npm said
+"Missing script", and the runner counted 0 failing. A mutant the smoke
+suite catches on its 62nd line read as surviving, and so did the control
+beside it, for the same reason. The runners take `smoke` now. Proven both
+ways from a Node 20 shell: `protocol` dropped from `/health` reads `1
+failing — ✗ and /health reports it (undefined)`, a comment-only change
+reads `SURVIVED (69 ✓)`, and a suite name npm does not have reads as no
+result.
 
 ## What goes in the report
 

@@ -1,12 +1,12 @@
 {
-  "description": "Report this session's state to the orchestratinator floor. Every event reads stdin and detaches, so nothing is on the critical path of a turn — a PreCompact hook that waited would be a slower compaction. The floor reads the conversation itself from Claude Code's own transcript; these hooks say what is happening, not what was said: a prompt is open, a turn ended, a compaction or a model switch started and finished.",
+  "description": "Report this session's state to the orchestratinator floor. Every event reads stdin and detaches, so nothing is on the critical path of a turn — a PreCompact hook that waited would be a slower compaction. The floor reads the conversation itself from Claude Code's own transcript; these hooks say what is happening, not what was said: a prompt is open, a turn ended, a compaction or a model switch started and finished. The node that runs it is the one on PATH, as it always was; with none there (a Mac whose only Claude Code is Anthropic's native install has no node), it is ~/.orchestratinator/bin/node, a link the desktop app keeps to the Node it carries, and with neither the hook does nothing, as it did before.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -94,7 +94,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]
@@ -127,7 +127,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(cat); [ -n \"$p\" ] && (printf '%s' \"$p\" | node \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); exit 0",
+            "command": "p=$(cat); [ -n \"$p\" ] && { n=$(command -v node) || n=\"$HOME/.orchestratinator/bin/node\"; [ -x \"$n\" ] && (printf '%s' \"$p\" | \"$n\" \"${CLAUDE_PLUGIN_ROOT}/hooks/report.mjs\" >/dev/null 2>&1 &); }; exit 0",
             "timeout": 5
           }
         ]

@@ -1,0 +1,65 @@
+[
+ [
+  "a signed-out host's desks take messages",
+  "floor",
+  "src/floor.js",
+  "  if (!h?.host_signed_out) return null;\n  return {\n    error: `Claude Code is signed out on",
+  "  if (h || !h) return null;\n  return {\n    error: `Claude Code is signed out on"
+ ],
+ [
+  "the desk's hosted row drops the host's sign-in",
+  "floor",
+  "src/floor.js",
+  "      host_signed_out: !!h.host_signed_out,\n    });",
+  "      host_signed_out: false,\n    });"
+ ],
+ [
+  "the route queues a sign-in for a host that is signed in",
+  "floor",
+  "src/floor.js",
+  "  if (!h.host_signed_out) return { error: `Claude Code is signed in on ${name}.`, code: 'signed_in' };",
+  ""
+ ],
+ [
+  "the sign-in is not audited",
+  "floor",
+  "src/floor.js",
+  "    store.logAdmin(channel, 'claude.signin', { target: agent, detail: `on ${check.hosted.host_name ?? check.hosted.host_id}` });",
+  ""
+ ],
+ [
+  "Claude Code is asked without USER filled in",
+  "host",
+  "host/auth.js",
+  "  if (env.USER && env.LOGNAME) return env;",
+  "  if (env) return env;"
+ ],
+ [
+  "a window's \"Not logged in\" is not believed until the heartbeat",
+  "host",
+  "host/index.js",
+  "      this.auth.said = true;\n      this.checkAuth('a window recorded \"Not logged in\"', { was })",
+  "      this.auth.said = false;\n      this.checkAuth('a window recorded \"Not logged in\"', { was })"
+ ],
+ [
+  "a second press opens a second sign-in",
+  "host",
+  "host/index.js",
+  "    if (this.auth.signing) {\n      desk.told(",
+  "    if (false) {\n      desk.told("
+ ],
+ [
+  "a window still signed out is left as it is",
+  "host",
+  "host/index.js",
+  "      await this.reopenSignedOut();\n",
+  ""
+ ],
+ [
+  "the reader takes the words from anywhere on the screen",
+  "window",
+  "host/window.js",
+  "  if (rule < 0) return false;\n  return /Not logged in\\s*·\\s*run \\/login/i.test(lines.slice(rule + 1)",
+  "  return /Not logged in\\s*·\\s*run \\/login/i.test(lines.slice(0)"
+ ]
+]

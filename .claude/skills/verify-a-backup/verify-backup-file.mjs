@@ -13,6 +13,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+// The Node floor in words, before better-sqlite3 is opened: a Node-API 9 node
+// segfaults on it with none (src/node-floor.js). A copy holding an older src/
+// has no such file, and that is not this script's fault to report.
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
 
 const FILE = process.argv[2];
 if (!FILE) {
@@ -27,7 +31,7 @@ const SCRATCH = mkdtempSync(join(tmpdir(), 'orch-verify-'));
 let failures = 0;
 const assert = (cond, msg) => { console.log(`  ${cond ? '✓' : '✗'} ${msg}`); if (!cond) failures++; };
 
-const server = spawn('node', ['src/server.js'], {
+const server = spawn(process.execPath, ['src/server.js'], {
   cwd: REPO,
   env: {
     ...process.env,

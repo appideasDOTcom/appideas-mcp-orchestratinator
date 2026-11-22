@@ -33,6 +33,7 @@
  *   reopen   the desk's session becomes the one asked for
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { boardProtocol } from './board-protocol.mjs';
 
 const args = process.argv.slice(2);
 const base = (args[0] ?? '').startsWith('http') ? args[0] : 'http://localhost:8905';
@@ -64,10 +65,13 @@ const folder = (path) => {
 };
 const FOLDERS = ['/repo/qa', '/repo/dev', '/repo/ops', '/repo/zed', '/repo/empty'];
 
+// The board refuses a host that sends no protocol number (develop's
+// protocolRefusal): asked of the board once, as seed-folders does.
+const PROTOCOL = await boardProtocol(base);
 const register = () => fetch(`${base}/api/host/register`, {
   method: 'POST', headers: HK,
   body: JSON.stringify({
-    host_id: HOST, name: 'testbox', tmux: 'orch', seats: true, dialog: false,
+    host_id: HOST, name: 'testbox', protocol: PROTOCOL, tmux: 'orch', seats: true, dialog: false,
     roots: ['/repo'], folders: FOLDERS.map(folder), desks: [...desks.values()],
   }),
 }).then((r) => r.json()).catch((e) => ({ error: String(e) }));

@@ -17,6 +17,9 @@
 # The copy keeps today's check and drive.mjs, so it is today's check at the
 # old page. A full run takes about 2.5 minutes. Announce PORT and CDP first.
 set -u
+# A Node that can load better-sqlite3 13, or a refusal in words: this machine's
+# default node segfaults on it silently (scripts/node-floor.sh has the why).
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; EXP="${2:-after}"; PORT="${PORT:-8912}"; CDP="${CDP:-9254}"
 S="$(mktemp -d "${TMPDIR:-/tmp}/check-backdrop.XXXXXX")"
 # Both ports must be free, and "free" means nothing accepts the connection

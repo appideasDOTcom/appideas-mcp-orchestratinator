@@ -111,6 +111,22 @@ person could have pressed. **Read `disabled` off the button before clicking
 it**, as part of the probe, and treat a disabled button you expected to
 press as the finding.
 
+**Removing a control from the page breaks the checks that drive it, and
+none of them runs until the release.** The settings round (2026-11-19)
+took the header's auto-refresh switch out; `check-select.mjs` switched the
+board's poll off with `#autorefresh` and would have thrown at the release
+run. Before removing or renaming an id, class or global the page has:
+`command grep -rn -e '<id>' .claude/skills test`. Fix every hit in the
+same change.
+
+**A new check's ports: read the ones in use first.** The defaults collide
+silently with another check's only when both run, and the runners refuse a
+taken port, so the clash shows up as a refusal at a bad time.
+`command grep -rhoe 'PORT:-89[0-9]*' -e 'CDP:-9[0-9]*' .claude/skills/*/*.sh | sort | uniq -c`
+lists them; the release runner hands out 8941+ and 9311+ in its own order
+(run-release-pages.sh). A check that needs a second board takes it at
+PORT+40 (run-check-settings.sh).
+
 ## A throwaway server
 
 Never seed `:8787`. Its pill counts are a deliberate demo fixture the operator
@@ -126,7 +142,42 @@ node <your-seed>.mjs        # only now
 
 Seed scripts live in the scratchpad, which is **outside the repo**, so
 `import Database from 'better-sqlite3'` will not resolve. Point the resolver at
-the repo instead of moving the file into it:
+the repo instead of moving the file into it.
+
+**Every script here that opens better-sqlite3, and every runner that starts
+the server, takes the Node floor first.** better-sqlite3 13 is a Node-API 10
+binary, and this machine's default `node` (20.20.1) segfaults loading it:
+exit 139, no words, so a seed says nothing and a server whose output goes
+to `server.log` reads as a dead port. The `run-check-*.sh` runners and
+`shoot-readme.sh` source `scripts/node-floor.sh`, which finds a suitable
+Node; the seeds and checks import `src/node-floor.js`, which says the floor
+in words. A new one needs the same line. For a runner, after `set -u`:
+
+```bash
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
+```
+
+and for a script, after its imports and before the `require`:
+
+```js
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
+```
+
+**A script that plays a host by hand sends the board's protocol number.**
+Since 0.12.5 the board refuses a registration without it, and a refused
+stand-in looks exactly like a page fault: the desk never comes live, the
+check waits out a selector, and the 409 is in nobody's output.
+`board-protocol.mjs` reads the number off the board the script is pointed
+at; its header has the line to copy. `answering-host.mjs`,
+`seed-folders.mjs`, `seed-form.mjs`, `landing-seed.mjs`,
+`nomenclature-seed.mjs` and `check-update.mjs` all register, and all six
+went two days without it. `seed-desk.mjs` writes its host row in SQL and
+was never refused, which is why the checks built on it alone stayed green.
+
+The `catch` is for a copy holding an older commit's `src/`, which has no
+such file. A seed kept in the scratchpad has no relative path to it: run it
+after `. scripts/node-floor.sh`, or it is the silent 139 again.
+`run-check-pop-foot.sh` from a Node 20 shell is the proof (PASS, 2026-11-08).
 
 ```js
 import { createRequire } from 'node:module';
@@ -234,6 +285,11 @@ round 2): hidden at start, shown with `display: block` the instant the row
 is ticked, hidden again when a pick replaces it, never shown for the multi.
 
 ### seed-archive.mjs and check-archive.mjs — archive on both views
+
+`PORT=8950 CDP=9290 run-check-archive.sh <dir>` is the whole fixture in one
+command (2026-11-19). The check prints its steps and asserts little, so the
+runner calls it PASS when it reaches its last line ("shots in …"); a probe
+made to throw reads FAIL, exit 3.
 
 Issues #21 and #6 (2026-11-02): archive is the one way to put a floor away,
 the pill lists at the bottom of both views are the only place a put-away
@@ -767,7 +823,7 @@ and nothing for the two it can't reach. A message landing after the page
 drew stays unread. Outside selection, the bell, the card, its Hide desk and
 the backlog dialog still work. The dialog is opened from a pill **newer than
 the board half's /api/state copy** (Decided 5). The board half's poll is
-switched off with the `#autorefresh` box first, so the pill is newer for
+switched off first (`setAutoRefresh(false)`, the Settings row's setter since the header switch went, 2026-11-19), so the pill is newer for
 certain and not by luck: once with nothing in the copy, once with an older
 backlog of one against a pill reading two. Two red-then-green lessons came
 out of it:
@@ -1224,6 +1280,37 @@ Four things it taught:
   so the patch writes the property wherever it differs from the form. A
   bound folder's agent arriving under typed text is the case.
 
+### check-release.mjs — Take a desk on a folder bound to another instance (task 292)
+
+```bash
+PORT=8961 CDP=9291 .claude/skills/verify-ui-change/run-check-release.sh "$PWD"
+# … PASS · 21 of 21        (about twenty seconds)
+```
+
+[`run-check-release.sh`](run-check-release.sh) serves any directory with
+`answering-host.mjs` twice: `testbox`, which can release and has a folder
+dialog, and `oldbox` (`--no-release --no-dialog`), a host from before
+releases. The folder is the fixture's `mars-elsewhere`, bound to another
+address. It drives the host's own dialog choosing that folder, what the
+form says and fills, a floor typed by name reaching the note, a release
+the host refuses (the wait said in the dialog, then the host's words, the
+dialog still open), one it makes (the dialog gone, the desk hosted, the
+page on the desk), what the host was sent, and the old host's disabled
+button. `answering-host.mjs` answers a `bind` only when the answers file
+has a `bind` key (`mode: "bound" | "refused"`, `delay`, `error`), so
+every older check sees the host it always saw.
+
+Its red was run in a copy holding 67aaac2's `app.js` over the tree's server
+(`copy-repo.sh`, then `git show 67aaac2:src/ui/app.js` into it): the check
+stops at its first wait, because that page says "not this board. Change it
+there." and never the release line.
+
+Two things it cost a run each to learn. **Take a desk is the floor's
+button**: its click is handled in `floor.js`, and on the board view
+`#take-desk` does nothing, so the check opens the floor. And **with two
+hosts the dialog opens on whichever is first**: the check picks the host in
+`#desk-host` the way a person would before it reads anything.
+
 ### check-poll-timeout.mjs and hold-proxy.mjs — a hung poll must not freeze the page
 
 Task 264 (2026-11-03). [`hold-proxy.mjs`](hold-proxy.mjs) stands in for a
@@ -1452,6 +1539,100 @@ check-popout's "send row in the window" step now measures `.p-compose`,
 not `.p-foot`. When wide, the foot is in the left column and no longer
 stands for the send row.
 
+### check-floor-windows.mjs — a tab per floor (task 315, 2026-11-19)
+
+```bash
+PORT=8948 CDP=9288 .claude/skills/verify-ui-change/run-check-floor-windows.sh "$PWD"   # about twenty seconds
+```
+
+On `seed-archive.mjs`'s three floors: the title and the address on the
+building, after a plain click, after another tab's stored pick and a
+reload, on the board view and after a reload of it, and after the floor is
+archived under the tab; the ⧉, ⌘-click and middle-click each opening a new
+tab on the right floor while the tab pressed in stays put; a bare address
+still meaning the stored choice. Every press is real input: `press()`
+takes `{ modifiers }` (CDP's mask: Alt 1, Ctrl 2, ⌘ 4, Shift 8) and
+`{ button: 'middle' }` for this check, because a browser follows a link
+elsewhere and opens a window only on real input. New tabs are found with
+`targets()` before and after, not by a window name, since the ⧉ uses
+none. Whether a new page is a tab or a window of its own is read with
+`page.windowId()` (CDP's `Browser.getWindowForTarget`): a tab shares the
+opener's id, a popup has its own. The app's case stands up its user-agent
+token with `Object.defineProperty(navigator, 'userAgent', …)`, which works
+because the page reads the agent at each use.
+`mutants-floor-windows.page.json` is the list: sixteen since the Open new
+floors setting (the first ten all red with the control at 23 of 23, load
+91, 2026-11-19). One red on the first run was the
+check's own: the all-floors chip's parent is the picker, which holds every
+⧉, so "has a ⧉ beside it" reads `.closest('.fchip')`.
+
+A plain click riding to a floor and a plain click *following the link* to
+it end on the same floor; only `window.__orchMark` surviving tells them
+apart. A check of anything that is now a link needs that row.
+
+**A tab drawn before its first `/api/floor`** (costmo, 2026-11-19: in the
+app the ⧉ opened all floors). The check's suite never had a meeting room
+open, and his board did: the room answered the new tab's `who` with
+`here`, that redraw ran on an empty payload, and render() dropped the
+floor it could not find. The row fails the tab's first poll instead,
+which draws on an empty payload the same way, and the mutant (the
+`floorRead` guard taken out) is the list's seventeenth, red with the
+control at 34 of 34. `page.beforeLoad(js)` in drive.mjs
+(`Page.addScriptToEvaluateOnNewDocument`) is how a row gets code in ahead
+of the page's own: here a `fetch` that fails once.
+
+### check-attention.mjs — what each window reports to the desktop app (2026-11-19)
+
+```bash
+PORT=8949 CDP=9289 .claude/skills/verify-ui-change/run-check-attention.sh "$PWD"   # about forty seconds
+```
+
+The app's tab pulse and badge, tray bell, Dock badge and per-window nudge
+all come from `window.orchAttention` (contract `orchestratinator.attention`
+on orchestratinator-desktop), which the app's main process calls with
+executeJavaScript. On `seed-select.mjs`'s floor and host, it drives the
+same calls: `get()` in two floor tabs, `next(v)` staying quiet with
+nothing changed and answering when mail lands on another floor, a
+permission prompt read as asking on its own floor and in the board's
+values only elsewhere, `nudgeAll()` from a floor tab (the host's work log
+says who was typed into, and the floor's bell rang) and from a meeting
+room whose To chips are narrowed (all participants with mail, not the
+chips'), a popout and a room taking their desks out of the floor tab's
+count, and a board-view tab that reports in the app and polls nothing in
+a browser. Seeded rows go into the scratch database directly (the
+check takes its path), which the board reads on its next poll.
+`mutants-attention.page.json` is the list (ten, all red with the control at
+27 of 27, load 8-20, 2026-11-19); the decisions' own rows are in
+`test:floor` ("window attention") with `mutants-attention.suite.json` in
+**mutate-in-a-copy** (six, all red, control 1,529 ✓). A count that grows as rows are added (the board's
+nudges) is read from another window's report, never written as a number:
+the first cut hard-coded 2 and went red when the room row added gil's mail.
+
+### check-settings.mjs — every setting behind ⚙, and the app's pane (2026-11-19)
+
+```bash
+PORT=8955 CDP=9295 .claude/skills/verify-ui-change/run-check-settings.sh "$PWD"   # about forty seconds
+```
+
+Two scratch boards, no seed: one as Docker runs it, and one on PORT+40
+started with `ORCH_BOARD_SUPERVISOR=app`, as the app runs its own. It
+reads the header (no auto-refresh switch, ↻ and ⚙ kept), the ⚙ dialog's
+sections and paragraphs, auto-refresh turned off and on in one tab
+stopping and starting the poll of another (counted by a `fetch` wrapper
+put in with `beforeLoad`), `?settings=1` as a page (title, nothing of the
+floor polled, its own address, Export and Restore through its own
+handlers, a chosen file surviving its polls), and under the app's
+user-agent token: ⚙ opening a `?settings=1` window and no dialog, the
+labels-only copy with the restore warning kept, the pane's change
+stopping an app window's poll, and the app's own board with no Updates
+anywhere. Two lessons from writing it: an earlier tab at the same address
+hides a new one from a filter of "addresses not there before", so it
+counts them; and `textContent` across a `<div>` break holds a newline,
+which `.` in a regex does not cross. `mutants-settings.page.json` is the
+list (thirteen); the server's rows are `test:update`'s and the stored
+value `test:floor`'s, with `mutants-settings.suite.json` in
+**mutate-in-a-copy**.
+
 ## Driving the page
 
 **Use `drive.mjs`, in this directory.** Headless Chrome over CDP, no
@@ -1470,6 +1651,12 @@ console.log(await page.probe('probe.js'));
 await page.shot('out.png', '#floor-pick');            // a PNG of one element
 await page.close();
 ```
+
+`page.beforeLoad(js)` runs `js` in every document the page loads after it,
+ahead of the page's own scripts (`Page.addScriptToEvaluateOnNewDocument`).
+It is how a row fails the first poll (check-floor-windows), or stands up
+the desktop app's user-agent token before load (check-attention); call it,
+then `page.goto()`.
 
 It exists because the same thirty lines were written from scratch six times in
 one session. Four things are built into it, and they are the four that have
@@ -1584,8 +1771,14 @@ whole question.
 | a meeting's box on the floor | `svg.room .meetBox[data-meeting="<room id>"]`: `.meetFrame` (the edge), `.meetLabel` ("In a meeting", `data-act="meet-raise"`), `.meetEnd` (`data-act="meet-end"`, `aria-disabled`). Read a placard's words from `.meetTabText`'s own text nodes: its `<title>` is a sibling in the same group |
 | Take a desk's floor and button | `#dlg #desk-channel` (its `value`), `#dlg [data-do="desk-take"]` (its words: Take desk / Move to <floor> / Bring onto the floor); wait for `#dlg [data-do="desk-pick"]` enabled before choosing a folder |
 
-Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true}))` — the
-handler is delegated and reads the event target.
+Floor pills need `dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}))` — the
+handler is delegated and reads the event target. **Say `cancelable: true`.**
+A MouseEvent is not cancelable unless it is told so, a person's click
+always is, and on an event that is not, `preventDefault()` does nothing.
+Since the floor chips became links (task 315) that is the difference
+between riding to a floor and following the link: check-select's dispatched
+click on a chip reloaded the page and lost the room's selection, while the
+page was right and a real press was green. `page.click()` says it now.
 
 `app.js` is a classic script, so its top-level functions are already on `window`;
 `floor.js` is an IIFE and exposes only what it explicitly assigns. That is the

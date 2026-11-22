@@ -33,6 +33,10 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { open } from './drive.mjs';
+// The Node floor in words, before better-sqlite3 is opened: a Node-API 9 node
+// segfaults on it with none (src/node-floor.js). A copy holding an older src/
+// has no such file, and that is not this script's fault to report.
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
 
 const base = process.argv[2] ?? 'http://localhost:8905';
 const out = process.argv[3] ?? tmpdir();
@@ -297,7 +301,9 @@ await page.waitFor("!!document.querySelector('svg.room[data-channel=\"alpha\"] .
 // a pill that arrived between the two used to open nothing (the same at
 // 39d5e4b). The board half's own poll is switched off first, so the pill is
 // certainly newer than its copy when it is clicked, rather than by luck.
-await page.evalJs(`(() => { const c = document.getElementById('autorefresh'); c.checked = false; c.dispatchEvent(new Event('change')); return true; })()`);
+// Auto-refresh is a row in Settings since 2026-11-19, not a header switch:
+// set through the page's own setter, which keeps it and stops this poll.
+await page.evalJs(`(() => { setAutoRefresh(false); return true; })()`);
 const lateId = db.prepare(`INSERT INTO messages (channel, from_agent, to_agent, body) VALUES ('alpha', 'ann', 'ed', '"one more"')`).run().lastInsertRowid;
 await page.waitFor("!!document.querySelector('.desk[data-agent=\"ed\"] .pill[data-act=\"unread\"]')");
 const stateAtClick = Number(await page.evalJs("findAgent('alpha', 'ed')?.unread ?? 0"));
@@ -318,7 +324,7 @@ await page.waitFor("!!document.querySelector('#dlg [data-do=\"advance\"]')");
 eq(Number(await page.evalJs(`document.querySelector('#dlg [data-do="advance"]').dataset.upTo`)), Number(newerId),
   'the dialog is read again first and marks up to the message only the floor had drawn');
 await page.click('#dlg [data-do="cancel"]');
-await page.evalJs(`(() => { const c = document.getElementById('autorefresh'); c.checked = true; c.dispatchEvent(new Event('change')); return true; })()`);
+await page.evalJs(`(() => { setAutoRefresh(true); return true; })()`);
 
 // A nudge still in line when its room has closed, and the room selected
 // again meanwhile. The first cut's rooms signature read "selecting, nothing

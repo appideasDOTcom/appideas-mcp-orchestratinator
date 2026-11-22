@@ -17,7 +17,7 @@ than believe.
 ## Run it
 
 ```
-node .claude/skills/verify-a-backup/verify-backup-file.mjs <backup.json> [port]
+. scripts/node-floor.sh && node .claude/skills/verify-a-backup/verify-backup-file.mjs <backup.json> [port]
 ```
 
 It spawns `src/server.js` from this working tree with a database in a temp
@@ -56,6 +56,25 @@ no home for. For the 0.9.0 production file that was `agents.hook_cursor`,
 obsolete cursor state, genuinely fine to drop. The next file's ignored column
 may not be fine, which is why the script surfaces them and refuses to rank
 them.
+
+## One line that reads red on a good file (2026-11-08)
+
+`✗ all 78 agents are known (board: 63)`, on an export taken from the live
+board that minute. Every row had loaded and every table matched value for
+value on the way back out, `agents` among them. The line compares the file's
+agent rows with `/api/state`'s `totals.agents + totals.retired_agents`, and
+the live board's own `/api/state` read the same 63 (43 and 20) over the same
+78 rows. So the restored board and the live one agree, and it is the line
+that is behind how the board counts. Which 15 the totals leave out was not
+found; it is not archived floors alone (52 agents sit on 14 of those). Until
+somebody finds it, read this line against the live board's totals before
+reading it as loss, and take the value-for-value block as the verdict on
+rows.
+
+Run it as `. scripts/node-floor.sh && node …/verify-backup-file.mjs <file>`:
+the server it starts needs a Node with Node-API 10, and on this machine's
+default `node` the script now says so instead of starting a server that
+dies unseen (it started one with `stdio: 'ignore'`).
 
 ## What a FAIL means
 

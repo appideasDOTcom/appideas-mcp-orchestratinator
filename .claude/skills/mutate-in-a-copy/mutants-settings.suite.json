@@ -1,0 +1,14 @@
+[
+ ["the app-run switch is ignored", "update", "src/updates.js",
+  "  const appRun = (env.ORCH_BOARD_SUPERVISOR ?? '').trim() === 'app';",
+  "  const appRun = false;"],
+ ["an app-run board still draws its updates", "update", "src/updates.js",
+  "    if (appRun) return null;\n    const s = settings();",
+  "    const s = settings();"],
+ ["an app-run board's routes still act", "update", "src/updates.js",
+  "    r.use((_req, res, next) => (appRun ? res.status(409).json({ error: APP_RUN_WORDS, update: null }) : next()));\n",
+  ""],
+ ["only \"on\" is on, so a fresh browser does not poll", "floor", "src/ui/app.js",
+  "function autoRefreshOn(stored) { return stored !== 'off'; }",
+  "function autoRefreshOn(stored) { return stored === 'on'; }"]
+]

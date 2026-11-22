@@ -1,0 +1,124 @@
+#!/bin/bash
+# A real window, our board and our host, all three from the tree, none of
+# them the operator's: the rig that showed the automatic reconnect and a
+# meeting room's notices working end to end (2026-11-19). SKILL.md, "A board
+# that goes away: the reconnect and a room's notices".
+#
+#   probe-host.sh up <probe dir> [port]  # scratch board (default 8931), the dir bound to it
+#                                        # in local scope as probe-floor/probe, and a dev host
+#                                        # on the probe socket (-L probe, session p) rooted at
+#                                        # the dir alone
+#   probe-host.sh window                 # the real window in that dir, its trust question
+#                                        # answered, and its MCP session on the board waited for:
+#                                        # without one an outage has nothing to take away
+#   probe-host.sh outage <seconds>       # stop the board, wait, start it again, then watch up
+#                                        # to 90 s for the window's MCP session and the host's
+#                                        # reconnect line. 5 s healed by itself on 2.1.328; 90 s
+#                                        # did not, and the host reconnected it 25 s after.
+#   probe-host.sh room                   # open a meeting room with the probe desk, end it, and
+#                                        # print what the window was sent and the floor filed
+#   probe-host.sh down                   # stop the host, the board and the window, remove the binding
+#
+# Refuses 8787 and 6724 (the live Docker board and the app's), and any
+# port something already answers on. The host's id is its own
+# (probe-rig-host), never the hostname, which is the live host's row.
+set -u
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+. "$REPO/scripts/node-floor.sh" >/dev/null || exit 2
+ST="${PROBE_HOST_STATE:-${TMPDIR:-/tmp}/probe-host}"
+mkdir -p "$ST"
+J='content-type: application/json'
+val() { cat "$ST/$1" 2>/dev/null; }
+sessions() { curl -s -m 2 "localhost:$(val port)/health" | python3 -c "import sys,json; print(json.load(sys.stdin)['sessions'])" 2>/dev/null; }
+board_up() {
+  # exec, and every stream redirected on the subshell itself: a subshell
+  # left holding the caller's stdout kept `probe-host.sh up | tail` open for
+  # as long as the board ran (the first cut did).
+  ( cd "$REPO" && PORT="$(val port)" DB_PATH="$ST/board.db" ORCH_AUTH_MODE=off exec node src/server.js ) >> "$ST/board.log" 2>&1 < /dev/null &
+  echo $! > "$ST/board.pid"
+  for _ in $(seq 1 40); do curl -s -m 1 "localhost:$(val port)/health" >/dev/null && return 0; sleep 0.25; done
+  echo "the board did not come up; $ST/board.log"; return 1
+}
+board_down() { [ -s "$ST/board.pid" ] && kill "$(val board.pid)" 2>/dev/null; rm -f "$ST/board.pid"; }
+
+case "${1:-}" in
+  up)
+    DIR="$(cd "${2:?probe dir}" && pwd)"; PORT="${3:-8931}"
+    case "$PORT" in 8787|6724) echo "refusing: $PORT is a live board"; exit 2;; esac
+    if curl -s -m 1 -o /dev/null "localhost:$PORT/health"; then echo "refusing: something answers on $PORT"; exit 2; fi
+    echo "$DIR" > "$ST/dir"; echo "$PORT" > "$ST/port"
+    printf '#!/bin/sh\nexec tmux -L probe "$@"\n' > "$ST/tmuxw"; chmod +x "$ST/tmuxw"
+    board_up || exit 1
+    ( cd "$DIR" && claude mcp add -s local --transport http orchestratinator "http://127.0.0.1:$PORT/mcp" \
+        -H "X-Channel: probe-floor" -H "X-Agent: probe" >/dev/null 2>&1 ) || { echo "claude mcp add failed"; exit 1; }
+    ( cd "$REPO" && ORCH_HOST_CONFIG=/nonexistent/host.json ORCH_URL="http://127.0.0.1:$PORT" \
+        ORCH_HOST_ID=probe-rig-host ORCH_HOST_NAME=probe-rig ORCH_HOST_ROOTS="$DIR" \
+        ORCH_TMUX="$ST/tmuxw" ORCH_TMUX_SESSION=p exec node host/index.js ) >> "$ST/host.log" 2>&1 < /dev/null &
+    echo $! > "$ST/host.pid"
+    sleep 3
+    grep -q "1 desk" "$ST/host.log" && echo "up: board :$PORT, $DIR bound as probe-floor/probe, host probe-rig-host (logs in $ST)" \
+      || { echo "the host did not find the desk:"; tail -5 "$ST/host.log"; exit 1; }
+    ;;
+  window)
+    DIR="$(val dir)"; [ -n "$DIR" ] || { echo "run up first"; exit 2; }
+    "$ST/tmuxw" kill-server 2>/dev/null
+    # Not the agent's own environment: a window started from inside Claude
+    # Code inherits CLAUDECODE and the rest and reads as nested (SKILL.md).
+    # `exec claude`, never `claude; sleep 30`: the host matches a session to
+    # its pane by pid, and with a shell in between the pane's pid is the
+    # shell's. The host then reads the window as held outside the floor (an
+    # editor: window_id null, outside_pid set), and the board, rightly,
+    # asks for no reconnect and sends no notice. Measured the first time
+    # this script ran.
+    env $(env | grep -oE '^CLAUDE[^=]*' | sed 's/^/-u /') "$ST/tmuxw" new-session -d -s p -n probe -c "$DIR" -x 200 -y 50 'exec claude'
+    for _ in $(seq 1 30); do
+      P="$("$ST/tmuxw" capture-pane -p -t p:probe 2>/dev/null)"
+      if echo "$P" | grep -q "Yes, I trust this folder"; then "$ST/tmuxw" send-keys -t p:probe Down; sleep 0.4; "$ST/tmuxw" send-keys -t p:probe Enter; fi
+      if [ "$(sessions)" = "1" ]; then
+        HELD=$(curl -s -m 2 "localhost:$(val port)/api/floor" | python3 -c "
+import sys,json
+for c in json.load(sys.stdin)['channels']:
+  for d in c['desks']:
+    if d['agent'] == 'probe': print((d.get('hosted') or {}).get('held'))" 2>/dev/null)
+        [ "$HELD" = "floor" ] && { echo "window up, held by the floor, and its MCP session is on the board (sessions=1)"; exit 0; }
+      fi
+      sleep 2
+    done
+    echo "after 60 s: sessions=$(sessions), held=${HELD:-?} (want 1 and floor); the pane:"; "$ST/tmuxw" capture-pane -p -t p:probe | sed '/^\s*$/d' | tail -8; exit 1
+    ;;
+  outage)
+    SECS="${2:?seconds}"
+    [ "$(sessions)" = "1" ] || { echo "refusing: the window holds no MCP session (sessions=$(sessions)), so an outage takes nothing away; run window first"; exit 2; }
+    echo "before: sessions=$(sessions)"
+    board_down; echo "board stopped at $(date -u +%T)"; sleep "$SECS"
+    board_up || exit 1; echo "board back at $(date -u +%T)"
+    MARK=$(wc -l < "$ST/host.log")
+    for _ in $(seq 1 45); do
+      [ "$(sessions)" = "1" ] && break; sleep 2
+    done
+    echo "$(date -u +%T) sessions=$(sessions)"
+    tail -n +"$((MARK + 1))" "$ST/host.log" | grep -e "lost the board" -e "reconnect" || echo "(no reconnect by the host: the window came back by itself, or not at all)"
+    ;;
+  room)
+    "$ST/tmuxw" capture-pane -p -t p:probe >/dev/null 2>&1 || { echo "no probe window; run window first"; exit 2; }
+    R=$(curl -s -X POST "localhost:$(val port)/api/floor/meeting" -H "$J" -d '{"channel":"probe-floor","agents":["probe"]}')
+    ID=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['room']['id'])") || { echo "no room: $R"; exit 1; }
+    echo "room $ID opened at $(date -u +%T)"
+    for _ in $(seq 1 30); do "$ST/tmuxw" capture-pane -p -t p:probe | grep -q "Messages the operator sends" && break; sleep 2; done
+    sleep 6
+    curl -s -X POST "localhost:$(val port)/api/floor/meeting/end" -H "$J" -d "{\"id\":$ID,\"final\":true}" >/dev/null; echo "ended at $(date -u +%T)"
+    for _ in $(seq 1 30); do "$ST/tmuxw" capture-pane -p -t p:probe | grep -q "left the meeting room" && break; sleep 2; done
+    sleep 6
+    curl -s "localhost:$(val port)/api/floor/turns?channel=probe-floor&agent=probe&limit=10" | python3 -c "
+import sys,json
+for t in json.load(sys.stdin).get('rows',[])[-6:]: print(' ', t['role'], t.get('tool_name') or '', (t.get('text') or '')[:100])"
+    ;;
+  down)
+    [ -s "$ST/host.pid" ] && kill "$(val host.pid)" 2>/dev/null; rm -f "$ST/host.pid"
+    board_down
+    [ -s "$ST/dir" ] && ( cd "$(val dir)" && claude mcp remove -s local orchestratinator >/dev/null 2>&1 )
+    [ -x "$ST/tmuxw" ] && "$ST/tmuxw" kill-server 2>/dev/null
+    echo "down: host, board and window stopped, binding removed"
+    ;;
+  *) sed -n '2,24p' "$0"; exit 1;;
+esac

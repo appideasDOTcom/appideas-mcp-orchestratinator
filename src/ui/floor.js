@@ -49,6 +49,13 @@
      through an error event, which raises its own alert — this deadline is just
      what stops a silent one from turning for ever. */
   const ANSWER_SEND_MS = 25_000;
+  /* A desk's Sign in waits on a person in a browser on the host's machine. The
+     host gives the page 15 minutes (SIGNIN_TIMEOUT_MS in host/auth.js); past
+     that the box is the button again. A sign-in that failed says so in the
+     conversation in the host's words, so after SIGNIN_AGAIN_MS the button
+     stands beside the wait, to press again. */
+  const SIGNIN_WAIT_MS = 15 * 60_000;
+  const SIGNIN_AGAIN_MS = 20_000;
   /* Moving a conversation between apps is the host's work, not the POST's. It
      closes a tmux window and opens the editor, or opens a window and waits for
      Claude Code to come up — up to READY_TIMEOUT_MS (45s) on the host — and the
@@ -377,6 +384,8 @@
     roomsSig: null,      // last drawn room signature, so a tick that changes nothing redraws nothing
     pickSig: null,
     floorFilter: null,   // a channel name, or null for every floor stacked
+    floorTab: false,     // this page is a floor tab, not a popout or a meeting room: it keeps its floor in its address
+    floorNames: null,    // the floors in the building at the last draw, for the title in the board view
     panelFor: null,      // which desk the panel skeleton was built for
     renderedTurn: 0,     // highest turn id already in the panel
     stick: true,         // auto-scroll follows only while the reader is at the bottom
@@ -453,6 +462,8 @@
     // Meetings the floor's End meeting was pressed for, by room id, with
     // when: the placard reads "Ending…" until the desks are back.
     meetEnding: new Map(),
+    // Kept meetings this page has opened a room for already (keepHeld): once each.
+    heldTried: new Set(),
     fate: null,
     mem: null,
     lastDesk: null,      // the popout's desk as last read, for a header after it is gone
@@ -464,10 +475,16 @@
     // Answers on their way to a window, by desk (`channel|agent`): what the
     // prompt box shows a spinner for until the desk gains a turn.
     answering: new Map(),
+    // A desk's Sign in pressed, by `channel|agent`: when, so the box shows
+    // the browser waiting instead of the button (drawAlert).
+    signingIn: new Map(),
   };
 
   let floor = { channels: [], queue: [], totals: {}, cast: [] };
   let floorRead = false;   // an /api/floor has answered at least once (loadTurns)
+  // What this window reports to the desktop app (window attention, below):
+  // the report, its version and the next() calls waiting on a change.
+  const attn = { version: 0, sig: null, report: null, waiters: [], nudging: null };
 
   /* ---------- small helpers ---------- */
 
@@ -615,7 +632,7 @@
 
     const s = d.session ?? {};
     const where = d.hosted
-      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : `host ${d.hosted.host} offline`)
+      ? (d.hosted.live ? `hosted on ${d.hosted.host}` : d.hosted.refused ? `host ${d.hosted.host} refused` : `host ${d.hosted.host} offline`)
       : d.live ? 'reporting' : d.reporting ? 'away' : 'never reported';
     row('window', `${esc(s.window ?? d.hosted?.window ?? '—')} <span class="dp-dim">· ${esc(where)}</span>`);
     if (s.git_branch) row('branch', `<span class="dp-dim">${esc(s.git_branch)}</span>`);
@@ -1273,10 +1290,11 @@
     if (at < 0) return { text: s, files: [] };
     const listAt = at === 0 ? 0 : at + 2;
     const lines = s.slice(listAt + header.length + 1).replace(/\n+$/, '').split('\n');
-    if (!lines.length || !lines.every((l) => /^- \/\S/.test(l))) return { text: s, files: [] };
+    // A Windows host writes `C:\Users\…\.orchestratinator\uploads\…`.
+    if (!lines.length || !lines.every((l) => /^- (?:\/|[A-Za-z]:[\\/])\S/.test(l))) return { text: s, files: [] };
     const files = lines.map((l) => {
       const path = l.slice(2);
-      return { path, name: path.split('/').pop() || path };
+      return { path, name: path.split(/[\\/]/).pop() || path };
     });
     return { text: s.slice(0, at).replace(/\s+$/, ''), files };
   }
@@ -1344,7 +1362,7 @@
     const t = String(text ?? '').trim();
     if (!t) return true;
     const names = new Set(files.map((f) => f.name));
-    return t.split(/\r?\n/).every((l) => names.has(l.trim()) || names.has(l.trim().split('/').pop()));
+    return t.split(/\r?\n/).every((l) => names.has(l.trim()) || names.has(l.trim().split(/[\\/]/).pop()));
   }
 
   /**
@@ -2403,7 +2421,7 @@
     // installed the plugin", and only one of those is something to go fix.
     const role = el('text', { x: 0, y: 15, class: 'plateRole', 'text-anchor': 'middle' });
     role.textContent = d.hosted
-      ? `${d.agent} · ${d.hosted.live ? 'ready' : 'host offline'}`
+      ? `${d.agent} · ${d.hosted.live ? 'ready' : d.hosted.refused ? 'host refused' : 'host offline'}`
       : d.reporting ? d.agent : `${d.agent} · not reporting`;
     plate.appendChild(role);
     // The pad goes LAST, so it lies over the words rather than behind them.
@@ -2813,6 +2831,40 @@
     return cx < area.left || cx >= area.left + area.width || cy < area.top || cy >= area.top + area.height;
   }
 
+  /**
+   * A meeting kept with no window showing it (0.14.4): the desktop app quit
+   * with its room open, and the board kept it (`meetings_held` on
+   * /api/floor). costmo's rulings, 2026-11-20: a meeting does not disappear
+   * from its floor until it is ended; its desks stay in it while no window
+   * shows it; and in the app the floor opens its room again.
+   *
+   * So the floor writes such a desk into `ui.outs` as a room's window would,
+   * marked `kept` and with no window id, and it is boxed, its composer kept
+   * off the floor and its broadcasts in the room, as any desk out in a room.
+   * `held: true` keeps it there however long polls take; the payload is
+   * what takes it away. A desk a real window has (one that is not kept, and
+   * live within `ttl`) is that window's, and is left alone.
+   *
+   * Returns what to write (`set`), what to take out (`drop`: kept entries
+   * for a meeting no longer held, or for a desk no longer in it), and which
+   * held meetings no window shows at all (`open`), which the app's floor
+   * opens again.
+   */
+  function heldPlan(held, outs, now, ttl) {
+    const windowHas = (o) => !!o && !o.kept && (o.held || now - o.at < ttl);
+    const want = new Map();
+    const open = [];
+    for (const m of Array.isArray(held) ? held : []) {
+      const keys = (m.agents ?? []).map((a) => `${m.channel}|${a}`);
+      const free = keys.filter((k) => !windowHas(outs.get(k)));
+      for (const k of free) want.set(k, m.id);
+      if (keys.length && free.length === keys.length) open.push(m.id);
+    }
+    const set = [...want].map(([k, id]) => [k, { at: now, id: null, held: true, kept: true, meeting: id }]);
+    const drop = [...outs].filter(([k, o]) => o?.kept && want.get(k) !== o.meeting).map(([k]) => k);
+    return { set, drop, open };
+  }
+
   /* ---------- a meeting on the floor: the drawing ---------- */
 
   /** One meeting's box: the frame behind its desks, and the two placards on its top edge. */
@@ -2865,7 +2917,11 @@
    * the payload): the reminder of who still needs the plugin was fifteen
    * nameplates on the live board that nobody could type into.
    */
-  const deskEmpty = (d) => !d.live && !d.hosted?.live;
+  // A desk whose host was refused for its protocol is not empty: its host
+  // is running, and the desk says why it takes nothing (hostAway on the
+  // board, F4 of the 0.14.5 review). Hidden, the operator would see the
+  // desk vanish after a deploy with no word anywhere on the page.
+  const deskEmpty = (d) => !d.live && !d.hosted?.live && !d.hosted?.refused;
 
   /**
    * How a storey draws its desks: the ones on it, and the ones the operator
@@ -4034,7 +4090,7 @@
    * popout (issue #19). The detach button in the header brings the popout to
    * the front.
    */
-  function outShell(wrap, channel, agent, meeting = false) {
+  function outShell(wrap, channel, agent, meeting = false, keptId = null) {
     stashDraft();
     wrap.dataset.channel = channel;
     wrap.dataset.agent = agent;
@@ -4050,7 +4106,7 @@
       <div class="p-meta mono muted"></div>
       <div class="p-out">
         <p class="muted p-out-why"></p>
-        <button class="btn primary" data-act="bring-back" data-channel="${esc(channel)}" data-agent="${esc(agent)}"${meeting ? ' title="Take this desk out of the meeting room; the room carries on with the others"' : ''}>${meeting ? 'Bring back from the meeting room' : 'Bring chat back here'}</button>
+        ${keptId ? `<button class="btn primary" data-act="open-held" data-meeting="${esc(String(keptId))}" title="Open this meeting's room in a window of its own; its desks join it again">Open the meeting room</button>` : `<button class="btn primary" data-act="bring-back" data-channel="${esc(channel)}" data-agent="${esc(agent)}"${meeting ? ' title="Take this desk out of the meeting room; the room carries on with the others"' : ''}>${meeting ? 'Bring back from the meeting room' : 'Bring chat back here'}</button>`}
       </div>`;
   }
 
@@ -4350,7 +4406,7 @@
     const h = d.hosted;
     const compacting = compactingLine(s.compacting);
     const presence = h
-      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : `host ${h.host} offline`)
+      ? (h.live ? `on ${h.host}${compacting ? ` · ${compacting}` : h.state === 'working' ? ' · working' : ''}` : h.refused ? `host ${h.host} refused` : `host ${h.host} offline`)
       : d.live ? 'live' : d.reporting ? 'away' : 'not reporting';
     const models = modelLine(s);
     return `${s.window ?? h?.window ?? 'no window seen'}${s.git_branch ? ` · ${s.git_branch}` : ''}${models ? ` · ${models}` : ''}` +
@@ -4448,20 +4504,28 @@
     // way back. The floor holds no stream for it and draws no composer
     // (issue #19; #44 Decided 3).
     if (isOut(channel, agent)) {
-      const forOut = `${channel}|${agent}|out|${inMeeting ? 'meeting' : 'popout'}`;
+      // A meeting kept with no window (0.14.4): the desk is still in it, and
+      // the way to it is its room, opened again (costmo: "Open the meeting
+      // room" in place of a message box). Bring back asks a window, and
+      // there is none to ask.
+      const kept = !!inMeeting && !!ui.outs.get(outKey(channel, agent))?.kept;
+      const forOut = `${channel}|${agent}|out|${inMeeting ? (kept ? `kept:${inMeeting}` : 'meeting') : 'popout'}`;
       if (ui.panelFor !== forOut) {
         stopReading();
         closeStream();
         closePromptMenu();
-        outShell(wrap, channel, agent, !!inMeeting);
+        outShell(wrap, channel, agent, !!inMeeting, kept ? inMeeting : null);
         ui.panelFor = forOut;
       }
       wrap.classList.remove('hidden');
       wrap.querySelector('.p-persona').textContent = d.persona;
       wrap.querySelector('.p-meta').textContent = panelMeta(d);
-      wrap.querySelector('.p-out-why').textContent = inMeeting
+      wrap.querySelector('.p-out-why').textContent = kept
+        ? `${d.persona} is in a meeting that is still on, with no window open for it. Open the meeting room to talk to it there, or end the meeting from its box on the floor.`
+        : inMeeting
         ? `${d.persona} is in a meeting room. Its chat is there, in one transcript with the room\u2019s other desks; the desk on the floor works as it always does.`
         : `${d.persona}\u2019s chat is in a window of its own. Everything in the chat works there; the desk on the floor works as it always does.`;
+      if (kept) return;
       // One agent can be in several rooms at once, each a session of its
       // own, and Bring back takes it out of all of them.
       const back = wrap.querySelector('[data-act="bring-back"]');
@@ -4558,15 +4622,22 @@
     // prompt, so the board refuses it (askingWhy, src/floor.js), and the box
     // says so before Send is pressed. The answer is the box above.
     const asking = canChat && d.nudge?.code === 'asking';
+    // Claude Code signed out on the desk's host: refused by the board in the
+    // same words (signedOutWhy), and the Sign in box is above.
+    const signedOut = canChat && d.nudge?.code === 'signed_out';
     $('p-text').placeholder = asking
       ? `${d.persona} is asking something — answer it above, then type here…`
+      : signedOut
+      ? `Claude Code is signed out on ${d.signin?.host ?? 'this desk\u2019s machine'} — sign in above, then type here…`
       : canChat
       ? `Message ${d.persona}…`
       : held
       ? `${d.persona}’s conversation is open in your editor…`
+      : h?.refused
+      ? `${d.persona}’s host was refused by this board, so nothing can be sent…`
       : `${d.persona}’s machine isn’t reachable right now…`;
-    wrap.querySelector('[data-act="send"]').disabled = !canChat || asking;
-    gateAttach(canChat && !asking);
+    wrap.querySelector('[data-act="send"]').disabled = !canChat || asking || signedOut;
+    gateAttach(canChat && !asking && !signedOut);
     drawAttach();
     // Gated with Send, not with the stop sign: a prompt is something to send, so
     // offering the library for a box that cannot deliver is the same drift the
@@ -4785,6 +4856,11 @@
       ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the link below — one app holds a conversation at a time.`
       : canChat
       ? `A turn in <b class="mono">${esc(h.window ?? agent)}</b> on ${esc(h.host)}. Enter sends, Shift+Enter for a new line.`
+      // A host refused for its protocol is running, so "start it" is the
+      // wrong remedy: the board's own words say what is wrong and what to do
+      // (hostAway; F4 of the 0.14.5 review, seen on the rig at C, task 336).
+      : h?.refused
+        ? esc(h.refused)
       : h
         ? `The host for this desk (${esc(h.host)}) is offline, so nothing sent here can reach it. Start it on that machine and this works again.`
         // Hosts look for a newly bound repo on their own — before each
@@ -4930,6 +5006,32 @@
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
           `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.startup ? `startup:${req.request_id}` : ''}`;
+    // Claude Code signed out on the desk's host (d.signin, src/floor.js):
+    // the window cannot answer, so the box says so and offers Sign in, which
+    // has the host run Claude Code's own sign-in (costmo, 2026-11-19). A
+    // prompt the window is showing outranks it: that is answered first.
+    if (canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {
+      const si = d.signin;
+      const pressed = ui.signingIn.get(answerKey);
+      if (pressed && Date.now() - pressed > SIGNIN_WAIT_MS) ui.signingIn.delete(answerKey);
+      const waiting = ui.signingIn.has(answerKey);
+      // After a while the button is back beside the spinner: a sign-in that
+      // failed says so in the conversation, and the remedy is pressing again.
+      const again = waiting && Date.now() - pressed > SIGNIN_AGAIN_MS;
+      const sig = `signin|${si.ok}|${si.reason ?? ''}|${si.host}|${waiting}|${again}`;
+      if (alertSlot.dataset.sig !== sig) {
+        alertSlot.dataset.sig = sig;
+        const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok ? '' : ' disabled'} title="Claude Code\u2019s own sign-in, run on ${esc(si.host)}: the browser opens there">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
+        alertSlot.innerHTML = `<div class="p-alert p-alert-ask p-signin">
+             <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 the window cannot answer until it is signed in again.</div>
+             ${waiting ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>finish signing in, in the browser that opened on ${esc(si.host)}\u2026</div>` : ''}
+             ${!waiting || again ? `<div class="p-decide">${button}</div>` : ''}
+             ${si.ok ? '' : `<div class="p-unknown-why">${esc(si.reason ?? '')}</div>`}
+           </div>`;
+      }
+      return;
+    }
+    ui.signingIn.delete(answerKey);
     if (alertSlot.dataset.sig !== alertSig) {
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
@@ -5046,7 +5148,10 @@
    * the window saying "this is in the conversation", and that is the only
    * thing that should retire the "sending" state.
    */
-  const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+  // Backslashes as slashes too, on both sides of every comparison: a Windows
+  // host types an attachment's path as `…\<id>\<name>`, and a pending
+  // message of files alone is matched by `<id>/<name>` (attachMatch).
+  const squash = (t) => String(t ?? '').replace(/\s+/g, ' ').replace(/\\/g, '/').trim();
 
   /* ---------- chat controls: what the page decides ---------- */
   // Pure, and lifted into test/floor.mjs by the two markers around this
@@ -5061,6 +5166,7 @@
     { name: 'model', args: 'name', hint: 'change the model — saved as the default for new sessions' },
     { name: 'effort', args: 'level', hint: 'change the effort level — saved as the default for new sessions' },
     { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools' },
+    { name: 'mcp', args: '', hint: 'reconnect this desk\u2019s tools to the board' },
   ];
   const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
   /** The models the floor offers by name; the name goes to the window's own
@@ -5283,6 +5389,113 @@
     if (!ui.open) return null;
     const d = floor.channels.find((c) => c.channel === ui.open.channel)?.desks.find((x) => x.agent === ui.open.agent);
     return d?.hosted?.session_id ?? null;
+  }
+
+  /* ---------- floor windows: what the page decides ---------- */
+  // Several floors at once, each in a tab or window of its own (costmo,
+  // 2026-11-19, task 315; the desktop app opens each as a window or a macOS
+  // tab of its own). Pure, and lifted into test/floor.mjs by this marker and
+  // the popouts' below it.
+  //
+  // The floor a tab stands on is in its address, `?floor=<channel>`, because
+  // the only other place it was kept is localStorage, which every tab shares:
+  // a reload, or a second tab, landed on whatever floor was picked last
+  // anywhere. `?floor=` with nothing after it is all floors (the building),
+  // so a window can be opened on the building whatever was picked last. A
+  // bare address still means the stored choice, which is still written, so
+  // a fresh open lands where the operator last was. `view=board` is kept too,
+  // since the view is the same shared slot. The desktop app relies on these
+  // forms (contract orchestratinator.consumed, dashboard.floor).
+
+  /** What a floor tab's address says: `floor` is a channel, null for all floors, undefined when it does not say; `view` likewise. */
+  function addressOf(search) {
+    const q = new URLSearchParams(search ?? '');
+    const floor = q.has('floor') ? (q.get('floor') || null) : undefined;
+    const v = q.get('view');
+    // An address that names a floor is a floor view: that is what a chip's
+    // link and the ⧉ open, whatever the stored view.
+    const view = v === 'board' || v === 'floor' ? v : (floor === undefined ? undefined : 'floor');
+    return { floor, view };
+  }
+
+  /** The query string a floor tab keeps in its address, anything else in it left as it was. */
+  function addressFor(search, { floor, view }) {
+    const q = new URLSearchParams(search ?? '');
+    q.set('floor', floor ?? '');
+    if (view === 'board') q.set('view', 'board'); else q.delete('view');
+    return `?${q}`;
+  }
+
+  /** A floor chip's link: the floor, or '' / null for all floors. */
+  const floorHref = (floor) => `?${new URLSearchParams({ floor: floor ?? '' })}`;
+
+  /**
+   * The tab's title. The floor's name comes first, because a macOS tab, a
+   * Dock menu and a crowded browser strip cut a title from the end. One floor
+   * with no picker is that floor, not "All floors". Null before the first
+   * payload when nothing says which floor: index.html's title stands.
+   */
+  const TITLE_TAIL = 'orchestratinator';
+  function windowTitle({ view, floor, floors }) {
+    const head = view === 'board' ? 'Board'
+      : floor ? floor
+        : floors?.length === 1 ? floors[0]
+          : floors?.length ? 'All floors' : null;
+    return head ? `${head} · ${TITLE_TAIL}` : null;
+  }
+
+  /**
+   * Whether a click on a chip's link is the browser's own "open it elsewhere"
+   * (⌘ or Ctrl for a new tab, Shift for a new window, any button but the
+   * first), which the page leaves to the browser. Alt is not one: on a link
+   * it downloads, which is nothing anyone means here.
+   */
+  const opensElsewhere = (e) => (e.button ?? 0) !== 0 || !!e.metaKey || !!e.ctrlKey || !!e.shiftKey;
+
+  /*
+   * Where the ⧉ opens a floor (costmo, 2026-11-19: "Open new floors: In
+   * tabs | In windows", default In tabs). In a browser it is this browser's
+   * choice, kept in localStorage under FLOOR_OPEN_KEY and set in Settings:
+   * it is about this browser's windows, not the board's, and a row on the
+   * board would also reach the desktop app's pages. A web page cannot open a
+   * full browser window: "In windows" is window.open with a features string,
+   * which the browser opens as a window of its own with no tab strip (a
+   * popup), the size of the one it came from and set down from it.
+   *
+   * Inside the desktop app the app decides, from its own Preferences, and
+   * the page offers no copy of the choice: two settings would fight (a
+   * features string reaches the app as another disposition). The app says
+   * it is the app with a token of its own in the user agent (contract
+   * orchestratinator.consumed, dashboard.floor), not Electron's, which any
+   * Electron browser carries.
+   */
+  const FLOOR_OPEN_KEY = 'orch.floorOpen';
+  const APP_UA = /\bOrchestratinatorDesktop\//;
+  /** 'tab' | 'window' in a browser, from what is stored; 'app' when the desktop app decides. */
+  function floorOpenMode(stored, ua) {
+    if (APP_UA.test(ua ?? '')) return 'app';
+    return stored === 'window' ? 'window' : 'tab';
+  }
+  /** The window.open features for a floor opened elsewhere: noopener always, and a window's place for 'window'. */
+  function floorOpenFeatures(mode, win, scr) {
+    if (mode !== 'window') return 'noopener';
+    const W = scr?.availWidth ?? 1280;
+    const H = scr?.availHeight ?? 800;
+    const L = scr?.availLeft ?? 0;
+    const Tp = scr?.availTop ?? 0;
+    const width = Math.max(480, Math.min(win?.outerWidth || 1200, W));
+    const height = Math.max(360, Math.min(win?.outerHeight || 800, H));
+    // Set down 24 px from the window it came from, the way a new window
+    // cascades, and kept wholly on the screen.
+    const left = Math.max(L, Math.min((win?.screenX ?? L) + 24, L + W - width));
+    const top = Math.max(Tp, Math.min((win?.screenY ?? Tp) + 24, Tp + H - height));
+    return `noopener,popup,width=${Math.round(width)},height=${Math.round(height)},left=${Math.round(left)},top=${Math.round(top)}`;
+  }
+  /** What the ⧉ says it does. */
+  function floorPopTitle(name, mode) {
+    return mode === 'window' ? `Open ${name} in a new window`
+      : mode === 'app' ? `Open ${name} in a new session`
+        : `Open ${name} in a new tab`;
   }
 
   /* ---------- popouts: what the page decides ---------- */
@@ -5911,6 +6124,105 @@
   }
 
   /* ---------- meeting rooms: the decisions end ---------- */
+
+  /* ---------- window attention: what the page decides ---------- */
+  // costmo, 2026-11-19: the desktop app pulses a tab or window blue when it
+  // has desks waiting for a nudge, amber when one is asking the operator
+  // something (amber wins), badges the count, colours its tray bell and
+  // badges the Dock from the whole board, and offers "nudge all" per window.
+  // The app draws all of that; what a window *has* is the page's, because
+  // only the page knows which desks it shows. Read by the app's main process
+  // through window.orchAttention (contract orchestratinator.consumed,
+  // dashboard.attention): the board's pages have no preload, on purpose, so
+  // main asks with executeJavaScript and long-polls on next().
+  //
+  // Pure, and lifted into test/floor.mjs with the meeting rooms' section
+  // (it uses nudgeWaiting from there) by this marker and its end twin.
+
+  /**
+   * A desk asking the operator something the floor shows as a prompt: a
+   * permission menu, a question form (also a permission_request, as the hook
+   * files it), or a startup question before a session exists. An error turn
+   * raises `awaiting_kind: 'error'` too, and is not a prompt: nothing waits
+   * on an answer. `live` as the board counts "need you" (buildFloor). And
+   * a desk whose host's Claude Code is signed out (`signin`, src/floor.js):
+   * nothing it is asked can be answered until the operator presses its Sign
+   * in, so the tab pulses for it as for a question (costmo, 2026-11-19: the
+   * pulse is for anything waiting on him).
+   */
+  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup || !!d.signin);
+
+  /**
+   * A desk a "nudge all" sends to, which is what a pending nudge is: something
+   * waiting for it on the board (unread messages plus unclaimed tasks, the
+   * meeting room's rule, nudgeWaiting) and the board's verdict that it can be
+   * nudged (`nudge.ok`, the bell's). A desk with mail whose host is offline is
+   * not counted: the badge is the number a click would send, nothing more.
+   */
+  const deskNudgeable = (d) => nudgeWaiting(d) > 0 && !!d?.nudge?.ok;
+
+  /**
+   * The desks a window shows, as { channel, d }. `scope` is the window's:
+   *   { kind: 'floor', floor }        a floor tab (floor null: all floors),
+   *                                   over `here`, the floors not put away,
+   *                                   every desk on them, a desk out in a
+   *                                   popout or a meeting room included;
+   *   { kind: 'popout', channel, agent }  its desk;
+   *   { kind: 'meeting', channel, agents } its participants.
+   * A popout and a room look their desks up in `all`, so one whose floor was
+   * put away while it was out still reports.
+   *
+   * A desk out in a popout or a room is counted by that window *and* by its
+   * floor's tab (costmo, 2026-11-19: "If there's a nudge or pending
+   * permission/decision prompt, I want for the tab background to have the
+   * animated background color effect ... even if the agent is in a room on
+   * the floor"). The first cut left such a desk out of the floor tab so a
+   * tray list of windows counted it once, and the floor tab then stopped
+   * pulsing for exactly the desks he was talking to in a room. A count
+   * summed over windows can now hold a desk twice; the board's own count
+   * (the bell, the Dock) is unchanged and counts each desk once.
+   */
+  function attentionDesks({ here, all, scope }) {
+    const pick = (chs, keep) => chs.flatMap((c) => (c.desks ?? []).filter((d) => keep(c.channel, d)).map((d) => ({ channel: c.channel, d })));
+    if (scope?.kind === 'popout') return pick(all ?? [], (ch, d) => ch === scope.channel && d.agent === scope.agent);
+    if (scope?.kind === 'meeting') {
+      const set = new Set(scope.agents ?? []);
+      return pick(all ?? [], (ch, d) => ch === scope.channel && set.has(d.agent));
+    }
+    const floors = (here ?? []).filter((c) => !scope?.floor || c.channel === scope.floor);
+    return pick(floors, () => true);
+  }
+
+  /** What a list of desks adds up to: how many a nudge all would send to, and whether any is asking. */
+  const attentionOf = (list) => ({ nudges: list.filter((x) => deskNudgeable(x.d)).length, asking: list.some((x) => deskAsking(x.d)) });
+
+  /**
+   * The report the app reads: this window's, and the whole board's for the
+   * tray bell and the Dock (every floor not put away, desks out included,
+   * because the bell is about the board, not about windows). Before the
+   * first /api/floor answers nothing is known, and it says nothing is
+   * pending rather than guess from an empty payload (`read` false).
+   */
+  function attentionReport({ read, here, all, scope }) {
+    if (!read) return { nudges: 0, asking: false, board: { nudges: 0, asking: false } };
+    return {
+      ...attentionOf(attentionDesks({ here, all, scope })),
+      board: attentionOf(attentionDesks({ here, all, scope: { kind: 'floor', floor: null } })),
+    };
+  }
+
+  /**
+   * Who a window's "nudge all" types into, in the order the floor's own bulk
+   * Nudge uses (nudgePlan): desks with a window first, then the ones a nudge
+   * opens a window for, so a window still coming up keeps only itself
+   * waiting. Order within each kept as drawn.
+   */
+  function attentionNudges(list) {
+    const go = list.filter((x) => deskNudgeable(x.d)).map((x) => ({ channel: x.channel, agent: x.d.agent, persona: x.d.persona, opens: !!x.d.nudge?.opens }));
+    return [...go.filter((x) => !x.opens), ...go.filter((x) => x.opens)];
+  }
+
+  /* ---------- window attention: the decisions end ---------- */
 
   /* ---------- popouts: the windows ---------- */
 
@@ -6729,6 +7041,23 @@
     $('p-text')?.focus();
   }
 
+  /**
+   * The window going while its meeting is held (orchMeeting.hold): the
+   * desks are let go here, as a closing window lets them go, and nothing
+   * ends the record. The floor boxes them again from `meetings_held`.
+   */
+  function leaveHeld() {
+    const m = ui.meeting;
+    if (!m) return;
+    stashDraft();
+    for (const p of m.parts) {
+      say({ t: 'gone', channel: m.channel, agent: p.agent, id: POP_ID, open: false, rejoin: true });
+      p.release?.();
+      p.release = null;
+    }
+    closeStream();
+  }
+
   /** End the meeting: every desk back on the floor, the record kept for Resume, and the window closed. */
   function endMeeting({ closing = false } = {}) {
     // `closing` is pagehide: the window may be reloading, and then says
@@ -6768,7 +7097,10 @@
    * desk has them. Who hears is left as the chips have it: a send does not
    * put it back to everyone (meetingTo).
    */
-  async function sendMeeting(given = null, { nudge = false } = {}) {
+  // `all` (the desktop app's nudge all, window attention) is every
+  // participant with something waiting, whatever the chips choose. Returns
+  // the send's record, or nothing when nothing was sent.
+  async function sendMeeting(given = null, { nudge = false, all = false } = {}) {
     const m = ui.meeting;
     const box = $('p-text');
     const btn = document.querySelector('#floor-panel [data-act="send"]');
@@ -6785,7 +7117,7 @@
       : meetingMentions(text, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
     if (named.unknown.length) { flash(btn, `nobody here is @${named.unknown[0]}`); return; }
     if (named.to && !named.text.trim() && !att.ids.length) { flash(btn, 'nothing to send after the names'); return; }
-    const chosen = named.to ?? meetingTo(inRoom, m.to);
+    const chosen = all ? inRoom : named.to ?? meetingTo(inRoom, m.to);
     if (!chosen.length) { flash(btn, 'nobody is chosen to hear it'); return; }
     // The room's Nudge goes only to the chosen desks with something waiting
     // on the board (meetingNudgeChip), so the others are not sent to check
@@ -6834,6 +7166,7 @@
     render();
     box?.focus();
     tick();
+    return s;
   }
 
   /** A nudge struck on the floor for a participant: its pending line is drawn here, where its chat is. */
@@ -6859,7 +7192,9 @@
     else if (msg.t === 'focus' && part) {
       // From a floor tab that holds no handle to this window
       // (raiseMeeting): the place to come to, which a window may take
-      // itself to.
+      // itself to. In the desktop app the move is what raises it, since
+      // Electron ignores `focus()` (raiseMeeting says why), so the move is
+      // made even when the window already stands there.
       if (msg.at && msg.area) {
         try {
           const place = meetingRaisePlace(msg.at, { width: window.outerWidth, height: window.outerHeight }, msg.area);
@@ -7290,8 +7625,20 @@
    * to itself (`focus`, carrying the place). A window may move itself, and
    * whether it may raise itself is the browser's to decide, so that path is
    * the best this tab can do and not a promise.
+   *
+   * In the desktop app the move is the raise. Electron ignores a page's
+   * `focus()` on a window entirely: no restore, no focus, no event in the
+   * app's main (measured on Electron 45.2.3, 2026-11-19; a minimized room
+   * was moved while minimized and nothing showed). A page's `moveTo` does
+   * reach main, as `content-bounds-updated`, and the app restores, shows and
+   * focuses the window there. So this and the room's `focus` handler are the
+   * only places the page moves a window, and a page-driven move added for
+   * anything else would raise that window in the app.
    */
   function raiseMeeting(channel, key, at) {
+    // A meeting kept with no window: there is nothing to raise, so its room
+    // is opened (0.14.4). The click is the gesture a browser asks for.
+    if (meetingKept(channel, key)) { openHeldRoom(Number(key)); return; }
     const keys = [...ui.outs].filter(([k, o]) => k.startsWith(`${channel}|`) && meetBoxKey(o) === key && outsNow(new Map([[k, o]]), Date.now()).size).map(([k]) => k);
     if (!keys.length) return;
     const scr = window.screen;
@@ -7368,6 +7715,18 @@
   function endMeetingHere(channel, id) {
     const key = String(id);
     if (!key || meetEndingNow(key)) return;
+    // A meeting kept with no window (0.14.4) has no window to tell: the
+    // board ends it, as the room's End would, and the next payload no longer
+    // holds it, which is what takes the box away.
+    if (meetingKept(channel, key)) {
+      ui.meetEnding.set(key, Date.now());
+      render();
+      post('./api/floor/meeting/end', { id: Number(key), final: true })
+        .then(() => { for (const [k, o] of [...ui.outs]) if (o.kept && String(o.meeting) === key) ui.outs.delete(k); })
+        .catch(() => {})
+        .finally(() => { tick().then(() => { ui.meetEnding.delete(key); render(); }); });
+      return;
+    }
     ui.meetEnding.set(key, Date.now());
     say({ t: 'end', channel, meeting: id });
     render();
@@ -7381,6 +7740,75 @@
       if (!meetEndingNow(key)) ui.meetEnding.delete(key);
       render();
     }, MEET_END_MS + 50);
+  }
+
+  /**
+   * Meetings the board kept while no window showed them (heldPlan, in "a
+   * meeting on the floor: what the page decides"). Their desks are written
+   * into `ui.outs` as kept, and in the desktop app each meeting no window
+   * shows is opened again, once per page. The app keeps no list of rooms:
+   * this is how a room comes back after the app was quit with it open.
+   *
+   * Several floor windows load together at the app's launch, so the open is
+   * behind a Web Lock per meeting, held long enough for the room's own
+   * `/open` to clear `held_at`, after which no floor is told of it. And it
+   * waits until the page has been up HELD_OPEN_AFTER_MS, so a room window
+   * that is already open has answered `who` first.
+   */
+  const HELD_OPEN_AFTER_MS = 1500;
+  const HELD_LOCK_MS = 20_000;
+  const pageAt = Date.now();
+  function keepHeld() {
+    const plan = heldPlan(floor?.meetings_held, ui.outs, Date.now(), POP_TTL_MS);
+    let changed = plan.drop.length > 0;
+    // Dropped as an ordinary entry that lapses in POP_TTL_MS, not at once:
+    // a meeting stops being held the moment its room's window opens it, and
+    // that window says `here` for its desks a moment later. Deleted at once,
+    // the desks stood on the floor in between.
+    for (const k of plan.drop) {
+      const o = ui.outs.get(k);
+      // One ended from this floor goes at once: there is no window coming.
+      if (ui.meetEnding.has(String(o?.meeting))) ui.outs.delete(k);
+      else ui.outs.set(k, { at: Date.now(), id: null, held: false, meeting: o?.meeting ?? null });
+    }
+    for (const [k, o] of plan.set) {
+      const was = ui.outs.get(k);
+      if (!was?.kept || was.meeting !== o.meeting) changed = true;
+      ui.outs.set(k, o);
+    }
+    if (changed) { render(); if (ui.open) renderPanel(); }
+    if (!APP_UA.test(navigator.userAgent ?? '') || Date.now() - pageAt < HELD_OPEN_AFTER_MS) return;
+    for (const id of plan.open) {
+      if (ui.heldTried.has(id)) continue;
+      ui.heldTried.add(id);
+      if (LOCKS) {
+        navigator.locks.request(`orch.meeting-held:${id}`, { ifAvailable: true }, async (lock) => {
+          if (!lock) return;
+          openHeldRoom(id);
+          await new Promise((ok) => setTimeout(ok, HELD_LOCK_MS));
+        }).catch(() => {});
+      } else openHeldRoom(id);
+    }
+  }
+
+  /** A kept meeting's room, opened: its window opens the record and takes its desks back, as a reload does. */
+  function openHeldRoom(id) {
+    let w = null;
+    try { w = window.open(`${location.pathname}${meetingQuery({ id })}`, meetingName(id), popoutFeatures(meetingPlace(window.screen))); } catch { w = null; }
+    return !!w;
+  }
+
+  /**
+   * Is this meeting kept with no window showing it? The board says so
+   * (`meetings_held`), or every desk the floor has in it is a kept entry.
+   * The board first: a room's window closing on a hold says `gone` with
+   * `rejoin`, so for a moment its desks read as a window's that may come
+   * back, and End pressed then was sent to a window that was not there.
+   */
+  function meetingKept(channel, key) {
+    if ((floor?.meetings_held ?? []).some((m) => m.channel === channel && String(m.id) === String(key))) return true;
+    const mine = [...ui.outs].filter(([k, o]) => k.startsWith(`${channel}|`) && meetBoxKey(o) === key);
+    return mine.length > 0 && mine.every(([, o]) => o.kept);
   }
 
   /** The rooms open in a window now, by id: the Recent list leaves them out, and Resume of one brings it to the front. */
@@ -7535,6 +7963,9 @@
   /* ---------- render ---------- */
 
   function render() {
+    // Every draw is where what a window shows can change: a poll, a desk
+    // going out or coming back, a room's desks, a floor picked.
+    publishAttention();
     // A meeting room is its desks' chat: no rooms either (issue #44).
     if (ui.meeting) {
       renderDetails();
@@ -7561,15 +7992,32 @@
     // A floor this browser remembers standing on that has since been put away
     // lands the page on all floors — a put-away floor is not somewhere to stand.
     const names = here.map((c) => c.channel);
-    if (ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
-    const pickSig = JSON.stringify([names, ui.floorFilter]);
+    // Only once a payload has said which floors there are (costmo,
+    // 2026-11-19: the ⧉ opened all floors). Before the first /api/floor
+    // answers there are none, and a draw then (a meeting room's `here`, a
+    // failed first poll) took ?floor=lab to ?floor= for good.
+    if (floorRead && ui.floorFilter && !names.includes(ui.floorFilter)) ui.floorFilter = null;
+    ui.floorNames = names;
+    syncAddress();
+    const openMode = floorOpenNow();
+    const pickSig = JSON.stringify([names, ui.floorFilter, openMode]);
     if (pickSig !== ui.pickSig) {
       ui.pickSig = pickSig;
-      const chip = (n) => `<button class="chip${ui.floorFilter === n ? ' on' : ''}" data-floor="${esc(n)}">${esc(n)}</button>`;
+      // Each chip is a link to its floor, so ⌘-click, middle-click and the
+      // browser's own "Open Link in New Tab" open it elsewhere; a plain click
+      // stays in the page (the click handler). The ⧉ beside it opens the
+      // floor in a new tab, or a window of its own in the desktop app (task
+      // 315). A popout's page has no picker, so none of this is drawn there.
+      const chip = (n) => {
+        const on = ui.floorFilter === n ? ' on' : '';
+        const tip = floorPopTitle(n, openMode);
+        return `<span class="fchip${on}"><a class="chip${on}" href="${esc(floorHref(n))}" data-floor="${esc(n)}">${esc(n)}</a>`
+          + `<button type="button" class="fchip-pop" data-floor-pop="${esc(n)}" title="${esc(tip)}" aria-label="${esc(tip)}">⧉</button></span>`;
+      };
       // A picker with one choice is furniture. A put-away floor is not a choice
       // here at all: it is a pill under the building, and only there.
       $('floor-pick').innerHTML = names.length < 2 ? '' : [
-        `<button class="chip${ui.floorFilter ? '' : ' on'}" data-floor="">all floors</button>`,
+        `<a class="chip${ui.floorFilter ? '' : ' on'}" href="${esc(floorHref(null))}" data-floor="">all floors</a>`,
         ...here.map((c) => chip(c.channel)),
       ].join('');
     }
@@ -7647,6 +8095,55 @@
     renderPanel();
   }
 
+  /**
+   * Keep a floor tab's address and title on what it shows (task 315): the
+   * address so a reload, or the desktop app reopening its windows at launch,
+   * lands each on its own floor; the title so a window, a tab or a Dock menu
+   * can be told apart by its floor. Called on every draw, and by setView,
+   * because a floor that is put away drops the tab to all floors with
+   * nothing clicked. replaceState only when it changed: the page draws every
+   * two seconds.
+   */
+  function syncAddress() {
+    if (!ui.floorTab) return;
+    const view = ui.on ? 'floor' : 'board';
+    const next = addressFor(location.search, { floor: ui.floorFilter, view });
+    if (next !== location.search) {
+      try { history.replaceState(history.state, '', `${location.pathname}${next}${location.hash}`); } catch { /* the address is only for a reload */ }
+    }
+    const title = windowTitle({ view, floor: ui.floorFilter, floors: ui.floorNames });
+    if (title && document.title !== title) document.title = title;
+  }
+
+  /** Where the ⧉ opens a floor here and now: this browser's choice, or the desktop app's. */
+  function floorOpenNow() {
+    let stored = null;
+    try { stored = localStorage.getItem(FLOOR_OPEN_KEY); } catch { /* the default */ }
+    return floorOpenMode(stored, navigator.userAgent);
+  }
+
+  /** Open a floor in a tab or window of its own (task 315; the choice, costmo 2026-11-19). */
+  function openFloorElsewhere(name) {
+    // No target name, so each press opens one more; noopener, because a floor
+    // is a peer of the one it was opened from, not its child. With no
+    // features the browser makes it a tab and the desktop app decides; with
+    // them the browser makes it a window (floorOpenFeatures).
+    const features = floorOpenFeatures(floorOpenNow(), window, window.screen);
+    try { window.open(`${location.pathname}${floorHref(name)}`, '_blank', features); } catch { /* blocked: nothing to undo */ }
+  }
+
+  // Settings (app.js) reads and writes the choice through this, so the rule
+  // and the key live here once. In the desktop app `inApp` is true and
+  // Settings leaves the choice out: the app's Preferences own it.
+  window.floorOpen = {
+    get: () => floorOpenNow(),
+    inApp: () => floorOpenNow() === 'app',
+    set: (v) => {
+      try { localStorage.setItem(FLOOR_OPEN_KEY, v === 'window' ? 'window' : 'tab'); } catch { /* not worth failing over */ }
+      if (ui.on) render();
+    },
+  };
+
   /** Ride to a floor, or back out to the building. */
   function setFloor(name) {
     ui.floorFilter = name || null;
@@ -7682,6 +8179,8 @@
       const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       if (r.ok) { floor = await r.json(); floorRead = true; }
     } catch { /* the board's own dot already reports the connection */ }
+    // Meetings kept with no window (0.14.4): boxed as if a room had them.
+    if (ui.floorTab) keepHeld();
     // What happened to bulk nudges still in line, against the payload just read.
     if (ui.bulk.size) await followBulk();
 
@@ -8058,8 +8557,18 @@
       return;
     }
 
+    const pop = e.target.closest?.('#floor-pick [data-floor-pop]');
+    if (pop && ui.on) {
+      openFloorElsewhere(pop.dataset.floorPop);
+      return;
+    }
+
     const pick = e.target.closest?.('#floor-pick [data-floor]');
     if (pick && ui.on) {
+      // A chip is a link: ⌘-click and the rest are the browser's to open
+      // elsewhere. A plain click rides to the floor in this tab.
+      if (opensElsewhere(e)) return;
+      e.preventDefault();
       setFloor(pick.dataset.floor || null);
       return;
     }
@@ -8080,6 +8589,8 @@
       detach(act.dataset.channel, act.dataset.agent, act);
     } else if (act.dataset.act === 'bring-back') {
       bringBack(act.dataset.channel, act.dataset.agent);
+    } else if (act.dataset.act === 'open-held') {
+      openHeldRoom(Number(act.dataset.meeting));
     } else if (act.dataset.act === 'reattach') {
       endPopout(true);
     } else if (act.dataset.act === 'close-window') {
@@ -8264,6 +8775,21 @@
         await decide(act.dataset.request, act.dataset.choice, why, targetOf(act));
       } finally {
         for (const b of all) b.disabled = false;
+      }
+    } else if (act.dataset.act === 'signin') {
+      // The desk's Sign in: its host runs Claude Code's own sign-in, and the
+      // browser opens on that machine (POST /api/floor/signin). The box shows
+      // the wait until the host says Claude Code is signed in again.
+      const to = targetOf(act);
+      if (!to || act.disabled) return;
+      act.disabled = true;
+      try {
+        await post('./api/floor/signin', { channel: to.channel, agent: to.agent });
+        ui.signingIn.set(`${to.channel}|${to.agent}`, Date.now());
+        tick();
+      } catch (err) {
+        act.disabled = false;
+        flash(act, String(err.message).slice(0, 60));
       }
     } else if (act.dataset.act === 'stop') {
       // Ask first. Nothing else in this panel throws work away, and a turn
@@ -8734,6 +9260,86 @@
   }
   window.floorNudged = (channel, agent, text) => nudged(channel, agent, text);
 
+  /* ---------- window attention: what the desktop app reads ----------
+     The decisions are in "window attention: what the page decides". Main
+     calls these through webContents.executeJavaScript (the board's pages
+     have no preload, on purpose): get() for the report now, next(v) to wait
+     for a version after v (it answers at once when there is one, so main
+     long-polls with no timer of its own), and nudgeAll() for the window's
+     "nudge all". Contract orchestratinator.consumed, dashboard.attention. */
+
+  /** Which desks this window shows, as attentionDesks takes it. */
+  function attentionScope() {
+    const m = ui.meeting;
+    if (m) return { kind: 'meeting', channel: m.channel, agents: m.phase === 'live' ? m.parts.map((p) => p.agent) : [] };
+    if (ui.popout) return { kind: 'popout', channel: ui.popout.channel, agent: ui.popout.agent };
+    return { kind: 'floor', floor: ui.floorFilter };
+  }
+  const attentionInputs = () => ({
+    read: floorRead,
+    here: onFloor(),
+    all: floor.channels ?? [],
+    scope: attentionScope(),
+  });
+
+  /** Work the report out again, and move its version only when it changed. */
+  function publishAttention() {
+    const report = attentionReport(attentionInputs());
+    const sig = JSON.stringify(report);
+    if (sig === attn.sig) return;
+    // The first report is version 0 and wakes nobody: nothing changed.
+    if (attn.sig !== null) attn.version++;
+    attn.sig = sig;
+    attn.report = report;
+    const now = { version: attn.version, ...report };
+    for (const w of attn.waiters.splice(0)) w(now);
+  }
+
+  /** Type the nudge into every desk this window shows that has something waiting, the way the floor's bulk Nudge does. */
+  async function nudgeAllHere() {
+    if (ui.meeting) {
+      // The room's own send, so its transcript records the nudge and each
+      // desk's delivery under it, as the room's Nudge button does; to every
+      // participant with something waiting, whatever the chips choose.
+      const s = await sendMeeting(NUDGE_WORD, { nudge: true, all: true });
+      const ch = ui.meeting.channel;
+      return {
+        sent: (s?.entries ?? []).filter((e) => e.state !== 'refused').map((e) => ({ channel: ch, agent: e.agent })),
+        refused: (s?.entries ?? []).filter((e) => e.state === 'refused').map((e) => ({ channel: ch, agent: e.agent, reason: e.words ?? '' })),
+      };
+    }
+    const list = attentionDesks(attentionInputs());
+    const sent = [];
+    const refused = list.filter((x) => nudgeWaiting(x.d) > 0 && !x.d.nudge?.ok)
+      .map((x) => ({ channel: x.channel, agent: x.d.agent, reason: x.d.nudge?.reason ?? 'Nothing is known about this desk yet.' }));
+    for (const e of attentionNudges(list)) {
+      try {
+        await post('./api/floor/chat', { channel: e.channel, agent: e.agent, text: NUDGE_WORD });
+        sent.push({ channel: e.channel, agent: e.agent });
+        nudged(e.channel, e.agent, NUDGE_WORD);
+      } catch (err) {
+        refused.push({ channel: e.channel, agent: e.agent, reason: String(err.message ?? err) });
+      }
+    }
+    tick();
+    return { sent, refused };
+  }
+
+  window.orchAttention = {
+    get: () => { publishAttention(); return { version: attn.version, ...attn.report }; },
+    next: (since) => {
+      publishAttention();
+      if (attn.version > Number(since ?? -1)) return Promise.resolve({ version: attn.version, ...attn.report });
+      return new Promise((resolve) => attn.waiters.push(resolve));
+    },
+    // One at a time: a second press while the first is still typing gets
+    // the same answer, not every desk nudged twice.
+    nudgeAll: () => {
+      attn.nudging ??= nudgeAllHere().finally(() => { attn.nudging = null; });
+      return attn.nudging;
+    },
+  };
+
   /**
    * Send: a user turn in the hosted session. The server refuses, with the
    * reason, if nothing is there to receive it — and the reason is shown, not a
@@ -9137,7 +9743,32 @@
       b.classList.toggle('on', b.dataset.view === view);
     }
     try { localStorage.setItem('orch.view', view); } catch { /* not worth failing over */ }
-    if (ui.on) start(); else stop();
+    if (ui.on) { stopAttentionPoll(); start(); } else { stop(); startAttentionPoll(); }
+    syncAddress();
+  }
+
+  /**
+   * A tab on the board view draws nothing of the floor and polls none of
+   * it, but in the desktop app it is still a tab whose pulse and badge the
+   * app reads (window attention). So there, and only there, it reads
+   * /api/floor at the floor's pace for the report alone. A browser's board
+   * tab is as it was.
+   */
+  function startAttentionPoll() {
+    if (ui.attnTimer || !ui.floorTab || !APP_UA.test(navigator.userAgent)) return;
+    const read = async () => {
+      try {
+        const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+        if (r.ok && !ui.on) { floor = await r.json(); floorRead = true; }
+      } catch { /* the board's own dot already reports the connection */ }
+      publishAttention();
+    };
+    read();
+    ui.attnTimer = setInterval(read, POLL_MS);
+  }
+  function stopAttentionPoll() {
+    clearInterval(ui.attnTimer);
+    ui.attnTimer = null;
   }
 
   document.addEventListener('click', (e) => {
@@ -9147,7 +9778,12 @@
 
   ui.popout = popoutOf(location.search);
   const meetingSpec = meetingOf(location.search);
-  if (meetingSpec) {
+  if (new URLSearchParams(location.search).get('settings') === '1') {
+    // The settings page (app.js's SETTINGS_PAGE): no floor, no popout, and
+    // none of a floor tab's choices or address. Only window.floorOpen, above,
+    // is used there, by the Open new floors row.
+    ui.popout = null;
+  } else if (meetingSpec) {
     // A meeting room's window (issue #44): the floor's view, like a
     // popout, and none of the floor tab's remembered choices.
     ui.popout = null;
@@ -9159,8 +9795,32 @@
     if (!LOCKS) setInterval(() => meetingAnnounce(), POP_BEAT_MS);
     setInterval(meetingTouch, MEETING_TOUCH_MS);
     // Closing the window ends the meeting (the issue's 7), and so does a
-    // reload, which then opens the room again from its address.
-    window.addEventListener('pagehide', () => endMeeting({ closing: true }));
+    // reload, which then opens the room again from its address. Not when
+    // the desktop app said it is quitting (hold, below): then the meeting is
+    // kept, and the room comes back at the app's next launch.
+    window.addEventListener('pagehide', () => (ui.meeting?.held ? leaveHeld() : endMeeting({ closing: true })));
+    /*
+     * The desktop app's word, before it quits (0.14.4; costmo, 2026-11-20:
+     * a meeting outlives a quit of the app, and closing the room's own
+     * window still ends it). The app calls `window.orchMeeting.hold()` in
+     * every room's window and waits for it, then quits. The board keeps the
+     * meeting (`held_at`), and this window then goes without ending it.
+     * Resolves false when the room has no record to keep (still starting,
+     * failed, ended, or the board would not), and the close then ends it
+     * as any close does. Contract `orchestratinator.consumed`,
+     * `dashboard.meeting_hold`.
+     */
+    window.orchMeeting = {
+      hold: async () => {
+        const m = ui.meeting;
+        if (!m?.id || m.phase === 'ended' || m.phase === 'failed') return false;
+        try {
+          const got = await post('./api/floor/meeting/hold', { id: m.id });
+          m.held = got?.held === true;
+        } catch { m.held = false; }
+        return m.held;
+      },
+    };
   } else if (ui.popout) {
     // A desk's popout (issue #19): the floor's view, always, and none of the
     // floor's remembered choices — a popout writes neither the view nor the
@@ -9184,12 +9844,17 @@
       say({ t: 'gone', channel: ui.popout.channel, agent: ui.popout.agent, id: POP_ID, open: !fateShown() });
     });
   } else {
-    try { ui.floorFilter = localStorage.getItem('orch.floor') || null; } catch { /* default: all floors */ }
+    // A floor tab. Its address says which floor and view it is on, when it
+    // says (a reload, a chip's link, the ⧉, the desktop app reopening its
+    // windows); otherwise the stored choice does (task 315).
+    ui.floorTab = true;
+    const said = addressOf(location.search);
+    try { ui.floorFilter = said.floor !== undefined ? said.floor : (localStorage.getItem('orch.floor') || null); } catch { /* default: all floors */ }
     /* First visit lands on the floor, all floors — the less technical face of the
        board. A stored choice (either one) always wins; only the absence of a
        choice defaults here. */
-    let initial = 'floor';
-    try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
+    let initial = said.view ?? 'floor';
+    if (!said.view) try { initial = (localStorage.getItem('orch.view') ?? 'floor') === 'floor' ? 'floor' : 'board'; } catch { /* default */ }
     setView(initial);
     // Which desks are out, from the popouts themselves: a reloaded floor
     // knows within a moment, without any of them having to be reopened.

@@ -272,6 +272,38 @@ async function main() {
     assert(/esc to interrupt/i.test(W.footOf(QUEUED_BOX)),
            'and one whose status line says it is, is');
 
+    // Claude Code signed out on the machine (costmo, 2026-11-19; host/auth.js).
+    // Captured from a real 2.1.329 window with no credentials, onboarding
+    // done, 120 columns: idle, then after a message was sent into it.
+    const R120 = '─'.repeat(120);
+    const SIGNED_OUT_IDLE = [
+      ' ▐▛███▛█   Claude Code v2.1.329',
+      '▝▜██████▀  Opus 5.5 · API Usage Billing',
+      R120,
+      '❯ ',
+      R120,
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents                                       Not logged in · run /login',
+      '                                                                                                    ◐ medium · /effort',
+    ].join('\n');
+    const SIGNED_OUT_SENT = [
+      '❯ say hi',
+      '  ⎿  Not logged in · Please run /login',
+      R120,
+      '❯ Once fixed, resend your message',
+      R120,
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+      '                                                                                            Not logged in · run /login',
+      '                  tmux focus-events off · add \'set -g focus-events on\' to ~/.tmux.conf and reattach for focus tracking',
+    ].join('\n');
+    assert(W.signedOutOf(SIGNED_OUT_IDLE), 'a window says Claude Code is signed out at the right of the status row under its composer');
+    assert(W.signedOutOf(SIGNED_OUT_SENT), 'and still says it after a message was sent into it, with another line under it');
+    // At 80 columns the row wraps: the words may break across two lines.
+    assert(W.signedOutOf([RULE, '❯ ', RULE, '  ⏵⏵ auto mode on (shift+tab to cycle)            Not logged in ·', 'run /login'].join('\n')),
+           'and when the status row wraps at 80 columns');
+    assert(!W.signedOutOf(QUOTES_BUSY), 'a signed-in window is not');
+    assert(!W.signedOutOf(['  ⏺ It said "Not logged in · run /login" earlier.', RULE, '❯ ', RULE, '  auto mode on (shift+tab to cycle)'].join('\n')),
+           'nor one whose conversation quotes the words above the composer');
+
     // Telling a live prompt from a conversation that is talking about one.
     //
     // Both of these are real captures of this repo's own window. The first is a
@@ -527,6 +559,44 @@ async function main() {
     eq(mcp?.options.map((o) => o.text), ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'],
        'its three rows are read, and the description sentence above them is not one');
     eq(mcp?.at, 2, 'with the cursor on "continue without" — Enter alone would disable the server');
+    // The browser extension's question, as costmo's screen showed it on a
+    // new machine (2026-11-20, a 2.1.318 window at 80 columns).
+    const RAW_CHROME = [
+      '',
+      '─'.repeat(80),
+      ' Claude in Chrome extension detected',
+      '',
+      ' Claude will use your Chrome browser by default — navigating sites, filling',
+      ' forms, and capturing screenshots in your existing session.',
+      '',
+      ' This session is in Auto mode, which checks routine browser actions — you are',
+      ' only prompted when it is unsure. Turn browser tools off for future sessions',
+      ' with /chrome.',
+      '',
+      ' ❯ No, keep browser tools off',
+      '   Yes, use my browser',
+      '',
+      ' Enter to confirm · Esc to keep browser tools off',
+      '',
+    ].join('\n');
+    const chrome = W.startupQuestionOf(RAW_CHROME);
+    eq(chrome?.kind, 'chrome', 'the browser extension’s question is recognised');
+    eq(chrome?.asks, 'Claude in Chrome extension detected', 'and named by its title');
+    eq(chrome?.options.map((o) => o.text), ['No, keep browser tools off', 'Yes, use my browser'], 'its two rows are read, and the paragraphs above the blank line are not');
+    eq(chrome?.at, 0, 'with the cursor on No, where the window puts it');
+    // A window Claude Code has no record of (costmo's second machine,
+    // 2026-11-20): what tells one standing idle from one that is starting,
+    // asking or working, and what is done about it, once.
+    eq(W.standingIdleOf(COMPOSER), true, 'a window at its composer is standing idle');
+    eq([W.standingIdleOf(RAW_TRUST), W.standingIdleOf(RAW_CHROME), W.standingIdleOf(Q_ONE)], [false, false, false], 'one asking something is not: a startup question, the browser’s, a form');
+    eq(W.standingIdleOf(['\u2500'.repeat(60), '\u276f ', '\u2500'.repeat(60), '  auto mode on · esc to interrupt'].join('\n')), false, 'nor one that is working');
+    eq([W.standingIdleOf(''), W.standingIdleOf('\n\n')], [false, false], 'nor a pane that has drawn nothing yet');
+    const NR0 = 1_000_000;
+    eq(W.unregisteredVerdict({ since: null, now: NR0, pid: 7 }), 'none', 'a window not standing idle is left alone');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 29_000, pid: 7, after: 30_000 }), 'wait', 'one idle with no record is given time: a window that is starting registers within it');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 7, after: 30_000 }), 'reopen', 'past that it is reopened');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 8, tried: 8, after: 30_000 }), 'say', 'the window that reopen made, with no record either, is said and not reopened again');
+    eq(W.unregisteredVerdict({ since: NR0, now: NR0 + 30_000, pid: 9, tried: 8, after: 30_000 }), 'reopen', 'a later window, opened by somebody, gets its one reopen');
     eq(W.startupQuestionOf(Q_ONE), null, 'a question form is not a startup question');
     eq(W.startupQuestionOf(COMPOSER), null, 'nor is a composer');
 
@@ -787,14 +857,104 @@ async function main() {
     // 'unread' rather than false when the pane's environment never arrived,
     // so a row asserting "nothing" cannot pass on a file that was empty.
     const given = async (d) => { const e = await paneEnvOf(d); return e ? /=board-key-value$/m.test(e) : 'unread'; };
-    eq([await given(litDir), await given(compoundDir), await given(filledDir), await given(keylessDir)], [false, false, false, false],
-      'a literal key, a key with text around the placeholder, one the host filled, and a host with no key of its own give the pane nothing');
-    eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null)], [['-e', 'X=k'], [], []],
-      'paneEnv: the variable for a desk that names one, nothing otherwise');
+    eq([await given(litDir), await given(compoundDir), await given(keylessDir)], [false, false, false],
+      'a literal key, a key with text around the placeholder, and a host with no key of its own give the pane nothing');
+    // Since 0.14.4 a window gets none of the host's ORCH_ variables
+    // (windowEnv), so a placeholder the host could fill is given to the pane
+    // too, as what the host made of it. Before, it was left to the tmux
+    // server's environment, which was the host's own.
+    assert(/^ORCH_TEST_FILLED_KEY=host-filled$/m.test(await paneEnvOf(filledDir)),
+      "a placeholder the host filled from its own environment is given to the pane by -e, as the host filled it");
+    eq([W.paneEnv({ keyVar: 'X' }, 'k'), W.paneEnv({}, 'k'), W.paneEnv({ keyVar: 'X' }, null), W.paneEnv({ keyVar: 'X', key: 'filled' }, 'k')],
+      [['-e', 'X=k'], [], [], ['-e', 'X=filled']],
+      'paneEnv: the variable for a desk that names one (as the host filled it, else the host\'s key), nothing otherwise');
     // tmux keeps a pane's start command and prints it (choose-tree,
     // #{pane_start_command}); `-e` is not part of it, so the key is not there.
     const starts = (await run('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_start_command}'])).stdout;
     assert(!starts.includes('board-key-value'), 'and the key is not in any pane\'s start command');
+
+    // A window gets a person's environment and nothing of the host's own
+    // settings (0.14.4, host.windows_inherit). The pure half first.
+    console.log('\n  what a window inherits from the host');
+    {
+      const host = { HOME: '/h', PATH: '/p', ORCH_URL: 'http://b', ORCH_AUTH_TOKEN: 'k', ORCH_HOST_SUPERVISOR: 'app', LANG: 'en_GB.UTF-8' };
+      const e = W.windowEnv(host, { platform: 'darwin', tempDir: () => '/var/folders/x/T/', user: () => 'pat' });
+      eq(Object.keys(e).filter((k) => k.startsWith('ORCH_')), [], 'windowEnv: none of the host\'s ORCH_ variables');
+      eq([e.HOME, e.PATH, e.LC_ALL], ['/h', '/p', 'en_GB.UTF-8'], 'and everything else, with the locale');
+      eq([e.TMPDIR, e.USER, e.LOGNAME], ['/var/folders/x/T/', 'pat', 'pat'], 'TMPDIR, USER and LOGNAME filled where the host has none (macOS)');
+      const own = W.windowEnv({ ...host, TMPDIR: '/mine/', USER: 'me', LOGNAME: 'me' }, { platform: 'darwin', tempDir: () => '/var/folders/x/T/', user: () => 'pat' });
+      eq([own.TMPDIR, own.USER, own.LOGNAME], ['/mine/', 'me', 'me'], 'and left as they are where it has them');
+      eq(W.windowEnv(host, { platform: 'linux', tempDir: () => '/var/folders/x/T/', user: () => 'pat' }).TMPDIR, undefined, 'TMPDIR is filled on macOS only');
+      eq(W.serverEnvPlan('HOME=/h\nORCH_URL=http://b\n-ORCH_GONE\nORCH_AUTH_TOKEN=k\nUSER=me\n', { TMPDIR: '/t/', USER: 'pat', LOGNAME: 'pat' }),
+        { unset: ['ORCH_URL', 'ORCH_AUTH_TOKEN'], set: [['TMPDIR', '/t/'], ['LOGNAME', 'pat']] },
+        'serverEnvPlan: unsets each ORCH_ variable the server lists (not one already removed), sets only what it lacks');
+      // A host started from inside a Claude Code window carries that
+      // session's markers, and a window that inherits them writes no
+      // transcript (pc-developer, Windows, 2026-11-20). Only the markers go.
+      const parent = { ...host, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_SESSION_ID: 's', CLAUDE_EFFORT: 'max',
+        CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_API_KEY: 'sk' };
+      const pe = W.windowEnv(parent, { platform: 'darwin', tempDir: () => '/t/', user: () => 'pat' });
+      eq(Object.keys(pe).filter((k) => /^(CLAUDE|ANTHROPIC)/.test(k)).sort(), ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CONFIG_DIR'],
+        'windowEnv: none of a parent Claude Code session\'s markers, and every setting a person gives Claude Code');
+      eq(W.serverEnvPlan('CLAUDECODE=1\nCLAUDE_CONFIG_DIR=/cfg\nCLAUDE_CODE_CHILD_SESSION=1\nTMPDIR=/t/\nUSER=a\nLOGNAME=a\n', {}).unset, ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION'],
+        'serverEnvPlan: and takes those markers out of a running server, leaving the settings');
+    }
+
+    // What a window runs. On Windows there is no exec, so a shell line leaves
+    // the shell as the pane's process and the pane's pid never meets the
+    // roster's (pc-developer, psmux 3.4.0, 2026-11-20): an argument list.
+    console.log('\n  what a window runs');
+    eq(W.launchArgs(['claude', '--resume', "it's"], { windows: false }), [`exec 'env' 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1' 'claude' '--resume' 'it'\\''s'`],
+      'elsewhere: the one exec line it has always been, quoted for the shell');
+    eq(W.launchArgs(['C:\\Users\\p\\.local\\bin\\claude.exe', '--resume', 'abc'], { windows: true }),
+      ['-e', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', '--', 'C:\\Users\\p\\.local\\bin\\claude.exe', '--resume', 'abc'],
+      'on Windows: the variable by -e, then the program and its arguments after --, unquoted');
+
+    // psmux answers some refusals on stdout with exit 0 (pc-developer, 3.4.0).
+    console.log('\n  psmux, on Windows');
+    eq([W.psmuxRefusal("ERROR: can't find window: =s1"), W.psmuxRefusal("psmux: no server running on session 'orchtest__orch'"), W.psmuxRefusal("psmux: can't find window: x")],
+      [true, true, true], 'psmuxRefusal: its three exit-0 refusals are refusals');
+    eq([W.psmuxRefusal("ERROR: can't find window: y\n❯ ok"), W.psmuxRefusal('orch:@2.%2|25236|0||C:\\x'), W.psmuxRefusal('')],
+      [false, false, false], 'and a screen that quotes one, a pane line or nothing at all is an answer');
+    // A seat rides in its window's name there: the tag is the session's.
+    const seatMark = W.seatNameMark('lab/bo%2D2');
+    eq([seatMark.startsWith('--s'), /^[A-Za-z0-9_-]+$/.test(seatMark), W.seatFromName(`quinn-repo-lab-bo-2${seatMark}`)], [true, true, 'lab/bo%2D2'],
+      'seatNameMark: a name tmux targets plainly, and seatFromName reads the seat back');
+    eq([W.seatFromName('quinn-repo'), W.seatFromName('build--sab'), W.seatFromName(`x${W.seatNameMark('no slash')}`), W.seatFromName(null)], [null, null, null, null],
+      'and a folder\'s own window, a folder that ends in --s and hex, or a mark that is not a seat\'s tag, is no seat');
+    eq(W.wtAttachArgs('C:\\psmux\\tmux.exe'), ['-w', 'new', 'new-tab', 'C:\\psmux\\tmux.exe', 'attach', '-t', `=${W.tmuxSession}`],
+      'wtAttachArgs: a Windows Terminal window of its own, attached to the floor\'s session by its exact name');
+    eq(W.wtAttachArgs('C:\\psmux\\tmux.exe', 'orch · orchestratinator · ab12'),
+      ['-w', 'new', 'new-tab', '--title', 'orch · orchestratinator · ab12', '--suppressApplicationTitle', 'C:\\psmux\\tmux.exe', 'attach', '-t', `=${W.tmuxSession}`],
+      'and with a title of its own that the program in it cannot change, which is how front-win.ps1 finds that window to bring it forward');
+    // Then a real server started the old way, with a host's settings and no
+    // TMPDIR, on a socket of its own: the default socket is the operator's.
+    // window.js reads ORCH_TMUX at load, so the host's side runs in a child.
+    {
+      const sock = `orch-envtest-${process.pid}`;
+      const wrap = `${FIX}/tmux-env-wrap`;
+      writeFileSync(wrap, `#!/bin/sh\nexec tmux -L ${sock} "$@"\n`);
+      chmodSync(wrap, 0o755);
+      const bare = { HOME: process.env.HOME, PATH: process.env.PATH };
+      await run('tmux', ['-L', sock, 'new-session', '-d', '-s', 'envtest', 'sleep 120'], { env: { ...bare, ORCH_URL: 'http://the-hosts-board', ORCH_AUTH_TOKEN: 'the-hosts-key', ORCH_HOST_SUPERVISOR: 'app' } });
+      try {
+        const child = await run(process.execPath, ['--input-type=module', '-e',
+          `const W = await import(${JSON.stringify(resolve('./host/window.js'))}); console.log(JSON.stringify(await W.cleanServerEnv()));`],
+          { env: { ...bare, ORCH_TMUX: wrap, ORCH_URL: 'http://the-hosts-board' } });
+        const did = JSON.parse(child.stdout.trim().split('\n').pop());
+        eq(did.unset.sort(), ['ORCH_AUTH_TOKEN', 'ORCH_HOST_SUPERVISOR', 'ORCH_URL'], 'cleanServerEnv unsets the host\'s variables in a server already running');
+        assert(did.set.includes('TMPDIR'), `and sets TMPDIR where the server had none — set ${did.set.join(', ')}`);
+        const out = `${FIX}/env-after.txt`;
+        await run('tmux', ['-L', sock, 'new-window', '-d', '-t', '=envtest:', `env > ${out}.tmp; mv ${out}.tmp ${out}; sleep 5`]);
+        for (let i = 0; i < 80 && !existsSync(out); i++) await sleep(100);
+        const env = existsSync(out) ? readFileSync(out, 'utf8') : '';
+        assert(env.includes('PATH='), 'the window opened after it wrote its environment');
+        eq(env.split('\n').filter((l) => l.startsWith('ORCH_')), [], 'and a window opened after it carries none of them');
+        assert(/^TMPDIR=\S/m.test(env), 'and has a TMPDIR');
+      } finally {
+        await run('tmux', ['-L', sock, 'kill-server']).catch(() => {});
+      }
+    }
 
     // A desk whose folder name begins with the tmux session's name. tmux
     // resolves new-window's `-t` against window names before session names,
@@ -1304,6 +1464,11 @@ async function main() {
     eq(W.commandOf('/btw first\nsecond'), null, 'a message with a newline in it is a message, whatever its first character');
     eq(W.commandOf('look at /tmp/x'), null, 'and so is a slash anywhere but first');
     eq(W.commandOf(''), null, 'nothing is not a command');
+    eq(W.typedCommand('/mcp'), '/mcp reconnect orchestratinator', 'a bare /mcp is typed as a reconnect of the board\'s server (alone it opens a panel nobody drives)');
+    eq(W.typedCommand('  /MCP  ', 'board-b'), '/mcp reconnect board-b', 'by the name the desk\'s binding gives that server, however it was typed');
+    eq(W.typedCommand('/mcp reconnect all'), '/mcp reconnect all', '/mcp with anything after it goes as typed');
+    eq(W.typedCommand('/mcp\nplease'), '/mcp\nplease', 'and a message that starts with /mcp is a message');
+    eq(W.typedCommand('/model opus'), '/model opus', 'every other command goes as typed');
     eq(W.wouldWrap('a'.repeat(800)), false, '800 characters on one line are pasted as they are');
     eq(W.wouldWrap('a'.repeat(801)), true, 'one more is wrapped in <pasted_content> (850 was, measured)');
     eq(W.wouldWrap('one\ntwo\nthree'), false, 'three lines are not wrapped');
@@ -1387,10 +1552,17 @@ async function main() {
     eq(W.switchConfirmOf(SWITCH_327.replace('  Enter to confirm · Esc to cancel', '  ? for shortcuts')), null, 'and any other line under the choices is still not the dialog');
     eq(W.switchConfirmOf(`${SWITCH_327}\n${RULE2}\n❯ \n${RULE2}\n  Enter to confirm · Esc to cancel`), null, 'nor is it one quoted above a composer, whatever the pane ends with');
     // The dialog's other title (QA, PR #55 finding 1): 2.1.325's own
-    // strings, with the model's lines under it. Not seen on a window.
+    // strings, with the model's lines under it.
     const EFFORT_ASK = SWITCH.replace('Switch model?', 'Change effort level?').replace('current model. Switching to Haiku 5.5', 'current effort level. Switching to high').replace('Yes, switch to Haiku 5.5', 'Yes, switch to high');
     eq(W.switchConfirmOf(EFFORT_ASK)?.yes, 'Yes, switch to high', 'the same warning under "Change effort level?", which an /effort raises, is read too');
     eq(W.switchConfirmOf(EFFORT_ASK.replace('Change effort level?', 'Change something else?')), null, 'and still under no third title');
+    // And as a live desk drew it on 2.1.300 (2026-11-06, found in the
+    // desktop app's work on develop), under a finished turn at 80 columns.
+    const EFFORT_WARN = '✻ Brewed for 2m 19s · done 11:11 AM\n▔▔▔▔▔▔▔▔\n   Change effort level?\n   Your next response will be slower and use more tokens\n   This conversation is cached for the current effort level. Switching to\n   medium means the full history gets re-read on your next message.\n   ❯ 1. Yes, switch to medium\n     2. No, go back\n';
+    eq(W.switchConfirmOf(EFFORT_WARN)?.yes, 'Yes, switch to medium',
+      'the effort warning a live desk stood on is read, with its yes');
+    eq(W.switchConfirmOf(EFFORT_WARN + '\n❯ \n  ? for shortcuts'), null,
+      'and a conversation that quotes it above its composer is not asked it');
     eq(W.switchConfirmOf(PICKER), null, 'and the picker is not it');
     eq(W.stillInComposer(SWITCH, '/model haiku'), false, 'the warning has no composer, so no Enter is pressed into it');
 
@@ -1505,6 +1677,11 @@ async function main() {
       `    const rows = lines.flatMap((l) => l.length ? l.match(/.{1,70}/g) : ['']);`,
       `    const top = cap && rows.length > cap ? '\\u2500\\u2500\\u2500 \\u2191 ' + (rows.length - cap) + ' more ' + '\\u2500'.repeat(60) + '\\r\\n' + rows.slice(-cap).map((l) => '  ' + l).join('\\r\\n') : rule + '\\r\\n\\u276f ' + (ghost || lines[0]) + lines.slice(1).map((l) => '\\r\\n  ' + l).join('');`,
       `    out += (busy ? '\\u276f /compact\\r\\n\\u273b Compacting conversation\\u2026 (2s \\u00b7 \\u2193 40 tokens)\\r\\n' : '\\u23fa ok\\r\\n') + top + '\\r\\n' + rule + '\\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)' + (busy ? ' \\u00b7 esc to interrupt' : '');`,
+      // cursor.flag: the cursor where Claude Code leaves it (F2, 0.14.5
+      // review): at column 2 of the `❯` row in an empty box, a suggestion
+      // drawn after it; at the end of what was typed otherwise. Without the
+      // flag it stays where the drawing ends, as every older row expects.
+      `    if (fs.existsSync(${JSON.stringify(`${CP_DIR}/cursor.flag`)}) && !(cap && rows.length > cap)) { const r = (busy ? 2 : 1) + 2 + (lines.length - 1); const c = composer ? 3 + lines[lines.length - 1].length : 3; out += '\\x1b[' + r + ';' + c + 'H'; }`,
       `  }`,
       `  process.stdout.write(out);`,
       `}`,
@@ -1625,6 +1802,103 @@ async function main() {
     eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, overGhost, 'as itself, the suggestion not in it');
     assert(!keysSince(mark).some((k) => k[1].startsWith('"paste:')), 'and typed, not pasted after all: a suggestion is not text somebody left in the box');
 
+    // F2 (0.14.5 review). What the host types that nobody asked for at that
+    // moment (a /mcp reconnect the board asked for, a meeting room's notice)
+    // is not typed onto a draft. Measured on the rig on 2.1.330: a draft and
+    // a reconnect went in as one user record, the agent took a turn on it,
+    // and the reconnect never ran.
+    {
+      const box = (row) => ['⏺ ok', '─'.repeat(80), row, '─'.repeat(80), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+      const DIM = '\u001b[2m', UNDIM = '\u001b[22m', GREY = '\u001b[38;5;246m', WHITE = '\u001b[38;5;231m', RESET = '\u001b[39m';
+      eq([W.draftOf?.(box('❯ '), GREY + '❯' + RESET + ' '),
+        W.draftOf?.(box('❯ Try "fix lint errors"'), GREY + '❯' + RESET + ' ' + DIM + 'Try "fix lint errors"' + UNDIM),
+        W.draftOf?.(box('❯ half typed'), GREY + '❯' + RESET + ' ' + WHITE + 'half typed' + RESET),
+        W.draftOf?.(box('❯ first line\n  second'), '❯ first line'),
+        W.draftOf?.(box('❯ half typed'), null)],
+        [false, false, true, true, true], 'an empty box and a dim suggestion are not a draft; typed text is, on its first row or below it, and a `❯` row out of view counts as one');
+      // F2-b (QA, measured on the rig, 2.1.330): a draft with Ctrl-A pressed
+      // has its cursor right behind the `❯`, where the first cut read "no
+      // draft", and the reconnect was typed in front of it. The cursor is not
+      // the test; how the text is drawn is.
+      eq(W.draftOf?.(box('❯ F2-b draft that nobody sent'), GREY + '❯' + RESET + ' ' + WHITE + 'F2-b draft that nobody sent' + RESET), true,
+        'a draft is a draft wherever the cursor stands (F2-b: Ctrl-A put it at the start)');
+      eq([W.dimOnly?.(`❯ ${DIM}one ${UNDIM}${DIM}two${UNDIM}`), W.dimOnly?.(`❯ ${DIM}dim${UNDIM} typed`), W.dimOnly?.('❯ '), W.dimOnly?.(`❯ \u001b[0;2mdim\u001b[0m`)], [true, false, false, true],
+        'a row is a suggestion only when every visible character after the mark is dim');
+      // The colour forms' arguments are not attributes (QA's probe, 0.14.5
+      // review 3850): the second cut read the 2 in `38;2;r;g;b` and in
+      // `38;5;2` as "dim", so a draft in truecolor or in index 2 read as a
+      // suggestion, and the 0 in a truecolor component as "reset".
+      const E = '\u001b[';
+      const reads = (r) => W.draftOf?.(box('❯ x'), '❯ ' + r);
+      eq([reads(E + '38;2;255;255;255mhalf a sentence' + E + '0m'), reads(E + '38;5;2mhalf a sentence'), reads(E + '48;2;40;40;40mhalf a sentence'),
+        reads(E + '38:2::255:255:255mhalf a sentence'), reads(E + '38:5:2mhalf a sentence')],
+        [true, true, true, true, true], 'a draft drawn in truecolor, in colour index 2, on a truecolor background, or in the colon forms is a draft');
+      eq([reads(E + '2;38;2;120;120;0mTry this' + E + '0m'), reads(E + '2mTry "how does <filepath> work?"' + E + '0m')], [false, false],
+        'a dim suggestion whose colour has a 0 in it is still a suggestion, and so is 2.1.330\'s placeholder as it draws it (ESC[2m … ESC[0m, measured)');
+      eq([W.sgrDim?.('38;2;255;255;255'), W.sgrDim?.('38;5;2'), W.sgrDim?.('2;38;5;246'), W.sgrDim?.('22', true), W.sgrDim?.('', true), W.sgrDim?.('48;5;0', true)], [false, false, true, false, false, true],
+        'an SGR sequence is read parameter by parameter, a colour with its arguments as one');
+      writeFileSync(`${CP_DIR}/cursor.flag`, '1');
+      await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+      await run('tmux', ['send-keys', '-t', cpTarget, '-l', 'half a sentence nobody sent']).catch(() => {});
+      assert(await until(async () => (await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout.includes('half a sentence nobody sent'), 4000),
+        'the fixture: somebody has typed half a sentence into the box');
+      eq(await W.draftAt?.(cpTarget), true, 'it is read off the pane as a draft');
+      mark = cpKeyLog().length;
+      const recsBefore = cpRecords().length;
+      const overDraft = await W.send(CP_DIR, W.typedCommand('/mcp', 'orchestratinator'), { unasked: true });
+      eq([overDraft.ok, overDraft.code], [false, 'draft'], `a reconnect nobody asked for is not typed onto it — ${overDraft.error ?? ''}`);
+      await sleep(800);
+      eq([keysSince(mark).length, cpRecords().length], [0, recsBefore], 'not a key reached the window, and nothing reached the conversation');
+      await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+      assert(await until(async () => ((await W.draftAt?.(cpTarget)) === false ? true : null), 4000), 'the box emptied, it is no longer a draft');
+      const intoEmpty = await W.send(CP_DIR, 'a notice into an empty box', { unasked: true });
+      assert(intoEmpty.ok, `then the same goes in${intoEmpty.ok ? '' : ` — ${intoEmpty.error}`}`);
+      eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, 'a notice into an empty box', 'as itself');
+      writeFileSync(`${CP_DIR}/suggest.flag`, 'Run the tests and tell me what failed.');
+      await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
+      assert(await until(async () => (await run('tmux', ['capture-pane', '-p', '-t', cpTarget])).stdout.includes('Run the tests and tell me'), 4000),
+        'the fixture: a suggestion stands in the box');
+      eq(await W.draftAt?.(cpTarget), false, 'a prompt suggestion is not a draft (the rig\'s control)');
+      const overSuggestion = await W.send(CP_DIR, 'a notice over a suggestion', { unasked: true });
+      assert(overSuggestion.ok, `so what is owed goes in over it${overSuggestion.ok ? '' : ` — ${overSuggestion.error}`}`);
+      eq(cpRecords().filter((r) => r.type === 'user').at(-1)?.message.content, 'a notice over a suggestion', 'as itself, the suggestion not in it');
+      rmSync(`${CP_DIR}/suggest.flag`, { force: true });
+      rmSync(`${CP_DIR}/cursor.flag`, { force: true });
+    }
+
+    // F3 (0.14.5 review): a Claude Code started by hand from a window's shell
+    // is that shell's child, so the pane's pid is not the roster's.
+    {
+      const parent = new Map([[100, 1], [200, 100], [300, 200], [400, 1], [5, 6], [6, 5]]);
+      eq([W.underIn?.(parent, 100, [300]), W.underIn?.(parent, 100, [400]), W.underIn?.(parent, 300, [100]), W.underIn?.(parent, 7, [5])], [true, false, false, false],
+        'a process two levels under the pane runs under it; a sibling, a parent, and a loop in the table do not');
+      const { spawn } = await import('node:child_process');
+      const kid = spawn('/bin/sh', ['-c', 'sleep 5; :'], { stdio: 'ignore' });
+      await sleep(200);
+      eq([await W.runsUnder?.(process.pid, [kid.pid]), await W.runsUnder?.(kid.pid, [process.pid])], [true, false], 'and read off ps: this suite\'s child runs under it, not the other way round');
+      // On Windows too (task 334, costmo: fix in 0.14.5). pc-developer's table
+      // from the PC, Win32_Process as `pid ppid`, CRLF: the hand-started
+      // claude.exe 4884 under the psmux pane's powershell.exe 4292, and a
+      // host-started window (10992) whose pane pid is its own.
+      const pcTable = '4884 4292\r\n4292 15704\r\n15704 2800\r\n10992 15704\r\n8532 15704\r\n';
+      eq([await W.runsUnder?.(4292, [4884], { windows: true, read: async () => pcTable }), await W.runsUnder?.(10992, [4884, 8532], { windows: true, read: async () => pcTable })], [true, false],
+        'on Windows a Claude Code typed into a psmux pane\'s PowerShell runs under that pane; a host-started window is its own pid and nothing runs under it');
+      const winCmd = W.parentsCommand?.({ windows: true, env: { SystemRoot: 'C:\\Windows' } });
+      eq([/powershell\.exe$/.test(winCmd?.cmd ?? ''), /Get-CimInstance Win32_Process/.test(winCmd?.args?.at(-1) ?? ''), W.parentsCommand?.({ windows: false })?.cmd], [true, true, 'ps'],
+        'the table is read from Win32_Process through Windows PowerShell there, and from ps elsewhere');
+      // Asked at every watch tick, so remembered per window shape (QA 3898:
+      // on Windows each read is 0.33–0.44 s of PowerShell).
+      let reads = 0;
+      const counted = { windows: true, read: async () => { reads++; return pcTable; } };
+      const memo = {};
+      const asks = [await W.runsUnderOnce?.(memo, 4292, [4884], counted), await W.runsUnderOnce?.(memo, 4292, [4884], counted), await W.runsUnderOnce?.(memo, 4292, [4884], counted)];
+      eq([asks, reads], [[true, true, true], 1], 'the same window asked three times reads the process table once');
+      await W.runsUnderOnce?.(memo, 4292, [4884, 8532], counted);
+      await W.runsUnderOnce?.(memo, 10992, [4884], counted);
+      eq(reads, 3, 'and again when the window or the roster changes');
+      kid.kill();
+    }
+
     // And into a composer Claude Code has scrolled (issue #31's second live
     // test, 2026-11-17): a five-line message with two attachments, typed
     // into an unattached 80x24 window, read "line 5 did not appear" because
@@ -1739,7 +2013,12 @@ async function main() {
     const busyModel = await W.send(CP_DIR, '/model opus');
     eq([busyModel.ok, busyModel.code], [false, 'busy'], 'a model change is refused while the window is working');
     eq((await W.send(CP_DIR, '/effort low')).code, 'busy', 'and so is an effort change');
-    eq(keysSince(mark).length, 0, 'with no key sent for either');
+    // And an MCP reconnect: measured on 2.1.328, the window drops one typed
+    // into a turn without a trace, so it is refused here in words instead.
+    const busyMcp = await W.send(CP_DIR, W.typedCommand('/mcp'));
+    eq([busyMcp.ok, busyMcp.code], [false, 'busy'], 'a reconnect is refused while the window is working');
+    assert(/drops an \/mcp typed into a turn/.test(busyMcp.error ?? ''), `in words that say why — ${busyMcp.error}`);
+    eq(keysSince(mark).length, 0, 'with no key sent for any of them');
     const behind = await W.send(CP_DIR, 'sent while it compacts');
     assert(behind.ok && behind.queued, `a message sent into a compaction is taken${behind.ok ? '' : ` — ${behind.error}`}`);
     eq(behind.held, 'compacting', 'and said to be held by the compaction, with no twenty-second wait');
@@ -2541,6 +2820,39 @@ async function main() {
     eq(thereResult.ok, true, `the presser succeeds once the cursor is confirmed on the right row — ${thereResult.error ?? ''}`);
     eq(thereResult.chose, 'Use this MCP server', 'and reports which row it took');
     assert(existsSync(enterMark), 'with Enter actually reaching the window this time');
+
+    // A cursor that moves, but late. On 2.1.328 under load the host read the
+    // pane 80 ms after its last key, before the redraw, and refused to press
+    // a trust question whose cursor was already on the row (the reader sweep,
+    // 2026-11-19). This stand-in moves on Up and Down and redraws 500 ms
+    // later; Enter is noted with the row the cursor was on when it arrived.
+    const lagDir = `${PROMPT_DIR}/startup-lag`;
+    mkdirSync(lagDir, { recursive: true });
+    const lagMark = `${lagDir}/enter-at.mark`;
+    writeFileSync(`${lagDir}/run.cjs`, [
+      '#!/usr/bin/env node',
+      `const fs = require('fs');`,
+      `const body = ${JSON.stringify(mcpBody(-1))};`,
+      `const rows = ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'];`,
+      `let at = 2;`,
+      `const draw = () => { const out = body.slice(); const first = out.indexOf('    ' + rows[0]); rows.forEach((t, i) => { out[first + i] = (i === at ? '  \u276f ' : '    ') + t; }); process.stdout.write('\\x1b[2J\x1b[H' + out.join('\\n') + '\\n'); };`,
+      `draw();`,
+      `if (process.stdin.isTTY) process.stdin.setRawMode(true);`,
+      `process.stdin.resume();`,
+      `process.stdin.on('data', (buf) => {`,
+      `  const s = buf.toString('latin1');`,
+      `  if (s.includes('\\x1b[A') || s.includes('\\x1bOA')) { at = Math.max(0, at - 1); setTimeout(draw, 500); }`,
+      `  if (s.includes('\\x1b[B') || s.includes('\\x1bOB')) { at = Math.min(2, at + 1); setTimeout(draw, 500); }`,
+      `  if (s.includes('\\r') || s.includes('\\n')) fs.appendFileSync(${JSON.stringify(lagMark)}, String(at));`,
+      `});`,
+    ].join('\n'));
+    chmodSync(`${lagDir}/run.cjs`, 0o755);
+    await run('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', lagDir, `${lagDir}/run.cjs`]).catch(() => {});
+    await drawn(lagDir);
+    const lagResult = await W.answerStartup(lagDir, 1);
+    eq([lagResult.ok, lagResult.chose ?? lagResult.error], [false, 'the window is still showing the same question after Enter \u2014 it reads "Use this MCP server"'],
+      'a cursor that redraws late is waited for: the host pressed Enter once it read the row (this stand-in keeps its dialog up, so the after-check says so)');
+    eq(existsSync(lagMark) ? readFileSync(lagMark, 'utf8') : '', '0', 'and Enter arrived with the cursor on the row it walked to, after the redraw, not before it');
 
     // waitReady's early return. A window sitting on this dialog is registered
     // — it is a live interactive tty — but must never be waited out to the

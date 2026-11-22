@@ -170,7 +170,11 @@ to the whole system.
 the floor does this for you: pick the folder, name the floor and the seat, and
 the host binds it in Claude Code's own configuration and opens a window there.
 No approval dialog, and the key never leaves that machine. A folder that
-already has a `.mcp.json` entry is imported the same way.
+already has a `.mcp.json` entry is imported the same way. A folder bound to
+another instance of the orchestratinator, at another address, is released
+from it and seated here on the same click: the dialog names the address it
+is leaving before you press. Its conversations come with it; its messages
+and tasks stay on the instance it left.
 
 **4. Install the plugin** — this is what puts each session on the floor.
 
@@ -180,11 +184,13 @@ this from whichever you work in.
 **From Claude Code** (a terminal session), from the clone:
 
 ```
-/plugin marketplace add .
+/plugin marketplace add ./
 /plugin install orchestratinator-floor
 ```
 
-From any other directory, give the full path to the clone instead of `.`.
+From any other directory, give the full path to the clone instead of `./`.
+Write it with the slash: on Windows a bare `.` is refused ("Invalid
+marketplace source format. Try: owner/repo, https://..., or ./path").
 
 **From VS Code**, the `/plugin` command doesn't take arguments — it answers
 *"/plugin isn't available in this environment."* Type `/plugin` on its own and

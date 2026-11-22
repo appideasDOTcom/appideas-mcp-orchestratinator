@@ -20,6 +20,11 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { boardProtocol } from './board-protocol.mjs';
+// The Node floor in words, before better-sqlite3 is opened: a Node-API 9 node
+// segfaults on it with none (src/node-floor.js). A copy holding an older src/
+// has no such file, and that is not this script's fault to report.
+await import('../../../src/node-floor.js').catch((e) => { if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e; });
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const require = createRequire(`${REPO}/package.json`);
@@ -52,10 +57,10 @@ export const FOLDERS = [
   { path: '/repo/mars-elsewhere', name: 'mars-elsewhere', depth: 1, bound: { channel: 'x', agent: 'y', scope: 'project', board: 'http://10.0.0.9:8787' }, has_mcp_json: true, other_board: 'http://10.0.0.9:8787', trusted: false, last_active: null, sessions: 0 },
 ];
 
-const register = () => fetch(`${base}/api/host/register`, {
+const register = async () => fetch(`${base}/api/host/register`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
-  body: JSON.stringify({ host_id: HOST, name: 'testbox', tmux: 'orch', desks: desksOf(), roots: ['/repo'], folders: FOLDERS }),
+  body: JSON.stringify({ host_id: HOST, name: 'testbox', protocol: await boardProtocol(base), tmux: 'orch', desks: desksOf(), roots: ['/repo'], folders: FOLDERS }),
 }).then((r) => r.json()).catch((e) => ({ error: e.message }));
 
 console.log(`register: ${JSON.stringify(await register())}`);

@@ -1,3 +1,4 @@
+import './node-floor.js';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -301,6 +302,21 @@ export function openDb(path) {
     );
     CREATE INDEX IF NOT EXISTS idx_meeting_rooms_updated ON meeting_rooms(updated_at);
 
+    -- Which meeting room each desk was last told it is in (costmo,
+    -- 2026-11-19): a desk is sent one message as it enters a room and one
+    -- as it is back on the floor (roomNoticePlan in src/floor.js). A row is
+    -- "told it is in room N"; no row is "on the floor". A table, not memory,
+    -- because the desktop app restarts its board on every launch, and a desk
+    -- told it is in a room before a restart is still owed the way back.
+    -- Not in BACKUP_TABLES, for meeting_rooms' reason.
+    CREATE TABLE IF NOT EXISTS room_told (
+      channel    TEXT NOT NULL,
+      agent      TEXT NOT NULL,
+      meeting_id INTEGER NOT NULL,
+      told_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
+    );
+
     -- ─── One agent, several sessions (costmo, 2026-11-16) ─────────────────────
     -- A second session of an agent on a floor it already has a desk on. The
     -- board files turns, unread mail, tasks and a meeting room's members by
@@ -381,6 +397,17 @@ export function openDb(path) {
   // (MEETING_LIVE_SECONDS): a window that crashed or was killed never sends
   // its end, and must not keep a floor's agents talking past each other.
   addColumn(db, 'meeting_rooms', 'live_at', 'TEXT');
+  // A meeting kept while no window shows it (0.14.4, costmo 2026-11-20:
+  // "a meeting room shouldn't disappear from a floor unless/until the
+  // meeting is ended"). Set when the desktop app, quitting, tells the room's
+  // window so (`window.orchMeeting.hold()` → /api/floor/meeting/hold), which
+  // then closes without ending the record. A held room is live whatever
+  // live_at says, so it goes on containing its desks' broadcasts and holding
+  // its second sessions, and the floor draws its box. Cleared when a window
+  // opens or touches the room again, and by End. Closing the room's own
+  // window still ends it (his ruling the same day), and a crash with no word
+  // still lapses after MEETING_LIVE_SECONDS, as before.
+  addColumn(db, 'meeting_rooms', 'held_at', 'TEXT');
   // Where a second session's mail starts (QA, PR #57 finding 2). Its
   // `agents` row is made when its window connects, and was made at cursor 0:
   // every broadcast the floor ever carried read as unread for it (7 of 7
@@ -456,6 +483,25 @@ export function openDb(path) {
   // board refuses files to it, and a restarted board must still know which
   // hosts can take them.
   addColumn(db, 'hosts', 'uploads', 'INTEGER NOT NULL DEFAULT 0');
+  // Whether the host takes `reconnect` work: typing `/mcp reconnect` into a
+  // floor window whose tools dropped (reconnectDue in src/floor.js). On the
+  // row for `seats`' reason. A host from before it would drop the work.
+  addColumn(db, 'hosts', 'reconnects', 'INTEGER NOT NULL DEFAULT 0');
+  // Claude Code signed out on the host's machine (costmo, 2026-11-19: the
+  // host signs in on the click). `signins`: the host takes `signin` work and
+  // runs `claude auth login` for it; a host from before it would drop the
+  // work, so the board offers Sign in only on one that says so. `signed_out`:
+  // its own reading at its last registration (host/auth.js), on the row for
+  // `seats`' reason, so a restarted board still draws the desks that way.
+  addColumn(db, 'hosts', 'signins', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'hosts', 'signed_out', 'INTEGER NOT NULL DEFAULT 0');
+  // `refused`: the words a host was refused in at its last registration,
+  // for its protocol (protocolRefusal), and null once one is accepted. On
+  // the row, for `seats`' reason: every check of "can this desk be typed
+  // into" reads the desk's row joined to its host's, and a refused host's
+  // desks used to read live for up to HOST_STALE_SECONDS and take messages
+  // nobody would deliver, then say only "offline" (F4, 0.14.5 review).
+  addColumn(db, 'hosts', 'refused', 'TEXT');
   // A host's work, past being handed out (milestone audit 2026-11-17,
   // finding 4). `boot`: which run of the host took it, so the next run can
   // tell work it never finished from work it is doing. `done_at`: the host
@@ -834,6 +880,16 @@ export function makeStore(db) {
       `UPDATE agents SET poll_cursor = MAX(poll_cursor, @cursor)
        WHERE channel = @channel AND agent = @agent`
     ),
+    // The highest message id this instance has ever issued. From SQLite's own
+    // counter for the AUTOINCREMENT column, not MAX(id): deleting a floor
+    // takes its messages with it, and MAX(id) would then fall below cursors
+    // this instance itself handed out.
+    messageHighWater: db.prepare(
+      `SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) AS id`
+    ),
+    pollCursorOf: db.prepare(
+      `SELECT poll_cursor FROM agents WHERE channel = @channel AND agent = @agent`
+    ),
     listAgents: db.prepare(
       `SELECT agent, last_seen, status, status_detail, status_at, status_expires_at,
               last_action, last_action_at
@@ -884,14 +940,19 @@ export function makeStore(db) {
     setMeetingParticipants: db.prepare(
       `UPDATE meeting_rooms SET participants = ?, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`
     ),
-    openMeeting: db.prepare(`UPDATE meeting_rooms SET ended_at = NULL, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`),
-    touchMeeting: db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now') WHERE id = ? AND ended_at IS NULL`),
+    openMeeting: db.prepare(`UPDATE meeting_rooms SET ended_at = NULL, held_at = NULL, updated_at = datetime('now'), live_at = datetime('now') WHERE id = ?`),
+    touchMeeting: db.prepare(`UPDATE meeting_rooms SET live_at = datetime('now'), held_at = NULL WHERE id = ? AND ended_at IS NULL`),
+    holdMeeting: db.prepare(`UPDATE meeting_rooms SET held_at = datetime('now'), live_at = datetime('now') WHERE id = ? AND ended_at IS NULL`),
+    heldMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms
+        WHERE ended_at IS NULL AND held_at IS NOT NULL ORDER BY id`
+    ),
     liveMeetings: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms
-        WHERE channel = ? AND ended_at IS NULL AND live_at > datetime('now', ?) ORDER BY live_at DESC, id DESC`
+        WHERE channel = ? AND ended_at IS NULL AND (live_at > datetime('now', ?) OR held_at IS NOT NULL) ORDER BY live_at DESC, id DESC`
     ),
     endMeeting: db.prepare(
-      `UPDATE meeting_rooms SET participants = ?, ended_at = datetime('now'), updated_at = datetime('now'), live_at = NULL WHERE id = ?`
+      `UPDATE meeting_rooms SET participants = ?, ended_at = datetime('now'), updated_at = datetime('now'), live_at = NULL, held_at = NULL WHERE id = ?`
     ),
     recentMeetings: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at FROM meeting_rooms ORDER BY updated_at DESC, id DESC LIMIT ?`
@@ -904,9 +965,21 @@ export function makeStore(db) {
     meetingsOn: db.prepare(
       `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
               CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
-              (ended_at IS NULL AND live_at > datetime('now', ?)) AS live
+              (ended_at IS NULL AND (live_at > datetime('now', ?) OR held_at IS NOT NULL)) AS live
          FROM meeting_rooms WHERE channel = ?`
     ),
+    allMeetings: db.prepare(
+      `SELECT id, channel, participants, started_at, updated_at, ended_at, live_at,
+              CAST((julianday('now') - julianday(ended_at)) * 86400 AS INTEGER) AS ended_s,
+              (ended_at IS NULL AND (live_at > datetime('now', ?) OR held_at IS NOT NULL)) AS live
+         FROM meeting_rooms ORDER BY id`
+    ),
+    listRoomTold: db.prepare(`SELECT channel, agent, meeting_id FROM room_told`),
+    setRoomTold: db.prepare(
+      `INSERT INTO room_told (channel, agent, meeting_id) VALUES (?, ?, ?)
+       ON CONFLICT(channel, agent) DO UPDATE SET meeting_id = excluded.meeting_id, told_at = datetime('now')`
+    ),
+    clearRoomTold: db.prepare(`DELETE FROM room_told WHERE channel = ? AND agent = ?`),
     // One agent, several sessions: the link from a second session to its agent.
     twinOf: db.prepare(`SELECT channel, agent, base, n, for_meeting, created_at, start_cursor,
                                CAST((julianday('now') - julianday(created_at)) * 86400 AS INTEGER) AS age_s
@@ -928,6 +1001,7 @@ export function makeStore(db) {
     ),
     deleteTwin: db.prepare(`DELETE FROM desk_twins WHERE channel = ? AND agent = ?`),
     agentRow: db.prepare(`SELECT agent, retired_at FROM agents WHERE channel = ? AND agent = ?`),
+    agentKeys: db.prepare(`SELECT channel, agent FROM agents`),
     hostedRow: db.prepare(`SELECT state FROM hosted_desks WHERE channel = ? AND agent = ?`),
     liveSession: db.prepare(`SELECT 1 FROM agent_sessions WHERE channel = ? AND agent = ? AND ended_at IS NULL LIMIT 1`),
     profileOf: db.prepare(`SELECT persona, gender, shirt, hair, skin FROM agent_profile WHERE agent = ?`),
@@ -1453,15 +1527,18 @@ export function makeStore(db) {
 
     // ─── Hosting ────────────────────────────────────────────────────────────
     upsertHost: db.prepare(
-      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, last_seen)
-       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, datetime('now'))
+      `INSERT INTO hosts (host_id, name, tmux_session, seats, uploads, reconnects, signins, signed_out, last_seen)
+       VALUES (@host_id, @name, @tmux_session, @seats, @uploads, @reconnects, @signins, @signed_out, datetime('now'))
        ON CONFLICT(host_id) DO UPDATE SET
          name = excluded.name, tmux_session = excluded.tmux_session, seats = excluded.seats,
-         uploads = excluded.uploads, last_seen = datetime('now')`
+         uploads = excluded.uploads, reconnects = excluded.reconnects, signins = excluded.signins,
+         signed_out = excluded.signed_out, refused = NULL, last_seen = datetime('now')`
     ),
+    setHostRefused: db.prepare(`UPDATE hosts SET refused = ? WHERE host_id = ?`),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, registered_at, last_seen FROM hosts ORDER BY name`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
+    hostReconnects: db.prepare(`SELECT reconnects FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
       // Re-registering brings a desk back from offline; the session id it had
       // is deliberately left alone so the host can resume it.
@@ -1501,14 +1578,16 @@ export function makeStore(db) {
     listHostedDesks: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
-              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
+              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
+              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
     hostedDesk: db.prepare(
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
-              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux
+              h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
+              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id
         WHERE d.channel = ? AND d.agent = ?`
@@ -1565,7 +1644,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins', 'room_told']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1661,6 +1740,170 @@ export function makeStore(db) {
       report[table] = { removed, inserted, ...(ignored.length ? { ignored_columns: ignored } : {}) };
     }
     return report;
+  });
+
+  /**
+   * One floor of a backup over the same floor here, and nothing else (costmo,
+   * 2026-11-19: bring the e3-roominator floor over from the Docker instance
+   * without losing what was said on it since the last full import). The
+   * reasons a whole-board merge was refused (web.js, "Load a backup over the
+   * top of this board") are about ids, so ids are what this is careful with:
+   *
+   * - **Nothing here is lost.** Refused, before any write, when this floor
+   *   here holds a message, task or audit row the file does not, a task the
+   *   file has older, or a contract at a later version. The floor here is
+   *   then not a stale copy of the file's, and replacing it would drop work.
+   * - **An id never means two things.** Message, task, contract-history and
+   *   audit ids count per instance. The file's ids are kept up to the first
+   *   one this instance has already given to a row of another floor; that row
+   *   and every one after it on the floor is numbered above everything here,
+   *   in the file's order. So the floor reads in the order it was written,
+   *   the rows already shared with the last import keep their numbers, and
+   *   the renumbered ones are said in the report.
+   * - **Read positions are carried.** An agent's poll_cursor is a message id
+   *   on the file's instance; it is moved to the new number of the newest
+   *   message it had read. An agent that remembers a number from the other
+   *   instance may be handed some messages again; it is never handed fewer.
+   * - **Names here win** (agent_profile is per agent, not per floor): a
+   *   profile from the file is taken only for an agent with none here.
+   *
+   * `tables` is the file's tables, already filtered to `channel`.
+   */
+  const ID_TABLES = ['messages', 'tasks', 'contract_history', 'admin_events'];
+  const FLOOR_TABLES = ['messages', 'contracts', 'contract_history', 'tasks', 'agents', 'channel_flags', 'desk_flags', 'admin_events', 'personas'];
+  // What a row is, apart from its number: how a row here is found in a file
+  // whose instance numbered it differently (or that this one renumbered on an
+  // earlier floor restore). A task is the same task whatever its status.
+  const ROW_IS = {
+    messages: (r) => `${r.from_agent}|${r.to_agent ?? ''}|${r.created_at}|${r.body}`,
+    tasks: (r) => `${r.created_by ?? ''}|${r.created_at}|${r.title}`,
+    contract_history: (r) => `${r.key}|${r.version}|${r.updated_at}`,
+    admin_events: (r) => `${r.action}|${r.actor ?? ''}|${r.target ?? ''}|${r.created_at}|${r.detail ?? ''}`,
+  };
+  const restoreFloor = db.transaction((channel, tables) => {
+    const rowsOf = (t) => (Array.isArray(tables[t]) ? tables[t] : []).filter((r) => r && r.channel === channel);
+    const hereOf = (t) => db.prepare(`SELECT * FROM ${t} WHERE channel = ?`).all(channel);
+
+    // What this floor here has that the file does not. A floor restore's own
+    // audit row is this instance's, and is kept across the restore below.
+    const lost = [];
+    const ownAudit = (r) => r.action === 'backup.restore_floor';
+    for (const t of ['messages', 'tasks', 'admin_events']) {
+      const file = new Map(rowsOf(t).map((r) => [ROW_IS[t](r), r]));
+      for (const h of hereOf(t)) {
+        if (t === 'admin_events' && ownAudit(h)) continue;
+        const f = file.get(ROW_IS[t](h));
+        if (!f) { lost.push(`${t === 'messages' ? 'message' : t === 'tasks' ? 'task' : 'audit row'} #${h.id} (${h.created_at})`); continue; }
+        if (t === 'tasks' && String(h.updated_at ?? '') > String(f.updated_at ?? '')) lost.push(`task #${h.id}, changed here at ${h.updated_at} after the file's copy`);
+      }
+    }
+    {
+      const file = new Map(rowsOf('contracts').map((r) => [r.key, r]));
+      for (const h of hereOf('contracts')) {
+        const f = file.get(h.key);
+        if (!f || Number(f.version) < Number(h.version)) lost.push(`contract ${h.key} v${h.version}`);
+      }
+    }
+    if (lost.length) {
+      const err = new Error(`this instance has ${lost.length} thing${lost.length === 1 ? '' : 's'} on ${channel} the file does not: ${lost.slice(0, 5).join('; ')}${lost.length > 5 ? '; …' : ''}. Nothing was changed.`);
+      err.code = 'floor_newer_here';
+      throw err;
+    }
+    // The numbers this floor's rows have here, by what each row is, and the
+    // floor restores' own audit rows, which stay.
+    const hereIds = {};
+    for (const t of ID_TABLES) hereIds[t] = new Map(hereOf(t).filter((r) => !(t === 'admin_events' && ownAudit(r))).map((r) => [ROW_IS[t](r), r.id]));
+    const keptAudit = hereOf('admin_events').filter(ownAudit);
+
+    const report = {};
+    const idMaps = {};
+    for (const t of FLOOR_TABLES) {
+      const { columns } = tableInfo(t);
+      const removed = db.prepare(`DELETE FROM ${t} WHERE channel = ?`).run(channel).changes;
+      let rows = rowsOf(t);
+      let renumbered = 0;
+      if (ID_TABLES.includes(t)) {
+        // A row this floor already has here keeps its number here. Any other
+        // keeps the file's number while that is free and later than every
+        // number given so far; else it is numbered above everything, in the
+        // file's order, so the floor still reads in the order it was written.
+        rows = rows.slice().sort((a, b) => Number(a.id) - Number(b.id));
+        if (t === 'admin_events') rows = rows.filter((r) => !ownAudit(r)).concat(keptAudit);
+        const taken = db.prepare(`SELECT 1 FROM ${t} WHERE id = ?`);
+        const seq = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`).get(t)?.seq ?? 0;
+        const top = db.prepare(`SELECT MAX(id) AS m FROM ${t}`).get().m ?? 0;
+        const reused = new Set(hereIds[t].values());
+        let next = Math.max(seq, top, ...reused, ...rows.map((r) => Number(r.id))) + 1;
+        let last = 0;
+        const map = new Map();
+        const given = new Set();
+        rows = rows.map((r) => {
+          const fileId = Number(r.id);
+          const mine = t === 'admin_events' && keptAudit.includes(r) ? r.id : hereIds[t].get(ROW_IS[t](r));
+          let id;
+          if (mine != null) id = mine;
+          else if (fileId > last && !taken.get(fileId) && !reused.has(fileId) && !given.has(fileId)) id = fileId;
+          else id = next++;
+          given.add(id);
+          if (mine == null || !(t === 'admin_events' && keptAudit.includes(r))) map.set(fileId, id);
+          if (id !== fileId) renumbered++;
+          last = Math.max(last, id);
+          return id === fileId ? r : { ...r, id };
+        });
+        idMaps[t] = { map };
+      }
+      if (t === 'agents') {
+        // A read position, moved to where its message now is: the new number
+        // of the newest message at or below it on the file's instance.
+        const m = idMaps.messages?.map ?? new Map();
+        const old = [...m.keys()].sort((a, b) => a - b);
+        rows = rows.map((r) => {
+          const c = Number(r.poll_cursor ?? 0);
+          if (!c) return r;
+          let at = null;
+          for (const id of old) { if (id <= c) at = id; else break; }
+          return at === null ? r : { ...r, poll_cursor: m.get(at) };
+        });
+      }
+      const present = [...new Set(rows.flatMap((r) => Object.keys(r ?? {})))];
+      const use = present.filter((c) => columns.includes(c));
+      let inserted = 0;
+      if (use.length && rows.length) {
+        const stmt = db.prepare(`INSERT INTO ${t} (${use.join(', ')}) VALUES (${use.map((c) => `@${c}`).join(', ')})`);
+        for (const row of rows) {
+          try {
+            stmt.run(Object.fromEntries(use.map((c) => [c, bindable(row?.[c])])));
+          } catch (err) {
+            err.message = `"${t}" row ${inserted + 1} of ${rows.length} on ${channel} was refused: ${err.message}`;
+            throw err;
+          }
+          inserted++;
+        }
+      }
+      report[t] = { removed, inserted, ...(renumbered ? { renumbered } : {}) };
+    }
+
+    // Profiles are per agent: taken only for an agent with none here.
+    const agentsHere = new Set(rowsOf('agents').map((r) => r.agent).concat(rowsOf('personas').map((r) => r.agent)));
+    const profiles = (Array.isArray(tables.agent_profile) ? tables.agent_profile : []).filter((r) => r && agentsHere.has(r.agent));
+    let adopted = 0, kept = 0;
+    if (profiles.length) {
+      const { columns } = tableInfo('agent_profile');
+      const has = db.prepare(`SELECT 1 FROM agent_profile WHERE agent = ?`);
+      for (const r of profiles) {
+        if (has.get(r.agent)) { kept++; continue; }
+        const use = Object.keys(r).filter((c) => columns.includes(c));
+        db.prepare(`INSERT INTO agent_profile (${use.join(', ')}) VALUES (${use.map((c) => `@${c}`).join(', ')})`)
+          .run(Object.fromEntries(use.map((c) => [c, bindable(r[c])])));
+        adopted++;
+      }
+    }
+    report.agent_profile = { adopted, kept };
+    const renumberedIds = Object.fromEntries(Object.entries(idMaps)
+      .map(([t, v]) => [t, [...v.map].filter(([a, b]) => a !== b)])
+      .filter(([, moved]) => moved.length)
+      .map(([t, moved]) => [t, { from: Math.min(...moved.map(([a]) => a)), to: Math.min(...moved.map(([, b]) => b)), count: moved.length }]));
+    return { report, renumbered: renumberedIds };
   });
 
   const setContract = db.transaction((channel, key, value, by) => {
@@ -1860,7 +2103,11 @@ export function makeStore(db) {
       q.setAgentStatus.run({ channel, agent, status, detail, ttl: `+${Math.max(0, Math.floor(ttlSeconds))} seconds` }),
     advancePollCursor: (channel, agent, cursor) =>
       q.advancePollCursor.run({ channel, agent, cursor }).changes,
+    messageHighWater: () => q.messageHighWater.get().id,
+    pollCursorOf: (channel, agent) => q.pollCursorOf.get({ channel, agent })?.poll_cursor ?? 0,
     listAgents: (channel) => q.listAgents.all({ channel }),
+    /** Every (channel, agent) that has an agents row: only an MCP connect or a tool call makes one (touchAgent, set_status). */
+    agentKeys: () => q.agentKeys.all(),
 
     // --- operator actions -----------------------------------------------------
     retireAgent: (channel, agent) => q.retireAgent.run({ channel, agent }).changes,
@@ -1905,6 +2152,7 @@ export function makeStore(db) {
     dumpTable: (table) => tableInfo(table).selectAll.all(),
     countTable: (table) => tableInfo(table).count.get().n,
     restoreBackup,
+    restoreFloor,
     /**
      * Take on names a legacy backup kept per desk — see applyBackup, which is
      * the only caller and holds the reasoning. A name already on this board
@@ -1962,6 +2210,13 @@ export function makeStore(db) {
     /** Every room on a floor, each with `live` (open and heard from lately) and `ended_s` (seconds since it ended). */
     meetingsOn: (channel, liveSeconds = MEETING_LIVE_SECONDS) =>
       q.meetingsOn.all(`-${liveSeconds} seconds`, channel).map((r) => ({ ...meetingRow(r), live: !!r.live })),
+    /** Every room on every floor, shaped as meetingsOn's. */
+    allMeetings: (liveSeconds = MEETING_LIVE_SECONDS) =>
+      q.allMeetings.all(`-${liveSeconds} seconds`).map((r) => ({ ...meetingRow(r), live: !!r.live })),
+    /** The room each desk was last told it is in (room_told). */
+    listRoomTold: () => q.listRoomTold.all(),
+    setRoomTold: (channel, agent, meetingId) => q.setRoomTold.run(channel, agent, meetingId).changes,
+    clearRoomTold: (channel, agent) => q.clearRoomTold.run(channel, agent).changes,
     // --- one agent, several sessions -------------------------------------------
     /** The link from a second session to its agent, or null: `{ base, n, for_meeting, age_s }`. */
     twinOf: (channel, agent) => q.twinOf.get(channel, agent) ?? null,
@@ -1974,6 +2229,10 @@ export function makeStore(db) {
     familyOf,
     /** The window says the room is still open; false when the board has it ended (a reload's end landed after its open). */
     touchMeeting: (id) => q.touchMeeting.run(id).changes > 0,
+    /** The desktop app is quitting with this room's window open: keep the meeting (held_at). False when it has ended. */
+    holdMeeting: (id) => q.holdMeeting.run(id).changes > 0,
+    /** Open meetings no window shows, because the app quit with them open. */
+    heldMeetings: () => q.heldMeetings.all().map(meetingRow),
     /**
      * The open, live meeting room `agent` is in on `channel`, or null: whose
      * participants its broadcasts reach. In it, not absent: a desk Resume
@@ -2123,10 +2382,15 @@ export function makeStore(db) {
     // `seats`: whether it said it can put a second desk in a folder; a host
     // from before seats says nothing, and is not asked for one.
     // `uploads`: whether it fetches a message's attachments (issue #31).
-    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false) =>
-      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0 }).changes,
+    // `signins` / `signedOut`: it runs Claude Code's sign-in for `signin`
+    // work, and whether Claude Code is signed out there now (host/auth.js).
+    registerHost: (hostId, name, tmuxSession = null, seats = false, uploads = false, reconnects = false, { signins = false, signedOut = false } = {}) =>
+      q.upsertHost.run({ host_id: hostId, name, tmux_session: tmuxSession, seats: seats ? 1 : 0, uploads: uploads ? 1 : 0, reconnects: reconnects ? 1 : 0, signins: signins ? 1 : 0, signed_out: signedOut ? 1 : 0 }).changes,
     hostTakesUploads: (hostId) => !!q.hostUploads.get(hostId)?.uploads,
+    hostReconnects: (hostId) => !!q.hostReconnects.get(hostId)?.reconnects,
     touchHost: (hostId) => q.touchHost.run(hostId).changes,
+    /** The words a host was refused in at registration (F4), or null to clear them. A host with no row has no desks to say them on. */
+    setHostRefused: (hostId, why) => q.setHostRefused.run(why ?? null, hostId).changes,
     listHosts: () => q.listHosts.all(),
     setHostedHolder: (channel, agent, { windowId = null, outsidePid = null, windowOpen = null, holders = 0, clients = 0 } = {}) =>
       q.setHostedHolder.run({ channel, agent, window_id: windowId, outside_pid: outsidePid, window_open: windowOpen, holders, clients }).changes,

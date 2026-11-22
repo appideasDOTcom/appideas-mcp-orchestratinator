@@ -23,7 +23,14 @@ const NAME = 'appideas-orchestratinator';
 // Read rather than duplicated: a hand-maintained copy of the version drifts from
 // package.json the first time one of them is bumped alone, and the dashboard
 // header then confidently reports a build that doesn't exist.
-const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+const PKG = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const VERSION = PKG.version;
+// The host<->board protocol this build speaks (task #288 on the desktop
+// channel). A host says its own at every registration and is refused, in
+// words, when the two differ — see protocolRefusal in src/floor.js for what
+// the number covers and when it moves. Read from package.json like the
+// version, so it cannot drift from the file a build is read off.
+const PROTOCOL = Number(PKG.protocol);
 // And the commit it was built from, which is what an update compares (issue
 // #40): written into the image at build, read from the clone run bare.
 const COMMIT = buildCommit();
@@ -102,9 +109,14 @@ const jsonRestore = express.json({ limit: process.env.RESTORE_BODY_LIMIT ?? '128
 // route after adminGuard has run, so no parser may touch it: a .json file sent
 // as application/json would otherwise be parsed here, against the 4mb limit.
 const UPLOAD_PATH = '/api/floor/upload';
+// The routes that take a whole backup file: a restore, one floor of it, and
+// the read of which floors it holds (the page posts the file to ask). A real
+// board's file is 14 MB (2026-11-19), so each needs the restore's headroom;
+// the one-floor routes were refused at 4mb by the first real file.
+const RESTORE_PATHS = new Set(['/api/admin/backup/restore', '/api/admin/backup/restore-floor', '/api/admin/backup/floors']);
 app.use((req, res, next) => {
   if (req.path === UPLOAD_PATH) return next();
-  return (req.path === '/api/admin/backup/restore' ? jsonRestore : jsonBody)(req, res, next);
+  return (RESTORE_PATHS.has(req.path) ? jsonRestore : jsonBody)(req, res, next);
 });
 
 // One transport per MCP session (keyed by the mcp-session-id header).
@@ -257,6 +269,7 @@ app.get('/health', (_req, res) => {
     ok: true,
     name: NAME,
     version: VERSION,
+    protocol: PROTOCOL,
     // What a page waiting out an update reads to know the new build is up.
     commit: COMMIT,
     sessions: Object.keys(transports).length,
@@ -429,6 +442,7 @@ app.use(createWebRouter({
   meta: {
     name: NAME,
     version: VERSION,
+    protocol: PROTOCOL,
     commit: COMMIT,
     port: PORT,
     dbPath: DB_PATH,

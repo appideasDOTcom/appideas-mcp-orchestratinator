@@ -14,8 +14,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
+
+// The host<->board protocol this tree speaks: every registration a suite
+// rolls by hand is a host, and a host that sends no number is refused.
+const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).protocol;
 
 const PORT = Number(process.env.FLOOR_TEST_PORT ?? 8897);
 const DB_PATH = `./data/floor-${process.pid}.db`;
@@ -79,6 +83,10 @@ const startServer = () => spawn('node', ['src/server.js'], {
     ...process.env, PORT: String(PORT), DB_PATH,
     ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', FLOOR_SESSION_TTL_MINUTES: '1',
     ORCH_TWIN_UNHEARD_MS: String(UNHEARD_MS),
+    // A floor window with no MCP session is asked to reconnect after this
+    // long, and once more after the retry (reconnectDue; 20 s and 2 min on a
+    // real board).
+    ORCH_RECONNECT_AFTER_MS: '1000', ORCH_RECONNECT_RETRY_MS: '2500',
     // Attachments (issue #31): staged in a folder of this run's, and a cap
     // small enough to meet without sending 100 MB.
     ORCH_UPLOAD_DIR: UPLOAD_DIR, ORCH_UPLOAD_MAX_BYTES: String(UPLOAD_CAP),
@@ -441,7 +449,7 @@ try {
     known.set(desk.agent, desk);
     return fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()] }),
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', protocol: PROTOCOL, desks: [...known.values()] }),
     });
   };
   // Applied-count returned, not just the status: this endpoint answers 200 for a
@@ -692,6 +700,83 @@ try {
   await hWork();
   }
 
+  console.log('\nthe protocol a host speaks, checked at registration (desktop #288)');
+  {
+    const B = { protocol: 2, version: '0.13.0' };
+    eq(protocolRefusal({ board: B, host: { protocol: 2 } }), null, 'the same number is not refused');
+    eq(protocolRefusal({ board: B, host: { protocol: '2' } }), null, 'however it was typed');
+    const behind = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 1, version: '0.12.9' } });
+    assert(/^The host "Mac" is behind this board: it speaks protocol 1 \(build 0\.12\.9\) and the board speaks protocol 2 \(build 0\.13\.0\)\. The two must match\./.test(behind), `a host behind the board is told so, with both builds ("${behind}")`);
+    assert(/Restart the host so it runs the clone's current code\.$/.test(behind), 'and, for launchd\'s host, what to do: the clone has the code, the host has not restarted');
+    // F4 (0.14.5 review): "or update it from the page" cannot work for the
+    // host it is said about. The page's update is carried out by the host
+    // beside the board's container, and a refused host is not on the board.
+    assert(!/from the page/i.test(behind), 'and only that: no remedy is offered that the refused host cannot carry out');
+    const app = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 1, version: '0.12.9', supervisor: 'app' } });
+    assert(/Update the Orchestratinator app, which carries the host\.$/.test(app), `an app-run host behind the board is sent to the app ("${app}")`);
+    const ahead = protocolRefusal({ board: B, host: { name: 'Mac', protocol: 3, version: '0.14.0' } });
+    assert(/is ahead of this board/.test(ahead) && /Rebuild the board from the clone the host runs from\.$/.test(ahead), `a host ahead of the board is refused too, and sent the other way ("${ahead}")`);
+    const appAhead = protocolRefusal({ board: B, host: { protocol: 3, supervisor: 'app' } });
+    assert(/^This host is ahead of this board/.test(appAhead) && /Update the board to the app's build/.test(appAhead), 'an app ahead of the board: update the board, or install the matching app');
+    const none = protocolRefusal({ board: B, host: { name: 'Old', version: '0.12.4' } });
+    assert(/sends no protocol version \(build 0\.12\.4, from before there was one\)/.test(none) && /is behind this board/.test(none), `a host that sends none is from before there was one, and is behind ("${none}")`);
+    const blank = protocolRefusal({ board: B, host: {} });
+    assert(/^This host is behind this board: it sends no protocol version \(an unknown build, from before there was one\)/.test(blank), 'with no name and no build, said as such');
+
+    // The route: refused in those words, remembered on /api/floor's hosts
+    // and the Take a desk host list, and forgotten the moment it registers.
+    const regAs = (body) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-old', name: 'oldbox', tmux: 'orch', desks: [], ...body }) })
+      .then(async (r) => ({ status: r.status, body: await r.json() }));
+    const old = await regAs({ protocol: PROTOCOL + 1, build: { version: '9.9.9' } });
+    eq([old.status, old.body.code, old.body.board?.protocol, old.body.host?.protocol], [409, 'protocol_mismatch', PROTOCOL, PROTOCOL + 1], 'a registration with another number is refused, naming both');
+    assert(/^The host "oldbox" is ahead of this board/.test(old.body.error), `in protocolRefusal\'s words ("${old.body.error}")`);
+    const fl = await fetch(`${HOST}/api/floor`).then((r) => r.json());
+    const row = fl.hosts.find((h) => h.host_id === 'h-old');
+    eq([row?.live, row?.refused], [false, old.body.error], '/api/floor lists the refused host, not live, with the words — it has no row of its own, so this is the only place the board can say it');
+    const tk = await fetch(`${HOST}/api/floor/folders`).then((r) => r.json());
+    eq(tk.hosts.find((h) => h.host_id === 'h-old')?.refused ?? 'absent', 'absent', 'Take a desk\'s host list is the registered hosts: a host that never registered is not a host to bind with');
+    const okNow = await regAs({ protocol: PROTOCOL });
+    eq(okNow.status, 200, 'the same host speaking the board\'s protocol registers');
+    const fl2 = await fetch(`${HOST}/api/floor`).then((r) => r.json());
+    eq([fl2.hosts.find((h) => h.host_id === 'h-old')?.refused, fl2.hosts.filter((h) => h.host_id === 'h-old').length], [null, 1], 'and the refusal is gone from its one row');
+    const again = await regAs({ protocol: 0 });
+    eq(again.status, 409, 'refused again on a later registration with the wrong number');
+    const fl3 = await fetch(`${HOST}/api/floor`).then((r) => r.json());
+    eq([fl3.hosts.find((h) => h.host_id === 'h-old')?.refused, fl3.hosts.find((h) => h.host_id === 'h-old')?.live], [again.body.error, false], 'said on the row it already has, which is not live however recently it registered before (a refused host takes no work)');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((r) => r.json())).hosts.find((h) => h.host_id === 'h-old')?.live, false, 'nor on Take a desk\'s list');
+    eq((await fetch(`${HOST}/api/floor/folders`).then((r) => r.json())).hosts.find((h) => h.host_id === 'h-old')?.refused, again.body.error, 'and on Take a desk\'s host list');
+    const noNum = await regAs({});
+    assert(noNum.status === 409 && /sends no protocol version/.test(noNum.body.error), 'a registration with no number at all is refused as a host from before there was one');
+    eq((await regAs({ protocol: PROTOCOL })).status, 200, 'restored');
+
+    // F4 (0.14.5 review, measured on a rig): after a deploy that rebuilt the
+    // board and left a 0.12.12 host running, that host was refused, and its
+    // desk still read live for HOST_STALE_SECONDS, took chats into the
+    // host's outbox that nobody would take, then said only "is offline". A
+    // desk whose host is refused says so in the refusal's words from the
+    // first refused registration, and takes nothing.
+    const refDesk = { channel: 'ref-ch', agent: 'refd', cwd: '/repo/refd', session_id: 'sdk-refd' };
+    const regRef = (body) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-ref', name: 'refbox', tmux: 'orch', desks: [refDesk], ...body }) })
+      .then(async (r) => ({ status: r.status, body: await r.json() }));
+    eq((await regRef({ protocol: PROTOCOL })).status, 200, 'the fixture: a host with one desk registers');
+    const refOf = async () => (await fetch(`${HOST}/api/floor`).then((r) => r.json())).channels.flatMap((c) => c.desks).find((x) => x.agent === 'refd' && x.hosted?.host_id === 'h-ref');
+    eq((await refOf())?.hosted?.live, true, 'the fixture: its desk is live');
+    const refused = await regRef({});
+    eq(refused.status, 409, 'the fixture: the same host, from before there was a protocol, is refused');
+    const rd = await refOf();
+    eq([rd?.hosted?.live, rd?.hosted?.refused, rd?.nudge?.code, rd?.nudge?.reason], [false, refused.body.error, 'host_refused', refused.body.error],
+      'its desk is not live at once (its last_seen is seconds old), says why in the refusal\'s words, and the bell is refused in them');
+    const rc = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: 'ref-ch', agent: 'refd', text: 'are you there?' }) });
+    const rcb = await rc.json();
+    eq([rc.status, rcb.code, rcb.error], [409, 'host_refused', refused.body.error], 'a message to it is refused in those words, not queued for a host that will not take it');
+    eq((await regRef({ protocol: PROTOCOL })).status, 200, 'the fixture: the host, restarted on the clone\'s code, registers');
+    const back = await refOf();
+    eq([back?.hosted?.live, back?.hosted?.refused, back?.nudge?.ok], [true, null, true], 'and its desk is live again, the words gone, the bell rings');
+    // A board restarted meanwhile still knows: the words are on the host's
+    // row, not only in this process (the PR #57 finding 5 rule).
+    eq((await regRef({})).status, 409, 'the fixture: refused again');
+  }
+
   console.log('\nthe folders a host offers');
   // The list the "take a desk" dialog draws. Every value here is one that
   // cannot be a fallback — a name, a time, a count that nothing on the server
@@ -700,7 +785,7 @@ try {
   const registerWith = (extra) =>
     fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', desks: [...known.values()], ...extra }),
+      body: JSON.stringify({ host_id: 'h-open', name: 'openbox', tmux: 'orch', protocol: PROTOCOL, desks: [...known.values()], ...extra }),
     });
   const folders = () => fetch(`${HOST}/api/floor/folders`).then((r) => r.json());
   eq((await folders()).hosts.find((h) => h.host_id === 'h-open')?.at ?? null, null,
@@ -733,6 +818,35 @@ try {
   assert(!('folders' in (fl.hosts.find((h) => h.host_id === 'h-open') ?? {})), 'the list itself stays off the payload every page polls');
   await registerWith({ roots: ['/repo'], folders: offered });
 
+  // A Windows host's paths are drive paths, and every check above was
+  // `startsWith('/')`: the board dropped its roots and folders, and Take a
+  // desk on it offered nothing (pc-developer, 2026-11-20). A drive path is
+  // absolute and compared with its separators and case folded, as Windows
+  // does; a POSIX one exactly as before.
+  {
+    const winHost = (extra) => fetch(`${HOST}/api/host/register`, {
+      method: 'POST', headers: HK,
+      body: JSON.stringify({ host_id: 'h-win', name: 'winbox', tmux: 'orch', protocol: PROTOCOL, desks: [], ...extra }),
+    });
+    await winHost({ roots: ['C:\\Users\\pat\\dev', 'relative\\nope'], folders: [
+      { path: 'C:\\Users\\pat\\dev\\scratch1', name: 'scratch1', depth: 5, bound: null },
+      { path: 'c:/users/PAT/dev/other', depth: 5, bound: null },
+      { path: 'C:\\Users\\pat\\devious', name: 'devious', depth: 4, bound: null },
+      { path: 'D:\\dev\\elsewhere', name: 'elsewhere', depth: 2, bound: null },
+    ] });
+    const win = (await folders()).hosts.find((h) => h.host_id === 'h-win');
+    eq(win?.roots, ['C:\\Users\\pat\\dev'], 'a Windows host\'s drive root is kept, and a relative one is still dropped');
+    eq(win?.folders.map((f) => [f.path, f.name]), [['C:\\Users\\pat\\dev\\scratch1', 'scratch1'], ['c:/users/PAT/dev/other', 'other']],
+      'its folders under that root are served, whatever their slashes or case, named by their last part; a sibling that only starts with the root\'s name, and another drive, are not');
+    const browse = await fetch(`${HOST}/api/floor/browse`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_id: 'h-win', path: 'C:/Users/pat/dev' }) });
+    assert(browse.status !== 400, `a drive path is a path to browse (got ${browse.status})`);
+    eq([isAbsPath('C:\\x'), isAbsPath('c:/x'), isAbsPath('/x'), isAbsPath('C:x'), isAbsPath('\\\\srv\\x'), isAbsPath('x/y')], [true, true, true, false, false, false],
+      'isAbsPath: a drive with its separator or a slash, and nothing else');
+    eq([underRoots('/repo/a', ['/repo']), underRoots('/Repo/a', ['/repo']), underRoots('/repo\\a', ['/repo']), underRoots('/repos', ['/repo'])], [true, false, false, false],
+      'underRoots: a POSIX path exactly as before, case and backslash being parts of a name there');
+    eq([baseName('C:\\a\\b'), baseName('/a/b\\c'), baseName('C:/a/b/')], ['b', 'b\\c', 'b'], 'baseName: by the path\'s own machine\'s separators');
+  }
+
   /* ── taking a desk ──────────────────────────────────────────────────────────
    * What the route checks is what the board knows; what the host does is the
    * host suite's. Every refusal must queue nothing. */
@@ -753,12 +867,96 @@ try {
   rr = await take({ host_id: 'h-open', path: '/repo/not-offered', channel: CH, agent: 'fresh' });
   eq((await rr.json()).code, 'unknown_folder', 'a folder the host did not offer is refused — the board never sends a path the host did not name');
   rr = await take({ host_id: 'h-open', path: '/repo/elsewhere-bound', channel: 'x', agent: 'y' });
-  eq((await rr.json()).code, 'other_board', 'a folder bound to another board is refused');
+  eq((await rr.json()).code, 'other_board', 'a folder bound to another instance is refused when the request does not name that instance');
   rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'wanderer' });
   eq((await rr.json()).code, 'desk_taken', 'a name already seated live at another folder is refused');
   rr = await take({ host_id: 'h-open', path: '/repo/alpha-older', channel: CH, agent: 'someone-else' });
   eq([rr.status, (await rr.json()).code], [400, 'agent_fixed'], 'a folder that names its agent cannot be taken under another name — only the floor can change');
   eq(await takeWork(), [], 'and none of those queued anything');
+
+  /* A release: a folder bound to another instance, taken here because the
+   * request names the instance it is leaving (costmo, 2026-11-08; the
+   * ruling and what keeps it narrow are in host/mcp.js). What the board
+   * checks is the address against the host's last reading, that the host
+   * can do it, and that it is never handed to the host as a move. What the
+   * host did is read from /api/floor/take, because the desk being released
+   * has no row here for a refusal to be said on. */
+  console.log('\nreleasing a folder from another instance');
+  {
+    const OTHER = 'http://10.0.0.9:8787';
+    const ELSE = '/repo/elsewhere-bound';
+    const takeOf = (channel, agent) => fetch(`${HOST}/api/floor/take?host_id=h-open&channel=${channel}&agent=${agent}`).then((r) => r.json()).then((b) => b.take);
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'y' });
+    const plain = await rr.json();
+    eq([rr.status, plain.code, plain.other_board], [409, 'other_board', OTHER], 'unasked, the refusal carries the address the folder is bound to, for a caller to confirm and send back');
+    assert(!/Change it there/.test(plain.error) && /releases it from there/.test(plain.error), `and no longer sends anybody to the other instance to change it — ${plain.error}`);
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'y', from_board: 'http://10.0.0.1:1' });
+    const wrong = await rr.json();
+    eq([rr.status, wrong.code, wrong.other_board], [409, 'board_changed', OTHER], 'an address that is not the one the host last read off the folder is refused, naming the one it is');
+    rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', from_board: OTHER });
+    eq([rr.status, (await rr.json()).code], [409, 'board_changed'], 'and so is a release of a folder that is bound to no other instance at all');
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'y', from_board: OTHER });
+    const old = await rr.json();
+    eq([rr.status, old.code], [409, 'old_host'], 'a host that has not said it can release is not asked: it would read the work as a plain take and leave the old binding standing');
+    assert(/openbox/.test(old.error), 'named, in the refusal');
+    eq(await takeWork(), [], 'and none of those queued anything');
+    eq(await takeOf('x', 'y'), null, 'or left a take on record');
+
+    await registerWith({ roots: ['/repo'], folders: offered, release: true });
+    eq((await folders()).hosts.find((h) => h.host_id === 'h-open')?.release, true, 'a host that says it can is served as one, for the dialog');
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'x', agent: 'someone-else', from_board: OTHER });
+    eq([rr.status, (await rr.json()).code], [400, 'agent_fixed'], 'the folder still names its agent: a release changes the instance and may change the floor, never the name');
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'landing', agent: 'y', from_board: OTHER });
+    const asked = await rr.json();
+    eq([rr.status, asked.mode, asked.from_board, asked.host_id], [200, 'release', OTHER, 'h-open'], 'named, it is taken as a release, and the reply says from where and which host has it');
+    const work = await takeWorkFull();
+    eq(work.map((w) => [w.kind, w.payload.path, w.payload.release, w.payload.from, w.payload.import, w.payload.open]),
+      [['bind', ELSE, { board: OTHER }, null, false, true]],
+      'the host is handed a bind that names the instance being left — and no `from`, though the floor differs: the names a folder carries elsewhere are not a desk on this instance to unseat');
+    eq([(await takeOf('landing', 'y'))?.state, (await takeOf('landing', 'y'))?.from_board], ['asked', OTHER], 'the take is on record as asked');
+    const said = 'not released from http://10.0.0.9:8787 — the window is still working: esc to interrupt';
+    eq((await hostEvents([{ type: 'error', channel: 'landing', agent: 'y', code: 'bind_refused', message: said, taking: { channel: 'landing', agent: 'y' } }])).applied, 1,
+      'the host refuses, for a desk this instance has no row for — and the refusal is taken, where it used to be dropped');
+    const refused = await takeOf('landing', 'y');
+    eq([refused?.state, refused?.error, refused?.code], ['refused', said, 'bind_refused'], 'it is on record in the host\'s own words, with its code');
+    assert(!deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'y', 'landing')?.hosted, 'and nothing is hosted there');
+
+    // Asked again: the take in flight replaces the refused one, and a late
+    // word about the old one cannot settle it twice.
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH);
+      db.prepare(`INSERT INTO agents (channel, agent, retired_at) VALUES ('landing', 'y', datetime('now')) ON CONFLICT(channel, agent) DO UPDATE SET retired_at = datetime('now')`).run();
+      db.close();
+    }
+    rr = await take({ host_id: 'h-open', path: ELSE, channel: 'landing', agent: 'y', from_board: OTHER, open: false });
+    eq(rr.status, 200, 'asked again');
+    eq((await takeWorkFull()).map((w) => w.payload.open), [false], 'with nothing to open, which a caller working through a list of folders asks for');
+    eq((await takeOf('landing', 'y'))?.state, 'asked', 'the record is the take in flight, not the refusal before it');
+    eq((await hostEvents([{ type: 'bound', channel: 'landing', agent: 'y', cwd: ELSE, scope: 'local', session_id: 'sess-y', from: null, released_from: OTHER }])).applied, 1, 'the host answers bound, saying where it was released from');
+    eq((await takeOf('landing', 'y'))?.state, 'seated', 'and the take reads seated');
+    const landed = deskOf(await fetch(`${HOST}/api/floor`).then((x) => x.json()), 'y', 'landing');
+    eq([landed?.hosted?.live, landed?.hosted?.session_id], [true, 'sess-y'], 'the desk is on this instance\'s floor, hosted, on the conversation the host read off the folder');
+    {
+      const { default: Database } = await import('better-sqlite3');
+      const db = new Database(DB_PATH, { readonly: true });
+      eq(db.prepare(`SELECT retired_at IS NULL AS live FROM agents WHERE channel = 'landing' AND agent = 'y'`).get()?.live, 1, 'a row retired here before the agent left is the agent\'s again: the release is the operator seating it');
+      db.close();
+    }
+    await hostEvents([{ type: 'error', channel: 'landing', agent: 'y', code: 'bind_refused', message: 'a late word about the first try', taking: { channel: 'landing', agent: 'y' } }]);
+    eq((await takeOf('landing', 'y'))?.state, 'seated', 'a refusal that arrives after the seat does not unseat the record');
+    const rows = (await fetch(`${HOST}/api/activity?limit=50&channel=landing`).then((r) => r.json())).rows;
+    eq(rows.filter((r) => r.kind === 'admin.desk.take').map((r) => r.detail), [`release ${ELSE} from ${OTHER}`, `release ${ELSE} from ${OTHER}`], 'each ask is logged as a release, naming the instance');
+    eq(rows.filter((r) => r.kind === 'admin.desk.bound').map((r) => r.detail), [`${ELSE} — released from ${OTHER}`], 'and the seat says where the desk came from');
+    eq((await fetch(`${HOST}/api/floor/take?host_id=h-open&channel=landing`)).status, 400, 'the read needs the host, the floor and the agent');
+    // A plain take's refusal is read the same way: it had no desk to be said on either.
+    rr = await take({ host_id: 'h-open', path: '/repo/zeta-newest', channel: 'landing', agent: 'zed' });
+    eq((await rr.json()).mode, 'take', 'a plain take');
+    await takeWork();
+    await hostEvents([{ type: 'error', channel: 'landing', agent: 'zed', code: 'no_key', message: 'this host has no shared secret to bind with', taking: { channel: 'landing', agent: 'zed' } }]);
+    eq([(await takeOf('landing', 'zed'))?.state, (await takeOf('landing', 'zed'))?.code], ['refused', 'no_key'], 'a plain take the host refuses is on record too');
+    await registerWith({ roots: ['/repo'], folders: offered });
+  }
 
   /* The picker: the host lists one folder at a time, and a folder it has
    * shown that way can be taken, whether or not the flat list offered it. */
@@ -1025,16 +1223,55 @@ try {
   await takeWork();
   eq((await folders()).names?.fresh, 'Fresh Face', 'and leaves the saved name exactly as it was');
 
+  // Auto-refresh is a setting behind ⚙ now, kept in localStorage (costmo,
+  // 2026-11-19). The page is check-settings.mjs; this is the stored value.
+  console.log('\nauto-refresh, as kept');
+  {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- auto-refresh: what the page decides ---------- */');
+    const b = src.indexOf('/* ---------- auto-refresh: end ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the auto-refresh section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/auto-refresh-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { AUTO_REFRESH_KEY, autoRefreshOn, autoRefreshValue };\n`);
+    let m;
+    try { m = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    eq(m.AUTO_REFRESH_KEY, 'orch.autoRefresh', 'one key, which the desktop app\'s pane shares with its windows (contract dashboard.settings)');
+    eq([m.autoRefreshOn(null), m.autoRefreshOn(undefined), m.autoRefreshOn('')], [true, true, true], 'nothing stored is on: a fresh browser polls, as the header switch did');
+    eq([m.autoRefreshOn('off'), m.autoRefreshOn('on')], [false, true], 'only "off" is off');
+    eq([m.autoRefreshValue(false), m.autoRefreshValue(true)], ['off', 'on'], 'and a choice is stored as on or off');
+    eq([true, false].map((v) => m.autoRefreshOn(m.autoRefreshValue(v))), [true, false], 'which reads back as the choice');
+  }
+
+  // The header's number: this instance's in a browser, the app's own inside
+  // the desktop app (costmo, 2026-11-20). The page is check-attention.mjs.
+  console.log('\nthe version in the header');
+  {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- header version: what the page decides ---------- */');
+    const b = src.indexOf('/* ---------- header version: end ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the header version section was not found in src/ui/app.js between its two section comments');
+    const tmp = `./data/header-version-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { headerVersion };\n`);
+    let m;
+    try { m = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    const CHROME_UA = 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36';
+    eq(m.headerVersion(CHROME_UA, '0.14.0'), { text: 'v0.14.0', title: '' }, 'in a browser the header shows this instance\'s version, as it always has');
+    eq(m.headerVersion(`${CHROME_UA} Electron/45.2.3 OrchestratinatorDesktop/0.14.1`, '0.14.0').text, 'v0.14.1', 'inside the desktop app it shows the app\'s own, the number the app\'s Settings shows');
+    assert(/0\.14\.0/.test(m.headerVersion(`${CHROME_UA} OrchestratinatorDesktop/0.14.1`, '0.14.0').title), 'with this instance\'s number kept on the tooltip');
+    eq(m.headerVersion(`${CHROME_UA} Electron/45.2.3`, '0.14.0').text, 'v0.14.0', 'another Electron browser is not the app');
+    eq(m.headerVersion(`${CHROME_UA} OrchestratinatorDesktop/`, '0.14.0').text, 'v0.14.0', 'and a token with no version shows this instance\'s');
+  }
+
   const lifted = await (async () => {
     const src = readFileSync('src/ui/app.js', 'utf8');
     const a = src.indexOf('/* ---------- take a desk: what the dialog reads ---------- */');
     const b = src.indexOf('/* ---------- take a desk: the dialog ---------- */');
     if (a < 0 || b < 0 || b < a) throw new Error('the take-a-desk section was not found in src/ui/app.js between its two section comments');
     const tmp = `./data/desk-dialog-${process.pid}.mjs`;
-    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing };\n`);
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing, takeable, releaseNoteText, takeOutcome };\n`);
     try { return await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
   })();
-  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing } = lifted;
+  const { savedName, recentFolders, takeBody, RECENT_MAX, rememberedDir, rememberDir, moveNoteText, moveFloors, moveBody, moveOutcome, takeListing, takeable, releaseNoteText, takeOutcome } = lifted;
 
   // A move the board accepted is not yet made: the page follows the agent
   // only once its host has seated it on the target, and says the host's
@@ -1072,6 +1309,29 @@ try {
   eq(takeBody({ hostId: 'h-open', path: '/repo/zeta-newest', channel: CH, newChannel: '', agent: ' fresh ', persona: 'Typed Name' }),
     { host_id: 'h-open', path: '/repo/zeta-newest', channel: CH, agent: 'fresh', open: true },
     'what the dialog sends on a take names the host, the folder, the floor and the agent — and no name, even if a form somehow held one');
+  // A release (costmo, 2026-11-08): the dialog's half of it.
+  {
+    const OTHER = 'http://localhost:8787';
+    const elsewhere = { path: '/repo/x', name: 'x', bound: { channel: 'there', agent: 'dev', scope: 'project', board: OTHER }, other_board: OTHER };
+    eq(takeBody({ hostId: 'h', path: '/repo/x', channel: 'there', newChannel: '', agent: 'dev', listing: { self: elsewhere } }),
+      { host_id: 'h', path: '/repo/x', channel: 'there', agent: 'dev', open: true, from_board: OTHER },
+      'a take of a folder bound to another instance names the instance it is leaving, as the dialog showed it — which is what the board checks');
+    eq(Object.hasOwn(takeBody({ hostId: 'h', path: '/repo/x', channel: 'c', newChannel: '', agent: 'dev', listing: { self: { ...elsewhere, other_board: null } } }), 'from_board'), false,
+      'and a folder on this instance names none');
+    eq([takeable(elsewhere, { release: true }), takeable(elsewhere, {}), takeable(elsewhere, null), takeable({ path: '/repo/y', other_board: null }, {}), takeable(null, { release: true })],
+      [true, false, false, true, false],
+      'such a folder can be taken when its host can release it, not from a host that has not said so; any other folder as before; no folder, no');
+    const rel = releaseNoteText('dev', 'there', OTHER, 'project');
+    assert(rel.includes(`Releases it from ${OTHER}`) && rel.includes(`Its messages and tasks on ${OTHER} stay there`), `the note names the instance being left, and what stays on it — ${rel}`);
+    assert(/comes out of the folder's \.mcp\.json \(other servers stay\)/.test(rel), 'and that the folder\'s own .mcp.json is what changes, when that is where the binding is');
+    assert(/comes out of Claude Code's local scope/.test(releaseNoteText('dev', 'there', OTHER, 'local')) && !/\.mcp\.json/.test(releaseNoteText('dev', 'there', OTHER, 'local')), 'or local scope, and then no file in the folder is named');
+    assert(/closes and a new conversation opens here/.test(rel) && /with no window open, it opens on its last conversation/.test(rel) && /Refused while a turn is running/.test(rel),
+      'and what happens to the window and the conversation, by a move\'s two rules');
+    eq([takeOutcome({ state: 'asked' }), takeOutcome(null), takeOutcome(undefined)], [null, null, null], 'a take the host has not answered, or one this instance does not remember, is neither seated nor refused — the page waits');
+    eq(takeOutcome({ state: 'seated' }), 'seated', 'seated once the host says bound');
+    eq(takeOutcome({ state: 'refused', error: 'not released from there — the window is still working' }), { refused: 'not released from there — the window is still working' }, 'refused in the host\'s words');
+    eq(takeOutcome({ state: 'refused', error: null }), { refused: 'The host refused and did not say why.' }, 'and said as that when it gave none');
+  }
 
   // Issue #37: the name is the operator's from the moment a folder is
   // chosen, so a listing arriving after it does not empty what was typed
@@ -1109,6 +1369,15 @@ try {
     fm = form({ channel: 'picked', wantChannel: null, path: '/repo/b', prefilled: '/repo/a' });
     takeListing(fm, listingOf('/repo/b'));
     eq(fm.channel, 'picked', 'and an unbound one leaves the floor as it is there');
+    // A folder bound to another instance (the desktop app's release, on
+    // develop): its agent is fixed, and it never proposes that instance's
+    // floor, wherever the dialog was opened.
+    fm = form({ agent: 'dev', agentTyped: true });
+    takeListing(fm, { path: '/repo/a', self: { path: '/repo/a', bound: { channel: 'theirs', agent: 'cy', scope: 'project', board: 'http://localhost:8787' }, other_board: 'http://localhost:8787' } });
+    eq([fm.agent, fm.channel], ['cy', CH], 'a folder bound to another instance fixes its agent too, and proposes no floor of that instance\'s: the dialog stays on the floor it was opened from (costmo, 2026-11-08)');
+    fm = form({ agent: '', channel: 'picked-before', wantChannel: null });
+    takeListing(fm, { path: '/repo/a', self: { path: '/repo/a', bound: { channel: 'theirs', agent: 'cy', scope: 'local', board: 'http://localhost:8787' }, other_board: 'http://localhost:8787' } });
+    eq(fm.channel, 'picked-before', 'and opened from no floor, it keeps whatever the form held, as an unbound folder does');
     fm = form({ path: '/repo/b', prefilled: '/repo/a', agent: 'dev', agentTyped: false });
     takeListing(fm, listingOf('/repo/b'));
     eq(fm.agent, '', 'a new folder the operator moved to starts with no name: typed values survive a redraw, not a new folder');
@@ -1138,7 +1407,7 @@ try {
     { path: '/repo/once', name: 'once', last_active: '2026-09-30T00:00:00.000Z', other_board: null },
   ]).map((f) => f.name), ['once'], 'a folder Claude Code has never been run in is not recent, wherever it sits in the host\'s list');
   eq(recentFolders([{ path: '/repo/elsewhere', name: 'elsewhere', last_active: '2026-09-30T00:00:00.000Z', other_board: 'http://10.0.0.9:8787' }]), [],
-    'a folder bound to another board is not offered, however recent — it could only be refused');
+    'a folder bound to another instance is not offered, however recent — it is released by standing in it, and five places do not fill with another instance\'s desks');
   eq([recentFolders(undefined), recentFolders([]), recentFolders([{ name: 'no-path', last_active: '2026-09-30T00:00:00.000Z' }])], [[], [], []],
     'no list, an empty list and a folder with no path are all nothing to offer');
 
@@ -1247,6 +1516,9 @@ try {
   const browserStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, m }; };
   const st = browserStore();
   eq(rememberedDir(st, 'h1'), null, 'a browser that has chosen nothing remembers nothing, and the dialog opens at home');
+  rememberDir(st, 'hw', 'C:\\Users\\pat\\dev');
+  eq(rememberedDir(st, 'hw'), 'C:\\Users\\pat\\dev', 'a Windows host\'s folder is a folder to remember');
+  st.m.clear();
   rememberDir(st, 'h1', '/Users/me/dev/plugins');
   eq(rememberedDir(st, 'h1'), '/Users/me/dev/plugins', 'after a choice it remembers the folder the choice was made in');
   eq(rememberedDir(st, 'h2'), null, 'per host — a path on one machine means nothing on another');
@@ -1341,6 +1613,19 @@ try {
   eq(ctxRow?.tool_name, 'ide_opened_file', 'and carries its tag as the label');
   eq((await noteOn('racer'))?.text, 'and this one is still waiting',
      'and a context turn retires no queued note — only the person becoming a turn does that');
+
+  // A room's notice that met a working window (desktop-dev, from costmo's
+  // screenshot, 2026-11-19): the page drew it as his bubble, "queued — the
+  // desk is working", and nothing ever took it down, because the notice
+  // becomes a context turn and never a user one.
+  const NOTICE = roomNoticeText('leave');
+  await register({ channel: CH, agent: 'roomer', cwd: '/repo/roomer', window: '@13' });
+  await hostEvents([{ type: 'session', channel: CH, agent: 'roomer', session_id: 's-roomer', cwd: '/repo/roomer' }]);
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'roomer', state: 'queued', text: NOTICE }]);
+  eq(await noteOn('roomer'), null, 'a notice queued behind a working turn puts no note on the desk: it is not the operator\'s message');
+  await hostEvents([{ type: 'delivery', channel: CH, agent: 'roomer', state: 'queued', text: 'and the next thing' }]);
+  await hostEvents([{ type: 'turn', channel: CH, agent: 'roomer', role: 'context', tool_name: 'meeting-room', text: '<meeting-room>and the next thing</meeting-room>' }]);
+  eq(await noteOn('roomer'), null, 'and a context turn carrying the queued words retires the note, as a user turn does');
 
   // A repeat. The desk's last user turn already says the same words — the
   // operator nudged earlier and is nudging again — but that turn is from
@@ -1459,7 +1744,12 @@ try {
   await takeWork();
   eq((await sessOf('typist'))?.effort_requested, 'xhigh', 'asked for, until the window confirms');
   eq(commandOf('/btw is it late?'), { name: 'btw', args: 'is it late?' }, 'the route and the host parse a command the same way');
-  eq(FLOOR_COMMANDS.map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'the floor\'s own list');
+  eq(FLOOR_COMMANDS.map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw', 'mcp'], 'the floor\'s own list');
+  // A bare /mcp goes to the host as typed: the host is what knows the
+  // window's name for the board's server, and types the reconnect.
+  rr2 = await say('/mcp');
+  eq(rr2.status, 200, 'a bare /mcp is taken, not refused like a bare /model');
+  assert((await takeWork()).includes('chat'), 'and goes to the host as chat work');
 
   // Two live sessions on one desk — the floor's window and an editor tab —
   // and the window is the one the host drives. The picker's words and the
@@ -1606,7 +1896,9 @@ try {
     try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(page.PAGE_COMMANDS.map((c) => c.name), FLOOR_COMMANDS.map((c) => c.name), 'the page offers the server\'s list');
     eq(page.PAGE_LEVELS, EFFORT_LEVELS, 'and the window\'s levels');
-    eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw'], 'a slash alone offers every command');
+    eq(page.slashMatches('/').map((c) => c.name), ['clear', 'compact', 'model', 'effort', 'btw', 'mcp'], 'a slash alone offers every command');
+    eq(page.slashMatches('/mc').map((c) => c.name), ['mcp'], '/mcp is offered by its first letters');
+    assert(/reconnect/.test(page.PAGE_COMMANDS.find((c) => c.name === 'mcp')?.hint ?? ''), 'and says it reconnects the desk\'s tools');
     eq(page.slashMatches('/co').map((c) => c.name), ['compact'], 'typed on, the matches narrow');
     eq(page.slashMatches('/model sonnet'), [], 'once a space is typed the command is chosen and the menu is gone');
     eq(page.slashMatches('hello /co'), [], 'a slash anywhere but first is text');
@@ -2734,8 +3026,12 @@ try {
     eq([d('waiter').live, d('waiter').session?.awaiting_kind != null], [true, true], 'a desk waiting on a person is live, however long it waits');
     eq([deskEmpty(d('warm')), deskEmpty(d('present')), deskEmpty(d('waiter'))], [false, false, false],
       'and none of those is empty — the readings are the whole of the rule, and nothing else makes a desk empty');
-    eq(fl.channels.every((c) => c.desks.every((x) => deskEmpty(x) === (!x.live && !x.hosted?.live))), true,
-      'over every desk the server built: empty is exactly !live && !hosted.live');
+    eq(fl.channels.every((c) => c.desks.every((x) => deskEmpty(x) === (!x.live && !x.hosted?.live && !x.hosted?.refused))), true,
+      'over every desk the server built: empty is exactly !live && !hosted.live, and not refused');
+    // F4: a desk whose host was refused for its protocol is drawn, so the page
+    // can say why it takes nothing; hidden, it vanished after a deploy.
+    eq([deskEmpty({ live: false, hosted: { live: false, refused: 'The host "x" is behind this board' } }), deskEmpty({ live: false, hosted: { live: false, refused: null } })], [false, true],
+      'a desk whose host was refused is not empty; one whose host is merely offline still is');
 
     // What a storey draws, off those same desks.
     let rows = deskRows(channelOf(fl));
@@ -3154,7 +3450,7 @@ try {
   const registerMove = (...desks) =>
     fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: HK,
-      body: JSON.stringify({ host_id: 'h-move', name: 'movebox', tmux: 'orch', desks }),
+      body: JSON.stringify({ host_id: 'h-move', name: 'movebox', tmux: 'orch', protocol: PROTOCOL, desks }),
     }).then((r) => r.json());
   const workMove = () =>
     fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK })
@@ -3362,6 +3658,137 @@ try {
       'the single-desk stream is as it was: its own desk, untagged, for a page older than the hub');
   }
 
+  console.log('\nwindow attention: what each window reports to the desktop app (costmo, 2026-11-19)');
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const cut = (from, to) => {
+      const a = src.indexOf(from);
+      const b = src.indexOf(to);
+      if (a < 0 || b < 0 || b < a) throw new Error(`a section was not found in src/ui/floor.js between ${JSON.stringify(from)} and ${JSON.stringify(to)}`);
+      return src.slice(a, b);
+    };
+    const tmp = `./data/attention-${process.pid}.mjs`;
+    writeFileSync(tmp, [
+      'const SENDING_GRACE_MS = 30000;',
+      cut('  /* ---------- chat controls: what the page decides ---------- */', '  /* ---------- chat controls: the drawing ---------- */'),
+      cut('  /* ---------- bulk selection: what the page decides ---------- */', '  /* ---------- bulk selection: the drawing ---------- */'),
+      cut('  /* ---------- popouts: what the page decides ---------- */', '  /* ---------- meeting rooms: what the page decides ---------- */'),
+      cut('  /* ---------- meeting rooms: what the page decides ---------- */', '  /* ---------- window attention: the decisions end ---------- */'),
+      'export { deskAsking, deskNudgeable, attentionDesks, attentionOf, attentionReport, attentionNudges };',
+    ].join('\n'));
+    let pg;
+    try { pg = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    const desk = (agent, { live = true, kind = null, startup = false, unread = 0, assigned = 0, claimed = 0, ok = true, opens = false, reason = null } = {}) => ({
+      agent, persona: agent.toUpperCase(), live,
+      session: kind ? { awaiting_kind: kind } : {},
+      permission: startup ? { startup: true } : null,
+      board: { unread, assigned_open: assigned, claimed },
+      nudge: ok ? { ok: true, opens } : { ok: false, reason: reason ?? 'its host is offline' },
+    });
+
+    eq(pg.deskAsking(desk('a', { kind: 'permission_request' })), true, 'a permission menu or a question form (permission_request) is asking');
+    eq(pg.deskAsking(desk('a', { kind: 'permission_prompt' })), true, 'and so is the notification\'s permission_prompt');
+    eq(pg.deskAsking(desk('a', { startup: true })), true, 'and a startup question before any session exists');
+    eq(pg.deskAsking(desk('a', { kind: 'error' })), false, 'an error turn is not a prompt: nothing waits on an answer');
+    eq(pg.deskAsking({ ...desk('a'), signin: { ok: true, host: 'box' } }), true, 'a desk whose host\'s Claude Code is signed out is waiting on the operator\'s Sign in, so the tab pulses for it (costmo, 2026-11-19)');
+    eq(pg.deskAsking({ ...desk('a', { live: false }), signin: { ok: true, host: 'box' } }), false, 'not when the desk is not live');
+    eq(pg.deskAsking(desk('a', { kind: 'permission_request', live: false })), false, 'a desk that is not live is not asking, as the board counts "need you"');
+    eq(pg.deskNudgeable(desk('a', { unread: 2 })), true, 'unread mail is a nudge waiting');
+    eq(pg.deskNudgeable(desk('a', { assigned: 1 })), true, 'and so is an unclaimed task assigned to it');
+    eq(pg.deskNudgeable(desk('a', { claimed: 3 })), false, 'a claimed task is not: the desk already knows about it');
+    eq(pg.deskNudgeable(desk('a', { unread: 2, ok: false })), false, 'nor a desk the board would refuse to nudge: the count is what a click would send');
+
+    const here = [
+      { channel: 'lab', desks: [desk('bo', { unread: 1 }), desk('cy', { assigned: 2 }), desk('dee', { kind: 'permission_request' }), desk('ed', { unread: 1, ok: false })] },
+      { channel: 'qa', desks: [desk('fay', { unread: 4 }), desk('gus')] },
+    ];
+    const shelf = { channel: 'old', archived: true, desks: [desk('hal', { unread: 1, kind: 'permission_request' })] };
+    const all = [...here, shelf];
+    const rep = (scope, read = true) => pg.attentionReport({ read, here, all, scope });
+    const board = { nudges: 3, asking: true };
+    eq(rep({ kind: 'floor', floor: 'lab' }), { nudges: 2, asking: true, board },
+      'a floor tab counts its own floor: two desks a nudge would reach (not the refused one), one asking; the board is every floor not put away');
+    eq(rep({ kind: 'floor', floor: 'qa' }), { nudges: 1, asking: false, board }, 'another floor\'s tab, its own floor only');
+    eq(rep({ kind: 'floor', floor: null }), { nudges: 3, asking: true, board }, 'the all-floors tab is every floor not put away');
+    // A desk out in a popout or a meeting room counts on its floor's tab too
+    // (costmo, 2026-11-19), so the tab pulses for it wherever it is. Which
+    // desks are out is the page's (ui.outs) and these decisions no longer
+    // take it, so no row here can see that rule: check-attention.mjs is
+    // where it is held, and its page mutant is the old rule put back.
+    eq(rep({ kind: 'popout', channel: 'lab', agent: 'dee' }), { nudges: 0, asking: true, board }, 'a popout reports its desk');
+    eq(rep({ kind: 'popout', channel: 'old', agent: 'hal' }), { nudges: 1, asking: true, board }, 'even one whose floor was put away while it was out');
+    eq(rep({ kind: 'meeting', channel: 'lab', agents: ['bo', 'cy'] }), { nudges: 2, asking: false, board }, 'a meeting room reports its participants');
+    eq(rep({ kind: 'meeting', channel: 'lab', agents: [] }), { nudges: 0, asking: false, board }, 'and a room not yet live, none');
+    eq(rep({ kind: 'floor', floor: 'lab' }, false), { nudges: 0, asking: false, board: { nudges: 0, asking: false } },
+      'before the first /api/floor answers it says nothing is pending, rather than guess');
+
+    const order = pg.attentionNudges(pg.attentionDesks({ here: [{ channel: 'lab', desks: [
+      desk('a', { unread: 1, opens: true }), desk('b', { unread: 1 }), desk('c'), desk('d', { assigned: 1, ok: false }), desk('e', { assigned: 1 }),
+    ] }], all: [], scope: { kind: 'floor', floor: null } }));
+    eq(order.map((x) => `${x.channel}/${x.agent}${x.opens ? '+opens' : ''}`), ['lab/b', 'lab/e', 'lab/a+opens'],
+      'nudge all types into the desks with something waiting, the open windows first, as the floor\'s bulk Nudge does');
+  }
+
+  console.log('\nfloor windows: the floor in the address, the title, the chip\'s link (task 315)');
+  {
+    const src = readFileSync('src/ui/floor.js', 'utf8');
+    const a = src.indexOf('  /* ---------- floor windows: what the page decides ---------- */');
+    const b = src.indexOf('  /* ---------- popouts: what the page decides ---------- */');
+    if (a < 0 || b < 0 || b < a) throw new Error('the floor windows section was not found in src/ui/floor.js between its two section comments');
+    const tmp = `./data/floorwin-${process.pid}.mjs`;
+    writeFileSync(tmp, `${src.slice(a, b)}\nexport { addressOf, addressFor, floorHref, windowTitle, opensElsewhere, floorOpenMode, floorOpenFeatures, floorPopTitle };\n`);
+    let page;
+    try { page = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+
+    eq(page.addressOf(''), { floor: undefined, view: undefined }, 'a bare address says nothing, so the stored choice decides (a fresh open lands where the operator last was)');
+    eq(page.addressOf('?floor=lab'), { floor: 'lab', view: 'floor' }, 'an address naming a floor is that floor, on the floor view whatever view is stored');
+    eq(page.addressOf('?floor='), { floor: null, view: 'floor' }, '?floor= with nothing after it is all floors, said, not "not said"');
+    eq(page.addressOf('?floor=lab&view=board'), { floor: 'lab', view: 'board' }, 'and a tab on the board view keeps it across a reload');
+    eq(page.addressOf('?view=nonsense'), { floor: undefined, view: undefined }, 'a view it does not know is not a view');
+    const odd = 'a b&c?d#e';
+    eq(page.addressOf(page.floorHref(odd)).floor, odd, 'a chip\'s link reads back as its floor, whatever the name holds');
+    eq(page.addressOf(page.floorHref(null)).floor, null, 'and the all-floors chip\'s as all floors');
+    eq(page.addressFor('', { floor: 'lab', view: 'floor' }), '?floor=lab', 'the floor view writes only the floor');
+    eq(page.addressFor('?floor=lab&view=board', { floor: 'lab', view: 'floor' }), '?floor=lab', 'and takes view=board out when the tab goes back to the floor');
+    eq(page.addressFor('?floor=lab', { floor: null, view: 'board' }), '?floor=&view=board', 'all floors is written, so the tab does not fall back to another tab\'s choice on a reload');
+    eq(page.addressFor('?x=1&floor=a', { floor: 'b', view: 'floor' }), '?x=1&floor=b', 'anything else in the address is left as it was');
+    eq(page.addressFor(page.addressFor('', { floor: 'lab', view: 'floor' }), { floor: 'lab', view: 'floor' }), '?floor=lab',
+      'written twice it is the same string, so a draw that changes nothing replaces nothing');
+
+    const t = (x) => page.windowTitle(x);
+    eq(t({ view: 'floor', floor: 'lab', floors: ['lab', 'qa'] }), 'lab · orchestratinator', 'one floor of several: its name, first, so a cut-off tab still shows it');
+    eq(t({ view: 'floor', floor: null, floors: ['lab', 'qa'] }), 'All floors · orchestratinator', 'the building: All floors');
+    eq(t({ view: 'floor', floor: null, floors: ['lab'] }), 'lab · orchestratinator', 'a board with one floor shows that floor, not a building, and the title says which');
+    eq(t({ view: 'board', floor: 'lab', floors: ['lab', 'qa'] }), 'Board · orchestratinator', 'the rows view: Board, whatever floor the floor view was on');
+    eq(t({ view: 'floor', floor: 'lab', floors: null }), 'lab · orchestratinator', 'before the first payload, a floor the address named is the title already');
+    eq(t({ view: 'floor', floor: null, floors: null }), null, 'and with nothing said and nothing drawn, the page\'s own title stands');
+    eq(t({ view: 'floor', floor: null, floors: [] }), null, 'nor with no floors at all');
+
+    const click = (o) => page.opensElsewhere({ button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...o });
+    eq([click({}), click({ altKey: true })], [false, false], 'a plain click, and an Alt-click, ride to the floor in this tab');
+    eq([click({ metaKey: true }), click({ ctrlKey: true }), click({ shiftKey: true }), click({ button: 1 })], [true, true, true, true],
+      '⌘, Ctrl, Shift and any other button are the browser\'s to open elsewhere');
+
+    // "Open new floors: In tabs | In windows" (costmo, 2026-11-19).
+    const CHROME = 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/142.0 Safari/537.36';
+    const APP = `${CHROME} Electron/45.2.3 OrchestratinatorDesktop/0.14.0`;
+    eq([page.floorOpenMode(null, CHROME), page.floorOpenMode('nonsense', CHROME)], ['tab', 'tab'], 'nothing stored, or nothing it knows, is In tabs: the default');
+    eq(page.floorOpenMode('window', CHROME), 'window', 'In windows when this browser chose it');
+    eq([page.floorOpenMode('window', APP), page.floorOpenMode(null, APP)], ['app', 'app'], 'inside the desktop app the app decides, whatever this browser stored');
+    eq(page.floorOpenMode('window', `${CHROME} Electron/45.2.3`), 'window', 'and Electron alone is not the app: its own token is what says so');
+    eq([page.floorOpenFeatures('tab', {}, {}), page.floorOpenFeatures('app', {}, {})], ['noopener', 'noopener'], 'a tab, and the app\'s choice, are opened with no features: noopener alone');
+    const scr = { availWidth: 1440, availHeight: 875, availLeft: 0, availTop: 25 };
+    eq(page.floorOpenFeatures('window', { outerWidth: 1000, outerHeight: 700, screenX: 100, screenY: 60 }, scr),
+      'noopener,popup,width=1000,height=700,left=124,top=84', 'a window: the size of this one, set down 24 px from it');
+    eq(page.floorOpenFeatures('window', { outerWidth: 1000, outerHeight: 700, screenX: 430, screenY: 190 }, scr),
+      'noopener,popup,width=1000,height=700,left=440,top=200', 'and kept wholly on the screen when this one is near its edge');
+    eq(page.floorOpenFeatures('window', { outerWidth: 3000, outerHeight: 2000, screenX: 0, screenY: 25 }, scr),
+      'noopener,popup,width=1440,height=875,left=0,top=25', 'and never larger than the screen');
+    eq([page.floorPopTitle('lab', 'tab'), page.floorPopTitle('lab', 'window'), page.floorPopTitle('lab', 'app')],
+      ['Open lab in a new tab', 'Open lab in a new window', 'Open lab in a new session'], 'the ⧉ says what it will do, and in the app, where the page does not know, a new session');
+  }
+
   console.log('\na desk\'s popout: what the page decides (issue #19)');
   {
     const src = readFileSync('src/ui/floor.js', 'utf8');
@@ -3432,7 +3859,7 @@ try {
     const ACH = 'att-ch';
     const aHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
     const reg = (hostId, name, desks, uploads = true) => fetch(`${HOST}/api/host/register`, {
-      method: 'POST', headers: aHK, body: JSON.stringify({ host_id: hostId, name, tmux: 'orch', desks, ...(uploads ? { uploads: true } : {}) }),
+      method: 'POST', headers: aHK, body: JSON.stringify({ host_id: hostId, name, tmux: 'orch', protocol: PROTOCOL, desks, ...(uploads ? { uploads: true } : {}) }),
     }).then((r) => r.json());
     const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
@@ -3445,10 +3872,10 @@ try {
     const staged = () => { try { return readdirSync(UPLOAD_DIR).length; } catch { return 0; } };
 
     await reg('h-att', 'attbox', [{ channel: ACH, agent: 'ada', cwd: '/repo/ada', session_id: 'sdk-ada' }]);
-    await reg('h-old', 'oldbox', [{ channel: ACH, agent: 'ole', cwd: '/repo/ole', session_id: 'sdk-ole' }], false);
+    await reg('h-noup', 'oldbox', [{ channel: ACH, agent: 'ole', cwd: '/repo/ole', session_id: 'sdk-ole' }], false);  // not h-old: the protocol rows above use that id, and queue rescans for it
     for (const a of ['ada', 'ole']) await post({ channel: ACH, agent: a, session_id: `sdk-${a}`, hook_event_name: 'SessionStart', cwd: `/repo/${a}` });
     const hostsNow = (await floor()).hosts ?? [];
-    eq([hostsNow.find((h) => h.host_id === 'h-att')?.uploads, hostsNow.find((h) => h.host_id === 'h-old')?.uploads], [true, false],
+    eq([hostsNow.find((h) => h.host_id === 'h-att')?.uploads, hostsNow.find((h) => h.host_id === 'h-noup')?.uploads], [true, false],
       'the payload says which hosts fetch attachments, from what each said at registration');
     eq(deskOf(await floor(), 'ada', ACH)?.hosted?.host_id, 'h-att', 'and a desk names its host by id, which is how the box finds that row');
 
@@ -3506,12 +3933,12 @@ try {
     r = await op('/api/floor/chat', { channel: ACH, agent: 'ole', text: 'see attached', files: [shot] });
     eq([r.status, r.body.code], [409, 'host_no_uploads'], 'a desk whose host does not fetch attachments is refused files');
     assert(/^oldbox runs a build from before attachments/.test(r.body.error ?? ''), `in words naming the host — ${r.body.error}`);
-    eq((await work('h-old')).length, 0, 'and nothing is queued for it');
+    eq((await work('h-noup')).map((w) => `${w.kind} ${w.channel}/${w.agent}`), [], 'and nothing is queued for it');
 
     let f = await fetchAs('h-att', shot);
     const gotBytes = [...new Uint8Array(await f.arrayBuffer())];
     eq([f.status, gotBytes.length <= 64 ? gotBytes : `${gotBytes.length} bytes`], [200, [...png]], 'the host a message named it to fetches the file, byte for byte');
-    f = await fetchAs('h-old', shot);
+    f = await fetchAs('h-noup', shot);
     eq(f.status, 403, 'another host may not');
     f = await fetchAs('h-att', shot, null);
     eq(f.status, 401, 'nor anything without the host key');
@@ -3566,6 +3993,8 @@ try {
       { path: '/Users/x/.orchestratinator/uploads/def456def/build.log', name: 'build.log' },
     ] }, 'a message the host composed splits into the words and the files, a name with a space in it included');
     eq(pg.splitAttached(hostUp.withAttachments('', ['/u/abcdefgh/a.png'])), { text: '', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] }, 'files alone are files and no words');
+    eq(pg.splitAttached(hostUp.withAttachments('see', ['C:\\Users\\pat\\.orchestratinator\\uploads\\abcdefgh\\a.png'])).files,
+      [{ path: 'C:\\Users\\pat\\.orchestratinator\\uploads\\abcdefgh\\a.png', name: 'a.png' }], 'and a Windows host\'s path is a file, named by its last part');
     eq(pg.splitAttached(composed.replace(/\n/g, '\r\n')).files.length, 2, 'and a window that records CRLF reads the same');
     eq(pg.ATTACHED_HEADER, 'Attached by the operator:', 'the list is the operator\'s, wherever it was attached from: the panel, a popout or a meeting room (costmo, 2026-11-17)');
     eq(pg.splitAttached('see this\n\nAttached from the floor:\n- /u/abcdefgh/a.png'), { text: 'see this', files: [{ path: '/u/abcdefgh/a.png', name: 'a.png' }] },
@@ -3623,7 +4052,7 @@ try {
     const QCH = 'ask-ch';
     const qHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
     const qDesks = [{ channel: QCH, agent: 'asa', cwd: '/repo/asa', session_id: 'sdk-asa' }, { channel: QCH, agent: 'bea', cwd: '/repo/bea', session_id: 'sdk-bea' }];
-    const beat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', desks: qDesks, ...(pending ? { pending } : {}) }) }).then((r) => r.status);
+    const beat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', protocol: PROTOCOL, desks: qDesks, ...(pending ? { pending } : {}) }) }).then((r) => r.status);
     const asked = async (agent) => deskOf(await floor(), agent, QCH)?.permission ?? null;
     const queued = () => fetch(`${HOST}/api/host/work?host_id=h-ask`, { headers: qHK }).then((r) => r.json()).then((b) => (b.work ?? []).map((w) => w.kind));
     await beat();
@@ -3702,7 +4131,7 @@ try {
     const WCH = 'boot-ch';
     const wHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
     const wDesks = [{ channel: WCH, agent: 'kip', cwd: '/repo/kip', session_id: 'sdk-kip' }];
-    const beat = (boot) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: wHK, body: JSON.stringify({ host_id: 'h-boot', name: 'bootbox', tmux: 'orch', desks: wDesks, ...(boot ? { boot } : {}) }) }).then((r) => r.status);
+    const beat = (boot) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: wHK, body: JSON.stringify({ host_id: 'h-boot', name: 'bootbox', tmux: 'orch', protocol: PROTOCOL, desks: wDesks, ...(boot ? { boot } : {}) }) }).then((r) => r.status);
     const poll = (boot, done = []) => fetch(`${HOST}/api/host/work?host_id=h-boot${boot ? `&boot=${boot}` : ''}${done.length ? `&done=${done.join(',')}` : ''}`, { headers: wHK }).then((r) => r.json()).then((b) => b.work ?? []);
     const { default: Database } = await import('better-sqlite3');
     const put = (kind, payload) => { const db = new Database(DB_PATH); try { return Number(db.prepare(`INSERT INTO host_outbox (host_id, channel, agent, kind, payload) VALUES ('h-boot', ?, 'kip', ?, ?)`).run(WCH, kind, JSON.stringify(payload)).lastInsertRowid); } finally { db.close(); } };
@@ -3761,7 +4190,7 @@ try {
     const MCH = 'meet-ch';
     const mHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
     const regMeet = (desks) => fetch(`${HOST}/api/host/register`, {
-      method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', name: 'meetbox', tmux: 'orch', desks }),
+      method: 'POST', headers: mHK, body: JSON.stringify({ host_id: 'h-meet', name: 'meetbox', tmux: 'orch', protocol: PROTOCOL, desks }),
     }).then((r) => r.json());
     const op = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
@@ -3862,6 +4291,23 @@ try {
     eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, true, 'its window saying so again');
     said = await mcpCall('mia', 'send_message', { body: 'contained again' });
     eq(said.meeting_room?.reached, ['oli'], 'contains it again');
+    // Held (0.14.4): the desktop app quit with the room's window open. The
+    // meeting is kept however long no window touches it, and the floor is
+    // told so it can draw the box and open the room again.
+    const heldOf = async () => ((await floor()).meetings_held ?? []).filter((x) => x.id === room.id);
+    eq(await heldOf(), [], 'a room with its window open is not listed as held');
+    eq((await op('/api/floor/meeting/hold', { id: room.id })).body.held, true, 'the app quitting: the room\'s window asks the board to keep the meeting');
+    sql.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-10 minutes') WHERE id = ?`).run(room.id);
+    said = await mcpCall('mia', 'send_message', { body: 'while the app was closed' });
+    eq(said.meeting_room?.reached, ['oli'], 'a held meeting goes on containing its desks with no window touching it for minutes');
+    eq(await heldOf(), [{ id: room.id, channel: MCH, agents: ['mia', 'oli'] }], 'and /api/floor lists it, with the desks present in it, for the floor to box and reopen');
+    eq((await op('/api/floor/meeting/hold', { id: 999999 })).body.code, 'no_room', 'a hold for a room the board does not have is refused');
+    eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, true, 'its window back (the app relaunched, the floor opened the room)');
+    eq(await heldOf(), [], 'and it is no longer held');
+    sql.prepare(`UPDATE meeting_rooms SET live_at = datetime('now', '-10 minutes') WHERE id = ?`).run(room.id);
+    said = await mcpCall('mia', 'send_message', { body: 'window gone again, unheld' });
+    assert(!said.meeting_room, 'so a window that then goes without a word lapses as any does: the hold is cleared, not kept');
+    eq((await op('/api/floor/meeting/open', { id: room.id })).status, 200, 'opened again');
     sql.close();
 
     // Oli goes absent (a Resume could not bring it back) and its desk moves
@@ -3880,6 +4326,8 @@ try {
     said = await mcpCall('mia', 'send_message', { body: 'after the meeting' });
     assert(!said.meeting_room && (await heard('noa', said.id - 1)).includes('mia:after the meeting'), 'an ended room contains nothing');
     eq((await op('/api/floor/meeting/touch', { id: room.id })).body.live, false, 'and a touch says it is ended, so a reloaded window opens it again');
+    eq((await op('/api/floor/meeting/hold', { id: room.id })).body.held, false, 'a hold for an ended room keeps nothing, so the closing window ends it as any close does');
+    eq(((await floor()).meetings_held ?? []).filter((x) => x.id === room.id), [], 'and nothing is listed as held');
     let list = (await fetch(`${HOST}/api/floor/meetings`).then((x) => x.json())).rows;
     const ended = list.find((x) => x.id === room.id);
     eq(ended.participants.map((p) => [p.agent, p.session_id, p.persona]), [['mia', 'sdk-mia-2', 'Mia'], ['oli', 'sdk-oli', 'Oli']],
@@ -4109,7 +4557,7 @@ try {
     writeFileSync(tmpBox, [
       ...[...decls, { at: bh.index, text: bh[0] }].sort((a, b) => a.at - b.at).map((d) => d.text),
       cut('  /* ---------- a meeting on the floor: what the page decides ---------- */', '  /* ---------- a meeting on the floor: the drawing ---------- */'),
-      `export { meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
+      `export { heldPlan, meetBoxKey, meetingSeating, floorPlan, meetTabs, meetNames, meetTabW, meetingRaisePlace, meetingElsewhere, MEET_TAB_H, MEET_TAB_GAP, MEET_PAD_X, ${NAMES.join(', ')} };`,
     ].join('\n'));
     let fp;
     try { fp = await import(new URL(tmpBox, `file://${process.cwd()}/`)); } finally { rmSync(tmpBox, { force: true }); }
@@ -4118,6 +4566,27 @@ try {
     eq([fp.meetBoxKey(undefined), fp.meetBoxKey({ at: 1, id: 'w' }), fp.meetBoxKey({ meeting: null }), fp.meetBoxKey({ meeting: 7 }), fp.meetBoxKey({ meeting: 'new', batch: 'new-ab12' }), fp.meetBoxKey({ meeting: 'new' })],
       [null, null, null, '7', 'new:new-ab12', 'new:'],
       'a desk on the floor or out in its own popout is in no box; one in a room is boxed by the room\'s number, and before the window has one, by the click that opened it');
+
+    // A meeting held with no window (0.14.4): what the floor writes into
+    // its record of who is out, what it takes away, and which rooms to open.
+    {
+      const T = 7000;
+      const now = 100_000;
+      const held = [{ id: 7, channel: 'f', agents: ['bo', 'cy'] }, { id: 9, channel: 'f', agents: ['dee'] }];
+      const outs = new Map([
+        ['f|dee', { at: now - 100, id: 'win', held: true, meeting: 9 }],       // a real room window has it
+        ['f|ed', { at: now - 100, id: null, held: true, kept: true, meeting: 5 }], // kept for a meeting no longer held
+        ['f|fay', { at: now - 100, id: 'pop', held: true, meeting: null }],    // a popout: not the plan's
+      ]);
+      const plan = fp.heldPlan(held, outs, now, T);
+      eq(plan.set.map(([k, o]) => [k, o.meeting, o.kept, o.held, o.id]), [['f|bo', 7, true, true, null], ['f|cy', 7, true, true, null]],
+        'heldPlan: each desk of a held meeting is written as kept, held and with no window, so it stays boxed however long polls take');
+      eq(plan.open, [7], 'a held meeting no window shows is one to open; one a window has a desk of is not');
+      eq(plan.drop, ['f|ed'], 'a kept desk for a meeting no longer held is taken away, and nothing a window wrote is');
+      const stale = new Map([['f|bo', { at: now - T - 1, id: 'win', held: false, meeting: 7 }]]);
+      eq(fp.heldPlan(held.slice(0, 1), stale, now, T).open, [7], 'a window entry gone stale is no window');
+      eq(fp.heldPlan(undefined, new Map(), now, T), { set: [], drop: [], open: [] }, 'a board from before it sends no list, and nothing is done');
+    }
 
     const desksOf = (...names) => names.map((agent) => ({ agent }));
     const nine = desksOf('bo', 'cy', 'dee', 'ed', 'fay', 'gus', 'hal', 'ivy', 'jo');
@@ -4248,6 +4717,217 @@ try {
    * The board's half and the page's decisions. What a host does with a `seat`
    * is the host suite's; what two real windows in one folder do is measured
    * on a probe (host/seats.js). Every refusal must queue nothing. */
+  console.log('\nwhat a desk is told as it enters a meeting room and leaves it (costmo, 2026-11-19)');
+  {
+    // The words: one tagged block, so the relay files it as a context line
+    // labeled meeting-room (contextTagOf in host/window.js), and one line,
+    // so it is pasted, never typed in pieces.
+    const enter = roomNoticeText('enter', ['bo', 'cy']);
+    assert(enter.startsWith(`<${ROOM_NOTICE_TAG}>`) && enter.endsWith(`</${ROOM_NOTICE_TAG}>`) && !enter.includes('\n'), 'a notice is one line, wholly one tagged block', enter);
+    assert(/in a meeting room with bo and cy and the operator\./.test(enter), 'entering names who else is in the room', enter);
+    assert(/not necessarily addressed to you/.test(enter) && /no need to relay them/.test(enter) && /needs no reply/.test(enter),
+      'and says what costmo typed by hand: messages to the room are not all for it, nothing to relay, no reply needed');
+    assert(/with bo, cy and dee and the operator/.test(roomNoticeText('enter', ['bo', 'cy', 'dee'])) && /with the operator\./.test(roomNoticeText('enter', [])),
+      'a list of three reads as one, and a room of one names only the operator');
+    const leave = roomNoticeText('leave');
+    assert(/back on the floor/.test(leave) && /addressed to you again/.test(leave) && /needs no reply/.test(leave), 'leaving says it is back on the floor', leave);
+    const W = await import('../host/window.js');
+    eq(W.typedCommand(enter), enter, 'and the host types it as given');
+
+    // The decision, over the cases that matter.
+    const room = (id, present, more = {}) => ({ id, channel: 'f', open: true, holding: true, present, ...more });
+    const kinds = (plan) => plan.map((n) => `${n.kind}:${n.agent}:${n.room}`);
+    eq(kinds(roomNoticePlan([room(1, ['bo', 'cy'])], [])), ['enter:bo:1', 'enter:cy:1'], 'a new room: everybody in it is told');
+    eq(roomNoticePlan([room(1, ['bo', 'cy'])], [])[0].others, ['cy'], 'with the others named');
+    eq(kinds(roomNoticePlan([room(1, ['bo', 'cy'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['enter:cy:1'], 'a desk already told is not told again');
+    eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: true })], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), [],
+      'a room ended a moment ago by a window that may be reloading still holds its desks: a reload says nothing');
+    eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: false })], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['leave:bo:1'],
+      'once it no longer holds them (End meeting, or the grace past), each is told it is back on the floor');
+    eq(kinds(roomNoticePlan([room(1, ['cy'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }, { channel: 'f', agent: 'cy', meeting_id: 1 }])), ['leave:bo:1'], 'a desk taken out of a live room is told at once, and the one still in it nothing');
+    eq(kinds(roomNoticePlan([room(1, ['cy'], { open: false, holding: false }), room(2, ['bo'])], [{ channel: 'f', agent: 'bo', meeting_id: 1 }])), ['enter:bo:2'],
+      'a desk that goes straight from one room to another is told of the new room, and not that it is on the floor');
+    // costmo, 2026-11-19: a stale room the app reopened and the room he
+    // opened beside it, the same two desks in each, sent the note twice.
+    eq(kinds(roomNoticePlan([room(17, ['bo', 'cy'], { open: false, holding: true }), room(18, ['bo', 'cy'])],
+      [{ channel: 'f', agent: 'bo', meeting_id: 17 }, { channel: 'f', agent: 'cy', meeting_id: 17 }])), ['quiet:bo:18', 'quiet:cy:18'],
+      'straight into another room with the same company: the record moves and nothing is sent');
+    eq(kinds(roomNoticePlan([room(17, ['bo', 'cy'], { open: false, holding: true }), room(18, ['bo', 'cy', 'dee'])],
+      [{ channel: 'f', agent: 'bo', meeting_id: 17 }])), ['enter:bo:18', 'enter:cy:18', 'enter:dee:18'],
+      'into a room with somebody new, the note is sent, naming them');
+    eq(kinds(roomNoticePlan([], [{ channel: 'f', agent: 'bo-2', meeting_id: 1 }], new Set(['f|bo-2']))), ['forget:bo-2:1'],
+      'a second session made for a room is closed when the room ends, so it is told nothing');
+    eq(kinds(roomNoticePlan([room(1, ['bo'], { open: false, holding: true })], [])), [], 'a silent room tells nobody they have entered it');
+
+    // End to end: the board queues each notice as chat work for the desk's host.
+    const TCH = 'tell-ch';
+    const tHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const desksT = ['tia', 'udo', 'vel'].map((a, i) => ({ channel: TCH, agent: a, cwd: `/repo/${a}`, session_id: `sdk-${a}`, window: `@${30 + i}` }));
+    const regT = () => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: tHK, body: JSON.stringify({ host_id: 'h-tell', name: 'tellbox', tmux: 'orch', protocol: PROTOCOL, desks: desksT }) }).then((r) => r.json());
+    await regT();
+    for (const d of desksT) await post({ channel: TCH, agent: d.agent, session_id: d.session_id, hook_event_name: 'SessionStart', cwd: d.cwd });
+    const opT = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const told = () => fetch(`${HOST}/api/host/work?host_id=h-tell&wait=0`, { headers: HK }).then((r) => r.json())
+      .then((b) => (b.work ?? []).filter((w) => w.kind === 'chat').map((w) => `${w.agent}:${new RegExp(`^<${ROOM_NOTICE_TAG}>You are now`).test(w.payload.text) ? 'enter' : /back on the floor/.test(w.payload.text) ? 'leave' : w.payload.text}`).sort());
+    let r = await opT('/api/floor/meeting', { channel: TCH, agents: ['tia', 'udo'] });
+    const tRoom = r.body.room.id;
+    eq(await told(), ['tia:enter', 'udo:enter'], 'opening a room sends each desk in it the note, as chat work for its host, at once');
+    r = await opT('/api/floor/meeting/participants', { id: tRoom, agents: ['tia', 'udo', 'vel'] });
+    eq(await told(), ['vel:enter'], 'Add tells the desk added, and nobody already told');
+    await opT('/api/floor/meeting/touch', { id: tRoom });
+    eq(await told(), [], 'a touch of a live room tells nobody anything');
+    // A reload: End without final, then Open a moment later. The look in
+    // between waits out the sweep's two-second throttle, so the board does
+    // look while the room stands ended, which is what the hold is for.
+    await opT('/api/floor/meeting/end', { id: tRoom });
+    await sleep(2100);
+    await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    eq(await told(), [], 'a room ended a moment ago still holds its desks: nobody is told they left while it may be reloading');
+    await opT('/api/floor/meeting/open', { id: tRoom });
+    await sleep(2100);
+    await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    eq(await told(), [], 'a reload of the room\'s window (End, then Open) tells nobody they left or entered');
+    r = await opT('/api/floor/meeting/participants', { id: tRoom, agents: ['tia', 'udo'] });
+    eq(await told(), ['vel:leave'], 'Remove tells the desk taken out that it is back on the floor');
+    // Asking: the window takes no message, so the note waits for the prompt to go.
+    await post({ channel: TCH, agent: 'vel', session_id: 'sdk-vel', hook_event_name: 'PermissionRequest', cwd: '/repo/vel', tool_name: 'Bash', tool_input: { command: 'ls' } });
+    await opT('/api/floor/meeting/participants', { id: tRoom, agents: ['tia', 'udo', 'vel'] });
+    eq(await told(), [], 'a desk whose window is asking is not sent the note while it asks');
+    await post({ channel: TCH, agent: 'vel', session_id: 'sdk-vel', hook_event_name: 'PreToolUse', cwd: '/repo/vel', tool_name: 'Bash', tool_input: { command: 'ls' } });
+    await sleep(2100);
+    await fetch(`${HOST}/api/floor`).then((x) => x.json());
+    eq(await told(), ['vel:enter'], 'and is sent it at the next look once the prompt is gone');
+    await opT('/api/floor/meeting/end', { id: tRoom, final: true });
+    eq(await told(), ['tia:leave', 'udo:leave', 'vel:leave'], 'End meeting tells every desk it is back on the floor, at once');
+    await opT('/api/floor/meeting/open', { id: tRoom });
+    eq(await told(), ['tia:enter', 'udo:enter', 'vel:enter'], 'Resume tells them they are in the room again');
+    // The board restarting between the two is in the table (room_told), not memory.
+    const { default: Database } = await import('better-sqlite3');
+    const sqlT = new Database(DB_PATH, { readonly: true });
+    eq(sqlT.prepare(`SELECT agent, meeting_id FROM room_told WHERE channel = ? ORDER BY agent`).all(TCH).map((x) => `${x.agent}:${x.meeting_id}`), ['tia:' + tRoom, 'udo:' + tRoom, 'vel:' + tRoom],
+      'what each desk was told is kept in the database, so a board restarted mid-meeting still owes the way back');
+    sqlT.close();
+    await opT('/api/floor/meeting/end', { id: tRoom, final: true });
+    eq((await told()).length, 3, 'and is cleared as each is told it is back');
+  }
+
+  console.log('\nreconnecting a floor window whose tools dropped (costmo, 2026-11-19)');
+  {
+    const k = (a) => `f|${a}`;
+    const desk = (agent, more = {}) => ({ channel: 'f', agent, window_id: '@1', outside_pid: null, state: 'idle', ...more });
+    const used = new Set([k('bo'), k('cy'), k('dee'), k('ed')]);
+    const state = new Map();
+    const due = (desks, nowMs, more = {}) => reconnectDue(desks, { present: new Set(), used, state, nowMs, after: 1000, retry: 5000, tries: 2, ...more }).map((d) => d.agent);
+    eq(due([desk('bo')], 0), [], 'a window with no MCP session is not asked about at once: it may be starting');
+    eq(due([desk('bo')], 1000), ['bo'], 'it is, once it has stood that long');
+    eq(due([desk('bo')], 2000), [], 'and not again inside the retry');
+    eq(due([desk('bo')], 6000), ['bo'], 'once more after the retry');
+    eq(due([desk('bo')], 20000), [], 'and then left alone: a window that will not connect is not given a line every half-minute');
+    eq(due([desk('bo')], 21000, { present: new Set([k('bo')]) }), [], 'a session arriving');
+    eq(due([desk('bo')], 22000), [], 'starts the count again');
+    eq(due([desk('bo')], 23000), ['bo'], 'from the start');
+    eq(due([desk('zed')], 0) && due([desk('zed')], 9999), [], 'an agent that never used its tools on this board has nothing to get back (a server declined at the folder\'s question)');
+    eq([due([desk('cy', { window_id: null })], 0), due([desk('cy', { window_id: null })], 9999)], [[], []], 'nor a desk with no floor window');
+    eq(due([desk('dee', { outside_pid: 4242 })], 9999), [], 'nor one an editor holds');
+    due([desk('ed', { state: 'working' })], 0);
+    eq(due([desk('ed', { state: 'working' })], 5000), [], 'a working window is not asked: the window drops /mcp typed into a turn');
+    eq(due([desk('ed')], 5001), ['ed'], 'and is asked once its turn ends, its silence already counted');
+    state.clear();
+    due([desk('ed')], 0, { pending: new Map([[k('ed'), { request_id: 'r' }]]) });
+    eq(due([desk('ed')], 5000, { pending: new Map([[k('ed'), { request_id: 'r' }]]) }), [], 'nor one that is asking: the keys would answer the prompt');
+
+    // End to end: a host that said it takes the work, a window whose agent
+    // connected and then lost its session.
+    const RCH = 'rc-ch';
+    const rHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const regR = (reconnect) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-rc', name: 'rcbox', tmux: 'orch', protocol: PROTOCOL, reconnect,
+      desks: [{ channel: RCH, agent: 'rex', cwd: '/repo/rex', session_id: 'sdk-rex', window: '@40' }, { channel: RCH, agent: 'sol', cwd: '/repo/sol', session_id: 'sdk-sol', window: '@41' }] }) }).then((x) => x.json());
+    await regR(true);
+    const mh = (agent) => ({ 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': RCH, 'X-Agent': agent, 'x-orchestratinator-key': KEY });
+    const connect = async (agent) => {
+      const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: mh(agent), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'floor-test', version: '0' } } }) });
+      await init.text();
+      const sid = init.headers.get('mcp-session-id');
+      await fetch(`${HOST}/mcp`, { method: 'POST', headers: { ...mh(agent), 'mcp-session-id': sid }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }).then((x) => x.text());
+      return sid;
+    };
+    const asked = () => fetch(`${HOST}/api/host/work?host_id=h-rc&wait=0`, { headers: HK }).then((x) => x.json()).then((b) => (b.work ?? []).filter((w) => w.kind === 'reconnect').map((w) => w.agent));
+    // The board looks at a host at most once in five seconds, and counts the
+    // silence from the look that first finds it: an ask lands up to ten
+    // seconds after the session goes, plus RECONNECT_AFTER_MS. So these read
+    // until an ask arrives, or for a stated time when none should.
+    const askedIn = async (ms, { all = false } = {}) => {
+      const end = Date.now() + ms;
+      let got = [];
+      while (Date.now() < end) {
+        got = got.concat(await asked());
+        if (got.length && !all) return got;
+        await sleep(400);
+      }
+      return got;
+    };
+    const rexSid = await connect('rex');
+    eq(await askedIn(7000, { all: true }), [], 'a window holding its session is never asked; one whose agent never connected (sol) is not either');
+    await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh('rex'), 'mcp-session-id': rexSid } }).then((x) => x.text());
+    eq(await askedIn(20000), ['rex'], 'once its session is gone (as after the board restarts), its host is asked to reconnect it');
+    eq(await askedIn(20000), ['rex'], 'once more after the retry, while the session is still missing');
+    eq(await askedIn(11000, { all: true }), [], 'and then left alone');
+    await connect('rex');
+    eq(await askedIn(7000, { all: true }), [], 'and the session coming back ends it');
+    await regR(false);
+    await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh('rex'), 'mcp-session-id': await connect('rex') } }).then((x) => x.text());
+    eq(await askedIn(12000, { all: true }), [], 'a host that has not said it takes the work is never handed it');
+  }
+
+  console.log('\nClaude Code signed out on a host (costmo, 2026-11-19)');
+  {
+    const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const row = (more = {}) => ({ host_id: 'h-so', host_name: 'sobox', host_seen: nowIso, state: 'idle', host_signins: 1, host_signed_out: 1, ...more });
+    eq(signedOutWhy(row({ host_signed_out: 0 })), null, 'a desk whose host is signed in is not refused for it');
+    eq(signedOutWhy(row())?.code, 'signed_out', 'one whose host is signed out is');
+    assert(/signed out on sobox.*Sign in/.test(signedOutWhy(row())?.error ?? ''), 'in words that name the machine and the desk\'s remedy, never a command');
+    eq(signinWhyNot(null)?.code, 'not_hosted', 'Sign in needs a host');
+    eq(signinWhyNot(row({ state: 'offline' }))?.code, 'host_offline', 'a live one');
+    eq(signinWhyNot(row({ host_signins: 0 }))?.code, 'host_no_signin', 'that takes the work: a host from before it would drop it');
+    eq(signinWhyNot(row({ host_signed_out: 0 }))?.code, 'signed_in', 'and on whose machine Claude Code is signed out');
+    eq(signinWhyNot(row({ outside_pid: 4242 }))?.hosted?.host_id, 'h-so', 'an editor holding the conversation is no reason to refuse it: the sign-in is the machine\'s');
+    assert(/press Sign in again/.test(lostWorkWords({ kind: 'signin' }) ?? ''), 'a sign-in lost to a host restart is said, with what to do');
+
+    // End to end, through the routes: a host that says it is signed out.
+    const OCH = 'so-ch';
+    const oHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
+    const regO = (more) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: oHK, body: JSON.stringify({ host_id: 'h-so', name: 'sobox', tmux: 'orch', protocol: PROTOCOL,
+      desks: [{ channel: OCH, agent: 'oli', cwd: '/repo/oli', session_id: 'sdk-oli', window: '@50' }], ...more }) }).then((x) => x.json());
+    const oDesk = async () => (await (await fetch(`${HOST}/api/floor`)).json()).channels.find((c) => c.channel === OCH)?.desks.find((d) => d.agent === 'oli');
+    const oHost = async () => (await (await fetch(`${HOST}/api/floor`)).json()).hosts.find((h) => h.host_id === 'h-so');
+    const oOp = (path, body) => fetch(`${HOST}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const oWork = () => fetch(`${HOST}/api/host/work?host_id=h-so&wait=0`, { headers: oHK }).then((x) => x.json()).then((b) => (b.work ?? []).map((w) => `${w.kind}:${w.agent}`));
+
+    await regO({ signin: true, signed_out: false });
+    eq((await oDesk())?.signin ?? null, null, 'signed in, the desk offers nothing');
+    await oWork();
+    await regO({ signin: true, signed_out: true });
+    eq((await oDesk())?.signin, { ok: true, host: 'sobox' }, 'signed out, the desk offers Sign in, naming the machine');
+    eq([(await oHost())?.signed_out, (await oHost())?.signin], [true, true], 'and the host row says both, as the host last said them');
+    eq((await oDesk())?.nudge?.code, 'signed_out', 'the bell does not ring it');
+    const chatted = await oOp('/api/floor/chat', { channel: OCH, agent: 'oli', text: 'hello?' });
+    eq([chatted.status, chatted.body.code], [409, 'signed_out'], 'a message is refused before it is queued');
+    eq(await oWork(), [], 'and nothing is handed to the host');
+    const pressed = await oOp('/api/floor/signin', { channel: OCH, agent: 'oli' });
+    eq([pressed.status, pressed.body.host], [200, 'sobox'], 'Sign in is taken');
+    eq(await oWork(), ['signin:oli'], 'and the host is handed the sign-in, for that desk');
+    const audit = await (await fetch(`${HOST}/api/activity?channel=${OCH}&limit=20`)).json();
+    assert((audit.rows ?? []).some((r) => r.kind === 'admin.claude.signin' && r.target === 'oli'), `with an audit row naming the desk — ${JSON.stringify((audit.rows ?? []).map((r) => r.kind))}`);
+    await regO({ signin: false, signed_out: true });
+    eq((await oDesk())?.signin?.code, 'host_no_signin', 'a host that has not said it takes the work: the desk says why Sign in cannot be pressed');
+    eq((await oOp('/api/floor/signin', { channel: OCH, agent: 'oli' })).body.code, 'host_no_signin', 'and the route refuses it in the same words');
+    await regO({ signin: true, signed_out: false });
+    eq((await oOp('/api/floor/signin', { channel: OCH, agent: 'oli' })).body.code, 'signed_in', 'nothing to do once Claude Code is signed in');
+    eq((await oOp('/api/floor/chat', { channel: OCH, agent: 'oli', text: 'hello again' })).status, 200, 'and a message is taken again');
+    await oWork();
+  }
+
   console.log('\none agent, several sessions');
   {
     const SA = 'seat-a';
@@ -4260,7 +4940,7 @@ try {
     const sDesks = new Map();
     const reg = (seats = true) => fetch(`${HOST}/api/host/register`, {
       method: 'POST', headers: sHK,
-      body: JSON.stringify({ host_id: 'h-seat', name: 'seatbox', tmux: 'orch', roots: ['/repo'], folders: sFolders, desks: [...sDesks.values()], ...(seats ? { seats: true } : {}) }),
+      body: JSON.stringify({ host_id: 'h-seat', name: 'seatbox', tmux: 'orch', protocol: PROTOCOL, roots: ['/repo'], folders: sFolders, desks: [...sDesks.values()], ...(seats ? { seats: true } : {}) }),
     }).then((r) => r.json());
     const work = () => fetch(`${HOST}/api/host/work?host_id=h-seat&wait=0`, { headers: sHK }).then((r) => r.json()).then((b) => b.work ?? []);
     const hev = (events) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: sHK, body: JSON.stringify({ host_id: 'h-seat', events }) }).then((r) => r.json());
@@ -4487,6 +5167,16 @@ try {
     // and a room ended that lately still holds its sessions (a reload). Aged,
     // so the only room these rows read is the silent one.
     await sql((db) => db.prepare(`UPDATE meeting_rooms SET ended_at = datetime('now', '-60 seconds') WHERE channel = ? AND ended_at IS NOT NULL`).run(SA));
+    // Held first (0.14.4): the app quit with the room open. Silent for as
+    // long as the watch takes and more, its second session stays.
+    eq((await op('/api/floor/meeting/hold', { id: rm.id })).body.held, true, 'a room the app quit with is held');
+    await hush(rm.id);
+    await sleep(2100);
+    await floor();
+    await sleep(UNHEARD_MS + 300);
+    await floor();
+    eq(await closes(), [], 'and a held room keeps its second session however long no window touches it');
+    eq((await op('/api/floor/meeting/touch', { id: rm.id })).body.live, true, 'its window back clears the hold');
     await hush(rm.id);
     await sleep(2100);
     await floor();
@@ -4598,7 +5288,7 @@ try {
     // board's memory, and raised again by the host's next heartbeat.
     const rHK = { 'content-type': 'application/json', 'x-orchestratinator-key': KEY };
     const rDesks = [{ channel: 'ask-ch', agent: 'asa', cwd: '/repo/asa', session_id: 'sdk-asa' }, { channel: 'ask-ch', agent: 'bea', cwd: '/repo/bea', session_id: 'sdk-bea' }];
-    const rBeat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', desks: rDesks, ...(pending ? { pending } : {}) }) });
+    const rBeat = (pending) => fetch(`${HOST}/api/host/register`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-ask', name: 'askbox', tmux: 'orch', protocol: PROTOCOL, desks: rDesks, ...(pending ? { pending } : {}) }) });
     await rBeat();
     await post({ channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PermissionRequest', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'make deploy' } });
     assert(/make deploy/.test(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary ?? ''), 'before the restart, the question is on the floor');

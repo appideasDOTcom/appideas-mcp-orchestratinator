@@ -264,6 +264,13 @@ async function connect(target) {
       await cmd('Browser.setWindowBounds', { windowId, bounds });
       return (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result.bounds;
     },
+    /**
+     * Which browser window this page is in: two tabs of one window share an
+     * id, and a page opened as a window of its own (a popup) has another
+     * (task 315's "Open new floors"). Bounds alone cannot tell them apart
+     * in a headless browser, which may draw every window in one place.
+     */
+    windowId: async () => (await cmd('Browser.getWindowForTarget', { targetId: target.id })).result?.windowId ?? null,
     /** The console's warnings and errors and the uncaught exceptions so far; `clear` empties the list after reading it. */
     console: ({ clear = false } = {}) => { const out = said.slice(); if (clear) said.length = 0; return out; },
     evalJs,
@@ -294,6 +301,8 @@ async function connect(target) {
      * only works on one of them is otherwise never looked at.
      */
     scheme: async (value) => cmd('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: value ?? '' }] }),
+    /** Run `js` in every document this page loads from now on, before the page's own scripts (e.g. to make its first poll fail). */
+    beforeLoad: async (js) => (await cmd('Page.addScriptToEvaluateOnNewDocument', { source: js })).result?.identifier ?? null,
     /** Run a file of browser code and return whatever it evaluates to. */
     probe: (file) => evalJs(readFileSync(file, 'utf8')),
     /**
@@ -303,7 +312,10 @@ async function connect(target) {
     click: async (selector) => evalJs(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) throw new Error('no element for ' + ${JSON.stringify(selector)});
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      // cancelable, as a person's click always is: without it preventDefault()
+      // does nothing, and a click on a link the page handles itself (the
+      // floor chips, task 315) followed the link and reloaded the page.
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       return true;
     })()`),
     /**
@@ -331,7 +343,7 @@ async function connect(target) {
      * through a layout shift. It is for asking whether an element survived
      * (issue #37's patch), apart from whether it moved; say the move too.
      */
-    press: async (from, to = from, { steps, held, follow = false } = {}) => {
+    press: async (from, to = from, { steps, held, follow = false, modifiers = 0, button = 'left' } = {}) => {
       const at = async (p) => (typeof p === 'string'
         ? JSON.parse(await evalJs(`(() => {
             const el = document.querySelector(${JSON.stringify(p)});
@@ -345,8 +357,16 @@ async function connect(target) {
       // turn the click into a short drag.
       const b = to === from ? a : await at(to);
       steps ??= a.x === b.x && a.y === b.y ? 0 : 6;
+      // `modifiers` is CDP's mask (Alt 1, Ctrl 2, Meta/⌘ 4, Shift 8) and
+      // `button` 'left' or 'middle': a ⌘-click or a middle-click on a link is
+      // the browser's own "open elsewhere" (task 315's floor chips).
+      const held1 = button === 'middle' ? 4 : 1;
+      // A move with the button held names that button: sent as 'none', Chrome
+      // does not take it as a drag, and a textarea's resize handle stayed
+      // where it was (check-chatbox and check-pop-foot red at the 0.14.0
+      // release gate, 2026-11-20, from this line's first cut).
       const mouse = (type, { x, y }, buttons) => cmd('Input.dispatchMouseEvent',
-        { type, x, y, button: 'left', buttons, clickCount: 1 });
+        { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : button, buttons: buttons ? held1 : 0, clickCount: 1, modifiers });
       await mouse('mouseMoved', a, 0);
       await mouse('mousePressed', a, 1);
       for (let i = 1; i <= steps; i++) {

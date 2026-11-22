@@ -64,8 +64,16 @@ echo "== 3. keep-both seams in Markdown"
 SEAMS=0
 for f in $CONFLICTED; do
   case "$f" in *.md) ;; *) continue ;; esac
+  # The two texts go to node as files, not as arguments: CLAUDE.md and the
+  # larger skills overflowed V8's argument buffer ("Fatal error … Check
+  # failed: n < static_cast<size_t>(buffer_size)") on the main → develop
+  # merge of 2026-11-18, and those files went unchecked with only that noise
+  # printed. Read with the files, the same three were clean.
+  SEAM_A=$(mktemp); SEAM_R=$(mktemp)
+  git show "$AUTO:$f" > "$SEAM_A"; git show "$SPEC$f" > "$SEAM_R"
   OUT=$(node -e '
-    const [auto, result, name] = [process.argv[1], process.argv[2], process.argv[3]];
+    const fs = require("fs");
+    const [auto, result, name] = [fs.readFileSync(process.argv[1], "utf8"), fs.readFileSync(process.argv[2], "utf8"), process.argv[3]];
     const a = auto.split("\n"), r = result.split("\n");
     const marker = (l) => /^(<<<<<<<|=======$|>>>>>>>)/.test(l);
     const pairs = new Set(r.slice(1).map((l, i) => r[i] + "\u0000" + l));
@@ -76,7 +84,8 @@ for f in $CONFLICTED; do
       if (p < 0 || n >= a.length || !a[p].trim() || !a[n].trim()) continue;
       if (pairs.has(a[p] + "\u0000" + a[n]))
         console.log(`  ${name}: no blank line where "${a[i].slice(0, 7)}" stood — «${a[p].trim().slice(0, 50)}» then «${a[n].trim().slice(0, 50)}»`);
-    }' "$(git show "$AUTO:$f")" "$(git show "$SPEC$f")" "$f")
+    }' "$SEAM_A" "$SEAM_R" "$f")
+  rm -f "$SEAM_A" "$SEAM_R"
   [ -n "$OUT" ] && { echo "$OUT"; SEAMS=1; }
 done
 [ "$SEAMS" = 0 ] && echo "  none" || FLAGS=$((FLAGS + 1))
@@ -86,6 +95,15 @@ V=$(for f in package.json host/package.json plugin/.claude-plugin/plugin.json; d
   git show "$SPEC$f" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))'; done)
 echo "  $(echo $V)"
 [ "$(echo "$V" | sort -u | wc -l | tr -d ' ')" = 1 ] || { echo "  THE THREE DISAGREE"; FLAGS=$((FLAGS + 1)); }
+# The host protocol number, which develop carries and main does not. Both
+# main -> develop merges of 2026-11 dropped it: the version line conflicted,
+# main's side was taken, and develop's "protocol": 1 beside it went too
+# (bf8079d, e54004b). The board then reads NaN and the host sends none. So
+# when the side merged into has one, the result must still have it.
+P_OURS=$(git show "$OURS:package.json" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).protocol ?? "none"))')
+P_RES=$(for f in package.json host/package.json; do git show "$SPEC$f" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).protocol ?? "none"))'; done)
+echo "  protocol: ours $P_OURS, result $(echo $P_RES)"
+if [ "$P_OURS" != none ] && echo "$P_RES" | grep -q none; then echo "  THE MERGE DROPPED THE PROTOCOL NUMBER"; FLAGS=$((FLAGS + 1)); fi
 
 echo "== 5. commits on the merged side's line that the merge does not include"
 SIDE=$(git rev-list "$BASE..$THEIRS")

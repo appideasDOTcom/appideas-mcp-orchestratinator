@@ -104,6 +104,33 @@ await page.evalJs(`(() => { const ta = document.querySelector('#p-text'); ta.foc
 r = await read(); console.log('== after Tab:', JSON.stringify({ textarea: r.textarea }));
 await page.evalJs(box(''));
 
+// /mcp (costmo, 2026-11-19): offered by the menu, and said for what it does
+// from the floor, which is not what it does typed in the window.
+await page.evalJs(box('/mc', false));
+const mcRows = JSON.parse(await page.evalJs(`JSON.stringify([...document.querySelectorAll('#floor-panel .p-slash-row')].filter((x) => !x.closest('.hidden')).map((x) => x.textContent.replace(/\\s+/g, ' ').trim()))`));
+console.log('== slash menu on /mc:', JSON.stringify(mcRows));
+ok(mcRows.length === 1 && /^\/mcp/.test(mcRows[0]) && /reconnect this desk.s tools to the board/.test(mcRows[0]), '/mcp is in the menu, saying it reconnects the desk\'s tools');
+await page.evalJs(box(''));
+
+// A room's notice is the board's words, not the operator's: one quiet line
+// labeled meeting-room, its tags gone, never a bubble from "you".
+await hostEvents([{ type: 'turn', channel: CH, agent: AG, session_id: SID, role: 'context', tool_name: 'meeting-room', at: new Date().toISOString(),
+  text: '<meeting-room>You are now in a meeting room with cy and the operator. This note needs no reply.</meeting-room>' }]);
+const noticeExpr = `[...document.querySelectorAll('#p-turns .t-context')].find((x) => /meeting-room/.test(x.textContent))?.textContent.replace(/\\s+/g, ' ').trim()`;
+await page.waitFor(noticeExpr, { timeout: 8000 }).catch(() => null);
+const noticeLine = await page.evalJs(noticeExpr);
+console.log('== a room notice:', JSON.stringify(noticeLine));
+ok(/^meeting-room · You are now in a meeting room with cy and the operator\. This note needs no reply\.$/.test(noticeLine ?? ''), 'a room notice is drawn as one quiet line labeled meeting-room, with no tags');
+ok(!(await page.evalJs(`[...document.querySelectorAll('#p-turns .t-user, #p-turns .t-you')].some((x) => /meeting room with cy/.test(x.textContent))`)), 'and never as a message from the operator');
+// One that met a working window is reported queued by the host: it used to
+// stand as his bubble, "queued — the desk is working", for good (desktop-dev,
+// from costmo's screenshot, 2026-11-19).
+await hostEvents([{ type: 'delivery', channel: CH, agent: AG, state: 'queued', text: '<meeting-room>You have left the meeting room and are back on the floor. This note needs no reply.</meeting-room>' }]);
+await new Promise((res) => setTimeout(res, 2500));
+const stuck = await page.evalJs(`[...document.querySelectorAll('#p-turns .t-pending, #p-turns .t-user')].filter((x) => /back on the floor/.test(x.textContent)).map((x) => x.textContent.replace(/\\s+/g, ' ').trim())`);
+console.log('== a notice reported queued:', JSON.stringify(stuck));
+ok(Array.isArray(stuck) && stuck.length === 0, 'a notice queued behind a working turn draws no bubble from the operator');
+
 await page.evalJs(box('/btw what is 6*7? reply with just the number'));
 await page.waitFor(`document.querySelectorAll('#p-turns .t-pending').length === 1`);
 console.log('== /btw pending:', await page.evalJs(`document.querySelector('#p-turns .t-pending .t-when').textContent`));

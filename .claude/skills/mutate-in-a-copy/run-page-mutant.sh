@@ -36,6 +36,9 @@
 # caught the mutant — "the card follows on the 200 again" killed step 3b by
 # timing out on a refusal the dialog never drew — and this says so.
 set -u
+# A Node that can load better-sqlite3 13, or a refusal in words: this machine's
+# default node segfaults on it silently (scripts/node-floor.sh has the why).
+. "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME="$1"; FILE="$2"; OLD="$3"; NEW="$4"; CHECK="$5"
 [ -d .git ] && { echo "refusing: this is a git checkout, not the copy" >&2; exit 2; }

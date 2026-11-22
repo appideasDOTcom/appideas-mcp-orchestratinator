@@ -28,10 +28,11 @@
  * `tmux attach -t orch` is a perfectly good front end to the whole board: the
  * windows are the desks, in the same order the floor shows them.
  */
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { homedir, userInfo } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { readDesk } from './identity.js';
@@ -53,9 +54,13 @@ const run = promisify(execFile);
  * board refused both, for every placeholder desk opened from the floor.
  * costmo's ruling (PR #52, 2026-11-06): the pane is given that one variable,
  * set to the host's key, and nothing is written to disk. Only for a desk whose
- * key names a variable the host could not fill (`keyVar`, identity.js) — a
- * literal key needs nothing, and one the host filled came from the same
- * environment the host started the tmux server with.
+ * key names a variable (`keyVar`, identity.js) — a literal key needs
+ * nothing. Since 0.14.4 that is every such desk, not only one whose variable
+ * the host could not fill: a window gets nothing of the host's own settings
+ * (windowEnv, below), so "the host filled it, so the tmux server has it" no
+ * longer holds. The value is what the host made of the placeholder, which is
+ * what the window would make of it in the host's environment, else the key
+ * the host settled on.
  */
 let boardKey = null;
 export function useKey(key) { boardKey = key || null; }
@@ -67,7 +72,8 @@ export function useKey(key) { boardKey = key || null; }
  *  every listing of the session. `-e` is the window's environment and
  *  nothing else (tmux 3.0 and later). */
 export function paneEnv(desk, key = boardKey) {
-  return desk?.keyVar && key ? ['-e', `${desk.keyVar}=${key}`] : [];
+  const value = desk?.key || key;
+  return desk?.keyVar && value ? ['-e', `${desk.keyVar}=${value}`] : [];
 }
 
 /**
@@ -77,12 +83,161 @@ export function paneEnv(desk, key = boardKey) {
  * if they have one; otherwise say UTF-8, because a repo's name is not ours to
  * mangle.
  */
-const TMUX_ENV = {
-  ...process.env,
-  LC_ALL: process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || 'en_US.UTF-8',
-};
+/** The markers a Claude Code session sets for its children; see windowEnv. */
+export const PARENT_SESSION = new Set([
+  'CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_EFFORT',
+  'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_CHILD_NOTES_DIR',
+  'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SSE_PORT',
+]);
+const TMUX_ENV = windowEnv();
 
-const TMUX = process.env.ORCH_TMUX ?? 'tmux';
+/**
+ * The environment tmux is run with, which is what a tmux server this host
+ * starts keeps, and so what every window opened on it gets: a person's
+ * environment, and nothing of the host's own settings (0.14.4; decided
+ * 2026-11-20, costmo having handed the call over, recorded in CLAUDE.md, "The
+ * clear of 2026-11-20", and contract `orchestratinator.consumed`,
+ * `host.windows_inherit`).
+ *
+ * - **No `ORCH_` variable.** Those are how a host is configured, and the
+ *   desktop app configures its host by environment. Handed down, every
+ *   window carried the app's board address, its key, its host id and
+ *   `ORCH_HOST_SUPERVISOR=app`, so a board, a host or a suite started by
+ *   hand in an agent's window silently became the app's (measured that day:
+ *   a host suite run from such a window read one red, the host meant to
+ *   have no key having the app's). The one thing of them a window needs,
+ *   the key its binding names as a variable, it is given by `-e` (paneEnv),
+ *   and a seat's window its four by `-e` too (seatEnv). The suites reach
+ *   their stand-ins by flag files, for the same reason, so nothing rides on
+ *   this.
+ * - **`TMPDIR` filled when missing**, on macOS the person's own (`getconf
+ *   DARWIN_USER_TEMP_DIR`). A window the app's host opened had none, so
+ *   everything in it wrote to `/tmp`. Elsewhere it is left alone.
+ * - **`USER` and `LOGNAME` filled when missing**, as claudeEnv does for the
+ *   host's own Claude Code calls: with HOME and PATH alone Claude Code says a
+ *   signed-in Mac is signed out, and a window is a Claude Code.
+ * - **None of the markers a Claude Code session sets for its own children**
+ *   (`PARENT_SESSION`). A host started from inside a Claude Code window, by
+ *   hand or by an app launched from one, hands them on, and a Claude Code
+ *   that inherits them believes it is that session's child. Measured by
+ *   pc-developer on Windows, 2026-11-20, Claude Code 2.1.330: a window under
+ *   a multiplexer started from an agent's window showed "⚠ Transcript saving
+ *   is off — inherited CLAUDE_CODE_CHILD_SESSION marker" and wrote no
+ *   transcript, which is a desk the floor can never hear. Only the markers
+ *   go: `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_API_KEY`
+ *   and the rest are how a person configures Claude Code, and a window needs
+ *   them. `CLAUDE_EFFORT` is the parent's effort level, and would set the
+ *   window's.
+ * - **A locale**, below.
+ *
+ * tmux finds its socket by `TMUX_TMPDIR`, never `TMPDIR`, so filling it moves
+ * no server. A server already running keeps what it was started with:
+ * cleanServerEnv() takes the same variables out of it at the host's start.
+ *
+ * tmux escapes whatever it thinks the terminal cannot print, so a directory
+ * with a character outside ASCII comes back as octal escapes unless the locale
+ * says UTF-8 — and under launchd there is no locale at all. Take the person's
+ * if they have one; otherwise say UTF-8, because a repo's name is not ours to
+ * mangle.
+ */
+export function windowEnv(env = process.env, { platform = process.platform, tempDir = darwinTempDir, user = accountName } = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_') && !PARENT_SESSION.has(k)) out[k] = v;
+  out.LC_ALL = env.LC_ALL || env.LC_CTYPE || env.LANG || 'en_US.UTF-8';
+  if (!env.TMPDIR && platform === 'darwin') {
+    const t = tempDir();
+    if (t) out.TMPDIR = t;
+  }
+  if (!env.USER || !env.LOGNAME) {
+    const u = env.USER || env.LOGNAME || user();
+    if (u) { out.USER = env.USER || u; out.LOGNAME = env.LOGNAME || u; }
+  }
+  return out;
+}
+
+/** The person's own temporary directory on macOS, as their shell has it in
+ *  `TMPDIR`, or null. */
+function darwinTempDir() {
+  try { return execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8', timeout: 2000 }).trim() || null; } catch { return null; }
+}
+function accountName() {
+  try { return userInfo().username || null; } catch { return null; }
+}
+
+/**
+ * What to change in a running tmux server's global environment, from
+ * `show-environment -g`: every `ORCH_` variable it holds is unset, and
+ * `TMPDIR`, `USER` and `LOGNAME` are set where it has none and windowEnv has
+ * one. A line `-NAME` is a variable already marked removed, and is left.
+ * Only names the server lists are unset, so nothing is asked of tmux about a
+ * variable it never had.
+ */
+export function serverEnvPlan(shown, want = TMUX_ENV) {
+  const have = new Set();
+  const unset = [];
+  for (const line of String(shown ?? '').split('\n')) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(line);
+    if (!m) continue;
+    have.add(m[1]);
+    if (m[1].startsWith('ORCH_') || PARENT_SESSION.has(m[1])) unset.push(m[1]);
+  }
+  const set = ['TMPDIR', 'USER', 'LOGNAME'].filter((k) => !have.has(k) && want[k]).map((k) => [k, want[k]]);
+  return { unset, set };
+}
+
+/**
+ * Bring a tmux server that is already running into line with windowEnv, at
+ * the host's start, so an update reaches the windows opened after it without
+ * the floor being closed. Windows already open keep what they have until they
+ * are reopened. No server running is nothing to do. Returns what it changed,
+ * names only (a value can be a key), for the host's log.
+ */
+export async function cleanServerEnv() {
+  const shown = await tmux(['show-environment', '-g']);
+  if (!shown.ok) return { unset: [], set: [] };
+  const plan = serverEnvPlan(shown.out);
+  const done = { unset: [], set: [] };
+  for (const k of plan.unset) if ((await tmux(['set-environment', '-g', '-u', k])).ok) done.unset.push(k);
+  for (const [k, v] of plan.set) if ((await tmux(['set-environment', '-g', k, v])).ok) done.set.push(k);
+  return done;
+}
+
+/**
+ * Windows, where the multiplexer is not tmux itself but a tool that answers
+ * tmux's commands (psmux 3.4.0 measured by pc-developer, 2026-11-20, against
+ * Claude Code 2.1.330: drawing, typing, keys, bracketed paste, `=name`, `-e`,
+ * `-c`, attach and detach all as on the Mac). Two things differ, and both are
+ * about how a program is found and started, not about what tmux is asked:
+ *
+ * - **A binary is found by its path.** winget puts psmux's `tmux.exe` in
+ *   `%LOCALAPPDATA%\Microsoft\WinGet\Links` and adds that to the user's
+ *   PATH, which only processes started after the install see. So the name
+ *   is resolved once with `where.exe`, then that folder, and `ORCH_TMUX` /
+ *   `ORCH_HOST_CLAUDE` still win.
+ * - **A window's program is started as an argument list, never a shell
+ *   line** (`launchArgs`). Windows has no `exec`, so a shell line leaves the
+ *   shell as the pane's process and Claude Code as its child: the pane's pid
+ *   is then `bash.exe` or `powershell.exe`, never the pid `claude agents`
+ *   reports, and the host finds a desk's window by exactly that join
+ *   (holderOf). Given after `--`, the pane's pid is claude.exe's, and its
+ *   folder is spelled as the roster spells it (both measured).
+ *
+ * `ORCH_HOST_PLATFORM` stands in for the platform, for the suites alone.
+ */
+export const WINDOWS = (process.env.ORCH_HOST_PLATFORM ?? process.platform) === 'win32';
+function findExe(name, { extra = [] } = {}) {
+  try {
+    // stderr ignored: where.exe says "INFO: Could not find files …" there on
+    // a miss, and that line read as the host's own in its log.
+    const hit = execFileSync('where.exe', [name], { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+      .split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l));
+    if (hit) return hit;
+  } catch { /* not on PATH */ }
+  return extra.find((p) => existsSync(p)) ?? name;
+}
+const WINGET_LINKS = join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Microsoft', 'WinGet', 'Links');
+const TMUX = process.env.ORCH_TMUX ?? (WINDOWS && process.platform === 'win32' ? findExe('tmux', { extra: [join(WINGET_LINKS, 'tmux.exe')] }) : 'tmux');
 /**
  * The field separator for `-F` formats.
  *
@@ -128,7 +283,23 @@ const SESSION = (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._
  * beside it has passed, when the exact name is what tmux prefers.
  */
 const EXACT = `=${SESSION}`;
-const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';
+const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? (WINDOWS && process.platform === 'win32' ? findExe('claude', { extra: [join(homedir(), '.local', 'bin', 'claude.exe')] }) : 'claude');
+
+/**
+ * The words that end a `new-window` or `new-session`: what the window runs.
+ *
+ * On the Mac and Linux, one shell line, `exec env … claude …`, exactly as it
+ * has been: `exec` makes Claude Code the pane's process. On Windows, the
+ * program and its arguments after `--`, with the one variable by `-e`, for
+ * the reason above WINDOWS. `-e` and not an `env` word there, as paneEnv
+ * already does for the key: there is no `env` to run.
+ */
+export function launchArgs(argv, { windows = WINDOWS } = {}) {
+  const SURVEY = 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1';
+  if (windows) return ['-e', SURVEY, '--', ...argv.map(String)];
+  const line = ['env', SURVEY, ...argv].map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ');
+  return [`exec ${line}`];
+}
 /** Long enough for a cold `claude agents --json`, short enough not to stall a poll. */
 const LIST_TIMEOUT_MS = Number(process.env.ORCH_ROSTER_TIMEOUT_MS ?? 15_000);
 // `claude stop` answers from the daemon at once — 0s measured on 2.1.258 — so
@@ -216,14 +387,52 @@ export function defaultModel(cwd) {
  */
 async function tmux(args, { timeout = 5000 } = {}) {
   try {
-    const { stdout } = await run(TMUX, args, { timeout, encoding: 'utf8', env: TMUX_ENV });
-    return { ok: true, out: stdout.trim() };
+    const { stdout } = await run(TMUX, args, { timeout, encoding: 'utf8', env: TMUX_ENV, windowsHide: true });
+    const out = stdout.trim();
+    if (WINDOWS && psmuxRefusal(out)) return { ok: false, error: out, out: '' };
+    return { ok: true, out };
   } catch (err) {
     if (err?.code === 'ENOENT') return { ok: false, missing: true, error: 'tmux is not installed' };
     // What it printed before it failed is kept: two commands in one call can
     // have the first succeed and say so (open(), a seat's tag).
     return { ok: false, error: (err?.stderr || err?.message || String(err)).trim(), out: String(err?.stdout ?? '').trim() };
   }
+}
+
+/**
+ * psmux exits 0 for some refusals and says them on stdout, measured by
+ * pc-developer on 3.4.0 (2026-11-20): `capture-pane` of a window it cannot
+ * find prints "ERROR: can't find window: …" and exits 0, and `list-panes`
+ * against a session with no server prints "psmux: no server running on
+ * session '…'" and exits 0. Read as answers, the first is a screen that
+ * reads as one line of text and the second a pane list of one line. Only
+ * the whole answer being one such line counts, so a screen whose
+ * conversation quotes the words is still a screen. The "no server running"
+ * words are kept in `error`, which paneGone reads.
+ */
+export function psmuxRefusal(out) {
+  return !out.includes('\n') && /^(?:ERROR: can't find |psmux: (?:no server running|can't find ))/.test(out);
+}
+
+/**
+ * The shell a window's command runs in, for the host's sign-in reading
+ * (statusCommand in host/auth.js): a window is `exec env … claude …` run by
+ * tmux through its `default-shell -c` (launchArgs), so that shell's startup
+ * files are part of what a window has. The floor's server says which shell
+ * it uses; with no server running, tmux would start one with SHELL, then the
+ * account's shell, then /bin/sh (tmux(1), default-shell), and so does this.
+ * Null on Windows, where a window is the program with no shell around it.
+ */
+export function shellFor({ told = '', env = process.env, account = () => userInfo().shell, exists = existsSync } = {}) {
+  let own = '';
+  try { own = account() || ''; } catch { /* no passwd entry */ }
+  for (const s of [told, env.SHELL, own]) if (s && s.startsWith('/') && exists(s)) return s;
+  return '/bin/sh';
+}
+export async function windowShell() {
+  if (WINDOWS) return null;
+  const r = await tmux(['show-options', '-gv', 'default-shell']);
+  return shellFor({ told: r.ok ? r.out.trim() : '' });
 }
 
 /** Whether tmux is usable at all. The floor degrades honestly if it isn't. */
@@ -526,6 +735,26 @@ const optionText = (line) => String(line ?? '').replace(/^\s*[\u276f>]?\s*/, '')
 const STARTUP_ASKS = [
   { kind: 'trust', asks: /Is this a project you created or one you trust/i },
   { kind: 'mcp', asks: /New MCP server found in this project/i },
+  // The browser extension's question, the same arrow list with its own
+  // footer ("Enter to confirm · Esc to keep browser tools off") and the
+  // cursor starting on No. Read off costmo's screen on a new machine
+  // (2026-11-20, a 2.1.318 window, after the trust question was answered
+  // from the floor): the host refused to type into it, said "answer it on
+  // the floor", and the floor had nothing to answer it with. His ruling the
+  // same hour: shown to the operator and answered by them, never by rule.
+  //
+  //   Claude in Chrome extension detected
+  //   Claude will use your Chrome browser by default — navigating sites, …
+  //   This session is in Auto mode, … with /chrome.
+  //   ❯ No, keep browser tools off
+  //     Yes, use my browser
+  //   Enter to confirm · Esc to keep browser tools off
+  //
+  // Not measured: whether the window is in the roster while it stands. So
+  // the host looks for a startup question on a registered window too, when
+  // a send has just been refused as asking and once a heartbeat
+  // (Desk.lookStartup in index.js), not only while a window is starting.
+  { kind: 'chrome', asks: /Claude in Chrome extension detected/i },
 ];
 export function startupQuestionOf(screen) {
   const lines = String(screen ?? '').split('\n').map((l) => l.replace(/\s+$/, ''));
@@ -545,6 +774,298 @@ export function startupQuestionOf(screen) {
   const options = block.map((l, i) => ({ n: i + 1, text: optionText(l) }));
   const asks = lines.find((l) => known.asks.test(l))?.trim() ?? known.kind;
   return { kind: known.kind, asks, options, at };
+}
+
+/* ───────────── a window Claude Code has no record of ─────────────
+ *
+ * The roster is how the host knows a window: which conversation it is on,
+ * and so which transcript to read. A window with no entry in it is one the
+ * host takes for still starting. Seen on costmo's second machine the day
+ * 0.14.0 was first installed there (2026-11-20): `~/.claude/sessions` was
+ * empty, and a 2.1.318 window stood at its composer, alive, running every
+ * command it was sent and writing its transcript. So the floor typed into a
+ * window it could not hear. A model change ended "gave no sign of running
+ * it within 20s" with the window's own line saying it was set. A message
+ * read "not recorded, send again" while the agent worked on it. And the
+ * board never asked for a /mcp reconnect after its restarts, because it asks
+ * only for a floor-held window and this one read as starting. He found it by
+ * opening the window; his word the same hour: "we need to be able to
+ * auto-resolve this. Another operator likely would not have been able to
+ * track that down."
+ *
+ * What removed that window's record was not found. Not reproduced here in
+ * six tries: a new conversation and a cold open through send() on 2.1.329
+ * and 2.1.318, a 2.1.318 window read by 2.1.329, and a 2.1.318 window on a
+ * brand-new profile, which wrote `sessions/<pid>.json` as soon as its folder
+ * was trusted and kept it through 2.1.329's `auth status` and `agents`. That
+ * machine's profile had been deleted and remade around a tmux server that
+ * was left running, which is the likeliest cause and is not proven.
+ *
+ * So the state is resolved, whatever makes it. A window that stands idle at
+ * its composer with no record for UNREGISTERED_MS is reopened on its own
+ * conversation, on the host's line, and the desk says so: a new process
+ * writes a new record, and connects its tools as it starts. Idle, because a
+ * window is never closed mid-turn, and a question, a menu or a typed draft
+ * is somebody's. Once: a reopened window with no record either is said on
+ * the desk in words and left alone, since reopening is a kill and a machine
+ * on which no window is recorded would otherwise be reopened for ever.
+ */
+export const UNREGISTERED_MS = Number(process.env.ORCH_UNREGISTERED_MS ?? 30_000);
+
+/** Whether a screen is a window standing at its composer: nothing asked, nothing running, nothing open over it. */
+export function standingIdleOf(screen) {
+  const text = String(screen ?? '');
+  if (!text.trim()) return false;
+  if (startupQuestionOf(text) || askingOf(text) || overlayOf(text) || /esc to interrupt/i.test(footOf(text))) return false;
+  return composerOf(text) != null;
+}
+
+/**
+ * The same, read off a pane, and with nothing typed in the box: the cursor
+ * right behind the prompt mark. Typed text has the cursor at its end; a
+ * prompt suggestion is drawn after a cursor that stays at column 2 (see
+ * composerOf's callers), so a suggestion is not somebody's draft. The answer
+ * carries the pane's own id, because tmux answers for another pane when the
+ * one named is gone.
+ */
+export async function standingIdleAt(target) {
+  if (!standingIdleOf(await screenOf(target, 30))) return false;
+  const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id} #{cursor_x}']);
+  const m = /^(%\d+) (\d+)$/.exec((at.out ?? '').trim());
+  return !!m && at.ok && String(target).endsWith(m[1]) && Number(m[2]) <= 2;
+}
+
+/**
+ * Whether somebody has typed into the window's message box and not sent it
+ * (F2 of the 0.14.5 review). For what the host types that nobody asked for
+ * at that moment (a `/mcp reconnect` after the board came back, a meeting
+ * room's notice): typed onto a draft, the two go in as one message. Measured
+ * on the rig on 2.1.330: the draft "this is a half-typed draft that nobody
+ * sent" and a reconnect became one user record, the agent took a turn on it,
+ * and the reconnect never ran.
+ *
+ * A draft is text in the box that is not drawn dim. A prompt suggestion is
+ * drawn dim (SGR 2, CLAUDE.md "a line in the composer that nobody typed",
+ * measured on 2.1.300), and so is a fresh window's placeholder hint
+ * (2.1.330, 2026-11-21: `❯ ESC[2mTry "how does <filepath> work?"ESC[0m`,
+ * cursor at column 2); typed text is in the terminal's colours (no SGR, or
+ * `38;5;231`, read on the same day's panes). Where the
+ * cursor stands is not the test: the first cut of this said "cursor right
+ * behind the `❯`" meant no draft, and QA's F2-b showed what that misses,
+ * measured on the rig the same afternoon: a draft with Ctrl-A pressed has
+ * its cursor there, the reconnect was typed in front of it, and the window
+ * ran `/mcp reconnect orchestratinatorF2-b draft that nobody sent`, a server
+ * not found, the draft gone. Text on a row under the `❯`, or a box scrolled
+ * past its `❯` row, is typed by definition.
+ *
+ * `promptRow` is the `❯` row as tmux draws it, with its escape codes
+ * (capture-pane -e), or null when that row is not in view. Read wrong, this
+ * errs one way: a suggestion that came undimmed would read as a draft, and
+ * the host would wait with what it owes rather than type over a person.
+ */
+/**
+ * Whether an SGR sequence's parameters leave the text dim, given whether it
+ * was dim before. The colour forms take arguments, and those arguments are
+ * not attributes: `38;2;255;255;255` is a truecolor foreground, not "dim",
+ * and `38;5;2` is colour index 2. The first cut of this read every parameter
+ * on its own, so a draft drawn in truecolor or in index 2 read as a dim
+ * suggestion (QA's probe, 0.14.5 review 3850). So 38 (foreground), 48
+ * (background) and 58 (underline colour) consume `5;n` or `2;r;g;b` after
+ * them, or nothing when written with colons (`38:2::r:g:b`, one parameter),
+ * before 2 (dim), 22 (normal intensity) and 0 or empty (reset) are judged.
+ */
+export function sgrDim(params, dim = false) {
+  const ps = params === '' ? [''] : String(params).split(';');
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    const head = p.split(':')[0];
+    if (head === '38' || head === '48' || head === '58') {
+      if (p.includes(':')) continue;
+      const kind = ps[i + 1];
+      i += kind === '5' ? 2 : kind === '2' ? 4 : 1;
+      continue;
+    }
+    if (p === '' || p === '0' || p === '22') dim = false;
+    else if (p === '2') dim = true;
+  }
+  return dim;
+}
+export function dimOnly(row) {
+  const text = String(row ?? '');
+  const at = text.indexOf('❯');
+  if (at < 0) return false;
+  let dim = false;
+  let seen = false;
+  // eslint-disable-next-line no-control-regex
+  const parts = text.slice(at + 1).split(/(\u001b\[[0-9;:]*m)/);
+  for (const part of parts) {
+    // eslint-disable-next-line no-control-regex
+    const sgr = /^\u001b\[([0-9;:]*)m$/.exec(part);
+    if (sgr) { dim = sgrDim(sgr[1], dim); continue; }
+    // eslint-disable-next-line no-control-regex
+    const visible = part.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+/g, '');
+    if (!visible) continue;
+    if (!dim) return false;
+    seen = true;
+  }
+  return seen;
+}
+export function draftOf(screen, promptRow) {
+  const text = composerOf(String(screen ?? ''));
+  if (text == null || !String(text).trim()) return false;
+  if (promptRow == null) return true;
+  // A box of more than its `❯` row holds typed lines below it.
+  const rows = String(screen ?? '').split('\n');
+  let at = -1;
+  for (let n = rows.length - 1; n >= 0; n--) if (/^\s*❯/.test(rows[n])) { at = n; break; }
+  const below = at >= 0 ? rows.slice(at + 1).findIndex((r) => /^[\s│|]*[─━—-]{20,}/.test(r)) : -1;
+  if (below > 0) return true;
+  return !dimOnly(promptRow);
+}
+
+/**
+ * The same, read off a pane. The `❯` row is captured with its attributes; a
+ * pane that cannot be read reads as a draft: for something nobody asked to
+ * have typed, "type nothing" is the safe side.
+ */
+export async function draftAt(target) {
+  const at = await tmux(['display-message', '-p', '-t', target, '#{pane_id}']);
+  if (!at.ok || !String(target).endsWith(at.out.trim())) return true;
+  const screen = await screenOf(target, 30);
+  const vis = await tmux(['capture-pane', '-p', '-e', '-t', target]);
+  if (!vis.ok) return true;
+  const rows = vis.out.split('\n');
+  let row = null;
+  for (let n = rows.length - 1; n >= 0; n--) {
+    // eslint-disable-next-line no-control-regex
+    if (/^\s*❯/.test(rows[n].replace(/\u001b\[[0-9;:?]*[A-Za-z]/g, ''))) { row = rows[n]; break; }
+  }
+  return draftOf(screen, row);
+}
+
+/**
+ * Whether any of `pids` runs under `ancestor`, from a table of each pid's
+ * parent (F3 of the 0.14.5 review). A Claude Code a person starts by hand in
+ * a window of the host's session is the child of the window's shell: the
+ * pane's pid is the shell's and the roster's is Claude Code's, so the two
+ * never match, and the window read as one with no record. Measured on the
+ * rig: `claude` typed into a zsh there, in a desk's folder with the desk's
+ * own window closed, was closed by the 30 s rule and replaced by a new
+ * conversation, while the roster held it (pid 19396 under pane pid 18792).
+ */
+export function underIn(parent, ancestor, pids) {
+  const top = Number(ancestor);
+  for (const p of pids ?? []) {
+    let x = Number(p);
+    for (let n = 0; n < 64 && x > 1; n++) {
+      x = parent.get(x);
+      if (x === top) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * How each process's parent is read: `ps` on the Mac and Linux, and on
+ * Windows Win32_Process through Windows PowerShell 5.1, which every Windows
+ * has. On Windows a window the host opens IS its program (launchArgs), so the
+ * pane's pid is the roster's; but a Claude Code a person types into a psmux
+ * window runs under that window's PowerShell, one hop down. Measured by
+ * pc-developer on the PC (2026-11-22, 0.14.5 review task 334: psmux 3.4.0,
+ * Claude Code 2.1.330): pane pid 4292 = powershell.exe, the roster's pid 4884
+ * = claude.exe with ParentProcessId 4292, and the 30 s rule closed it 32 s
+ * after `claude` was typed, because this read used to answer false there.
+ * The table read takes 0.33 to 0.44 s there (pc-developer, five runs of
+ * readParents in node at 18% CPU, about 300 processes). It is asked only when a
+ * roster session in the folder does not match the pane's pid, so a window
+ * the host started, whose pid matches, never pays for it.
+ */
+export function parentsCommand({ windows = WINDOWS, env = process.env } = {}) {
+  if (!windows) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };
+  return {
+    cmd: join(env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    args: ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId }"],
+  };
+}
+/** Each process's parent, from what parentsCommand printed (`pid ppid` a line, CRLF or LF). */
+export function parentsOf(out) {
+  const parent = new Map();
+  for (const l of String(out ?? '').split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)/.exec(l);
+    if (m) parent.set(Number(m[1]), Number(m[2]));
+  }
+  return parent;
+}
+export function readParents({ windows = WINDOWS } = {}) {
+  const { cmd, args } = parentsCommand({ windows });
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: windows ? 10_000 : 5000, windowsHide: true }, (err, o) => resolve(err ? '' : String(o)));
+  });
+}
+/** Whether any of `pids` runs under the process `ancestor`, read off this machine's process table. */
+export async function runsUnder(ancestor, pids, { windows = WINDOWS, read = () => readParents({ windows }) } = {}) {
+  if (!ancestor || !pids?.length) return false;
+  return underIn(parentsOf(await read()), ancestor, pids);
+}
+
+/**
+ * runsUnder, asked once per window shape and remembered (task 334's
+ * follow-up, QA 3898). The watch asks it at every tick (WATCH_MS, 700 ms) for
+ * as long as a window's pid is not the roster's, which a hand-started window
+ * is for as long as it stands; on Windows each ask is a 0.33–0.44 s
+ * PowerShell read (pc-developer, 3891), so asked every tick it was a process
+ * running nearly all the time. A process's parent does not change for its
+ * life, so the answer for one pane pid and one set of roster pids is the
+ * answer until either changes: `memo` holds the last key and its answer.
+ */
+export async function runsUnderOnce(memo, ancestor, pids, opts) {
+  const key = `${ancestor}|${[...(pids ?? [])].map(Number).sort((a, b) => a - b).join(',')}`;
+  if (memo.key !== key) { memo.key = key; memo.value = await runsUnder(ancestor, pids, opts); }
+  return memo.value;
+}
+
+/**
+ * What to do about a window with no record, from how long it has stood
+ * idle (`since`, null when it has not) and the window the host last
+ * reopened for this (`tried`, a pid):
+ *   none    not standing idle
+ *   wait    not for long enough yet
+ *   reopen  reopen it on its conversation
+ *   say     this is the window that reopen made, and it has no record either
+ */
+export function unregisteredVerdict({ since, now, pid, tried = null, after = UNREGISTERED_MS }) {
+  if (!since || !pid) return 'none';
+  if (now - since < after) return 'wait';
+  return tried === pid ? 'say' : 'reopen';
+}
+
+/** When a process started, in ms, from how long `ps` says it has run; null when it cannot say. */
+export async function startedAt(pid) {
+  if (!pid) return null;
+  const r = await new Promise((resolve) => {
+    execFile('ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 5000 }, (err, out) => resolve(err ? null : String(out).trim()));
+  });
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(r ?? '');
+  if (!m) return null;
+  const secs = (Number(m[1] ?? 0) * 86400) + (Number(m[2] ?? 0) * 3600) + (Number(m[3]) * 60) + Number(m[4]);
+  return Date.now() - (secs * 1000);
+}
+
+/**
+ * The conversation a window with no record is on: the one in its folder
+ * somebody last spoke in, when that was after the window started. Anything
+ * older is not this window's, and a folder just taken starts a new
+ * conversation rather than whichever old one is in it (resumable). Null
+ * when nothing was said in it: a new conversation loses nothing.
+ */
+export async function spokenSince(where, sinceMs) {
+  if (seatOf(where) || !sinceMs) return null;
+  const newest = await newestConversation(canonical(cwdOf(where)));
+  if (!newest) return null;
+  const at = Date.parse(newest.at);
+  // A second of grace: a turn's stamp is the window's clock at the write,
+  // and the start is `ps`, which counts whole seconds.
+  return Number.isFinite(at) && at >= sinceMs - 1000 ? newest.id : null;
 }
 
 /** The startup question on a pane, if one is up. Thirty lines: both dialogs
@@ -574,8 +1095,22 @@ export async function answerStartup(cwd, n) {
     if (!moved.ok) return { ok: false, error: moved.error };
     await sleep(80);
   }
-  const now = startupQuestionOf(await screenOf(pane.target, 30));
-  const under = now?.options[now.at]?.text ?? null;
+  // Read the cursor until it is on the row, up to STARTUP_CURSOR_MS, never
+  // once at a fixed moment. On 2.1.328 under load (average about 100) the read
+  // 80 ms after the last key came before the redraw: the pane then showed the
+  // cursor on "Yes, I trust this folder" and the host had refused to press,
+  // on the one question every first window asks (reader sweep, 2026-11-19).
+  // The keys move one way, so the cursor reaching the wanted row is where it
+  // stops; a cursor that never gets there is still refused, a bound later.
+  let now = null;
+  let under = null;
+  const give = Date.now() + STARTUP_CURSOR_MS;
+  for (;;) {
+    now = startupQuestionOf(await screenOf(pane.target, 30));
+    under = now?.options[now.at]?.text ?? null;
+    if (!now || under === want.text || Date.now() >= give) break;
+    await sleep(80);
+  }
   if (!now || under !== want.text) {
     return {
       ok: false, code: 'not_taken',
@@ -859,6 +1394,29 @@ export function seatWindowName(cwd, seat) {
   return `${basename(cwd)}-${who}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 60) || 'seat';
 }
 
+/**
+ * On Windows a seat is told by its window's name, not by `@orch_seat`.
+ * psmux 3.4.0 keeps a user option for the whole session whatever window is
+ * named (pc-developer, 2026-11-20: `set-option -w -t =orch:b @orch_seat B`
+ * read B on windows a, b and c alike, by name, window id or pane id), so the
+ * tag cannot tell a seat's window from its folder's own there. A window
+ * named with `-n` keeps its name (measured, automatic-rename on or off, after
+ * Claude Code drew and answered), and a 200-character name comes back whole
+ * and is targeted exactly. So a seat's window name ends in `--s` and the
+ * seat's tag in hex: no character a target parses, decoded only when it is a
+ * seat's tag (`channel/agent`), so a folder that happens to end in `--sab`
+ * is still a folder.
+ */
+export function seatNameMark(seat) {
+  return `--s${Buffer.from(String(seat), 'utf8').toString('hex')}`;
+}
+export function seatFromName(name) {
+  const m = /--s((?:[0-9a-f]{2})+)$/.exec(String(name ?? ''));
+  if (!m) return null;
+  const seat = Buffer.from(m[1], 'hex').toString('utf8');
+  return /^[^/\s]+\/[^/\s]+$/.test(seat) ? seat : null;
+}
+
 /** The variable a seat's window carries: the path of its binding file. */
 export const SEAT_ENV = 'ORCH_DESK_CONFIG';
 
@@ -910,7 +1468,9 @@ export async function panes() {
   // to contain a '|'. The four before it are tmux's own ids, a flag and a tag.
   // The seat's tag is the host's own (seatTag in seats.js: percent-encoded,
   // so it holds no separator) and empty on every window but a seat's.
-  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
+  // On Windows the fourth field is the window's name, which carries the
+  // seat there (seatFromName); the tag is the session's on psmux.
+  const fields = ['#{session_name}:#{window_id}.#{pane_id}', '#{pane_dead}', '#{pane_pid}', WINDOWS ? '#{window_name}' : `#{${SEAT_OPTION}}`, '#{pane_current_path}'];
   const r = await tmux(['list-panes', '-t', `${EXACT}:`, '-s', '-F', fields.join(SEP)]);
   if (!r.ok || !r.out) return [];
   return r.out.split('\n')
@@ -922,7 +1482,7 @@ export async function panes() {
       // a person needs to be given to sit down at this desk, and pulling it
       // out of a string we already have beats another tmux call.
       const window = target.match(/@\d+/)?.[0] ?? null;
-      return { target, window, dead: dead === '1', pid: Number(pid) || null, seat: seat || null, cwd: parts.slice(4).join(SEP) };
+      return { target, window, dead: dead === '1', pid: Number(pid) || null, seat: (WINDOWS ? seatFromName(seat) : seat) || null, cwd: parts.slice(4).join(SEP) };
     })
     .filter((p) => p && p.target && p.cwd && !p.dead);
 }
@@ -1426,6 +1986,32 @@ export function commandOf(text) {
 }
 
 /**
+ * What the window is given for a message from the floor: the words as
+ * typed, except a bare `/mcp`, which is typed as `/mcp reconnect <server>`.
+ *
+ * In the window a bare `/mcp` opens the "MCP servers" panel, an arrow list
+ * with nothing chosen. From the floor that panel was read as a screen,
+ * shown on the desk and closed with Escape, so nothing reconnected. What
+ * the operator means by it on the floor is the thing he reaches for after
+ * the desktop app restarts its board: the desk's tools back. Measured on
+ * 2.1.328 (2026-11-19), a probe with the board stopped and started again:
+ * `/mcp reconnect orchestratinator` wrote "Reconnected to orchestratinator",
+ * "Couldn't reconnect to orchestratinator" with the board down, and
+ * `MCP server "x" not found` for a name the window does not have, each as
+ * local-command-stdout under the command's record, which is the receipt
+ * every other command is confirmed on. `/mcp reconnect all` works too, but
+ * counts the disabled built-in computer-use and so always ends "1 still not
+ * connected · run /mcp to check", which on the floor reads as a failure.
+ * So it is this desk's own entry, by the name its binding gives it. `/mcp`
+ * with anything after it goes as typed.
+ */
+export function typedCommand(text, server = 'orchestratinator') {
+  const c = commandOf(text);
+  if (c?.name === 'mcp' && !c.args) return `/mcp reconnect ${server}`;
+  return text;
+}
+
+/**
  * Whether the window would wrap this paste in `<pasted_content>` tags.
  *
  * Measured on 2.1.300 (2026-11-03, issue #10): a bracketed paste of four or
@@ -1592,13 +2178,20 @@ export function overlayOf(screen) {
  * finding 1), and is read as the same thing. That title is read from
  * 2.1.325's own strings, where it shares every other line with the model's
  * ("This conversation is cached for the current effort level. Switching
- * to X means the full history gets re-read.", the same two choices). It
- * has not been seen on a window: `/effort <another level>` after a reply
- * went straight through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5
- * (probe, 2026-11-15), because those take effort per turn and a change
- * keeps the cache. So the read is the model's, measured, with the title
- * the binary gives; a desk on a model that does not take effort per turn
- * is where it would stand.
+ * to X means the full history gets re-read.", the same two choices). A
+ * live desk stood on it once, on 2.1.300 (2026-11-06, found in the desktop
+ * app's work on develop): "Change effort level? / Your next response will
+ * be slower and use more tokens / This conversation is cached for the
+ * current effort level. … / ❯ 1. Yes, switch to medium / 2. No, go back".
+ * Read as nothing then, it was left standing: the change was reported
+ * unconfirmed after 8 s, and the next two tries pasted "/model" at the
+ * dialog for a minute each. On 2.1.325 it was not raised again:
+ * `/effort <another level>` after a reply went straight through on Fable
+ * 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (probe, 2026-11-15), because
+ * those take effort per turn and a change keeps the cache. So the read is
+ * the model's, measured, with the title both the binary and that desk
+ * gave; a desk on a model that does not take effort per turn is where it
+ * stands.
  *
  * Read by position, like every other prompt: the dialog stands where the
  * composer was, so its two choices are the pane's last two lines and its
@@ -1927,6 +2520,19 @@ async function clearComposer(target) {
 const RENEW_WAIT_MS = Number(process.env.ORCH_RENEW_WAIT_MS ?? 10 * 60_000);
 
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+/**
+ * Not on Windows. The refusal these reads catch is macOS's (a tmux server
+ * denied `~/Documents` by the kernel's policy, above), and the read is a
+ * POSIX shell line, while psmux runs `run-shell` under Windows PowerShell 5.1
+ * whatever SHELL says (pc-developer, 2026-11-20). PowerShell 5.1 refuses
+ * `&&` outright, so every folder would read as refused, and open() would
+ * then answer "macOS will not let anything the host starts read …" for the
+ * second window of every session. A PowerShell read that works was measured
+ * (Get-ChildItem in a try), but no folder that denies a read was, and there
+ * is no Windows refusal known that a fresh server clears. So null, which is
+ * "no server to ask": open() goes on and checkServer moves nothing.
+ */
+const NO_READ_CHECK = WINDOWS;
 const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
 
 /** Whether a process this host's tmux server starts can read `dir`. Null when
@@ -1944,6 +2550,7 @@ const readsCmd = (dir) => `cd -- ${shq(dir)} && /bin/ls -a >/dev/null 2>&1`;
  *  the pane's path. The `has-session` stays: with no server at all,
  *  `run-shell` fails too, and that is not a refusal. */
 export async function serverReads(dir) {
+  if (NO_READ_CHECK) return null;
   if (!(await tmux(['has-session', '-t', EXACT])).ok) return null;
   return (await tmux(['run-shell', readsCmd(dir)])).ok;
 }
@@ -1951,6 +2558,7 @@ export async function serverReads(dir) {
 /** The same question put to a tmux server started now, on a private socket and
  *  gone straight after. Null if one could not be started. */
 export async function freshReads(dir) {
+  if (NO_READ_CHECK) return null;
   const sock = `orch-check-${process.pid}-${Date.now().toString(36)}`;
   const made = await tmux(['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', 'check', 'sleep 30']);
   if (!made.ok) return null;
@@ -2191,7 +2799,8 @@ export async function open(where, { resume = null, moving = false } = {}) {
   const names = await windowNames();
   const plain = seat ? seatWindowName(here, seat) : windowName(here);
   const taken = names.includes(plain);
-  const name = taken ? `${plain}-${(Math.abs(hash(seat ? `${here}|${seat}` : here)) % 65536).toString(16).padStart(4, '0')}` : plain;
+  const unique = taken ? `${plain}-${(Math.abs(hash(seat ? `${here}|${seat}` : here)) % 65536).toString(16).padStart(4, '0')}` : plain;
+  const name = WINDOWS && seat ? `${unique}${seatNameMark(seat)}` : unique;
   // `claude` is exec'd rather than run from a shell so the pane dies with the
   // session instead of dropping to a prompt that looks like a live window.
   //
@@ -2234,12 +2843,10 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // entry's place in this window (host/seats.js). The file's path and not
   // its contents, because tmux keeps and prints a pane's start command and
   // the contents hold the board's key.
-  const cmd = ['env', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1', CLAUDE,
+  const cmd = launchArgs([CLAUDE,
     ...(pick.id ? ['--resume', pick.id] : []),
     ...(model ? ['--model', model] : []),
-    ...(seatFile ? ['--mcp-config', seatFile] : [])]
-    .map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
-    .join(' ');
+    ...(seatFile ? ['--mcp-config', seatFile] : [])]);
 
   // Take the target tmux hands back rather than looking the new pane up again.
   //
@@ -2276,10 +2883,11 @@ export async function open(where, { resume = null, moving = false } = {}) {
   // `=name` is an exact window name. Measured on tmux 3.7c: `set-option -w`
   // with no target after a detached new-window tags the *current* window,
   // and a name with a dot in it is "no such window".
-  const tag = seat ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
+  // On Windows the name carries the seat (seatNameMark) and no tag is set.
+  const tag = seat && !WINDOWS ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];
   let made = has.ok
-    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag])
-    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, `exec ${cmd}`, ...tag]);
+    ? await tmux(['new-window', '-d', '-P', '-F', FORMAT, '-t', `${EXACT}:`, '-n', name, '-c', here, ...env, ...cmd, ...tag])
+    : await tmux(['new-session', '-d', '-P', '-F', FORMAT, '-s', SESSION, '-n', name, '-c', here, ...env, ...cmd, ...tag]);
   // The window made and the tag refused: tmux printed the new pane and then
   // failed. Tagged by the pane it named, or closed, never left untagged.
   if (!made.ok && seat && made.out?.includes(SEP)) {
@@ -2400,7 +3008,7 @@ async function windowFor(where, { open: autoOpen = false, resume = null } = {}) 
  *  closes the overlay, for a person who happens to be looking at it. */
 const BTW_LINGER_MS = Number(process.env.ORCH_BTW_LINGER_MS ?? 3000);
 
-export async function send(cwd, text, { open: autoOpen = false, resume = null } = {}) {
+export async function send(cwd, text, { open: autoOpen = false, resume = null, unasked = false } = {}) {
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'nothing to send' };
   const cmd = commandOf(text);
   // A bare /model opens a picker in the window, and a picker is not something
@@ -2452,6 +3060,17 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
     }
   }
 
+  // Something nobody asked to have typed now (`unasked`: a reconnect the
+  // board asked for, a meeting room's notice) is not typed onto a draft:
+  // the two would go in as one message (draftOf). Refused in a second, and
+  // the caller keeps it until the box is empty.
+  if (unasked && await draftAt(pane.target)) {
+    return {
+      ok: false, code: 'draft', target: pane.target,
+      error: 'somebody has typed into the window\'s message box and not sent it, so nothing was typed over it',
+    };
+  }
+
   // A working window is typed into, not waited for.
   //
   // This used to wait for the turn to end, on the grounds that "a message
@@ -2480,6 +3099,15 @@ export async function send(cwd, text, { open: autoOpen = false, resume = null } 
   // it is. Refused before a key is pressed, and said on the desk.
   if ((cmd?.name === 'model' || cmd?.name === 'effort') && wasBusy) {
     return { ok: false, code: 'busy', target: pane.target, error: `the desk is working — change the ${cmd.name === 'model' ? 'model' : 'effort level'} when the turn ends` };
+  }
+  // Nor an MCP reconnect. Measured 2026-11-19 on 2.1.328, a probe 9 s into
+  // a 25 s tool call: `/mcp reconnect orchestratinator` left the composer and
+  // was never heard of again: no command record, no queue entry, no line on
+  // screen, and the turn ended without it. Typed, it waited out the 20 s and
+  // said not_delivered about a command that had gone nowhere. Idle, the same
+  // command answered in about 3 s every time.
+  if (cmd?.name === 'mcp' && wasBusy) {
+    return { ok: false, code: 'busy', target: pane.target, error: 'the desk is working, and the window drops an /mcp typed into a turn — send /mcp when the turn ends' };
   }
 
   // Where the transcript stood before anything was typed. Taken here rather
@@ -3482,6 +4110,8 @@ const CONFIRM_TRIES = Number(process.env.ORCH_CONFIRM_TRIES ?? 3);
 
 /** How long the window gets to act on an answer before we look at the result. */
 const ANSWER_CONFIRM_MS = Number(process.env.ORCH_ANSWER_CONFIRM_MS ?? 900);
+/** How long answerStartup reads for the cursor to land on the row it walked to. */
+const STARTUP_CURSOR_MS = Number(process.env.ORCH_STARTUP_CURSOR_MS ?? 1_500);
 /** How long a step waits for a busy window before calling it stopped. Generous
  *  against a tool call finishing mid-sequence; short of the operator noticing. */
 const BUSY_WAIT_MS = Number(process.env.ORCH_BUSY_WAIT_MS ?? 20_000);
@@ -3861,11 +4491,53 @@ function pickTerminal() {
  * That is the trade "open THIS desk" makes, and with the usual zero or one
  * other clients it is the right one.
  */
+/**
+ * On Windows the terminal is Windows Terminal, given the attach as a program
+ * and its arguments (pc-developer, 2026-11-20, psmux 3.4.0: `wt.exe -w new
+ * new-tab tmux attach -t =orch` attached, the attached client resized the
+ * pane, and closing the tab left the window running, as on the Mac). `-w new`
+ * so the operator gets a window of their own rather than a tab in whichever
+ * one is in front. The desk's window is chosen before, by select-window, and
+ * not chained after the attach: tmux clients on one session share a current
+ * window either way, and psmux's parsing of a `;` inside wt's arguments is
+ * not measured.
+ */
+export function wtAttachArgs(tmuxBin = TMUX, title = null) {
+  // A title of its own, kept from the program in the tab, so front-win.ps1
+  // can find this window among every other Windows Terminal window.
+  return ['-w', 'new', 'new-tab', ...(title ? ['--title', title, '--suppressApplicationTitle'] : []), tmuxBin, 'attach', '-t', EXACT];
+}
+
+/**
+ * Windows Terminal opened by the host lands behind the window in front
+ * (pc-developer, 2026-11-20: "YES, BUT BEHIND"), because a hidden process may
+ * not take the front. host/front-win.ps1 finds the new window by its title
+ * and brings it forward with the unlock measured for the folder dialog.
+ * Started and not awaited: it waits up to FRONT_WAIT_MS for the window to
+ * appear, and the host's line is the one that delivers messages. What it
+ * reports goes to the host log. Measured (pc-developer, 2026-11-20, 9e160cc):
+ * in front and focused 1.0 to 1.3 s after opening, 4 of 4, from both
+ * buttons; the table is in front-win.ps1's header.
+ */
+const FRONT_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'front-win.ps1');
+const FRONT_WAIT_MS = 5000;
+function bringToFront(title) {
+  const ps = join(process.env.SystemRoot || process.env.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  execFile(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', FRONT_SCRIPT, title, String(FRONT_WAIT_MS)],
+    { timeout: FRONT_WAIT_MS + 10_000, encoding: 'utf8', windowsHide: true }, (err, stdout, stderr) => {
+      let said = null;
+      try { said = JSON.parse(String(stdout).trim()); } catch { /* reported below as it came */ }
+      if (said?.front) log(`brought the Windows Terminal window "${title}" to the front`);
+      else warn(`the Windows Terminal window "${title}" opened but was not brought to the front: ${said?.why ?? (String(stderr).trim() || err?.message || 'no answer')}`);
+    });
+}
+
 export async function attachTerminal({ target = null } = {}) {
   // select-window wants a window, and open()'s targets name a pane. The pane
   // suffix is always tmux's own `%N` id here, never typed by anyone, so
   // stripping it is safe where parsing a human-named window would not be.
   const win = target ? String(target).replace(/\.%\d+$/, '') : null;
+  if (WINDOWS) return attachWindowsTerminal(win);
   const cmd = `${TMUX} attach -t ${SESSION}` + (win ? ` \\; select-window -t '${win}'` : '');
   const term = pickTerminal();
   if (!term) {
@@ -3894,6 +4566,35 @@ export async function attachTerminal({ target = null } = {}) {
   } catch (err) {
     const why = (err?.stderr || err?.message || String(err)).trim();
     return { ok: false, cmd, error: `could not open ${term.app}: ${why}. Run \`${cmd}\` on this machine yourself.` };
+  }
+}
+
+async function attachWindowsTerminal(win) {
+  const cmd = `tmux attach -t ${EXACT}`;
+  const has = await tmux(['has-session', '-t', EXACT]);
+  if (!has.ok) {
+    return {
+      ok: false,
+      cmd,
+      error: has.missing
+        ? 'psmux is not installed on this machine, so there is nothing to attach to.'
+        : `there is no session called ${SESSION} on this machine: ${has.error}`,
+    };
+  }
+  if (win) await tmux(['select-window', '-t', win]);
+  const title = `${SESSION} · orchestratinator · ${Date.now().toString(36).slice(-4)}`;
+  try {
+    // Detached and not awaited past its start: wt.exe hands the tab to the
+    // running Windows Terminal and may outlive this call or return at once.
+    await new Promise((resolve, reject) => {
+      const child = spawn('wt.exe', wtAttachArgs(TMUX, title), { detached: true, stdio: 'ignore' });
+      child.once('error', reject);
+      child.once('spawn', () => { child.unref(); resolve(); });
+    });
+    bringToFront(title);
+    return { ok: true, app: 'Windows Terminal', cmd };
+  } catch (err) {
+    return { ok: false, cmd, error: `could not open Windows Terminal: ${err?.code === 'ENOENT' ? 'wt.exe is not installed' : err?.message ?? err}. Run \`${cmd}\` on this machine yourself.` };
   }
 }
 
@@ -4122,6 +4823,20 @@ export async function sessionsIn(cwd, { limit = 30 } = {}) {
   return rows;
 }
 
+/**
+ * The conversation in a folder somebody last spoke in, as the session picker
+ * would list it, or null. For a desk released from another instance (bind in
+ * host/index.js): this host has never watched the folder, so it has no pin
+ * to keep, and the agent should arrive on the conversation it was having
+ * rather than on a blank one. The picker's bounded reads, not resumable()'s
+ * whole-file ones: a release can be one of thirty in a row.
+ */
+export async function lastSpokenIn(cwd) {
+  const rows = (await sessionsIn(cwd)).filter((r) => r.spoken);
+  rows.sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
+  return rows[0]?.id ?? null;
+}
+
 /** A title from a first prompt: its first line, whitespace folded, 80 characters. */
 function clipTitle(s) {
   const line = String(s).trim().split('\n')[0].replace(/\s+/g, ' ');
@@ -4222,6 +4937,30 @@ export async function busyAt(cwd) {
   const r = await tmux(['capture-pane', '-p', '-t', pane.target]);
   const text = r.ok ? r.out : '';
   return { pane, busy: r.ok && isBusy(text), foot: footOf(text) };
+}
+
+/**
+ * Whether a window says Claude Code is signed out: "Not logged in · run
+ * /login", which 2.1.329 draws at the right of the status rows under the
+ * composer, on a window that is otherwise an idle composer (measured
+ * 2026-11-19, a window with no credentials). Read from the rows under the
+ * composer's bottom rule only, rejoined because they wrap at 80 columns, so
+ * a conversation quoting the words above the composer cannot fake it.
+ */
+export function signedOutOf(screen) {
+  const lines = String(screen ?? '').split('\n').map((l) => l.trimEnd());
+  let rule = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (/^\s*[─━]{8,}/.test(lines[i])) { rule = i; break; }
+  if (rule < 0) return false;
+  return /Not logged in\s*·\s*run \/login/i.test(lines.slice(rule + 1).map((l) => l.trim()).join(' '));
+}
+
+/** Whether this window, if there is one, says Claude Code is signed out (signedOutOf). */
+export async function signedOutAt(where) {
+  const pane = await paneFor(where);
+  if (!pane) return { pane: null, signedOut: false };
+  const r = await tmux(['capture-pane', '-p', '-t', pane.target]);
+  return { pane, signedOut: r.ok && signedOutOf(r.out) };
 }
 
 /**

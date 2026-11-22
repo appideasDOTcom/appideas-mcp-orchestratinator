@@ -96,3 +96,4 @@ while a real pane asks and reads the question back on the floor.
 ## Linux and Windows backends for the folder picker
 
 `host/dialog.js` has a native folder dialog for macOS only, so a Linux or Windows host gets the page's in-page list — issue #4 is held open as partially implemented until each backend is built and watched taking focus from the host's own service, or ruled out.
+

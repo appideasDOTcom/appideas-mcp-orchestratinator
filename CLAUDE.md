@@ -89,6 +89,83 @@ behaviour, not a fault. The host pins its board with `url` in
 `~/.orchestratinator/host.json`; when desks disagree and nothing pins it, the
 host refuses to start rather than guess.
 
+**That paragraph is the launchd host's, and this folder's own window is no
+longer on that board** (read 2026-11-19). Since costmo moved his work into
+the desktop app (2026-11-08), this folder's binding in local scope is
+`http://127.0.0.1:6724/mcp`, the app's own board, as `coordinator`, and the
+app's agent is bound there too. So `whoami`, every poll and a meeting room
+are on 6724, and `localhost:8787` is the Docker board the live clone runs,
+with the launchd host: still never built, restarted or tested against from
+here. A third board in a round is a scratch one of your own. Read the
+binding, never assume it; the one-liner and the table are in
+**catch-up-the-desktop-app**. And when costmo restarts the app, every
+agent's orchestratinator tools go with its board (`ECONNREFUSED`) until he
+runs `/mcp` in each window: read the board with curl meanwhile, and say so.
+
+## The live instance runs from its own clone, and this one is for development
+
+costmo's ruling, 2026-11-18, by AskUserQuestion through appideas-qa, when
+the desktop app's work went back to `develop`: **the operator's live
+instance (the board on `localhost:8787`, its host, and the plugin's
+marketplace) runs from a second clone pinned to `main`,**
+`…/appideas-site-dev/orchestratinator-live`. **This folder,
+`…/appideas-site-dev/appideas-mcp-orchestratinator`, is the development
+tree**, on `develop`, the 0.14.x line. His addition the same hour: "We'll be
+doing desktop development with another agent in another session, so that
+decision needs to survive." So it is written here, in the deploy skill, and
+in the desktop channel's contract (`orchestratinator.consumed`).
+
+Before it, one folder was both. The board's container was built from it,
+the host's LaunchAgent ran its `host/run.sh`, and the plugin's marketplace
+was a directory source pointing at it. With the folder on `develop`, the
+next host restart (a crash under `KeepAlive`, a reboot, an Update) would
+have started develop's host against main's board. Any `docker compose up`
+here would have replaced the live board with develop's, which refuses
+main's host for its protocol number.
+
+So, in this folder:
+- **Never `docker compose up`, `host/install.sh`, `launchctl kickstart` of
+  the host, or `claude plugin update`.** Each one acts on the live
+  instance. `container_name: appideas-orchestratinator` and port 8787 are
+  in `docker-compose.yml`, so a compose run here collides with the live
+  container rather than starting a second board beside it. That is a
+  refusal by accident; do not "fix" it.
+- **Development runs on its own ports**: the suites' defaults, a scratch
+  board (`PORT=89xx DB_PATH=<scratch> node src/server.js`), page checks on
+  private ports, and probes on their own tmux socket. A dev host started
+  by hand or by the app must not register with `localhost:8787` under the
+  live host's id: `ORCH_HOST_ID` defaults to the hostname, which is the
+  live host's row and work queue. Give a dev host its own board, or at
+  least its own `ORCH_HOST_ID`.
+- **A release reaches the live clone through `main`**: a PR, QA's release
+  check, costmo's merge, then in the live clone `git pull`, and the deploy
+  from there (**deploy-both-halves**), or the page's Update, which
+  fast-forwards the clone the host runs from. That is the live clone now.
+- **A maintenance fix to the live service is a branch off `main`** (0.12.x,
+  as 0.12.12 was), merged forward into `develop` after it ships. Both
+  times so far, the forward merge conflicted on the version line, and
+  taking main's side dropped develop's `"protocol": 1` beside it (bf8079d,
+  e54004b). The field now sits after `"type"`, away from `"version"`, so a
+  bump merges cleanly (measured with `git merge-file`). After any forward
+  merge, read `"protocol"` in both `package.json` files. And keep
+  develop's version: develop is 0.14.0 from the same evening (costmo's
+  pick), so a 0.12.x bump merged forward conflicts on that line, and
+  main's number is the wrong side to take.
+
+**Two things since, both 2026-11-20.** The desktop app's releases do not
+go through `main` at all: they are tags on `develop` ("A new machine's
+first windows"). And the live instance has had no host on this machine
+since that afternoon's clear, which removed the launchd job, its plist and
+`host.json` ("The clear of 2026-11-20"). The container still runs. Until
+costmo has `host/install.sh` run from the live clone, a board on 8787 with
+no live host is that, not a fault to diagnose.
+
+The database moved with the board: it is the named volume of the live
+clone's compose project (`orchestratinator-live_orchestratinator-data`),
+copied from the old one (`appideas-mcp-orchestratinator_orchestratinator-data`)
+while both boards were stopped. The old volume is left as it was, as the
+backup from that moment.
+
 ## The host
 
 A launchd job (`com.appideas.orchestratinator-host`), not part of the Docker
@@ -274,14 +351,18 @@ is what brought it back.
 
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
-[`host/dialog.js`](host/dialog.js), with a backend per platform and only
-macOS filled in. Its header is the record: four ways of opening a dialog
-from a LaunchAgent were watched, three are *drawn and never focused* (or
-outlive their process), and a cross-platform npm library was tried and is
-one of the three. So: do not swap it for a library, and do not write a Linux
-or Windows backend from first principles — a backend goes in after it has
-been watched taking focus from the host's own service, which is what the
-**measure-the-desktop** skill is for. A host with no backend says so on
+[`host/dialog.js`](host/dialog.js), with a backend per platform: macOS, and
+Windows since issue #28 (`host/dialog-win.ps1`). Its header is the record:
+four ways of opening a dialog from a LaunchAgent were watched, three are
+*drawn and never focused* (or outlive their process), and a cross-platform
+npm library was tried and is one of the three. On Windows, from the hidden
+Task Scheduler process, the dialog alone opened behind the window in front,
+an always-on-top owner made it drawn but not focused, and that owner brought
+to the front first (an ALT tap and AttachThreadInput) made it the foreground
+window (pc-developer, 2026-11-20, costmo watching). So: do not swap it for a
+library, and do not write a Linux backend from first principles — a backend
+goes in after it has been watched taking focus from the host's own service,
+which is what the **measure-the-desktop** skill is for. A host with no backend says so on
 registration (`dialog`) and the page draws its own list for it; that list is
 the fallback, not leftover code.
 
@@ -446,7 +527,8 @@ Three consequences worth knowing before touching `host/window.js`:
   fix it in 0.12.12). So: when `claude --version` moves, run the
   probe over every reader (**measure-a-real-window**: the trust question,
   a permission menu, `form.mjs` with two questions, `send.mjs '/model …'`
-  on a conversation with a reply in it) before believing a report that the
+  on a conversation with a reply in it, and `/mcp reconnect` on a window
+  with a server) before believing a report that the
   floor "stopped working". The first sign in the host log is a `read a
   form of N` whose last question is Submit, or a change that ends "no
   longer in the composer".
@@ -836,6 +918,458 @@ installs from the tree on `claude plugin update`; until then the installed
 plugin's hooks fire for the old eight events only, and a desk's compacting
 state and model switch reach the live board only from the transcript.
 
+## /mcp from the floor, a reconnect the board asks for, and a room's notices
+
+costmo, 2026-11-19, three rulings by AskUserQuestion. All three were
+measured on 2.1.328 on a probe with a scratch board that was stopped and
+started again.
+
+- **A bare `/mcp` from a desk's box or a room is typed as `/mcp reconnect
+  <the desk's server>`** (`typedCommand` in `host/window.js`). In the
+  window, `/mcp` alone opens the "MCP servers" panel. Before this, the
+  floor read that panel as a screen, put it on the desk ("shown in the
+  window"), and closed it with Escape. Nothing reconnected. `reconnect
+  <name>` writes "Reconnected to …", "Couldn't reconnect to …" or `MCP
+  server "x" not found` as local-command-stdout, the receipt every other
+  command is confirmed on. `reconnect all` counts the disabled built-in
+  computer-use, so it always adds "1 still not connected", which reads as
+  a failure on the floor. The name is the binding's own (`server` from
+  `deskIn` in `host/identity.js`): a hand-written `.mcp.json` need not
+  call it `orchestratinator`. `/mcp` with arguments goes as typed.
+- **`/mcp` is never typed into a working window.** Typed 9 s into a 25 s
+  tool call, it left the composer and was never heard of again: no command
+  record, no queue entry, no line on screen. The host refuses it in words,
+  as it already did `/model` and `/effort`.
+- **The board asks a host to reconnect a floor window whose tools
+  dropped** (`reconnectDue` in `src/floor.js`, work kind `reconnect`,
+  `reconnect: true` at registration, kept on `hosts.reconnects`). The
+  desktop app runs its board as a child process, so every launch is a
+  fresh board, MCP sessions live in the board's memory, and Claude Code
+  does not connect again by itself. He used to `/mcp` each desk by hand.
+  "Dropped" is three facts together: a floor window, no MCP session, and
+  an `agents` row. Only an MCP connect or a tool call makes that row, so a
+  window that never connected (a server declined at the folder's question,
+  every stand-in in the suites) is never asked. An idle connected window
+  never reads as dropped, because Claude Code holds its GET stream open
+  and `sweepIdleSessions` skips a streaming session. A desk is asked after
+  `RECONNECT_AFTER_MS` (20 s), once more two minutes later, then left
+  alone until a session comes back. It is checked at the host's work poll
+  and on a 5 s board timer that wakes the poll, because a poll can sit 25 s
+  in its wait. The host does it only while the window is idle and not
+  asking, and says it on the desk: "the desk's tools had lost the board,
+  so the host ran /mcp — Reconnected to orchestratinator". A lost
+  `reconnect` item is said nowhere (`lostWorkWords`): the board asks again.
+- **A desk is sent a message as it enters a meeting room, and another as
+  it is back on the floor** (`roomNoticeText`, `roomNoticePlan`,
+  `noticeRooms` in `src/floor.js`). He used to type the first one himself
+  at the start of every room. His pick was a message at each change. The
+  other offers were the note riding on the next message, and hidden
+  context from the plugin's UserPromptSubmit hook. Do not re-propose
+  either. Each notice is one line, wholly one `<meeting-room>…</meeting-room>`
+  block, so the relay files it as a `context` turn labeled `meeting-room`
+  (`contextTagOf`) and the floor draws it as a quiet line, never as his
+  bubble. On a real window, each got one short line back ("Okay, I'm in
+  the room."), which is the cost of that pick. What each desk was last told
+  is the `room_told` table, not memory: the app restarts its board on
+  every launch, and a desk told it is in a room is still owed the way
+  back. Leaving uses the twin sweep's rule for whether a room still holds
+  a desk (`roomHolds`), so a reload of the room's window (End, then Open
+  within a second) sends neither notice, End meeting sends the way back at
+  once, and a window that crashed sends it after `MEETING_LIVE_SECONDS`
+  plus `TWIN_UNHEARD_MS`. A desk moved straight into another room is told
+  of the new room only, and told nothing when the new room has the same
+  others (`quiet`; his pick the same evening, after a stale room the app
+  reopened and the room he opened beside it, the same two desks in each,
+  sent the note twice). **A notice is never a queued note**: one that meets
+  a working window comes back from the host as `delivery: queued`, and the
+  page drew that as his bubble, "queued — the desk is working", which
+  nothing retired, because a notice becomes a `context` turn and never a
+  user one (desktop-dev, from his screenshot). The board drops a delivery
+  for wholly-tagged text (`WHOLE_TAG`), and a context turn carrying the
+  queued words retires a note as a user turn does. A second session made for a room is told nothing
+  on the way out, because it is being closed. A desk whose window is
+  asking, held by an editor, or on an offline host is not marked told,
+  and is tried again at the next look. Run from the sweep: every route a
+  page polls and every meeting route, a touch included, so a room's own
+  window keeps it going with no floor tab open.
+
+How it is tested: the decisions and both board halves in `test:floor`
+("what a desk is told…", "reconnecting a floor window…"), `typedCommand`
+and the working-window refusal in `test:window`, the host typing both
+reconnects in `test:host` (its stand-in answers `/mcp` as 2.1.328 does;
+the suite connects as a desk and drops the session, since the stand-in
+never connects), the slash menu and a notice's line in
+`check-chat-controls.mjs`. The 17 mutants are
+`mutants-mcp-rooms.suite.json` (**mutate-in-a-copy**), all red on their
+rows. Seen end to end on a real window (2026-11-19, `probe-host.sh` in
+**measure-a-real-window**): a board down 5 s healed by itself and nothing
+was asked; a board down 90 s did not, and the host reconnected the window
+25 s after the board came back. In costmo's app the same evening, a 22 s
+relaunch healed by itself, and a 6-minute one was reconnected by the host
+30 s and 33 s after, on both desks. A room opened and ended put both notices in the
+window, filed as `meeting-room` lines.
+
+## One floor of a backup
+
+costmo, 2026-11-19: after a full import from the Docker instance he kept
+working on one floor (`e3-roominator`) there, and wanted that floor in the
+app's instance without losing what was said on it since. A whole-board
+restore would have dropped everything done on the app since the import, and
+the restore route's own comment refuses a merge for a reason that still
+holds: ids count per instance. Read off the two real exports that evening:
+the floor's 175 new messages carried ids 3526 to 3700, and the app had
+given 3526 to 3620 to other floors' rows meanwhile. So **Settings → Recover
+from a backup → "Or bring over one floor"** (`POST /api/admin/backup/floors`
+lists a file's floors, `POST /api/admin/backup/restore-floor` confirmed by
+typing the floor's name), with the rules on `restoreFloor` in `src/db.js`:
+
+- **Nothing here is lost.** Refused, with nothing changed, when the floor
+  here holds a message, task or audit row the file does not, a task the file
+  has older, or a contract at a later version. Rows are matched by what they
+  are (author, time, text), not by number: a number is the instance's, and a
+  second import of the same floor would otherwise be refused over the rows
+  the first one renumbered. The floor restore's own audit rows are this
+  instance's and are kept across the next one.
+- **An id never means two things.** A row the floor already has here keeps
+  the number it has here. Any other keeps the file's number while that is
+  free and later than every number given so far; past the first clash, every
+  row is numbered above everything here, in the file's order, so the floor
+  still reads in the order it was written. A free number after a clash is
+  not kept, because it would sort before the renumbered rows.
+- **Read positions follow their messages** (`poll_cursor` to the new number
+  of the newest message it had read). An agent that remembers a number from
+  the other instance can be handed messages again, never fewer: its `since`
+  is from the other sequence and is below the renumbered rows.
+- **A remembered task number cannot touch another floor's task**: the task
+  tools are `WHERE channel = ? AND id = ?`. Renumbered tasks are said in the
+  report and the audit row, and an agent that asks for its old number finds
+  nothing and lists.
+- **A whole file's routes take a whole file's size.** The board parses 4 MB
+  everywhere but the restore paths (`RESTORE_PATHS` in server.js), and a real
+  export is 14 MB: the first rehearsal on real data was refused at the door,
+  which the suite's small fixture could not see. check-settings pads its
+  file past 4 MB for that.
+- **Names here win** (`agent_profile` is per agent): taken only for an agent
+  with none here.
+
+Rehearsed on the real exports (app 0.14.0 and Docker 0.12.12, 2026-11-19) on
+a scratch board: the floor arrived whole (372 messages, 28 tasks, 9
+contracts, 7 agents) in the order written, every other floor's rows were
+unchanged by id and text, 175 messages and 6 tasks were renumbered, cursors
+followed (3700 to 3875), and the same file restored a second time. Moving
+the agents after it is the release (Take a desk on each folder), which
+brings their conversations. Tested in `test:auth` ("one floor of a
+backup"), `check-settings.mjs` ("one floor of a backup"), with
+`mutants-floor-restore.suite.json` and `mutants-floor-restore.page.json`.
+
+## Claude Code signed out on a desk's machine
+
+costmo, 2026-11-19, in the release-prep round (meeting room 22 with
+orchestratinator-desktop-dev): "Host signs in". Measured first on 2.1.329, a
+window with no credentials and onboarding done, on a tmux socket of its own.
+Idle, it is an ordinary composer with "Not logged in · run /login" at the
+right of the status row under it, and nothing in the transcript. Sent a
+message, it writes one assistant record, `isApiErrorMessage: true`, with the
+text "Not logged in · Please run /login", and the composer reads "Once fixed,
+resend your message". So the floor drew the desk as idle, then showed the
+operator a command as its answer. Both are faults by this file's own rules.
+
+- **The host reads the machine, not each window** (host/auth.js).
+  `claude auth status --json` (`loggedIn`, about 0.25 s at load 67) at every
+  heartbeat, and at once when the relay sees that error record (`noteTurn`).
+  It says the result at registration (`signed_out`, kept on the host's row).
+  The window's record counts on its own (`auth.said`), because a credential
+  that is there and no longer accepted can still read as signed in to `auth
+  status`. A reply from any window ends that. A footer read on every window
+  at every tick was the other way, and was not taken: a capture per desk per
+  tick, for a fact about the machine.
+- **USER and LOGNAME are filled in when missing** (`claudeEnv`). With HOME
+  and PATH alone Claude Code says a signed-in Mac is signed out (the app's
+  agent, measured 2026-11-09). launchd gives a LaunchAgent both (read off the
+  running host); a host started by another parent may not have them, and
+  every desk on it would then read as signed out. `test:host` starts its host
+  with both empty for that row.
+- **The board refuses what would fail, in words** (`signedOutWhy`, beside
+  `askingWhy`): a message, the bell, a room's notice. The desk carries
+  `signin` (`signinWhyNot`), and the panel draws a box with **Sign in** in
+  the prompt box's place. A prompt the window shows outranks it. The tab
+  pulses for it as for a question (`deskAsking`), because nothing the desk is
+  asked can be answered until he presses it.
+- **Sign in is the host running Claude Code's own sign-in** (`signin` work,
+  `POST /api/floor/signin`, an audit row `claude.signin`). `claude auth login`
+  with no terminal opens the browser on that machine and waits on a local
+  port until the person finishes (the desktop app runs it the same way). It
+  waits on a person, so it is started and not awaited, one at a time: a
+  second press says the first is still open. A failure is an error turn in
+  Claude Code's own last words. The app's own `?signin=1` seam was offered
+  by desktop-dev and not used: the host's way is the same on the Docker
+  board and in the app.
+- **A window still signed out after the sign-in is reopened on its
+  conversation.** Whether a running window takes a sign-in made by another
+  process is not measured: it needs a real account, and an agent cannot sign
+  in. So the host reads each window (`signedOutOf`, the rows under the
+  composer's bottom rule, rejoined for an 80-column wrap) for up to 3 s, and
+  reopens only one that still says it. A signed-out window cannot be
+  working. The reopen runs on the host's line (`later`, drained before each
+  work poll), and the board hears "signed in" only after it, so nothing is
+  typed into a window while it is being reopened.
+- **A host says it can** (`signin: true` at registration, `hosts.signins`).
+  A host from before it would drop the work, so the box dims Sign in with
+  why. It is a field added, so the protocol number did not move.
+
+Not measured, and left: the reopen above on a real window (whether it is
+needed at all), and `claude auth login` started from a launchd host on a
+real desktop (the app's own run of it is measured). The first real sign-out
+on his machine answers both. How it is tested: `test:host` ("Claude Code
+signed out on this machine", the stand-in answers `auth status` and `auth
+login` from files and draws the footer), `test:floor` ("Claude Code signed
+out on a host"), `test:window` (the reader, on the captured screens), and
+**check-signin.mjs** in **verify-ui-change**, with
+`mutants-signin.page.json` beside it and `mutants-signin.suite.json` in
+**mutate-in-a-copy**.
+
+## A new machine's first windows (0.14.0 to 0.14.3)
+
+2026-11-20, the day the desktop app went out as a signed build and costmo
+installed it on a second Mac. Three things that machine showed, each fixed
+the same day. **This section was written afterwards from the code's own
+comments, the commits and the scratch logs of the session that did the
+work**: that session's history was lost the same afternoon (the next
+section), so nothing here is from memory, and where the record did not say,
+this says "not known".
+
+**A desktop release is a tag on `develop`** (costmo, 2026-11-19; recorded
+in the app repo's `docs/follow-ups.md`, "Pin a release tag"). The desktop
+and Docker releases are separate lines. A desktop release is not a merge to
+`main`: he tags `develop` after `npm run release-gate` passes at that
+commit, the app names the tag (`#v0.14.3`), and `main` stays on 0.12.x for
+the Docker instance. So "a release reaches the live clone through `main`"
+above is the Docker line's rule, and "the full chain runs before any merge
+to main" reads, for the desktop line, as the gate before the tag. **The
+app's version and this repo's are kept the same** (costmo, 2026-11-20). The
+app took 0.14.1 alone, which is why there is no `v0.14.1` here: v0.14.0 is
+b3127e4, v0.14.2 is d1fe63a, v0.14.3 is 5fcb0b8.
+
+- **The 0.14.0 gate, and its three reds.** At 6826bab it read EXIT=1 (3 ✗
+  in the suites, 13 of 15 pages, load 57 to 106). All three were fixed in
+  b3127e4, where it read EXIT=0: 3342 ✓, 15 of 15 pages, at load 73 to 139.
+  - `drive.mjs`'s drag sent `mouseMoved` with `button: 'none'` while the
+    button was held, and Chrome does not take that as a drag: a textarea's
+    resize handle stayed where it was (check-chatbox, check-pop-foot). A
+    move with the button held names the button.
+  - **`reopen()` wrote to `desk.intent` after its awaits, and the watch
+    loop had let the intent go.** The loop runs beside it and clears the
+    intent the moment a live session matches it, which for a known id can
+    be inside those awaits: a reopen after a sign-in threw on
+    `desk.intent.pid`. The intent is held in a local as well, and written
+    through that. Anything else that sets `desk.intent` and then awaits has
+    the same gap.
+  - The host suite's busy-window pick waited against the wrong list of
+    panes, and with the host's line held it took the next pick's window for
+    its own.
+- **The browser extension's question is a startup question, asked after
+  the window has registered** (0.14.2, `STARTUP_ASKS` kind `chrome`). On
+  the new machine a 2.1.318 window raised "Claude in Chrome extension
+  detected" (two rows, the cursor on No, "Enter to confirm · Esc to keep
+  browser tools off") once the trust question had been answered from the
+  floor. The host refused to type into it, said "answer it on the floor",
+  and the floor had nothing to answer it with. His ruling: shown to the
+  operator and answered by them, never by rule. The reader knew a startup
+  question only on a window that was still starting, so the tick now looks
+  on a registered window too, in three cases: while a question is already
+  standing (and "gone" is said only when the pane no longer shows it), when
+  a send has just been refused as `asking`, and once a heartbeat
+  (`Desk.lookStartup`). Not measured: whether a real window is in the
+  roster while that question stands. That is why all three looks exist.
+- **Inside the app the header shows the app's version** (0.14.2,
+  `headerVersion` in `src/ui/app.js`, lifted into `test:floor`). The app
+  was 0.14.1 on an Orchestratinator 0.14.0, the header said one and the
+  app's Settings the other, and to a person that is one screen
+  contradicting another. The number comes from the user-agent token the
+  app already sends (`OrchestratinatorDesktop/<version>`); this instance's
+  own number stays on the tooltip. In a browser nothing changed.
+- **A window Claude Code has no record of is reopened, once** (0.14.3; the
+  account is above `UNREGISTERED_MS` in `host/window.js`). On that machine
+  `~/.claude/sessions` was empty under a live window: it ran every command
+  and wrote its transcript, and the floor could not hear it. A model change
+  ended "gave no sign of running it within 20s", a message read "not
+  recorded, send again" while the agent worked on it, and no `/mcp`
+  reconnect was asked for, because the window read as starting. costmo
+  found it by opening the window: "we need to be able to auto-resolve
+  this. Another operator likely would not have been able to track that
+  down." Not reproduced in six tries. The likeliest cause is a Claude Code
+  profile deleted and remade under a tmux server that was left running,
+  and it is not proven. So the state is resolved, whatever makes it: a
+  window standing idle at its composer, nothing typed, for 30 s with no
+  record is reopened on the conversation last spoken in since it started
+  (a new one when nothing was said), on the host's line, and the desk says
+  so. A reopened window with no record either is said on the desk and left
+  alone, because a reopen is a kill. Three things about it:
+  - **Idle is read, never assumed**: no startup question, no prompt, no
+    overlay, not working, a composer on screen, and the cursor right behind
+    the `❯` (a typed draft is somebody's; a prompt suggestion is not).
+  - **The job reads everything again before it closes anything**, on the
+    whole roster and by pid: the tick's own check is against this desk's
+    sessions by folder. And since 2026-11-20 it leaves the window when the
+    roster could not be read at all. `roster()` gives an empty list with
+    `ok: false` then, and the first cut read that as "no record". No row
+    holds that line: the suites' stand-in always answers `agents`.
+  - **Known and left**: a seat is reopened on a new conversation, since
+    "the folder's newest" may be another desk's (`spokenSince` gives a seat
+    nothing), and the desk's line then says "as nothing had been said in
+    it", which may not be so. And if an editor in the same folder spoke
+    more recently than the window, the reopen names the editor's
+    conversation and is refused by `open()` with the window already
+    closed. Neither has been seen.
+- **The app's release checklist ends every window before it deletes
+  anything of Claude Code's** (`tmux kill-server` first; the app repo's
+  `docs/release-checklist.md`, "A fresh install from nothing").
+- **Backlog from that day, not built**: a meeting room should survive
+  closing the app or the floor it came from (`docs/backlog.md`, with what
+  each repo's half is).
+
+How it is tested: the reader on the captured screen and the verdicts in
+`test:window`; the question on a registered window and the reopen in
+`test:host` (`startup-ask.flag` takes `chrome`, `composer.flag` draws a
+window at its composer, and the host runs with `ORCH_UNREGISTERED_MS` at
+3 s); the header in `test:floor` and check-attention. The mutants are
+`mutants-first-run.suite.json`, ten of them, each red on its own rows.
+Two things from running them:
+- **"A refused send does not ask for a look" survived its first run and
+  was red on its second** (5 rows). The heartbeat asks for the same look,
+  so when a registration lands inside the row's wait the question reaches
+  the floor without the line. That is the likeliest second path and was
+  not watched happening. Run that mutant twice before reading it.
+- The five for the unrecorded window were cut off by the clear and run
+  again that afternoon: three on the window suite (control 482 ✓), two on
+  the host suite.
+
+## The clear of 2026-11-20, and what the record is since
+
+About 12:30 PST that day costmo ran the app's "A fresh install from
+nothing" on this machine, meaning it for the test Mac. Read afterwards.
+What it took, because each one explains something that will look wrong
+later:
+
+- **The launchd host of the live instance.** The job was booted out and
+  its plist and `~/.orchestratinator/host.json` deleted. The Docker board
+  on 8787 still runs (0.12.12, main) and has no host on this machine.
+  Putting it back is `host/install.sh` run from the live clone, with the
+  board's key, and it is costmo's to run or to ask for.
+- **`~/.claude` and `~/.claude.json`**: every session's transcript, every
+  folder's local-scope binding (so every desk that was not bound by a
+  `.mcp.json` is unbound until it is taken again), the settings, the
+  installed plugin, and each agent's memory directory.
+- **The app's profile, so the app's board.** It was restored at 20:46Z
+  from the newest whole backup in Downloads, which is the *Docker* board's
+  export of 2026-11-20 03:00Z. On it this floor and the
+  orchestratinator-desktop channel stop at 2026-11-19 05:11Z, the hour the
+  work moved to the app's board. So the board lost two days of these two
+  channels, not seventeen hours: every message and task written on them
+  after that hour, and the desktop channel's contracts. A message number
+  above 3525 cited in this file or the app's documents names a message
+  that no longer exists, or another floor's: the restored board's newest id
+  was 3700, and new messages count on from there.
+- **The contracts were written again that afternoon**, from this file, the
+  code and the app repo's documents, each with a `restated` line:
+  `orchestratinator.attention`, `orchestratinator.window_moves`,
+  `orchestratinator.app_setup`, and `orchestratinator.consumed` (v9 kept,
+  its later sections added, v10). The board counts versions from 1 again,
+  so "attention v3" in an older note is the content of today's v1.
+- **What survived**: both repos, the Docker board and its volume, and the
+  lost sessions' scratch directories under `/private/tmp/claude-501/`,
+  which is where the gate results above were read from. `/tmp` goes at a
+  reboot. No Time Machine backup exists (off since 2021), and no local
+  snapshot.
+
+How all of that was read, as three commands and the order they pay off
+in, is the **recover-a-lost-record** skill.
+
+**A window the app's host opens carries the host's own settings, and no
+`TMPDIR`** (found by the app's agent that afternoon, measured in this
+folder's window too). The host builds what it gives tmux from its whole
+environment (`TMUX_ENV` in `host/window.js`), a tmux server keeps the
+environment of the process that started it, and the app configures its
+host by environment where launchd's reads `host.json`. So after that day's
+`tmux kill-server` every window had `ORCH_URL`, `ORCH_AUTH_TOKEN`,
+`ORCH_HOST_ID`, `ORCH_HOST_SUPERVISOR=app`, `ORCH_FOLDER_DIALOG=parent`,
+`ORCH_HOST_CONFIG` and `ORCH_TMUX_SESSION`. A host, a board or a suite
+started by hand there takes them as its own. Measured: the full chain run
+from this window read one red, "and with nothing at all the host says so,
+and how to give it one", because the host meant to have no key had the
+app's; with the variables unset the host suite read 520 ✓. The suite's
+own hosts name their board and id, so the app's board was not touched. So,
+until every window open on the machine was opened by a 0.14.4 host (below):
+
+```
+for v in $(env | command grep -o -E '^ORCH_[A-Z_]+'); do unset "$v"; done
+export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
+```
+
+before any suite, scratch board or host from a window on the app's floor.
+
+**A window gets a person's environment and nothing of the host's: decided
+2026-11-20, built in 0.14.4.** costmo handed the call over that evening
+("make the open decision based on what is going to be smoothest to the
+operator and end user experience"), and again in the 0.14.4 round with the
+same caveat, so the pick is the developer's. What was picked, and why each
+part:
+
+1. **The host hands tmux its environment without its own settings**:
+   every `ORCH_` variable the host reads as configuration, the key
+   included (`TMUX_ENV` in `host/window.js`). An agent's window is
+   somebody's terminal. A board, a host or a suite started in it should
+   behave as it would in any other terminal, and today it silently
+   becomes the app's host. The suites' own seams reach a stand-in by flag
+   files already, for this same reason, so nothing of theirs rides on it.
+2. **The key reaches a window only where its binding names a variable,
+   by `-e`, as PR #52 ruled.** That rule gave the variable only to a desk
+   whose placeholder the host could not fill, on the ground that one it
+   could fill "came from the same environment the host started the tmux
+   server with". With 1 that stops being true, so `paneEnv` gives it in
+   both cases (`keyVar` in `host/identity.js` has to say "names a
+   variable", not "could not be filled"). A desk with a literal key, which
+   is every desk the app binds, gets nothing: its key is in its binding.
+3. **The host takes the same variables out of a running tmux server at
+   its start** (`set-environment -g -u`), so the fix reaches windows
+   opened after an update without the floor being closed. Windows already
+   open keep what they have until they are reopened. Measured on a socket
+   of its own (2026-11-20, tmux 3.7c): a server started with three `ORCH_`
+   variables and no `TMPDIR` lost all three, gained `TMPDIR`, and a window
+   opened after it carried none. A `-u` of a name the server never had
+   exits 0 and says nothing, and the host asks only for names the server
+   lists anyway (`serverEnvPlan`).
+4. **`TMPDIR` is filled when missing, by the host**, as `claudeEnv` fills
+   `USER` and `LOGNAME`: on macOS the user's own (`getconf
+   DARWIN_USER_TEMP_DIR`), elsewhere left alone. In the host and not only
+   the app, because it is then right under every supervisor, and whether
+   launchd gives a LaunchAgent one has not been read. The app's agent
+   gives its host one as well; that is its half and it has agreed. `USER`
+   and `LOGNAME` are filled the same way, because a window is a Claude
+   Code and with HOME and PATH alone it says a signed-in Mac is signed out.
+
+What was weighed and not picked: leaving the key in (it is one variable
+and every window's binding holds it anyway), because the red above was the
+key, and a host started by hand with the app's key and its own address is
+the surprise this removes. And fixing it in the suites alone (each drops
+inherited `ORCH_` variables at its top), because that leaves a hand-started
+host as it is. It changes what a launchd host's windows get only where
+that host was configured by environment and not by `host.json`, which
+`install.sh` does not do. Built as `windowEnv`, `serverEnvPlan` and
+`cleanServerEnv` in `host/window.js`, `paneEnv` and `keyVar`, and the call
+at the host's start. Tested: `test:window` ("what a window inherits from
+the host", including a live server on a socket of its own), `test:host`
+(the pane-env row, with a variable planted in the server before each host
+starts, because the default socket is shared and one clean run would
+otherwise leave every later run reading clean), and the mutants in
+`mutants-0-14-4.suite.json`. Not yet read: a real window opened by the
+app's host on 0.14.4, with `env`. It is written in
+`orchestratinator.consumed`, `host.windows_inherit`. **Running `test:host`
+cleans the operator's own tmux server** (its host runs on the default
+socket, and cleaning at the start is the rule): the `ORCH_` variables an
+older host left in the global environment are unset there, which is what
+the next 0.14.4 host would do anyway. Windows already open keep theirs.
+
 ## A file attached to a message
 
 Issue #31 (2026-11-17, costmo's rulings by AskUserQuestion that day). A file
@@ -989,7 +1523,7 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   `test:window`, `test:host` and the press route's in `test:floor`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the eleven release page checks, on the Node and the
+  Every suite and the release page checks (sixteen since 0.14.4, which added check-meeting-held), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
@@ -1103,6 +1637,112 @@ stopped process removes its session file, 6–14 ms after the kill — not
 found); the host suite's stand-in has `linger.flag`, which is the
 deterministic version. `seed-move.mjs` + `check-card-move.mjs` in
 **verify-ui-change** drive the card on both views.
+
+## Releasing a folder from another instance
+
+Task #292, 0.12.7 (2026-11-08; measured on 2.1.300 with two real hosts and
+a real window, in both directions). Take a desk on a folder bound to
+another instance used to say "is bound to <address>, not this board. Change
+it there." It now releases the folder from that instance and seats it here.
+The need was the desktop app: it runs an instance of its own, so every repo
+of an operator who already uses the Docker one was bound elsewhere and
+refused, and the instance being left may not be running to change anything
+on.
+
+**"Instance" is costmo's word, and the page's, for one running
+orchestratinator.** This file says "board" for that all over, and also for
+the rows-per-agent view. He asked what "board" meant (2026-11-08). New
+words an operator reads say instance, release, and the address. The older
+text is not renamed.
+
+- **The reversal is costmo's, and it is narrow on purpose** ("We need to be
+  able to 'release' an agent so that it can be opened by another
+  instance"). `host/mcp.js` said an entry pointing at another instance is
+  never touched, and that went in with Take a desk itself. No failure is
+  recorded behind it; it is the one-instance rule applied to the config
+  file. What it protected is kept by the shape. Only the folder the
+  operator named is touched, on their click, on the floor taking it. The
+  request names the instance being left (`from_board`). The board checks
+  that against the host's last reading and the host against the disk at the
+  bind, so a binding that changed since the click is refused, not followed.
+  The host still only writes entries for its own instance, and a third
+  instance's entry in the same file stays. Do not widen it to a host
+  releasing on its own judgment.
+- **A release is never a move.** `from` on a bind names a desk on *this*
+  instance for the `bound` handler to unseat and retire. The names a
+  folder carries elsewhere are nobody here, or, after a restore, a real row
+  that is going nowhere. So `seatDesk` has a fourth mode, `release`, that
+  sends `release: { board }` and no `from`, whatever floor it lands on.
+- **Both scopes are cleared.** Local scope by the name each entry was
+  written under (`localEntries`; a hand-added one need not be called
+  `orchestratinator`), and the folder's `.mcp.json` for the named
+  instance. Leaving the file's entry was not an option: beside a local one
+  it raises the approval question on every fresh window, and under another
+  server name the window connects to both instances. That file may be
+  tracked, so a release can dirty a repo's tree, as an import already does.
+  The dialog says so before the click.
+- **The conversation goes by a move's two rules.** A window open in the
+  folder is closed and a new conversation opens (#24's race is the same
+  race). It is found by its folder, whichever host opened it: both hosts
+  see every pane on the tmux server. With no window the desk arrives on
+  the conversation somebody last spoke in (`lastSpokenIn`, the session
+  picker's bounded reads), because this host never watched the folder and
+  has no pin. Measured: the resumed window answered `whoami` as the new
+  instance, in the same conversation. With `open: false` a window is still
+  closed and nothing is opened, which is what a caller working through a
+  list wants.
+- **What became of a take is read from `GET /api/floor/take`**
+  (`live.takes`: asked, then seated or refused in the host's words). The
+  desk being released has no row on this instance, and the board drops a
+  host's error for a desk it has no row for. That was the gap PR #33 closed
+  for a move only, and a plain take's refusal was lost the same way; both
+  are on record now. The host's refusals carry `taking` so the board knows
+  which take. The dialog waits on it (`waitForTake`).
+- **A host says it can (`release: true` at registration), and the protocol
+  number did not move.** A host from before this reads the work as a plain
+  take and leaves the old binding beside the new one, so the board refuses
+  to ask one (`old_host`) and the dialog disables its button with the
+  reason. A field was added and nothing was reshaped, which is the
+  protocol's own rule.
+- **The host being left looks before it acts** (`boundAt`,
+  `letGoIfReleased` in `host/index.js`). It learns a binding has gone at
+  its next rescan, up to a heartbeat later. Measured before the fix: the
+  instance that was left received every turn of the new conversation for
+  40 s, because its host found the other host's window by its folder and
+  followed it. It now reads the binding when work arrives for a desk and
+  when a window comes up in its folder, and lets the desk go: 0.9 s on the
+  same rig. A local-scope file that cannot be read concludes nothing. A
+  host on an older build still takes its heartbeat.
+- **A poll says when its cursor is another instance's** (`since_ahead`).
+  Ids count per instance, so an agent arriving with a remembered `since`
+  above this one's newest id polled empty for ever, and the empty poll
+  wrote that number down as what the agent had read. The poll now reads
+  from this instance's own record of the agent and says so. "Newest" is
+  SQLite's counter for the column (`sqlite_sequence`), not `MAX(id)`:
+  deleting a floor takes its messages, and `MAX(id)` would then fall below
+  cursors this instance handed out itself.
+
+Two calls on the dialog were costmo's, asked both ways (2026-11-08). A
+folder bound elsewhere stays out of **Recently opened**, so five places do
+not fill with another instance's desks on a machine that runs two; it is
+reached with the folder dialog. And the dialog starts on **the floor it was
+opened from**, not the floor the folder had on the other instance, which is
+not offered at all unless this instance has a floor of that name. The agent
+keeps the name the folder gives it. The first cut proposed the floor it
+had; do not put that back.
+
+What a release does not bring: messages, tasks, contracts and the agent's
+floor on the other instance. Those come by backup and restore, and the
+app's "bring everything over" is built on this route in its own repo. The
+conversations are the folder's and come with it.
+
+Not measured: a chat held in an editor across a release (it followed a
+rebind on one instance in 2026-09; a change of address is the same
+re-read, unwatched), and a host being left that runs an older build.
+
+`two-instances.sh` in **measure-a-real-window** is the rig (two throwaway
+instances, a host each, a tmux server of their own), and
+`check-release.mjs` in **verify-ui-change** is the page.
 
 ## One agent, several sessions
 
@@ -1288,6 +1928,28 @@ optional:
   named it, before any host had seated it (the browser check drew a desk
   for a session its host had refused). `unbound` for a seat ends its
   conversations.
+
+**On develop, every seat was read as a released folder until 0.14.4**
+(costmo's report, 2026-11-20: a second meeting room with two agents
+already in one, "everything about it failed miserably", and the `-2`
+desks could not be removed). A merge seam, not a fault in either half:
+develop's release check (`boundAt`, 0.12.7, 11-09) read a desk's binding
+off its folder, and main's seats (0.12.9, 11-16) are desks whose folder
+names *another* desk, by design. The 11-18 merge put them together with no
+conflict. So every piece of work for a seat (a room's message, its notice,
+its Leave) was refused with "not done: <folder> is <the folder's desk> on
+this instance now … The desk is let go here", and its window coming up did
+the same at every watch tick, after which the rescan found the seat again
+from its record: the app's host log carried four lines a second for every
+seat, a seat on another floor included. `boundAt` reads a seat's own
+record (`S.listSeats()`) now. Why 99 ✓ in `test:seats` never saw it: its
+fixture HOME had no `~/.claude.json`, so the local scope read as
+unreadable and `boundAt` concluded nothing. The fixture writes one now, as
+every real machine has, and the change taken out is 33 red there. **Two
+lessons for the next merge of main into develop**: a check that reads "the
+folder's binding" is wrong for a seat, so grep both sides' new readers of
+`readDesk`/`readLocalScope` against `desk.seat`; and a fixture that leaves
+out a file every machine has can switch a whole check off in silence.
 
 **How a new thing was asked of the host, for the next one.** Three parts,
 each of which has a failure behind it elsewhere in this file. A **work
@@ -1694,6 +2356,174 @@ in no room). `check-popout.mjs` in **verify-ui-change** drives all of it,
 including a floor reload and close. A popup opens only on real input
 (`press()`), never on a dispatched click.
 
+**Several floors at once: a tab each, and each tab keeps its own floor**
+(costmo, 2026-11-19, task 315 from the desktop app's agent, his picks by
+AskUserQuestion to both of us). The floor a tab stands on used to live
+only in localStorage `orch.floor`, which every tab shares, so a reload or a
+second tab landed on whatever floor was picked last anywhere, and in the
+desktop app, which has no address bar and no "new tab", there was no way
+to have two floors up at all. Four parts, in "floor windows: what the page
+decides" in `src/ui/floor.js`:
+- **The address carries the floor**: `?floor=<channel>`, `?floor=` for all
+  floors, `&view=board` for the rows view. Read at load, where it outranks
+  the stored choice; kept current with `replaceState` on every draw
+  (`syncAddress`), not only on a pick, because a floor put away under a tab
+  drops it to all floors with nothing clicked. A bare `/` is still the
+  stored choice, and `setFloor` still writes it, so a fresh open lands
+  where the operator last was. All floors is written as `?floor=` and not
+  left out: left out, a reload fell back to another tab's floor. The
+  desktop app saves each window's address at quit and reopens it, so the
+  forms are in its contract (`orchestratinator.consumed`,
+  `dashboard.floor`). Only a floor tab writes it (`ui.floorTab`); a popout
+  and a meeting room keep their own addresses and titles.
+- **The title names the floor, first**: "lab · orchestratinator", "All
+  floors · orchestratinator", "Board · orchestratinator". First because a
+  macOS tab, a Dock or Window menu and a crowded browser strip cut a title
+  from the end. A board with one floor is titled by it. The app copies the
+  page's title to its window.
+- **Each floor chip is a link** (`<a href="?floor=lab">`), so ⌘-click,
+  middle-click and the browser's "Open Link in New Tab" work as on any
+  page. A plain click is still the page's (`preventDefault`, then
+  `setFloor`): followed, the link lands on the same floor by a reload,
+  which throws away an open panel and a draft. `opensElsewhere` decides;
+  Alt is not one of its keys, since Alt on a link downloads.
+- **⧉ on each floor's chip opens it in a new tab** ("Open lab in a new
+  window", costmo's pick over one button, a right-click menu, or the app's
+  menu alone): `window.open(…, '_blank', 'noopener')`, no features and no
+  target name, so each press opens one more and the new tab is a peer, not
+  the opener's child. In the desktop app it is a window of the app's own
+  (its agent maps Electron's disposition: the ⧉ to a window, a ⌘-click or
+  middle-click to a macOS tab behind), and the app adds File ▸ New Floor
+  Window ⌘N, macOS tabs and reopening at launch. The all-floors chip has
+  no ⧉ (his pick's picture), but is a link like the rest.
+- **Where the ⧉ opens is a setting: "Open new floors: In tabs | In
+  windows", In tabs by default** (costmo, 2026-11-19, the same day). In a
+  browser it is a row at the top of Settings, kept in this browser
+  (`orch.floorOpen`), not a board row like the update settings: it is about
+  one browser's windows, and a row on the board would reach the app's
+  pages too. "In windows" is `window.open` with a `popup` features string,
+  the size of the window it came from and set down 24 px, because a page
+  cannot open a full browser window: the browser gives it one with no tab
+  strip, and the row says so. **Inside the desktop app the page offers
+  nothing and always opens with no features**: the app's own Preferences
+  pane has the setting and maps the request, and two settings for one
+  button would fight. The app says it is the app with
+  `OrchestratinatorDesktop/<version>` on the user agent, its own token,
+  not Electron's (any Electron browser carries that). There the ⧉ reads
+  "Open <floor> in a new session", his word from the app's menu, since the
+  page does not know which the app will do. The rule is `floorOpenMode` in
+  the lifted section; Settings reaches it through `window.floorOpen`.
+Two floor tabs were already safe together before this: each asks `who`
+and holds its own record of which desks are out, and the hub is shared by
+every window of the origin. What two tabs on one desk do (both may open
+its panel) is as it was. `check-floor-windows.mjs` in **verify-ui-change**
+is the page, with seventeen page mutants beside it, and it runs at every
+release.
+
+**A floor in the address is dropped only once a payload says it is not
+there** (costmo, 2026-11-19: in the app every ⧉ opened all floors).
+render() puts a tab on all floors when its floor is not among the floors
+it has, which is right for a floor put away under it. Before the first
+`/api/floor` answer it has none, and any draw then dropped the address's
+floor for good: on his board a meeting room was open, it answered the new
+tab's `who` with `here`, and that redraw came first. A failed first poll
+does the same. The drop now waits for `floorRead`. The app's suite and
+check-floor-windows both passed before, because neither had a room open:
+desktop-dev found the mechanism from the app's side the same hour.
+
+**What each window reports to the desktop app, and its nudge all**
+(costmo, the same day). The app pulses a tab or window blue when it has
+desks waiting for a nudge and amber when one is asking (amber wins),
+badges counts over one, colours its tray bell and badges the Dock from
+the whole board, lists windows in its tray, and offers "nudge all" per
+window. All of that is drawn by the app; what a window *has* is the
+page's, because only the page knows which desks it shows. So every page
+window exposes `window.orchAttention` (`get`, `next(v)`, `nudgeAll`),
+which the app's main process calls with executeJavaScript: the board's
+pages have no preload, on purpose, so there is no event to send. The
+contract is `orchestratinator.attention` on the orchestratinator-desktop
+channel; the decisions are "window attention: what the page decides" in
+`src/ui/floor.js`. Four of them were the developers', agreed between the
+two agents in the room, and are open to his reversal:
+- **A nudge is a desk, not a message**: the count is how many desks a
+  nudge all would type into, which is desks with something waiting (the
+  meeting room's rule, `nudgeWaiting`) that the board would nudge now. A
+  desk with mail on an offline host is not counted. The room's own
+  "Nudge all (N)" counts messages and tasks, by his pick (0.12.9); this is
+  a different number on purpose, the badge on a button that nudges desks.
+- **Asking is a prompt**: a permission menu, a question form or a startup
+  question on a live desk. An error turn sets `awaiting_kind` too, and the
+  floor counts it in "need you", but nothing waits on an answer to it.
+- **A desk out in a popout or a room counts on its floor's tab as well
+  as in that window** (costmo, the same evening, reversing the first cut:
+  "If there's a nudge or pending permission/decision prompt, I want for
+  the tab background to have the animated background color effect ...
+  even if the agent is in a room on the floor"). The first cut gave such
+  a desk to its window only, so the tray's list of windows counted it
+  once. But a room window has no tab strip, so the tab stopped pulsing
+  for exactly the desks he was talking to in a room. Now a sum over
+  windows can count a desk twice. The board's values (the bell, the
+  Dock) still count every desk once. A floor tab's nudge all reaches
+  such a desk too, because the badge is the number a click sends, and
+  the room folds that nudge into its transcript like any user turn it
+  did not send. Which desks are out is the page's (`ui.outs`), so
+  `test:floor` cannot see this rule: check-attention's page mutant (the
+  old rule put back) is what holds it. Do not bring back "counted
+  once".
+- **A room's nudge all is every participant with something waiting**,
+  whatever its To chips choose, and goes through the room's own send so
+  the transcript records it.
+A floor tab on the rows view reads `/api/floor` for the report only inside
+the app (its user-agent token): the rows view polls nothing of the floor,
+and a browser's board tab is left as it was. `check-attention.mjs` in
+**verify-ui-change** drives the calls the app makes, and runs at every
+release.
+
+**Every setting is behind ⚙, and in the desktop app every setting is in
+its Settings pane, drawn by this page** (costmo, 2026-11-19, four picks by
+AskUserQuestion, with desktop-dev in meeting room 20; the contract is
+`dashboard.settings` on the orchestratinator-desktop channel). Four parts:
+- **`?settings=1` is the Settings dialog's sections as a page of their
+  own** (`SETTINGS_PAGE` in `src/ui/app.js`), titled "Settings", with no
+  header, floor or dialog around them; it polls `/api/state` like a popout
+  and nothing of the floor (floor.js leaves the address alone). The app's
+  pane shows it in a view under the app's own rows, on the floor windows'
+  session. **Embedded, not rebuilt in the app**, his pick: the update and
+  restore wording and rules exist once. The section's handlers sit on
+  `#set-body`, not the dialog, because the page moves that element out of
+  the dialog. The page is drawn whole once, on its first state, and patched
+  after (renderUpdate), so a chosen backup and a half-typed RESTORE survive
+  its polls.
+- **In the app the copy is labels and controls only** (his answer to
+  desktop-dev), plus what is a warning or a fact needed to act: the restore
+  warning, what the chosen file holds, type RESTORE, errors, the result.
+  `toolsPanel(compact)`; a browser keeps its paragraphs. Open new floors is
+  left out there, as before: the app's own row has it.
+- **The ⚙ in an app window opens the app's pane**, not a dialog (his
+  answer, asked twice because desktop-dev's round had read "hidden"): the
+  page `window.open`s `?settings=1` with no features and the app's open
+  handler turns any board address with `settings=1` into its pane.
+- **Auto-refresh is a setting**: a row in Settings, no longer a switch in
+  the header; ↻ stays there, being an action. It is localStorage
+  `orch.autoRefresh` (only `off` is off, so a fresh browser polls as the
+  switch did), and every window applies a change at once on the `storage`
+  event: a browser's tabs, and every app window, since the pane is a page
+  on the same origin and session.
+- **A board started with `ORCH_BOARD_SUPERVISOR=app` has no updates at
+  all** (his pick: Updates in the app's pane only for a Docker board). The
+  app sets it on its built-in board. `view()` is null, so the page draws no
+  Updates section and no Update button, in a browser too; the update routes
+  refuse in words (409); the timer and the tick both do nothing, so either
+  guard alone keeps GitHub uncontacted and a mutant removing one survives
+  by design. A Docker board seen from the app keeps its section, now in
+  the app's pane.
+Not covered by the check: a later change patched into the settings page's
+Updates section (Check now on a scratch board would ask the real GitHub).
+`check-settings.mjs` in **verify-ui-change** is the page, with
+`mutants-settings.page.json` beside it; the server's rows are in
+`test:update`, the stored value in `test:floor`
+(`mutants-settings.suite.json`).
+
 **A meeting room is a popout of several desks, out the popout's way**
 (issue #44, 0.12.0). It is this page with `?meeting=<id>`, opened from a
 room's selection toolbar or from Resume. Its code names are `meeting…`,
@@ -1918,6 +2748,48 @@ Resume makes write their own `desk.reopen`. **`meeting_rooms` in backups**: it n
 sessions on disks that may not be this machine's. `check-meeting.mjs` in
 **verify-ui-change** drives all of it.
 
+**A meeting outlives a quit of the desktop app, and closing its own window
+still ends it** (0.14.4; costmo, 2026-11-20, "a meeting room shouldn't
+disappear from a floor unless/until the meeting is ended", then three
+rulings by AskUserQuestion the same hour). A room's window closing ends its
+meeting because the page cannot tell a close from a reload, and that
+stays: **closing the room's own window ends it** (his pick over "only End
+meeting ends it"). What changed is that a close caused by the app quitting
+does not, and a floor closing never did, since a room no longer closes
+with the window that opened it (the app's half, `outlivesOpener`):
+- **The app's word is `window.orchMeeting.hold()`**, which the app calls
+  in every room's window before it quits and waits for (bounded at 3 s,
+  its half). It posts `/api/floor/meeting/hold`, which sets `held_at`, and
+  the window's pagehide then lets its desks go (`leaveHeld`) without
+  ending the record. A room already ended answers false, and its close ends
+  it as any close does. Contract `orchestratinator.consumed`,
+  `dashboard.meeting_hold`. A crash with no word lapses as before.
+- **A held meeting is a live one** wherever "live" is read
+  (`liveMeetings`, `meetingsOn`, `allMeetings`): it contains its desks'
+  broadcasts, its second sessions are not swept, its desks are still told
+  they are in it. A touch or an open clears the hold, End clears it.
+- **While no window shows it, its desks stay in it** (his pick over
+  "usable from the floor"). `/api/floor` lists `meetings_held`, the floor
+  writes each desk into `ui.outs` as `kept` (`heldPlan`, lifted into
+  `test:floor`), so the box stands, and a desk's panel offers **Open the
+  meeting room** in place of a message box and of Bring back, which asks a
+  window there is none of. "In a meeting" opens the room; End meeting
+  ends it on the board. Whether a meeting is held is read off the payload
+  first (`meetingKept`): a held window's `gone` carries `rejoin`, and End
+  pressed in that moment was sent to a window that was not there (the page
+  check's first run).
+- **In the app, a floor that loads with a held meeting no window shows
+  opens its room** (his pick over "never by itself"), once per page, behind
+  a Web Lock per meeting so two floor windows at a launch open it once, and
+  only after `HELD_OPEN_AFTER_MS` so an open room has answered `who`. The
+  app keeps no list of rooms. A browser opens nothing by itself (a popup
+  needs a click there), and its box is a click away. The app has no popup
+  blocker (desktop-dev, msg 3710), so the open needs no gesture.
+
+`check-meeting-held.mjs` in **verify-ui-change** is the page (with popups
+allowed, as in the app), `mutants-meeting-held.page.json` beside it, and
+the board's rows are in `test:floor` with `mutants-0-14-4.suite.json`.
+
 **A meeting's desks stand in a box of their own on the floor** (costmo,
 2026-11-16; "a meeting on the floor" in `src/ui/floor.js`). A 2.5px light
 grey edge, "In a meeting" on its upper left corner, and **End meeting**,
@@ -2031,6 +2903,19 @@ say, so they were costmo's to see on his screen, and neither was held for
 
 He reported the monitor case first, after trying it. He confirmed the
 minimized case later the same day, when asked what the window did.
+
+**In the desktop app the move is the raise** (costmo's report,
+2026-11-19: minimized, nothing; covered, moved but left behind). Electron
+ignores a page's `focus()` on a window completely: no restore, no focus,
+and nothing reaches the app's main. Measured on Electron 45.2.3 in a
+scratch script. A page's `moveTo` does reach main, as
+`content-bounds-updated`, in every case: covered, minimized, the room
+moving itself, and a move to the spot it already stands on. The app
+raises the window there. So the page moves a window only to raise it,
+and both raise paths always move. That is a contract,
+`orchestratinator.window_moves` on the orchestratinator-desktop channel.
+A page-driven move added for any other reason would raise that window in
+the app, so it changes that entry first.
 
 Riding along: a desk's open nameplate card now follows the desk when the
 rooms are redrawn, since desks move with nothing clicked. One thing not
@@ -2375,6 +3260,287 @@ real processes with stand-ins for `docker` and `claude`, and the two
 Docker halves (the image recording its commit, and the host finding the
 live container from launchd's environment) each for real.
 
+## The host under the desktop app
+
+Three tasks from the app's agent on the `orchestratinator-desktop` channel
+(#288–#290, 0.12.5, 2026-11-07; the contract there is
+`orchestratinator.consumed`). The app runs `host/index.js` as a child it
+keeps running and shows the board in a webview, and three things that were
+one number, one word and one process came apart:
+
+- **The protocol is a number beside the version, and the board refuses a
+  host that does not speak it.** `protocol` in `package.json` and
+  `host/package.json`; `protocolRefusal` in `src/floor.js` says what it
+  covers and when it moves (a reshaping, never a field added). Equal or
+  refused, no range, and a host that sends none is refused as a build from
+  before there was one — which is every hand-rolled registration in a
+  suite, so each one sends `protocol: PROTOCOL` now. The page checks'
+  stand-in hosts are hand-rolled registrations too, and six of them were
+  missed for two days. The update check is the one that was run in that
+  state: 15 of 19, "got []" and a selector timing out, over a 409 that
+  nothing printed, so it read as a page fault. The stand-ins behind the
+  backdrop, popout, redraw and meeting checks and the README shots sent no
+  number either. They send what
+  the board they are pointed at reports now (`board-protocol.mjs` in
+  **verify-ui-change**), so a copy holding an older `src/` still works. A
+  change to what the board demands of a host is not done until `grep -rl
+  api/host/register .claude/skills test` has been read. A refused host keeps
+  trying on its backoff, logs the words once, tells its parent over its
+  port, and is on `/api/floor`'s `hosts` as `refused`. On this machine the
+  mismatch it catches is a deploy that rebuilt the board and left the host
+  running: the board now says so instead of a desk quietly taking no
+  message. Do not widen it to a range until there is code that reads an
+  older or newer side correctly; today there is not.
+- **`supervised` became `supervisor`**, and the page's update is launchd's
+  only. `ORCH_HOST_SUPERVISOR=app` is the app; launchd is still read from
+  `XPC_SERVICE_NAME`; `ORCH_HOST_SUPERVISED=1` is still the suites'
+  stand-in for launchd. An app-run host has no clone to move, so the board
+  offers nothing (`available` false, not a button that is only refused),
+  Settings says the app installs updates, and preflight refuses in the
+  same words. A report with `supervised` and no `supervisor` is an older
+  host and means launchd (`supervisorOf`).
+- **The folder dialog has a backend that is not a command.**
+  `ORCH_FOLDER_DIALOG=parent` asks the process that started the host over
+  Electron's `process.parentPort` or Node's IPC channel (the host suite is
+  the app that way), with an id per ask so a late answer to a closed dialog
+  is not the next one's, and `close` so the app takes its dialog down when
+  the host times out or stops. It went in under the rule above it — a
+  backend goes in after it has been watched taking focus — because the
+  app's agent watched Electron's dialog take the front in the app and
+  recorded the table; the header of `host/dialog.js` has it. A host told
+  to ask a parent it was not started with has no dialog and says so at
+  startup.
+- **better-sqlite3 is 13, and it needs Node-API 10, so Node 22.14 or
+  later** (task #291, 0.12.6; the board, the gate and the host are all on
+  Node 24 since 0.12.11, Tests, "What ships is what is tested"). 11.x does not compile against Electron 45's V8, and
+  12.11.1 still calls `v8::Context::GetIsolate`; 13 is Node-API with the
+  prebuilt binary for each platform inside the package. Its binary is
+  Node-API 10, and a Node that offers 9 (20.x, 22.x before 22.14) does not
+  fail to load it: the process segfaults, exit 139, with no words.
+  Measured on 20.20.1 — this machine's default `node`, and the one the
+  host's LaunchAgent runs on — and on 22.11.0. So `src/node-floor.js`,
+  imported ahead of better-sqlite3 in `src/db.js`, says it in words. The
+  host has no dependencies, and ran on Node 20 then; the image was node:22
+  and loaded it. Both are Node 24 since 0.12.11. Two things keep that from costing anyone a round here.
+  `scripts/node-floor.sh` is sourced by every runner under `.claude/skills`
+  (seven `run-check-*.sh` had drifted without it until 2026-11-19, and from
+  a Node 20 shell such a runner printed nothing at all; a new runner is
+  checked with `grep -L node-floor.sh .claude/skills/*/run-*.sh`, which
+  should list nothing)
+  and by hand before a suite (`. scripts/node-floor.sh && npm test`): it
+  reads `process.versions.napi`, leaves a good `node` alone, and otherwise
+  puts the oldest nvm Node that has Node-API 10 first on PATH, or refuses in
+  words. And every skill script that opens better-sqlite3 itself, or starts
+  the server as a child, imports the floor first, because a seed that
+  segfaults says nothing and a server whose output goes to a log file reads
+  as a dead port. A new seed, check or runner takes the same line; copy it
+  from `seed-desk.mjs` or `run-check-pop-foot.sh`. **The machine's default
+  Node stays 20, and that is costmo's ruling** (2026-11-08: "I don't want to
+  mess with node versions"; he switches by hand, in one shell, only to run
+  the desktop app). So nothing here may ask him to change it, set an nvm
+  default, or add a version file that a shell acts on: the helper changes
+  PATH inside the script that sources it and nowhere else. Do not re-propose
+  moving his default as the simpler fix. 12.11.1's call is written
+  `context->GetIsolate()`; the qualified name is in no file, which is how a
+  grep by the compiler's name reads that version as clean.
+- **What the app asks for is added beside what runs, never in place of it**
+  (costmo, 2026-11-07: "I do not want to break our current tool along the
+  way"). Each of the four above is off unless the app turns it on, or is
+  the same for launchd as it was: a number both sides already agree on, a
+  word launchd never sets, a dialog backend chosen by an environment
+  variable, a dependency the image already had the Node for. So a task from
+  that channel is closed with what it changes for the board, the launchd
+  host and the plugin as they run today, measured and not reasoned — for a
+  dependency, **try-a-dependency** reads the live database through the new
+  version before the tree has it — and anything that would change what the
+  existing tool does goes to him as a decision first. The one such change so
+  far is the protocol check: a deploy that rebuilds the board and leaves the
+  host running now reads as a refused host, in words, until the host is
+  restarted.
+
+**Catching the app up to develop, and a first run that asks nothing**
+(2026-11-19, meeting room 1 with orchestratinator-desktop-dev, at costmo's
+ask: everything since the app stopped following, around 11-09; install to
+first use on macOS without Docker; connect to a local Docker board). His
+rule for the round, again: nothing that works in the Docker+launchd app
+today may break. What the app runs and places is the contract
+`orchestratinator.app_setup` on the orchestratinator-desktop channel,
+beside `orchestratinator.consumed`. Four things this repo changed or
+decided for it, each additive:
+
+- **A History search under the app runs in a worker thread.** The search
+  is `process.execPath host/history.js`, a process of its own so a 70 MB
+  `JSON.parse` stays off the relay's loop. Under Electron's utility process
+  `execPath` is the app's helper binary, and the app's RunAsNode fuse is
+  off, so that cannot start there. `SEARCH_IN_WORKER` (true under
+  `process.versions.electron`, or `ORCH_SEARCH_IN=worker`, the suite's
+  seam) sends it to `searchInWorker`, a `worker_threads` Worker with the
+  same answer, the same words on a failure and `terminate()` for a newer
+  search. Everywhere else the spawn is untouched. One trap, measured: a
+  worker's `process.argv[1]` is the worker's file, so history.js's "run as
+  a script" branch also ran in it and wrote a JSON error to the host's
+  stderr; it is guarded with `isMainThread`. Not yet measured: a Worker
+  loading history.js from inside the packaged app's asar (desktop-dev's
+  packaged check reads it; a failure is said on the floor, not silent).
+- **The hook runs without a node on PATH.** A Mac whose only Claude Code
+  is Anthropic's native install has no `node`, so every hook died in
+  silence: no prompt, question or stop ever reached the floor. The line in
+  hooks.json tries `command -v node` first, as before, then
+  `~/.orchestratinator/bin/node`, a link the app keeps to the Node it
+  carries, then nothing. `test:plugin` runs all three under a bare PATH.
+  The hook line is in hooks.json twelve times, so mutate.py's
+  exactly-once rule cannot carry its mutants: both were run as a whole
+  file (the old line; the link tried before PATH), each red on its row.
+  The other four of the round are `mutants-desktop-catchup.suite.json`.
+- **The app installs the plugin as its own directory marketplace,
+  `orchestratinator-app`, and only when no `orchestratinator-floor@…` is
+  installed** (`claude plugin list --json`). Two copies would fire every
+  hook twice, and on costmo's machine the live clone's
+  `appideas-orchestratinator` is the installed one. Measured on 2.1.328 in
+  an empty config dir: `marketplace add <dir>` and `install` exit 0 with
+  stdin closed, need no sign-in, are idempotent, and a directory
+  marketplace loads in place, so rewriting the copy is the update.
+- **The app's host shares session `orch` on the default socket with a
+  launchd host**, and does not run at all when a launchd host serves the
+  same board. A release finds the window open in the folder through the
+  host's own session (`list-panes -s`), so a session of the app's own would
+  leave the launchd-opened window running beside the app's after a move
+  from Docker, two processes on one conversation. And two hosts for one
+  board would both find every folder bound to it, and both relay and type
+  into its desks. Known and left: `renewServer` is run by whichever host
+  notices a refused server, and resumes only its own desks.
+- **A startup question's cursor is read until it lands, not once.** The
+  reader sweep on 2.1.328 (2026-11-19, load about 100) had `answerStartup`
+  refuse the trust question, `not_taken`, with the pane showing the cursor
+  on "Yes, I trust this folder": the read 80 ms after the last key came
+  before the redraw. That is the first thing every new desk asks, on
+  every machine, so it is fixed for the launchd host too: the cursor is
+  read every 80 ms for up to `ORCH_STARTUP_CURSOR_MS` (1.5 s), and a
+  cursor that never gets there is refused as before, that much later. The
+  keys move one way, so the wanted row is where the cursor stops.
+  `test:window` has a stand-in that redraws 500 ms late. Everything else
+  the sweep read on 2.1.328 held: permission menu (with a new "Tip: auto
+  mode…" line, which lands in the question's text), both form shapes,
+  `/model` with "Switch model?", `/btw`, `/cost` (now listed as "/usage
+  (cost)").
+
+- **The app stops its host with SIGTERM and waits 20 s, because the host
+  needs that long and Electron gives two.** The host's stop finishes the
+  item in hand (up to `ORCH_STOP_DRAIN_MS`, 15 s), then releases and
+  unregisters at up to 2 s each. Electron's `utilityProcess.kill()` ends
+  the process 2 s after asking, whatever it is doing (the app's agent,
+  measured with a stand-in that takes 3 s to leave: gone at 2.2 s, last
+  step never run). So before 2026-11-19 every stop of a *busy* host under
+  the app (quit, leaving the board, a restart) was cut off with nothing
+  handed back, and 0.12.11's hand-back never ran there. An idle host never
+  showed it. Nothing changed in this repo; it is here because the host's
+  stop is this repo's, and a supervisor that gives it less than 20 s
+  breaks "done once, handed out again, or said lost".
+
+A board to test "connect to Docker" against is a scratch container from
+this tree's image, never the live one, and it is a script:
+`.claude/skills/catch-up-the-desktop-app/scratch-docker-board.sh up [port]
+| status | down` (its own tag, name, loopback port and volume; it refuses
+8787 and 6724). That is not `docker compose up`, which would collide with
+the live container by name. The app reads such a board's key from `docker
+inspect` (Config.Env `ORCH_AUTH_TOKEN`), so nobody pastes it, and `/health`
+names it `appideas-orchestratinator`. The same skill has the read that says
+which commit the app really runs (`app-pin-check.sh`), the plugin commands
+on today's Claude Code (`plugin-install-probe.sh`), and how a round with
+the app's agent goes.
+
+## A host on Windows (feature/windows-implementation)
+
+2026-11-20, costmo's scope: the Docker install working on Windows, the
+desktop app later. Built from this folder and measured on his Windows 11 PC
+by **pc-developer**, a Claude Code desk on this floor running there (it
+reaches costmo's app board over an SSH tunnel and has a Docker board of its
+own on that PC's 8787). Nothing here can be seen from the Mac: **a claim
+about Windows is believed when pc-developer has measured it there**, by the
+same rule as the folder dialog's. Ask it with send_message and say what to
+read; costmo nudges it. Every step below was measured, and the code beside
+each says how, so this is the map, not the record.
+
+- **The multiplexer is psmux** (`winget install marlocarlo.psmux`, 3.4.0),
+  which answers tmux's commands. MSYS2's tmux and `arndawg.tmux-windows`
+  were measured and fail the one join that matters (a pane's pid is a
+  shell's, never the pid `claude agents` reports). psmux's differences, each
+  handled on `WINDOWS` only in [`host/window.js`](host/window.js): a window's
+  program is an argument list after `--` (`launchArgs`; Windows has no
+  `exec`, and a shell line leaves the shell as the pane's process);
+  binaries are found by path (`findExe`: winget's Links folder is on PATH
+  only for processes started after the install); a window target is
+  `=orch:name`, never `=orch:=name` (psmux drops the keys silently);
+  `@orch_seat` is session-wide there, so **a seat rides in its window's
+  name** (`seatNameMark`, `--s<hex>`); some refusals exit 0 with the error
+  on stdout (`psmuxRefusal`); `run-shell` runs under **Windows PowerShell
+  5.1** whatever SHELL says, so the macOS folder-read check is off there
+  (`NO_READ_CHECK`); `-J` does not join, and `pane_dead_status` is not
+  filled.
+- **Paths are a machine's own.** The board (Linux, in a container) takes
+  `/…` or a drive (`C:\` or `C:/`) as absolute and compares a drive path
+  with separators and case folded (`isAbsPath`, `underRoots`, `baseName` in
+  [`src/floor.js`](src/floor.js)); the host uses `node:path`, which is
+  native (`isUnder` in [`host/identity.js`](host/identity.js)); the page
+  has its own copies. `claude mcp add -s local` keys `~/.claude.json` as
+  `C:/Users/…` while Node gives `C:\Users\…`: the hook (`localAt`) and the
+  host (`atFolder`) fold the two. `ORCH_HOST_ROOTS` splits on
+  `path.delimiter`. A test that expects a path spells it with `resolve()`,
+  and one that checks a Windows answer uses a path absolute on the machine
+  running it (`readAnswer` is native; a drive path is not absolute on a Mac).
+- **The supervisor is Task Scheduler, and it does neither of launchd's two
+  jobs.** It does not restart a task that exits, and Stop-ScheduledTask is a
+  kill with no signal. So the task runs [`host/supervise.mjs`](host/supervise.mjs)
+  (restarts after any exit; on a stop file it sends the host `{type:'stop'}`
+  over IPC, which index.js treats as SIGTERM), started by
+  `conhost.exe --headless node.exe …`, the only way measured to put nothing
+  on screen. [`host/install.ps1`](host/install.ps1) writes `host.json`,
+  stops a running host through the stop file before the task, and registers
+  an AtLogOn task (Interactive, Limited, IgnoreNew). `-Uninstall` removes it.
+- **A hidden process may not take the front** (the foreground lock): a
+  dialog or a Windows Terminal it opens lands behind. The unlock that was
+  measured to work is an invisible always-on-top owner (for a dialog), an
+  ALT tap, AttachThreadInput to the front window's thread, then
+  SetForegroundWindow. It is in [`host/dialog-win.ps1`](host/dialog-win.ps1)
+  (the folder dialog, #28) and [`host/front-win.ps1`](host/front-win.ps1)
+  (Open in tmux / Open in Claude, which titles its window with
+  `--suppressApplicationTitle` so the script can find it). Both were 4 of 4
+  in front and focused. Not measured: a locked screen, two monitors.
+- **Windows PowerShell 5.1, which every Windows has, has three traps.** It
+  refuses `&&`. It does not escape a `"` inside an argument handed to a
+  program, so values go to `node -e` through the environment
+  (`install.ps1`). And without `[Console]::OutputEncoding` set to UTF-8, a
+  path with an accent is mangled on its way to node; `Get-Content` of the
+  UTF-8 log needs `-Encoding UTF8`. Run a script with `-File` (arguments
+  arrive whole), never `-Command`.
+- **A host started from inside a Claude Code window hands that session's
+  markers to every window** (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, …),
+  and a Claude Code that inherits them writes no transcript ("Transcript
+  saving is off"). `windowEnv` leaves them out (`PARENT_SESSION`) on every
+  platform, a person's own Claude Code settings kept.
+- **What runs on Windows, and what does not.** `test:plugin` runs there
+  (from PowerShell too: its wrapper finds the bash beside `git.exe`). The
+  suites that drive tmux panes do not. Node refuses to spawn a `.cmd` or
+  `.bat` without a shell (the CVE-2024-27980 fix), so an `ORCH_FOLDER_DIALOG`
+  stand-in there must be an `.exe` (`node.exe` with `NODE_OPTIONS=--import`
+  worked). Hooks run under Git Bash; a `node` installed after the terminal
+  that started Claude Code is not on its PATH until a new terminal.
+
+Measured working there at 9e160cc: the README's Docker install (with
+`/plugin marketplace add ./`), the installed host (silent start, restart
+after a kill, clean stop, AtLogOn, uninstall), messages, permissions and
+questions from the floor, `/mcp` reconnect, Take a desk with the native
+dialog, seats, History, attachments, and both terminal buttons in front.
+How to measure a window or a dialog there is **measure-the-desktop**'s
+Windows section.
+
+**Scope is costmo's, and a relay can widen it.** A "host-side native file
+picker for attachments" was built across the board and page on a relayed
+reading of "native file/folder pickers", and removed the same hour: the
+paperclip already opens Windows' own dialog through the browser. Something
+new that crosses board and page is confirmed with him before it is built,
+however it arrived.
+
 ## Tests
 
 **Every suite, check and scratch board on this machine needs a newer Node
@@ -2385,7 +3551,21 @@ not a word (measured 2026-11-16: `node -e "require('better-sqlite3')…"`,
 139 under v20.20.1, `ok` under v24.22.2), which reads as a suite or a
 server that printed nothing. So a run names its own:
 `export PATH=$HOME/.nvm/versions/node/v24.22.2/bin:$PATH` at the top of the
-command.
+command. Or `. scripts/node-floor.sh && npm test`, which puts such a Node
+first for the shell, chosen by what it needs (Node-API 10), not by its
+number ("The host under the desktop app", above); every runner under
+`.claude/skills` sources it.
+
+**And from a window on the app's floor, the host's own `ORCH_` variables
+are unset first** (2026-11-20; the two lines and the red they cause are at
+the end of "The clear of 2026-11-20"). A suite's hosts are started with
+`...process.env`, so an inherited `ORCH_AUTH_TOKEN` or
+`ORCH_HOST_SUPERVISOR=app` is theirs too. `env | command grep -c '^ORCH_'`
+should print 0 before a run whose result will be quoted. Since 0.14.4 a
+window a host opens carries none of them (a seat's window carries its own
+four, which a suite does not read), so the unset is for a window opened
+before that host started; the count says which you are in. And a suite run
+from any window still wants `TMPDIR` set if the count was not 0.
 
 **What ships is what is tested: one Node major and one lockfile**
 (costmo's ruling on the milestone audit's finding 5, 2026-11-17, in
@@ -2473,6 +3653,10 @@ scripts are not affected, because `sh` does not load the function. And
 strings and always equal. Use `shasum`, and say which: with no flag it is
 SHA-1, and one sent to QA unlabelled was set against their sha256 of the
 same file and read as two files (PR #55 round 4). `shasum -a 256`.
+One from 2026-11-18. **In zsh, `$var:h…` is a modifier, not a colon.**
+`git show "$r:host/x.js"` takes `:h` as "head of the path", so git was
+asked for `.ost/x.js` and said "ambiguous argument". It bit twice in one
+evening, in a loop over commits. Write `"${r}:host/x.js"`.
 Two more from 2026-11-16. **A heredoc whose delimiter is unquoted runs the
 backticks in its text.** A Python edit fed through `<<EOF` carried
 "\`npm test\`" in a sentence, so the shell started the whole chain. Smoke
@@ -2515,6 +3699,31 @@ example is "the fixture held: Resume landed N ms after the End" in
 check-meeting-box. Give the load beside the result. Do not widen a timeout
 to make a load red go away: that is how a row stops seeing its fault, as
 Info 5's 8 s wait did.
+
+**Seven take-a-desk reds in `test:host` were a race in the case before
+them, not load** (2026-11-07). "and within seconds the host has bound it"
+and six after it went red with the window suite running beside the host
+suite, and the reading was load; then once more with nothing beside it.
+The host log had the mechanism: `found desk host-test/pane` and, 45.4 s
+later, `dropped desk host-test/pane` and the bind. The placeholder-key
+case (PR #52) opens a window, reads its env line, kills the pane and puts
+the roster back, and the env line is written at the stand-in's first
+breath, before its roster entry. So the host's `waitReady` for that pane's
+pid found nothing in the roster, and could not see the pane die either
+(its exit check reads `#{pane_dead}`, which a target that no longer exists
+does not answer), and sat out `READY_TIMEOUT_MS` with the next section's
+bind in line. When the host's poll won the race the run was green, which
+is why it read as load. The case now waits for the window's
+`remain-on-exit` to read `off`, which `waitReady` sets the moment it finds
+the session, before anything is taken down. A red of that shape again is
+something else; read the host log's gap first. The suite prints the host's
+log at its end, every line timed, and a gap of `READY_TIMEOUT_MS` between
+two lines is a window the host was waiting on. The gap in `waitReady` is
+the host's own, and was left open when this was written (2026-11-08,
+on develop): a window closed by hand while it is starting held the host's
+line for 45 s. It was fixed since, on main, in `waitReady` itself (QA,
+PR #57 Info 10, below: it says `window_gone` at its next look), after the
+same seven reds were first written down there as load.
 
 **One move-section red in `test:host` has now been seen twice with no other
 suite on its ports.** "the new floor holds no session row for the
@@ -2661,6 +3870,30 @@ None is in code PR #57 touched. A fourth sighting of any of them is read
 with its log kept (`run-mutants.mjs --logs`, or the suite's own output),
 not rerun.
 
+**The same `test:renew` section, read again on 2026-11-20** (the Windows
+branch). A third row of it, "the agent whose turn was cut off is told so",
+fails the same way: nothing, or the wrong note, reaches that window after
+the move. Its two siblings above failed beside it. All three are older
+than the branch: on a quiet machine (load 4 to 6), 6 runs of `43fadc8`
+against 6 of the branch's head, in clean `git archive` copies, read 1 red
+in 6 on each side. An earlier reading of "0 of 4 before, 3 of 4 after" was
+an artefact: the branch's copy ran second in every pair, and the second
+run of a pair started straight after the first, under load from suites
+and page checks of its own. **An A/B of a flaky row alternates which side
+goes first, and runs with nothing else of yours beside it.** The cause of
+the reds is still not found.
+
+**Two `test:update` reds seen once, under load** (2026-11-19, the Open
+new floors round, load average 84–98): "finished: the board is not rebuilt
+again, the plugin is updated, the host restarts and comes back" (got
+undefined) and "every part on the commit: no button, and now \"You have the
+latest\"" (got "Not checked on this branch yet"). Both are in the Finish
+the update flow, which that round did not touch (it changed Settings'
+first row in app.js). The suite alone straight after read 0 red on the tree
+and 0 red on a copy holding HEAD's page, at load 38. The cause was not
+looked for. A second sighting is read with the suite's output kept, not
+rerun.
+
 **A key log is read after a wait, not straight after `send()`** (QA,
 PR #55 Info 9). The composer stand-in writes its log when a key reaches
 it, and `send()` returns when tmux has taken the key. "which the host
@@ -2722,6 +3955,74 @@ writes a primer turn and waits for the floor to show it, so the relay is
 known to be reading before anything is timed against it. A row that
 restarts the host and then writes to the transcript has the same race:
 wait for a turn to arrive first.
+
+**Open on `develop` after the main → develop merge (2026-11-18): the
+host suite is red intermittently, and one cause is known.** QA's check of
+the merge (0b51ba0, from a clean clone) read `test:host` red in 3 of 17
+runs, on four timing rows in three places on the watch path: "joined at
+its tail" (`test/host.mjs` near 981), "a window closed while the host was
+still waiting for it to start does not hold the host's line" (near 848),
+and "a window that comes up in a folder released elsewhere is not this
+desk's" with "the desk goes offline here within the watch". Main's tree
+read 0 of about 29 that day, and develop before the merge 0 of 6 on those
+rows. QA's logs: `evidence/merge-develop-2026-11-18/` in the QA repo
+(alt-merge-2.log, alt-merge-5.log, L3a-host-run-with-extra-red.log).
+- **Known, and the merge's:** both sides had fixed one race in the
+  placeholder-key section, differently, and git merged the file without a
+  conflict. Main writes `ready-delay.flag` (8000) so that the host is
+  always still waiting when the pane is killed (PR #57 Info 10). Develop
+  waits for the window's `remain-on-exit` to read `off`, which the host
+  sets only once it has seen the window (2026-11-07). Together, the wait
+  outlasts the delay, the host is no longer waiting when the pane goes,
+  and the row near 848 no longer sets up what it names. **Done
+  2026-11-19:** develop's wait is out, main's flag kept.
+- **The release rows: a race in the case, read and fixed 2026-11-19.**
+  Red in 2 of my 3 runs that day (load 39 to 130), always "a window that
+  comes up in a folder released elsewhere is not this desk's", and the
+  host's log said why: `dropped desk host-test-rel/rel-c … (heartbeat)`,
+  before the watch had looked. The case rebound the folder, then killed
+  the pane and slept `WATCH_SETTLE_MS`, then put the other host's window
+  in the roster. The heartbeat's rescan drops a desk whose folder is
+  bound elsewhere too, it falls about 60 s after the suite's host starts,
+  and that is about when this case runs, so under load it landed in
+  those two seconds. Not a fault in the host: the desk was let go, by the
+  other path. The folder is now rebound in the same moment the window
+  appears, and a red prints the host's log and names the heartbeat if it
+  was that. 3 of 3 green after. The watch path removed is still red there
+  (a mutant in a copy). Two wrong turns on the way, so they are not taken
+  again: `last_seen` does not mark a heartbeat (the host registers after
+  every bind and rescan too), and the heartbeat is not every 60 s on the
+  dot (it is checked when the work poll returns, up to 25 s later).
+- **The same two release rows again, 2026-11-20, and a second race in
+  the case.** Red in 3 of 8 host runs made in a copy that day, an
+  unmutated control among them, at load 5 to 8, with nothing in the host's
+  log from the staging on: not the heartbeat this time. The lines that
+  named it were the host's own, set side by side for a red and a green
+  run (`run-mutants.mjs --logs`): in every red the message to `rel-a`
+  reached the host 100 ms after `rel-c`'s reopen, so the case went on to
+  kill `rel-c`'s new window within a watch tick of its registering. The
+  case waited for `waitReady` to see the window (`remain-on-exit` off),
+  and that is not the watch seeing it. A reopen's intent is let go only by
+  the watch, at the tick that finds the window. Killed before that tick,
+  the window leaves an intent nothing can match for 45 s, and the desk
+  adopts nothing else in its folder meanwhile, the other host's window
+  included. The case now lets the watch settle before it takes the window
+  down. **In the product that is a desk deaf to its folder for 45 s after
+  a window that died in its first third of a second**, ending in "the
+  reopened window did not register within 45s", which is not what
+  happened. Known and left: letting an intent go when its pid is dead is
+  the fix, and nobody has met it outside this fixture.
+- **Not seen in six runs on 2026-11-19:** "joined at its tail" (near
+  981). If it comes back, read the host's log beside it first.
+- **Also owed, from QA's review of 0.12.12 (PR #60, review 5969322428,
+  three Infos):** the window suite's form stand-in (`test/window.mjs`
+  near the "Ready to submit your answers?" fixtures) still draws the old
+  review screen, so no stand-in carries the 2.1.327 screen end to end; a
+  "Switch model?" raised by hand in the window (a `/model` typed there and
+  left standing) is unmeasured on a real window: a floor message is
+  refused as `asking`, and the floor offers nothing to answer it with; and
+  a multi-question form answered from the floor on a live desk is still
+  owed as the live proof of the review-screen fix.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
@@ -2951,11 +4252,15 @@ operator's live floor.
 
   | Changed | Run |
   |---|---|
-  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:window` and `test:markdown` also read `floor.js`, `test:update` reads `app.js` |
+  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:markdown` also reads `floor.js` (the renderer), `test:window` only its `LINK_LABEL.attach` (read 2026-11-19), `test:update` reads `app.js` |
   | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
   | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
+  | `host/dialog-win.ps1` | `test:host` (the command rows); what it does on a screen only by hand on Windows, from a hidden scheduled task, with somebody watching (the header of `host/dialog.js`) |
+  | `host/front-win.ps1`, `host/install.ps1` | no suite: by hand on Windows through pc-developer (**measure-the-desktop**, Windows); `test:window` holds the Terminal's arguments (`wtAttachArgs`) |
+  | `host/supervise.mjs` | `test:host` ("the supervisor Windows runs the host under") |
   | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
+  | `host/auth.js` | `test:host` |
   | `src/updates.js`, `host/update.js` | `test:update` |
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |

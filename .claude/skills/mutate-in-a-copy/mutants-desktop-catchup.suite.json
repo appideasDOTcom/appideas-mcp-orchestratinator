@@ -1,0 +1,30 @@
+[
+ [
+  "desktop catch-up: the search's worker seam ignored, so plain Node never takes the worker path (red: 'and its log says the worker answered')",
+  "host",
+  "host/index.js",
+  "const SEARCH_IN_WORKER = !!process.versions.electron || process.env.ORCH_SEARCH_IN === 'worker';",
+  "const SEARCH_IN_WORKER = !!process.versions.electron;"
+ ],
+ [
+  "desktop catch-up: history.js's script half not guarded by isMainThread, so it also runs in the worker (red: 'the worker runs only the worker half')",
+  "host",
+  "host/history.js",
+  "if (isMainThread && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {",
+  "if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {"
+ ],
+ [
+  "desktop catch-up: the watch does not read the binding when a window comes up (red: 'a window that comes up in a folder released elsewhere\u2026', 'nothing of the other instance's conversation')",
+  "host",
+  "host/index.js",
+  "    if (id && id !== this.sessionId && await this.host.letGoIfReleased(this, 'a window came up in its folder')) return;",
+  "    /* mutant */"
+ ],
+ [
+  "desktop catch-up: answerStartup reads the cursor once, as before (red: 'a cursor that redraws late is waited for', 'Enter arrived with the cursor on the row')",
+  "window",
+  "host/window.js",
+  "    if (!now || under === want.text || Date.now() >= give) break;",
+  "    break;"
+ ]
+]

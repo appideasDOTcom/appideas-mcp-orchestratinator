@@ -13,6 +13,17 @@ const POPOUT = new URLSearchParams(location.search).get('popout') === '1'
   // A meeting room's window (issue #44) is a popout of several desks, and
   // the same here: its dialogs, and nothing of the board.
   || new URLSearchParams(location.search).has('meeting');
+/* The settings on their own (costmo, 2026-11-19): `?settings=1` is the
+   Settings dialog's sections as a page, drawn by the same code, with no
+   header, floor or dialog around them. The desktop app shows it in its
+   Settings pane under its own rows, so the app's settings are all in one
+   place and none of the board's is written twice (contract
+   dashboard.settings on orchestratinator-desktop). Like a popout it polls
+   /api/state only. */
+const SETTINGS_PAGE = new URLSearchParams(location.search).get('settings') === '1';
+/* The desktop app says it is the app with a token of its own in the user
+   agent (floor.js's APP_UA, contract orchestratinator.consumed). */
+const IN_APP = /\bOrchestratinatorDesktop\//.test(navigator.userAgent);
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -28,7 +39,6 @@ const el = {
   filterKinds: $('filter-kinds'),
   filterText: $('filter-text'),
   loadMore: $('load-more'),
-  autorefresh: $('autorefresh'),
   refreshNow: $('refresh-now'),
   adminState: $('admin-state'),
   dlg: $('dlg'),
@@ -377,7 +387,9 @@ function renderChannels(state) {
 
 function renderServer(state) {
   const s = state.server;
-  el.version.textContent = `v${s.version}`;
+  const shown = headerVersion(navigator.userAgent, s.version);
+  el.version.textContent = shown.text;
+  el.version.title = shown.title;
   el.meta.textContent = `up ${duration(s.uptime_seconds)} · port ${s.port} · db ${s.db_path} · claim ttl ${s.claim_ttl_minutes}m · ${s.now.replace('T', ' ').slice(0, 19)}Z`;
   // Connection churn is a client trait, not a coordination fact — keep it out of
   // the way, but reachable when a session count looks surprising.
@@ -1341,9 +1353,12 @@ function channelDialog(channel) {
  * of it is coordination data: it is what you have chosen and not yet committed.
  */
 const set = {
+  drawn: false,       // the settings page has drawn its sections
   backup: null,       // a chosen file, parsed and vetted, awaiting confirmation
   backupName: null,
   restored: null,     // the report from a completed restore
+  floors: null,       // the floors the chosen file holds, as the board read them
+  floorRestored: null, // the report from a completed one-floor restore
 };
 
 const setErr = (msg) => {
@@ -1359,8 +1374,16 @@ const setNote = (msg) => {
   box.hidden = !msg;
 };
 
-function toolsPanel() {
+/**
+ * The sections, as the dialog and the settings page draw them. In the app
+ * the copy is labels and controls only, plus what is a warning or a fact
+ * needed to act (type RESTORE, what the chosen file holds, errors, the
+ * restore's result): costmo, 2026-11-19, through desktop-dev. The browser
+ * keeps its paragraphs.
+ */
+function toolsPanel(compact = IN_APP) {
   const t = ui.state?.totals;
+  const prose = (html) => (compact ? '' : html);
   const b = set.backup;
   const counted = b ? Object.entries(b.counts ?? {}).filter(([, n]) => n > 0) : [];
 
@@ -1379,9 +1402,19 @@ function toolsPanel() {
        <div class="dlg-confirm">
          <input class="input mono" id="restore-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="type RESTORE">
          <button type="button" class="btn danger" data-set="restore">Restore</button>
-       </div>`
+       </div>
+       ${floorRestoreHtml(set.floors, compact)}`
     : '';
 
+  const floorDone = set.floorRestored
+    ? `<div class="set-done">
+         <b>Restored ${set.floorRestored.rows} rows of ${esc(set.floorRestored.channel)}.</b> Every other floor is as it was.
+         ${Object.entries(set.floorRestored.renumbered ?? {}).map(([t, r]) => `<div>${r.count} ${esc(t.replace(/_/g, ' '))} numbered differently here (from #${r.from} on the file's instance, #${r.to} here), because this board had used those numbers.</div>`).join('')}
+         <div>${set.floorRestored.snapshot?.saved
+           ? `The board as it was is saved at <span class="mono">${esc(set.floorRestored.snapshot.path)}</span>.`
+           : 'The pre-restore snapshot could not be written.'}</div>
+       </div>`
+    : '';
   const done = set.restored
     ? `<div class="set-done">
          <b>Restored ${set.restored.rows} rows.</b>
@@ -1393,16 +1426,18 @@ function toolsPanel() {
     : '';
 
   return `
-    ${updatesSection(ui.state?.update)}
+    ${autoRefreshSection(compact)}
+    ${floorsSection()}
+    ${updatesSection(ui.state?.update, compact)}
     <div class="set-tool">
       <div>
         <h4 class="set-h">Export a backup</h4>
-        <p>Downloads this whole board as one JSON file: every message, task, contract with its history, agent,
+        ${prose(`<p>Downloads this whole board as one JSON file: every message, task, contract with its history, agent,
           channel flag, and operator-action record.
           ${t ? `Right now that is ${t.channels + t.archived_channels} channel(s) and ${t.agents + t.retired_agents} agent(s).` : ''}</p>
         <p><b>One thing is deliberately not in it:</b> the shared MCP secret — only a fingerprint of it, so you can
           check the new host has the same one. Everything else in the file is board data, and there are no
-          dashboard accounts to carry.</p>
+          dashboard accounts to carry.</p>`)}
       </div>
       <button type="button" class="btn primary" data-set="export">Export</button>
     </div>
@@ -1410,22 +1445,111 @@ function toolsPanel() {
     <div class="set-tool">
       <div>
         <h4 class="set-h risky">Recover from a backup</h4>
-        <p>Replaces everything on this board with the contents of a backup file. Not a merge: ids are per-board, so
+        ${compact ? '<p class="set-warn">Replaces everything on this board. Not a merge.</p>' : `<p>Replaces everything on this board with the contents of a backup file. Not a merge: ids are per-board, so
           blending two histories would give you one task <span class="mono">#14</span> that means two different things.</p>
         <p>Before overwriting, the current board is written to the data directory next to the database, so a restore
-          you regret is recoverable. Live agent sessions are closed and reconnect by themselves.</p>
+          you regret is recoverable. Live agent sessions are closed and reconnect by themselves.</p>`}
         <label class="set-picker">
           <input type="file" id="restore-file" accept=".json,application/json">
         </label>
         ${chosen}
         ${done}
+        ${floorDone}
       </div>
     </div>
     <div class="set-err" hidden></div>
     <p class="set-note-live" hidden></p>
-    <p class="dlg-note">Moving to a new host: export here, start the new instance with the same
+    ${prose(`<p class="dlg-note">Moving to a new host: export here, start the new instance with the same
       <span class="mono">ORCH_AUTH_TOKEN</span> in its <span class="mono">.env</span> (that part does not travel in the
-      file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`;
+      file), then restore there. Agents keep the same <span class="mono">.mcp.json</span> apart from the URL.</p>`)}`;
+}
+
+/* ---------- header version: what the page decides ---------- */
+
+/*
+ * The number in the header. In a browser it is this instance's, the build
+ * that answered. Inside the desktop app it is the app's own, the number the
+ * app's Settings shows (costmo's ruling, 2026-11-20, through the app's
+ * agent): the app was 0.14.1 on an Orchestratinator 0.14.0, the header said
+ * one and Settings the other, and to a person that is one screen
+ * contradicting another, so one of them is broken. The app's number is in
+ * the user-agent token it already sends, OrchestratinatorDesktop/<version>
+ * (contract orchestratinator.consumed, dashboard.floor), so nothing new is
+ * passed. This instance's own number is kept on the header's tooltip there,
+ * since it is still what a host's protocol and an update are about.
+ */
+function headerVersion(userAgent, instanceVersion) {
+  const app = /\bOrchestratinatorDesktop\/(\d+\.\d+\.\d+[\w.+-]*)/.exec(String(userAgent ?? ''))?.[1] ?? null;
+  return app
+    ? { text: `v${app}`, title: `Orchestratinator desktop app ${app} · its Orchestratinator is ${instanceVersion}` }
+    : { text: `v${instanceVersion}`, title: '' };
+}
+
+/* ---------- header version: end ---------- */
+
+/* ---------- auto-refresh: what the page decides ---------- */
+
+/*
+ * Auto-refresh is a setting (costmo, 2026-11-19): it was a switch in the
+ * header and is a row in Settings now, in the browser's dialog and in the
+ * desktop app's pane (the settings page). Kept in localStorage, so a
+ * browser's tabs share it and every window of the app does too: the app's
+ * pane is a page on the board's origin in the floor windows' own session,
+ * so a change there reaches each window as a `storage` event. ↻ stays in
+ * the header: it is an action, not a setting. Only "off" is stored as
+ * off, so a fresh browser polls, as the switch's `checked` did.
+ */
+const AUTO_REFRESH_KEY = 'orch.autoRefresh';
+/** Whether a stored value means on. */
+function autoRefreshOn(stored) { return stored !== 'off'; }
+/** What is stored for a choice. */
+function autoRefreshValue(on) { return on ? 'on' : 'off'; }
+
+/* ---------- auto-refresh: end ---------- */
+
+function readAutoRefresh() {
+  try { return autoRefreshOn(localStorage.getItem(AUTO_REFRESH_KEY)); } catch { return true; }
+}
+
+function autoRefreshSection(compact = IN_APP) {
+  const on = readAutoRefresh();
+  return `
+    <div class="set-tool set-auto" id="set-auto">
+      <div>
+        <h4 class="set-h">Auto-refresh</h4>
+        ${compact ? '' : `<p>Redraws the board view every few seconds. Off, the board view changes only when you
+          press <span class="mono">↻</span>; the floor's desks and chats stay live either way. Kept in this browser,
+          for all of its tabs.</p>`}
+      </div>
+      <label class="set-check"><input type="checkbox" id="autorefresh" data-set-auto ${on ? 'checked' : ''}>
+        <span>${compact ? 'Every window' : 'On'}</span></label>
+    </div>`;
+}
+
+/*
+ * "Open new floors" (costmo, 2026-11-19): what the ⧉ beside a floor's name
+ * opens, this browser's choice. The rule and the key are floor.js's
+ * (window.floorOpen); this is only the row. Left out where floor.js did not
+ * load, and in the desktop app, whose Preferences own the choice.
+ */
+function floorsSection() {
+  const fo = window.floorOpen;
+  if (!fo || fo.inApp()) return '';
+  const mode = fo.get();
+  return `
+    <div class="set-tool set-floors" id="set-floors">
+      <div>
+        <h4 class="set-h">Open new floors</h4>
+        <p>What the <span class="mono">⧉</span> beside a floor's name in the floor picker opens. A ⌘-click or a
+          middle-click on the name still opens a tab. Kept in this browser.</p>
+        <p class="muted">A web page cannot open a full browser window, so a new window is one of its own with no
+          tab strip, the size of this one.</p>
+      </div>
+      <select class="input" id="floor-open" data-set-floor-open aria-label="Open new floors">
+        <option value="tab"${mode === 'window' ? '' : ' selected'}>In tabs</option>
+        <option value="window"${mode === 'window' ? ' selected' : ''}>In windows</option>
+      </select>
+    </div>`;
 }
 
 function renderSettings() {
@@ -1433,6 +1557,14 @@ function renderSettings() {
 }
 
 function openSettings() {
+  // In the desktop app the board's settings are in the app's Settings pane
+  // (costmo, 2026-11-19: the ⚙ opens it). The page asks for the settings
+  // page as a new window, and the app opens its pane instead of a window
+  // (contract dashboard.settings). A browser keeps the dialog.
+  if (IN_APP && !SETTINGS_PAGE) {
+    try { window.open(`${location.pathname}?settings=1`, '_blank'); } catch { /* the app said no: nothing to undo */ }
+    return;
+  }
   set.restored = null;
   set.backup = null;
   set.backupName = null;
@@ -1481,6 +1613,8 @@ async function chooseBackupFile(file) {
   set.backup = null;
   set.backupName = null;
   set.restored = null;
+  set.floors = null;
+  set.floorRestored = null;
   setErr(null);
   setNote(null);
   try {
@@ -1494,7 +1628,71 @@ async function chooseBackupFile(file) {
     setErr(`could not read ${file.name}: ${e.message ?? e}`);
     return;
   }
+  // The floors it holds, as the board reads them, for "bring over one floor".
+  // A board from before it answers 404, and the page offers the whole-board
+  // restore alone.
+  try {
+    const res = await fetch('./api/admin/backup/floors', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ backup: set.backup }) });
+    if (res.ok) set.floors = (await res.json()).floors ?? null;
+  } catch { set.floors = null; }
   renderSettings();
+}
+
+/**
+ * One floor of the chosen file (costmo, 2026-11-19): the floors it holds, as
+ * the board read them (POST /api/admin/backup/floors), a pick, and the
+ * floor's name typed to confirm, as a floor's delete is. The board's rules
+ * are on restoreFloor in src/db.js: only that floor here is replaced, and
+ * only when it holds nothing the file does not.
+ */
+function floorRestoreHtml(floors, compact) {
+  if (!floors?.length) return '';
+  const when = (t) => (t ? new Date(`${String(t).replace(' ', 'T')}Z`).toLocaleString() : 'no messages');
+  return `<div class="set-floor-restore">
+    <h5 class="set-h">Or bring over one floor</h5>
+    ${compact ? '<p class="set-warn">Replaces that floor only. Every other floor stays.</p>' : `<p>Replaces only that floor on this board with the file's copy, and every other floor is left as it is.
+      Refused, with nothing changed, if this board has anything on that floor the file does not. A row this board already has
+      keeps its number; one whose number this board has used for something else is numbered after everything here.</p>`}
+    <div class="dlg-confirm">
+      <select class="input" id="restore-floor-pick">${floors.map((f) =>
+        `<option value="${esc(f.channel)}">${esc(f.channel)} \u2014 ${f.messages} message${f.messages === 1 ? '' : 's'}, newest ${esc(when(f.newest))}${f.here ? '' : ' \u00b7 not on this board'}</option>`).join('')}</select>
+    </div>
+    <div class="dlg-confirm">
+      <input class="input mono" id="restore-floor-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="type the floor's name">
+      <button type="button" class="btn danger" data-set="restore-floor">Restore floor</button>
+    </div>
+  </div>`;
+}
+
+async function restoreFloor() {
+  const channel = el.setBody.querySelector('#restore-floor-pick')?.value ?? '';
+  const typed = el.setBody.querySelector('#restore-floor-confirm')?.value.trim() ?? '';
+  setErr(null);
+  if (typed !== channel) { setErr(`type ${channel} to restore that floor`); return; }
+  setNote(`restoring ${channel}…`);
+  const buttons = [...el.setBody.querySelectorAll('button, input, select')];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const res = await fetch('./api/admin/backup/restore-floor', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel, confirm: typed, backup: set.backup }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    set.floorRestored = json;
+    set.backup = null;
+    set.backupName = null;
+    set.floors = null;
+    renderSettings();
+    ui.lastChannelSig = null;
+    ui.lastLogSig = null;
+    tick();
+  } catch (e) {
+    buttons.forEach((b) => { b.disabled = false; });
+    setNote(null);
+    setErr(e.message ?? e);
+  }
 }
 
 async function restoreBackup() {
@@ -1534,24 +1732,33 @@ el.setDlg.addEventListener('click', (e) => {
     if (!holdsTyping(el.setBody.querySelectorAll('input, textarea'))) el.setDlg.close();
     return;
   }
+  if (e.target.closest('[data-set="close"]')) el.setDlg.close();
+});
+
+// The sections' own buttons are handled on their body, which the settings
+// page moves out of the dialog (SETTINGS_PAGE), so they work in both.
+el.setBody.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-set]');
   if (!btn) return;
-
   switch (btn.dataset.set) {
-    case 'close': el.setDlg.close(); break;
     case 'export': exportBackup(); break;
     case 'restore': restoreBackup(); break;
+    case 'restore-floor': restoreFloor(); break;
     default: break;
   }
 });
 
 el.setBody.addEventListener('change', (e) => {
+  const auto = e.target.closest('[data-set-auto]');
+  if (auto) { setAutoRefresh(auto.checked); return; }
+  const open = e.target.closest('[data-set-floor-open]');
+  if (open) { window.floorOpen?.set(open.value); return; }
   const input = e.target.closest('#restore-file');
   if (!input?.files?.[0]) return;
   chooseBackupFile(input.files[0]);
 });
 
-el.setDlg.addEventListener('close', () => { set.backup = null; set.backupName = null; });
+el.setDlg.addEventListener('close', () => { set.backup = null; set.backupName = null; set.floors = null; });
 
 /* ---------- updates: what the page decides ---------- */
 
@@ -1616,6 +1823,9 @@ function latestText(u) {
   const l = u.latest;
   const what = l ? `${l.version ? `v${l.version} · ` : ''}${sha7(l.sha)}` : '?';
   if (st === 'ahead') return `${what} — this build is ahead of ${u.branch}`;
+  // A host the desktop app runs is updated by the app, so the page offers
+  // nothing (`available` is false for it) and says here who does.
+  if (st === 'behind' && u.host?.supervisor === 'app') return `${what} — newer than this build. The Orchestratinator app installs updates on this machine, not this page.`;
   if (st === 'behind') return `${what} — ${u.standing.behind_by ? `${u.standing.behind_by} commit${u.standing.behind_by === 1 ? '' : 's'} newer than this build` : 'newer than this build'}`;
   if (st === 'diverged') return `${what} — this build was made from commits that are not on ${u.branch}`;
   return `${what}${u.standing?.why ? ` — ${u.standing.why}` : ''}`;
@@ -1679,17 +1889,18 @@ const upd = {
   busy: false,
 };
 
-function updatesSection(u) {
+function updatesSection(u, compact = IN_APP) {
   if (!u) return '<div id="set-updates"></div>';
   const cur = u.current ?? {};
+  const hint = (html) => (compact ? '' : ` <span class="muted">— ${html}</span>`);
   return `
     <div class="set-tool set-updates" id="set-updates">
       <div>
         <h4 class="set-h">Updates</h4>
         <label class="set-check"><input type="checkbox" data-upd="check" ${u.check ? 'checked' : ''}>
-          <span><b>Check for updates</b> <span class="muted">— once a day, from GitHub. Off, the board contacts GitHub only when you press Check now.</span></span></label>
+          <span><b>Check for updates</b>${hint('once a day, from GitHub. Off, the board contacts GitHub only when you press Check now.')}</span></label>
         <label class="set-check"><input type="checkbox" data-upd="dev" ${u.dev ? 'checked' : ''}>
-          <span><b>Use the development version</b> <span class="muted">— follow <span class="mono">develop</span> instead of <span class="mono">main</span>.</span></span></label>
+          <span><b>Use the development version</b>${hint('follow <span class="mono">develop</span> instead of <span class="mono">main</span>.')}</span></label>
         <dl class="set-facts">
           <dt>Current</dt><dd class="mono">v${esc(cur.version ?? '?')} · ${esc(sha7(cur.commit) ?? 'commit unknown')}</dd>
           <dt>Latest on ${esc(u.branch)}</dt><dd>${u.latest?.url && u.standing?.state !== 'latest'
@@ -1773,7 +1984,7 @@ function renderUpdate(state) {
   el.updBtn.hidden = !b;
   if (b) { el.updBtn.textContent = b.label; el.updBtn.title = b.title; el.updBtn.classList.toggle('busy', updRunning(u.run)); }
   if (el.updDlg.open) drawIfChanged(el.updBody, updatePanel(u));
-  const sec = el.setDlg.open ? el.setBody.querySelector('#set-updates') : null;
+  const sec = el.setDlg.open || SETTINGS_PAGE ? el.setBody.querySelector('#set-updates') : null;
   if (sec) {
     // Patched, for the same reason as the dialog (#37). It used to be
     // `sec.outerHTML = html` when `sec.outerHTML !== html`, and the two
@@ -1916,8 +2127,12 @@ async function tick({ background = false } = {}) {
   if (background && document.hidden) return; // don't poll a tab nobody is looking at
   inFlight = true;
   try {
-    if (POPOUT) {
+    if (POPOUT || SETTINGS_PAGE) {
       ui.state = await getJson('./api/state');
+      // The settings page is drawn whole once, on its first state, and
+      // patched after that like the dialog (renderUpdate), so a chosen
+      // backup file and a half-typed RESTORE survive every poll.
+      if (SETTINGS_PAGE && !set.drawn) { set.drawn = true; if (!set.backup && !set.restored) renderSettings(); }
       // A popout has no header, but it is a page on the old build too: it
       // watches an update and reloads onto the new one like the floor does
       // (issue #40). The reload keeps its ?popout= address, so it comes back
@@ -2120,10 +2335,14 @@ el.dlgBody.addEventListener('click', (e) => {
       const was = ui.deskForm.listing?.self?.bound ?? null;
       const moving = was && was.agent === body.agent && was.channel !== body.channel ? { channel: was.channel, agent: body.agent, to: body.channel } : null;
       const hostName = (ui.deskForm.hosts ?? []).find((h) => h.host_id === body.host_id)?.name ?? null;
+      // A release waits the same way, on the board's own record of the take:
+      // the desk it leaves is on another instance, so there is no desk here
+      // for the host to say a refusal on.
       act(async () => {
-        const before = moving ? await lastTurnIdOf(moving.channel, moving.agent) : null;
+        const before = moving && !body.from_board ? await lastTurnIdOf(moving.channel, moving.agent) : null;
         const r = await floorPost('desk', body);
-        if (moving && r.mode === 'move') await waitForMove(moving, before, hostName);
+        if (r.mode === 'release') await waitForTake(body, hostName);
+        else if (moving && r.mode === 'move') await waitForMove(moving, before, hostName);
         window.floorOpenDesk?.(body.channel, body.agent);
       });
       break;
@@ -2351,15 +2570,43 @@ el.dlg.addEventListener('close', () => {
 });
 
 const poll = () => tick({ background: true });
-let timer = setInterval(poll, REFRESH_MS);
-el.autorefresh.addEventListener('change', () => {
+let autoRefresh = readAutoRefresh();
+let timer = autoRefresh ? setInterval(poll, REFRESH_MS) : null;
+/** Start or stop this window's poll, and show the choice wherever it is drawn here. */
+function applyAutoRefresh(on) {
+  const box = el.setBody.querySelector('[data-set-auto]');
+  if (box) box.checked = on;
+  if (on === autoRefresh) return;
+  autoRefresh = on;
   clearInterval(timer);
-  if (el.autorefresh.checked) { timer = setInterval(poll, REFRESH_MS); tick(); }
+  timer = on ? setInterval(poll, REFRESH_MS) : null;
+  if (on) tick();
+}
+/** The choice made here: kept, then applied. Other windows hear it as `storage`. */
+function setAutoRefresh(on) {
+  try { localStorage.setItem(AUTO_REFRESH_KEY, autoRefreshValue(on)); } catch { /* this window still follows it */ }
+  applyAutoRefresh(on);
+}
+// Another tab, or the app's Settings pane, changed it.
+window.addEventListener('storage', (e) => {
+  if (e.key === AUTO_REFRESH_KEY || e.key === null) applyAutoRefresh(readAutoRefresh());
 });
 // Catch up as soon as the tab is looked at again.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && el.autorefresh.checked) tick();
+  if (!document.hidden && autoRefresh) tick();
 });
+
+// The settings page: the dialog's body, moved onto a page of its own.
+if (SETTINGS_PAGE) {
+  document.body.classList.add('view-settings');
+  document.title = 'Settings';
+  const page = document.createElement('main');
+  page.className = 'dlg set-page';
+  page.id = 'set-page';
+  page.append(el.setBody);
+  document.body.append(page);
+  renderSettings();
+}
 
 tick();
 
@@ -2375,10 +2622,12 @@ const RECENT_MAX = 5;
  * actually been run in, newest first, a handful of them.
  *
  * A folder nobody has opened is not recent, whatever its place in the host's
- * list, and one bound to another board cannot be taken from here — a row
- * whose only answer is a refusal is not worth one of five places. Sorted
- * here as well as by the host, so the order does not depend on every hop
- * between the two keeping it.
+ * list. One bound to another instance is left out as well. It used to be
+ * because such a row's only answer was a refusal; it can be released and
+ * taken now (releaseNoteText), and it is still left out, so that five places
+ * do not fill with another instance's desks on a machine that runs two. It
+ * is reached by standing in it. Sorted here as well as by the host, so the
+ * order does not depend on every hop between the two keeping it.
  */
 function recentFolders(folders, max = RECENT_MAX) {
   return (Array.isArray(folders) ? folders : [])
@@ -2412,10 +2661,14 @@ const DESK_DIR_KEY = 'orch.desk.dir';
  * else's. Anything in the store that is not an absolute path is no memory at
  * all — the store is the browser's and can hold whatever was once put there.
  */
+/** Absolute on the host's machine: `/…`, or a drive on Windows (`C:\…`).
+ *  The board's own copy of the rule is isAbsPath in src/floor.js. */
+const hostAbsPath = (p) => typeof p === 'string' && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p));
+
 function rememberedDir(storage, hostId) {
   try {
     const dir = JSON.parse(storage.getItem(DESK_DIR_KEY) ?? '{}')?.[hostId];
-    return typeof dir === 'string' && dir.startsWith('/') ? dir : null;
+    return hostAbsPath(dir) ? dir : null;
   } catch { return null; }
 }
 
@@ -2428,7 +2681,7 @@ function rememberedDir(storage, hostId) {
  * a remembered folder that has since gone costs nothing but being wrong.
  */
 function rememberDir(storage, hostId, dir) {
-  if (!hostId || typeof dir !== 'string' || !dir.startsWith('/')) return;
+  if (!hostId || !hostAbsPath(dir)) return;
   try {
     let all = {};
     try { all = JSON.parse(storage.getItem(DESK_DIR_KEY) ?? '{}') ?? {}; } catch { /* unreadable: start again */ }
@@ -2447,7 +2700,49 @@ function rememberDir(storage, hostId, dir) {
  */
 function takeBody(fm, { seat = false } = {}) {
   const channel = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
-  return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true, ...(seat ? { seat: true } : {}) };
+  // A folder bound to another instance: the take names the instance it is
+  // leaving, as the dialog showed it. That is what makes it a release, and
+  // the board refuses one whose address is no longer what the host reads.
+  const leaving = fm.listing?.self?.other_board ?? null;
+  return { host_id: fm.hostId, path: fm.path, channel, agent: fm.agent.trim(), open: true, ...(seat ? { seat: true } : {}), ...(leaving ? { from_board: leaving } : {}) };
+}
+
+/**
+ * Whether the folder the dialog stands in can be taken at all: any folder on
+ * this instance or bound to nothing, and one bound to another instance when
+ * the host can release it (a host from before that says nothing, and the
+ * board would refuse it as `old_host`).
+ */
+function takeable(self, host) {
+  return !!self && (!self.other_board || host?.release === true);
+}
+
+/**
+ * What a release does, in one sentence, before the click that does it. Plain
+ * text; the dialog escapes it.
+ *
+ * It names the instance being left, because that is the confirmation: the
+ * request carries the same address and is refused if the folder no longer
+ * says it. And it says the two things a person would otherwise find out
+ * afterwards. The binding comes out of the folder's own .mcp.json when that
+ * is where it is, which is a change in the repo's tree. And what the other
+ * instance holds for this agent (its messages, tasks and floor) stays there:
+ * the conversations are the folder's and come with it.
+ */
+function releaseNoteText(agent, to, board, scope) {
+  const where = scope === 'project' ? 'its entry comes out of the folder\'s .mcp.json (other servers stay)' : 'its entry comes out of Claude Code\'s local scope';
+  return `Releases it from ${board} and seats it here as ${agent} on ${to}: ${where}, and the folder is bound to this instance. A window open in the folder closes and a new conversation opens here — the one it was on stays in its folder, in the session picker and History; with no window open, it opens on its last conversation. Its messages and tasks on ${board} stay there. Refused while a turn is running.`;
+}
+
+/**
+ * What the host did with a take, read off `GET /api/floor/take`: 'seated',
+ * `{ refused }` in the host's words, or null while it has said neither (or
+ * this instance remembers no such take).
+ */
+function takeOutcome(take) {
+  if (take?.state === 'seated') return 'seated';
+  if (take?.state === 'refused') return { refused: take.error ?? 'The host refused and did not say why.' };
+  return null;
 }
 
 /**
@@ -2574,6 +2869,11 @@ function moveOutcome(floor, { channel, agent, to }, beforeId) {
  * (`agentTyped`: set by typing, cleared by browseTo on another folder, by a
  * pick and by a change of host), and only an untyped name is emptied. A
  * bound folder's agent still wins over anything typed.
+ *
+ * A folder bound to another instance fixes the agent the same way and
+ * proposes no floor: the floor it names is that instance's, and the dialog
+ * starts on the floor it was opened from, like an unbound folder (costmo,
+ * 2026-11-08, asked both ways: "The floor you opened from").
  */
 function takeListing(fm, got) {
   fm.listing = got;
@@ -2582,7 +2882,7 @@ function takeListing(fm, got) {
     const b = got.self?.bound ?? null;
     if (b) fm.agent = b.agent;
     else if (!fm.agentTyped) fm.agent = '';
-    if (!fm.wantChannel) { if (b) fm.channel = b.channel; }
+    if (!fm.wantChannel) { if (b && !got.self?.other_board) fm.channel = b.channel; }
     else if (!fm.channel) fm.channel = fm.wantChannel;
     fm.prefilled = fm.path;
   }
@@ -2623,7 +2923,10 @@ function takeListing(fm, got) {
  * folder's own makes the take a move; its own makes it an import into local
  * scope; an unbound folder asks for a name. One dialog, three modes, decided
  * by what the folder says and what you pick. The floor starts as the one
- * you are standing on and a folder does not change it (takeListing).
+ * you are standing on and a folder does not change it (takeListing). And a
+ * fourth, decided by the folder alone: one bound to another instance is
+ * released from it and seated here (releaseNoteText), where the dialog used
+ * to say "Change it there".
  *
  * Two things beside the picker are read rather than asked for. The agent's
  * name is the one it already carries on the board — shown, not typed, and
@@ -2852,12 +3155,15 @@ const agoText = (isoStr) => {
 
 /** The path from the root to here, one crumb per folder. */
 function crumbsOf(root, path) {
+  // A Windows host's paths are `C:\…`, joined with its own separator.
+  const sep = /^[A-Za-z]:[\\/]/.test(path) && path.includes('\\') ? '\\' : '/';
+  const split = sep === '\\' ? /[\\/]/ : '/';
   const base = root && path.startsWith(root) ? root : path;
-  const rest = path.slice(base.length).split('/').filter(Boolean);
-  const out = [{ name: base.split('/').filter(Boolean).pop() ?? base, path: base }];
+  const rest = path.slice(base.length).split(split).filter(Boolean);
+  const out = [{ name: base.split(split).filter(Boolean).pop() ?? base, path: base }];
   let p = base;
   for (const part of rest) {
-    p = `${p}/${part}`;
+    p = p.endsWith(sep) ? `${p}${part}` : `${p}${sep}${part}`;
     out.push({ name: part, path: p });
   }
   return out;
@@ -2875,7 +3181,7 @@ function renderDeskDialog({ opening = false } = {}) {
   const self = L?.self ?? null;
   const bound = self?.bound ?? null;
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
-  const mode = !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
+  const mode = self?.other_board ? 'release' : !bound ? 'take' : bound.channel === channelNow ? 'import' : 'move';
   // The floors on the board, never a put-away one — plus whatever the form
   // already holds, so a floor archived while the dialog is open keeps its place
   // in the dropdown rather than silently becoming another floor.
@@ -2895,12 +3201,14 @@ function renderDeskDialog({ opening = false } = {}) {
     : fm.pickNote ? esc(fm.pickNote)
     : '';
 
-  const title = mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
-  const primary = mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
+  const title = mode === 'release' ? `Release ${esc(bound?.agent ?? self.name)} from ${esc(self.other_board)}`
+    : mode === 'import' ? `Bring ${esc(self.name)} onto the floor` : mode === 'move' ? `Move ${esc(bound.agent)} to ${esc(channelNow || '…')}` : 'Take a desk';
+  const primary = mode === 'release' ? 'Release and seat here'
+    : mode === 'import' ? 'Bring onto the floor' : mode === 'move' ? `Move to ${esc(channelNow || '…')}` : 'Take desk';
   const dirRow = (f) => {
     const marks = [
       f.bound && !f.other_board ? `${f.bound.channel} / ${f.bound.agent}` : null,
-      f.other_board ? 'another board' : null,
+      f.other_board ? 'another instance' : null,
       f.sessions > 0 ? 'opened by Claude' : null,
     ].filter(Boolean);
     return `<button type="button" class="dir-row" data-go="${esc(f.path)}" title="Open ${esc(f.name)}"><span class="dir-name">${esc(f.name)}</span><span class="dir-marks">${marks.map(esc).join(' · ')}</span></button>`;
@@ -2920,7 +3228,7 @@ function renderDeskDialog({ opening = false } = {}) {
   let here = '';
   if (self) {
     const where = bound?.scope === 'project' ? 'its .mcp.json' : "Claude Code's local scope";
-    if (self.other_board) here = `<b>${esc(self.name)}</b> is bound to <span class="mono">${esc(self.other_board)}</span>, not this board. Change it there.`;
+    if (self.other_board) here = `<b>${esc(self.name)}</b> is <span class="mono">${esc(bound?.agent ?? '?')}</span> on <span class="mono">${esc(bound?.channel ?? '?')}</span> at <span class="mono">${esc(self.other_board)}</span>, another instance, according to ${where}.`;
     else if (bound) here = `<b>${esc(self.name)}</b> is <span class="mono">${esc(bound.agent)}</span> on <span class="mono">${esc(bound.channel)}</span>, according to ${where}.`;
     else here = `<b>${esc(self.name)}</b> is not a desk yet.${self.sessions > 0 ? ` Claude Code has opened it before (${self.sessions} conversation${self.sessions === 1 ? '' : 's'}).` : ''}`;
   }
@@ -2930,7 +3238,11 @@ function renderDeskDialog({ opening = false } = {}) {
   else if (!hosts.length) notes.push('No host is registered on this board, so there is nobody to bind a folder. Install the host on a machine that has the repos.');
   else if (!liveHosts.length) notes.push('Every host on this board is offline right now.');
   else if (fm.listing?.error) notes.push(`<b>${esc(fm.listing.error)}</b>`);
-  if (self && !self.other_board) {
+  if (self && mode === 'release') {
+    notes.push(takeable(self, host)
+      ? esc(releaseNoteText(bound?.agent ?? fm.agent, channelNow || '…', self.other_board, bound?.scope))
+      : `${esc(host?.name ?? 'This host')} runs a build from before a folder could be released from another instance. It can once it is updated.`);
+  } else if (self) {
     if (mode === 'take') {
       notes.push(`Binds this folder as the agent you name, on the floor you pick, and opens a window there. Nothing in the folder is edited.${self.trusted ? '' : ' Claude Code has not opened it before, so its window will ask the folder-trust question — on the desk, for you to answer.'}`);
     } else if (mode === 'import') {
@@ -2939,7 +3251,7 @@ function renderDeskDialog({ opening = false } = {}) {
       notes.push(esc(moveNoteText(bound.agent, channelNow, bound.channel)));
     }
   }
-  const canGo = !!(host?.live && self && !self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
+  const canGo = !!(host?.live && takeable(self, host) && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
   // "New desk here": the folder's agent seated on this floor as well, its
   // other sessions left running (seatOffer). Whether somebody already
   // answers to its name here is read off the board's own copy of the floor.
@@ -3099,6 +3411,36 @@ async function waitForSeat(seat, beforeId, host) {
 }
 
 /**
+ * A release, waited on like a move: the board accepting it, then the host
+ * making it or refusing it, read off the board's record of the take
+ * (takeOutcome). A refusal is the error act() shows in the dialog, in the
+ * host's words, and the dialog stays for the operator to look at the folder
+ * again: a release that stopped partway says which part took.
+ */
+async function waitForTake(body, host) {
+  const note = el.dlgBody.querySelector('.dlg-note');
+  const said = note?.textContent ?? null;
+  if (note) note.textContent = `Asked ${host ?? 'the host'} to release ${body.agent} from ${body.from_board} — waiting for it to sit down on ${body.channel}…`;
+  const until = Date.now() + MOVE_WAIT_MS;
+  const q = `host_id=${encodeURIComponent(body.host_id)}&channel=${encodeURIComponent(body.channel)}&agent=${encodeURIComponent(body.agent)}`;
+  try {
+    for (;;) {
+      const got = await fetch(`./api/floor/take?${q}`, { headers: { accept: 'application/json' } }).then((r) => r.json()).catch(() => null);
+      const out = takeOutcome(got?.take);
+      if (out === 'seated') return;
+      if (out?.refused) throw new Error(out.refused);
+      if (Date.now() > until) {
+        throw new Error(`No seat on ${body.channel} and no refusal from ${host ?? 'the host'} after ${MOVE_WAIT_MS / 1000}s. The release may yet arrive; look at the folder again to see where it is bound.`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  } catch (e) {
+    if (note && said !== null) note.textContent = said;
+    throw e;
+  }
+}
+
+/**
  * Move to another floor, from a desk's nameplate card (#18): Take a desk's
  * move, approached from the agent. The desk already names its folder, its
  * host and its agent, so the only question is the floor — chosen the way
@@ -3220,12 +3562,18 @@ el.dlgBody.addEventListener('input', (e) => {
   }
   const channelNow = fm.channel === '__new__' ? fm.newChannel.trim() : fm.channel;
   const go = el.dlgBody.querySelector('[data-do="desk-take"]');
-  if (go && !go.dataset.held) go.disabled = !(fm.listing?.self && !fm.listing.self.other_board && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
+  const host = (fm.hosts ?? []).find((h) => h.host_id === fm.hostId) ?? null;
+  if (go && !go.dataset.held) go.disabled = !(takeable(fm.listing?.self, host) && channelNow && fm.agent.trim() && !fm.waiting && !fm.picking);
+  // A release's note names the floor it lands on, like a move's.
+  if (fm.listing?.self?.other_board && takeable(fm.listing.self, host)) {
+    const note = el.dlgBody.querySelector('.dlg-note');
+    const b = fm.listing.self.bound;
+    if (note) note.textContent = releaseNoteText(b?.agent ?? fm.agent, channelNow || '…', fm.listing.self.other_board, b?.scope);
+  }
   // "New desk here" needs the same things, and a host that can (its title
   // carries the reason when it cannot, set when the dialog was drawn).
   const sit = el.dlgBody.querySelector('[data-do="desk-seat"]');
-  const sitHost = (fm.hosts ?? []).find((h) => h.host_id === fm.hostId);
-  if (sit && !sit.dataset.held) sit.disabled = !(go && !go.disabled && sitHost?.seats === true);
+  if (sit && !sit.dataset.held) sit.disabled = !(go && !go.disabled && host?.seats === true);
 });
 
 /* ---------- sessions: what a row says ---------- */

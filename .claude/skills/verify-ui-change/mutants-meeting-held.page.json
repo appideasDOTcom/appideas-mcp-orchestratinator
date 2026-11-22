@@ -1,0 +1,56 @@
+[
+ [
+  "a room's window ends its meeting on close even when the app said it is quitting",
+  "src/ui/floor.js",
+  "window.addEventListener('pagehide', () => (ui.meeting?.held ? leaveHeld() : endMeeting({ closing: true })));",
+  "window.addEventListener('pagehide', () => endMeeting({ closing: true }));"
+ ],
+ [
+  "the floor draws nothing for a held meeting",
+  "src/ui/floor.js",
+  "    if (ui.floorTab) keepHeld();\n",
+  ""
+ ],
+ [
+  "the app's floor does not open a held meeting's room",
+  "src/ui/floor.js",
+  "    if (!APP_UA.test(navigator.userAgent ?? '') || Date.now() - pageAt < HELD_OPEN_AFTER_MS) return;",
+  "    return;"
+ ],
+ [
+  "a browser floor opens a held room by itself",
+  "src/ui/floor.js",
+  "    if (!APP_UA.test(navigator.userAgent ?? '') || Date.now() - pageAt < HELD_OPEN_AFTER_MS) return;",
+  "    if (Date.now() - pageAt < HELD_OPEN_AFTER_MS) return;"
+ ],
+ [
+  "two app floors are not kept from both opening the room",
+  "src/ui/floor.js",
+  "      if (LOCKS) {\n        navigator.locks.request(`orch.meeting-held:",
+  "      if (false) {\n        navigator.locks.request(`orch.meeting-held:"
+ ],
+ [
+  "In a meeting on a held box raises nothing and opens nothing",
+  "src/ui/floor.js",
+  "    if (meetingKept(channel, key)) { openHeldRoom(Number(key)); return; }\n",
+  ""
+ ],
+ [
+  "End on a held box asks a window that is not there",
+  "src/ui/floor.js",
+  "    if (meetingKept(channel, key)) {\n      ui.meetEnding.set(key, Date.now());",
+  "    if (false) {\n      ui.meetEnding.set(key, Date.now());"
+ ],
+ [
+  "whether a meeting is held is not read off the board (the rejoin race)",
+  "src/ui/floor.js",
+  "    if ((floor?.meetings_held ?? []).some((m) => m.channel === channel && String(m.id) === String(key))) return true;\n",
+  ""
+ ],
+ [
+  "a held meeting's desk panel offers Bring back, not the room",
+  "src/ui/floor.js",
+  "      const kept = !!inMeeting && !!ui.outs.get(outKey(channel, agent))?.kept;",
+  "      const kept = false;"
+ ]
+]

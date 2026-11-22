@@ -1,0 +1,37 @@
+[
+ [
+  "an error turn reads as asking",
+  "floor",
+  "src/ui/floor.js",
+  "  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup || !!d.signin);",
+  "  const deskAsking = (d) => !!d?.live && (!!d.session?.awaiting_kind || !!d.permission?.startup || !!d.signin);"
+ ],
+ [
+  "a desk the board would refuse is counted as a nudge",
+  "floor",
+  "src/ui/floor.js",
+  "  const deskNudgeable = (d) => nudgeWaiting(d) > 0 && !!d?.nudge?.ok;",
+  "  const deskNudgeable = (d) => nudgeWaiting(d) > 0;"
+ ],
+ [
+  "nudge all keeps the drawn order, windowless desks first if drawn first",
+  "floor",
+  "src/ui/floor.js",
+  "    return [...go.filter((x) => !x.opens), ...go.filter((x) => x.opens)];",
+  "    return go;"
+ ],
+ [
+  "a popout looks its desk up only on floors not put away",
+  "floor",
+  "src/ui/floor.js",
+  "    if (scope?.kind === 'popout') return pick(all ?? [], (ch, d) => ch === scope.channel && d.agent === scope.agent);",
+  "    if (scope?.kind === 'popout') return pick(here ?? [], (ch, d) => ch === scope.channel && d.agent === scope.agent);"
+ ],
+ [
+  "a report is made from an empty payload before the first poll",
+  "floor",
+  "src/ui/floor.js",
+  "    if (!read) return { nudges: 0, asking: false, board: { nudges: 0, asking: false } };\n",
+  "    void read;\n"
+ ]
+]

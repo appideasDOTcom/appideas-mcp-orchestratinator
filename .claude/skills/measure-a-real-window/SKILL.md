@@ -547,6 +547,164 @@ predicted — a desk moved back to a floor it had left by a move missing from
 the recorders a deadline (`seconds`) longer than the session you plan: they
 stopped at ten minutes here, one move before the last reading was taken.
 
+### Two instances on one machine (task 292)
+
+Anything that happens *between* instances needs two of them, a host each,
+and windows both hosts can see. [`two-instances.sh`](probe-desk/two-instances.sh)
+is that rig, with the isolation above: both hosts' roots are one directory
+of yours, and their windows are on a tmux socket named for the rig, in one
+session called `orch`, because two hosts in one session is the real case.
+
+```bash
+T=$D/two-instances.sh; E=$SP/rel
+$T up "$E" "$PWD"                         # servers on 8962 (a) and 8963 (b), from the tree; keys probe-a, probe-b
+$D/make-probe.sh "$E/root/rel-desk"
+$T api "$E" a POST /api/floor/browse "{\"host_id\":\"rel-host-a\",\"path\":\"$E/root/rel-desk\"}"
+$T api "$E" a POST /api/floor/desk   "{\"host_id\":\"rel-host-a\",\"path\":\"$E/root/rel-desk\",\"channel\":\"rel-old\",\"agent\":\"probe\"}"
+$T tmux "$E" send-keys -t orch: Down; sleep 0.6; $T tmux "$E" send-keys -t orch: Enter     # the trust question
+# … then the same two calls on b, with "from_board":"http://localhost:8962": the release
+$T api "$E" b GET "/api/floor/take?host_id=rel-host-b&channel=rel-new&agent=probe"
+$T hosts "$E" "$PWD"                      # after editing host/*.js: the hosts only, the servers stay
+$T api "$E" a POST /api/floor/desk/leave '{"channel":"rel-old","agent":"probe"}'            # removes the binding
+$T down "$E"
+```
+
+To ask a window which instance it is on, send it a message through that
+instance's floor (`/api/floor/chat`) asking it to call `whoami` and repeat
+the channel. That costs a few tokens and is the only proof the window's
+connection moved. What it measured on 2026-11-08: a release with the other
+host's window open seated in 1.2 s and opened a new conversation; one with
+no window resumed the conversation last spoken in (`claude --resume <id>`
+in `ps`), and that window answered as the new instance. Before the host
+looked at bindings, the instance that was left got every turn of the new
+conversation for 40 s; after, its host let go in 0.9 s.
+
+Three things about running it. **A host started from a script keeps the
+script's stdout**, so `up … | tail` never returned until every stream of
+the pair went to the log. **Stop by the pid files, never by a pattern**: a
+`ps | grep "host/index.js"` in a command that itself names that file
+killed the shell running it (exit 144), and the live host matches the same
+pattern. And **a command the harness moved to the background is still
+running**: one that hung on `up` carried on into its `hosts` and `down`
+when its pipe closed, on the same directory as the rerun, and the two
+scripts overwrote each other's pid files.
+
+## A board that goes away: the reconnect and a room's notices
+
+The rig that showed both features of 2026-11-19 working on a real window
+(CLAUDE.md, "/mcp from the floor, a reconnect the board asks for, and a
+room's notices"): a scratch board, the probe folder bound to it in local
+scope, a dev host on the probe's socket, and the probe window. All of it
+is in [`probe-host.sh`](probe-host.sh).
+
+```bash
+export PROBE_HOST_STATE=$SP/ph                           # its pids, logs and database
+H=.claude/skills/measure-a-real-window/probe-host.sh
+$H up "$SP/rig"                                          # board :8931, binding, host probe-rig-host
+$H window          # the window, its trust question answered, its MCP session waited for
+$H outage 5        # 2.1.328: sessions=1 within seconds, no host line (it healed by itself)
+$H outage 90       # 2.1.328: the host's line "the desk's tools had lost the board, so the
+                   # host ran /mcp — Reconnected to orchestratinator", 25 s after the board
+$H room            # the window's two notes, filed as context/meeting-room
+$H down
+```
+
+Bind before the window starts: a window reads its MCP servers at start.
+And an outage only means something to a window that holds a session.
+The first cut of this script let `probe.mjs up` start the window in a
+new folder, where it sat on the trust question with nothing connected,
+and both outages then read "no reconnect" as if that were a result.
+`outage` refuses now unless the board has the session. And the window is
+`exec claude`, never `claude; sleep 30` (the reader sweep's form): with a
+shell in between, the pane's pid is not the session's, and the host reads
+the window as an editor's (`window_id` null, `outside_pid` set). Neither
+a reconnect nor a notice goes to an editor's desk, so the second run read
+"no reconnect" for that reason. `window` waits for `held: floor` as well.
+`up` refuses 8787, 6724 and any port that answers, and the host's id is
+its own, never the hostname (the live host's row). Read without a
+script, `/mcp` itself on 2.1.328: bare, it opens the "MCP servers" panel
+(an arrow list, `✘ orchestratinator` when dropped). `/mcp reconnect
+<name>` writes "Reconnected to <name>", "Couldn't reconnect to <name>"
+with the board down, or `MCP server "x" not found`, each as
+local-command-stdout. `reconnect all` adds "1 still not connected" for
+the disabled computer-use. Typed into a running turn, it vanished: no
+record, no queue entry.
+
+## When `claude --version` moves: the reader sweep
+
+Claude Code 2.1.326 moved two screens the host reads by position, and the
+floor failed on every desk without a word that blamed the update: a model
+change ended "no sign of running it within 20s", and a multi-question form
+was called answered while it stood unsubmitted (CLAUDE.md, "A Claude Code
+update can move a line the host reads by position"; 0.12.12). The sweep
+that found both, and `/cost`, took about forty minutes on 2.1.327
+(2026-11-18). Run it when the version moves, before believing a report
+that the floor "stopped working". Every step goes through the tree's own
+host code against a probe on `-L probe`, at **80x24**, the size the host
+opens windows at.
+
+```bash
+SP=<scratchpad>; export PATH=$HOME/.nvm/versions/node/v24.22.2/bin:$PATH
+printf '#!/bin/sh\nexec tmux -L probe "$@"\n' > "$SP/tmuxw"; chmod +x "$SP/tmuxw"
+export ORCH_TMUX="$SP/tmuxw" ORCH_TMUX_SESSION=p
+cp -p ~/.claude/settings.json "$SP/settings.json.before"     # /model writes it
+mkdir -p "$SP/p" "$SP/panes"   # a NEW folder each time, so the trust question is asked
+# `claude; sleep 30`, not `exec claude`: an exit stays on screen to read.
+tmux -L probe new-session -d -s p -n probe -c "$SP/p" -x 80 -y 24 'claude; sleep 30'
+```
+
+1. **Trust question**: capture the pane, read it with `startupQuestionOf`,
+   then `answerStartup(dir, 2)` (the host's presser). 2.1.327: read, and
+   "Yes, I trust this folder" chosen.
+2. **Permission menu**: restart with `claude --permission-mode default`,
+   ask for a `touch`, then `readPrompt`, `promptChoices`, and
+   `answerPrompt(dir, String(deny))`. 2.1.327 has four rows ("Yes, and
+   switch to auto mode" is new) and Deny is row 4; the floor finds Approve
+   and Deny by their words, so it held.
+3. **Forms**: `form.mjs` with two single-selects, then a preview question
+   plus a multi-select (the Usage at the top of `form.mjs`). The receipt is
+   the tool result in the transcript. "readQuestions → … Submit[single,2]"
+   or "tool result NONE" is the review screen not being read.
+4. **Commands**: `send.mjs` with `/model <other>` on a conversation that
+   has a reply cached (the "Switch model?" path), then `/btw …`, then
+   `/cost` and a plain message after it (the message must reach the
+   composer). Then `send.mjs '/mcp reconnect orchestratinator'` on a
+   window started with an MCP server (`probe-host.sh up` first, or
+   `claude --mcp-config`): the receipt is "Reconnected to …" as the
+   window's stdout, and a bare `/mcp` from the floor depends on it
+   (`typedCommand`). The automatic reconnect depends on it as well:
+   `probe-host.sh outage 90`.
+5. Put the settings back: `restore-settings.py "$SP/settings.json.before"`,
+   then `tmux -L probe kill-server`.
+
+Save every pane you read (`capture-pane -p > "$SP/panes/<name>.txt"`):
+the fixes' rows in `test/window.mjs` are built from those captures, and QA
+asks for them. A reader that fails gets its fix, a row from the real
+capture beside the old shape's, and a mutant
+(`mutants-claude-2-1-326.suite.json` is the list from that day).
+
+**2.1.328, the same sweep (2026-11-19, a subagent, about five minutes).**
+Every reader held. One fault, in a presser and not a reader: under a load
+average near 100 `answerStartup` read the cursor 80 ms after its key,
+before the redraw, and refused the trust question with the cursor already
+on "Yes, I trust this folder". It reads until the cursor lands now
+(CLAUDE.md, "The host under the desktop app"). Three things that moved and
+broke nothing: the permission menu has a line under "Bash command", "Tip:
+auto mode handles these prompts for you…", which lands in the question's
+text; `/cost` is listed as "/usage (cost)" and still opens the settings
+screen on its Usage tab; and `/model sonnet` on a conversation whose
+replies were Fable's raised no "Switch model?" (0 of 34 frames), while
+`/model haiku` after one more reply did, which is not what "whenever the
+conversation has a reply cached" says below. Not chased. The sweep is a
+good thing to hand a subagent whole: give it this section, the scratchpad,
+and "never the default socket, never 8787 or 6724, restore settings.json".
+
+Unexplained, seen once on 2.1.327: `probe.mjs up` printed "up" with an
+empty footer, and the probe's tmux server was gone (its pane runs `exec
+claude`, so an exit leaves nothing to read). Started by hand as above, the
+same folder worked. If `up` does that again, start it by hand and read
+what Claude Code says before it exits.
+
 ## A model or effort change
 
 Since 2026-11-14 the floor changes a model or an effort level by typing the

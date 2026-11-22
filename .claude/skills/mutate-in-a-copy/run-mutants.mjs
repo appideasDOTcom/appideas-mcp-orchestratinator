@@ -48,6 +48,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, copyFileSync, renameSync, mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+// A suite is started through scripts/node-floor.sh, which finds a Node that
+// can load this tree's better-sqlite3 (this machine's default cannot), and
+// under the name package.json gives it: every suite is `test:<name>` but
+// smoke, which is `smoke`. Both were false survivors once (2026-11-08): a
+// suite that never starts prints no ✗, and "0 failing" was read as a mutant
+// nothing caught. So a run with no ✗ and no ✓ is said to be no result.
+const runSuite = (copy, name) => spawnSync('bash', ['-c', '. scripts/node-floor.sh && npm run "$0"', name === 'smoke' ? 'smoke' : `test:${name}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
+const didNotRun = (out) => out.trim().split('\n').filter(Boolean).slice(-4).map((l) => `    ${l.slice(0, 220)}`).join('\n');
 
 const D = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -81,11 +89,12 @@ for (const [n, [name, suite, file, oldS, newS]] of M.entries()) {
     const applied = spawnSync('python3', [`${D}/mutate.py`, f, oldS, newS], { encoding: 'utf8' });
     if (applied.status !== 0) { console.log(`MUTANT [${name}]: DID NOT APPLY — ${(applied.stderr || applied.stdout).trim()}`); continue; }
     const t0 = Date.now();
-    const run = spawnSync('npm', ['run', `test:${suite}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
+    const run = runSuite(copy, suite);
     const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
     keep(`${n + 1}-${suite}.log`, out);
     const red = out.split('\n').filter(isRed);
     const green = out.split('\n').filter(isGreen).length;
+    if (!red.length && !green) { console.log(`MUTANT [${name}] (${suite}): THE SUITE DID NOT RUN — not a result. Its last lines:\n${didNotRun(out)}`); continue; }
     // A suite that stops on a throw prints a stack, not a ✗, and its own
     // catch still fails the run: its exit is the verdict then. Read by ✗
     // lines alone, such a run was reported SURVIVED (milestone round,
@@ -107,7 +116,7 @@ for (const [n, [name, suite, file, oldS, newS]] of M.entries()) {
 if (control) {
   for (const suite of [...new Set(M.map((m) => m[1]))]) {
     const t0 = Date.now();
-    const run = spawnSync('npm', ['run', `test:${suite}`], { cwd: copy, encoding: 'utf8', maxBuffer: 64e6 });
+    const run = runSuite(copy, suite);
     const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
     keep(`control-${suite}.log`, out);
     const red = out.split('\n').filter(isRed);

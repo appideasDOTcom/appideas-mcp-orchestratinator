@@ -153,6 +153,14 @@ End to end:
    the measurement). A move with no floor window opens on the desk's last
    conversation, as before. The editor case is not refused — see "Two design
    consequences" below.
+   *A folder bound to another instance (task 292, 0.12.7).* The design
+   above refused it ("Change it there"). Since 0.12.7 Take a desk releases
+   it from that instance and seats it here: `POST /api/floor/desk` with
+   `from_board` naming the address being left, mode `release`. The host
+   removes that instance's entry from both scopes, binds with its own key,
+   closes a window open in the folder, and opens per `open`. What it did is
+   read from `GET /api/floor/take`. CLAUDE.md, "Releasing a folder from
+   another instance", has the ruling and the measurements.
 5. **Remove a desk** is the same route backwards, and it should be offered:
    a binding that can only be made from the floor and only unmade in a file is
    the old problem with a new front.

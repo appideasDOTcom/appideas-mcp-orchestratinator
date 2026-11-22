@@ -52,7 +52,7 @@
   "the page reads a relative path as an attachment",
   "floor",
   "src/ui/floor.js",
-  "    if (!lines.length || !lines.every((l) => /^- \\/\\S/.test(l))) return { text: s, files: [] };",
+  "    if (!lines.length || !lines.every((l) => /^- (?:\\/|[A-Za-z]:[\\\\/])\\S/.test(l))) return { text: s, files: [] };",
   "    if (!lines.length || !lines.every((l) => /^- \\S/.test(l))) return { text: s, files: [] };"
  ],
  [
