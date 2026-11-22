@@ -59,7 +59,7 @@
   "a Claude Code under its window's shell is never found (F3: both guards, the watch's and the healer's, call this)",
   "host",
   "host/window.js",
-  "  if (WINDOWS || !ancestor || !pids?.length) return false;",
+  "  return underIn(parentsOf(await read()), ancestor, pids);",
   "  return false;"
  ],
  [
@@ -138,5 +138,19 @@
   "host/auth.js",
   "      const t = setTimeout(() => finish(readSignedIn(out)), 100);",
   "      const t = null;"
+ ],
+ [
+  "Windows answers no for a Claude Code under the pane's shell again (F3 on Windows, task 334)",
+  "window",
+  "host/window.js",
+  "  if (!ancestor || !pids?.length) return false;\n  return underIn(parentsOf(await read()), ancestor, pids);",
+  "  if (windows || !ancestor || !pids?.length) return false;\n  return underIn(parentsOf(await read()), ancestor, pids);"
+ ],
+ [
+  "Windows reads its process table with ps (F3 on Windows, task 334)",
+  "window",
+  "host/window.js",
+  "  if (!windows) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };",
+  "  if (true) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };"
  ]
 ]

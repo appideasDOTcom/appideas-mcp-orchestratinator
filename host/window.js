@@ -965,18 +965,47 @@ export function underIn(parent, ancestor, pids) {
   return false;
 }
 
-/** The same, read off `ps`. On Windows a window is its program, with no shell to stand between. */
-export async function runsUnder(ancestor, pids) {
-  if (WINDOWS || !ancestor || !pids?.length) return false;
-  const out = await new Promise((resolve) => {
-    execFile('ps', ['-A', '-o', 'pid=,ppid='], { timeout: 5000 }, (err, o) => resolve(err ? '' : String(o)));
-  });
+/**
+ * How each process's parent is read: `ps` on the Mac and Linux, and on
+ * Windows Win32_Process through Windows PowerShell 5.1, which every Windows
+ * has. On Windows a window the host opens IS its program (launchArgs), so the
+ * pane's pid is the roster's; but a Claude Code a person types into a psmux
+ * window runs under that window's PowerShell, one hop down. Measured by
+ * pc-developer on the PC (2026-11-22, 0.14.5 review task 334: psmux 3.4.0,
+ * Claude Code 2.1.330): pane pid 4292 = powershell.exe, the roster's pid 4884
+ * = claude.exe with ParentProcessId 4292, and the 30 s rule closed it 32 s
+ * after `claude` was typed, because this read used to answer false there.
+ * The table read takes 0.33 to 0.44 s there (pc-developer, five runs of
+ * readParents in node at 18% CPU, about 300 processes). It is asked only when a
+ * roster session in the folder does not match the pane's pid, so a window
+ * the host started, whose pid matches, never pays for it.
+ */
+export function parentsCommand({ windows = WINDOWS, env = process.env } = {}) {
+  if (!windows) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };
+  return {
+    cmd: join(env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    args: ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId }"],
+  };
+}
+/** Each process's parent, from what parentsCommand printed (`pid ppid` a line, CRLF or LF). */
+export function parentsOf(out) {
   const parent = new Map();
-  for (const l of out.split('\n')) {
+  for (const l of String(out ?? '').split('\n')) {
     const m = /^\s*(\d+)\s+(\d+)/.exec(l);
     if (m) parent.set(Number(m[1]), Number(m[2]));
   }
-  return underIn(parent, ancestor, pids);
+  return parent;
+}
+export function readParents({ windows = WINDOWS } = {}) {
+  const { cmd, args } = parentsCommand({ windows });
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: windows ? 10_000 : 5000, windowsHide: true }, (err, o) => resolve(err ? '' : String(o)));
+  });
+}
+/** Whether any of `pids` runs under the process `ancestor`, read off this machine's process table. */
+export async function runsUnder(ancestor, pids, { windows = WINDOWS, read = () => readParents({ windows }) } = {}) {
+  if (!ancestor || !pids?.length) return false;
+  return underIn(parentsOf(await read()), ancestor, pids);
 }
 
 /**

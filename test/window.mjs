@@ -1876,6 +1876,16 @@ async function main() {
       const kid = spawn('/bin/sh', ['-c', 'sleep 5; :'], { stdio: 'ignore' });
       await sleep(200);
       eq([await W.runsUnder?.(process.pid, [kid.pid]), await W.runsUnder?.(kid.pid, [process.pid])], [true, false], 'and read off ps: this suite\'s child runs under it, not the other way round');
+      // On Windows too (task 334, costmo: fix in 0.14.5). pc-developer's table
+      // from the PC, Win32_Process as `pid ppid`, CRLF: the hand-started
+      // claude.exe 4884 under the psmux pane's powershell.exe 4292, and a
+      // host-started window (10992) whose pane pid is its own.
+      const pcTable = '4884 4292\r\n4292 15704\r\n15704 2800\r\n10992 15704\r\n8532 15704\r\n';
+      eq([await W.runsUnder?.(4292, [4884], { windows: true, read: async () => pcTable }), await W.runsUnder?.(10992, [4884, 8532], { windows: true, read: async () => pcTable })], [true, false],
+        'on Windows a Claude Code typed into a psmux pane\'s PowerShell runs under that pane; a host-started window is its own pid and nothing runs under it');
+      const winCmd = W.parentsCommand?.({ windows: true, env: { SystemRoot: 'C:\\Windows' } });
+      eq([/powershell\.exe$/.test(winCmd?.cmd ?? ''), /Get-CimInstance Win32_Process/.test(winCmd?.args?.at(-1) ?? ''), W.parentsCommand?.({ windows: false })?.cmd], [true, true, 'ps'],
+        'the table is read from Win32_Process through Windows PowerShell there, and from ps elsewhere');
       kid.kill();
     }
 
