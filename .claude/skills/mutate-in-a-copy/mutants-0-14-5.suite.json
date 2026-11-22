@@ -21,6 +21,13 @@
   "    if (false) return false;"
  ],
  [
+  "a colour's arguments are read as attributes, so a truecolor draft reads as dim (F2, QA 3850)",
+  "window",
+  "host/window.js",
+  "      i += kind === '5' ? 2 : kind === '2' ? 4 : 1;",
+  "      i += 0;"
+ ],
+ [
   "a profile's own line hides the sign-in answer (F1)",
   "host",
   "host/auth.js",

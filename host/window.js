@@ -846,7 +846,10 @@ export async function standingIdleAt(target) {
  *
  * A draft is text in the box that is not drawn dim. A prompt suggestion is
  * drawn dim (SGR 2, CLAUDE.md "a line in the composer that nobody typed",
- * measured on 2.1.300), typed text in the terminal's colours. Where the
+ * measured on 2.1.300), and so is a fresh window's placeholder hint
+ * (2.1.330, 2026-11-21: `❯ ESC[2mTry "how does <filepath> work?"ESC[0m`,
+ * cursor at column 2); typed text is in the terminal's colours (no SGR, or
+ * `38;5;231`, read on the same day's panes). Where the
  * cursor stands is not the test: the first cut of this said "cursor right
  * behind the `❯`" meant no draft, and QA's F2-b showed what that misses,
  * measured on the rig the same afternoon: a draft with Ctrl-A pressed has
@@ -860,6 +863,33 @@ export async function standingIdleAt(target) {
  * errs one way: a suggestion that came undimmed would read as a draft, and
  * the host would wait with what it owes rather than type over a person.
  */
+/**
+ * Whether an SGR sequence's parameters leave the text dim, given whether it
+ * was dim before. The colour forms take arguments, and those arguments are
+ * not attributes: `38;2;255;255;255` is a truecolor foreground, not "dim",
+ * and `38;5;2` is colour index 2. The first cut of this read every parameter
+ * on its own, so a draft drawn in truecolor or in index 2 read as a dim
+ * suggestion (QA's probe, 0.14.5 review 3850). So 38 (foreground), 48
+ * (background) and 58 (underline colour) consume `5;n` or `2;r;g;b` after
+ * them, or nothing when written with colons (`38:2::r:g:b`, one parameter),
+ * before 2 (dim), 22 (normal intensity) and 0 or empty (reset) are judged.
+ */
+export function sgrDim(params, dim = false) {
+  const ps = params === '' ? [''] : String(params).split(';');
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    const head = p.split(':')[0];
+    if (head === '38' || head === '48' || head === '58') {
+      if (p.includes(':')) continue;
+      const kind = ps[i + 1];
+      i += kind === '5' ? 2 : kind === '2' ? 4 : 1;
+      continue;
+    }
+    if (p === '' || p === '0' || p === '22') dim = false;
+    else if (p === '2') dim = true;
+  }
+  return dim;
+}
 export function dimOnly(row) {
   const text = String(row ?? '');
   const at = text.indexOf('❯');
@@ -869,12 +899,9 @@ export function dimOnly(row) {
   // eslint-disable-next-line no-control-regex
   const parts = text.slice(at + 1).split(/(\u001b\[[0-9;:]*m)/);
   for (const part of parts) {
+    // eslint-disable-next-line no-control-regex
     const sgr = /^\u001b\[([0-9;:]*)m$/.exec(part);
-    if (sgr) {
-      const codes = sgr[1] === '' ? ['0'] : sgr[1].split(/[;:]/);
-      for (const c of codes) { if (c === '2') dim = true; else if (c === '0' || c === '22') dim = false; }
-      continue;
-    }
+    if (sgr) { dim = sgrDim(sgr[1], dim); continue; }
     // eslint-disable-next-line no-control-regex
     const visible = part.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+/g, '');
     if (!visible) continue;

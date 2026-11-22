@@ -1824,6 +1824,19 @@ async function main() {
         'a draft is a draft wherever the cursor stands (F2-b: Ctrl-A put it at the start)');
       eq([W.dimOnly?.(`❯ ${DIM}one ${UNDIM}${DIM}two${UNDIM}`), W.dimOnly?.(`❯ ${DIM}dim${UNDIM} typed`), W.dimOnly?.('❯ '), W.dimOnly?.(`❯ \u001b[0;2mdim\u001b[0m`)], [true, false, false, true],
         'a row is a suggestion only when every visible character after the mark is dim');
+      // The colour forms' arguments are not attributes (QA's probe, 0.14.5
+      // review 3850): the second cut read the 2 in `38;2;r;g;b` and in
+      // `38;5;2` as "dim", so a draft in truecolor or in index 2 read as a
+      // suggestion, and the 0 in a truecolor component as "reset".
+      const E = '\u001b[';
+      const reads = (r) => W.draftOf?.(box('❯ x'), '❯ ' + r);
+      eq([reads(E + '38;2;255;255;255mhalf a sentence' + E + '0m'), reads(E + '38;5;2mhalf a sentence'), reads(E + '48;2;40;40;40mhalf a sentence'),
+        reads(E + '38:2::255:255:255mhalf a sentence'), reads(E + '38:5:2mhalf a sentence')],
+        [true, true, true, true, true], 'a draft drawn in truecolor, in colour index 2, on a truecolor background, or in the colon forms is a draft');
+      eq([reads(E + '2;38;2;120;120;0mTry this' + E + '0m'), reads(E + '2mTry "how does <filepath> work?"' + E + '0m')], [false, false],
+        'a dim suggestion whose colour has a 0 in it is still a suggestion, and so is 2.1.330\'s placeholder as it draws it (ESC[2m … ESC[0m, measured)');
+      eq([W.sgrDim?.('38;2;255;255;255'), W.sgrDim?.('38;5;2'), W.sgrDim?.('2;38;5;246'), W.sgrDim?.('22', true), W.sgrDim?.('', true), W.sgrDim?.('48;5;0', true)], [false, false, true, false, false, true],
+        'an SGR sequence is read parameter by parameter, a colour with its arguments as one');
       writeFileSync(`${CP_DIR}/cursor.flag`, '1');
       await run('tmux', ['send-keys', '-t', cpTarget, 'C-u']).catch(() => {});
       await run('tmux', ['send-keys', '-t', cpTarget, '-l', 'half a sentence nobody sent']).catch(() => {});
