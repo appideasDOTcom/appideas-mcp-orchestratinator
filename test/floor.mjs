@@ -14,8 +14,18 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, wakeDue, wakeWords, wakeText, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
+
+// No host a suite starts may see the machine's tmux (2026-11-23): a host lists
+// the panes of session `orch` at its start (W.endLegacyWindows), and a mutant
+// that dropped its folder check ended the operator's own agents' windows on
+// the real server. Every host spawned here inherits this; a row that wants a
+// tmux passes its own stand-in.
+process.env.ORCH_TMUX = '/nonexistent/orch-suite-has-no-tmux';
+// Nor runs the protocol probe on a real Claude Code (task 351): a row that
+// wants it names a stand-in (ORCH_CANARY_STANDIN) and turns it on.
+process.env.ORCH_CANARY = 'off';
 
 // The host<->board protocol this tree speaks: every registration a suite
 // rolls by hand is a host, and a host that sends no number is refused.
@@ -419,6 +429,12 @@ try {
   eq(claudeable({ ...live, outside_pid: 4242 }).code, 'held_by_editor', 'but not one another process holds');
   assert(/CLI|terminal/i.test(claudeable({ ...live, outside_pid: 4242 }).error),
          'and that refusal names a CLI as well as an editor — the person clicking this button is the one whose holder IS a terminal');
+  // A handoff ends the desk's Claude Code, so a turn or a question in hand
+  // would be cut off (QA, task 347 R11): refused in words, as Open in VS
+  // Code refuses a working desk.
+  eq(claudeable({ ...live, state: 'working' }).code, 'working', 'not one in the middle of a turn, which the handoff would end');
+  eq(claudeable(live, Date.now(), { lastTurn: { role: 'tool' } }).code, 'working', 'nor one whose last turn is a tool call');
+  eq(claudeable(live, Date.now(), { pending: { request_id: 'cu-1' } }).code, 'asking', 'nor one asking a question the handoff would end unanswered');
   eq(claudeable(null).code, 'not_hosted', 'nor one no host is running');
   eq(claudeable({ ...live, host_seen: stale }).code, 'host_offline',
      'nor one whose host is offline — only the host can open the window this button may need to open');
@@ -4741,6 +4757,37 @@ try {
     sqlT.close();
     await opT('/api/floor/meeting/end', { id: tRoom, final: true });
     eq((await told()).length, 3, 'and is cleared as each is told it is back');
+  }
+
+  console.log('\nwaking a desk with work waiting and no Claude Code (task 350, costmo 2026-11-23)');
+  {
+    const k = (a) => `f|${a}`;
+    const desk = (agent, more = {}) => ({ channel: 'f', agent, window_id: null, outside_pid: null, state: 'idle', ...more });
+    const state = new Map();
+    let work = new Map([[k('bo'), { unread: 2, unreadMax: 10, tasks: [] }], [k('cy'), { unread: 0, unreadMax: 0, tasks: [7] }]]);
+    const run = (desks, nowMs, more = {}) => wakeDue(desks, { work, state, nowMs, after: 1000, retry: 5000, tries: 2, ...more });
+    const woke = (desks, nowMs, more) => run(desks, nowMs, more).wake.map((x) => x.desk.agent);
+    eq(woke([desk('bo'), desk('cy')], 0), [], 'a desk with work waiting is not woken at once: its Claude Code may be restarting or handed over');
+    eq(woke([desk('bo'), desk('cy')], 1000), ['bo', 'cy'], 'it is, once it has had none for the grace: unread messages, or a task assigned or claimed');
+    eq(woke([desk('bo'), desk('cy')], 1500), [], 'and not again for the same work');
+    eq(woke([desk('bo', { window_id: 'proc:1' }), desk('cy', { window_id: 'proc:2' })], 2000), [], 'a running desk is not woken');
+    eq(woke([desk('bo'), desk('cy')], 99000), [], 'nor, once it came up, woken again for the same work when it goes quiet');
+    work = new Map([[k('bo'), { unread: 3, unreadMax: 11, tasks: [] }]]);
+    eq(woke([desk('bo')], 100500), ['bo'], 'a new message is new work, and wakes it again, after the grace');
+    eq(woke([desk('ed', { outside_pid: 4242 })], 200000, { work: new Map([[k('ed'), { unread: 1, unreadMax: 5, tasks: [] }]]) }), [], 'one an editor or a terminal holds is never woken: never a second process');
+    const w2 = new Map([[k('dee'), { unread: 1, unreadMax: 5, tasks: [] }]]);
+    eq(woke([desk('dee')], 0, { work: w2, blocked: () => true }), [], 'nor one the board would not message (host offline, signed out, refused)');
+    eq(woke([desk('dee')], 0, { work: w2, skip: new Map([[k('dee'), true]]) }), [], 'nor one hidden, archived or asking');
+    eq(woke([desk('dee')], 0, { work: w2 }), [], 'the fixture: dee waits out the grace');
+    eq(woke([desk('dee')], 1000, { work: w2 }), ['dee'], 'woken');
+    eq(woke([desk('dee')], 2000, { work: w2 }), [], 'a start that did not come up is not retried inside the retry');
+    eq(woke([desk('dee')], 6000, { work: w2 }), ['dee'], 'it is after it');
+    const last = run([desk('dee')], 12000, { work: w2 });
+    eq([last.wake.length, last.gaveUp.map((x) => x.desk.agent)], [0, ['dee']], 'and after its tries it is given up, once, to be said on the desk');
+    eq(run([desk('dee')], 20000, { work: w2 }).gaveUp.length, 0, 'and said only once');
+    eq(wakeWords({ unread: 3, tasks: [1] }), '3 unread messages, 1 task', 'said as what it is for');
+    eq(wakeText({ unread: 1, tasks: [] }), 'nudge — the floor woke you: 1 unread message waiting for you on the board. Poll your messages and list your open tasks.',
+      'and the woken desk is told what the work is and what to do, not only the bell\'s word (QA L4)');
   }
 
   console.log('\nreconnecting a floor window whose tools dropped (costmo, 2026-11-19)');

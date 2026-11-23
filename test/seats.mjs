@@ -30,6 +30,16 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+// No host a suite starts may see the machine's tmux (2026-11-23): a host lists
+// the panes of session `orch` at its start (W.endLegacyWindows), and a mutant
+// that dropped its folder check ended the operator's own agents' windows on
+// the real server. Every host spawned here inherits this; a row that wants a
+// tmux passes its own stand-in.
+process.env.ORCH_TMUX = '/nonexistent/orch-suite-has-no-tmux';
+// Nor runs the protocol probe on a real Claude Code (task 351): a row that
+// wants it names a stand-in (ORCH_CANARY_STANDIN) and turns it on.
+process.env.ORCH_CANARY = 'off';
+
 const PORT = Number(process.env.SEATS_TEST_PORT ?? 8902);
 const DB_PATH = `./data/seats-${process.pid}.db`;
 const HOST = `http://localhost:${PORT}`;

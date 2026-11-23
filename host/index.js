@@ -1,28 +1,26 @@
 #!/usr/bin/env node
 /**
  * The orchestratinator host: this workstation's link between the floor and the
- * Claude Code windows running here.
+ * Claude Code conversations here.
  *
- * There is one conversation per repo and nobody owns it. Claude Code runs in a
- * tmux pane; the floor types into that pane, and so do you, by attaching to it.
- * Switching between the two costs nothing because nothing moves. You never
- * exit a session to hand it over, and you never resume one to get it back.
- *
- * That is the whole of it, and it is why this file is half what it was. The
- * driver/release/fork/TTL/pid-watch machinery it used to carry existed only to
- * work around "a terminal owns its session and cannot be typed into from
- * anywhere else", which was never true. See host/window.js.
+ * Each desk's Claude Code is a process this host runs and speaks to as data,
+ * through Claude Code's stream-JSON interface (host/agent.js, host/desk.js).
+ * A conversation is one process, so one app holds it at a time: the floor,
+ * or the operator's editor or terminal after a handoff (CLAUDE.md, "The one
+ * rule everything else follows from"). Until 0.15.0 desks ran in tmux
+ * windows that the host typed into and read back; that layer is gone, and
+ * an upgrade ends the windows it left (W.endLegacyWindows).
  *
  * What this process actually does:
  *
  *   - enumerates the repos here that belong to the board (each one's
  *     `.mcp.json` says which desk it is),
- *   - asks `claude agents --json` which of them have a live window,
+ *   - reads Claude Code's roster for which conversations are live, and whose,
  *   - tails each live session's own transcript and sends the turns up, so a
  *     turn you type in your own terminal appears on the floor with nothing
  *     reporting it,
  *   - and does what the floor asks: deliver a message, answer a permission
- *     prompt, stop a turn, open a window.
+ *     prompt or a question, stop a turn, start a desk's Claude Code.
  *
  * It only ever reaches out. The server never connects to this machine and
  * nothing here listens on a port. If the server is down it retries with
@@ -32,7 +30,8 @@
  *   ORCH_URL          the board, e.g. http://localhost:8787 (from .mcp.json if unset)
  *   ORCH_AUTH_TOKEN   the shared secret                     (from .mcp.json if unset)
  *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
- *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
+ *   ORCH_TMUX_SESSION the tmux session 0.14.x ran desks in, whose windows
+ *                     an upgrade ends (orch)
  *   ORCH_HOST_SUPERVISOR who restarts this process: `app` for the desktop
  *                     app (launchd is read from XPC_SERVICE_NAME) — host/update.js
  *   ORCH_FOLDER_DIALOG  a program to run as the folder dialog, or `parent` to
@@ -40,10 +39,10 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Worker } from 'node:worker_threads';
 import { discover, listFolder, localEntries, originOf, readDesk, readLocalScope } from './identity.js';
@@ -57,9 +56,24 @@ import * as U from './update.js';
 import * as UP from './uploads.js';
 import * as A from './auth.js';
 import * as V from './version.js';
+import * as C from './canary.js';
 import { log, warn, error, failureOf, requestFailed } from './log.js';
 
+// The installer's line for giving the host its key, in this platform's own
+// words (pc-developer, task 348 I4: a Windows host told its person to run
+// ./host/install.sh).
+const INSTALL_TOKEN_LINE = process.platform === 'win32'
+  ? 'powershell -ExecutionPolicy Bypass -File host\\install.ps1 -Token <the ORCH_AUTH_TOKEN from the server\'s .env> <your projects folder>'
+  : './host/install.sh --token <the ORCH_AUTH_TOKEN from the server\'s .env> <your projects dir>';
+// How long after Open in Claude or Open in VS Code the host also reads the
+// process table for the conversation's new holder (task 348 F6).
+const HANDOFF_WATCH_MS = 30 * 60_000;
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
+// What the protocol probe said about each Claude Code version this host has
+// seen (task 351), beside host.json; and the folder it runs in, kept, so
+// Claude Code's own list of projects gains one entry, not one a run.
+const CANARY_FILE = process.env.ORCH_CANARY_FILE ?? join(dirname(CONFIG_FILE), 'claude-canary.json');
+const CANARY_DIR = join(dirname(CONFIG_FILE), 'canary');
 /** How long a queued permission answer stays worth delivering. */
 const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
@@ -270,6 +284,77 @@ class Host {
     const rows = [...this.desks.values()].filter((d) => d.running).map((d) => ({ pid: d.proc.pid, cwd: d.cwd, session: d.sessionId ?? d.lastSessionId ?? null }));
     W.noteDeskPids(W.deskPidsFile(this.cfg.hostId), rows);
   }
+
+  /**
+   * Check a Claude Code version this host has not checked with the protocol
+   * probe (host/canary.js, task 351; costmo, 2026-11-23: "Orchestratinator
+   * breaks every time anything comes in even with the slightest difference
+   * from before"). Once per version per machine, kept in CANARY_FILE; run
+   * in the background, one at a time; desks are not held by it. A probe
+   * whose first message does not come back (not signed in, no network) is
+   * kept as "could not be checked" with why, and not run again for that
+   * version: it does not loop. A machine signed out is not probed at all
+   * until it is signed in. \`ORCH_CANARY=off\` (the suites) runs nothing;
+   * \`ORCH_CANARY_STANDIN\` names a module whose probeClaude stands in.
+   */
+  canaryCheck(version) {
+    if (!version || process.env.ORCH_CANARY === 'off' || this.canaryRunning) return;
+    const read = () => { try { return JSON.parse(readFileSync(CANARY_FILE, 'utf8')) ?? {}; } catch { return {}; } };
+    const known = read()[version];
+    if (known) { this.canary = known; return; }
+    if (this.signedOut()) return;
+    this.canaryRunning = true;
+    log(`checking Claude Code ${version} with the protocol probe (about a minute, a dozen short haiku turns)`);
+    const at = () => new Date().toISOString();
+    const probe = process.env.ORCH_CANARY_STANDIN
+      ? import(pathToFileURL(process.env.ORCH_CANARY_STANDIN).href).then((m) => m.probeClaude)
+      : Promise.resolve(C.probeClaude);
+    probe
+      .then((fn) => fn({ claude: W.CLAUDE, model: 'haiku', dir: CANARY_DIR }))
+      .then((r) => {
+        const first = r.rows.find((x) => /the turn ends in one result/.test(x.what));
+        if (!r.total || (first && !first.ok)) return { version, at: at(), error: `its first message did not come back (${first?.saw || 'no answer'}), so nothing could be compared` };
+        return { version, at: at(), ok: r.fails === 0, total: r.total, differed: r.rows.filter((x) => !x.ok).map(({ what, saw }) => ({ what, saw })) };
+      }, (err) => ({ version, at: at(), error: err.message }))
+      .then((res) => {
+        const all = read();
+        all[version] = res;
+        try {
+          mkdirSync(dirname(CANARY_FILE), { recursive: true });
+          writeFileSync(`${CANARY_FILE}.${process.pid}`, `${JSON.stringify(all, null, 2)}\n`);
+          renameSync(`${CANARY_FILE}.${process.pid}`, CANARY_FILE);
+        } catch (err) { warn(`the protocol probe's result for ${version} could not be kept (${err.message}); it will run again`); }
+        this.canary = res;
+        this.emit({ type: 'canary', canary: res }, true);
+        const words = res.error
+          ? `Claude Code ${version} could not be checked with the floor's protocol probe: ${res.error}`
+          : res.ok
+            ? `Claude Code ${version} checked with the floor's protocol probe: it speaks what the floor reads (${res.total} of ${res.total})`
+            : `Claude Code ${version} answered ${res.differed.length} of the floor's ${res.total} protocol checks differently from what it was built on; the floor names them at the top`;
+        log(words);
+        // After the first registration: before it, a desk new to this board
+        // has no row there and what is said about it is dropped.
+        const tell = () => { for (const d of this.desks.values()) d.told(words); };
+        if (this.registered) tell(); else (this.afterRegister ??= []).push(tell);
+      })
+      .finally(() => { this.canaryRunning = false; });
+  }
+
+  /** End the windows an earlier host ran this host's desks in (W.endLegacyWindows); say each on its desk. */
+  async sweepLegacy({ deferTold = false } = {}) {
+    const desks = [...this.desks.values()];
+    const { ended, waiting } = await W.endLegacyWindows(desks.map((d) => d.cwd));
+    for (const l of ended) {
+      const desk = desks.find((d) => W.canonical(d.cwd) === l.cwd && !d.seat) ?? desks.find((d) => W.canonical(d.cwd) === l.cwd);
+      const words = `the host ended the tmux window an earlier version ran this desk's Claude Code in (${l.name ? `window ${l.name}, ` : ''}pid ${l.pid ?? 'unknown'}), so its conversation continues here; the next message resumes it`;
+      // Said after the first registration when asked: before it, a desk new
+      // to this board has no row there and the board drops what is said.
+      const say = () => (desk ? desk.told(words, l.session ?? undefined) : log(words));
+      if (deferTold) (this.afterRegister ??= []).push(say); else say();
+    }
+    if (waiting.length && !this.legacyWaiting) for (const w of waiting) log(`left the tmux window an earlier version ran ${w.cwd} in (pid ${w.pid}) to finish its turn; the floor takes it over when it ends`);
+    this.legacyWaiting = waiting.length > 0;
+  }
   seatPids() { return new Set([...this.desks.values()].filter((d) => d.running && d.seat).map((d) => d.proc.pid)); }
 
   /** A seat's own binding file, which its Claude Code is started with; none for a folder's own desk. */
@@ -322,6 +407,7 @@ class Host {
       }
       V.keepVersion(this.cfg.hostId, cv);
       this.claudeVersion = cv;
+      this.canaryCheck(cv);
     }
     // Where each desk stands, reported every time rather than once. `window`
     // is the desk's own Claude Code while the host runs one (`proc:<pid>`),
@@ -370,7 +456,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), boot: this.boot, claude_version: this.claudeVersion ?? null, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), boot: this.boot, claude_version: this.claudeVersion ?? null, canary: this.canary ?? null, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -518,6 +604,18 @@ class Host {
     // Code of its own. A desk's sessions are its own process's and anybody
     // else's in the folder (a terminal, an editor), never another desk's.
     const ours = new Map([...this.desks.values()].filter((d) => d.running).map((d) => [d.proc.pid, d]));
+    // A terminal's or an editor's Claude Code that the roster does not list
+    // yet (W.resumingProcesses), looked for only while a handoff is recent
+    // (HANDOFF_WATCH_MS): that is when one is waiting on the trust question.
+    // Every 2 s, every 5 s on Windows, where asking the system is slow. A
+    // desk being started looks for itself as well (Desk.ensure).
+    const handing = [...this.desks.values()].some((d) => d.handedOffAt && Date.now() - d.handedOffAt < HANDOFF_WATCH_MS);
+    if (!handing) this.resuming = new Map();
+    else if (!this.resumingAt || Date.now() - this.resumingAt > (process.platform === 'win32' ? 5000 : 2000)) {
+      this.resumingAt = Date.now();
+      try { this.resuming = await W.resumingProcesses(); } catch { this.resuming = new Map(); }
+    }
+    for (const desk of this.desks.values()) desk.resuming = this.resuming ?? new Map();
     for (const desk of this.desks.values()) {
       // A seat's are its own process's only; the folder's own desk has the
       // rest, an editor's or a terminal's included (host/seats.js).
@@ -619,7 +717,7 @@ class Host {
     if (!path) return fail('refused: no folder was named', 'bind_refused');
     if (!existsSync(path)) return fail(`refused: ${path} does not exist`, 'bind_refused');
     if (!this.cfg.token) {
-      return fail(`this host has no shared secret to bind with — run  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>  on it, or bind one repo by hand`, 'no_key');
+      return fail(`this host has no shared secret to bind with — run  ${INSTALL_TOKEN_LINE}  on it, or bind one repo by hand`, 'no_key');
     }
     const dir = W.canonical(path);
     const origin = originOf(this.cfg.url);
@@ -1442,6 +1540,15 @@ class Host {
     switch (item.kind) {
       case 'chat': {
         let text = typeof item.payload?.text === 'string' ? item.payload.text : '';
+        // A wake from the floor (wakeDue in src/floor.js): said on the desk
+        // with what it is for, so the operator can see why it started.
+        const woken = item.payload?.woken;
+        if (woken && typeof woken === 'object') {
+          const parts = [];
+          if (Number(woken.unread)) parts.push(`${Number(woken.unread)} unread message${Number(woken.unread) === 1 ? '' : 's'}`);
+          if (Number(woken.tasks)) parts.push(`${Number(woken.tasks)} task${Number(woken.tasks) === 1 ? '' : 's'}`);
+          desk.told(`woken by the floor: ${parts.join(', ') || 'work waiting'}, and no Claude Code running here`);
+        }
         // Attachments (issue #31): each fetched from the board onto this
         // machine, outside the repo, and named in the message by its path
         // (host/uploads.js). Awaited, on this line, because the message must
@@ -1520,6 +1627,7 @@ class Host {
         }
         const id = desk.sessionId ?? desk.lastSessionId;
         await desk.stop();
+        desk.handedOffAt = Date.now();
         const opened = await W.openInEditor({ sessionId: id });
         if (!opened.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true);
         break;
@@ -1558,6 +1666,7 @@ class Host {
         }
         const id = desk.sessionId ?? await desk.resumeId();
         await desk.stop();
+        desk.handedOffAt = Date.now();
         const t = await W.openInTerminal({ cwd: desk.cwd, sessionId: id });
         if (!t.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: t.error }, true); break; }
         desk.told(`handed to ${t.app} (\`${t.cmd}\`). What is said there reaches the floor; Open on the floor brings it back once you exit there.`, id);
@@ -1613,6 +1722,9 @@ class Host {
   async watchLoop() {
     while (!this.stopping) {
       try { await this.watch(); } catch (err) { warn(`watch: ${err.message}`); }
+      // An earlier host's window that was mid-turn at the start: looked at
+      // each tick until its turn ends, then ended (sweepLegacy).
+      if (this.legacyWaiting) { try { await this.sweepLegacy(); } catch (err) { warn(`legacy windows: ${err.message}`); } }
       if (this.stopping) break;
       await sleep(WATCH_MS);
     }
@@ -1634,6 +1746,8 @@ class Host {
           await this.checkAuth('heartbeat', { register: false });
           await this.register();
           lastRegister = Date.now();
+          this.registered = true;
+          for (const say of (this.afterRegister ?? []).splice(0)) say();
           // Attachments past Claude Code's own cleanupPeriodDays (host/uploads.js).
           try {
             const gone = UP.sweepUploads();
@@ -1742,6 +1856,11 @@ class Host {
     // conversation is on disk; the next run of the host resumes it at the
     // desk's next message.
     await Promise.all([...this.desks.values()].map((d) => d.stop().catch(() => {})));
+    // One last read of every desk's transcript, so what was written between
+    // the relay's last tick and the stop reaches the floor (pc-developer,
+    // measured on Windows: a reply finished 234 ms before a stop was never
+    // relayed, and the next run joins the transcript at its end).
+    try { await this.watch(); } catch (err) { warn(`last read of the transcripts: ${err.message}`); }
     await this.flush();
     // Best effort — the board reads a host whose heartbeat has stopped as
     // gone anyway (HOST_STALE_SECONDS) — but said, like every other request
@@ -1823,7 +1942,7 @@ async function main() {
     if (cfg.token) {
       log(`shared secret: from ${cfg.tokenSource} (${placeholders ?? 'no desk here carries one'})`);
     } else {
-      warn(`no shared secret: ${placeholders ?? 'no desk here carries a key'}, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
+      warn(`no shared secret: ${placeholders ?? 'no desk here carries a key'}, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ${INSTALL_TOKEN_LINE}`);
     }
   }
   W.useKey(cfg.token);
@@ -1848,6 +1967,11 @@ async function main() {
   const host = new Host(cfg);
   host.folders = folders;
   for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
+  // The tmux windows an earlier build (0.14.x) ran these desks in, ended so
+  // their conversations come to the floor instead of reading "held by an
+  // editor" behind a window nobody can see (W.endLegacyWindows, task 341).
+  // A window mid-turn is left to finish and looked at again by the watch.
+  await host.sweepLegacy({ deferTold: true });
 
   log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
   for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope)`);
@@ -1861,7 +1985,7 @@ async function main() {
   // its turn with nobody listening (task 340). A kill outright runs nothing
   // here: the next run's endLeftoverDesks is for that.
   process.on('exit', () => {
-    for (const d of host.desks.values()) { try { d.proc?.child?.kill('SIGTERM'); } catch { /* gone */ } }
+    for (const d of host.desks.values()) { try { d.proc?.kill('SIGTERM', { sync: true }); } catch { /* gone */ } }
   });
   // And when the process that started it says so, which is the only stop
   // Windows has: Task Scheduler's own is a kill with no signal (measured), so

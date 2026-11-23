@@ -269,6 +269,43 @@ try {
     eq(ctxRead.turns[0].tool_name, 'ide_opened_file', 'a context turn is labeled by its tag');
     eq(ctxRead.turns[2].tool_name, 'command-name', 'and by the first tag when a record is several wrappers');
 
+    // A record Claude Code writes itself (model "<synthetic>"), such as the
+    // "No response requested." a resumed, cut-off turn leaves (task 348 F4):
+    // never the agent's words. An API error is still an error turn.
+    const synT = ctxT.replace(/\.jsonl$/, '-syn.jsonl');
+    writeFileSync(synT, [
+      JSON.stringify({ type: 'assistant', uuid: 's1', message: { model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }] } }),
+      JSON.stringify({ type: 'assistant', uuid: 's2', isApiErrorMessage: true, message: { model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } }),
+      JSON.stringify({ type: 'assistant', uuid: 's3', message: { model: 'claude-haiku-5-5', content: [{ type: 'text', text: 'real words' }] } }),
+    ].join('\n') + '\n');
+    eq((await W.readTranscript(synT)).turns.map((x) => `${x.role}${x.tool_name ? `/${x.tool_name}` : ''}:${x.text}`),
+      ['context/synthetic:No response requested.', 'error:Not logged in · Please run /login', 'assistant:real words'],
+      'a record Claude Code wrote itself is a quiet line, not the agent\'s words; an API error is still an error');
+    // A Claude Code resuming a conversation, read off a process's command
+    // line (task 348 F6): a terminal's, an npm install's, VS Code's; never a
+    // desk's own (-p).
+    eq([
+      W.resumingIdOf('claude --resume 4cbfb241-1111-2222-3333-444444444444'),
+      W.resumingIdOf('/Users/a/.local/bin/claude --resume=98a15be9-970b-4f74-ae2c-a6302c36d919 --setting-sources=user'),
+      W.resumingIdOf('"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js --resume 7f75d964-aaaa-bbbb-cccc-dddddddddddd'),
+      W.resumingIdOf('claude -p --input-format stream-json --resume 4cbfb241-1111-2222-3333-444444444444'),
+      W.resumingIdOf('node /some/other/tool.js --resume 4cbfb241-1111-2222-3333-444444444444'),
+    ], ['4cbfb241-1111-2222-3333-444444444444', '98a15be9-970b-4f74-ae2c-a6302c36d919', '7f75d964-aaaa-bbbb-cccc-dddddddddddd', null, null],
+    'a Claude Code resuming a conversation is read off its command line, an npm install\'s node cli.js included, and a desk\'s own (-p) and anything else are not');
+
+    // Claude Code's own marks in a user record (QA L2, pc-developer I1): its
+    // record of a stop, and a command's output that is only the plugin's hook
+    // command echoed back. Neither is the operator speaking.
+    const markT = ctxT.replace(/\.jsonl$/, '-mark.jsonl');
+    writeFileSync(markT, [
+      JSON.stringify({ type: 'user', uuid: 'm1', message: { content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } }),
+      JSON.stringify({ type: 'user', uuid: 'm2', message: { content: '<local-command-stdout>Compacted PreCompact [p=$(cat); [ -n "$p" ] && (printf \'%s\' "$p" | node /x/plugin/hooks/report.mjs) ] completed successfully</local-command-stdout>' } }),
+      JSON.stringify({ type: 'user', uuid: 'm3', message: { content: 'carry on' } }),
+    ].join('\n') + '\n');
+    eq((await W.readTranscript(markT)).turns.map((x) => `${x.role}${x.tool_name ? `/${x.tool_name}` : ''}:${x.text}`),
+      ['context/interrupted:[Request interrupted by user for tool use]', 'user:carry on'],
+      'Claude Code\'s record of a stop is a quiet line, and the hook command echoed after /compact is not shown');
+
     /* Claude Code's own notices come in by the message queue too — a
      * background command finishing, a subagent's result — as one
      * <task-notification> block in a queued_command. Read from the qa desk's

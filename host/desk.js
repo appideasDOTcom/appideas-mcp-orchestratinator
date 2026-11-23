@@ -133,11 +133,22 @@ export class Desk {
         const held = (await W.roster()).sessions?.find((s) => s.sessionId === id && s.pid !== this.proc?.pid);
         // A background session has no screen and nobody at it: this is the
         // handoff, so the host moves it here (W.releaseBackground).
-        if (held?.kind === 'background') {
+        // An earlier host's window (0.14.x): idle, it is ended and the
+        // conversation resumed here; mid-turn, the turn is left to finish.
+        if (held && W.isLegacyWindow(held)) {
+          if (held.status === 'busy') return { ok: false, code: 'legacy_busy', error: 'its Claude Code is finishing a turn in the tmux window an earlier version of the host ran it in; the floor takes the conversation over as soon as that turn ends' };
+          await W.endLegacyWindow({ pid: held.pid, window: /:(@\d+)/.exec(held.tmux)?.[1] ?? null });
+          this.told(`the host ended the tmux window an earlier version ran this desk's Claude Code in (pid ${held.pid}), so its conversation continues here`, id);
+        } else if (held?.kind === 'background') {
           const rel = await W.releaseBackground(held);
           if (!rel.ok) return rel;
           this.told(`its conversation was running as a background Claude Code session (${rel.job}), so the host stopped that with claude stop and resumed it here`, id);
         } else if (held) return { ok: false, code: 'held_elsewhere', pid: held.pid, error: `that conversation is open in another Claude Code (pid ${held.pid}): close it there, then send this again` };
+        // Not in the roster yet, and running all the same (W.resumingProcesses).
+        if (!held) {
+          const pid = (await W.resumingProcesses()).get(id);
+          if (pid && pid !== this.proc?.pid) return { ok: false, code: 'held_elsewhere', pid, error: `that conversation is open in another Claude Code (pid ${pid}, \`claude --resume\`) that has not finished starting, such as a terminal still asking whether to trust this folder: answer or close it there, then send this again` };
+        }
       }
       const env = this.host.agentEnv(this);
       const proc = new Agent({ cwd: this.cwd, env, resume: id, claude: W.CLAUDE, mcpConfig: this.host.seatConfig(this), shell: process.platform === 'win32' ? null : W.shellFor() });
@@ -147,7 +158,7 @@ export class Desk {
       this.sessionId = id;
       this.host.notePids?.();
       if (id && id !== this.lastSessionId) await this.follow(id, 'tail');
-      log(`${this.label}: Claude Code started (pid ${proc.pid}) ${id ? `on ${id}` : 'on a new conversation'}`);
+      log(proc.pid ? `${this.label}: Claude Code started (pid ${proc.pid}) ${id ? `on ${id}` : 'on a new conversation'}` : `${this.label}: Claude Code could not be started (${W.CLAUDE})`);
       this.report();
       return { ok: true, created: true };
     })();
@@ -188,6 +199,13 @@ export class Desk {
       if (!m.ok && /not logged in/i.test(m.text)) this.host.noteTurn({ role: 'error', text: m.text });
     });
     proc.on('permission', (ask) => this.raise({ ...ask, kind: 'permission', rows: permissionRows(ask), summary: askSummary(ask) }));
+    proc.on('garbled', (l) => warn(`${this.label}: skipped a line from Claude Code that is not JSON: ${l}`));
+    // Withdrawn by Claude Code (an interrupt while it asked), or left over at
+    // a turn's end: off the desk and off the floor (agent.js, 'cancelled').
+    proc.on('cancelled', (m) => {
+      if (!this.asks.delete(m.request_id)) return;
+      this.host.emit({ type: 'ask', channel: this.channel, agent: this.agent, request_id: m.request_id, gone: true }, true);
+    });
     proc.on('question', (ask) => this.raise({ ...ask, kind: 'question', summary: 'a question for you', tool: 'AskUserQuestion' }));
     proc.on('ask', (ask) => {
       // Something the floor has no way to answer yet (a dialog Claude Code
@@ -204,7 +222,16 @@ export class Desk {
       for (const id of this.asks.keys()) this.host.emit({ type: 'ask', channel: this.channel, agent: this.agent, request_id: id, gone: true }, true);
       this.asks.clear();
       if (!this.stopping && e.code !== 0) {
-        this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, code: 'agent_exited', message: `the desk's Claude Code ended (${e.signal ?? `code ${e.code}`})${e.stderr ? `: ${e.stderr.split('\n').slice(-3).join(' ')}` : ''}. The next message starts it again.` }, true);
+        // 127 is the shell's "command not found" (and a spawn error is the
+        // same with no shell): Claude Code is not where the host was told it
+        // is, so the next message will meet the same thing. Said as that, not
+        // as a promise (task 341 C2h, measured with ORCH_HOST_CLAUDE missing).
+        const missing = e.code === 127 || !!e.error;
+        const why = e.stderr ? `: ${e.stderr.split('\n').slice(-3).join(' ')}` : e.error ? `: ${e.error}` : '';
+        const message = missing
+          ? `the desk's Claude Code could not be started on this machine${why}. Claude Code (\`${W.CLAUDE}\`) is not installed, or not where the host looks for it; reinstall it, or run the host's installer again so it finds it`
+          : `the desk's Claude Code ended (${e.signal ?? `code ${e.code}`})${why}. The next message starts it again.`;
+        this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, code: missing ? 'agent_missing' : 'agent_exited', message }, true);
       }
       this.stopping = false;
       this.report();
@@ -325,14 +352,19 @@ export class Desk {
   /** End the desk's Claude Code, for a handoff, a move, a leave or the host stopping. */
   async stop() {
     if (!this.proc) return;
+    const proc = this.proc;
     this.stopping = true;
-    await this.proc.stop();
+    await proc.stop();
+    // A turn the stop cut off is said (task 348 F4, pc-developer and QA,
+    // measured): the stop suppresses agent_exited, so the floor showed the
+    // operator's message with no reply and no word about why.
+    if (proc.exited?.midTurn) this.told('its Claude Code was stopped in the middle of a turn (the host stopping, or the desk handed over), so that turn ended unfinished; what it had already written or run stays, and the next message continues the conversation');
   }
 
   /** Tell the board who holds the desk now, when that changed. */
   report() {
-    const holder = this.running ? 'floor' : this.outsidePid ? 'editor' : null;
-    const window = this.running ? `proc:${this.proc.pid}` : null;
+    const holder = this.running || this.legacyPid ? 'floor' : this.outsidePid ? 'editor' : null;
+    const window = this.running ? `proc:${this.proc.pid}` : this.legacyPid ? `legacy:${this.legacyPid}` : null;
     const key = `${holder}|${window}|${this.holders}|${this.sessionId}`;
     if (key === this.reported) return;
     this.reported = key;
@@ -378,7 +410,15 @@ export class Desk {
       if (newest.sessionId && newest.sessionId !== this.lastSessionId) await this.follow(newest.sessionId, (newest.startedAt ?? 0) >= this.since);
     }
     const outside = others.find((s) => s.sessionId === this.lastSessionId) ?? null;
-    this.outsidePid = outside?.pid ?? null;
+    // An earlier host's tmux window on the conversation (0.14.x, left by an
+    // upgrade) is the floor's own, finishing a turn: said as the floor's, not
+    // as an editor the operator is told to quit (W.endLegacyWindows).
+    this.legacyPid = outside && W.isLegacyWindow(outside) ? outside.pid : null;
+    // A Claude Code on this conversation that the roster does not list yet
+    // (a terminal waiting on the trust question: W.resumingProcesses) holds
+    // it as surely as one that it does.
+    const unlisted = !this.running && !outside && this.lastSessionId ? this.resuming?.get(this.lastSessionId) ?? null : null;
+    this.outsidePid = this.legacyPid ? null : outside?.pid ?? unlisted ?? null;
     this.holders = live.filter((s) => s.sessionId === (this.sessionId ?? this.lastSessionId)).length;
     this.report();
     if (!this.lastSessionId) return;

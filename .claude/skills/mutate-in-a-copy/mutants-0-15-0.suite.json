@@ -73,8 +73,8 @@
   "a background session's conversation is refused as held elsewhere",
   "host",
   "host/desk.js",
-  "        if (held?.kind === 'background') {",
-  "        if (false) {"
+  "        } else if (held?.kind === 'background') {",
+  "        } else if (false) {"
  ],
  [
   "a reopen hands its id to --resume unchecked",
@@ -143,7 +143,7 @@
   "task 340: any live pid in the record is ended, whatever it is now",
   "host",
   "host/claude.js",
-  "      if (!cmd || !cmd.includes('--input-format stream-json') || !cmd.includes('--output-format stream-json')) continue;",
+  "      if (!argv.includes('-p') || !cmd.includes('--input-format stream-json') || !cmd.includes('--permission-prompt-tool stdio')) continue;",
   "      if (false) continue;"
  ],
  [
@@ -166,5 +166,96 @@
   "src/tools.js",
   "      if (empty) {\n        const other",
   "      if (false) {\n        const other"
+ ],
+ [
+  "upgrade: the host does not end an earlier version's windows at its start",
+  "host",
+  "host/index.js",
+  "  await host.sweepLegacy({ deferTold: true });\n",
+  ""
+ ],
+ [
+  "upgrade: a window mid-turn is ended anyway",
+  "host",
+  "host/claude.js",
+  "    if (w.status === 'busy') { waiting.push(w); continue; }\n",
+  ""
+ ],
+ [
+  "upgrade: a pane in a folder that is no desk is ended too",
+  "host",
+  "host/claude.js",
+  "if (!found.has(pid) && mine.has(p.cwd) && alive(pid))",
+  "if (!found.has(pid) && alive(pid))"
+ ],
+ [
+  "upgrade: a window mid-turn reads as an editor",
+  "host",
+  "host/desk.js",
+  "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? unlisted ?? null;",
+  "    this.outsidePid = outside?.pid ?? unlisted ?? null;"
+ ],
+ [
+  "upgrade: a waiting window is never looked at again",
+  "host",
+  "host/index.js",
+  "      if (this.legacyWaiting) { try {",
+  "      if (false) { try {"
+ ],
+ [
+  "R2: a withdrawn ask is not read (control_cancel_request)",
+  "agent",
+  "host/agent.js",
+  "  if (r.type === 'control_cancel_request') return",
+  "  if (false) return"
+ ],
+ [
+  "R2: the desk keeps a withdrawn ask and never says it gone",
+  "host",
+  "host/desk.js",
+  "      if (!this.asks.delete(m.request_id)) return;\n      this.host.emit({ type: 'ask', channel: this.channel, agent: this.agent, request_id: m.request_id, gone: true }, true);",
+  "      return;"
+ ],
+ [
+  "F1h: a missing Claude Code is promised to start at the next message",
+  "host",
+  "host/desk.js",
+  "        const missing = e.code === 127 || !!e.error;",
+  "        const missing = false;"
+ ],
+ [
+  "350: the same work wakes a desk again once it came up",
+  "floor",
+  "src/floor.js",
+  "      if (s.ran) continue;\n",
+  ""
+ ],
+ [
+  "350: a desk an editor holds is woken (a second process)",
+  "floor",
+  "src/floor.js",
+  "    if (d.window_id || d.outside_pid) { s.since = null; if (s.sig) s.ran = true; continue; }",
+  "    if (d.window_id) { s.since = null; if (s.sig) s.ran = true; continue; }"
+ ],
+ [
+  "350: no grace before a wake",
+  "floor",
+  "src/floor.js",
+  "    if (nowMs - s.since < after) continue;\n",
+  ""
+ ],
+ [
+  "350: a start that never came up is retried without end",
+  "floor",
+  "src/floor.js",
+  "      if (s.tries >= tries) { if (!s.said) { s.said = true; gaveUp.push({ desk: d, w }); } continue; }",
+  ""
+ ],
+ [
+  "F6: a Claude Code the roster does not list yet holds nothing",
+  "host",
+  "host/desk.js",
+  "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? unlisted ?? null;",
+  "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? null;"
  ]
 ]

@@ -177,8 +177,11 @@ function findExe(name, { extra = [] } = {}) {
   try {
     // stderr ignored: where.exe says "INFO: Could not find files …" there on
     // a miss, and that line read as the host's own in its log.
-    const hit = execFileSync('where.exe', [name], { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
-      .split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l));
+    const hits = execFileSync('where.exe', [name], { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+      .split(/\r?\n/).map((l) => l.trim());
+    // The .exe first (Anthropic's native install); an npm install is only a
+    // .cmd, which spawnPlan in host/agent.js runs through cmd.exe (task 348 F7).
+    const hit = hits.find((l) => /\.exe$/i.test(l)) ?? hits.find((l) => /\.cmd$/i.test(l));
     if (hit) return hit;
   } catch { /* not on PATH */ }
   return extra.find((p) => existsSync(p)) ?? name;
@@ -310,6 +313,12 @@ function readSessionFiles() {
       // and `claude attach` take. `name` is a label and may be words.
       job: typeof d.jobId === 'string' ? d.jobId : null,
       startedAt: Number(d.startedAt) || null,
+      // The tmux pane an interactive Claude Code runs in (`orch:@12.%12`) and
+      // whether it is in a turn (`busy` / `idle`), as 2.1.330 writes them:
+      // how an earlier host's window is known, and when it may be ended
+      // (endLegacyWindows).
+      tmux: typeof d.tmux === 'string' ? d.tmux : null,
+      status: typeof d.status === 'string' ? d.status : null,
     });
   }
   return { ok: true, sessions };
@@ -363,12 +372,15 @@ async function rosterViaCli() {
  * did not know and refused it ("held elsewhere"), so the operator was handed
  * a remedy for the host's own leftover. Now the new run ends it first.
  *
- * One file per host id, beside claude-version.json: two hosts on one machine
- * (the app's and one started by hand) never end each other's desks.
+ * One file per host id, beside host.json: two hosts on one machine (the
+ * app's and one started by hand) never end each other's desks.
  */
 export function deskPidsFile(hostId) {
   const safe = String(hostId ?? 'host').replace(/[^A-Za-z0-9._-]/g, '_');
-  return process.env.ORCH_DESK_PIDS_FILE ?? join(homedir(), '.orchestratinator', `desk-pids-${safe}.json`);
+  // Beside host.json, as the seats and the uploads are: ~/.orchestratinator
+  // for a launchd host, the app's profile for the app's.
+  const dir = process.env.ORCH_DESK_PIDS_DIR ?? dirname(process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json'));
+  return join(dir, `desk-pids-${safe}.json`);
 }
 
 /** Write the running desks' pids (best effort: a host that cannot write it runs as before). */
@@ -405,7 +417,12 @@ export async function endLeftoverDesks(file, { graceMs = 5000 } = {}) {
       const pid = Number(r?.pid);
       if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || !alive(pid)) continue;
       const cmd = await commandLineOf(pid);
-      if (!cmd || !cmd.includes('--input-format stream-json') || !cmd.includes('--output-format stream-json')) continue;
+      // A desk's own command line (agentArgs): \`-p\` and the space form of
+      // --permission-prompt-tool. The VS Code extension's Claude Code also
+      // speaks stream-JSON both ways, but with \`--permission-prompt-tool=stdio\`
+      // and no \`-p\` (read off a running one, 2.1.329), so it never matches.
+      const argv = cmd ? cmd.split(/\s+/) : [];
+      if (!argv.includes('-p') || !cmd.includes('--input-format stream-json') || !cmd.includes('--permission-prompt-tool stdio')) continue;
       try { process.kill(pid, 'SIGTERM'); } catch { continue; }
       const end = Date.now() + graceMs;
       while (alive(pid) && Date.now() < end) await sleep(100);
@@ -415,6 +432,156 @@ export async function endLeftoverDesks(file, { graceMs = 5000 } = {}) {
   }
   noteDeskPids(file, []);
   return ended;
+}
+
+/**
+ * The windows an earlier build of the host ran desks in, ended so their
+ * conversations can come to the floor (0.15.0's upgrade, measured
+ * 2026-11-22 in task 341 C1). Up to 0.14.x each desk's Claude Code ran in a
+ * window of the host's tmux session `orch` (psmux on Windows), and those
+ * windows outlive the host that made them. After the upgrade the new host
+ * found each desk's conversation held by that window's process, so every
+ * desk read "held by an editor", and Open on the floor said "Quit it there
+ * first" about a window in a detached session nobody could see or knew of.
+ *
+ * So the new host ends them at its start, as it ends a background session
+ * on a click (releaseBackground): the host made them, nobody is at them, and
+ * the conversation is on disk and resumes on the floor. Only a window of
+ * that session whose folder is one of this host's desks' (a seat's included:
+ * it shares its desk's folder) is touched; a pane in any other folder, and
+ * every other session and socket, is left alone. A machine with no tmux, or
+ * no such session, is a no-op. `ORCH_TMUX` and `ORCH_TMUX_SESSION`, which
+ * 0.14.x read, still name the binary and the session.
+ */
+const LEGACY_SEP = '|';   // 0.14.x's own: a tab comes back as `_` with no locale (launchd)
+function legacyTmux() {
+  if (process.env.ORCH_TMUX) return process.env.ORCH_TMUX;
+  if (!WINDOWS) return 'tmux';
+  const links = join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Microsoft', 'WinGet', 'Links');
+  return process.platform === 'win32' ? findExe('tmux', { extra: [join(links, 'tmux.exe')] }) : 'tmux';
+}
+const tmuxRun = (bin, args) => new Promise((resolve) => {
+  execFile(bin, args, { timeout: 5000, windowsHide: true, env: { ...process.env, LC_ALL: process.env.LC_ALL ?? 'en_US.UTF-8' } },
+    (err, out) => resolve(err ? null : String(out)));
+});
+
+const legacySessionName = () => (process.env.ORCH_TMUX_SESSION ?? 'orch').replace(/[^A-Za-z0-9._-]/g, '-') || 'orch';
+/** A roster entry that is an earlier host's window: its pane is in the host's session. */
+export const isLegacyWindow = (s) => typeof s?.tmux === 'string' && s.tmux.startsWith(`${legacySessionName()}:`);
+
+/** End one such window: its tmux window if there is one, its process either way. */
+export async function endLegacyWindow({ pid, window = null }, { graceMs = 5000 } = {}) {
+  const bin = legacyTmux();
+  const win = window ?? null;
+  if (win) await tmuxRun(bin, ['kill-window', '-t', win]);
+  if (Number.isInteger(pid) && pid > 1) {
+    const end = Date.now() + graceMs;
+    while (alive(pid) && Date.now() < end) await sleep(100);
+    if (alive(pid)) { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
+    const hard = Date.now() + graceMs;
+    while (alive(pid) && Date.now() < hard) await sleep(100);
+    if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+  }
+  return { ok: !alive(pid) };
+}
+const windowOf = (tmux) => /:(@\d+)/.exec(tmux ?? '')?.[1] ?? null;
+
+/**
+ * Every earlier-host window in one of these folders: from the roster (its
+ * `tmux` field names the session) and from tmux itself (a pane of the
+ * session, for a build whose roster writes no `tmux`). An idle one is ended;
+ * a busy one (the roster's `status`) is left to finish its turn and returned
+ * as waiting, to be looked at again, because ending it would cut off work in
+ * flight. An agent of the operator's own may be mid-turn in one at the
+ * moment the new host starts (the desktop app's update, run while its agents
+ * work, is exactly that).
+ */
+export async function endLegacyWindows(deskDirs, opts = {}) {
+  const session = legacySessionName();
+  const mine = new Set(deskDirs.map((d) => canonical(d)));
+  const roster = readSessionFiles()?.sessions ?? [];
+  const out = await tmuxRun(legacyTmux(), ['list-panes', '-s', '-t', `=${session}`, '-F', ['#{window_id}', '#{window_name}', '#{pane_pid}', '#{pane_current_path}'].join(LEGACY_SEP)]);
+  const panes = new Map();
+  for (const line of (out ?? '').split(/\r?\n/).filter(Boolean)) {
+    const [win, name, pidText, ...rest] = line.split(LEGACY_SEP);
+    if (Number(pidText)) panes.set(Number(pidText), { window: win, name, cwd: canonical(rest.join(LEGACY_SEP)) });
+  }
+  const found = new Map();
+  for (const r of roster) {
+    if (r.kind !== 'interactive' || !mine.has(r.cwd)) continue;
+    if (!isLegacyWindow(r) && !panes.has(r.pid)) continue;
+    found.set(r.pid, { pid: r.pid, cwd: r.cwd, session: r.sessionId, status: r.status, window: windowOf(r.tmux) ?? panes.get(r.pid)?.window ?? null, name: panes.get(r.pid)?.name ?? r.name ?? null });
+  }
+  for (const [pid, p] of panes) {
+    // A pane whose process has gone (0.14.x set remain-on-exit) holds nothing.
+    if (!found.has(pid) && mine.has(p.cwd) && alive(pid)) found.set(pid, { pid, cwd: p.cwd, session: null, status: null, window: p.window, name: p.name });
+  }
+  const ended = [];
+  const waiting = [];
+  for (const w of found.values()) {
+    if (w.status === 'busy') { waiting.push(w); continue; }
+    await endLegacyWindow(w, opts);
+    ended.push(w);
+  }
+  return { ended, waiting };
+}
+
+/**
+ * Claude Codes resuming a conversation that Claude Code's roster does not
+ * list yet: session id → pid, from the process table. (task 348 F6,
+ * pc-developer, measured on Windows; the premise read on macOS by QA.) A
+ * terminal opened by "Open in Claude" on a folder taken under 0.15 stops at
+ * Claude Code's trust question, because the desk's own Claude Code (`-p`)
+ * never asked it, and until it is answered that Claude Code writes no roster
+ * entry. The floor then read the desk as held by nobody, took the next
+ * message and started a second process on the conversation. The process
+ * table has the terminal's `claude --resume <id>` from its first moment.
+ * A desk's own command line (`-p`, `--print`) is never one of these.
+ */
+/**
+ * One process's command line, read as a Claude Code resuming a conversation:
+ * its session id, or null. Pure, for the suites. Claude Code is \`claude\`,
+ * \`claude.exe\`, or an npm install's \`node …/claude-code/cli.js\` (what a
+ * \`claude.cmd\` runs on Windows: pc-developer, task 348); never one started
+ * with \`-p\` or \`--print\`, which is a desk's own.
+ */
+export function resumingIdOf(cmd) {
+  if (typeof cmd !== 'string') return null;
+  const argv = cmd.trim().split(/\s+/).map((a) => a.replace(/^"|"$/g, ''));
+  const isClaude = argv.some((a) => /(^|[\\/])claude(\.exe)?$/i.test(a) || /claude-code[\\/]cli\.m?js$/i.test(a));
+  if (!isClaude || argv.includes('-p') || argv.includes('--print')) return null;
+  for (let i = 0; i < argv.length; i++) {
+    const m = /^--resume=(.+)$/.exec(argv[i]);
+    const id = m ? m[1] : argv[i] === '--resume' ? argv[i + 1] : null;
+    if (id && /^[0-9a-f-]{8,}$/i.test(id)) return id;
+  }
+  return null;
+}
+
+export async function resumingProcesses() {
+  const out = new Map();
+  const take = (pid, cmd) => {
+    if (!pid) return;
+    const id = resumingIdOf(cmd);
+    if (id) out.set(id, pid);
+  };
+  if (process.platform === 'win32') {
+    const ps = await new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"], { timeout: 8000, windowsHide: true }, (err, o) => resolve(err ? null : String(o)));
+    });
+    let rows = [];
+    try { rows = JSON.parse(ps || '[]'); } catch { rows = []; }
+    for (const r of Array.isArray(rows) ? rows : [rows]) take(Number(r?.ProcessId), r?.CommandLine);
+    return out;
+  }
+  const ps = await new Promise((resolve) => {
+    execFile('ps', ['-Ao', 'pid=,command='], { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, o) => resolve(err ? '' : String(o)));
+  });
+  for (const line of ps.split('\n')) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (m) take(Number(m[1]), m[2]);
+  }
+  return out;
 }
 
 /** When a process started, in ms, from how long `ps` says it has run; null when it cannot say. */
@@ -1038,8 +1205,21 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
       const tag = contextTagOf(s);
       // A command's stdout carries the SGR codes the window printed it with
       // ("\u001b[2mCompacted…"); a context line is read, not rendered.
-      if (tag) { flush(); turns.push({ role: 'context', text: s.replace(SGR, '').trim(), tool_name: tag, at, uuid }); }
-      else human.push(s);
+      if (tag) {
+        flush();
+        const text = s.replace(SGR, '').trim();
+        // A command's output that is only the plugin's hook command echoed
+        // back ("Compacted PreCompact [p=$(cat); … report.mjs …] completed
+        // successfully", after /compact; pc-developer, task 348 I1): the
+        // floor's own plumbing, which nobody reading the desk asked to see.
+        if (tag === 'local-command-stdout' && /\[p=\$\(cat\);[\s\S]*report\.mjs/.test(text)) continue;
+        turns.push({ role: 'context', text, tool_name: tag, at, uuid });
+      } else if (/^\s*\[Request interrupted by user[^\]]*\]\s*$/.test(s)) {
+        // Claude Code's own record of a stop (QA, L2: "[Request interrupted
+        // by user for tool use]" read as the operator's words). A quiet line.
+        flush();
+        turns.push({ role: 'context', text: s.trim(), tool_name: 'interrupted', at, uuid });
+      } else human.push(s);
     }
     flush();
   };
@@ -1149,6 +1329,16 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
     if (d.isApiErrorMessage) {
       const text = textOf(content);
       if (text.trim()) turns.push({ role: 'error', text, at, uuid, ...(via ? { via } : {}) });
+      continue;
+    }
+    // Nor is any other record Claude Code writes itself under the model
+    // "<synthetic>": "No response requested." when a conversation whose
+    // turn was cut off is resumed (task 348 F4, measured on 2.1.330), which
+    // the floor drew as the agent's own answer. Surfaced as a quiet line,
+    // never as the agent's words.
+    if (d.message?.model === '<synthetic>') {
+      const text = textOf(content);
+      if (text.trim()) turns.push({ role: 'context', text, tool_name: 'synthetic', at, uuid, ...(via ? { via } : {}) });
       continue;
     }
     // What the agent thought before it spoke — Claude Code's thinking blocks,

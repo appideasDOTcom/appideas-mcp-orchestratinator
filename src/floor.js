@@ -251,7 +251,7 @@ export const FLOOR_COMMANDS = [
   { name: 'compact', args: false, hint: 'summarise the conversation to free context', receipt: 'the window compacting' },
   { name: 'model', args: 'name', hint: 'change the model, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'effort', args: 'level', hint: 'change the effort level, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
-  { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
+  { name: 'btw', args: 'question', hint: 'a side question, answered on the side, without tools', receipt: 'the answer' },
   { name: 'mcp', args: false, hint: 'reconnect this desk\u2019s tools to the board', receipt: 'the window\u2019s own line' },
 ];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -474,7 +474,7 @@ export function askingWhy(pending) {
 export function signedOutWhy(h) {
   if (!h?.host_signed_out) return null;
   return {
-    error: `Claude Code is signed out on ${h.host_name ?? h.host_id}, so the window cannot answer. Press Sign in on the desk, finish in the browser that opens there, then send this.`,
+    error: `Claude Code is signed out on ${h.host_name ?? h.host_id}, so its Claude Code cannot answer. Press Sign in on the desk, finish in the browser that opens there, then send this.`,
     code: 'signed_out',
   };
 }
@@ -541,7 +541,7 @@ export function nudgeable(h, nowMs = Date.now()) {
  * point of this button is to get somebody to a real prompt; when it cannot do
  * that itself, the next best thing it can do is say how.
  */
-export function attachable(h, nowMs = Date.now()) {
+export function attachable(h, nowMs = Date.now(), { lastTurn = null, pending = null } = {}) {
   // "Open in Claude": the conversation handed to a terminal of the
   // operator's own (host/index.js `claude`), since a desk's Claude Code is a
   // process of the host's with no screen to attach to (2026-11-22). So it
@@ -560,12 +560,18 @@ export function attachable(h, nowMs = Date.now()) {
     };
   }
   if (can.error) return can;
+  // A handoff ends the desk's Claude Code (host/index.js \`claude\`), so a turn
+  // or a question in hand would be cut off: refused in words, as Open in VS
+  // Code is (switchable). In 0.14 this button attached to the live window
+  // and interrupted nothing (QA, task 347 R11).
+  if (pending) return { error: 'This desk is asking you something: answer it or cancel it first. Handing it to a terminal now would end the question unanswered.', code: 'asking' };
+  if (isWorking(h, lastTurn)) return { error: `${h.agent} is in the middle of a turn, and handing it to a terminal now would end that turn. Wait for it to finish, or stop it first.`, code: 'working' };
   return { hosted: h, opens: !h.window_id };
 }
 
 /** "Open in Claude" and the old "Open in tmux" are one handoff now. */
-export function claudeable(h, nowMs = Date.now()) {
-  return attachable(h, nowMs);
+export function claudeable(h, nowMs = Date.now(), opts = {}) {
+  return attachable(h, nowMs, opts);
 }
 
 /**
@@ -788,6 +794,94 @@ export function reconnectDue(desks, { present, used, state, pending = new Map(),
 }
 
 /**
+ * The floor wakes a desk that has work waiting and no Claude Code running
+ * (task 350, costmo 2026-11-23: "the floor wakes a desk that has unread tasks
+ * or messages but no running Claude Code"). The coordinator was down five
+ * and a half hours with five tasks waiting, and nothing on the floor would
+ * start it; only the bell does, and nobody rang it. A wake is what the bell
+ * sends (the word `nudge`, which starts the desk's Claude Code on its
+ * conversation), said on the desk with why (\`woken\`, host/index.js).
+ *
+ * AFTER: the desk has had no Claude Code for that long, so a deliberate
+ * restart or a handoff in flight is not raced. Once per piece of work: the
+ * signature is the newest unread message's id and the open task ids, so the
+ * same backlog never wakes a desk twice, and anything new wakes it again. A
+ * start that never came up is tried again after RETRY, up to TRIES, then
+ * given up once, in words, on the desk (\`gaveUp\`). Spacing between wakes on
+ * one host (WAKE_SPACING_MS) is the caller's, so a restart with many such
+ * desks wakes them one at a time.
+ */
+export const WAKE_AFTER_MS = Math.max(0, Number(process.env.ORCH_WAKE_AFTER_MS ?? 60_000));
+export const WAKE_RETRY_MS = Math.max(0, Number(process.env.ORCH_WAKE_RETRY_MS ?? 300_000));
+export const WAKE_SPACING_MS = Math.max(0, Number(process.env.ORCH_WAKE_SPACING_MS ?? 15_000));
+export const WAKE_TRIES = 3;
+/** A host's probe result, cut to what the floor draws (task 351). */
+export function canaryOf(c) {
+  if (!c || typeof c !== 'object') return null;
+  const version = typeof c.version === 'string' ? c.version.slice(0, 40) : null;
+  if (!version) return null;
+  const differed = Array.isArray(c.differed) ? c.differed.slice(0, 40).map((r) => ({ what: String(r?.what ?? '').slice(0, 200), saw: String(r?.saw ?? '').slice(0, 220) })) : [];
+  return { version, at: typeof c.at === 'string' ? c.at : null, ok: c.ok === true && !c.error, total: Number(c.total) || 0, differed, error: typeof c.error === 'string' ? c.error.slice(0, 300) : null };
+}
+/**
+ * What a wake sends the desk's Claude Code (QA, L4: the bell's word alone,
+ * "nudge", left an agent whose brief does not define it answering "no task
+ * in progress" with its message unread). The word first, for agents that
+ * know it, then the work and what to do about it.
+ */
+export function wakeText(w) {
+  return `nudge — the floor woke you: ${wakeWords(w)} waiting for you on the board. Poll your messages and list your open tasks.`;
+}
+
+/** "3 unread messages, 1 task": what a wake is for, in words. */
+export function wakeWords(w) {
+  const parts = [];
+  if (w.unread) parts.push(`${w.unread} unread message${w.unread === 1 ? '' : 's'}`);
+  if (w.tasks?.length) parts.push(`${w.tasks.length} task${w.tasks.length === 1 ? '' : 's'}`);
+  return parts.join(', ') || 'nothing';
+}
+
+/**
+ * Pure. \`desks\`: the host's hosted rows. \`work\`: deskKey → { unread,
+ * unreadMax, tasks: [ids] }. \`state\`: deskKey → kept between looks. \`skip\`:
+ * deskKey → true for a desk hidden, archived or asking. Returns the desks
+ * to wake now and the ones given up on just now.
+ */
+export function wakeDue(desks, { work, state, skip = new Map(), blocked = () => false, nowMs = Date.now(), after = WAKE_AFTER_MS, retry = WAKE_RETRY_MS, tries = WAKE_TRIES } = {}) {
+  const wake = [];
+  const gaveUp = [];
+  for (const d of desks) {
+    const k = deskKey(d.channel, d.agent);
+    const w = work.get(k);
+    if (!w || (!w.unread && !w.tasks.length)) { state.delete(k); continue; }
+    const sig = `${w.unreadMax ?? 0}|${[...w.tasks].sort((a, b) => a - b).join(',')}`;
+    let s = state.get(k);
+    if (!s) { s = { since: null, sig: null, tries: 0, at: 0, ran: false, said: false }; state.set(k, s); }
+    // Running, or held by somebody else: not a desk to wake. A start the
+    // floor asked for that came up counts as done for that work.
+    if (d.window_id || d.outside_pid) { s.since = null; if (s.sig) s.ran = true; continue; }
+    // A desk the board would not take a message for (its host offline,
+    // signed out or refused: deliverable), or one hidden, archived or asking.
+    if (d.state === 'offline' || skip.get(k) || blocked(d)) { s.since = null; continue; }
+    if (s.since == null) s.since = nowMs;
+    if (nowMs - s.since < after) continue;
+    if (s.sig !== sig) { s.sig = null; s.tries = 0; s.ran = false; s.said = false; }
+    if (s.sig === sig) {
+      // Woken for this work already: again only if that start never came up.
+      if (s.ran) continue;
+      if (s.tries >= tries) { if (!s.said) { s.said = true; gaveUp.push({ desk: d, w }); } continue; }
+      if (nowMs - s.at < retry) continue;
+    }
+    s.sig = sig;
+    s.tries += 1;
+    s.at = nowMs;
+    s.ran = false;
+    wake.push({ desk: d, w });
+  }
+  return { wake, gaveUp };
+}
+
+/**
  * What a desk is told as it enters a meeting room, and as it is back on the
  * floor (costmo, 2026-11-19: he prefixed his first message in every room
  * with this by hand, so that agents stop relaying what he says to the room
@@ -870,7 +964,7 @@ export function roomNoticePlan(rooms, told, twins = new Set()) {
 }
 
 /** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
-export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor opened in that folder is the other desk, so this conversation stays in the floor\'s window; Open in tmux reaches it.';
+export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor or a terminal opened in that folder is the other desk, so this conversation stays on the floor.';
 
 /**
  * A bind that would take a name from a working seat: the folder is being
@@ -1884,6 +1978,10 @@ export function protocolRefusal({ board, host }) {
 
 export function createLive() {
   const partial = new Map();   // deskKey -> text of the reply so far
+  /** What each host's protocol probe said about its Claude Code (task 351,
+   *  host/canary.js), by host id: re-said at every registration, so a board
+   *  that restarted has it again within a heartbeat. */
+  const canary = new Map();
   const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
   // Prompts the operator has answered, kept only until the answer is known to
   // have landed. The floor drops a desk's prompt the moment a decision is made,
@@ -1994,7 +2092,7 @@ export function createLive() {
     recent,
     searches,
     refused,
-    partial,
+    canary, partial,
     folders,
     sessions,
     sessionsAsked,
@@ -2110,6 +2208,14 @@ export function askRescan(store, live, { channel, agent, why, force = false }) {
 function applyHostEvent(store, live, hostId, ev) {
   // A step of an update this host is carrying out: about the board, not a desk.
   if (str(ev.type) === 'update') return live.updates?.applyEvent(hostId, ev) ?? false;
+  // The protocol probe's result for this host's Claude Code (task 351): about
+  // the host, said the moment the probe ends, and again at each registration.
+  if (str(ev.type) === 'canary') {
+    const c = canaryOf(ev.canary);
+    if (!c) return false;
+    live.canary?.set(hostId, c);
+    return true;
+  }
   // A folder listing is about the host, not a desk: kept per host for the
   // picker, before the desk checks below, which it has nothing to do with.
   if (str(ev.type) === 'browse') {
@@ -3338,6 +3444,9 @@ export function buildFloor(store, live = null, sessions = null) {
     // Claude Code is signed out on its machine now (host/auth.js).
     signin: !!h.signins,
     signed_out: !!h.signed_out,
+    // What the protocol probe said about its Claude Code (task 351): drawn
+    // as a banner on the floor when anything differed or it could not run.
+    canary: live?.canary?.get(h.host_id) ?? null,
   }));
   for (const [hostId, r] of live?.refused ?? []) {
     if (hosts.some((h) => h.host_id === hostId)) continue;
@@ -3448,6 +3557,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         return res.status(409).json({ error: why, code: 'protocol_mismatch', board: { protocol: boardProtocol, version: boardVersion }, host: { protocol: said.protocol ?? null, version: said.version ?? null } });
       }
       live.refused.delete(hostId);
+    }
+    // What its protocol probe said about its Claude Code (task 351), re-said
+    // at every registration.
+    if (req.body && 'canary' in req.body) {
+      const c = canaryOf(req.body.canary);
+      if (c) live.canary.set(hostId, c); else live.canary.delete(hostId);
     }
     // `seats`: it can put a second desk in a folder (host/seats.js). A host
     // from before seats says nothing, and is not asked: it would not know
@@ -3615,12 +3730,53 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     } catch (err) { console.error(`[floor] reconnect check: ${err.message}`); }
     return asked;
   };
+  /**
+   * Wake the desks that have work waiting and no Claude Code (wakeDue), one
+   * a host at a time, WAKE_SPACING_MS apart. A live host only: an offline
+   * one's desks are \`offline\` and skipped.
+   */
+  const wakeState = new Map();
+  const lastWake = new Map();
+  const askWakes = (hostId) => {
+    const now = Date.now();
+    if (now - (lastWake.get(hostId) ?? 0) < WAKE_SPACING_MS) return false;
+    let asked = false;
+    try {
+      const work = new Map();
+      for (const u of store.unreadCounts()) if (u.unread) work.set(deskKey(u.channel, u.agent), { unread: u.unread, unreadMax: u.unread_max_id, tasks: [] });
+      for (const t of store.wakeTasks()) {
+        const k = deskKey(t.channel, t.agent);
+        if (!work.has(k)) work.set(k, { unread: 0, unreadMax: 0, tasks: [] });
+        work.get(k).tasks.push(t.id);
+      }
+      const archived = new Set(store.listChannelFlags().filter((f) => f.archived_at).map((f) => f.channel));
+      const hidden = new Set(store.listDeskFlags().map((f) => deskKey(f.channel, f.agent)));
+      const desks = store.listHostedDesks().filter((d) => d.host_id === hostId);
+      const skip = new Map(desks.map((d) => { const k = deskKey(d.channel, d.agent); return [k, archived.has(d.channel) || hidden.has(k) || !!live.pending.get(k)]; }));
+      const { wake, gaveUp } = wakeDue(desks, { work, state: wakeState, skip, blocked: (d) => !!deliverable(d, now).error, nowMs: now });
+      for (const { desk: d, w } of gaveUp) {
+        applyHostEvent(store, live, hostId, { type: 'error', channel: d.channel, agent: d.agent, code: 'wake_gave_up', message: `the floor tried ${WAKE_TRIES} times to start this desk's Claude Code for the work waiting on it (${wakeWords(w)}), and it did not come up, so it has stopped trying for this work. A message to the desk starts it; the host's log says what happened at each start.` });
+      }
+      const first = wake[0];
+      if (first) {
+        store.enqueueHostWork(hostId, first.desk.channel, first.desk.agent, 'chat', { text: wakeText(first.w), woken: { unread: first.w.unread, tasks: first.w.tasks.length } });
+        lastWake.set(hostId, now);
+        asked = true;
+      }
+    } catch (err) { console.error(`[floor] wake check: ${err.message}`); }
+    return asked;
+  };
+
   // And every five seconds, waking the host's poll when there is work: a
   // host's poll can sit in its wait for WORK_WAIT_MAX_MS, and a desk whose
   // tools dropped should not wait that long again after RECONNECT_AFTER_MS.
   setInterval(() => {
     try {
-      for (const hostId of new Set(store.listHostedDesks().map((d) => d.host_id))) if (askReconnects(hostId)) live.wake(hostId);
+      for (const hostId of new Set(store.listHostedDesks().map((d) => d.host_id))) {
+        const r = askReconnects(hostId);
+        const w = askWakes(hostId);
+        if (r || w) live.wake(hostId);
+      }
     } catch { /* the next tick looks again */ }
   }, 5000).unref();
 
@@ -3979,7 +4135,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // not one of the window's is answered here, in the floor's words.
     const cmd = commandOf(text);
     if (cmd?.name === 'model' && !cmd.args) {
-      return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. A bare /model opens a picker in the window.', code: 'picker' });
+      return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. There is no picker here.', code: 'picker' });
     }
     if (cmd?.name === 'effort' && cmd.args && !EFFORT_LEVELS.includes(cmd.args.toLowerCase())) {
       return res.status(400).json({ error: `Effort is one of ${EFFORT_LEVELS.join(', ')}.`, code: 'bad_effort' });
@@ -4949,7 +5105,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    const can = attachable(store.hostedDesk(channel, agent));
+    const can = attachable(store.hostedDesk(channel, agent), Date.now(), { lastTurn: store.deskLastTurn(channel, agent), pending: live.pending.get(deskKey(channel, agent)) ?? null });
     if (can.error) return res.status(409).json({ error: can.error, code: can.code, cmd: can.cmd ?? null });
     store.enqueueHostWork(can.hosted.host_id, channel, agent, 'attach', {});
     live.wake(can.hosted.host_id);
@@ -4974,7 +5130,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    const can = claudeable(store.hostedDesk(channel, agent));
+    const can = claudeable(store.hostedDesk(channel, agent), Date.now(), { lastTurn: store.deskLastTurn(channel, agent), pending: live.pending.get(deskKey(channel, agent)) ?? null });
     if (can.error) return res.status(409).json({ error: can.error, code: can.code, cmd: can.cmd ?? null });
     store.enqueueHostWork(can.hosted.host_id, channel, agent, 'claude', {});
     live.wake(can.hosted.host_id);

@@ -107,7 +107,7 @@ Where you *work* is your choice: start sessions from Claude Code in a
 terminal, from VS Code, or both. The floor doesn't replace either — it hands
 any conversation back to them whenever you want a feature its chat doesn't
 provide. The host — the part that runs each desk's Claude Code for the floor —
-runs on **macOS** for now; the server and the board run anywhere Docker does,
+runs on **macOS** and **Windows**; the server and the board run anywhere Docker does,
 and the plugin wherever Claude Code has a POSIX shell. A desk with no host
 behind it is still on the floor with its presence, status, prompts and the
 conversation as the plugin's hooks report it, but it is read there, not typed
@@ -225,6 +225,14 @@ registers a LaunchAgent so it starts at login, and reads the server address and
 shared secret from those desks. If your desks point at more than one board, the
 host refuses to guess — name one with
 `./host/install.sh --url http://localhost:8787 ~/path/to/your/projects`.
+
+On **Windows**, from PowerShell in the clone:
+`powershell -ExecutionPolicy Bypass -File host\install.ps1 C:\path\to\your\projects`.
+It registers a task that starts the host at logon (Task Scheduler stands in
+for launchd), takes `-Url` and `-Token` like `install.sh`'s `--url` and
+`--token`, and `-Uninstall` removes it. One known limit there: when a desk
+stops, a command it ran through Git Bash that has detached itself (a dev
+server or a watcher started with `exec`) is not stopped with it.
 
 A machine with no hand-bound repo has nothing to read the shared secret from,
 and the host needs one to talk to the board and to bind desks from the floor.
@@ -371,7 +379,9 @@ the followed branch. One that stops after the server was rebuilt (the plugin
 update failed, say) leaves **Update stopped** in the header, and **Finish the
 update** runs what is left. **Settings** (⚙) turns the daily check off, switches to
 the development version (`develop` instead of `main`), and has **Check now**.
-Restarting the host is macOS-only for now.
+The page's Update restarts a host that launchd runs (macOS). On Windows,
+pull the clone and run `host\install.ps1` again, which stops the running
+host cleanly and starts the new one.
 
 ## Useful commands
 

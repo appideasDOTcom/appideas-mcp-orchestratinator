@@ -36,7 +36,7 @@
  * This module knows the protocol and the process. It knows nothing of
  * desks, the board or the floor; host/index.js does.
  */
-import { spawn } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
@@ -127,6 +127,13 @@ export function readRecord(r) {
     // Never left hanging: the host puts it on the desk or refuses it.
     return { kind: 'ask', request_id: r.request_id, subtype: q.subtype ?? null, request: q };
   }
+  // Claude Code withdrawing what it asked: an interrupt while a permission
+  // or question stands is answered with \`control_cancel_request\` naming the
+  // ask, then the turn's result (QA, measured on 2.1.330, msg 4100). Read
+  // as nothing, the dead ask stayed in \`asks\` and every later message was
+  // refused "waiting on an answer" while the floor showed a prompt Claude
+  // Code had withdrawn.
+  if (r.type === 'control_cancel_request') return { kind: 'cancelled', request_id: r.request_id ?? r.request?.request_id ?? null };
   if (r.type === 'control_response') {
     const p = r.response ?? {};
     return { kind: 'answered', request_id: p.request_id ?? null, ok: p.subtype === 'success', response: p.response ?? null, error: p.error ?? null };
@@ -144,6 +151,30 @@ export function readRecord(r) {
  *   permission, question, ask                         Claude Code asks the host something
  *   exit      { code, signal, stderr }                the process is gone
  */
+/** One argument quoted for a Windows command line (the MSVCRT rules node and
+ *  claude.exe parse by), and left bare when it needs nothing. */
+export function winQuote(arg) {
+  const a = String(arg);
+  if (a && /^[\w.\-/\\:=@+,]+$/.test(a)) return a;
+  return `"${a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+}
+
+/**
+ * How Claude Code is started: [command, argv, options]. Through the person's
+ * shell where there is one (POSIX: its startup files are part of what Claude
+ * Code has). On Windows an npm install is \`claude.cmd\`, which Node will not
+ * spawn without a shell (CVE-2024-27980), so it runs through \`cmd.exe /d /s
+ * /c\` with each argument quoted (pc-developer, task 348 F7, measured: with
+ * only claude.cmd on PATH the desk never started).
+ */
+export function spawnPlan(claude, args, shell, platform = process.platform) {
+  if (shell) return [shell, ['-c', 'exec "$0" "$@"', claude, ...args], {}];
+  if (platform === 'win32' && /\.(cmd|bat)$/i.test(claude)) {
+    return ['cmd.exe', ['/d', '/s', '/c', `"${[claude, ...args].map(winQuote).join(' ')}"`], { windowsVerbatimArguments: true }];
+  }
+  return [claude, args, {}];
+}
+
 export class Agent extends EventEmitter {
   constructor({ cwd, env = process.env, resume = null, mcpConfig = null, model = null, claude = CLAUDE, shell = null } = {}) {
     super();
@@ -171,8 +202,8 @@ export class Agent extends EventEmitter {
 
   start() {
     if (this.child) return this;
-    const [cmd, argv] = this.shell ? [this.shell, ['-c', 'exec "$0" "$@"', this.claude, ...this.args]] : [this.claude, this.args];
-    this.child = spawn(cmd, argv, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const [cmd, argv, opts] = spawnPlan(this.claude, this.args, this.shell);
+    this.child = spawn(cmd, argv, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...opts });
     this.child.on('error', (err) => this.gone({ code: null, signal: null, error: err.message }));
     this.child.stderr.on('data', (d) => { this.stderr = (this.stderr + d).slice(-4000); });
     this.child.stdin.on('error', () => { /* a write to a process that has left: exit says it */ });
@@ -183,7 +214,10 @@ export class Agent extends EventEmitter {
 
   line(line) {
     let r;
-    try { r = JSON.parse(line); } catch { return; }
+    // A line that is not JSON is skipped, and said (QA, task 344 R5): were it
+    // a request, the turn would wait on an answer nobody knew was asked. The
+    // first few a process, so a stream gone wrong cannot flood the log.
+    try { r = JSON.parse(line); } catch { if ((this.garbled = (this.garbled ?? 0) + 1) <= 5 && line.trim()) this.emit('garbled', line.slice(0, 200)); return; }
     const m = readRecord(r);
     this.emit('record', r);
     if (!m) return;
@@ -204,7 +238,15 @@ export class Agent extends EventEmitter {
         if (w) { clearTimeout(w.timer); this.takenWaits.delete(m.uuid); w.resolve({ ok: true, uuid: m.uuid }); }
         break;
       }
-      case 'result': this.working = false; if (m.session_id) this.sessionId = m.session_id; break;
+      // A turn that has ended asks nothing: any ask left over is dead, and
+      // is said gone by whoever listens for 'cancelled'.
+      case 'result': {
+        this.working = false;
+        if (m.session_id) this.sessionId = m.session_id;
+        for (const id of [...this.asks.keys()]) { this.asks.delete(id); this.emit('cancelled', { kind: 'cancelled', request_id: id }); }
+        break;
+      }
+      case 'cancelled': this.asks.delete(m.request_id); break;
       case 'reset': this.sessionId = null; break;
       case 'permission': case 'question': case 'ask': this.asks.set(m.request_id, m); break;
       case 'answered': {
@@ -273,14 +315,34 @@ export class Agent extends EventEmitter {
     return new Promise((resolve) => {
       this.once('exit', resolve);
       try { this.child.stdin.end(); } catch { /* gone */ }
-      setTimeout(() => { if (!this.exited) { try { this.child.kill('SIGTERM'); } catch { /* gone */ } } }, graceMs);
-      setTimeout(() => { if (!this.exited) { try { this.child.kill('SIGKILL'); } catch { /* gone */ } } }, graceMs * 2);
+      setTimeout(() => { if (!this.exited) this.kill('SIGTERM'); }, graceMs);
+      setTimeout(() => { if (!this.exited) this.kill('SIGKILL'); }, graceMs * 2);
     });
+  }
+
+  /**
+   * End the process and what it runs. On POSIX a signal (SIGTERM ends Claude
+   * Code and the tool it is running: desktop-dev, measured on 2.1.330). On
+   * Windows a signal is TerminateProcess of the one pid, which left a Bash
+   * tool's tree running with its parent gone (pc-developer, task 348 F5), and
+   * the pid may be cmd.exe's (spawnPlan): so the whole tree, by taskkill.
+   * \`sync\` for process.on('exit'), where nothing asynchronous runs.
+   */
+  kill(signal = 'SIGTERM', { sync = false } = {}) {
+    const pid = this.child?.pid;
+    if (!pid) return;
+    if (process.platform === 'win32') {
+      const args = ['/PID', String(pid), '/T', '/F'];
+      try { if (sync) execFileSync('taskkill', args, { windowsHide: true, stdio: 'ignore' }); else execFile('taskkill', args, { windowsHide: true }, () => {}); } catch { /* gone */ }
+      return;
+    }
+    try { this.child.kill(signal); } catch { /* gone */ }
   }
 
   gone(info) {
     if (this.exited) return;
-    this.exited = { ...info, stderr: this.stderr.trim().slice(-600) };
+    // midTurn: it left with a turn running and no result for it.
+    this.exited = { ...info, stderr: this.stderr.trim().slice(-600), midTurn: this.working };
     this.working = false;
     for (const [, w] of this.takenWaits) { clearTimeout(w.timer); w.resolve({ ok: false, code: 'exited', error: 'the desk\'s Claude Code ended before it took the message' }); }
     this.takenWaits.clear();

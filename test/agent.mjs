@@ -19,7 +19,7 @@
  */
 import { writeFileSync, chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Agent, readRecord, agentArgs, userLine } from '../host/agent.js';
+import { Agent, readRecord, agentArgs, userLine, spawnPlan, winQuote } from '../host/agent.js';
 
 let failures = 0;
 const assert = (cond, msg) => { console.log(`  ${cond ? '✓' : '✗'} ${msg}`); if (!cond) failures++; };
@@ -66,6 +66,9 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
   if (r.type === 'control_request') {
     const q = r.request;
     const reply = (response) => out({ type: 'control_response', response: { subtype: 'success', request_id: r.request_id, response } });
+    // An interrupt while an ask stands, as 2.1.330 answers it (QA, msg 4100):
+    // control_cancel_request naming the ask, then the turn ends.
+    if (q.subtype === 'interrupt' && waits.size) { reply({ still_queued: [] }); for (const id of [...waits.keys()]) { waits.delete(id); out({ type: 'control_cancel_request', request_id: id }); } result('', false, 'error_during_execution'); pending--; done(); return; }
     if (q.subtype === 'interrupt') { reply({ still_queued: [] }); if (busy) { clearTimeout(busy); out({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } }); result('', false, 'error_during_execution'); pending--; done(); } return; }
     if (q.subtype === 'set_model') { reply({ model: 'claude-' + q.model + '-5-5' }); return; }
     if (q.subtype === 'side_question') { reply({ response: 'ASIDE:' + q.question, synthetic: false }); return; }
@@ -154,6 +157,15 @@ try {
   assert(agentArgs({ resume: 'S1', mcpConfig: '/x.json' }).join(' ') === '-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages --resume S1 --mcp-config /x.json',
     'the command line: stream-JSON both ways, permissions over stdin, every message echoed, then the resume and the binding');
   eq(JSON.parse(userLine('hi', 'u')), { type: 'user', uuid: 'u', message: { role: 'user', content: 'hi' } }, 'a message carries the uuid its receipt will name');
+  // How Claude Code is started (task 348 F7, pc-developer: with only an npm
+  // claude.cmd on PATH the desk never started; Node will not spawn a .cmd
+  // without a shell).
+  eq(spawnPlan('claude', ['-p', '--resume', 'abc'], '/bin/zsh', 'darwin'), ['/bin/zsh', ['-c', 'exec "$0" "$@"', 'claude', '-p', '--resume', 'abc'], {}], 'through the person\'s shell on a Mac, exec\'d so the pid is Claude Code\'s');
+  eq(spawnPlan('C:\\Users\\a\\.local\\bin\\claude.exe', ['-p'], null, 'win32'), ['C:\\Users\\a\\.local\\bin\\claude.exe', ['-p'], {}], 'claude.exe on Windows, started as it is');
+  const cmdPlan = spawnPlan('C:\\Program Files\\nodejs\\claude.cmd', ['-p', '--mcp-config', 'C:\\Users\\Jo Ann\\x.json'], null, 'win32');
+  eq([cmdPlan[0], cmdPlan[1].slice(0, 3), cmdPlan[2]], ['cmd.exe', ['/d', '/s', '/c'], { windowsVerbatimArguments: true }], 'an npm claude.cmd through cmd.exe, which can start it');
+  eq(cmdPlan[1][3], '""C:\\Program Files\\nodejs\\claude.cmd" -p --mcp-config "C:\\Users\\Jo Ann\\x.json""', 'with each argument that needs it quoted, a space in a path included');
+  eq([winQuote('-p'), winQuote('a b'), winQuote('say "hi"'), winQuote('C:\\dir\\')], ['-p', '"a b"', '"say \\"hi\\""', 'C:\\dir\\'], 'quoted by the rules node and claude.exe parse a command line by');
 
   console.log('\n  a process');
   const a = new Agent({ cwd: FIX, claude: STAND, env: process.env });
@@ -201,6 +213,18 @@ try {
   a.allow(held.request_id);
   await heldDone;
   eq((await a.send('after the answer')).ok, true, 'and once it is answered, a message is taken again');
+  await next(a, 'result');
+  // Stopped while it asks: Claude Code withdraws the ask (control_cancel_request),
+  // and the process takes messages again (QA, measured on 2.1.330, msg 4100).
+  const cancelAsked = next(a, 'permission');
+  const cancelSeen = next(a, 'cancelled');
+  await a.send('PERMIT Bash');
+  const toCancel = await cancelAsked;
+  eq((await a.control('interrupt')).ok, true, 'the fixture: a stop while it asks');
+  eq((await cancelSeen)?.request_id, toCancel?.request_id, 'a withdrawn ask is read as withdrawn, by its id');
+  eq(a.asks.size, 0, 'and is no longer held as asking');
+  const afterCancel = await a.send('after the withdrawn ask');
+  eq(afterCancel.ok, true, 'so the next message is taken, not refused as waiting on an answer');
   await next(a, 'result');
   const alwaysAsked = next(a, 'permission');
   const alwaysDone = next(a, 'result');

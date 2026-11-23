@@ -197,15 +197,36 @@ on was measured on 2.1.330 before it was built
   again. Stopping the host ends every desk's process: its input is closed,
   then SIGTERM after 5 s (`STOP_GRACE_MS`) and SIGKILL after 10 s if it has
   not left. The conversation is on disk.
+- **An upgrade from 0.14.x leaves each desk's tmux window running, and the
+  new host ends it** (task 341 C1, measured 2026-11-22 on a real 0.14.5
+  board and host replaced by 0.15.0, on a private tmux socket). The old
+  host's windows outlive it, their `claude` holds each desk's conversation,
+  and the 0.15 host read every desk as held by an editor: Open on the floor
+  said "Quit it there first" about a window in a detached session nobody
+  could see. So at its start, and on each watch tick while any is waiting,
+  the host ends every interactive Claude Code in one of its desks' folders
+  whose roster entry names a pane of the legacy session (`tmux: "orch:@N.%N"`,
+  as 2.1.330 writes it; `ORCH_TMUX_SESSION` if set), or that `tmux
+  list-panes` shows in that session, and says it on the desk
+  (`endLegacyWindows` in `host/claude.js`, `Host.sweepLegacy`). **One
+  mid-turn (`status: "busy"`) is left to finish**: on this machine the
+  desktop app runs its agents in exactly such windows, so the app's update
+  is started while agents work, and cutting a turn off was not acceptable.
+  Until its turn ends the desk reads as the floor's (`window:
+  legacy:<pid>`), not an editor's, and a message is refused
+  `legacy_busy` in words. A window in any other folder, any other session,
+  and a machine with no tmux are left alone. On Windows (psmux) the roster's
+  `tmux` field has not been measured; the `list-panes` path is the fallback.
 - **A host that dies without its stop does not leave a desk running**
   (task 340, desktop-dev's measurement on 2.1.330). A Claude Code whose
   input closes finishes the turn it is in first: 38 s more on a 41 s tool
   call, with nobody listening, and the next run then met its conversation
   held by a process it did not know (`held_elsewhere`, "close it there":
   a remedy handed to the operator for the host's own leftover). So the host
-  keeps its desks' pids in `~/.orchestratinator/desk-pids-<host id>.json`
-  at each start and exit (one file per host id, so the app's host and one
-  started by hand never touch each other's), and its next run ends any
+  keeps its desks' pids in `desk-pids-<host id>.json` beside its
+  `host.json` (`~/.orchestratinator` for a launchd host, the app's profile
+  for the app's, as the seats and uploads are) at each start and exit (one
+  file per host id, so two hosts never touch each other's), and its next run ends any
   that `ps` still shows as a Claude Code on the stream-JSON path before it
   does anything else (`endLeftoverDesks` in `host/claude.js`); a pid since
   reused is left alone. A host exiting on an uncaught error ends its desks
@@ -216,6 +237,64 @@ on was measured on 2.1.330 before it was built
   (`term | eof | parentkill`, its real-machine-proofs skill). The sweep
   itself is held by `test:host` on a stand-in; it has not been run against
   that probe on a real Claude Code.
+- **The floor wakes a desk that has work waiting and no Claude Code
+  running** (task 350, costmo 2026-11-23: the coordinator was down five
+  and a half hours with five tasks waiting, and nothing started it).
+  `wakeDue` in `src/floor.js`, run on the board's five-second timer beside
+  `reconnectDue`: a desk with unread board messages or an open or claimed
+  task, no process (`window_id`) and nobody else holding it
+  (`outside_pid`), that the board would message (`deliverable`), not hidden,
+  archived or asking, gone for `WAKE_AFTER_MS` (60 s), is sent the bell's
+  word with its work named (`wakeText`: "nudge — the floor woke you: 1
+  unread message waiting for you on the board…", QA L4: the word alone left
+  an agent whose brief does not define it with its mail unread) and `woken`
+  counts, and the host says "woken by the
+  floor: 1 unread message" on the desk. Once per piece of work (the newest
+  unread id and the task ids): a desk that came up is not woken again for
+  the same backlog, only for something new. A start that never came up is
+  tried again after 5 min, three tries, then said once as an error turn.
+  One wake a host every 15 s, so a restart does not start every desk at
+  once. Measured on a real 2.1.330: a message to a desk with no process,
+  woken 13 s later on a 10 s grace, on its own conversation. On the app's
+  board the morning it was built, 4 hosted desks and none would wake (all
+  running); after the 0.15 upgrade ends their tmux windows, any with unread
+  work would.
+- **The host checks each new Claude Code version with the protocol probe**
+  (task 351, costmo 2026-11-23: "Orchestratinator breaks every time
+  anything comes in even with the slightest difference from before"). The
+  checks are `host/canary.js` (`protocol-probe.mjs` in
+  **measure-a-real-window** is a wrapper that prints them). `canaryCheck` in
+  `host/index.js` runs them once per version it has not checked, in the
+  background, in a kept folder beside `host.json` (so Claude Code's project
+  list gains one entry, not one a run), and keeps the result in
+  `claude-canary.json` there. It is said on every desk, sent as a `canary`
+  event, and said again at each registration; the board puts a host whose
+  probe differed, or could not run, in a banner at the top of the floor
+  (`drawCanary`, **check-canary.mjs**). Desks are never held by it. A
+  machine signed out is not probed; a probe whose first message does not
+  come back is "could not be checked", kept, and not run again for that
+  version. Measured on a real 2.1.330 host: 54 s, 32 of 32, a line on each
+  desk; and by pc-developer on Windows, 56 s, 32 of 32. The suites set
+  `ORCH_CANARY=off` for every host they start, and `ORCH_TMUX` to a tmux
+  that does not exist (a mutant of the legacy sweep once ended the
+  operator's own agents' windows through the real one).
+- **On Windows**, an npm install's `claude.cmd` is run through `cmd.exe /d
+  /s /c` with each argument quoted (`spawnPlan`, `winQuote` in
+  `host/agent.js`; task 348 F7), and a desk is stopped with `taskkill /T
+  /F` so its tool's tree goes with it (`Agent.kill`, F5). One process
+  escapes: one Git Bash's `exec` has already detached from Claude Code's
+  tree (pc-developer, measured; a Job object would reach it, not built).
+  The supervisor (`host/supervise.mjs`) holds a one-per-user lock (a named
+  pipe) and stops the host when the process that started it is gone, which
+  is what Task Scheduler's End does to it (F3).
+- **Claude Code's own records are never somebody's words**: a `<synthetic>`
+  assistant record is a `context` line labeled `synthetic` ("No response
+  requested."), "[Request interrupted by user…]" is a `context` line
+  labeled `interrupted`, and a command output that is only the plugin's
+  hook command echoed back is not shown (`readTranscript`). A turn the
+  host's stop cut off is said on the desk, and the stop reads every
+  transcript once more before its last flush, so a reply written just
+  before it still reaches the floor.
 - **The relay still tails the transcript** (`Desk.watch`, `readTranscript`,
   each subagent's file), on its own loop, so the floor shows what was said
   whoever said it. The desk's own process is in the roster while it runs

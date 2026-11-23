@@ -20,11 +20,11 @@ tab on the same conversation). Read these first:
 
 ```bash
 # Every desk process on this machine, with its parent (the host's pid) and start time
-ps -Ao pid,ppid,lstart,command | command grep -e '--input-format stream-json' | command grep -v grep
+ps -Ao pid,ppid,lstart,command | command grep -e '--permission-prompt-tool stdio' | command grep -v grep   # VS Code's Claude Code writes =stdio, and has no -p
 # Its roster entry: kind interactive, entrypoint sdk-cli, and the conversation it is on
 cat ~/.claude/sessions/<pid>.json
 # What the host recorded as its desks' processes (task 340), one file per host id
-cat ~/.orchestratinator/desk-pids-<host id>.json
+cat <the folder of host.json>/desk-pids-<host id>.json      # ~/.orchestratinator, or the app's profile
 # What the board thinks: held floor/editor, window proc:<pid>, holders, state, session
 curl -s <board>/api/floor | python3 -c "
 import json,sys

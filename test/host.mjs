@@ -18,10 +18,20 @@ import http from 'node:http';
 import net from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { userInfo } from 'node:os';
+import { join, resolve } from 'node:path';
+import { tmpdir, userInfo } from 'node:os';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale, parentPort, readParentAnswer, askParent, dialogBackend } from '../host/dialog.js';
 import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads, fetchUpload } from '../host/uploads.js';
+
+// No host a suite starts may see the machine's tmux (2026-11-23): a host lists
+// the panes of session `orch` at its start (W.endLegacyWindows), and a mutant
+// that dropped its folder check ended the operator's own agents' windows on
+// the real server. Every host spawned here inherits this; a row that wants a
+// tmux passes its own stand-in.
+process.env.ORCH_TMUX = '/nonexistent/orch-suite-has-no-tmux';
+// Nor runs the protocol probe on a real Claude Code (task 351): a row that
+// wants it names a stand-in (ORCH_CANARY_STANDIN) and turns it on.
+process.env.ORCH_CANARY = 'off';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -110,6 +120,11 @@ const dropRosterEntry = (pid) => rmSync(`${SESSIONS_DIR}/${pid}.json`, { force: 
 const argvLog = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
 // One line per Claude Code started (the stand-in logs nothing else), so none at all reads as [].
 const launches = (from) => argvLog().slice(from).split('\n').slice(0, -1);
+// A row that EXPECTS a launch waits for it to be recorded: the host can say a
+// desk started before the stand-in has appended its line to argv.log, and a
+// read at once saw [] under load (QA, msg 4146: one helper, not a wait per
+// row). Rows that prove NO launch read at once, as before.
+const launchedSince = async (from, n = 1, ms = 8000) => (await until(() => { const l = launches(from); return l.length >= n ? l : null; }, ms)) ?? launches(from);
 /** The next conversation a stand-in starts on a fresh conversation (or a /clear) gets this id, once. */
 const nextFreshId = (id) => writeFileSync(`${FIX}/fresh-id.flag`, id);
 
@@ -390,6 +405,9 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
     const answer = (response) => out({ type: 'control_response', response: { subtype: 'success', request_id: r.request_id, response } });
     if (q.subtype === 'interrupt') {
       answer({ still_queued: [] });
+      // While an ask stands, as 2.1.330 does (QA, msg 4100): the ask is
+      // withdrawn by control_cancel_request naming it, and the turn ends.
+      for (const [id, res] of [...waits]) { waits.delete(id); out({ type: 'control_cancel_request', request_id: id }); res({ cancelled: true }); }
       if (busy) { clearTimeout(busy.timer); const b = busy; busy = null; b.stop(); }
       return;
     }
@@ -425,7 +443,16 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
   } else if (text.startsWith('PERMIT ')) {
     const tool = text.slice(7);
     const a = await ask({ subtype: 'can_use_tool', tool_name: tool, display_name: tool, input: { command: 'ls' }, description: 'List files', permission_suggestions: [{ type: 'addRules', rules: [{ toolName: tool, ruleContent: 'ls' }], behavior: 'allow', destination: 'localSettings' }] });
-    finish(a.behavior === 'allow' ? 'ALLOWED:' + JSON.stringify(a.updatedInput) + (a.updatedPermissions ? ':ALWAYS' : '') : 'DENIED:' + a.message);
+    if (a.cancelled) result('', false, 'error_during_execution');
+    else finish(a.behavior === 'allow' ? 'ALLOWED:' + JSON.stringify(a.updatedInput) + (a.updatedPermissions ? ':ALWAYS' : '') : 'DENIED:' + a.message);
+  } else if (text === 'CANCELASK') {
+    // Claude Code withdrawing what it asked (control_cancel_request, as
+    // 2.1.330 sends it on an interrupt while an ask stands; QA, msg 4100).
+    const pend = ask({ subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'touch x' }, description: 'Touch a file', permission_suggestions: [] });
+    await new Promise((res) => setTimeout(res, 1500));
+    for (const [id, res] of [...waits]) { waits.delete(id); out({ type: 'control_cancel_request', request_id: id }); res({ cancelled: true }); }
+    await pend;
+    result('', false, 'error_during_execution');
   } else if (text === 'ASK') {
     const input = { questions: [{ question: 'Pick a colour', header: 'Colour', multiSelect: false, options: [{ label: 'Red' }, { label: 'Blue' }] }, { question: 'Pick a day', header: 'Day', multiSelect: false, options: [{ label: 'Monday' }, { label: 'Friday' }] }] };
     const a = await ask({ subtype: 'can_use_tool', tool_name: 'AskUserQuestion', display_name: 'AskUserQuestion', input });
@@ -503,6 +530,9 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
       // A desk's Claude Code that has not left 2 s after its input closed is
       // ended (host/agent.js), not 5 s: the stand-in leaves at once.
       ORCH_STOP_GRACE_MS: '2000',
+      // The desk-pid record (task 340) goes beside host.json, which here does
+      // not exist; the fixture HOME's is where the rows read it.
+      ORCH_DESK_PIDS_DIR: `${HOME}/.orchestratinator`,
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe', ...(ipc ? ['ipc'] : [])],
@@ -556,8 +586,13 @@ const heldBy = (agent, held, sid = undefined, ms = 20000, ch = CH) => until(asyn
   return d?.hosted?.held === held && (sid === undefined || d.hosted.session_id === sid) ? d : null;
 }, ms);
 /** End a desk's Claude Code from outside the host, as a person quitting it would: SIGTERM, a clean exit. */
+// Waits on the things themselves (QA, msg 4130): a Claude Code just (re)started
+// may not be in ps yet, so the processes are waited for before the signal,
+// and their going before the held-by-nobody wait.
 const quitByHand = async (dir = REPO, agent = 'free', ch = CH) => {
-  for (const s of procsIn(dir)) { try { process.kill(s.pid, 'SIGTERM'); } catch { /* gone */ } }
+  const procs = await until(() => { const p = procsIn(dir); return p.length ? p : null; }, 8000) ?? [];
+  for (const s of procs) { try { process.kill(s.pid, 'SIGTERM'); } catch { /* gone */ } }
+  await until(() => (procs.every((s) => { try { process.kill(s.pid, 0); return false; } catch { return true; } }) ? true : null), 8000);
   return heldBy(agent, null, undefined, 8000, ch);
 };
 const turnRows = async (agent = 'free', ch = CH) => (await json(`/api/floor/turns?channel=${ch}&agent=${agent}&limit=500`).then((r) => r.json())).rows ?? [];
@@ -635,7 +670,7 @@ try {
   const sent = await chat('free', 'ship it');
   eq(sent.status, 200, 'the floor accepts a message for a desk with nothing running yet');
   assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the host starts the desk\'s Claude Code, and the floor holds the desk, on the conversation Claude Code named at the message');
-  eq(launches(argvAtFirst), ['-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages'],
+  eq(await launchedSince(argvAtFirst), ['-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages'],
     'one Claude Code, started as the programmatic interface: stream-JSON both ways, permissions over stdin, every message echoed, nothing to resume');
   assert(await until(async () => ((await turnRows()).some((r) => r.role === 'assistant' && r.text === 'ECHO:ship it') ? true : null), 10000),
     'the message is delivered and its reply reaches the floor, read from the transcript Claude Code writes');
@@ -695,6 +730,19 @@ try {
   eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'cancel' })).status, 200, 'Cancel is taken');
   eq((await answerFor(p?.request_id))?.response, { behavior: 'deny', message: 'The operator cancelled this.' }, 'and is a refusal');
   assert(await until(() => (controlsSent().slice(controlsBeforeCancel).some((c) => c.subtype === 'interrupt') ? true : null), 8000), 'followed by a stop of the turn, as Escape was');
+
+  // Claude Code withdrawing an ask (control_cancel_request; QA measured it
+  // on 2.1.330 for an interrupt while a permission stood, msg 4100). The
+  // floor's own stop sign is refused while a desk asks (Cancel answers the
+  // ask first), but any withdrawal must take the prompt off the floor and
+  // let the desk take messages again: read as nothing, the dead ask refused
+  // every message "waiting on an answer".
+  await chat('free', 'CANCELASK');
+  assert(!!(await until(async () => (await permOf()) ?? null, 10000)), 'the fixture: Claude Code asks');
+  assert(await until(async () => ((await permOf()) ? null : true), 10000), 'and when it withdraws the ask, the prompt leaves the floor');
+  mark = await lastId();
+  eq((await chat('free', 'after a withdrawn ask')).status, 200, 'and a message to the desk is taken');
+  assert(!!(await replyAfter(mark, /^ECHO:after a withdrawn ask$/)), 'and answered, not refused as waiting on an answer');
 
   // A board restart (every deploy) while Claude Code is still asking
   // (milestone audit 2026-11-17, finding 1). The board keeps open prompts in
@@ -976,7 +1024,10 @@ try {
   let argvAt = argvLog().length;
   eq((await chat('free', 'still there?')).status, 200, 'and the floor still takes a message for it');
   assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'which starts its Claude Code again');
-  eq(launches(argvAt).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_ID}`], 'resuming the same conversation rather than starting a new one');
+  // The launch is waited for, not read at once: "held by the floor" can be
+  // reported before the stand-in has written its line (QA, msg 4113).
+  const resumedArgv = await until(() => { const l = launches(argvAt); return l.length ? l : null; }, 8000) ?? [];
+  eq(resumedArgv.map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_ID}`], 'resuming the same conversation rather than starting a new one');
   assert(await until(async () => ((await turnRows()).some((r) => r.text === 'ECHO:still there?') ? true : null), 10000), 'and the message is delivered there');
 
   // Ended on its own, mid-turn: said on the desk, and the next message starts it again.
@@ -989,7 +1040,7 @@ try {
   mark = await lastId();
   eq((await chat('free', 'after the end')).status, 200, 'the next message is taken');
   assert(await until(async () => ((await newRows(mark)).some((r) => r.text === 'ECHO:after the end') ? true : null), 10000), 'and starts it again, on the same conversation, and is answered');
-  eq(launches(argvAt).length, 1, 'one Claude Code started for it');
+  eq((await launchedSince(argvAt)).length, 1, 'one Claude Code started for it');
 
   // Held by a background session (Claude Code's daemon kept it running after
   // its tab closed): there is nobody to close it, so the host stops it with
@@ -1017,7 +1068,7 @@ try {
   eq((await chat('free', 'over to the floor')).status, 200, 'and when it can be stopped');
   assert(!!(await hostLine(mark, /^its conversation was running as a background Claude Code session \(bgjob-1\), so the host stopped that with claude stop and resumed it here$/)), 'the host stops it and says so on the desk');
   assert(await until(() => (!bgAlive(bgPid) ? true : null), 5000), 'the background session is gone');
-  eq(launches(argvAt).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_ID}`], 'and the desk resumes that conversation');
+  eq((await launchedSince(argvAt)).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_ID}`], 'and the desk resumes that conversation');
   assert(await until(async () => ((await newRows(mark)).some((r) => r.text === 'ECHO:over to the floor') ? true : null), 10000), 'where the message is answered');
 
   console.log('\nhanding the conversation to another app');
@@ -1141,7 +1192,11 @@ try {
   // scope. Its Claude Code is running, and is not touched.
   eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'the fixture: free\'s Claude Code is running');
   assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: held by the floor');
-  const freePidBefore = pidIn(REPO);
+  // Waited for: "held by the floor" can pass before the stand-in's process
+  // is visible in ps, and a null here compared against the live pid later
+  // read as the conversation moving (QA, msg 4130).
+  const freePidBefore = await until(() => pidIn(REPO), 8000);
+  assert(!!freePidBefore, 'the fixture: the desk\'s Claude Code is visible before the reopen');
   writeFileSync(`${REPO}/.mcp.json`, JSON.stringify({
     mcpServers: {
       orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'free', 'X-Orchestratinator-Key': KEY } },
@@ -1206,7 +1261,7 @@ try {
   for (let i = 0; i < 16; i++) { seenIds.add(deskOf(await floor(), 'free')?.hosted?.session_id ?? null); await sleep(150); }
   assert(!seenIds.has('stray-session'), `a stray session in the folder is not adopted — saw ${[...seenIds].join(', ')}`);
   assert(!!(await heldBy('free', 'floor', SESSION_B, 25000)), 'and the desk lands on the conversation that was picked');
-  eq(launches(argvAtReopen).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_B}`], 'its Claude Code started again with --resume of that id');
+  eq((await launchedSince(argvAtReopen)).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_B}`], 'its Claude Code started again with --resume of that id');
   assert(pidIn(REPO) && pidIn(REPO) !== pidBeforeB, 'a new process, the old one gone');
   dropRosterEntry(process.pid);
   assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('B-TAIL-SEEN')) ? true : null), 8000),
@@ -1458,8 +1513,14 @@ try {
   // with, so the move ends it, and the new floor gets a NEW conversation
   // (#24 Decided 2, costmo 2026-11-03: "A new session should be started
   // instead"). The one it was on stays in its folder.
+  const argvBeforeMoveReopen = argvLog().length;
   eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: free is put back on its first conversation');
   assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the desk to move is on a known conversation, held by the floor');
+  // The reopen's own launch, waited for before the move's count starts:
+  // "held by the floor" can already be true from before it, and its line
+  // landing after the baseline read as the move resuming (QA, msg 4113).
+  await until(() => (launches(argvBeforeMoveReopen).some((l) => l.includes(`--resume ${SESSION_ID}`)) ? true : null), 8000);
+  await sleep(WATCH_SETTLE_MS);
   const SESSION_MOVED = 'eeeeeeee-2222-3333-4444-555555555555';
   const pidBeforeMove = pidIn(REPO);
   const argvAtMove = argvLog().length;
@@ -1472,7 +1533,7 @@ try {
   assert(/free: bound .*repo-a in local scope/.test(host.log) && /moving it from host-test\/free/.test(host.log), 'the host rebound the folder and said where from');
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'floor' && pidIn(REPO) && pidIn(REPO) !== pidBeforeMove ? true : null), 30000),
     'one move seats it there with a Claude Code of its own, the old one ended — no second Take a desk (#24 Decided 1)');
-  const moveArgv = launches(argvAtMove);
+  const moveArgv = await launchedSince(argvAtMove);
   assert(moveArgv.length === 1 && !moveArgv[0].includes('--resume'), `on a new conversation: started with nothing to resume (#24 Decided 2) — ${JSON.stringify(moveArgv)}`);
   eq((await json('/api/floor/chat', { channel: CH2, agent: 'free', text: 'hello from the new floor' })).status, 200, 'a message on the new floor is taken');
   assert(!!(await heldBy('free', 'floor', SESSION_MOVED, 15000, CH2)), 'and the desk follows the conversation Claude Code names');
@@ -1527,7 +1588,7 @@ try {
   const argvAtClosed = argvLog().length;
   eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose Claude Code is not running is a move');
   assert(!!(await heldBy('free', 'floor', SESSION_ID, 30000, CH2)), 'it opens on the new floor, on its last conversation (#24 Decided 3)');
-  const closedArgv = launches(argvAtClosed);
+  const closedArgv = await until(() => { const l = launches(argvAtClosed); return l.length ? l : null; }, 8000) ?? [];
   assert(closedArgv.length === 1 && closedArgv[0].includes(`--resume ${SESSION_ID}`), `resumed by its id, not started fresh — ${JSON.stringify(closedArgv)}`);
 
   // A conversation open in another app: a Claude Code the host does not run,
@@ -1585,7 +1646,6 @@ try {
   const deskBeforeRead = deskOf(await floor(), 'free')?.hosted;
   const pidBeforeRead = pidIn(REPO);
   const argvBeforeRead = argvLog().length;
-  const turnsBeforeRead = ((await turns('free')).rows ?? []).length;
   const askedRead = await json('/api/floor/read', { channel: CH, agent: 'free', session_id: SESSION_C });
   eq(askedRead.status, 200, 'the floor can ask a desk\'s host to read one of its conversations whole');
   const whole = await until(async () => { const g = await readGetC(); return g.done ? g : null; }, 15000);
@@ -1602,7 +1662,11 @@ try {
     'and nothing moved: the desk is on the conversation it was on, in the window it was in, and no window was opened or closed — reading is not resuming');
   await sleep(WATCH_SETTLE_MS);
   const afterRead = (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
-  eq([afterRead.length, afterRead.some((r) => (r.text ?? '').includes('C-FIRST-WORDS'))], [turnsBeforeRead, false], 'nor did any of it become the desk\'s own turns');
+  // By what was read, not by a count: the desk's own turns from the section
+  // before can still be arriving (the relay's lag under load), and a count
+  // read them as the read's (QA's runs and this one, 80 → 128 with none of C).
+  const fromC = afterRead.filter((r) => r.session_id === SESSION_C || /C-(FIRST-WORDS|REPLY-ONE|SECOND-WORDS|LAST-WORD|SUBAGENT-SEARCHING|A-THOUGHT)/.test(r.text ?? ''));
+  eq(fromC.map((r) => r.text), [], 'nor did any of it become the desk\'s own turns');
   await json('/api/floor/read', { channel: CH, agent: 'free', session_id: 'no-such-conversation' });
   const missing = await until(async () => { const g = await readGetC('no-such-conversation'); return g.done ? g : null; }, 15000);
   assert(/no conversation no-such-conversation in .*repo-a/.test(missing?.error ?? ''), `a conversation that is not in the desk's folder is said as that, naming the folder — ${missing?.error}`);
@@ -2050,7 +2114,13 @@ try {
   }
 
   console.log('\nwhen the host is gone');
+  // Written just before the stop, inside one watch tick: the stop's last read
+  // of the transcripts relays it (pc-developer, msg 4125: a reply finished
+  // 234 ms before a stop never reached the floor).
+  const lastWords = `LAST-WORDS-BEFORE-THE-STOP-${Date.now()}`;
+  appendTurn({ type: 'assistant', uuid: `last-${Date.now()}`, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: lastWords }] } });
   host.kill('SIGTERM');
+  assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => r.text === lastWords) ? true : null), 15000), 'what was written just before the host stopped still reaches the floor');
   await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null));
   const refused = await chat('free', 'anyone there?');
   eq(refused.status, 409, 'a message with no host to take it is refused rather than swallowed');
@@ -2069,13 +2139,15 @@ try {
     const id = 'host-test-leftover';
     const file = `${HOME}/.orchestratinator/desk-pids-${id}.json`;
     const spin = 'setInterval(() => {}, 1000)';
-    const left = spawn(process.execPath, ['-e', spin, '--', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { stdio: 'ignore' });
+    const left = spawn(process.execPath, ['-e', spin, '--', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'stdio', '--replay-user-messages'], { stdio: 'ignore' });
     const other = spawn(process.execPath, ['-e', spin, '--', 'not-a-desk'], { stdio: 'ignore' });
+    // The VS Code extension's Claude Code, as read off a running one: stream-JSON both ways too, but =stdio and no -p.
+    const editor = spawn(process.execPath, ['-e', spin, '--', '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json', '--permission-prompt-tool=stdio', '--replay-user-messages'], { stdio: 'ignore' });
     let leftGone = false;
     left.on('exit', () => { leftGone = true; });
     await sleep(300);
     mkdirSync(`${HOME}/.orchestratinator`, { recursive: true });
-    writeFileSync(file, JSON.stringify([{ pid: left.pid, cwd: '/somewhere', session: 'sess-left' }, { pid: other.pid, cwd: '/elsewhere', session: null }]));
+    writeFileSync(file, JSON.stringify([{ pid: left.pid, cwd: '/somewhere', session: 'sess-left' }, { pid: other.pid, cwd: '/elsewhere', session: null }, { pid: editor.pid, cwd: '/editor', session: 'sess-editor' }]));
     mkdirSync(`${FIX}/no-desks`, { recursive: true });
     const h = startHost(id, { ORCH_HOST_ROOTS: `${FIX}/no-desks` });
     const said = await until(() => (/ended a desk's Claude Code an earlier run of this host left running \(pid (\d+)/.exec(h.log)?.[1] ?? null), 15000);
@@ -2084,12 +2156,209 @@ try {
     let otherAlive = true;
     try { process.kill(other.pid, 0); } catch { otherAlive = false; }
     assert(otherAlive && !h.log.includes(`pid ${other.pid}`), 'a recorded pid that is no Claude Code on the stream-JSON path is left alone');
+    let editorAlive = true;
+    try { process.kill(editor.pid, 0); } catch { editorAlive = false; }
+    assert(editorAlive && !h.log.includes(`pid ${editor.pid}`), 'and so is the VS Code extension\'s Claude Code, which speaks stream-JSON too (=stdio, no -p)');
     let after = null;
     try { after = JSON.parse(readFileSync(file, 'utf8')); } catch { /* unreadable */ }
     assert(Array.isArray(after) && after.length === 0, `and the record is cleared (${JSON.stringify(after)})`);
     h.kill('SIGTERM');
     try { other.kill('SIGKILL'); } catch { /* gone */ }
     try { left.kill('SIGKILL'); } catch { /* gone */ }
+    try { editor.kill('SIGKILL'); } catch { /* gone */ }
+    await sleep(300);
+  }
+
+  /* ── an earlier version's tmux windows (0.14.x → 0.15.0, task 341 C1) ────────
+   * Up to 0.14.x each desk's Claude Code ran in a window of the host's tmux
+   * session `orch`, and those windows outlive the host. Measured on a real
+   * upgrade: the 0.15 host found every desk's conversation held by one, the
+   * desk read "held by an editor", and Open on the floor said "Quit it there
+   * first" about a window nobody could see. The new host ends the windows in
+   * its desks' folders at its start, and says so on the desk. Here tmux is a
+   * stand-in that lists panes and records what it is asked to kill. */
+  console.log('\n  an earlier version\'s tmux windows');
+  {
+    const root = `${FIX}/legacy-root`;
+    const deskDir = `${root}/old1`;
+    const busyDir = `${root}/old2`;
+    const otherDir = `${root}/not-a-desk`;
+    for (const d of [deskDir, busyDir, otherDir]) mkdirSync(d, { recursive: true });
+    const bindAs = (dir, agent) => writeFileSync(`${dir}/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': KEY } } } }));
+    bindAs(deskDir, 'legacy-1');
+    bindAs(busyDir, 'legacy-2');
+    const spin = 'setInterval(() => {}, 1000)';
+    const winA = spawn(process.execPath, ['-e', spin], { cwd: deskDir, stdio: 'ignore' });
+    const winC = spawn(process.execPath, ['-e', spin], { cwd: busyDir, stdio: 'ignore' });
+    const winB = spawn(process.execPath, ['-e', spin], { cwd: otherDir, stdio: 'ignore' });
+    let aGone = false;
+    let cGone = false;
+    winA.on('exit', () => { aGone = true; });
+    winC.on('exit', () => { cGone = true; });
+    await sleep(300);
+    // Claude Code's roster entries for the two desk windows, as 2.1.330 writes
+    // them: the pane in `tmux`, the turn in `status`.
+    const sessDir = `${HOME}/.claude/sessions`;
+    mkdirSync(sessDir, { recursive: true });
+    const rosterAs = (child, dir, sessionId, tmux, status) => writeFileSync(`${sessDir}/${child.pid}.json`, JSON.stringify({ pid: child.pid, sessionId, cwd: dir, kind: 'interactive', entrypoint: 'cli', tmux, status, startedAt: Date.now() }));
+    rosterAs(winA, deskDir, 'legacy-sess-1', 'orch:@1.%1', 'idle');
+    rosterAs(winC, busyDir, 'legacy-sess-2', 'orch:@3.%3', 'busy');
+    const panes = `${FIX}/legacy-panes.txt`;
+    const killed = `${FIX}/legacy-killed.txt`;
+    writeFileSync(panes, [`@1|legacy-1|${winA.pid}|${deskDir}`, `@3|legacy-2|${winC.pid}|${busyDir}`, `@2|notadesk|${winB.pid}|${otherDir}`].join('\n') + '\n');
+    writeFileSync(killed, '');
+    writeFileSync(`${FIX}/fake-tmux.cjs`, `
+const fs = require('fs');
+const [cmd, ...rest] = process.argv.slice(2);
+if (cmd === 'list-panes') { process.stdout.write(fs.readFileSync(${JSON.stringify(panes)}, 'utf8')); process.exit(0); }
+if (cmd === 'kill-window') {
+  const win = rest[rest.indexOf('-t') + 1];
+  fs.appendFileSync(${JSON.stringify(killed)}, win + '\\n');
+  const line = fs.readFileSync(${JSON.stringify(panes)}, 'utf8').split('\\n').find((l) => l.startsWith(win + '|'));
+  if (line) { try { process.kill(Number(line.split('|')[2]), 'SIGHUP'); } catch {} }
+  process.exit(0);
+}
+process.exit(1);
+`);
+    writeFileSync(`${FIX}/fake-tmux`, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(`${FIX}/fake-tmux.cjs`)} "$@"\n`);
+    chmodSync(`${FIX}/fake-tmux`, 0o755);
+    const h = startHost('host-test-legacy', { ORCH_HOST_ROOTS: root, ORCH_TMUX: `${FIX}/fake-tmux` });
+    const said = await until(() => (/ended the tmux window an earlier version ran this desk's Claude Code in \(window legacy-1, pid (\d+)\)/.exec(h.log)?.[1] ?? null), 15000);
+    eq(said, String(winA.pid), 'the host ends the window an earlier version ran a desk in, at its start, and says so');
+    assert(await until(() => (aGone ? true : null), 8000), 'and that window\'s process is gone');
+    let bAlive = true;
+    try { process.kill(winB.pid, 0); } catch { bAlive = false; }
+    eq([readFileSync(killed, 'utf8').trim(), bAlive], ['@1', true], 'a window of that session in a folder that is no desk of this host\'s is left alone, and so, for now, is one mid-turn');
+    const onDesk = await until(async () => (((await turns('legacy-1')).rows ?? []).find((r) => r.tool_name === 'host' && /ended the tmux window an earlier version ran/.test(r.text ?? '')) ?? null), 15000);
+    assert(!!onDesk, 'and the desk says it on the floor, a line labeled host');
+    // The one mid-turn: the floor's own, finishing a turn, never "held by an
+    // editor" with "quit it there first".
+    // Waited for the watch's report, not only the desk going live: the first
+    // registration seats the desk before any watch tick has said who holds it.
+    const busyHeld = await until(async () => { const d = deskOf(await floor(), 'legacy-2'); return d?.hosted?.live && d.hosted.held ? d.hosted : null; }, 15000);
+    eq([busyHeld?.held, busyHeld?.outside_pid ?? null, cGone], ['floor', null, false], 'a window mid-turn is left to finish it, and the desk reads as the floor\'s, not an editor\'s');
+    rosterAs(winC, busyDir, 'legacy-sess-2', 'orch:@3.%3', 'idle');
+    assert(await until(() => (cGone ? true : null), 10000), 'and once its turn ends, it is ended too');
+    eq(readFileSync(killed, 'utf8').trim().split('\n'), ['@1', '@3'], 'its own window, and nothing else');
+    h.kill('SIGTERM');
+    for (const c of [winA, winB, winC]) { try { c.kill('SIGKILL'); } catch { /* gone */ } }
+    for (const c of [winA, winC]) rmSync(`${sessDir}/${c.pid}.json`, { force: true });
+    await sleep(300);
+  }
+
+  /* ── a terminal's Claude Code the roster does not list yet (task 348 F6) ─────
+   * pc-developer, measured on Windows: Open in Claude on a folder taken under
+   * 0.15 stops at Claude Code's trust question in the terminal (the desk's
+   * own `-p` never asked it), and until it is answered that Claude Code
+   * writes no roster entry. The floor read the desk as held by nobody and
+   * started a second process on the conversation. The process table has the
+   * terminal's `claude --resume <id>` from its first moment. */
+  console.log('\n  a terminal\'s Claude Code the roster does not list yet');
+  {
+    const root = `${FIX}/handoff-root`;
+    mkdirSync(`${root}/h1`, { recursive: true });
+    writeFileSync(`${root}/h1/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'handoff-1', 'X-Orchestratinator-Key': KEY } } } }));
+    const h = startHost('host-test-handoff', { ORCH_HOST_ROOTS: root });
+    assert(await until(async () => (deskOf(await floor(), 'handoff-1')?.hosted?.live ? true : null), 20000), 'the fixture: the desk is live');
+    const hm = Math.max(0, ...(((await turns('handoff-1')).rows ?? []).map((r) => r.id)));
+    await chat('handoff-1', 'first words');
+    assert(await until(async () => ((((await turns('handoff-1')).rows ?? []).some((r) => r.id > hm && r.role === 'assistant')) ? true : null), 20000), 'the fixture: the desk has a conversation');
+    const sid = await until(async () => deskOf(await floor(), 'handoff-1')?.hosted?.session_id ?? null, 10000);
+    // Open in Claude: the desk's Claude Code ends; the terminal here is none.
+    await json('/api/floor/claude', { channel: CH, agent: 'handoff-1' });
+    assert(await until(async () => (deskOf(await floor(), 'handoff-1')?.hosted?.held ? null : true), 15000), 'the fixture: the desk\'s own Claude Code has ended');
+    mkdirSync(`${FIX}/term`, { recursive: true });
+    writeFileSync(`${FIX}/term/claude`, 'setInterval(() => {}, 1000);\n');
+    const term = spawn(process.execPath, [`${FIX}/term/claude`, '--resume', sid], { stdio: 'ignore' });
+    const held = await until(async () => { const d = deskOf(await floor(), 'handoff-1'); return d?.hosted?.held === 'editor' ? d.hosted : null; }, 15000);
+    assert(!!held, 'a Claude Code resuming the conversation that the roster does not list yet holds the desk', JSON.stringify(deskOf(await floor(), 'handoff-1')?.hosted));
+    const refused = await chat('handoff-1', 'second words');
+    eq(refused.status, 409, 'and a message is refused, not given to a second process on the conversation');
+    term.kill('SIGKILL');
+    assert(await until(async () => (deskOf(await floor(), 'handoff-1')?.hosted?.held === 'editor' ? null : true), 15000), 'once it has gone, the desk is free again');
+    eq(argvLog().split('\n').slice(0, -1).filter((l) => l.includes(`--resume ${sid}`)).length, 0, 'and nothing was ever started beside it');
+    // A host stopped while its desk is in a turn (task 348 F4): the stop
+    // ends the turn, and that is said on the desk, where it used to show the
+    // message with no reply and no word about why.
+    const sm = Math.max(0, ...(((await turns('handoff-1')).rows ?? []).map((r) => r.id)));
+    await chat('handoff-1', 'SLOW 30000');
+    assert(await until(async () => (deskOf(await floor(), 'handoff-1')?.working ? true : null), 15000), 'the fixture: the desk is in a turn');
+    const gone = new Promise((res) => h.once('exit', res));
+    h.kill('SIGTERM');
+    await gone;
+    const cut = await until(async () => (((await turns('handoff-1')).rows ?? []).find((r) => r.id > sm && r.tool_name === 'host' && /stopped in the middle of a turn/.test(r.text ?? '')) ?? null), 10000);
+    assert(!!cut, 'a turn the host\'s stop cut off is said on the desk');
+  }
+
+  /* ── the protocol probe on a Claude Code version not checked (task 351) ──────
+   * costmo, 2026-11-23: a new Claude Code is checked with the protocol probe
+   * before desks are affected, and any difference is on the floor. The probe
+   * here is a stand-in module (ORCH_CANARY_STANDIN) whose answer is a file,
+   * counting its runs; the real one is host/canary.js. */
+  console.log('\n  the protocol probe on a Claude Code version not checked');
+  {
+    const root = `${FIX}/canary-root`;
+    mkdirSync(`${root}/c1`, { recursive: true });
+    writeFileSync(`${root}/c1/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'canary-1', 'X-Orchestratinator-Key': KEY } } } }));
+    const mode = `${FIX}/canary-mode.txt`;
+    const runs = `${FIX}/canary-runs.txt`;
+    writeFileSync(`${FIX}/canary-standin.mjs`, `
+import { readFileSync, appendFileSync } from 'node:fs';
+export async function probeClaude() {
+  appendFileSync(${JSON.stringify(runs)}, 'run\\n');
+  const m = readFileSync(${JSON.stringify(mode)}, 'utf8').trim();
+  const first = { ok: m !== 'signedout', what: 'the turn ends in one result, with the reply', saw: m === 'signedout' ? 'Not logged in · Please run /login' : '' };
+  const rows = [first, { ok: true, what: 'an init names the session', saw: '' }, { ok: m !== 'differ', what: 'command_lifecycle records are sent (the host\\'s receipt)', saw: m === 'differ' ? 'none seen' : '' }];
+  return { rows, version: 'x', fails: rows.filter((r) => !r.ok).length, total: rows.length };
+}
+`);
+    const canaryEnv = { ORCH_HOST_ROOTS: root, ORCH_CANARY: 'on', ORCH_CANARY_STANDIN: `${FIX}/canary-standin.mjs`, ORCH_CANARY_FILE: `${FIX}/canary-state.json` };
+    const runCount = () => (existsSync(runs) ? readFileSync(runs, 'utf8').split('\n').filter(Boolean).length : 0);
+    const hostCanary = async () => (await floor()).hosts?.find((h) => h.host_id === 'host-test-canary')?.canary ?? null;
+    writeFileSync(mode, 'differ');
+    let h = startHost('host-test-canary', canaryEnv);
+    const c1 = await until(hostCanary, 20000);
+    eq([/^\d+\.\d+\.\d+/.test(c1?.version ?? ''), c1?.ok, c1?.differed?.map((r) => r.what)], [true, false, ["command_lifecycle records are sent (the host's receipt)"]],
+      'a version not checked is probed, and the row that differed is on the floor, in the probe\'s words, with the version');
+    const said = await until(async () => (((await turns('canary-1')).rows ?? []).find((r) => r.tool_name === 'host' && /answered 1 of the floor's 3 protocol checks differently/.test(r.text ?? '')) ?? null), 10000);
+    assert(!!said, 'and said on the desk');
+    h.kill('SIGTERM');
+    await new Promise((res) => h.once('exit', res));
+    h = startHost('host-test-canary', canaryEnv);
+    assert(await until(async () => ((await hostCanary())?.version === c1?.version ? true : null), 20000), 'a host started again still says what the probe found, from its own record');
+    eq(runCount(), 1, 'and the same version is probed once, not again');
+    h.kill('SIGTERM');
+    await new Promise((res) => h.once('exit', res));
+    // A probe that could not run: its first message did not come back.
+    rmSync(`${FIX}/canary-state.json`, { force: true });
+    writeFileSync(mode, 'signedout');
+    h = startHost('host-test-canary', canaryEnv);
+    const c2 = await until(async () => { const c = await hostCanary(); return c?.error ? c : null; }, 20000);
+    assert(!!c2 && /could not|did not come back/.test(c2.error) && /Not logged in/.test(c2.error), 'a probe that could not run says why, not that Claude Code is different', c2?.error);
+    h.kill('SIGTERM');
+    await new Promise((res) => h.once('exit', res));
+    h = startHost('host-test-canary', canaryEnv);
+    assert(await until(async () => ((await hostCanary())?.error ? true : null), 20000), 'the fixture: the host is back with that record');
+    eq(runCount(), 2, 'and it is not run again for that version: it does not loop');
+    h.kill('SIGTERM');
+    await sleep(300);
+  }
+
+  /* ── Claude Code missing from where the host looks (task 341 C2h) ───────────
+   * Measured with a real host and ORCH_HOST_CLAUDE pointing nowhere: the shell
+   * said "no such file or directory" (exit 127), and the desk said "The next
+   * message starts it again", which it never would. Said as what it is. */
+  console.log('\n  Claude Code missing from where the host looks');
+  {
+    const root = `${FIX}/missing-root`;
+    mkdirSync(`${root}/m1`, { recursive: true });
+    writeFileSync(`${root}/m1/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'missing-1', 'X-Orchestratinator-Key': KEY } } } }));
+    const h = startHost('host-test-missing', { ORCH_HOST_ROOTS: root, ORCH_HOST_CLAUDE: `${FIX}/no-such-claude` });
+    assert(await until(async () => (deskOf(await floor(), 'missing-1')?.hosted?.live ? true : null), 20000), 'the fixture: the desk is live on its host');
+    eq((await chat('missing-1', 'anyone there?')).status, 200, 'the fixture: the message is taken by the board');
+    const said = await until(async () => (((await turns('missing-1')).rows ?? []).find((r) => r.role === 'error' && /Claude Code/.test(r.text ?? '')) ?? null), 20000);
+    assert(!!said && /could not be started on this machine/.test(said.text) && !/next message starts it again/.test(said.text), 'a Claude Code that is not there is said as that, never as "the next message starts it again"', said?.text);
+    h.kill('SIGTERM');
     await sleep(300);
   }
 
@@ -2119,7 +2388,9 @@ try {
   }
   assert(joined, 'the fixture: the restarted host is reading the desk\'s transcript before the timed part starts');
 
-  const turnsBefore = ((await turns('free')).rows ?? []).length;
+  // By id, not by count: the turns route serves a limited window, and once
+  // the desk's turns pass it, a count stays the same whatever arrives.
+  const turnsBefore = Math.max(0, ...(((await turns('free')).rows ?? []).map((r) => r.id)));
   const marker = `SPOKEN-WHILE-BUSY-${Date.now()}`;
   const queued = await chat('free', 'this one takes a while to go in');
   eq(queued.status, 200, 'the floor accepts the message');
@@ -2131,7 +2402,7 @@ try {
   }, 4000);
   assert(!!heard, 'a turn written while the message is still going in reaches the floor anyway');
   assert(!received().includes('takes a while to go in'), 'and it got there before the message it was queued behind — the relay is not waiting on the delivery');
-  assert((heard?.length ?? 0) > turnsBefore, 'the floor gained a turn rather than replaying the transcript');
+  assert((heard ?? []).some((r) => r.id > turnsBefore && (r.text ?? '').includes(marker)), 'the floor gained a turn rather than replaying the transcript');
   // And the subagent file already on disk was joined at its end, not replayed.
   // Named directly: QA's M6 (offsets read from 0) turned this suite red only
   // three sections later (PR #3 review, 2026-09-03).
@@ -2244,6 +2515,7 @@ try {
   const soLines = await soHostLines();
   assert(soLines.some((t) => /already open in the browser on Test Mac/.test(t ?? '')), `and says the first is still open — ${JSON.stringify(soLines.slice(-6))}`);
   assert(soLines.includes('signed in to Claude Code on Test Mac'), 'the desk says it is signed in');
+  await until(() => (launches(soArgvAt).filter((l) => l.endsWith(`--resume ${SESSION_ID}`)).length >= 2 ? true : null), 8000);
   eq(launches(soArgvAt).filter((l) => l.endsWith(`--resume ${SESSION_ID}`)).length, 2,
     `the desk's Claude Code, started signed out, was started again on its own conversation, so it reads the new sign-in — ${JSON.stringify(launches(soArgvAt))}`);
   assert(soLines.some((t) => t === 'started its Claude Code again on the same conversation, so it reads the new sign-in'), 'and the desk says why');
@@ -2613,10 +2885,11 @@ try {
     const supLog = `${supHome}/.orchestratinator/log/host.log`;
     const stopFile = `${supHome}/.orchestratinator/host.stop`;
     const readLog = () => { try { return readFileSync(supLog, 'utf8'); } catch { return ''; } };
-    const supervise = (env) => spawn(process.execPath, ['host/supervise.mjs'], {
-      env: { PATH: process.env.PATH, HOME: supHome, TMPDIR: process.env.TMPDIR ?? '/tmp', ORCH_HOST_CONFIG: '/nonexistent/host.json', ORCH_SUPERVISE_RESTART_MS: '300', ...env },
-      stdio: 'ignore',
-    });
+    // The one-supervisor lock (task 348 F3), at a short path: a socket path
+    // under the fixture is longer than the system takes.
+    const supLock = join(process.env.TMPDIR || tmpdir(), `orch-sup-${process.pid}.sock`);
+    const supEnv = (env) => ({ PATH: process.env.PATH, HOME: supHome, TMPDIR: process.env.TMPDIR ?? '/tmp', ORCH_HOST_CONFIG: '/nonexistent/host.json', ORCH_SUPERVISE_RESTART_MS: '300', ORCH_SUPERVISE_LOCK: supLock, ...env });
+    const supervise = (env) => spawn(process.execPath, ['host/supervise.mjs'], { env: supEnv(env), stdio: 'ignore' });
 
     // A host that cannot start (no board named anywhere) exits, and is started again.
     const crashing = supervise({ ORCH_HOST_ROOTS: empty });
@@ -2634,6 +2907,14 @@ try {
     const running = supervise({ ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: empty, ORCH_HOST_ID: 'host-test-sup', ORCH_HOST_NAME: 'Supervised' });
     const up = await until(async () => ((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-sup')?.live ? true : null), 20000);
     assert(up, 'the fixture: the supervised host registers with the board');
+    // A second supervisor while one runs (Task Scheduler's Start after an End
+    // that killed only conhost, task 348 F3): it starts nothing, and says so.
+    const second = supervise({ ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: empty, ORCH_HOST_ID: 'host-test-sup', ORCH_HOST_NAME: 'Supervised' });
+    const secondExit = await Promise.race([new Promise((d) => second.once('exit', (code) => d(code))), sleep(10000).then(() => 'still running')]);
+    eq(secondExit, 0, 'a second supervisor for the same host exits at once, rather than start a second host');
+    assert(/another supervisor already runs this host/.test(readLog()), 'and says why in the log');
+    eq((readLog().match(/supervisor: started the host/g) ?? []).length, 1, 'and only the first one\'s host was started');
+    if (secondExit === 'still running') second.kill('SIGKILL');
     writeFileSync(stopFile, 'stop');
     const t0 = Date.now();
     const runExit = await Promise.race([new Promise((d) => running.once('exit', (code) => d(code))), sleep(30000).then(() => 'still running')]);
@@ -2643,6 +2924,19 @@ try {
     assert(!/did not leave in time/.test(said), 'and the host left on its own, told over the channel, rather than being ended');
     assert(!/the host exited \(code \d+\); starting it again/.test(said), 'and nothing was started again after the stop');
     if (runExit === 'still running') running.kill('SIGKILL');
+
+    // Its parent gone (Task Scheduler's End kills conhost and nothing under
+    // it): the supervisor stops the host properly and leaves.
+    writeFileSync(supLog, '');
+    const parentEnv = { ...supEnv({ ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: empty, ORCH_HOST_ID: 'host-test-sup2', ORCH_HOST_NAME: 'Supervised 2' }) };
+    const parent = spawn(process.execPath, ['-e', `const c = require('child_process').spawn(process.execPath, ['host/supervise.mjs'], { stdio: 'ignore', detached: true }); console.log(c.pid); setInterval(() => {}, 1000);`], { env: parentEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+    const supPid = await new Promise((d) => parent.stdout.once('data', (b) => d(Number(String(b).trim()))));
+    const up2 = await until(async () => ((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-sup2')?.live ? true : null), 20000);
+    assert(up2, 'the fixture: a supervisor started by a process of its own runs its host');
+    parent.kill('SIGKILL');
+    const supGone = await until(() => { try { process.kill(supPid, 0); return null; } catch { return true; } }, 30000);
+    assert(supGone && /the process that started this supervisor is gone/.test(readLog()) && /supervisor: stopped/.test(readLog()), 'when the process that started it is killed, it stops its host properly and leaves');
+    if (!supGone) { try { process.kill(supPid, 'SIGKILL'); } catch { /* gone */ } }
   }
 
   /* ── what the host log says ─────────────────────────────────────────────────

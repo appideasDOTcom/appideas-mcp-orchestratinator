@@ -779,8 +779,8 @@
       const other = (Array.isArray(a.choose) ? a.choose : []).map((n) => opts.find((o) => o.n === n)).find((o) => o?.other);
       if (!other) continue;
       return qs.length > 1
-        ? '\u270e A typed answer withdraws the form in the window \u2014 every answer will be sent as one message in words instead'
-        : '\u270e A typed answer withdraws the form in the window \u2014 it will be sent as a message in words instead';
+        ? '\u270e A typed answer withdraws the form in Claude Code \u2014 every answer will be sent as one message in words instead'
+        : '\u270e A typed answer withdraws the form in Claude Code \u2014 it will be sent as a message in words instead';
     }
     return null;
   }
@@ -876,7 +876,7 @@
       <div class="p-ask-foot">
         <button type="button" class="btn primary" data-act="ask-submit">${qs.length > 1 ? 'Submit all answers' : 'Submit answers'}</button>
         <button type="button" class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}"
-                title="The same as pressing Escape in the window">Cancel</button>
+                title="Claude Code's own cancel: the question is refused and the turn stopped">Cancel</button>
       </div>
     </div>`;
   }
@@ -4313,7 +4313,7 @@
              empty corner on each side of the fold. -->
         <div class="p-foot">
         <div class="p-links">
-          <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">${LINK_LABEL.openhere}</button>
+          <button class="p-link" data-act="openhere" title="Start this desk's Claude Code on its conversation, on this machine">${LINK_LABEL.openhere}</button>
           <button class="p-link" data-act="handback" title="Open this conversation in VS Code">${LINK_LABEL.handback}</button>
           <!-- Not a seat move, though it stands with one: the window stays on
                the floor, which keeps driving it. The terminal lands ON that
@@ -5117,7 +5117,7 @@
         alertSlot.dataset.sig = sig;
         const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok ? '' : ' disabled'} title="Claude Code\u2019s own sign-in, run on ${esc(si.host)}: the browser opens there">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
         alertSlot.innerHTML = `<div class="p-alert p-alert-ask p-signin">
-             <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 the window cannot answer until it is signed in again.</div>
+             <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 its Claude Code cannot answer until it is signed in again.</div>
              ${waiting ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>finish signing in, in the browser that opened on ${esc(si.host)}\u2026</div>` : ''}
              ${!waiting || again ? `<div class="p-decide">${button}</div>` : ''}
              ${si.ok ? '' : `<div class="p-unknown-why">${esc(si.reason ?? '')}</div>`}
@@ -5130,7 +5130,7 @@
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
         ? `<div class="p-alert p-alert-ask">
-             <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to the window…</div>
+             <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to Claude Code…</div>
            </div>`
         : (s.awaiting_kind || req?.host_ask)
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
@@ -5143,26 +5143,25 @@
                // was the whole failure: it told the operator the floor could not
                // help and sent them to a terminal, which is the outcome the
                // floor exists to avoid.
-               : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
+               : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'Claude Code is waiting on an answer', 200))}`
              } <span class="mono t-when" data-at="${esc(s.awaiting_since ?? req?.at ?? '')}"></span></div>
              ${req?.questions?.length ? askHtml(req) : ''}
-             ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question from the window\u2026</div>` : ''}
+             ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question\u2026</div>` : ''}
              ${unreadable && !reading ? `<div class="p-unknown">
                <div class="p-unknown-why">This desk's conversation is open in another app (your editor, or claude in a terminal), and the question is being asked there. Answer it in that app.</div>
              </div>` : ''}
              ${offer === 'question-unread' ? `<div class="p-unknown p-question-unread">
                <div class="p-unknown-why">This is a question, and the board could not read its choices
-                 \u2014 ${esc(req.form_unread ?? 'the host has not sent back what the window is showing')}.
-                 Nothing here would be an answer to it: open the window to answer it there, or cancel the question.</div>
+                 \u2014 ${esc(req.form_unread ?? 'its choices did not reach the board')}.
+                 Nothing here would be an answer to it: cancel the question, and Claude Code goes on without one.</div>
                <div class="p-decide">
-                 <button class="btn primary" data-act="ask-open" title="A terminal on this desk\u2019s own window, where the question is">Open the window</button>
-                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel the question</button>
+                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="Claude Code's own cancel: the question is refused and the turn stopped">Cancel the question</button>
                </div>
              </div>` : ''}
              ${offer === 'menu' ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="${req.choices?.denyAsks ? 'deny-open' : 'decide'}" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
-               <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
+               <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="Claude Code's own cancel: the question is refused and the turn stopped">Cancel</button>
              </div>
              ${req.choices?.denyAsks ? `<div class="p-why hidden">
                <input class="input p-why-text" type="text" placeholder="What should Claude do instead? (optional)" maxlength="2000">
@@ -5240,7 +5239,7 @@
     { name: 'compact', args: '', hint: 'summarise the conversation to free context' },
     { name: 'model', args: 'name', hint: 'change the model — saved as the default for new sessions' },
     { name: 'effort', args: 'level', hint: 'change the effort level — saved as the default for new sessions' },
-    { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools' },
+    { name: 'btw', args: 'question', hint: 'a side question, answered on the side, without tools' },
     { name: 'mcp', args: '', hint: 'reconnect this desk\u2019s tools to the board' },
   ];
   const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -8058,6 +8057,31 @@
 
   /* ---------- render ---------- */
 
+  /**
+   * The protocol probe's banner (task 351, host/canary.js): every host whose
+   * Claude Code answered the floor's checks differently, naming the version
+   * and each row in the probe's own words, or that could not be checked, and
+   * why. Desks are not held by it (costmo's rule: nothing that works stops
+   * working). Drawn only when it changed, as the rooms are.
+   */
+  function drawCanary() {
+    const el = $('floor-canary');
+    if (!el) return;
+    const items = (floor.hosts ?? []).filter((h) => h.canary && !h.canary.ok);
+    const sig = JSON.stringify(items.map((h) => [h.host_id, h.name, h.canary]));
+    if (sig === ui.canarySig) return;
+    ui.canarySig = sig;
+    if (!items.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+    el.innerHTML = items.map((h) => {
+      const c = h.canary;
+      const who = `<b>Claude Code ${esc(c.version)} on ${esc(h.name ?? h.host_id)}</b>`;
+      if (c.error) return `<div data-canary="${esc(h.host_id)}">${who} could not be checked with the floor's protocol probe: ${esc(c.error)}</div>`;
+      const rows = c.differed.map((r) => `<li>${esc(r.what)}${r.saw ? ` <span class="mono">— ${esc(r.saw)}</span>` : ''}</li>`).join('');
+      return `<div data-canary="${esc(h.host_id)}">${who} answered ${c.differed.length} of the floor's ${c.total} protocol checks differently from what it was built on. Desks keep running; if one misbehaves, these are the differences:<ul>${rows}</ul></div>`;
+    }).join('');
+    el.classList.remove('hidden');
+  }
+
   function render() {
     // Every draw is where what a window shows can change: a poll, a desk
     // going out or coming back, a room's desks, a floor picked.
@@ -8074,6 +8098,7 @@
       renderPanel();
       return;
     }
+    drawCanary();
     const rooms = $('floor-rooms');
     // Rooms are rebuilt only when something they depict actually changed. The
     // board does the same thing for the same reason, and here it matters more:

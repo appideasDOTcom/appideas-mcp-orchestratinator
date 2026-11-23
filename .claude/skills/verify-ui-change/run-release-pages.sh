@@ -34,7 +34,8 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 . "$REPO/scripts/node-floor.sh" || exit 2
-ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows attention settings signin meeting-held plate-fit ask"
+# canary, the nineteenth, from 0.15.0: the protocol probe's banner (task 351).
+ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows attention settings signin meeting-held plate-fit ask canary"
 LIST="${*:-$ALL}"
 COPY="$("$REPO/.claude/skills/mutate-in-a-copy/copy-repo.sh" "${TMPDIR:-/tmp}/orch-release-pages")" || exit 2
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/release-pages-out.XXXXXX")"

@@ -33,12 +33,17 @@
   runs and speaks to through Claude Code's programmatic interface
   (2026-11-22, replacing psmux windows).
 #>
-[CmdletBinding()]
+# PositionalBinding off, and the folders at position 0: with [CmdletBinding()]
+# alone, PowerShell bound a bare argument to -Url and the next to -Token, so
+# `install.ps1 <dir1> <dir2>` wrote a folder as the shared secret, said
+# "shared secret from -Token" and exited 0 (pc-developer, task 346 F2,
+# measured on Windows 11). -Url and -Token are taken by name only.
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [string]$Url = '',
   [string]$Token = '',
   [switch]$Uninstall,
-  [Parameter(ValueFromRemainingArguments = $true)][string[]]$Roots = @()
+  [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Roots = @()
 )
 $ErrorActionPreference = 'Stop'
 

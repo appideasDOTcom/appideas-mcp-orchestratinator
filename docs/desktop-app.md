@@ -130,15 +130,16 @@ session, which is what the **verify-ui-change** checks already drive.
 ### Tauri's usual case does not apply
 
 Its pitch is a small download, a small memory footprint and a tight
-permission model. People installing this already run Claude Code, tmux and
+permission model. People installing this already run Claude Code and
 several agents, so 150 MB does not matter to them. Electron's hardening is
 standard and well documented: context isolation on, Node integration off in
 the renderer, the remote page sandboxed.
 
 ### Cross-platform is decided by the host, not the shell
 
-The host needs tmux, and its folder dialog (`host/dialog.js`) has a macOS
-backend only. The shell widens the platform list neither way.
+The host needs Claude Code and Node, and its folder dialog (`host/dialog.js`)
+has macOS and Windows backends. The shell widens the platform list neither way.
+(Until 0.15.0 the host also needed tmux; desks are now processes it runs.)
 
 ### When Tauri would be right
 
