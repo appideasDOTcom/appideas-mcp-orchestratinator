@@ -211,6 +211,7 @@ function fixture() {
     `  const text = typeof r.message?.content === 'string' ? r.message.content : '';`,
     // Taken into a turn already running: echoed when taken, answered in that
     // turn's one result. "look idle" is what ends a turn "look busy" left open.
+    `  out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'queued' });`,
     `  if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); said(text, who); if (/look idle/.test(text)) result(who); return; }`,
     `  inTurn = true;`,
     `  out({ type: 'system', subtype: 'init', session_id: id, model: 'claude-haiku-5-5', permissionMode: 'default', claude_code_version: '2.1.330' });`,

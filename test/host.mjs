@@ -399,6 +399,9 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
   logIn({ type: 'user', text });
   const hold = /^HOLD (\d+)/.exec(text);
   if (hold) await new Promise((res) => setTimeout(res, Number(hold[1])));
+  // The receipt, as 2.1.330 gives it (after HOLD's delay, which is how a
+  // message "taken late" is staged).
+  out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'queued' });
   // Taken into a turn already running, as 2.1.330 does: echoed when taken,
   // answered in that turn's one result, and in the conversation by its end.
   if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); queued.push(text); return; }
@@ -439,9 +442,12 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
     out({ type: 'system', subtype: 'compact_boundary' });
     result('');
   } else if (slash && slash[1] === 'clear') {
+    // As 2.1.330 does it: the reset names a conversation id that is not
+    // the session's (and nothing is written under it); the init after it
+    // names the session.
+    out({ type: 'conversation_reset', new_conversation_id: randomUUID(), trigger: 'clear' });
     session = newId();
     announce();
-    out({ type: 'conversation_reset', new_conversation_id: session, trigger: 'clear' });
     init();
     result('');
   } else {

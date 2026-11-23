@@ -171,7 +171,9 @@ export class Desk {
       if (m.session_id !== this.lastSessionId) this.follow(m.session_id, 'start').then(() => this.report());
       else this.report();
     });
-    proc.on('reset', (m) => { this.sessionId = m.session_id; this.follow(m.session_id, 'start').then(() => this.report()); });
+    // /clear: the conversation it names is not the session's id; the init
+    // right after it is, and that moves the desk (agent.js, readRecord).
+    proc.on('reset', () => { this.sessionId = null; });
     proc.on('status', (m) => {
       if (m.status === 'compacting') this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: 'compacting', text: '/compact', session_id: this.sessionId, compacting: true }, true);
       else if (m.compact) this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: m.compact === 'success' ? 'Compacted' : `compaction ${m.compact}`, text: '/compact', session_id: this.sessionId, compacting: false, compacted: m.compact === 'success' }, true);

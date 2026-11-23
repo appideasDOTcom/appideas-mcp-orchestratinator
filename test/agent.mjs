@@ -28,9 +28,10 @@ const eq = (actual, expected, msg) => {
   console.log(`  ${ok ? '✓' : '✗'} ${msg}${ok ? '' : `  (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`}`);
   if (!ok) failures++;
 };
-const next = (agent, event, ms = 5000) => new Promise((res) => {
-  const t = setTimeout(() => res(null), ms);
-  agent.once(event, (v) => { clearTimeout(t); res(v); });
+const next = (agent, event, ms = 5000, pred = () => true) => new Promise((res) => {
+  const t = setTimeout(() => { agent.off(event, on); res(null); }, ms);
+  function on(v) { if (!pred(v)) return; clearTimeout(t); agent.off(event, on); res(v); }
+  agent.on(event, on);
 });
 
 const FIX = resolve(`./data/agent-fixture-${process.pid}`);
@@ -72,6 +73,24 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
   if (r.type !== 'user') return;
   const text = r.message.content;
   if (text === 'IGNORE') return;
+  // The receipt, as 2.1.330 gives it: command_lifecycle queued the moment a
+  // message arrives, whatever the turn is doing.
+  out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'queued' });
+  // A reply written with no tool (a long text): 2.1.330 echoes the message
+  // only when the reply is done, with its result. Only the lifecycle record
+  // says it was taken before then.
+  if (text.startsWith('LONGTEXT ')) {
+    inTurn = true;
+    pending++;
+    init();
+    out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'started' });
+    await new Promise((res) => setTimeout(res, Number(text.slice(9))));
+    out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } });
+    result('LONGTEXT-DONE');
+    pending--;
+    done();
+    return;
+  }
   // Taken into a turn already running, as 2.1.330 does: echoed when taken,
   // answered in that turn's one result (measured: DONE-SLEEP and MIDTURN in one).
   if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); return; }
@@ -93,8 +112,10 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     if (busy) result('SLOW-DONE');
     else { pending--; done(); return; }
   } else if (text === '/clear') {
+    // As 2.1.330 does it: the reset names a conversation id that is not the
+    // session's; the init after it names the session.
+    out({ type: 'conversation_reset', new_conversation_id: randomUUID(), trigger: 'clear' });
     session = randomUUID();
-    out({ type: 'conversation_reset', new_conversation_id: session, trigger: 'clear' });
     init();
     result('');
   } else {
@@ -113,11 +134,12 @@ try {
   console.log('\n  what a record means (readRecord), as 2.1.330 writes them');
   eq(readRecord({ type: 'system', subtype: 'init', session_id: 'S', model: 'm', permissionMode: 'default', claude_code_version: '2.1.330' }),
     { kind: 'init', session_id: 'S', model: 'm', mode: 'default', version: '2.1.330' }, 'an init names the session, the model, the mode and the version');
-  eq(readRecord({ type: 'user', uuid: 'u1', isReplay: true }), { kind: 'taken', uuid: 'u1' }, 'a replayed user record is the receipt for the message of that uuid');
+  eq(readRecord({ type: 'command_lifecycle', command_uuid: 'u1', state: 'queued' }), { kind: 'taken', uuid: 'u1', state: 'queued' }, 'the receipt is command_lifecycle, the moment Claude Code has the message');
+  eq(readRecord({ type: 'user', uuid: 'u1', isReplay: true }), { kind: 'taken', uuid: 'u1', state: 'echo' }, 'and a replayed user record is one too, for a Claude Code that sends no lifecycle');
   eq(readRecord({ type: 'user', uuid: 'u2', message: { content: [{ type: 'tool_result' }] } }), null, 'a tool result is not a receipt');
   eq(readRecord({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', session_id: 'S' }),
     { kind: 'result', ok: false, subtype: 'error_during_execution', text: '', session_id: 'S' }, 'a result says whether the turn ended well');
-  eq(readRecord({ type: 'conversation_reset', new_conversation_id: 'S2' }), { kind: 'reset', session_id: 'S2' }, '/clear names the new conversation');
+  eq(readRecord({ type: 'conversation_reset', new_conversation_id: 'S2' }), { kind: 'reset', conversation: 'S2' }, '/clear\'s reset carries no session id: its id is not the session\'s');
   eq(readRecord({ type: 'system', subtype: 'status', status: 'compacting' }), { kind: 'status', status: 'compacting', compact: null }, 'compacting begins');
   eq(readRecord({ type: 'control_request', request_id: 'r', request: { subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'ls' }, description: 'd', permission_suggestions: [1] } }),
     { kind: 'permission', request_id: 'r', tool: 'Bash', title: 'Bash', input: { command: 'ls' }, description: 'd', suggestions: [1] }, 'a permission is the tool, its input, what it is for, and the rules that would allow it again');
@@ -157,6 +179,20 @@ try {
   eq(a.allow(perm.request_id).ok, true, 'and is allowed with one call');
   eq((await permDone)?.text, 'ALLOWED:{"command":"ls"}', 'which Claude Code reads as allowed, with the input it asked for');
   eq(a.allow(perm.request_id).code, 'stale_request', 'a second answer to it is refused: it is no longer open');
+  // While a permission stands, a message is not taken by Claude Code until
+  // it is answered (the protocol probe, 2.1.330): refused before it is
+  // written, so it is never said "not taken" and then delivered anyway.
+  const heldAsked = next(a, 'permission');
+  const heldDone = next(a, 'result');
+  await a.send('PERMIT Bash');
+  const held = await heldAsked;
+  const refused = await a.send('a message while it asks');
+  eq([refused.ok, refused.code], [false, 'asking'], 'a message while a permission stands is refused, not written');
+  assert(/waiting on an answer to what it asked \(permission for Bash\)/.test(refused.error ?? ''), 'saying what it waits on', refused.error);
+  a.allow(held.request_id);
+  await heldDone;
+  eq((await a.send('after the answer')).ok, true, 'and once it is answered, a message is taken again');
+  await next(a, 'result');
   const alwaysAsked = next(a, 'permission');
   const alwaysDone = next(a, 'result');
   await a.send('PERMIT Bash');
@@ -187,10 +223,19 @@ try {
   eq((await intDone)?.subtype, 'error_during_execution', 'and the turn ends interrupted');
   const resetSeen = next(a, 'reset');
   const before = a.sessionId;
+  const initAfter = next(a, 'init', 5000, (m) => m.session_id !== before);
   await a.send('/clear');
   const reset = await resetSeen;
-  assert(!!reset?.session_id && reset.session_id !== before && a.sessionId === reset.session_id, '/clear moves the process onto the new conversation');
+  const init2 = await initAfter;
+  assert(!!init2?.session_id && init2.session_id !== before && a.sessionId === init2.session_id, '/clear moves the process onto the new session the init after it names');
+  assert(reset?.conversation && reset.conversation !== init2?.session_id, 'never onto the id the reset names, which is not on disk');
   await next(a, 'result');
+
+  console.log('\n  a reply longer than the receipt timeout');
+  const longDone = next(a, 'result', 6000);
+  const longTaken = await a.send('LONGTEXT 1500', { timeoutMs: 500 });
+  eq(longTaken.ok, true, 'a message whose reply takes longer than the wait is taken by its lifecycle receipt, not said "not taken" (its echo comes with the result)');
+  eq((await longDone)?.text, 'LONGTEXT-DONE', 'and its reply arrives');
 
   console.log('\n  when it is not there');
   const notTaken = await a.send('IGNORE', { timeoutMs: 300 });

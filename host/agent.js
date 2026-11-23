@@ -87,11 +87,26 @@ export function readRecord(r) {
   if (r.type === 'system' && r.subtype === 'init') {
     return { kind: 'init', session_id: r.session_id ?? null, model: r.model ?? null, mode: r.permissionMode ?? null, version: r.claude_code_version ?? null };
   }
-  if (r.type === 'user' && r.isReplay) return { kind: 'taken', uuid: r.uuid ?? null };
+  // The receipt. Claude Code says `command_lifecycle` `queued` with our
+  // message's uuid the moment it has the message, then `started` and
+  // `completed` (2.1.330, measured 2026-11-22). The echo (`isReplay`) comes
+  // only when the message is written into the conversation, which for a
+  // message that starts a long reply is when the reply ends: a first message
+  // on an idle desk was echoed 14 s later, with the result. Waiting on the
+  // echo alone said "not taken" after 30 s about every message whose reply
+  // took longer. The echo stays a receipt too, for a Claude Code that does
+  // not send lifecycle records.
+  if (r.type === 'command_lifecycle') return { kind: 'taken', uuid: r.command_uuid ?? null, state: r.state ?? null };
+  if (r.type === 'user' && r.isReplay) return { kind: 'taken', uuid: r.uuid ?? null, state: 'echo' };
   if (r.type === 'result') {
     return { kind: 'result', ok: !r.is_error, subtype: r.subtype ?? null, text: typeof r.result === 'string' ? r.result : '', session_id: r.session_id ?? null };
   }
-  if (r.type === 'conversation_reset') return { kind: 'reset', session_id: r.new_conversation_id ?? null };
+  // /clear. Its `new_conversation_id` is NOT the new session's id: the init
+  // that follows names that, and only that id is on disk (the protocol
+  // probe, 2026-11-22, 2.1.330: reset 0e0457e3…, init and transcript
+  // 5c414aac…; the spike's run had the same split, misread when this was
+  // written). So a reset carries no session, and the next init moves us.
+  if (r.type === 'conversation_reset') return { kind: 'reset', conversation: r.new_conversation_id ?? null };
   if (r.type === 'system' && r.subtype === 'status') {
     return { kind: 'status', status: r.status ?? null, compact: r.compact_result ?? null };
   }
@@ -175,13 +190,17 @@ export class Agent extends EventEmitter {
     switch (m.kind) {
       case 'init': this.sessionId = m.session_id ?? this.sessionId; break;
       case 'taken': {
+        // A message taken means a turn: it starts one on an idle process,
+        // and a running one is working already. `completed` is the end of
+        // one message, and the result says when the turn ends.
+        if (m.state === 'completed') break;
         this.working = true;
         const w = this.takenWaits.get(m.uuid);
         if (w) { clearTimeout(w.timer); this.takenWaits.delete(m.uuid); w.resolve({ ok: true, uuid: m.uuid }); }
         break;
       }
       case 'result': this.working = false; if (m.session_id) this.sessionId = m.session_id; break;
-      case 'reset': if (m.session_id) this.sessionId = m.session_id; break;
+      case 'reset': this.sessionId = null; break;
       case 'permission': case 'question': case 'ask': this.asks.set(m.request_id, m); break;
       case 'answered': {
         const w = this.controls.get(m.request_id);
@@ -202,6 +221,14 @@ export class Agent extends EventEmitter {
   send(text, { timeoutMs = TAKEN_TIMEOUT_MS } = {}) {
     const uuid = randomUUID();
     if (!this.alive) return Promise.resolve({ ok: false, code: 'no_process', error: 'the desk\'s Claude Code is not running' });
+    // While it waits on an answer, Claude Code does not take a message: it
+    // is taken only once the ask is answered (the protocol probe,
+    // 2026-11-22, 2.1.330), so it would read "not taken" after 30 s and then
+    // arrive anyway. Refused before a byte is written, as the board refuses.
+    if (this.asks.size) {
+      const what = [...this.asks.values()][0];
+      return Promise.resolve({ ok: false, code: 'asking', error: `its Claude Code is waiting on an answer to what it asked (${what.kind === 'question' ? 'a question' : `permission for ${what.tool ?? 'a tool'}`}), and takes no message until then: answer it, or cancel it, then send this again` });
+    }
     return new Promise((resolve) => {
       const timer = setTimeout(() => { this.takenWaits.delete(uuid); resolve({ ok: false, code: 'not_taken', uuid, error: `Claude Code did not take the message within ${Math.round(timeoutMs / 1000)}s` }); }, timeoutMs);
       this.takenWaits.set(uuid, { resolve, timer });
