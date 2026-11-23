@@ -55,8 +55,8 @@
  * this instance's own entry; the dialog says so before the click.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { header, isUnder, originOf } from './identity.js';
 import { canonical } from './claude.js';
@@ -73,9 +73,14 @@ export const SERVER_NAME = 'orchestratinator';
 
 /** The host's environment without any `CLAUDE*` variable: a host started from
  *  inside a Claude Code session (a test, an agent) would otherwise hand the
- *  CLI a nested-session environment. */
+ *  CLI a nested-session environment. Except `CLAUDE_CONFIG_DIR`, which says
+ *  which config the person's Claude Code reads, and which the host reads
+ *  bindings from (identity.js): dropped, `mcp add` wrote a desk's binding into
+ *  the default ~/.claude.json and the rescan looked for it in the other, so
+ *  no desk could be taken under it (desktop-dev, measured on 7c9ca84, a
+ *  scratch app with a config dir of its own; the same line since 0.14.6). */
 export function cliEnv() {
-  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE')));
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE') || k === 'CLAUDE_CONFIG_DIR'));
 }
 
 const lastLine = (s) => String(s ?? '').trim().split('\n').filter((l) => l.trim()).pop() ?? '';
@@ -165,4 +170,73 @@ export function dropProjectEntry(dir, { origin, channel = null, agent = null, al
 export function insideRoots(dir, roots) {
   const here = canonical(dir);
   return roots.map((r) => canonical(r)).some((r) => isUnder(here, r));
+}
+
+/**
+ * The board's own tools, allowed in the folder a desk is bound in (task 352 B,
+ * costmo 2026-11-23, "in 0.15.0": his first session on the PC asked him for
+ * every whoami, poll and send). One rule, `mcp__<server>`, in the folder's
+ * `.claude/settings.local.json`, which Claude Code keeps out of git by
+ * itself. Measured on 2.1.330, a -p desk on a scratch board: with no rule
+ * whoami and list_tasks each raised can_use_tool; with `mcp__orchestratinator`
+ * (or `mcp__orchestratinator__*`) neither did. Every other tool still asks.
+ *
+ * What the host adds it records (`record`, a file beside host.json), so
+ * Leave takes away only that: a rule the person wrote is theirs, and is
+ * never recorded or removed. A settings file that is not JSON is left alone,
+ * as a .mcp.json is (above): the desk is bound, and its board tools ask.
+ */
+export function boardToolRule(name = SERVER_NAME) { return `mcp__${name}`; }
+const settingsAt = (dir) => join(dir, '.claude', 'settings.local.json');
+const readRecord = (record) => { try { return JSON.parse(readFileSync(record, 'utf8')) ?? {}; } catch { return {}; } };
+const writeJson = (file, json, raw = '') => {
+  const indent = /^([ \t]+)"/m.exec(raw)?.[1] ?? '  ';
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(`${file}.${process.pid}`, JSON.stringify(json, null, indent) + '\n');
+  renameSync(`${file}.${process.pid}`, file);
+};
+
+export function allowBoardTools(dir, record, name = SERVER_NAME) {
+  const file = settingsAt(dir);
+  const rule = boardToolRule(name);
+  const had = existsSync(file);
+  const raw = had ? readFileSync(file, 'utf8') : '';
+  let json;
+  try { json = had && raw.trim() ? JSON.parse(raw) : {}; } catch (err) { return { ok: false, error: `${file} is not JSON (${err.message}), so it was left alone` }; }
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return { ok: false, error: `${file} is not a settings object, so it was left alone` };
+  const allow = Array.isArray(json.permissions?.allow) ? json.permissions.allow : [];
+  if (allow.includes(rule)) return { ok: true, added: false };
+  json.permissions = { ...(json.permissions ?? {}), allow: [...allow, rule] };
+  try {
+    writeJson(file, json, raw);
+    const all = readRecord(record);
+    all[dir] = { rule, created: !had };
+    writeJson(record, all);
+  } catch (err) { return { ok: false, error: `${file} could not be written (${err.code ?? err.message})` }; }
+  return { ok: true, added: true, file };
+}
+
+/** Take away what allowBoardTools added in `dir`, and nothing else. */
+export function unallowBoardTools(dir, record) {
+  const all = readRecord(record);
+  const ours = all[dir];
+  if (!ours) return { ok: true, removed: false };
+  const file = settingsAt(dir);
+  const forget = () => { delete all[dir]; try { writeJson(record, all); } catch { /* a record that cannot be written keeps the entry; the next Leave tries again */ } };
+  if (!existsSync(file)) { forget(); return { ok: true, removed: false }; }
+  const raw = readFileSync(file, 'utf8');
+  let json;
+  try { json = JSON.parse(raw); } catch (err) { return { ok: false, error: `${file} is not JSON (${err.message}), so it was left alone` }; }
+  const allow = Array.isArray(json?.permissions?.allow) ? json.permissions.allow : [];
+  if (!allow.includes(ours.rule)) { forget(); return { ok: true, removed: false }; }
+  json.permissions.allow = allow.filter((r) => r !== ours.rule);
+  if (!json.permissions.allow.length) delete json.permissions.allow;
+  if (!Object.keys(json.permissions).length) delete json.permissions;
+  try {
+    // A file the host made, holding nothing else now, goes with the rule.
+    if (ours.created && !Object.keys(json).length) rmSync(file, { force: true });
+    else writeJson(file, json, raw);
+  } catch (err) { return { ok: false, error: `${file} could not be written (${err.code ?? err.message})` }; }
+  forget();
+  return { ok: true, removed: true, file };
 }

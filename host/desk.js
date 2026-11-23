@@ -240,11 +240,14 @@ export class Desk {
 
   /** Something Claude Code asks: said to the board, kept until answered. */
   raise(ask) {
+    // A subagent's ask says whose it is (task 352): its description, read
+    // once here and kept with the ask for every heartbeat after.
+    if (ask.agent) ask.via = W.subagentLabel(this.cwd, this.sessionId ?? this.lastSessionId, ask.agent) ?? 'a subagent';
     this.asks.set(ask.request_id, ask);
     this.host.emit({
       type: 'ask', channel: this.channel, agent: this.agent, session_id: this.sessionId ?? this.lastSessionId,
       request_id: ask.request_id, kind: ask.kind, tool: ask.tool, tool_input: ask.input ?? null,
-      summary: ask.summary, description: ask.description ?? null,
+      summary: ask.summary, description: ask.description ?? null, via: ask.via ?? null,
       options: (ask.rows ?? []).map(({ n, text }) => ({ n, text })),
     }, true);
     log(`${this.label}: Claude Code asks (${ask.kind}): ${ask.summary}`);
@@ -255,7 +258,7 @@ export class Desk {
     return [...this.asks.values()].map((ask) => ({
       type: 'ask', channel: this.channel, agent: this.agent, session_id: this.sessionId ?? this.lastSessionId,
       request_id: ask.request_id, kind: ask.kind, tool: ask.tool, tool_input: ask.input ?? null,
-      summary: ask.summary, description: ask.description ?? null, options: (ask.rows ?? []).map(({ n, text }) => ({ n, text })),
+      summary: ask.summary, description: ask.description ?? null, via: ask.via ?? null, options: (ask.rows ?? []).map(({ n, text }) => ({ n, text })),
     }));
   }
 
@@ -361,10 +364,15 @@ export class Desk {
     if (proc.exited?.midTurn) this.told('its Claude Code was stopped in the middle of a turn (the host stopping, or the desk handed over), so that turn ended unfinished; what it had already written or run stays, and the next message continues the conversation');
   }
 
+  /** The desk's window mark, said the same in a holder report and at every
+   *  registration: its own process, or an earlier version's window finishing
+   *  a turn (the board reads either as the floor holding it). */
+  get windowMark() { return this.running ? `proc:${this.proc.pid}` : this.legacyPid ? `legacy:${this.legacyPid}` : null; }
+
   /** Tell the board who holds the desk now, when that changed. */
   report() {
     const holder = this.running || this.legacyPid ? 'floor' : this.outsidePid ? 'editor' : null;
-    const window = this.running ? `proc:${this.proc.pid}` : this.legacyPid ? `legacy:${this.legacyPid}` : null;
+    const window = this.windowMark;
     const key = `${holder}|${window}|${this.holders}|${this.sessionId}`;
     if (key === this.reported) return;
     this.reported = key;

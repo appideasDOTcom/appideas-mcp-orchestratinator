@@ -74,6 +74,9 @@ const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestrat
 // Claude Code's own list of projects gains one entry, not one a run.
 const CANARY_FILE = process.env.ORCH_CANARY_FILE ?? join(dirname(CONFIG_FILE), 'claude-canary.json');
 const CANARY_DIR = join(dirname(CONFIG_FILE), 'canary');
+/** Which folders' board-tool allow rule this machine's host wrote (task 352
+ *  B, host/mcp.js), beside the desk-pid record, so Leave removes only that. */
+const BOARD_TOOLS_RECORD = join(dirname(W.deskPidsFile('host')), 'board-tools-allowed.json');
 /** How long a queued permission answer stays worth delivering. */
 const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
@@ -421,9 +424,13 @@ class Host {
       desks.push({
         channel: d.channel, agent: d.agent, cwd: d.cwd, scope: d.scope,
         session_id: d.sessionId ?? d.lastSessionId,
-        window: d.running ? `proc:${d.proc.pid}` : null,
+        // The same mark as the desk's holder report: a registration that
+        // said null for an earlier version's window mid-turn put the desk
+        // back to unheld at every heartbeat (patch E's row, which reads past
+        // the first registration).
+        window: d.windowMark,
         outside_pid: d.running ? null : d.outsidePid,
-        window_open: d.running ? `proc:${d.proc.pid}` : null,
+        window_open: d.windowMark,
         holders: d.holders ?? 0,
       });
     }
@@ -812,6 +819,11 @@ class Host {
     }
     rebound = true;
     log(`${channel}/${agent}: bound ${dir} in local scope`);
+    // The board's own tools ask nothing in a folder the floor took (task 352
+    // B, host/mcp.js): a take, an import, a move and a release all bind here.
+    const allowed = M.allowBoardTools(dir, BOARD_TOOLS_RECORD);
+    if (allowed.added) log(`${channel}/${agent}: allowed the board's tools (${M.boardToolRule()}) in ${allowed.file}`);
+    else if (!allowed.ok) warn(`${channel}/${agent}: the board's tools will ask for permission there: ${allowed.error}`);
     this.addRoot(dir);
     // Whether the move closes the floor's window for a new conversation is
     // asked before the rescan, and the intent is handed to the rescan to set
@@ -1005,6 +1017,9 @@ class Host {
     const rm = await M.mcpRemove(desk.cwd);
     if (!rm.ok) return fail(`could not remove the local-scope entry in ${desk.cwd}: ${rm.error}`);
     if (rm.removed) log(`${desk.label}: removed the local-scope entry in ${desk.cwd}`);
+    const unallowed = M.unallowBoardTools(desk.cwd, BOARD_TOOLS_RECORD);
+    if (unallowed.removed) log(`${desk.label}: took the board's tools rule out of ${unallowed.file}`);
+    else if (!unallowed.ok) warn(`${desk.label}: ${unallowed.error}`);
     const dropped = M.dropProjectEntry(desk.cwd, { origin: originOf(this.cfg.url), channel, agent });
     if (!dropped.ok) return fail(`left ${desk.cwd}/.mcp.json alone: ${dropped.error}`);
     if (dropped.removed.length) log(`${desk.label}: removed ${dropped.removed.join(', ')} from ${desk.cwd}/.mcp.json`);

@@ -430,22 +430,38 @@ try {
     c.stdin.end(JSON.stringify({ cwd: REPO, transcript_path: transcriptPath(canonical(REPO), ev.session_id), ...ev }));
   });
   let q;
-  const asks = { hook_event_name: 'Notification', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' };
-  await hook(s1.env, { session_id: sidB, ...asks });
-  q = await until(async () => { const f = await floor(); return f.queue.length ? f.queue : null; }, 6000);
-  eq((q ?? []).map((x) => `${x.channel}/${x.agent}`), [`${SB}/quinn`], 'a prompt raised in the seat\'s process is the seat\'s: the hook reads the process\'s own binding, not the folder\'s');
-  await hook(s1.env, { session_id: sidB, hook_event_name: 'Stop', last_assistant_message: 'ok' });
-  await until(async () => ((await floor()).queue.length === 0 ? true : null), 6000);
-  await hook({}, { session_id: sidA, ...asks });
-  q = await until(async () => { const f = await floor(); return f.queue.length ? f.queue : null; }, 6000);
-  eq((q ?? []).map((x) => `${x.channel}/${x.agent}`), [`${SA}/quinn`], 'and one raised in the folder\'s own process is the folder\'s desk\'s, as it always was');
-  await hook({}, { session_id: sidA, hook_event_name: 'Stop', last_assistant_message: 'ok' });
-  await until(async () => ((await floor()).queue.length === 0 ? true : null), 6000);
-  await hook({ ORCH_DESK_CONFIG: `${SEATS}/gone.json`, ORCH_CHANNEL: SB, ORCH_AGENT: 'quinn' }, { session_id: sidB, ...asks });
-  q = await until(async () => { const f = await floor(); return f.queue.length ? f.queue : null; }, 6000);
-  eq((q ?? []).map((x) => `${x.channel}/${x.agent}`), [`${SB}/quinn`], 'with its file gone, the two names the process was given still say which desk it is');
-  await hook(s1.env, { session_id: sidB, hook_event_name: 'Stop', last_assistant_message: 'ok' });
-  await until(async () => ((await floor()).queue.length === 0 ? true : null), 6000);
+  // Which desk a hook files its event under, read off the session row it
+  // upserts (the row takes the desk the hook resolved). Not a prompt: on a
+  // desk whose own Claude Code the host runs, a hook raises none (task 352 A,
+  // patch F: the host's ask is the one). Each row first has the other
+  // process's hook file the conversation under the other desk, so a hook
+  // that resolved nothing could not pass by leaving the row as it was. The
+  // event is a notification the board keeps no state for (idle_prompt).
+  const Database = (await import('better-sqlite3')).default;
+  const whose = (sid) => {
+    const db = new Database(DB_PATH, { readonly: true });
+    try { const r = db.prepare('SELECT channel, agent FROM agent_sessions WHERE session_id = ?').get(sid); return r ? `${r.channel}/${r.agent}` : null; } finally { db.close(); }
+  };
+  const quiet = (sid) => ({ session_id: sid, hook_event_name: 'Notification', notification_type: 'idle_prompt', notification_message: 'Claude is waiting for your input' });
+  const filedBy = async (env, sid, want) => { await hook(env, quiet(sid)); return (await until(() => (whose(sid) === want ? want : null), 6000)) ?? whose(sid); };
+  eq(await filedBy({}, sidB, `${SA}/quinn`), `${SA}/quinn`, 'the fixture: the folder\'s process files the conversation under the folder\'s desk');
+  eq(await filedBy(s1.env, sidB, `${SB}/quinn`), `${SB}/quinn`, 'an event raised in the seat\'s process is the seat\'s: the hook reads the process\'s own binding, not the folder\'s');
+  // The file alone: without the two names beside it, only reading the
+  // process's own binding file can say it is the seat (the mutant that
+  // skips the file survived the rows above, which carry the names too).
+  const fileOnly = { ORCH_DESK_CONFIG: s1.env.ORCH_DESK_CONFIG, ORCH_DESK_ROOT: s1.env.ORCH_DESK_ROOT };
+  eq(await filedBy({}, sidB, `${SA}/quinn`), `${SA}/quinn`, 'the fixture: under the folder\'s desk again');
+  eq([!!fileOnly.ORCH_DESK_CONFIG, await filedBy(fileOnly, sidB, `${SB}/quinn`)], [true, `${SB}/quinn`], 'the process\'s binding file alone says it is the seat');
+  eq(await filedBy(s1.env, sidA, `${SB}/quinn`), `${SB}/quinn`, 'the fixture: the seat\'s process files the conversation under the seat');
+  eq(await filedBy({}, sidA, `${SA}/quinn`), `${SA}/quinn`, 'and one raised in the folder\'s own process is the folder\'s desk\'s, as it always was');
+  const goneEnv = { ORCH_DESK_CONFIG: `${SEATS}/gone.json`, ORCH_CHANNEL: SB, ORCH_AGENT: 'quinn' };
+  eq(await filedBy({}, sidB, `${SA}/quinn`), `${SA}/quinn`, 'the fixture: under the folder\'s desk again');
+  eq(await filedBy(goneEnv, sidB, `${SB}/quinn`), `${SB}/quinn`, 'with its file gone, the two names the process was given still say which desk it is');
+  // And a hook's permission prompt on a desk the host runs raises nothing:
+  // what the seat's process asks arrives from the host, below.
+  await hook(s1.env, { session_id: sidB, hook_event_name: 'Notification', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
+  await sleep(1500);
+  eq((await floor()).queue.length, 0, "a hook's permission prompt on a desk the host runs raises nothing: the host's ask is the one");
 
   console.log('\n  a permission asked in a seat\'s process');
   r = await op('/api/floor/chat', { channel: SB, agent: 'quinn', text: 'PERMIT Bash' });
@@ -583,9 +599,7 @@ try {
   eq((await desk(SB, 'quinn'))?.hosted?.live, true, 'the seat is still a desk, in a folder that now names no desk of its own');
   a = await ask(SB, 'quinn', 'on your own now?');
   assert(ON(SB, 'quinn').test(a.answer ?? ''), 'and still answers as itself', a);
-  await hook(s1.env, { session_id: sidB, ...asks });
-  q = await until(async () => { const f = await floor(); return f.queue.length ? f.queue : null; }, 6000);
-  eq((q ?? []).map((x) => `${x.channel}/${x.agent}`), [`${SB}/quinn`], 'its hook still reports, from the process\'s own file, though the folder binds nothing');
+  eq(await filedBy(s1.env, sidB, `${SB}/quinn`), `${SB}/quinn`, 'its hook still reports, from the process\'s own file, though the folder binds nothing');
 
   // A bind onto a name one of the folder's seats carries (QA, PR #57
   // finding 3, and Q2). The seat gives the name up to the folder's own

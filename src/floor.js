@@ -440,6 +440,85 @@ export function deliverable(h, nowMs = Date.now()) {
 }
 
 /**
+ * Every prompt a desk's Claude Code has open, in the order it asked them
+ * (task 352 A, costmo 2026-11-23: "it just looked a little broken"). Claude
+ * Code asks several at once: four Read permissions in 1.7 s from one
+ * assistant message of parallel tool calls, and a background subagent's
+ * prompts between its parent's (his session on the PC at 7c9ca84). The board
+ * held one a desk, so each new ask took the last one's place on the floor,
+ * answering the one shown left the composer looking free, and the next
+ * message bounced off the host's own refusal after a 200.
+ *
+ * So it is a Map whose `get` is the prompt the floor shows (the oldest still
+ * open), with the rest behind it. `get(k).more` is how many wait behind it.
+ * `set` and `delete` keep a Map's meaning: `set` puts a prompt in front (a
+ * hook's, or an answer that did not take, offered again), `delete` drops
+ * every prompt of the desk (the desk left, its host went offline). A host's
+ * asks go through `add`, and an answer or a withdrawal through `shift` and
+ * `remove`, which bring the next one forward.
+ */
+export class AskMap extends Map {
+  constructor() { super(); this.behind = new Map(); }
+  #mark(k) { const head = super.get(k); if (head) head.more = this.behind.get(k)?.length ?? 0; return head ?? undefined; }
+  get(k) { return this.#mark(k); }
+  set(k, req) {
+    // A host's ask is never dropped by being stood in front of: it stays
+    // open in Claude Code until it is answered or withdrawn, so it goes
+    // behind, first in line (QA at patch E: a hook's prompt set over it, and
+    // the subagent's real ask was gone from the floor while it still waited).
+    const head = super.get(k);
+    if (head?.host_ask && head.request_id !== req.request_id) {
+      if (!this.behind.has(k)) this.behind.set(k, []);
+      this.behind.get(k).unshift(head);
+    }
+    return this.#put(k, req);
+  }
+  #put(k, req) { super.set(k, req); this.#mark(k); return this; }
+  delete(k) { this.behind.delete(k); return super.delete(k); }
+  clear() { this.behind.clear(); super.clear(); }
+  /** Every prompt open on the desk, the shown one first. */
+  all(k) { const head = super.get(k); return head ? [head, ...(this.behind.get(k) ?? [])] : []; }
+  holds(k, rid) { return this.all(k).some((r) => r.request_id === rid); }
+  /** A host's ask: shown if nothing is, behind the rest if something is, nothing if it is open already. */
+  add(k, req) {
+    if (this.holds(k, req.request_id)) return null;
+    if (!super.get(k)) { this.#put(k, req); return 'shown'; }
+    if (!this.behind.has(k)) this.behind.set(k, []);
+    this.behind.get(k).push(req);
+    this.#mark(k);
+    return 'behind';
+  }
+  /** In front of the rest, keeping them: an answer that did not take, offered again. */
+  front(k, req) {
+    const head = super.get(k);
+    if (head && head.request_id !== req.request_id) {
+      if (!this.behind.has(k)) this.behind.set(k, []);
+      this.behind.get(k).unshift(head);
+    }
+    return this.#put(k, req);
+  }
+  /** The shown prompt is answered: the next comes forward, and is returned. */
+  shift(k) {
+    const rest = this.behind.get(k) ?? [];
+    const next = rest.shift() ?? null;
+    if (!rest.length) this.behind.delete(k);
+    if (next) this.#put(k, next); else super.delete(k);
+    return next;
+  }
+  /** One prompt is over, wherever it stands. */
+  remove(k, rid) {
+    if (super.get(k)?.request_id === rid) return { was: 'shown', next: this.shift(k) };
+    const rest = this.behind.get(k) ?? [];
+    const i = rest.findIndex((r) => r.request_id === rid);
+    if (i < 0) return { was: null, next: null };
+    rest.splice(i, 1);
+    if (!rest.length) this.behind.delete(k);
+    this.#mark(k);
+    return { was: 'behind', next: null };
+  }
+}
+
+/**
  * A desk whose window is asking something takes no message, and says so
  * before anything is queued: the open prompt (`live.pending`) — a question
  * form, a permission menu, a question before the window can start. Its keys
@@ -456,8 +535,11 @@ export function deliverable(h, nowMs = Date.now()) {
 export function askingWhy(pending) {
   if (!pending) return null;
   const what = pending.questions?.length || pending.reading || pending.tool === 'AskUserQuestion' ? 'a question' : 'for permission';
+  const more = pending.more ?? 0;
   return {
-    error: `This desk's Claude Code is asking ${what}, and waits on your answer before anything else: answer it, or cancel it, then send this.`,
+    error: more
+      ? `This desk's Claude Code is asking ${what}, with ${more} more waiting behind it, and takes nothing else until all ${more + 1} are answered: answer them, or cancel, then send this.`
+      : `This desk's Claude Code is asking ${what}, and waits on your answer before anything else: answer it, or cancel it, then send this.`,
     code: 'asking',
   };
 }
@@ -1638,6 +1720,15 @@ export function ingestHookEvent(store, body, live = null) {
     askRescan(store, live, { channel, agent, why: 'a session started on a desk no host runs' });
   }
 
+  // A desk whose own Claude Code the host runs says what it asks as data
+  // (`ask` events: host/desk.js). The plugin's hooks fire in that process
+  // too, and a subagent's PermissionRequest reached the board as a prompt
+  // of its own beside the host's ask for the same tool: QA on a real
+  // 2.1.330 at patch E, a parent and a background subagent each asking,
+  // three prompts on the floor for two, the hook's answered into nothing
+  // ("that question is no longer open"). So on such a desk a hook never
+  // raises a prompt; the host's ask is the one (task 352 A).
+  const hostAsks = mirrored && String(hosted?.window_id ?? '').startsWith('proc:');
   const key = deskKey(channel, agent);
   const state = (s) => {
     if (!hosted) return;
@@ -1799,6 +1890,7 @@ export function ingestHookEvent(store, body, live = null) {
      * it would do — and either of them can be the one who does it.
      */
     case 'PermissionRequest': {
+      if (hostAsks) break;
       const summary = str(body.tool_name)
         ? toolSummary(body.tool_name, body.tool_input)
         : 'a tool needs a permission decision';
@@ -1835,6 +1927,7 @@ export function ingestHookEvent(store, body, live = null) {
     case 'Notification': {
       const kind = str(body.notification_type);
       if (!AWAITING_NOTIFICATIONS.has(kind)) break;
+      if (hostAsks && kind === 'permission_prompt') break;
       const said = clip(body.notification_message, 500);
       const open = live?.pending.get(key);
 
@@ -1982,7 +2075,7 @@ export function createLive() {
    *  host/canary.js), by host id: re-said at every registration, so a board
    *  that restarted has it again within a heartbeat. */
   const canary = new Map();
-  const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
+  const pending = new AskMap(); // deskKey -> the prompt shown { request_id, tool, summary, message, at, more }, the rest behind it
   // Prompts the operator has answered, kept only until the answer is known to
   // have landed. The floor drops a desk's prompt the moment a decision is made,
   // so if the keystroke turns out not to have taken there is nothing left to put
@@ -2865,15 +2958,24 @@ function applyHostEvent(store, live, hostId, ev) {
       if (!rid) break;
       const open = live.pending.get(key);
       if (ev.gone) {
-        if (open?.request_id === rid) {
-          live.pending.delete(key);
-          store.clearAwaiting(open.session_id ?? sessionId);
-          store.clearDeskAwaiting(channel, agent);
+        // One prompt is over: the shown one (the next comes forward), or one
+        // behind it (the count goes down). Never the desk's other prompts.
+        const { was, next } = live.pending.remove(key, rid);
+        if (was === 'shown') {
           live.publish(key, { type: 'permission', request_id: rid, decision: 'gone', resolved: true });
+          if (next) {
+            store.setAwaiting(next.session_id ?? sessionId, 'permission_request', next.summary);
+            live.publish(key, { type: 'permission', request: live.pending.get(key) });
+          } else {
+            store.clearAwaiting(open.session_id ?? sessionId);
+            store.clearDeskAwaiting(channel, agent);
+          }
+        } else if (was === 'behind') {
+          live.publish(key, { type: 'permission', request: live.pending.get(key) });
         }
         break;
       }
-      if (open?.request_id === rid) break;
+      if (live.pending.holds(key, rid)) break;
       if (live.answered.get(key)?.request_id === rid) break;
       const isQuestion = str(ev.kind) === 'question';
       const form = isQuestion ? formFromInput(ev.tool_input?.questions) : null;
@@ -2882,14 +2984,21 @@ function applyHostEvent(store, live, hostId, ev) {
         : [];
       const summary = clip(str(ev.summary) ?? (isQuestion ? 'a question for you' : 'a tool needs a permission decision'), 500);
       store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd, runner: 'host', pid: null });
-      live.pending.set(key, {
+      // Behind any prompt already shown: Claude Code asks several at once
+      // (parallel tool calls, a subagent beside its parent), and each is
+      // answered in turn (AskMap). `via` is the subagent's description when
+      // a subagent asked, so the prompt says whose it is.
+      const placed = live.pending.add(key, {
         request_id: rid, session_id: sessionId, tool: str(ev.tool) ?? 'tool', host_ask: true,
         summary, message: clip(str(ev.description), 500), options, read: true, reading: false,
         asked: form, questions: form?.questions ?? null, tabs: form?.tabs ?? null, at: now,
+        via: clip(str(ev.via), 200),
       });
-      store.setAwaiting(sessionId, 'permission_request', summary);
-      state('awaiting');
-      live.publish(key, { type: 'permission', request: live.pending.get(key) });
+      if (placed === 'shown') {
+        store.setAwaiting(sessionId, 'permission_request', summary);
+        state('awaiting');
+      }
+      if (placed) live.publish(key, { type: 'permission', request: live.pending.get(key) });
       break;
     }
 
@@ -2928,7 +3037,7 @@ function applyHostEvent(store, live, hostId, ev) {
       if (again) {
         again.reoffers = (again.reoffers ?? 0) + 1;
         live.answered.delete(key);
-        live.pending.set(key, again);
+        live.pending.front(key, again);
         live.publish(key, { type: 'permission', request: again });
       }
       // One message, said in both places. The chat row and the desk's own
@@ -4100,6 +4209,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
 
   /** A hosted desk that can take a message right now, or the reason it can't. */
   const hostedOrWhyNot = (channel, agent) => deliverable(store.hostedDesk(channel, agent));
+  /** After an answer: the prompt that waited behind it is the desk's now, said as asked (AskMap). */
+  const showNextAsk = (key, next) => {
+    if (!next) return;
+    store.setAwaiting(next.session_id, 'permission_request', next.summary);
+    live.publish(key, { type: 'permission', request: live.pending.get(key) });
+  };
 
   /**
    * Say something to a hosted desk. The message is a user turn in that session:
@@ -5201,7 +5316,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // approvals arrived in it as twenty-nine keystrokes, which submitted
     // themselves as a message. Clearing the prompt first makes the second
     // click a no-op instead of a stored one.
-    live.pending.delete(key);
+    const nextAsk = live.pending.shift(key);
     // Kept, not dropped: this is the only copy of the question, and if the host
     // reports that the keystroke never took it is what gets offered again.
     live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
@@ -5225,6 +5340,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // host/index.js, case 'permission').
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
+    showNextAsk(key, nextAsk);
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
       request_id: requestId, decision: send, message: str(req.body?.message), reason, queued_at: Date.now(),
       // How the host knows, if this waits in its line, that the prompt is
@@ -5296,10 +5412,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // any typed words, which Claude Code takes as an answer of their own
     // (host/desk.js). No keys, and so no withdrawing a form for typed words.
     const toolAnswers = pendingReq.host_ask ? answersForTool(pendingReq.questions, answers) : null;
-    live.pending.delete(key);
+    const nextAsk = live.pending.shift(key);
     live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision: 'answered', resolved: true });
+    showNextAsk(key, nextAsk);
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'answer', {
       request_id: requestId, steps, answers: toolAnswers, queued_at: Date.now(),
       // How the host knows, if this waits, that the question is still the

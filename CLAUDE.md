@@ -152,6 +152,46 @@ on was measured on 2.1.330 before it was built
   does not raise the same request a second time. Every standing ask is said
   again at each heartbeat (`standingAsks`), so a board that restarted
   raises it again, and said `gone` when the process that asked has ended.
+- **A desk can have several prompts open, and the floor shows them one at
+  a time** (task 352 A, costmo 2026-11-23, from his first session on the
+  PC: "it just looked a little broken"). Claude Code asks for parallel tool
+  calls and for a subagent's tools beside its parent's, and the board held
+  one prompt a desk: each new one took the last one's place, and answering
+  the one shown left the composer free for a message the host then
+  refused. `live.pending` is an `AskMap` in `src/floor.js`: `get` is the
+  oldest prompt still open, with `more` counting the rest; a host's ask is
+  `add`ed behind it; an answer `shift`s the next forward (said at once,
+  `showNextAsk`), a withdrawal or `gone` `remove`s that one wherever it
+  stands, and `delete` still drops all of a desk's (it left, its host went
+  offline). The board refuses a message while any stands, naming how many
+  (`askingWhy`). A subagent's `can_use_tool` carries `agent_id` and the
+  conversation's own does not (measured on 2.1.330); the host reads the
+  subagent's description from its meta file (`subagentLabel` in
+  `host/claude.js`) and the box says "asked by the subagent …". On that
+  run, three parallel Bash calls asked one at a time, each after the last
+  was answered; his session saw four within 1.7 s, which is what the queue
+  is for either way. Two faults QA found on a real 2.1.330 at patch E, a
+  parent and a background subagent each asking, are rules now. **On a
+  desk whose own Claude Code the host runs, a hook never raises a
+  prompt** (`hostAsks` in `ingestHookEvent`): a subagent's
+  PermissionRequest fires there, and its prompt stood in front of the
+  host's ask for the same tool, answered into nothing. And **a turn's end
+  clears only the conversation's own leftover asks** (`result` in
+  `host/agent.js`): a background subagent asks after its parent's turn
+  has ended, and clearing it left the subagent waiting for ever on a
+  prompt nobody could see. A host ask is never dropped by a prompt set in
+  front of it either (`AskMap.set` puts it behind).
+- **The board's own tools ask nothing in a folder the floor took** (task
+  352 B, costmo 2026-11-23). Every bind (take, import, move, release)
+  writes one rule, `mcp__orchestratinator`, into the folder's
+  `.claude/settings.local.json` (`allowBoardTools` in `host/mcp.js`), and
+  Leave removes it. Measured on 2.1.330, a -p desk on a scratch board:
+  with no rule, whoami and list_tasks each raised `can_use_tool`; with
+  `mcp__orchestratinator` or `mcp__orchestratinator__*`, neither did. What
+  the host added is kept in `board-tools-allowed.json` beside the desk-pid
+  record, so Leave takes away only that: a rule the person wrote is never
+  removed, and a file the host made for it alone goes with it. A settings
+  file that is not JSON is left as it is, and the desk's board tools ask.
 - **Anything else Claude Code asks is declined and said on the desk** (the
   `ask` handler in `desk.js`). A dialog it would have drawn arrives, by the
   binary, as `request_user_dialog`; that has not been measured. Declined so

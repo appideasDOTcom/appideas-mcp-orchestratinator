@@ -257,5 +257,103 @@
   "host/desk.js",
   "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? unlisted ?? null;",
   "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? null;"
+ ],
+ [
+  "Q2: a version already checked is probed again",
+  "host",
+  "host/index.js",
+  "if (known) { this.canary = known; return; }",
+  "if (false) { this.canary = known; return; }"
+ ],
+ [
+  "352A: a host's ask always takes the place of the one shown",
+  "floor",
+  "src/floor.js",
+  "    if (!super.get(k)) { this.set(k, req); return 'shown'; }",
+  "    { this.set(k, req); return 'shown'; }"
+ ],
+ [
+  "352A: an answer drops every prompt behind it",
+  "floor",
+  "src/floor.js",
+  "    const nextAsk = live.pending.shift(key);\n    // Kept, not dropped",
+  "    const nextAsk = (live.pending.delete(key), null);\n    // Kept, not dropped"
+ ],
+ [
+  "352A: one withdrawn from behind closes the one shown",
+  "floor",
+  "src/floor.js",
+  "    if (super.get(k)?.request_id === rid) return { was: 'shown', next: this.shift(k) };",
+  "    if (super.get(k)) return { was: 'shown', next: this.shift(k) };"
+ ],
+ [
+  "352A: the refusal does not say how many wait",
+  "floor",
+  "src/floor.js",
+  "    error: more\n      ?",
+  "    error: false\n      ?"
+ ],
+ [
+  "352B: a bind does not allow the board's tools",
+  "host",
+  "host/index.js",
+  "    const allowed = M.allowBoardTools(dir, BOARD_TOOLS_RECORD);",
+  "    const allowed = { ok: true };"
+ ],
+ [
+  "352B: Leave keeps the board-tools rule",
+  "host",
+  "host/index.js",
+  "    const unallowed = M.unallowBoardTools(desk.cwd, BOARD_TOOLS_RECORD);",
+  "    const unallowed = { ok: true };"
+ ],
+ [
+  "352B: a rule the person wrote is recorded as the host's",
+  "host",
+  "host/mcp.js",
+  "  if (allow.includes(rule)) return { ok: true, added: false };\n",
+  ""
+ ],
+ [
+  "352A: a subagent's ask is not named",
+  "host",
+  "host/desk.js",
+  "    if (ask.agent) ask.via =",
+  "    if (false) ask.via ="
+ ],
+ [
+  "4154: CLAUDE_CONFIG_DIR is dropped from the binding CLI",
+  "host",
+  "host/mcp.js",
+  " || k === 'CLAUDE_CONFIG_DIR'",
+  ""
+ ],
+ [
+  "upgrade: a registration says no window for an earlier version's window mid-turn",
+  "host",
+  "host/index.js",
+  "        window: d.windowMark,",
+  "        window: d.running ? `proc:${d.proc.pid}` : null,"
+ ],
+ [
+  "352A: a subagent's hook raises a prompt on a desk the host runs",
+  "floor",
+  "src/floor.js",
+  "    case 'PermissionRequest': {\n      if (hostAsks) break;",
+  "    case 'PermissionRequest': {"
+ ],
+ [
+  "352A: a prompt set over a host's ask drops it",
+  "floor",
+  "src/floor.js",
+  "    if (head?.host_ask && head.request_id !== req.request_id) {\n      if (!this.behind.has(k)) this.behind.set(k, []);\n      this.behind.get(k).unshift(head);\n    }\n    return this.#put(k, req);",
+  "    return this.#put(k, req);"
+ ],
+ [
+  "352A: a background subagent's ask is dropped at its parent's turn end",
+  "agent",
+  "host/agent.js",
+  "          if (ask.agent) continue;\n",
+  ""
  ]
 ]

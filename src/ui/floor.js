@@ -5041,6 +5041,16 @@
    * is answered by the one click handler, which reads the desk off the box
    * (targetOf). Rebuilt only when what it says changes.
    */
+  /* Whose prompt this is, and how many wait behind it (task 352): Claude Code
+     asks several at once, and the floor shows them one at a time, the oldest
+     first. Nothing when it is the conversation's own and the only one. */
+  function askQueueLine(req) {
+    if (!req?.via && !req?.more) return '';
+    const whose = req.via ? `asked by the subagent \u201c${esc(clip(req.via, 120))}\u201d` : '';
+    const more = req.more ? `${req.more} more waiting after this one` : '';
+    return `<div class="p-ask-queue muted">${[whose, more].filter(Boolean).join(' \u00b7 ')}</div>`;
+  }
+
   function drawAlert(alertSlot, d, channel, agent, canChat) {
     const s = d.session ?? {};
     // The alert is rebuilt only when what it says changes; its age ticks in
@@ -5099,7 +5109,8 @@
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.host_ask ? `ask:${req.request_id}:${req.summary ?? ''}:${(req.options ?? []).map((o) => o.text).join(',')}` : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.host_ask ? `ask:${req.request_id}:${req.summary ?? ''}:${(req.options ?? []).map((o) => o.text).join(',')}` : ''}` +
+          `|${req?.via ?? ''}|${req?.more ?? 0}`;
     // Claude Code signed out on the desk's host (d.signin, src/floor.js):
     // the window cannot answer, so the box says so and offers Sign in, which
     // has the host run Claude Code's own sign-in (costmo, 2026-11-19). A
@@ -5145,6 +5156,7 @@
                // floor exists to avoid.
                : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'Claude Code is waiting on an answer', 200))}`
              } <span class="mono t-when" data-at="${esc(s.awaiting_since ?? req?.at ?? '')}"></span></div>
+             ${askQueueLine(req)}
              ${req?.questions?.length ? askHtml(req) : ''}
              ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question\u2026</div>` : ''}
              ${unreadable && !reading ? `<div class="p-unknown">

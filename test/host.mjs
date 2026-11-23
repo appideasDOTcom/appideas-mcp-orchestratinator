@@ -249,6 +249,8 @@ function fixture() {
  *   PERMIT <tool>  asks permission for <tool> (with a rule it would allow
  *                  again) and says what it was told
  *   ASK            asks a two-question form and says the answers it got
+ *   PAIR           asks two permissions at once, its own and a subagent's
+ *   BGSUB          a background subagent asks, and the turn ends before it is answered
  *   DIALOG         asks something the floor has no way to answer
  *   SLOW <ms>      a turn that long, which runs a tool first (so the board
  *                  sees it working); a stop ends it
@@ -307,7 +309,7 @@ if (argv[0] === '--version') { process.stdout.write((flag('version.flag') || '2.
 // projects[cwd].mcpServers, "already exists" on a duplicate add, "No MCP
 // server named" on a missing remove, and "File modified:" on success.
 if (argv[0] === 'mcp') {
-  const CFG = path.join(os.homedir(), '.claude.json');
+  const CFG = path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json');
   let j = {}; try { j = JSON.parse(fs.readFileSync(CFG, 'utf8')); } catch {}
   const a = argv.slice(1); const sub = a[0];
   const scopeAt = a.indexOf('-s'); if (scopeAt >= 0 && a[scopeAt + 1] !== 'local') { process.stderr.write('stand-in: only local scope\n'); process.exit(2); }
@@ -445,6 +447,27 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
     const a = await ask({ subtype: 'can_use_tool', tool_name: tool, display_name: tool, input: { command: 'ls' }, description: 'List files', permission_suggestions: [{ type: 'addRules', rules: [{ toolName: tool, ruleContent: 'ls' }], behavior: 'allow', destination: 'localSettings' }] });
     if (a.cancelled) result('', false, 'error_during_execution');
     else finish(a.behavior === 'allow' ? 'ALLOWED:' + JSON.stringify(a.updatedInput) + (a.updatedPermissions ? ':ALWAYS' : '') : 'DENIED:' + a.message);
+  } else if (text === 'PAIR') {
+    // Two asks at once, the conversation's own and a subagent's (2.1.330:
+    // a subagent's can_use_tool carries agent_id, and its meta file names it).
+    const sub = path.join(transcriptFile().replace(/\.jsonl$/, ''), 'subagents');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'agent-sub1.meta.json'), JSON.stringify({ agentType: 'general-purpose', description: 'Build incidents capture' }));
+    const [p1, p2] = await Promise.all([
+      ask({ subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'touch parent' }, description: 'Parent touch', permission_suggestions: [], tool_use_id: 'tu-p' }),
+      ask({ subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'touch sub' }, description: 'Subagent touch', permission_suggestions: [], tool_use_id: 'tu-s', agent_id: 'sub1' }),
+    ]);
+    finish('PAIR:' + p1.behavior + ',' + p2.behavior);
+  } else if (text === 'BGSUB') {
+    // A background subagent asking after its parent's turn has ended
+    // (QA, a real 2.1.330 at patch E): its ask is still waited on.
+    const sub = path.join(transcriptFile().replace(/\.jsonl$/, ''), 'subagents');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'agent-sub2.meta.json'), JSON.stringify({ agentType: 'general-purpose', description: 'Background capture' }));
+    const waiting = ask({ subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'touch bg' }, description: 'Background touch', permission_suggestions: [], tool_use_id: 'tu-bg', agent_id: 'sub2' });
+    finish('BG-STARTED');
+    const a = await waiting;
+    reply('BGSUB:' + a.behavior);
   } else if (text === 'CANCELASK') {
     // Claude Code withdrawing what it asked (control_cancel_request, as
     // 2.1.330 sends it on an interrupt while an ask stands; QA, msg 4100).
@@ -730,6 +753,35 @@ try {
   eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'cancel' })).status, 200, 'Cancel is taken');
   eq((await answerFor(p?.request_id))?.response, { behavior: 'deny', message: 'The operator cancelled this.' }, 'and is a refusal');
   assert(await until(() => (controlsSent().slice(controlsBeforeCancel).some((c) => c.subtype === 'interrupt') ? true : null), 8000), 'followed by a stop of the turn, as Escape was');
+
+  // Two asks at once, the conversation's own and a subagent's (task 352 A):
+  // both stand, one shown and one counted, the parent's never replaced, and
+  // the subagent's named by the description its caller gave it.
+  mark = await lastId();
+  await chat('free', 'PAIR');
+  const pair1 = await until(async () => { const q = await permOf(); return q?.more === 1 ? q : null; }, 10000);
+  eq([pair1?.message, pair1?.more, pair1?.via ?? null], ['Parent touch', 1, null], 'two asks at once: the first is shown, the other counted behind it');
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: pair1?.request_id, decision: 'allow' })).status, 200, 'the first is answered');
+  const pair2 = await until(async () => { const q = await permOf(); return q && q.request_id !== pair1?.request_id ? q : null; }, 10000);
+  eq([pair2?.message, pair2?.more, pair2?.via], ['Subagent touch', 0, 'Build incidents capture'], "and the subagent's comes forward, named as the subagent's");
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: pair2?.request_id, decision: 'allow' })).status, 200, 'and is answered in its turn');
+  assert(!!(await replyAfter(mark, /^PAIR:allow,allow$/)), 'and Claude Code had both answers');
+
+  // A background subagent's ask, standing after its parent's turn has ended:
+  // it stays on the floor, the desk takes no message while it does, and the
+  // answer reaches the subagent (QA at patch E: the host dropped it at the
+  // turn's result, and the subagent waited for ever on nothing anyone saw).
+  mark = await lastId();
+  await chat('free', 'BGSUB');
+  assert(!!(await replyAfter(mark, /^BG-STARTED$/)), "the fixture: the parent's turn has ended");
+  await sleep(1500);
+  const bgAsk = await permOf();
+  eq([bgAsk?.message, bgAsk?.via], ['Background touch', 'Background capture'], "the subagent's ask is still on the floor after its parent's turn ended, named as the subagent's");
+  const subRefused = await chat('free', 'while the subagent asks');
+  eq([subRefused.status, (await subRefused.json()).code], [409, 'asking'], 'and the desk takes no message while it stands');
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: bgAsk?.request_id, decision: 'allow' })).status, 200, 'it is answered from the floor');
+  assert(!!(await replyAfter(mark, /^BGSUB:allow$/)), 'and the answer reaches the subagent, which goes on');
+  assert(await until(async () => ((await permOf()) ? null : true), 5000), 'and the desk asks nothing any more');
 
   // Claude Code withdrawing an ask (control_cancel_request; QA measured it
   // on 2.1.330 for an interrupt while a permission stood, msg 4100). The
@@ -1181,6 +1233,11 @@ try {
     'written by `claude mcp add -s local`, with the key the host holds — the board never sent one');
   eq(entry?.url, `${HOST}/mcp`, 'pointing at this board');
   assert(/newbie: bound .*plain-git in local scope/.test(host.log), 'and the host log says so');
+  // The board's own tools ask nothing there (task 352 B): one rule in the
+  // folder's local settings, measured on 2.1.330 to let whoami and
+  // list_tasks through with no can_use_tool.
+  const localSettings = (dir) => { try { return JSON.parse(readFileSync(`${dir}/.claude/settings.local.json`, 'utf8')); } catch { return null; } };
+  eq(localSettings(`${FIX}/plain-git`)?.permissions?.allow, ['mcp__orchestratinator'], "and the board's own tools are allowed in that folder, in its local settings");
   assert(!!(await heldBy('newbie', 'floor', undefined, 15000)), 'and its Claude Code is started there, held by the floor');
   const newbieArgv = await until(() => { const l = launches(argvBefore); return l.length ? l : null; }, 8000) ?? [];
   assert(newbieArgv.length === 1 && !newbieArgv[0].includes('--resume'), `a fresh conversation, with nothing to resume — ${JSON.stringify(newbieArgv)}`);
@@ -1197,6 +1254,9 @@ try {
   // read as the conversation moving (QA, msg 4130).
   const freePidBefore = await until(() => pidIn(REPO), 8000);
   assert(!!freePidBefore, 'the fixture: the desk\'s Claude Code is visible before the reopen');
+  // The person's own settings in that folder: kept as they are, the rule added beside them.
+  mkdirSync(`${REPO}/.claude`, { recursive: true });
+  writeFileSync(`${REPO}/.claude/settings.local.json`, JSON.stringify({ permissions: { allow: ['Bash(npm test)'] }, model: 'sonnet' }, null, 2));
   writeFileSync(`${REPO}/.mcp.json`, JSON.stringify({
     mcpServers: {
       orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'free', 'X-Orchestratinator-Key': KEY } },
@@ -1209,6 +1269,7 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.scope === 'local' ? true : null), 20000), 'after which it is a local-scope desk');
   eq(Object.keys(JSON.parse(readFileSync(`${REPO}/.mcp.json`, 'utf8')).mcpServers), ['github'], 'its .mcp.json lost the orchestratinator entry and kept the other server');
   eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Agent'], 'free', 'and ~/.claude.json gained it');
+  eq(localSettings(REPO), { permissions: { allow: ['Bash(npm test)', 'mcp__orchestratinator'] }, model: 'sonnet' }, "an import allows the board's tools too, beside the person's own settings, which stay");
   eq([deskOf(await floor(), 'free')?.hosted?.session_id, pidIn(REPO)], [SESSION_ID, freePidBefore], 'the conversation it was on is the one it is still on, in the same Claude Code');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/opened`, channel: CH, agent: 'newbie' })).status, 409, 'a name already seated at another folder is refused');
 
@@ -1217,9 +1278,23 @@ try {
   eq(left.status, 200, 'a desk can be left from the floor');
   assert(await until(async () => (deskOf(await floor(), 'newbie')?.hosted?.state === 'offline' ? true : null), 20000), 'and the desk goes offline once the host has unbound it');
   eq(localCfg().projects?.[`${FIX}/plain-git`]?.mcpServers?.orchestratinator ?? null, null, 'its local-scope entry is gone');
+  eq(existsSync(`${FIX}/plain-git/.claude/settings.local.json`), false, "and the rule with it: the file the host made for it, holding nothing else, is gone");
   assert(/dropped desk host-test\/newbie/.test(host.log), 'the host dropped the desk');
   eq(pidIn(`${FIX}/plain-git`), null, 'and ended its Claude Code');
   assert(!!deskOf(await floor(), 'newbie'), 'the seat stays on the floor — whether the agent is gone is the board\'s question');
+  {
+    // Leave takes away only what the host wrote: a rule the person had
+    // already is theirs (host/mcp.js, allowBoardTools).
+    const M = await import('../host/mcp.js');
+    const own = `${FIX}/own-rule`;
+    const rec = `${FIX}/board-tools-unit.json`;
+    mkdirSync(`${own}/.claude`, { recursive: true });
+    writeFileSync(`${own}/.claude/settings.local.json`, '{\n    "permissions": { "allow": ["mcp__orchestratinator"] }\n}\n');
+    eq([M.allowBoardTools(own, rec).added, M.unallowBoardTools(own, rec).removed, localSettings(own)?.permissions?.allow], [false, false, ['mcp__orchestratinator']],
+      "a rule the person wrote is neither added again nor taken away by a Leave");
+    writeFileSync(`${own}/.claude/settings.local.json`, '{ not json');
+    eq([M.allowBoardTools(own, rec).ok, readFileSync(`${own}/.claude/settings.local.json`, 'utf8')], [false, '{ not json'], 'a settings file that is not JSON is left as it is');
+  }
 
   /* ── the session picker and the reopen primitive ────────────────────────────
    * A desk's folder holds many conversations; the picker lists them and a
@@ -2222,7 +2297,9 @@ process.exit(1);
 `);
     writeFileSync(`${FIX}/fake-tmux`, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(`${FIX}/fake-tmux.cjs`)} "$@"\n`);
     chmodSync(`${FIX}/fake-tmux`, 0o755);
-    const h = startHost('host-test-legacy', { ORCH_HOST_ROOTS: root, ORCH_TMUX: `${FIX}/fake-tmux` });
+    // A heartbeat every 1.5 s, so a registration after the watch has looked is
+    // read below, not only the first one (which says nothing of holders yet).
+    const h = startHost('host-test-legacy', { ORCH_HOST_ROOTS: root, ORCH_TMUX: `${FIX}/fake-tmux`, ORCH_HOST_HEARTBEAT_MS: '1500' });
     const said = await until(() => (/ended the tmux window an earlier version ran this desk's Claude Code in \(window legacy-1, pid (\d+)\)/.exec(h.log)?.[1] ?? null), 15000);
     eq(said, String(winA.pid), 'the host ends the window an earlier version ran a desk in, at its start, and says so');
     assert(await until(() => (aGone ? true : null), 8000), 'and that window\'s process is gone');
@@ -2237,6 +2314,13 @@ process.exit(1);
     // registration seats the desk before any watch tick has said who holds it.
     const busyHeld = await until(async () => { const d = deskOf(await floor(), 'legacy-2'); return d?.hosted?.live && d.hosted.held ? d.hosted : null; }, 15000);
     eq([busyHeld?.held, busyHeld?.outside_pid ?? null, cGone], ['floor', null, false], 'a window mid-turn is left to finish it, and the desk reads as the floor\'s, not an editor\'s');
+    // And still so after heartbeats that came after the watch's look: the
+    // registration carries `outside_pid`, which the board's wake reads as
+    // "somebody else holds it" (QA's mutant reporting the window as an
+    // outside holder survived the first read alone).
+    await sleep(4000);
+    const busyLater = deskOf(await floor(), 'legacy-2')?.hosted;
+    eq([busyLater?.held, busyLater?.outside_pid ?? null, busyLater?.window_open ?? null, cGone], ['floor', null, true, false], 'heartbeats later, the window mid-turn is still the floor\'s own, open, with no outside holder');
     rosterAs(winC, busyDir, 'legacy-sess-2', 'orch:@3.%3', 'idle');
     assert(await until(() => (cGone ? true : null), 10000), 'and once its turn ends, it is ended too');
     eq(readFileSync(killed, 'utf8').trim().split('\n'), ['@1', '@3'], 'its own window, and nothing else');
@@ -2312,7 +2396,11 @@ export async function probeClaude() {
   return { rows, version: 'x', fails: rows.filter((r) => !r.ok).length, total: rows.length };
 }
 `);
-    const canaryEnv = { ORCH_HOST_ROOTS: root, ORCH_CANARY: 'on', ORCH_CANARY_STANDIN: `${FIX}/canary-standin.mjs`, ORCH_CANARY_FILE: `${FIX}/canary-state.json` };
+    // This host's Claude Code answers --version from a flag of its own, so a
+    // version changed here is never read by the suite's other host.
+    const cver = `${FIX}/canary-version.flag`;
+    writeFileSync(`${FIX}/canary-claude`, `#!/bin/sh\nif [ "$1" = "--version" ] && [ -s ${JSON.stringify(cver)} ]; then echo "$(cat ${JSON.stringify(cver)}) (Claude Code)"; exit 0; fi\nexec ${JSON.stringify(`${FIX}/claude`)} "$@"\n`, { mode: 0o755 });
+    const canaryEnv = { ORCH_HOST_ROOTS: root, ORCH_HOST_CLAUDE: `${FIX}/canary-claude`, ORCH_CANARY: 'on', ORCH_CANARY_STANDIN: `${FIX}/canary-standin.mjs`, ORCH_CANARY_FILE: `${FIX}/canary-state.json` };
     const runCount = () => (existsSync(runs) ? readFileSync(runs, 'utf8').split('\n').filter(Boolean).length : 0);
     const hostCanary = async () => (await floor()).hosts?.find((h) => h.host_id === 'host-test-canary')?.canary ?? null;
     writeFileSync(mode, 'differ');
@@ -2324,9 +2412,20 @@ export async function probeClaude() {
     assert(!!said, 'and said on the desk');
     h.kill('SIGTERM');
     await new Promise((res) => h.once('exit', res));
-    h = startHost('host-test-canary', canaryEnv);
+    // Started again on the same version, with a heartbeat every 1.5 s, so
+    // each heartbeat is a chance to probe it again. Then a new version on
+    // the same host: once that one's result is on the floor, the heartbeats
+    // on the old version have been and gone, and the count says what they did
+    // (QA's inversion Q2 at patch C: the old row read the count before the
+    // second host had looked at all).
+    h = startHost('host-test-canary', { ...canaryEnv, ORCH_HOST_HEARTBEAT_MS: '1500' });
     assert(await until(async () => ((await hostCanary())?.version === c1?.version ? true : null), 20000), 'a host started again still says what the probe found, from its own record');
-    eq(runCount(), 1, 'and the same version is probed once, not again');
+    await sleep(4000);
+    writeFileSync(cver, '2.1.330-canary');
+    const c3 = await until(async () => { const c = await hostCanary(); return c?.version === '2.1.330-canary' ? c : null; }, 20000);
+    assert(!!c3, 'a new version on a running host is probed at its next heartbeat', JSON.stringify(c3));
+    eq(runCount(), 2, 'and each version is probed once: the same version twice is one run, a new one is the second');
+    rmSync(cver, { force: true });
     h.kill('SIGTERM');
     await new Promise((res) => h.once('exit', res));
     // A probe that could not run: its first message did not come back.
@@ -2339,7 +2438,7 @@ export async function probeClaude() {
     await new Promise((res) => h.once('exit', res));
     h = startHost('host-test-canary', canaryEnv);
     assert(await until(async () => ((await hostCanary())?.error ? true : null), 20000), 'the fixture: the host is back with that record');
-    eq(runCount(), 2, 'and it is not run again for that version: it does not loop');
+    eq(runCount(), 3, 'and it is not run again for that version: it does not loop');
     h.kill('SIGTERM');
     await sleep(300);
   }
@@ -2726,6 +2825,18 @@ export async function probeClaude() {
   // not on the name alone, which the key warning before it carries too.
   const moved = await runHost(boards, { CLAUDE_CONFIG_DIR: cfgDir, until: /cfg-agent [^\n]*\(local scope\)/ });
   assert(/host-test\/cfg-agent .*\(local scope\)/.test(moved.out), `a desk bound in local scope under CLAUDE_CONFIG_DIR is found there${/host-test\/cfg-agent .*\(local scope\)/.test(moved.out) ? '' : ` — ${JSON.stringify(moved.out.slice(-600))}`}`);
+  // And written there: the host runs `claude mcp add` with CLAUDE_CONFIG_DIR
+  // kept, so a desk taken under it lands in the file the host then reads
+  // (desktop-dev, 7c9ca84: dropped with every other CLAUDE* variable, the
+  // binding went to the default ~/.claude.json and no desk could be taken).
+  {
+    const { cliEnv } = await import('../host/mcp.js');
+    const was = { cfg: process.env.CLAUDE_CONFIG_DIR, cc: process.env.CLAUDECODE };
+    process.env.CLAUDE_CONFIG_DIR = cfgDir; process.env.CLAUDECODE = '1';
+    const e = cliEnv();
+    eq([e.CLAUDE_CONFIG_DIR ?? null, e.CLAUDECODE ?? null], [cfgDir, null], "the CLI the host runs for a binding keeps CLAUDE_CONFIG_DIR, and still none of a Claude Code session's own markers");
+    for (const [k, v] of [['CLAUDE_CONFIG_DIR', was.cfg], ['CLAUDECODE', was.cc]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 
   /* ── where the shared secret comes from ─────────────────────────────────────
    * A desk's own binding outranks ORCH_AUTH_TOKEN and host.json (the operator's

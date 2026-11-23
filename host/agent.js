@@ -114,12 +114,16 @@ export function readRecord(r) {
   if (r.type === 'control_request') {
     const q = r.request ?? {};
     if (q.subtype === 'can_use_tool' && q.tool_name === 'AskUserQuestion') {
-      return { kind: 'question', request_id: r.request_id, input: q.input ?? {}, questions: q.input?.questions ?? [] };
+      return { kind: 'question', request_id: r.request_id, input: q.input ?? {}, questions: q.input?.questions ?? [], agent: q.agent_id ?? null };
     }
     if (q.subtype === 'can_use_tool') {
       return {
         kind: 'permission', request_id: r.request_id, tool: q.tool_name ?? 'tool', title: q.display_name ?? q.tool_name ?? 'tool',
         input: q.input ?? {}, description: q.description ?? null, suggestions: q.permission_suggestions ?? [],
+        // A subagent's ask names it (`agent_id`, the id its transcript and
+        // meta file carry; absent for the conversation's own: 2.1.330,
+        // measured 2026-11-23 for task 352).
+        agent: q.agent_id ?? null,
       };
     }
     // Anything else Claude Code asks of the host: a dialog it would have
@@ -238,12 +242,22 @@ export class Agent extends EventEmitter {
         if (w) { clearTimeout(w.timer); this.takenWaits.delete(m.uuid); w.resolve({ ok: true, uuid: m.uuid }); }
         break;
       }
-      // A turn that has ended asks nothing: any ask left over is dead, and
-      // is said gone by whoever listens for 'cancelled'.
+      // A turn that has ended asks nothing of its own: an ask of the
+      // conversation's left over is dead, and is said gone by whoever listens
+      // for 'cancelled'. A subagent's is not: a background subagent goes on
+      // after its parent's turn has ended, and its ask is still waited on
+      // (QA, a real 2.1.330 at patch E: cleared here, the subagent waited on
+      // a permission nobody could see, its work never done, and the desk
+      // took messages as if nothing stood). Withdrawn, it comes as its own
+      // control_cancel_request.
       case 'result': {
         this.working = false;
         if (m.session_id) this.sessionId = m.session_id;
-        for (const id of [...this.asks.keys()]) { this.asks.delete(id); this.emit('cancelled', { kind: 'cancelled', request_id: id }); }
+        for (const [id, ask] of [...this.asks]) {
+          if (ask.agent) continue;
+          this.asks.delete(id);
+          this.emit('cancelled', { kind: 'cancelled', request_id: id });
+        }
         break;
       }
       case 'cancelled': this.asks.delete(m.request_id); break;

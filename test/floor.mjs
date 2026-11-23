@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, wakeDue, wakeWords, wakeText, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, wakeDue, wakeWords, wakeText, signedOutWhy, signinWhyNot, lostWorkWords, AskMap } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 // No host a suite starts may see the machine's tmux (2026-11-23): a host lists
@@ -3570,6 +3570,68 @@ try {
     eq(!!(await moverDesk()).session?.compacting, true, 'the fixture: the desk is compacting');
     await eventsMove([{ type: 'state', channel: CH, agent: 'mover-a', state: 'idle' }]);
     eq((await moverDesk()).session?.compacting ?? null, null, 'and the host saying idle ends a compaction no receipt ended');
+
+    // Several at once (task 352 A): Claude Code asks for parallel tool calls
+    // and a subagent's tools beside its parent's, and the floor held one a
+    // desk, so each took the last one's place, and answering the one shown
+    // left the composer free for a message the host then refused.
+    // On the conversation the desk shows, so its needs-you mark is the one read.
+    const askSid = (await moverDesk()).session?.session_id ?? 'sdk-mover-ask';
+    const ask = (id, extra = {}) => ({ type: 'ask', channel: CH, agent: 'mover-a', session_id: askSid, request_id: id, kind: 'permission', tool: 'Bash', summary: `Bash: touch ${id}`, options: ROWS, ...extra });
+    const chatMover = async () => { const r = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) }); return { status: r.status, ...(await r.json()) }; };
+    const allow = (id) => fetch(`${HOST}/api/floor/permission`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: id, decision: 'allow' }) });
+    await eventsMove([ask('b-1'), ask('b-2'), ask('b-3')]);
+    d = await moverDesk();
+    eq([d.permission?.request_id, d.permission?.more, !!d.session?.awaiting_kind], ['b-1', 2, true], 'three asked at once: the first is shown, with two waiting behind it, none replacing it');
+    let refused = await chatMover();
+    assert(refused.status === 409 && refused.code === 'asking' && /2 more waiting/.test(refused.error), `a message is refused by the board, naming how many wait (${refused.error})`);
+    eq((await allow('b-1')).status, 200, 'the first is answered');
+    d = await moverDesk();
+    eq([d.permission?.request_id, d.permission?.more, !!d.session?.awaiting_kind], ['b-2', 1, true], 'and the next is shown at once, the desk still needing you');
+    refused = await chatMover();
+    eq([refused.status, refused.code], [409, 'asking'], 'and the composer still refuses: something is still asked');
+    await eventsMove([ask('b-3', { gone: true })]);
+    d = await moverDesk();
+    eq([d.permission?.request_id, d.permission?.more], ['b-2', 0], 'one withdrawn from behind leaves the one shown, and the count goes down');
+    await eventsMove([ask('b-2')]);
+    eq((await moverDesk()).permission?.more, 0, 'said again by a heartbeat, a prompt already open is not queued a second time');
+    // A subagent asks while its parent's prompt stands: the parent's is never
+    // replaced, and the subagent's says whose it is.
+    await eventsMove([ask('b-4', { via: 'Build incidents.ps1 capture' })]);
+    d = await moverDesk();
+    eq([d.permission?.request_id, d.permission?.via ?? null, d.permission?.more], ['b-2', null, 1], "a subagent's ask waits behind its parent's, which stays shown");
+    eq((await allow('b-2')).status, 200, "the parent's is answered");
+    d = await moverDesk();
+    eq([d.permission?.request_id, d.permission?.via], ['b-4', 'Build incidents.ps1 capture'], "and the subagent's comes forward, named as the subagent's");
+    await eventsMove([ask('b-4', { gone: true })]);
+    d = await moverDesk();
+    eq([d.permission ?? null, d.session?.awaiting_kind ?? null], [null, null], 'the last one over, the desk asks nothing and needs nobody');
+    // A subagent's own hooks on a desk the host runs (QA, a real 2.1.330 at
+    // patch E): its PermissionRequest raised a prompt of its own beside the
+    // host's ask, in front of it, and answering it answered nothing. On a desk
+    // whose own Claude Code the host runs, the host's ask is the one.
+    await eventsMove([{ type: 'holder', channel: CH, agent: 'mover-a', holder: 'floor', window: 'proc:77', window_open: 'proc:77' }]);
+    eq((await moverDesk()).hosted?.window_open, true, "the fixture: the desk's own Claude Code is the host's");
+    await eventsMove([ask('c-1', { via: 'qa sub' })]);
+    await post(ev('mover-a', askSid, 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'touch qa-sub.txt' }, agent_id: 'a7b75ffdfeb377708' }));
+    await post(ev('mover-a', askSid, 'Notification', { notification_type: 'permission_prompt', notification_message: 'Claude needs your permission to use Bash' }));
+    d = await moverDesk();
+    eq([d.permission?.request_id, d.permission?.more, d.permission?.host_ask], ['c-1', 0, true], "a hook's permission on a desk the host runs raises nothing: the host's ask stands alone");
+    await eventsMove([ask('c-1', { gone: true })]);
+    // The map itself.
+    {
+      const m0 = new AskMap();
+      m0.add('k', { request_id: 'h1', host_ask: true });
+      m0.set('k', { request_id: 'hook' });
+      eq(m0.all('k').map((r) => r.request_id), ['hook', 'h1'], "a prompt set over a host's ask keeps that ask, first behind it: it is still open in Claude Code");
+      const m = new AskMap();
+      eq([m.add('k', { request_id: 'x' }), m.add('k', { request_id: 'y' }), m.add('k', { request_id: 'x' }), m.add('k', { request_id: 'z' })], ['shown', 'behind', null, 'behind'], 'AskMap: the first is shown, the rest wait, one already open is not added twice');
+      m.front('k', { request_id: 'w' });
+      eq(m.all('k').map((r) => r.request_id), ['w', 'x', 'y', 'z'], 'an answer that did not take goes back in front, keeping the rest');
+      eq([m.remove('k', 'y').was, m.shift('k')?.request_id, m.get('k')?.more], ['behind', 'x', 1], 'removed from behind, then the shown one answered: the next forward, one left');
+      m.delete('k');
+      eq([m.get('k') ?? null, m.all('k')], [null, []], 'delete drops every prompt of the desk');
+    }
     await post(ev('mover-a', 'sdk-mover-ask', 'SessionEnd', {}));
   }
 
@@ -4772,9 +4834,16 @@ try {
     eq(woke([desk('bo'), desk('cy')], 1500), [], 'and not again for the same work');
     eq(woke([desk('bo', { window_id: 'proc:1' }), desk('cy', { window_id: 'proc:2' })], 2000), [], 'a running desk is not woken');
     eq(woke([desk('bo'), desk('cy')], 99000), [], 'nor, once it came up, woken again for the same work when it goes quiet');
+    // Past the grace too: the row above reads inside it, where nothing wakes
+    // anyway (QA's mutant without the once-per-work check survived it).
+    eq(woke([desk('bo'), desk('cy')], 100000), [], 'not even once its grace is over: that work has had its wake');
     work = new Map([[k('bo'), { unread: 3, unreadMax: 11, tasks: [] }]]);
     eq(woke([desk('bo')], 100500), ['bo'], 'a new message is new work, and wakes it again, after the grace');
-    eq(woke([desk('ed', { outside_pid: 4242 })], 200000, { work: new Map([[k('ed'), { unread: 1, unreadMax: 5, tasks: [] }]]) }), [], 'one an editor or a terminal holds is never woken: never a second process');
+    // Twice, the grace apart: read once, inside the grace, nothing wakes
+    // whoever holds it (QA's mutant waking a held desk survived that).
+    const wEd = new Map([[k('ed'), { unread: 1, unreadMax: 5, tasks: [] }]]);
+    eq([woke([desk('ed', { outside_pid: 4242 })], 200000, { work: wEd }), woke([desk('ed', { outside_pid: 4242 })], 201000, { work: wEd }), woke([desk('ed', { outside_pid: 4242 })], 260000, { work: wEd })], [[], [], []],
+      'one an editor or a terminal holds is never woken, however long it holds it: never a second process');
     const w2 = new Map([[k('dee'), { unread: 1, unreadMax: 5, tasks: [] }]]);
     eq(woke([desk('dee')], 0, { work: w2, blocked: () => true }), [], 'nor one the board would not message (host offline, signed out, refused)');
     eq(woke([desk('dee')], 0, { work: w2, skip: new Map([[k('dee'), true]]) }), [], 'nor one hidden, archived or asking');

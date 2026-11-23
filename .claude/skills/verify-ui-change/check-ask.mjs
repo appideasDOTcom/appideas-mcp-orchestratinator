@@ -14,6 +14,8 @@
  * 2. A question: the form built from its questions; Submit with a chosen row
  *    and typed words reaches the host as `answers`, the typed words an
  *    answer of their own (nothing withdrawn).
+ * 3. Several at once (task 352 A): one shown with "N more waiting", the next
+ *    forward when it is answered, a subagent's named, Send dimmed throughout.
  */
 import { readFileSync } from 'node:fs';
 import { open } from './drive.mjs';
@@ -98,6 +100,23 @@ await sleep(1500);
 got = work().filter((x) => x.kind === 'answer' && x.payload.request_id === 'cu-3').map((x) => x.payload.answers);
 ok(JSON.stringify(got) === JSON.stringify([{ 'Pick a colour': 'Blue', 'Pick a day': 'Saturday, actually' }]), 'and reaches the host as answers, typed words an answer of their own', JSON.stringify(got));
 ok(!work().some((x) => x.kind === 'chat' && /Pick a day/.test(x.payload?.text ?? '')), 'with nothing sent after it as a message: no form was withdrawn for the typed words');
+
+console.log('\nseveral at once (task 352 A)');
+// The conversation's own and a subagent's, asked together: one shown, the
+// other counted and named when it comes forward; Send dimmed throughout.
+await say({ type: 'ask', request_id: 'cu-4', kind: 'permission', tool: 'Bash', tool_input: { command: 'touch a' }, summary: 'Bash: touch a', options: ROWS });
+await say({ type: 'ask', request_id: 'cu-5', kind: 'permission', tool: 'Bash', tool_input: { command: 'touch b' }, summary: 'Bash: touch b', options: ROWS, via: 'Build incidents capture' });
+await floor.waitFor(`/1 more waiting/.test(document.querySelector('#floor-panel .p-alert')?.textContent ?? '')`, { timeout: 8000 }).catch(() => {});
+b = await box(floor);
+ok(/touch a/.test(b?.head ?? '') && /1 more waiting after this one/.test(b?.head ?? ''), 'the first is shown, saying one more waits behind it', b?.head);
+ok(b?.send?.disabled === true, 'Send is dimmed', JSON.stringify(b?.send));
+await floor.shot(`${shots}/ask-several.png`, '#floor-panel', { scale: 1 });
+await floor.click('#floor-panel .p-alert [data-choice="allow"][data-request="cu-4"]');
+await floor.waitFor(`!!document.querySelector('#floor-panel .p-alert [data-request="cu-5"]')`, { timeout: 8000 }).catch(() => {});
+b = await box(floor);
+ok(/touch b/.test(b?.head ?? '') && /asked by the subagent \u201cBuild incidents capture\u201d/.test(b?.head ?? '') && !/more waiting/.test(b?.head ?? ''), 'answered, the next comes forward at once, named as the subagent\'s', b?.head);
+ok(b?.send?.disabled === true, 'and Send stays dimmed: something is still asked', JSON.stringify(b?.send));
+await floor.shot(`${shots}/ask-subagent.png`, '#floor-panel', { scale: 1 });
 
 console.log(`\n${fails ? 'FAIL' : 'PASS'} · ${fails ? `${fails} of ${total} red` : `${total} of ${total}`}`);
 process.exit(fails ? 1 : 0);

@@ -115,6 +115,13 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     const input = { questions: [{ question: 'Pick a colour', header: 'Colour', multiSelect: false, options: [{ label: 'Red' }, { label: 'Blue' }] }, { question: 'Pick a day', header: 'Day', multiSelect: false, options: [{ label: 'Monday' }, { label: 'Friday' }] }] };
     const a = await ask({ subtype: 'can_use_tool', tool_name: 'AskUserQuestion', display_name: 'AskUserQuestion', input });
     result(a.behavior === 'allow' ? 'ANSWERS:' + JSON.stringify(a.updatedInput.answers) : 'DENIED:' + a.message);
+  } else if (text === 'BGSUB') {
+    // A background subagent asking: its ask outlives the parent's turn,
+    // which ends at once (QA, a real 2.1.330 at patch E).
+    const sub = ask({ subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'touch sub' }, tool_use_id: 'tu-s', agent_id: 'sub1' });
+    result('BG-STARTED');
+    const a = await sub;
+    out({ type: 'assistant', message: { content: [{ type: 'text', text: 'BGSUB:' + a.behavior }] } });
   } else if (text.startsWith('SLOW ')) {
     await new Promise((res) => { busy = setTimeout(() => { res(); }, Number(text.slice(5))); });
     if (busy) result('SLOW-DONE');
@@ -150,7 +157,11 @@ try {
   eq(readRecord({ type: 'conversation_reset', new_conversation_id: 'S2' }), { kind: 'reset', conversation: 'S2' }, '/clear\'s reset carries no session id: its id is not the session\'s');
   eq(readRecord({ type: 'system', subtype: 'status', status: 'compacting' }), { kind: 'status', status: 'compacting', compact: null }, 'compacting begins');
   eq(readRecord({ type: 'control_request', request_id: 'r', request: { subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'ls' }, description: 'd', permission_suggestions: [1] } }),
-    { kind: 'permission', request_id: 'r', tool: 'Bash', title: 'Bash', input: { command: 'ls' }, description: 'd', suggestions: [1] }, 'a permission is the tool, its input, what it is for, and the rules that would allow it again');
+    { kind: 'permission', request_id: 'r', tool: 'Bash', title: 'Bash', input: { command: 'ls' }, description: 'd', suggestions: [1], agent: null }, 'a permission is the tool, its input, what it is for, and the rules that would allow it again');
+  // A subagent's names it (2.1.330, task 352: `agent_id` on the request,
+  // absent on the conversation's own).
+  eq(readRecord({ type: 'control_request', request_id: 'r2', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x' }, tool_use_id: 'toolu_1', agent_id: 'a7b75ffdfeb377708' } }).agent, 'a7b75ffdfeb377708',
+    "a subagent's permission says which subagent asked");
   eq(readRecord({ type: 'control_request', request_id: 'q', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input: { questions: [{ question: 'x' }] } } }).kind, 'question', 'AskUserQuestion is a question, not a permission');
   eq(readRecord({ type: 'control_request', request_id: 'd', request: { subtype: 'request_user_dialog', title: 'T' } }).kind, 'ask', 'anything else Claude Code asks is kept, never dropped');
   eq(readRecord({ type: 'rate_limit_event' }), null, 'a record the host has no use for is nothing');
@@ -226,6 +237,20 @@ try {
   const afterCancel = await a.send('after the withdrawn ask');
   eq(afterCancel.ok, true, 'so the next message is taken, not refused as waiting on an answer');
   await next(a, 'result');
+  // A background subagent's ask, standing when its parent's turn ends: kept,
+  // and answerable (QA at patch E: cleared at the result, the subagent waited
+  // for ever on a permission nobody could see).
+  const bgAsked = next(a, 'permission');
+  const bgEnded = next(a, 'result');
+  let bgGone = false;
+  const onGone = () => { bgGone = true; };
+  a.on('cancelled', onGone);
+  await a.send('BGSUB');
+  const bg = await bgAsked;
+  eq((await bgEnded)?.text, 'BG-STARTED', "the fixture: the parent's turn ends while its subagent asks");
+  eq([bg.agent, a.asks.has(bg.request_id), bgGone], ['sub1', true, false], "a subagent's ask outlives its parent's turn: still held, never said gone");
+  eq(a.allow(bg.request_id).ok, true, 'and it can be answered after the turn');
+  a.off('cancelled', onGone);
   const alwaysAsked = next(a, 'permission');
   const alwaysDone = next(a, 'result');
   await a.send('PERMIT Bash');

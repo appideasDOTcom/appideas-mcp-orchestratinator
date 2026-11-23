@@ -1388,6 +1388,21 @@ const SUBAGENT_META_GRACE_MS = Number(process.env.ORCH_SUBAGENT_META_GRACE_MS ??
 /** When each meta-less subagent transcript was first seen, by path. */
 const subagentFirstSeen = new Map();
 
+/**
+ * Whose ask this is, when a subagent asked: the description its caller gave
+ * it, from `agent-<id>.meta.json` beside its transcript (task 352: the floor
+ * showed a background subagent's prompt as its parent's). Null when the meta
+ * is not there to read; the caller says "a subagent" then.
+ */
+export function subagentLabel(cwd, sessionId, agentId) {
+  if (!cwd || !sessionId || !agentId) return null;
+  try {
+    const meta = JSON.parse(readFileSync(join(projectDir(cwd), sessionId, 'subagents', `agent-${agentId}.meta.json`), 'utf8'));
+    const label = [meta?.description, meta?.agentType].find((v) => typeof v === 'string' && v.trim());
+    return label ? String(label).trim().slice(0, 120) : null;
+  } catch { return null; }
+}
+
 export async function subagentTranscripts(mainPath, { metaGraceMs = SUBAGENT_META_GRACE_MS } = {}) {
   const dir = `${String(mainPath).replace(/\.jsonl$/, '')}/subagents`;
   if (!existsSync(dir)) return [];
