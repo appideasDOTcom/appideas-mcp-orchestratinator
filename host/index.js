@@ -264,6 +264,12 @@ class Host {
 
   /** The pids of the Claude Codes this host runs for its desks, and for its seats alone. */
   ourPids() { return new Set([...this.desks.values()].filter((d) => d.running).map((d) => d.proc.pid)); }
+  /** Kept on disk at each start and exit of a desk's process, so the next
+   *  run can end what a crash left (W.endLeftoverDesks, task 340). */
+  notePids() {
+    const rows = [...this.desks.values()].filter((d) => d.running).map((d) => ({ pid: d.proc.pid, cwd: d.cwd, session: d.sessionId ?? d.lastSessionId ?? null }));
+    W.noteDeskPids(W.deskPidsFile(this.cfg.hostId), rows);
+  }
   seatPids() { return new Set([...this.desks.values()].filter((d) => d.running && d.seat).map((d) => d.proc.pid)); }
 
   /** A seat's own binding file, which its Claude Code is started with; none for a folder's own desk. */
@@ -1834,6 +1840,12 @@ async function main() {
   // otherwise only be found out at the first click (host/dialog.js).
   if (D.dialogBackend() === 'parent' && !D.parentPort()) warn('ORCH_FOLDER_DIALOG=parent, but nothing started this process with a message port — this host has no folder dialog');
 
+  // Desks an earlier run of this host left running when it died without its
+  // stop (a kill, a crash): ended before anything here resumes their
+  // conversations beside them (task 340; W.endLeftoverDesks).
+  const leftovers = await W.endLeftoverDesks(W.deskPidsFile(cfg.hostId));
+  for (const l of leftovers) log(`ended a desk's Claude Code an earlier run of this host left running (pid ${l.pid}${l.cwd ? `, ${l.cwd}` : ''}${l.session ? `, conversation ${l.session}` : ''})`);
+
   const host = new Host(cfg);
   host.folders = folders;
   for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
@@ -1845,6 +1857,13 @@ async function main() {
   const stop = () => (stopped ??= host.stop().finally(() => process.exit(0)));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
+  // A host that exits on anything but its stop (an uncaught error, a fatal
+  // one in main) takes its desks with it rather than leaving each to finish
+  // its turn with nobody listening (task 340). A kill outright runs nothing
+  // here: the next run's endLeftoverDesks is for that.
+  process.on('exit', () => {
+    for (const d of host.desks.values()) { try { d.proc?.child?.kill('SIGTERM'); } catch { /* gone */ } }
+  });
   // And when the process that started it says so, which is the only stop
   // Windows has: Task Scheduler's own is a kill with no signal (measured), so
   // host/supervise.mjs asks over the IPC channel and waits. Any parent may

@@ -50,7 +50,11 @@ const init = () => out({ type: 'system', subtype: 'init', session_id: session, m
 let busy = null;
 let n = 0;
 const waits = new Map();
-const result = (text, ok = true, subtype = 'success') => { busy = null; inTurn = false; out({ type: 'result', subtype, is_error: !ok, result: text, session_id: session }); };
+// \`completed\` for each message of the turn comes after its result, and
+// \`cancelled\` after a failed one's (2.1.330, measured 2026-11-22: result at
+// 1162 ms, completed at 1164; a signed-out turn's result, then cancelled).
+const taken = [];
+const result = (text, ok = true, subtype = 'success') => { busy = null; inTurn = false; out({ type: 'result', subtype, is_error: !ok, result: text, session_id: session }); for (const u of taken.splice(0)) out({ type: 'command_lifecycle', command_uuid: u, state: ok ? 'completed' : 'cancelled' }); };
 const ask = (request) => new Promise((res) => { const id = 'cu-' + (++n); waits.set(id, res); out({ type: 'control_request', request_id: id, request }); });
 let pending = 0;
 let inTurn = false;
@@ -76,6 +80,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
   // The receipt, as 2.1.330 gives it: command_lifecycle queued the moment a
   // message arrives, whatever the turn is doing.
   out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'queued' });
+  taken.push(r.uuid);
   // A reply written with no tool (a long text): 2.1.330 echoes the message
   // only when the reply is done, with its result. Only the lifecycle record
   // says it was taken before then.
@@ -162,6 +167,10 @@ try {
   eq([s1.ok, typeof s1.uuid], [true, 'string'], 'a message is delivered when Claude Code takes it: its own echo');
   const r1 = await r1Done;
   eq([r1?.ok, r1?.text, a.working], [true, 'ECHO:hello', false], 'and the turn ends in a result, the process idle again');
+  // Claude Code says the message \`completed\` just after the result (2.1.330,
+  // measured). That is the end of a message, not the start of a turn.
+  await new Promise((res) => setTimeout(res, 150));
+  eq(a.working, false, 'and stays idle once the lifecycle says the message completed, which comes after the result');
 
   const slowDone = next(a, 'result', 8000);
   const slow = await a.send('SLOW 600');
@@ -221,14 +230,20 @@ try {
   await a.send('SLOW 5000');
   eq((await a.control('interrupt')).ok, true, 'a stop is a request');
   eq((await intDone)?.subtype, 'error_during_execution', 'and the turn ends interrupted');
+  await new Promise((res) => setTimeout(res, 150));
+  eq(a.working, false, 'and the process stays idle once the lifecycle says the message was cancelled, which comes after a failed turn\'s result');
   const resetSeen = next(a, 'reset');
   const before = a.sessionId;
+  // Read in the reset's own emit, before the init's line can land.
+  let atReset;
+  a.once('reset', () => { atReset = a.sessionId; });
   const initAfter = next(a, 'init', 5000, (m) => m.session_id !== before);
   await a.send('/clear');
   const reset = await resetSeen;
   const init2 = await initAfter;
   assert(!!init2?.session_id && init2.session_id !== before && a.sessionId === init2.session_id, '/clear moves the process onto the new session the init after it names');
   assert(reset?.conversation && reset.conversation !== init2?.session_id, 'never onto the id the reset names, which is not on disk');
+  eq(atReset, null, 'and between the reset and that init it is on no conversation, never on the reset\'s id');
   await next(a, 'result');
 
   console.log('\n  a reply longer than the receipt timeout');

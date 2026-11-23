@@ -1,0 +1,170 @@
+[
+ [
+  "the lifecycle receipt is not read: a message is taken only at its echo",
+  "agent",
+  "host/agent.js",
+  "  if (r.type === 'command_lifecycle') return { kind: 'taken', uuid: r.command_uuid ?? null, state: r.state ?? null };",
+  "  if (false) return { kind: 'taken', uuid: r.command_uuid ?? null, state: r.state ?? null };"
+ ],
+ [
+  "the echo is no fallback receipt",
+  "agent",
+  "host/agent.js",
+  "  if (r.type === 'user' && r.isReplay) return { kind: 'taken', uuid: r.uuid ?? null, state: 'echo' };",
+  "  if (false) return { kind: 'taken', uuid: r.uuid ?? null, state: 'echo' };"
+ ],
+ [
+  "a completed or cancelled message reads as a turn starting",
+  "agent",
+  "host/agent.js",
+  "        if (m.state !== 'queued' && m.state !== 'started' && m.state !== 'echo') break;\n",
+  ""
+ ],
+ [
+  "a cancelled message reads as a turn starting (the old guard, completed only)",
+  "agent",
+  "host/agent.js",
+  "        if (m.state !== 'queued' && m.state !== 'started' && m.state !== 'echo') break;\n",
+  "        if (m.state === 'completed') break;\n"
+ ],
+ [
+  "/clear's reset id is taken for the session (the old misreading)",
+  "agent",
+  "host/agent.js",
+  "      case 'reset': this.sessionId = null; break;",
+  "      case 'reset': this.sessionId = m.conversation ?? null; break;"
+ ],
+ [
+  "a message is written while a permission stands",
+  "agent",
+  "host/agent.js",
+  "    if (this.asks.size) {",
+  "    if (false) {"
+ ],
+ [
+  "the desk keeps the old session through a /clear",
+  "host",
+  "host/desk.js",
+  "    proc.on('reset', () => { this.sessionId = null; });",
+  "    proc.on('reset', () => {});"
+ ],
+ [
+  "the host never says idle at a turn's end",
+  "host",
+  "host/desk.js",
+  "      this.host.emit({ type: 'state', channel: this.channel, agent: this.agent, state: 'idle' }, true);\n",
+  ""
+ ],
+ [
+  "an effort nothing wrote is said as saved",
+  "seats",
+  "host/desk.js",
+  "said = saved.ok && saved.wrote ?",
+  "said = saved.ok ?"
+ ],
+ [
+  "saveDefaults reports a write when it had nothing to write",
+  "claude",
+  "host/claude.js",
+  "  if (!model && !(effort && modelId)) return { ok: true, wrote: false };\n",
+  ""
+ ],
+ [
+  "a background session's conversation is refused as held elsewhere",
+  "host",
+  "host/desk.js",
+  "        if (held?.kind === 'background') {",
+  "        if (false) {"
+ ],
+ [
+  "a reopen hands its id to --resume unchecked",
+  "seats",
+  "host/index.js",
+  "    if (sessionId) {\n      const pick = await W.resumable(desk.where, sessionId",
+  "    if (false) {\n      const pick = await W.resumable(desk.where, sessionId"
+ ],
+ [
+  "a seat's watch takes the folder's other conversations",
+  "seats",
+  "host/index.js",
+  "(desk.seat ? ours.get(s.pid) === desk : !ours.has(s.pid) || ours.get(s.pid) === desk)",
+  "(!ours.has(s.pid) || ours.get(s.pid) === desk)"
+ ],
+ [
+  "event batches go out side by side",
+  "host",
+  "host/index.js",
+  "    this.flushing = (this.flushing ?? Promise.resolve()).then(() => this.sendOutbox());",
+  "    this.flushing = this.sendOutbox();"
+ ],
+ [
+  "a subagent's hook closes the desk's question",
+  "floor",
+  "src/floor.js",
+  "  if (CLEARS_AWAITING.has(event) && !str(body.agent_id)) {",
+  "  if (CLEARS_AWAITING.has(event)) {"
+ ],
+ [
+  "idle overrides a question the host's Claude Code is asking",
+  "floor",
+  "src/floor.js",
+  "        if (live.pending.get(key)?.host_ask) break;\n",
+  ""
+ ],
+ [
+  "idle leaves a desk compacting",
+  "floor",
+  "src/floor.js",
+  "host_ask) break;\n        if (store.clearDeskCompacting(channel, agent)) live.publish(key, { type: 'compacting', compacting: null });\n",
+  "host_ask) break;\n"
+ ],
+ [
+  "the hook does not forward agent_id",
+  "plugin",
+  "plugin/hooks/report.mjs",
+  "    agent_id: typeof ev.agent_id === 'string' && ev.agent_id ? ev.agent_id : undefined,",
+  "    agent_id: undefined,"
+ ],
+ [
+  "a turn ended 'not logged in' is not noted",
+  "host",
+  "host/desk.js",
+  "      if (!m.ok && /not logged in/i.test(m.text)) this.host.noteTurn",
+  "      if (false) this.host.noteTurn"
+ ],
+ [
+  "task 340: the host does not end what an earlier run left",
+  "host",
+  "host/index.js",
+  "  const leftovers = await W.endLeftoverDesks(W.deskPidsFile(cfg.hostId));",
+  "  const leftovers = [];"
+ ],
+ [
+  "task 340: any live pid in the record is ended, whatever it is now",
+  "host",
+  "host/claude.js",
+  "      if (!cmd || !cmd.includes('--input-format stream-json') || !cmd.includes('--output-format stream-json')) continue;",
+  "      if (false) continue;"
+ ],
+ [
+  "task 340: a desk process is not recorded when it starts",
+  "host",
+  "host/desk.js",
+  "      this.sessionId = id;\n      this.host.notePids?.();",
+  "      this.sessionId = id;"
+ ],
+ [
+  "task 340: the record is not cleared after the sweep",
+  "host",
+  "host/claude.js",
+  "  noteDeskPids(file, []);\n  return ended;",
+  "  return ended;"
+ ],
+ [
+  "send_message files an empty message as null and says sent",
+  "admin",
+  "src/tools.js",
+  "      if (empty) {\n        const other",
+  "      if (false) {\n        const other"
+ ]
+]

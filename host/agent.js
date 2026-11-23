@@ -191,9 +191,14 @@ export class Agent extends EventEmitter {
       case 'init': this.sessionId = m.session_id ?? this.sessionId; break;
       case 'taken': {
         // A message taken means a turn: it starts one on an idle process,
-        // and a running one is working already. `completed` is the end of
-        // one message, and the result says when the turn ends.
-        if (m.state === 'completed') break;
+        // and a running one is working already. Only `queued`, `started`
+        // and the echo say that. `completed` and `cancelled` are the end of
+        // one message and come after the turn's result (2.1.330, measured
+        // 2026-11-22: completed 2 ms after a result; cancelled after a
+        // signed-out turn's), so read as a turn starting they left the
+        // process working with nothing running. The result says when a
+        // turn ends.
+        if (m.state !== 'queued' && m.state !== 'started' && m.state !== 'echo') break;
         this.working = true;
         const w = this.takenWaits.get(m.uuid);
         if (w) { clearTimeout(w.timer); this.takenWaits.delete(m.uuid); w.resolve({ ok: true, uuid: m.uuid }); }

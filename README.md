@@ -23,8 +23,8 @@ that, running the team happens on the page:
 - **Answer from one screen.** A permission prompt is **Approve / Deny** on the
   desk; a question is a form. No hunting for the terminal that's waiting.
 - **Seat an agent without editing a file.** **Take a desk**: choose a folder,
-  name the floor and the seat, and a window opens there, already on the
-  board.
+  name the floor and the seat, and its Claude Code starts there, already
+  on the board.
 - **Keep several chats open at once.** **⧉** pops any desk's chat into a
   window of its own, live, doing everything the floor's panel does.
 - **Talk to several agents in one conversation.** Check the desks, press
@@ -87,8 +87,8 @@ restored.
 Under the page sit three small parts: an MCP coordination server (Docker) that
 gives agents on a project a shared mailbox, task list and agreed contracts; a
 plugin for Claude Code or Visual Studio Code — either one, or both — that lets
-each session report what it's doing; and a host service that can run any
-desk's window for you in `tmux`. Agents keep their own repos and their own
+each session report what it's doing; and a host service that runs each
+desk's Claude Code for you, so the floor can talk to it. Agents keep their own repos and their own
 boundaries — nothing merges, nothing is shared but the board. Those are the
 three things the next section installs.
 
@@ -100,13 +100,13 @@ in it from Claude Code or VS Code, and say *"install the orchestratinator by
 following the README."* Everything below is the manual path, and exactly what
 the agent will follow.
 
-Everything here is done once per machine. You need **Docker**, **tmux**,
-**Node 20+**, and **Claude Code** (the `claude` command) installed and signed
+Everything here is done once per machine. You need **Docker**,
+**Node 24**, and **Claude Code** (the `claude` command) installed and signed
 in — the host runs desks with it even if you only ever work from VS Code.
 Where you *work* is your choice: start sessions from Claude Code in a
 terminal, from VS Code, or both. The floor doesn't replace either — it hands
 any conversation back to them whenever you want a feature its chat doesn't
-provide. The host — the part that opens and drives windows from the floor —
+provide. The host — the part that runs each desk's Claude Code for the floor —
 runs on **macOS** for now; the server and the board run anywhere Docker does,
 and the plugin wherever Claude Code has a POSIX shell. A desk with no host
 behind it is still on the floor with its presence, status, prompts and the
@@ -168,7 +168,7 @@ to the whole system.
 
 **Or skip the file.** Once the host is installed (step 5), **Take a desk** on
 the floor does this for you: pick the folder, name the floor and the seat, and
-the host binds it in Claude Code's own configuration and opens a window there.
+the host binds it in Claude Code's own configuration and starts it there.
 No approval dialog, and the key never leaves that machine. A folder that
 already has a `.mcp.json` entry is imported the same way. A folder bound to
 another instance of the orchestratinator, at another address, is released
@@ -214,7 +214,7 @@ claude plugin update orchestratinator-floor
 (or the same from the `/plugin` menu). Check with `claude plugin list`; the
 number should match the one `/health` reports.
 
-**5. Install the host** — this is what lets the floor open and drive windows.
+**5. Install the host** — this is what lets the floor run and talk to desks.
 
 ```bash
 ./host/install.sh ~/path/to/your/projects
@@ -237,8 +237,8 @@ A `.mcp.json` that keeps the key out of the tree as `"${ORCH_AUTH_TOKEN}"` is
 filled in by Claude Code from your shell, but the host runs as a LaunchAgent,
 which starts with none of your exported variables. So `install.sh` takes the
 key from the shell you run it in: with `ORCH_AUTH_TOKEN` exported there, no
-`--token` is needed, and it is written to the host's own config. Windows the
-host opens for such a repo are given the variable too. Without either, the
+`--token` is needed, and it is written to the host's own config. Each Claude
+Code the host starts for such a repo is given the variable too. Without either, the
 host's log says at startup which desk it could not read a key from.
 
 **6. Open the floor.**
@@ -326,29 +326,26 @@ floor shows the prompt and says *"answer this in your editor"* — answer it
 there.
 
 **6. Ring the service bell** on any desk whose tray shows waiting messages or
-tasks. The agent picks them up. A desk with no window open shows its bell
-half-lit: ringing it opens the window first — the conversation resumes where
+tasks. The agent picks them up. A desk whose Claude Code is not running shows
+its bell half-lit: ringing it starts it first — the conversation resumes where
 it left off — and then nudges. To nudge several at once, or mark their messages
 read, or hide them, use **select desks** on the room's header, check the desks,
 and pick the action.
 
 **7. Type to a desk from the floor** by first closing that conversation's tab
 in your editor and clicking **Open on the Floor** — one app at a time. The composer
-comes alive a second or two later; if no window is open at all, the host opens
-one and *resumes the same conversation*, history intact. Windows the host opens
-start with Claude Code's session survey (*"How is Claude doing this session?"*)
-switched off: nobody is sitting at them to answer it, and it looked like a
-desk stuck on a question the floor could not see.
+comes alive a second or two later; if the desk's Claude Code is not running,
+the host starts it and *resumes the same conversation*, history intact.
 
 The composer takes a slash command too: `/clear`, `/compact`, `/btw <question>`
-and anything else Claude Code knows, each confirmed on the window's own
+and anything else Claude Code knows, each confirmed by Claude Code's own
 receipt and said in its own terms — a new conversation started, compacting,
-answered in the window (with the answer). The model and effort controls on
-the panel's foot are the window's own `/model` and `/effort`, so a choice is
+answered on the side (with the answer). The model and effort controls on
+the panel's foot are Claude Code's own `/model` and `/effort`, so a choice is
 also **saved as the default for new sessions** on that desk's machine, the
 way it is when you change it in Claude Code or your editor. While a
-desk compacts, the floor says so, and a message sent meanwhile is held and
-read when the compaction ends.
+desk compacts, the floor says so, and a message sent meanwhile is taken and
+answered when the compaction ends.
 
 **8. Pop a chat out, or bring several desks into one.** **⧉** on a desk's
 panel detaches its chat into a window of its own; open as many as you like
@@ -360,8 +357,9 @@ desk here** does the same across floors. All of it is in
 
 **9. Take a conversation back whenever you want** — for any feature the floor
 chat doesn't provide. **Open in VS Code** moves it to your editor with everything
-you did from the floor already in it; **Open in Claude** lands a terminal on the
-desk's tmux window; or `tmux attach -t orch` and sit at any desk the host runs.
+you did from the floor already in it; **Open in Claude** opens a terminal of your
+own `claude` on the same conversation. Either one takes the conversation from
+the floor, and the floor's next message takes it back.
 
 **10. Keep it current.** The header shows **Update available** when the
 branch the board follows has a commit this build lacks; it checks GitHub once

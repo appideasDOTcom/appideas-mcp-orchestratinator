@@ -118,6 +118,16 @@ export function registerTools(server, { store, context }) {
     },
     async (args) => {
       const { channel, agent } = resolve(args, context);
+      // A message with nothing in it is refused, not stored as null: \`body\`
+      // is z.any(), so a call that names the field anything else (\`content\`,
+      // \`message\`) passed validation, was filed as the text "null" and
+      // answered sent: true, and the recipient read an empty message
+      // (2026-11-22, two of the coordinator's to desktop-dev).
+      const empty = args.body === undefined || args.body === null || (typeof args.body === 'string' && !args.body.trim());
+      if (empty) {
+        const other = Object.keys(args).filter((k) => !['body', 'to', 'channel', 'agent'].includes(k));
+        return ok({ sent: false, error: `Nothing was sent: the message goes in "body"${other.length ? `, and this call named ${other.map((k) => `"${k}"`).join(', ')} instead` : ', and this call had none'}.` });
+      }
       touch(channel, agent, 'send_message');
       // A broadcast from an agent in an open meeting room reaches that room
       // and nobody else on the floor (issue #44: a room's conversation is

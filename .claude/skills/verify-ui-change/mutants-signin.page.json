@@ -2,8 +2,8 @@
  [
   "the desk draws no sign-in box",
   "src/ui/floor.js",
-  "    if (canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {",
-  "    if (false && canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {"
+  "    if (canChat && d.signin && !s.awaiting_kind && !req?.host_ask && !sendingAnswers) {",
+  "    if (false && canChat && d.signin && !s.awaiting_kind && !req?.host_ask && !sendingAnswers) {"
  ],
  [
   "Send is not dimmed while signed out",
@@ -14,8 +14,8 @@
  [
   "a signed-out desk does not make the tab pulse",
   "src/ui/floor.js",
-  "|| !!d.permission?.startup || !!d.signin);",
-  "|| !!d.permission?.startup);"
+  "test(d.session?.awaiting_kind ?? '') || !!d.signin);",
+  "test(d.session?.awaiting_kind ?? '') || false);"
  ],
  [
   "pressing Sign in shows no wait",

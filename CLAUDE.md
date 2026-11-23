@@ -114,11 +114,27 @@ on was measured on 2.1.330 before it was built
   that restarts starts none; each desk's conversation is resumed at its
   next message.
 - **A message is delivered when Claude Code takes it.** The host writes a
-  `user` record with a uuid, and Claude Code echoes it back with that uuid
-  and `isReplay: true` the moment it takes it, idle or mid-turn. That echo
-  is the receipt; none within 30 s (`TAKEN_TIMEOUT_MS`) is "not delivered".
-  A message sent while a turn runs is folded into that turn, and the host
-  emits `delivery: queued` for it.
+  `user` record with a uuid, and Claude Code answers `command_lifecycle`
+  with that uuid as `command_uuid`, `queued` then `started` and
+  `completed`, the moment it has the message (2 ms in the probe, idle or
+  mid-turn). That is the receipt; none within 30 s (`TAKEN_TIMEOUT_MS`) is
+  "not delivered". The `isReplay` echo of the record is kept as a second
+  receipt, and is not enough alone: it comes when the message is written
+  into the conversation, which for a reply that uses no tool is the turn's
+  end, so a long reply read as "not delivered" (found by the floor e2e,
+  2026-11-22). A message sent while a turn runs is folded into that turn,
+  and the host emits `delivery: queued` for it. **A message sent while a
+  permission or question stands is refused by the host** (`asking`), as the
+  board refuses it: Claude Code would take it only after the answer.
+- **The host says when a turn starts and ends** (`state` events: `working`
+  at `init`, `idle` at `result`). The board takes them for the desk's
+  state, never over a standing host ask, and idle ends a compaction. Event
+  batches go to the board one at a time (`flush()` is chained), so a
+  turn's events arrive in order.
+- **`/clear` names the next conversation by its `init`, not its reset.**
+  `conversation_reset`'s `new_conversation_id` is not the session id; the
+  following `init` is, and only that one has a transcript. A `/clear` sent
+  mid-turn is applied after the turn.
 - **What Claude Code asks arrives as data.** A permission is a
   `control_request` `can_use_tool` (tool, input, description, and the
   "don't ask again" rules as `permission_suggestions`). The host says it to
@@ -150,8 +166,8 @@ on was measured on 2.1.330 before it was built
   `/mcp reconnect <name>` for that one. Everything else, `/compact`,
   `/clear` and `/cost` included, goes as a message: a compaction comes back
   as `status: compacting` and its result, and `/clear` as
-  `conversation_reset` naming the new conversation, which the desk follows
-  from its first word. A command's receipt is one line labeled `host`: what
+  `conversation_reset`, after which the desk follows the conversation the
+  next `init` names, from its first word. A command's receipt is one line labeled `host`: what
   was typed, then what happened.
 - **A model or effort change from the floor is also saved as the default
   for new sessions** (costmo, 2026-11-22, by AskUserQuestion: "Also save as
@@ -181,6 +197,20 @@ on was measured on 2.1.330 before it was built
   again. Stopping the host ends every desk's process: its input is closed,
   then SIGTERM after 5 s (`STOP_GRACE_MS`) and SIGKILL after 10 s if it has
   not left. The conversation is on disk.
+- **A host that dies without its stop does not leave a desk running**
+  (task 340, desktop-dev's measurement on 2.1.330). A Claude Code whose
+  input closes finishes the turn it is in first: 38 s more on a 41 s tool
+  call, with nobody listening, and the next run then met its conversation
+  held by a process it did not know (`held_elsewhere`, "close it there":
+  a remedy handed to the operator for the host's own leftover). So the host
+  keeps its desks' pids in `~/.orchestratinator/desk-pids-<host id>.json`
+  at each start and exit (one file per host id, so the app's host and one
+  started by hand never touch each other's), and its next run ends any
+  that `ps` still shows as a Claude Code on the stream-JSON path before it
+  does anything else (`endLeftoverDesks` in `host/claude.js`); a pid since
+  reused is left alone. A host exiting on an uncaught error ends its desks
+  in `process.on('exit')`. Not on Windows, which has no `ps` to tell a
+  reused pid apart: there a leftover still finishes its turn and leaves.
 - **The relay still tails the transcript** (`Desk.watch`, `readTranscript`,
   each subagent's file), on its own loop, so the floor shows what was said
   whoever said it. The desk's own process is in the roster while it runs
@@ -192,6 +222,13 @@ on was measured on 2.1.330 before it was built
 - **The protocol is 2** (`"protocol"` in both `package.json` files): the
   `ask` event is new, and answers reach the host as data, which a
   protocol-1 host would read wrongly (`protocolRefusal`).
+
+**Two scripts prove it on a real Claude Code**, in
+**measure-a-real-window**: `protocol-probe.mjs` (does Claude Code still
+speak what `host/agent.js` reads; scratch folder, haiku, the operator's
+settings.json hashed before and after) and `floor-e2e.mjs` (the floor's
+routes end to end on a scratch board and a dev host). Run both after a
+Claude Code update that changes anything on this path.
 
 The skills written for the window layer still describe it:
 **measure-a-real-window** and **watch-the-window** drive tmux windows, and
@@ -2893,7 +2930,7 @@ decided for it, each additive:
 - **The app's host does not run when a launchd host serves the same
   board.** Two hosts for one board would both find every folder bound to
   it, and both relay and run its desks.
-- **The app stops its host with SIGTERM and waits 20 s, because the host
+- **The app stops its host with SIGTERM and waits 30 s, because the host
   needs that long and Electron gives two.** The host's stop finishes the
   item in hand (up to `ORCH_STOP_DRAIN_MS`, 15 s), then releases and
   unregisters at up to 2 s each. Electron's `utilityProcess.kill()` ends
@@ -2906,8 +2943,10 @@ decided for it, each additive:
   stop is this repo's, and a supervisor that gives it less than 20 s
   breaks "done once, handed out again, or said lost". Since 2026-11-22 a
   stop also ends each desk's Claude Code after the release (input closed,
-  SIGTERM at 5 s); whether 20 s still covers a host whose desks are
-  mid-turn has not been measured.
+  SIGTERM at 5 s), so the app's grace went from 20 s to 30 s
+  (`HOST_STOP_GRACE_MS`, desktop-dev, task 340): 15 s of drain, 5 s to the
+  SIGTERM, then 2 + 2 s. A stop that is cut off anyway leaves desks the
+  next run ends (the bullet on task 340, "How a desk runs Claude Code").
 
 A board to test "connect to Docker" against is a scratch container from
 this tree's image, never the live one, and it is a script:

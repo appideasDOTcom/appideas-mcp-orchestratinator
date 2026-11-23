@@ -367,7 +367,11 @@ let queued = [];
 let asks = 0;
 const waits = new Map();
 const done = () => { if (closing && pending === 0) process.exit(0); };
-const result = (text, ok = true, subtype = 'success') => { inTurn = false; out({ type: 'result', subtype, is_error: !ok, result: text, session_id: session }); };
+// \`completed\` for each message of the turn comes after its result, and
+// \`cancelled\` after a failed one's (2.1.330, measured 2026-11-22: result at
+// 1162 ms, completed at 1164; a signed-out turn's result, then cancelled).
+const taken = [];
+const result = (text, ok = true, subtype = 'success') => { inTurn = false; out({ type: 'result', subtype, is_error: !ok, result: text, session_id: session }); for (const u of taken.splice(0)) out({ type: 'command_lifecycle', command_uuid: u, state: ok ? 'completed' : 'cancelled' }); };
 const ask = (request) => new Promise((res) => { const id = 'cu-' + (++asks); waits.set(id, res); out({ type: 'control_request', request_id: id, request }); });
 const flushQueued = () => { for (const t of queued) said(t); queued = []; };
 const ready = new Promise((r) => setTimeout(r, startDelay));
@@ -402,6 +406,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
   // The receipt, as 2.1.330 gives it (after HOLD's delay, which is how a
   // message "taken late" is staged).
   out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'queued' });
+  taken.push(r.uuid);
   // Taken into a turn already running, as 2.1.330 does: echoed when taken,
   // answered in that turn's one result, and in the conversation by its end.
   if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); queued.push(text); return; }
@@ -2020,6 +2025,12 @@ try {
     const saidAt = await until(() => (byText()['HOLD 1000 batch two']?.done_at ? { fourSent: received().includes('batch four') } : null), 15000);
     assert(saidAt && !saidAt.fourSent, `a message finished in the middle of a batch is said done before the batch ends${!saidAt ? ' (never said)' : saidAt.fourSent ? ' (said only once "batch four" was sent)' : ''}`);
     const open = Object.entries(byText()).filter(([, r]) => r.taken_at && !r.done_at).map(([t]) => t);
+    // What the next run reads to end a leftover (task 340): the record of
+    // this run's desk processes, kept at each start and exit.
+    let rec = [];
+    try { rec = JSON.parse(readFileSync(`${HOME}/.orchestratinator/desk-pids-host-test-1.json`, 'utf8')); } catch { /* none */ }
+    const runningNow = standIns();
+    assert(runningNow.length >= 1 && runningNow.every((pid) => rec.some((r) => r.pid === pid)), `the host keeps a record of its desks' running processes (${runningNow.join(', ')} running; ${rec.map((r) => r.pid).join(', ') || 'none'} recorded)`);
     host.kill('SIGKILL');
     assert(open.length >= 1, `the fixture: the host is killed with work of the batch still unfinished (${open.join(', ') || 'none'})`);
     // Its desks' Claude Codes outlive it until their input closes and the
@@ -2045,6 +2056,42 @@ try {
   eq(refused.status, 409, 'a message with no host to take it is refused rather than swallowed');
   eq((await refused.json()).code, 'host_offline', 'with the reason');
   host = null;
+
+  /* ── a desk an earlier run left running (task 340) ──────────────────────────
+   * A host that dies without its stop leaves each desk's Claude Code to finish
+   * the turn it is in, with nobody listening (desktop-dev measured 38 s on a
+   * 41 s tool call), and the next run found its conversation held by a process
+   * it did not know. The next run of the same host ends it first, by the
+   * record above, and only while `ps` still shows that pid as a Claude Code on
+   * the stream-JSON path: a pid since given to something else is left alone. */
+  console.log('\n  a desk\'s Claude Code an earlier run left running');
+  {
+    const id = 'host-test-leftover';
+    const file = `${HOME}/.orchestratinator/desk-pids-${id}.json`;
+    const spin = 'setInterval(() => {}, 1000)';
+    const left = spawn(process.execPath, ['-e', spin, '--', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { stdio: 'ignore' });
+    const other = spawn(process.execPath, ['-e', spin, '--', 'not-a-desk'], { stdio: 'ignore' });
+    let leftGone = false;
+    left.on('exit', () => { leftGone = true; });
+    await sleep(300);
+    mkdirSync(`${HOME}/.orchestratinator`, { recursive: true });
+    writeFileSync(file, JSON.stringify([{ pid: left.pid, cwd: '/somewhere', session: 'sess-left' }, { pid: other.pid, cwd: '/elsewhere', session: null }]));
+    mkdirSync(`${FIX}/no-desks`, { recursive: true });
+    const h = startHost(id, { ORCH_HOST_ROOTS: `${FIX}/no-desks` });
+    const said = await until(() => (/ended a desk's Claude Code an earlier run of this host left running \(pid (\d+)/.exec(h.log)?.[1] ?? null), 15000);
+    eq(said, String(left.pid), 'the next run of the host ends the desk process its last run left, and says so');
+    assert(await until(() => (leftGone ? true : null), 8000), 'and that process is gone');
+    let otherAlive = true;
+    try { process.kill(other.pid, 0); } catch { otherAlive = false; }
+    assert(otherAlive && !h.log.includes(`pid ${other.pid}`), 'a recorded pid that is no Claude Code on the stream-JSON path is left alone');
+    let after = null;
+    try { after = JSON.parse(readFileSync(file, 'utf8')); } catch { /* unreadable */ }
+    assert(Array.isArray(after) && after.length === 0, `and the record is cleared (${JSON.stringify(after)})`);
+    h.kill('SIGTERM');
+    try { other.kill('SIGKILL'); } catch { /* gone */ }
+    try { left.kill('SIGKILL'); } catch { /* gone */ }
+    await sleep(300);
+  }
 
   /* ── the floor keeps hearing while a message is being delivered ─────────────
    * Relaying the conversation and delivering a message used to share one

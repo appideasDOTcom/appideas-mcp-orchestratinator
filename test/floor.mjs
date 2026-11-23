@@ -3532,8 +3532,21 @@ try {
     // Gone: the process that asked has ended.
     await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-3', kind: 'permission', tool: 'Write', summary: 'Write: x', options: ROWS }]);
     eq((await moverDesk()).permission?.request_id, 'cu-3', 'another stands');
+    // A turn's end said by the host while its Claude Code still asks (a turn
+    // that asks is not over for the operator): the desk stays asking.
+    await eventsMove([{ type: 'state', channel: CH, agent: 'mover-a', state: 'idle' }]);
+    d = await moverDesk();
+    eq([d.hosted?.state, d.permission?.request_id], ['awaiting', 'cu-3'], 'the host saying idle does not override a question it is asking: the desk still reads asking');
     await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', request_id: 'cu-3', gone: true }]);
     eq((await moverDesk()).permission ?? null, null, 'and the host saying it is gone (its process ended) closes it');
+    // A compaction the host said began, whose end never came as its own
+    // receipt (a /compact with nothing to compact): the turn's end, said by
+    // the host, ends it, so the desk does not read compacting for good.
+    const packSid = (await moverDesk()).session?.session_id ?? 'sdk-mover-ask';
+    await eventsMove([{ type: 'receipt', channel: CH, agent: 'mover-a', session_id: packSid, command: 'compact', said: 'compacting', text: '/compact', compacting: true }]);
+    eq(!!(await moverDesk()).session?.compacting, true, 'the fixture: the desk is compacting');
+    await eventsMove([{ type: 'state', channel: CH, agent: 'mover-a', state: 'idle' }]);
+    eq((await moverDesk()).session?.compacting ?? null, null, 'and the host saying idle ends a compaction no receipt ended');
     await post(ev('mover-a', 'sdk-mover-ask', 'SessionEnd', {}));
   }
 

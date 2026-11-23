@@ -145,6 +145,7 @@ export class Desk {
       proc.start();
       this.proc = proc;
       this.sessionId = id;
+      this.host.notePids?.();
       if (id && id !== this.lastSessionId) await this.follow(id, 'tail');
       log(`${this.label}: Claude Code started (pid ${proc.pid}) ${id ? `on ${id}` : 'on a new conversation'}`);
       this.report();
@@ -198,6 +199,7 @@ export class Desk {
     proc.on('exit', (e) => {
       if (this.proc !== proc) return;
       this.proc = null;
+      this.host.notePids?.();
       this.sessionId = null;
       for (const id of this.asks.keys()) this.host.emit({ type: 'ask', channel: this.channel, agent: this.agent, request_id: id, gone: true }, true);
       this.asks.clear();

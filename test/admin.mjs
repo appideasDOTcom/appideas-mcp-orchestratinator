@@ -106,6 +106,16 @@ try {
   await call(alpha.client, 'send_message', { body: 'broadcast one' });
   await call(alpha.client, 'send_message', { body: 'broadcast two' });
   await call(alpha.client, 'send_message', { to: 'beta', body: 'a direct one' });
+  // A message with no body is refused in words, not filed as "null" with
+  // sent: true (2026-11-22: two messages sent under the wrong field name).
+  // Addressed to an agent of its own, so no other row's unread count moves.
+  const gamma = await makeClient('gamma');
+  const noBody = await call(alpha.client, 'send_message', { to: 'gamma', content: 'under the wrong name' });
+  assert(noBody.sent === false && /"body"/.test(noBody.error ?? ''), `a send_message with no body is refused and names the field (${noBody.error})`);
+  const blank = await call(alpha.client, 'send_message', { to: 'gamma', body: '   ' });
+  assert(blank.sent === false, 'and so is one whose body is blank');
+  eq((await call(gamma.client, 'poll_messages', { since: 0 })).messages.filter((m) => m.from === 'alpha' && m.to === 'gamma').length, 0, 'and nothing reaches the recipient');
+  await gamma.client.close?.();
   const t1 = (await call(alpha.client, 'open_task', { title: 'unassigned work' })).id;
   const t2 = (await call(alpha.client, 'open_task', { title: 'beta work', assignee: 'beta' })).id;
   const t3 = (await call(alpha.client, 'open_task', { title: 'claimed work' })).id;

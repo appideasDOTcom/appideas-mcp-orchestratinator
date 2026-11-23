@@ -54,12 +54,5 @@
   "host/index.js",
   "      await this.reopenSignedOut();\n",
   ""
- ],
- [
-  "the reader takes the words from anywhere on the screen",
-  "window",
-  "host/window.js",
-  "  if (rule < 0) return false;\n  return /Not logged in\\s*·\\s*run \\/login/i.test(lines.slice(rule + 1)",
-  "  return /Not logged in\\s*·\\s*run \\/login/i.test(lines.slice(0)"
  ]
 ]

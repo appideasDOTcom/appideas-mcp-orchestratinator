@@ -201,7 +201,9 @@ function fixture() {
     `  rec({ type: 'assistant', uuid: 'a' + process.pid + '-' + k, timestamp: new Date().toISOString(), message: { role: 'assistant', model: 'claude-haiku-5-5', content: [{ type: 'text', text: reply } ] } });`,
     `  out({ type: 'assistant', message: { content: [{ type: 'text', text: reply }] } });`,
     `};`,
-    `const result = (text) => { inTurn = false; out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: id }); };`,
+    // completed for each message of the turn comes after its result (2.1.330, measured).
+    `const taken = [];`,
+    `const result = (text) => { inTurn = false; out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: id }); for (const u of taken.splice(0)) out({ type: 'command_lifecycle', command_uuid: u, state: 'completed' }); };`,
     `const ask = (request) => new Promise((res) => { const rid = 'cu-' + process.pid + '-' + (++reqs); waits.set(rid, res); out({ type: 'control_request', request_id: rid, request }); });`,
     `require('readline').createInterface({ input: process.stdin }).on('line', async (line) => {`,
     `  let r; try { r = JSON.parse(line); } catch { return; }`,
@@ -212,6 +214,7 @@ function fixture() {
     // Taken into a turn already running: echoed when taken, answered in that
     // turn's one result. "look idle" is what ends a turn "look busy" left open.
     `  out({ type: 'command_lifecycle', command_uuid: r.uuid, state: 'queued' });`,
+    `  taken.push(r.uuid);`,
     `  if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); said(text, who); if (/look idle/.test(text)) result(who); return; }`,
     `  inTurn = true;`,
     `  out({ type: 'system', subtype: 'init', session_id: id, model: 'claude-haiku-5-5', permissionMode: 'default', claude_code_version: '2.1.330' });`,
@@ -359,6 +362,17 @@ try {
   eq(existsSync(`${REPO}/.mcp.json`) && JSON.parse(readFileSync(`${REPO}/.mcp.json`, 'utf8')).mcpServers.orchestratinator.headers['X-Channel'], SA, 'and nothing in the folder is changed: its own binding is as it was');
   eq((await desk(SA, 'quinn'))?.hosted?.live, true, 'the folder\'s own desk is still there');
   eq((await desk(SA, 'quinn'))?.hosted?.held ?? null, null, 'with no process: the seat\'s is not its');
+  // An effort set before the desk's Claude Code has named its model (no
+  // message yet, so no init) is set for the conversation and said as not
+  // saved: the default is kept per model, and the model is not known.
+  {
+    const before = existsSync(`${HOME}/.claude/settings.json`) ? readFileSync(`${HOME}/.claude/settings.json`, 'utf8') : null;
+    const er = await op('/api/floor/chat', { channel: SB, agent: 'quinn', text: '/effort high' });
+    eq(er.status, 200, 'an /effort before the first message is taken');
+    const line = await until(async () => (await turns(SB, 'quinn')).find((t) => t.tool_name === 'host' && /^\/effort high — /.test(t.text ?? '')) ?? null, 10000);
+    assert(!!line && /for this conversation; not saved as your default/.test(line.text) && !/and saved as your default/.test(line.text), 'and said as set for this conversation, not saved as the default, with no model known to save it under', line?.text);
+    eq(existsSync(`${HOME}/.claude/settings.json`) ? readFileSync(`${HOME}/.claude/settings.json`, 'utf8') : null, before, 'and Claude Code\'s settings are untouched');
+  }
 
   console.log('\n  each desk answers as itself');
   let a = await ask(SB, 'quinn', 'who are you, on the other floor?');

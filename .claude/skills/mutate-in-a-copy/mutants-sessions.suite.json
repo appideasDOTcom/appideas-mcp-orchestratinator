@@ -252,48 +252,6 @@
   ""
  ],
  [
-  "a seat's window is not tagged",
-  "seats",
-  "host/window.js",
-  "  const tag = seat && !WINDOWS ? [';', 'set-option', '-w', '-t', `${EXACT}:=${name}`, SEAT_OPTION, seat] : [];",
-  "  const tag = [];"
- ],
- [
-  "a seat's window is started without its binding",
-  "seats",
-  "host/window.js",
-  "    ...(seatFile ? ['--mcp-config', seatFile] : [])]",
-  "    ]"
- ],
- [
-  "what a seat's window was given stays in the session's environment",
-  "seats",
-  "host/window.js",
-  "    for (let i = 1; i < env.length; i += 2) await tmux(['set-environment', '-t', `${EXACT}:`, '-u', env[i].split('=')[0]]);\n",
-  ""
- ],
- [
-  "a window is found by its folder alone",
-  "seats",
-  "host/window.js",
-  "  return all.find((p) => (p.seat ?? null) === seat && canonical(p.cwd) === here) ?? null;",
-  "  return all.find((p) => canonical(p.cwd) === here) ?? null;"
- ],
- [
-  "a folder's sessions are every desk's",
-  "seats",
-  "host/window.js",
-  "  return sessions.filter((s) => s.cwd === here && (seatByPid.get(s.pid) ?? null) === seat);",
-  "  return sessions.filter((s) => s.cwd === here);"
- ],
- [
-  "a conversation in another desk's window is this desk's to type into",
-  "seats",
-  "host/window.js",
-  "    where: pane ? (theirs ? 'other' : 'floor') : 'editor',",
-  "    where: pane ? 'floor' : 'editor',"
- ],
- [
   "a restarted host does not read its seats",
   "seats",
   "host/identity.js",
@@ -308,25 +266,11 @@
   "    if (false) {\n      S.removeSeat(channel, agent, originOf(this.cfg.url));"
  ],
  [
-  "a seat falls back to the folder's newest conversation",
-  "seats",
-  "host/window.js",
-  "  if (seatOf(where)) return { id: null, note: `${asked}; this desk shares",
-  "  if (false) return { id: null, note: `${asked}; this desk shares"
- ],
- [
   "the hook does not read a window's own binding",
   "seats",
   "plugin/hooks/report.mjs",
   "  if (own) {\n    id = { ...own, root: own.root ?? start ?? cwd };\n  } else if (start) {",
   "  if (false) {\n    id = { ...own, root: own.root ?? start ?? cwd };\n  } else if (start) {"
- ],
- [
-  "a seat's window is not given its names",
-  "seats",
-  "host/window.js",
-  "    '-e', `ORCH_CHANNEL=${channel}`,\n    '-e', `ORCH_AGENT=${agent}`,\n",
-  ""
  ],
  [
   "the hook does not read a window's own binding",
@@ -348,13 +292,6 @@
   "plugin/hooks/report.mjs",
   "  try { id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers); } catch { return null; }\n  if (!id) return null;",
   "  id = identityIn(JSON.parse(readFileSync(file, 'utf8'))?.mcpServers);\n  if (!id) return null;"
- ],
- [
-  "a move reopens a seat's window by its folder alone",
-  "renew",
-  "host/window.js",
-  "    p.at = p.seat ? { cwd: p.cwd, seat: p.seat } : p.cwd;",
-  "    p.at = p.cwd;"
  ],
  [
   "a seat nobody sat at makes its name taken",

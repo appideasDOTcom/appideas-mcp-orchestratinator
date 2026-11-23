@@ -14,17 +14,10 @@
   "if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {"
  ],
  [
-  "desktop catch-up: the watch does not read the binding when a window comes up (red: 'a window that comes up in a folder released elsewhere\u2026', 'nothing of the other instance's conversation')",
+  "desktop catch-up: the watch does not read the binding when a window comes up (red: 'a window that comes up in a folder released elsewhere…', 'nothing of the other instance's conversation')",
   "host",
-  "host/index.js",
-  "    if (id && id !== this.sessionId && await this.host.letGoIfReleased(this, 'a window came up in its folder')) return;",
-  "    /* mutant */"
- ],
- [
-  "desktop catch-up: answerStartup reads the cursor once, as before (red: 'a cursor that redraws late is waited for', 'Enter arrived with the cursor on the row')",
-  "window",
-  "host/window.js",
-  "    if (!now || under === want.text || Date.now() >= give) break;",
-  "    break;"
+  "host/desk.js",
+  "      if (await this.host.letGoIfReleased?.(this, 'a window came up in its folder')) return;",
+  "      if (false) return;"
  ]
 ]

@@ -1,12 +1,5 @@
 [
  [
-  "the host asks for its sign-in with no shell around it (F1)",
-  "host",
-  "host/index.js",
-  "    const st = await A.signedIn({ shell: await W.windowShell() });\n    if (st !== null) this.auth.status = st;\n    const now",
-  "    const st = await A.signedIn();\n    if (st !== null) this.auth.status = st;\n    const now"
- ],
- [
   "the sign-in reading ignores the window's shell (F1)",
   "host",
   "host/auth.js",
@@ -14,74 +7,11 @@
   "  return { cmd: argv[0], args: argv.slice(1) };"
  ],
  [
-  "a typed draft with the cursor at its start reads as a suggestion (F2-b)",
-  "window",
-  "host/window.js",
-  "    if (!dim) return false;",
-  "    if (false) return false;"
- ],
- [
-  "a colour's arguments are read as attributes, so a truecolor draft reads as dim (F2, QA 3850)",
-  "window",
-  "host/window.js",
-  "      i += kind === '5' ? 2 : kind === '2' ? 4 : 1;",
-  "      i += 0;"
- ],
- [
   "a profile's own line hides the sign-in answer (F1)",
   "host",
   "host/auth.js",
   "  for (const from of [...starts].reverse()) {",
   "  for (const from of [0]) {"
- ],
- [
-  "the floor's default-shell is passed over for SHELL (F1)",
-  "host",
-  "host/window.js",
-  "  for (const s of [told, env.SHELL, own]) if (s && s.startsWith('/') && exists(s)) return s;",
-  "  for (const s of [env.SHELL, own]) if (s && s.startsWith('/') && exists(s)) return s;"
- ],
- [
-  "the host types a reconnect onto a draft (F2)",
-  "window",
-  "host/window.js",
-  "  if (unasked && await draftAt(pane.target)) {",
-  "  if (false) {"
- ],
- [
-  "a suggestion reads as a draft (F2)",
-  "window",
-  "host/window.js",
-  "  return seen;\n}\nexport function draftOf(",
-  "  return false;\n}\nexport function draftOf("
- ],
- [
-  "a Claude Code under its window's shell is never found (F3: both guards, the watch's and the healer's, call this)",
-  "host",
-  "host/window.js",
-  "  return underIn(parentsOf(await read()), ancestor, pids);",
-  "  return false;"
- ],
- [
-  "what a desk is owed is never typed once the box empties (F2)",
-  "host",
-  "host/index.js",
-  "          await desk.payOwed().catch(",
-  "          if (false) await desk.payOwed().catch("
- ],
- [
-  "a reconnect over a draft is dropped, not owed (F2)",
-  "host",
-  "host/index.js",
-  "      this.owedReconnect = true;\n      return;",
-  "      return;"
- ],
- [
-  "the process table walk stops at the first parent (F3)",
-  "window",
-  "host/window.js",
-  "    for (let n = 0; n < 64 && x > 1; n++) {",
-  "    for (let n = 0; n < 1 && x > 1; n++) {"
  ],
  [
   "a refused host's desk takes work until it goes stale (F4)",
@@ -121,9 +51,9 @@
  [
   "a replayed turn is the machine's word now (F5)",
   "host",
-  "host/index.js",
-  "      if (!(this.joinedAt && Date.parse(turn.at) < this.joinedAt)) this.host.noteTurn(turn);",
-  "      this.host.noteTurn(turn);"
+  "host/desk.js",
+  "      if (!(this.joinedAt && Date.parse(turn.at) < this.joinedAt)) this.host.noteTurn?.(turn);",
+  "      this.host.noteTurn?.(turn);"
  ],
  [
   "the sign-in reading waits for a child that ignores SIGTERM (QA 3800)",
@@ -138,26 +68,5 @@
   "host/auth.js",
   "      const t = setTimeout(() => finish(readSignedIn(out)), 100);",
   "      const t = null;"
- ],
- [
-  "Windows answers no for a Claude Code under the pane's shell again (F3 on Windows, task 334)",
-  "window",
-  "host/window.js",
-  "  if (!ancestor || !pids?.length) return false;\n  return underIn(parentsOf(await read()), ancestor, pids);",
-  "  if (windows || !ancestor || !pids?.length) return false;\n  return underIn(parentsOf(await read()), ancestor, pids);"
- ],
- [
-  "Windows reads its process table with ps (F3 on Windows, task 334)",
-  "window",
-  "host/window.js",
-  "  if (!windows) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };",
-  "  if (true) return { cmd: 'ps', args: ['-A', '-o', 'pid=,ppid='] };"
- ],
- [
-  "the process table is read at every tick, not once per window (task 334, QA 3898)",
-  "window",
-  "host/window.js",
-  "  if (memo.key !== key) { memo.key = key; memo.value = await runsUnder(ancestor, pids, opts); }",
-  "  { memo.key = key; memo.value = await runsUnder(ancestor, pids, opts); }"
  ]
 ]

@@ -351,6 +351,72 @@ async function rosterViaCli() {
   };
 }
 
+/**
+ * The desk processes a host has running, kept on disk so the next run of the
+ * same host can end any that a crash left behind (task 340, desktop-dev,
+ * measured on 2.1.330). A host stopped properly ends its desks (stop() in
+ * host/agent.js). A host that dies outright (a kill, a crash that takes the
+ * process, the app's utility process going with the app) closes their input
+ * and nothing else, and a Claude Code whose input closes finishes the turn it
+ * is in first: a desk in a 41 s tool call ran on 38 s with nobody listening.
+ * A host started meanwhile then found its conversation held by a process it
+ * did not know and refused it ("held elsewhere"), so the operator was handed
+ * a remedy for the host's own leftover. Now the new run ends it first.
+ *
+ * One file per host id, beside claude-version.json: two hosts on one machine
+ * (the app's and one started by hand) never end each other's desks.
+ */
+export function deskPidsFile(hostId) {
+  const safe = String(hostId ?? 'host').replace(/[^A-Za-z0-9._-]/g, '_');
+  return process.env.ORCH_DESK_PIDS_FILE ?? join(homedir(), '.orchestratinator', `desk-pids-${safe}.json`);
+}
+
+/** Write the running desks' pids (best effort: a host that cannot write it runs as before). */
+export function noteDeskPids(file, rows) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}`;
+    writeFileSync(tmp, `${JSON.stringify(rows)}\n`);
+    renameSync(tmp, file);
+    return true;
+  } catch { return false; }
+}
+
+const commandLineOf = (pid) => new Promise((resolve) => {
+  execFile('ps', ['-o', 'command=', '-p', String(pid)], { timeout: 5000 }, (err, out) => resolve(err ? null : String(out).trim()));
+});
+
+/**
+ * End the desk processes an earlier run of this host left running. A pid is
+ * ended only while `ps` still shows it as a Claude Code on the stream-JSON
+ * path, so a pid the system has since given to something else is left alone.
+ * SIGTERM ends Claude Code at once, tool and all (0.5 s, measured); SIGKILL
+ * after `graceMs` for one that has not gone. Not on Windows, where there is
+ * no `ps` to tell a reused pid apart: there the leftover finishes its turn
+ * and leaves, as before (unmeasured there). Returns what it ended.
+ */
+export async function endLeftoverDesks(file, { graceMs = 5000 } = {}) {
+  let rows = [];
+  try { rows = JSON.parse(readFileSync(file, 'utf8')); } catch { return []; }
+  if (!Array.isArray(rows)) rows = [];
+  const ended = [];
+  if (process.platform !== 'win32') {
+    for (const r of rows) {
+      const pid = Number(r?.pid);
+      if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || !alive(pid)) continue;
+      const cmd = await commandLineOf(pid);
+      if (!cmd || !cmd.includes('--input-format stream-json') || !cmd.includes('--output-format stream-json')) continue;
+      try { process.kill(pid, 'SIGTERM'); } catch { continue; }
+      const end = Date.now() + graceMs;
+      while (alive(pid) && Date.now() < end) await sleep(100);
+      if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+      ended.push({ pid, cwd: r.cwd ?? null, session: r.session ?? null });
+    }
+  }
+  noteDeskPids(file, []);
+  return ended;
+}
+
 /** When a process started, in ms, from how long `ps` says it has run; null when it cannot say. */
 export async function startedAt(pid) {
   if (!pid) return null;
