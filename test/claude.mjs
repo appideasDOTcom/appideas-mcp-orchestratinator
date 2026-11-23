@@ -353,6 +353,33 @@ try {
     eq(W.saveDefaults({ model: 'x' }, f).ok, false, 'and a file it cannot read is refused, never overwritten');
     eq(readFileSync(f, 'utf8'), '{ not json', 'left exactly as it was');
   }
+  console.log('\n  the permission mode a conversation was left in, and a new process\'s id');
+  {
+    const t = `${FIX}/mode.jsonl`;
+    eq(await W.conversationMode(t), null, 'a transcript not on disk has none');
+    writeFileSync(t, [
+      { type: 'permission-mode', permissionMode: 'acceptEdits', sessionId: 's' },
+      { type: 'user', permissionMode: 'acceptEdits', message: { role: 'user', content: 'a' } },
+      { type: 'permission-mode', permissionMode: 'auto', sessionId: 's' },
+      // A -p process's own user records say default, the record beside them
+      // the conversation's choice (desktop-dev's transcript, 2026-11-23).
+      { type: 'user', permissionMode: 'default', message: { role: 'user', content: 'b' } },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n{ torn');
+    eq(await W.conversationMode(t), 'auto', 'its last permission-mode record, never a user record\'s, and a torn last line is skipped');
+    writeFileSync(t, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'permission-mode' } })}\n`);
+    eq(await W.conversationMode(t), null, 'and none from words that only mention it');
+    writeFileSync(t, [
+      { type: 'permission-mode', permissionMode: 'auto', sessionId: 's' },
+      // Quoted in a value, as a tool's input can carry it (a user's own
+      // words are escaped in JSON and never match the line filter).
+      { type: 'user', permissionMode: 'default', toolUseResult: { kind: 'permission-mode' }, message: { role: 'user', content: 'x' } },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    eq(await W.conversationMode(t), 'auto', 'and a user record that mentions it, carrying default, is still not the conversation\'s mode');
+    eq([...W.CARRIED_MODES].sort(), ['acceptEdits', 'auto', 'dontAsk', 'plan'], 'the modes carried: not bypassPermissions, not default');
+    mkdirSync(`${CLAUDE_HOME}/sessions`, { recursive: true });
+    writeFileSync(`${CLAUDE_HOME}/sessions/4242.json`, JSON.stringify({ pid: 4242, sessionId: 'new-1', cwd: '/x' }));
+    eq([W.sessionOfPid(4242), W.sessionOfPid(4243), W.sessionOfPid(null)], ['new-1', null, null], 'a process\'s conversation from its own roster file, before any message');
+  }
 } catch (err) {
   console.log(`  ✗ the suite stopped: ${err.stack}`);
   failures++;

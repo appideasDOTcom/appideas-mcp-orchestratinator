@@ -108,6 +108,24 @@ on was measured on 2.1.330 before it was built
   environment is `agentEnv()`: a person's own and nothing of the host's
   settings (`windowEnv()`, "The clear of 2026-11-20"), plus the board's key
   where the binding names a variable for it, and a seat's four variables.
+- **A desk runs in the permission mode its conversation was left in**
+  (costmo, 2026-11-23, the day 0.15.0 reached his app: "roughly 100 times
+  the number of permissions prompts"). A `-p` Claude Code started without
+  `--permission-mode` runs `default` whatever the conversation was in, so
+  every desk taken over from an `auto` window asked about every tool. The
+  host reads the transcript's last `permission-mode` record
+  (`conversationMode` in `host/claude.js`; never a user record's
+  `permissionMode`, which a `-p` process writes as `default`) and passes it
+  (`Desk.modeFor`); a new conversation keeps the desk's mode, else the
+  folder's last spoken conversation's. `bypassPermissions` is not carried
+  (unmeasured on this path). Measured on 2.1.331: init `default` without
+  the flag, `auto` with it.
+- **A new conversation is named when its process starts, not at its first
+  message** (same day: New session spun for ever). `init` comes only with
+  the first message, so the host reads the id from the process's own roster
+  file (`sessionOfPid`, `Desk.learnNewId`), there within milliseconds of the
+  start (measured on 2.1.331, nothing sent), and reports it, which is what
+  the floor's New session waits on.
 - **Nothing runs until something asks for it**: a message, Open on the floor
   (`open` work), a take or a move (unless it says `open: false`), a pick in
   Sessions (`reopen`), a new seat. One process a desk (`ensure`). A host
@@ -124,8 +142,14 @@ on was measured on 2.1.330 before it was built
   end, so a long reply read as "not delivered" (found by the floor e2e,
   2026-11-22). A message sent while a turn runs is folded into that turn,
   and the host emits `delivery: queued` for it. **A message sent while a
-  permission or question stands is refused by the host** (`asking`), as the
-  board refuses it: Claude Code would take it only after the answer.
+  permission or question stands is held, not refused** (F17, costmo
+  2026-11-23: with prompts several a second, a refused message never
+  reached the desk). The host writes it at once and says `delivery: queued,
+  held: 'asking'` ("held — it reaches the desk once you answer…"); its
+  receipt clock starts only when nothing is asked (`armHeld` in
+  `host/agent.js`). Measured on 2.1.331: written while a Write permission
+  stood, it was `queued` in 1 ms, `started` 32 ms after the answer, and the
+  reply answered both messages.
 - **The host says when a turn starts and ends** (`state` events: `working`
   at `init`, `idle` at `result`). The board takes them for the desk's
   state, never over a standing host ask, and idle ends a compaction. Event
@@ -163,7 +187,8 @@ on was measured on 2.1.330 before it was built
   `add`ed behind it; an answer `shift`s the next forward (said at once,
   `showNextAsk`), a withdrawal or `gone` `remove`s that one wherever it
   stands, and `delete` still drops all of a desk's (it left, its host went
-  offline). The board refuses a message while any stands, naming how many
+  offline). A message while any stands is taken and held by the host (F17,
+  above); the bell, Nudge and a room's notices still wait, naming how many
   (`askingWhy`). A subagent's `can_use_tool` carries `agent_id` and the
   conversation's own does not (measured on 2.1.330); the host reads the
   subagent's description from its meta file (`subagentLabel` in
@@ -714,12 +739,14 @@ made the floor feel broken.
 record for one (measured on 2.1.220). Without it the floor showed the agent
 answering a question nobody could see being asked.
 
-**A desk whose Claude Code is asking something takes no message, and that
-is said at once** (#44 follow-up, from costmo's report, 2026-11-05). The
-board refuses the message before it is queued (`askingWhy` in
-src/floor.js, on `/api/floor/chat` and in the desk's `nudge` verdict, so the
-bell, Nudge and a meeting room send nothing), and the panel's Send dims with
-the reason in the box. A stale `live.pending` would refuse messages
+**A desk whose own Claude Code is asking something takes a message and
+holds it until the answer; the board's own words wait** (F17, costmo
+2026-11-23, replacing the #44 follow-up's refusal of 2026-11-05, which was
+the window layer's: typed into a window, a message went into its prompt).
+On `/api/floor/chat` a host's ask (`host_ask`) no longer refuses; a prompt
+a hook raised still does (`askingWhy`), since nothing holds the message
+there, and the panel dims Send only then. The desk's `nudge` verdict still
+says `asking`, so the bell, Nudge and a room's notices send nothing. A stale `live.pending` would refuse messages
 wrongly. It is cleared by an answer from the floor, by the host saying the
 ask is `gone`, by the conversation's next hook, and at session end, and the
 panel shows the prompt with Cancel.

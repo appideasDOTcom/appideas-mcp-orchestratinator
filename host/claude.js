@@ -992,6 +992,63 @@ export async function lastSpokenIn(cwd) {
   return rows[0]?.id ?? null;
 }
 
+/**
+ * The permission modes a desk carries over from its conversation. Claude Code
+ * writes a `permission-mode` record into the transcript at each turn of an
+ * interactive session (Shift+Tab's choice), and a `-p` process started
+ * without `--permission-mode` runs in `default` however the conversation was
+ * left: every tool asks (costmo, 2026-11-23, the day 0.15.0 took his `auto`
+ * desks over). `bypassPermissions` is not carried: on this path it has not
+ * been measured, and a flag Claude Code refuses would stop the desk starting.
+ * `default` needs no flag.
+ */
+export const CARRIED_MODES = new Set(['auto', 'acceptEdits', 'plan', 'dontAsk']);
+const MODE_TAIL_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The mode a transcript was last in, from its last `permission-mode` record,
+ * or null. Read from the tail first (one is written each turn), then whole.
+ * Only that record: a `-p` process's own user records say `default` while the
+ * record beside them still carries the conversation's choice (read on
+ * desktop-dev's conversation, 2026-11-23).
+ */
+export async function conversationMode(path) {
+  const { open } = await import('node:fs/promises');
+  let fh;
+  try { fh = await open(path, 'r'); } catch { return null; }
+  try {
+    const { size } = await fh.stat();
+    for (const from of size > MODE_TAIL_BYTES ? [size - MODE_TAIL_BYTES, 0] : [0]) {
+      const buf = Buffer.alloc(size - from);
+      await fh.read(buf, 0, buf.length, from);
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"permission-mode"')) continue;
+        let r;
+        try { r = JSON.parse(lines[i]); } catch { continue; }
+        if (r?.type === 'permission-mode' && typeof r.permissionMode === 'string') return r.permissionMode;
+      }
+    }
+    return null;
+  } finally { await fh.close(); }
+}
+
+/**
+ * The conversation a running Claude Code is on, from its own roster file, or
+ * null. A `-p` process names its conversation in `init`, which it writes only
+ * when its first message arrives, so a desk opened on a new conversation had
+ * no id until somebody typed, and the floor's New session spun for ever
+ * (costmo, 2026-11-23). Its roster file carries the id from its first
+ * milliseconds (measured on 2.1.331, nothing sent).
+ */
+export function sessionOfPid(pid) {
+  if (!pid) return null;
+  try {
+    const d = JSON.parse(readFileSync(join(CLAUDE_HOME, 'sessions', `${pid}.json`), 'utf8'));
+    return typeof d?.sessionId === 'string' ? d.sessionId : null;
+  } catch { return null; }
+}
+
 /** A title from a first prompt: its first line, whitespace folded, 80 characters. */
 function clipTitle(s) {
   const line = String(s).trim().split('\n')[0].replace(/\s+/g, ' ');

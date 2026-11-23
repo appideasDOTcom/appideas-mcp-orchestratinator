@@ -727,11 +727,15 @@ try {
   assert(!!p, 'a permission Claude Code asks for is on the desk, with nothing read off a screen');
   eq(p?.options?.map((o) => o.text), ['Yes', "Yes, and don't ask again for Bash(ls)", 'No'], 'with three rows: yes, yes for good under the rule Claude Code offered, and no');
   eq(p?.summary, 'Bash: ls', 'and what it is for');
-  const refusedWhileAsking = await chat('free', 'are you there?');
-  eq([refusedWhileAsking.status, (await refusedWhileAsking.json()).code], [409, 'asking'], 'a message to a desk that is asking is refused before it is queued');
+  // Held, not refused (F17, costmo 2026-11-23: with prompts several a
+  // second, a refused message never reached the desk).
+  const heldWhileAsking = await chat('free', 'held behind the permission');
+  eq(heldWhileAsking.status, 200, 'a message to a desk that is asking is taken by the board');
+  assert(await until(() => (host.log.includes('held behind the permission') || readFileSync(STDIN_LOG, 'utf8').includes('held behind the permission') ? true : null), 10000), 'and written to its Claude Code, held behind the prompt');
   eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'allow' })).status, 200, 'Approve is taken');
   eq((await answerFor(p?.request_id))?.response, { behavior: 'allow', updatedInput: { command: 'ls' } }, 'and reaches Claude Code as an allow, with the input it asked to run with');
   assert(!!(await replyAfter(mark, /^ALLOWED:\{"command":"ls"\}$/)), 'which Claude Code reads as allowed, and says so on the floor');
+  assert(!!(await until(async () => (await newRows(mark)).find((r) => r.role === 'user' && r.text === 'held behind the permission') ?? null, 10000)), 'and the message held behind it is in the conversation');
   assert(await until(async () => ((await permOf()) ? null : true), 5000), 'and the desk asks nothing any more');
 
   mark = await lastId();
@@ -777,8 +781,8 @@ try {
   await sleep(1500);
   const bgAsk = await permOf();
   eq([bgAsk?.message, bgAsk?.via], ['Background touch', 'Background capture'], "the subagent's ask is still on the floor after its parent's turn ended, named as the subagent's");
-  const subRefused = await chat('free', 'while the subagent asks');
-  eq([subRefused.status, (await subRefused.json()).code], [409, 'asking'], 'and the desk takes no message while it stands');
+  const subHeld = await chat('free', 'while the subagent asks');
+  eq(subHeld.status, 200, 'and a message sent while it stands is taken, for the host to hold');
   eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: bgAsk?.request_id, decision: 'allow' })).status, 200, 'it is answered from the floor');
   assert(!!(await replyAfter(mark, /^BGSUB:allow$/)), 'and the answer reaches the subagent, which goes on');
   assert(await until(async () => ((await permOf()) ? null : true), 5000), 'and the desk asks nothing any more');
@@ -1355,12 +1359,19 @@ try {
   const tailBefore = await bTailCount();
   await sleep(6000);   // past the listing throttle, so the reopen's own list is fresh — and past nothing else
   const pidAfterB = pidIn(REPO);
+  // The conversation was left in auto mode in a terminal (Shift+Tab writes
+  // this record at each turn). Started without the flag, Claude Code runs it
+  // in default and asks about every tool (costmo, 2026-11-23, 0.15.0).
+  appendFileSync(transcriptB, JSON.stringify({ type: 'permission-mode', permissionMode: 'auto', sessionId: SESSION_B }) + '\n');
+  const argvAtSecond = argvLog().length;
   const secondPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
   eq((await secondPick.json()).known, true, 'a second pick of the same conversation is one the board knows');
   assert(await until(async () => (pidIn(REPO) && pidIn(REPO) !== pidAfterB && deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 25000),
     'and the desk\'s Claude Code is started again on it');
   await sleep(WATCH_SETTLE_MS);
   eq(await bTailCount(), tailBefore, 'with nothing replayed');
+  assert(launches(argvAtSecond).some((l) => l.includes(`--resume ${SESSION_B}`) && l.includes('--permission-mode auto')),
+    `and in the permission mode the conversation was left in — ${JSON.stringify(launches(argvAtSecond))}`);
 
   // A new conversation: nothing to resume, and the desk follows the id
   // Claude Code names at the first message.
@@ -1370,6 +1381,11 @@ try {
   eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null })).status, 200, 'start new is accepted');
   assert(await until(() => (launches(argvAtNew).length === 1 ? true : null), 10000), 'and a Claude Code is started');
   assert(!launches(argvAtNew)[0].includes('--resume'), `with nothing to resume — ${JSON.stringify(launches(argvAtNew))}`);
+  assert(launches(argvAtNew)[0].includes('--permission-mode auto'), `in the mode the desk was in — ${JSON.stringify(launches(argvAtNew))}`);
+  // Named before anybody types: Claude Code says init only at the first
+  // message, and the floor's New session waited for an id for ever (costmo,
+  // 2026-11-23). The host reads it from the process's roster file.
+  assert(!!(await heldBy('free', 'floor', SESSION_NEW, 10000)), 'and the desk is on the new conversation before any message');
   eq((await chat('free', 'hello, new conversation')).status, 200, 'a message to it is taken');
   assert(!!(await heldBy('free', 'floor', SESSION_NEW)), 'and the desk follows the conversation Claude Code names');
   /* ── the folder picker, and moving a desk to another floor ────────────────

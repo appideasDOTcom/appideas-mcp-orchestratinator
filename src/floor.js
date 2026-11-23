@@ -4276,7 +4276,16 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
     const check = hostedOrWhyNot(channel, agent);
     if (check.error) return res.status(409).json(check);
-    const asking = askingWhy(live.pending.get(deskKey(channel, agent))) ?? signedOutWhy(check.hosted);
+    // A desk whose own Claude Code is asking (a host's ask) takes the
+    // message all the same: its host holds it behind the prompt and Claude
+    // Code takes it once the prompt is answered (host/agent.js send, F17;
+    // costmo, 2026-11-23: refused, a message sent while prompts arrived
+    // several a second never reached the desk). A prompt a hook raised has
+    // nothing to hold it, and is refused as before. The bell, Nudge and a
+    // room's notices still wait (askingWhy in the nudge verdict): those are
+    // the board's own words, not his.
+    const pending = live.pending.get(deskKey(channel, agent));
+    const asking = (pending?.host_ask ? null : askingWhy(pending)) ?? signedOutWhy(check.hosted);
     if (asking) return res.status(409).json(asking);
 
     const h = check.hosted;

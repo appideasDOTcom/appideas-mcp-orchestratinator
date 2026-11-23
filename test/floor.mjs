@@ -3530,7 +3530,9 @@ try {
       'a permission the host says stands on the desk with its rows, read and complete');
     const asked = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) });
     const askedBody = await asked.json();
-    assert(asked.status === 409 && askedBody.code === 'asking' && /asking for permission/.test(askedBody.error), `a message to the desk is refused while it stands, in words (${askedBody.error})`);
+    // Taken, and held by the host behind the prompt until it is answered
+    // (F17, costmo 2026-11-23: refused, it never reached the desk).
+    eq([asked.status, askedBody.code ?? null], [200, null], `a message to the desk is taken while the host's ask stands, for its host to hold (${askedBody.error ?? ''})`);
     await post(ev('mover-a', 'sdk-mover-ask', 'PreToolUse', { tool_name: 'Read', tool_input: { file_path: '/x' } }));
     eq((await moverDesk()).permission?.request_id, 'cu-1', 'a hook from the same session (a tool beside the one asked about) does not close it: only its answer or the host does');
     const allowed = await fetch(`${HOST}/api/floor/permission`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'cu-1', decision: 'allow' }) });
@@ -3594,12 +3596,14 @@ try {
     d = await moverDesk();
     eq([d.permission?.request_id, d.permission?.more, !!d.session?.awaiting_kind], ['b-1', 2, true], 'three asked at once: the first is shown, with two waiting behind it, none replacing it');
     let refused = await chatMover();
-    assert(refused.status === 409 && refused.code === 'asking' && /2 more waiting/.test(refused.error), `a message is refused by the board, naming how many wait (${refused.error})`);
+    eq(refused.status, 200, 'a message is taken with three asked, for the host to hold');
+    eq([askingWhy({ ...d.permission, more: 2 })?.code, /2 more waiting/.test(askingWhy({ ...d.permission, more: 2 })?.error)], ['asking', true], 'and the bell\'s refusal still names how many wait');
     eq((await allow('b-1')).status, 200, 'the first is answered');
     d = await moverDesk();
     eq([d.permission?.request_id, d.permission?.more, !!d.session?.awaiting_kind], ['b-2', 1, true], 'and the next is shown at once, the desk still needing you');
     refused = await chatMover();
-    eq([refused.status, refused.code], [409, 'asking'], 'and the composer still refuses: something is still asked');
+    eq(refused.status, 200, 'and still taken with one answered and one standing');
+    eq((await moverDesk()).nudge?.code, 'asking', 'while the bell still waits: something is still asked');
     await eventsMove([ask('b-3', { gone: true })]);
     d = await moverDesk();
     eq([d.permission?.request_id, d.permission?.more], ['b-2', 0], 'one withdrawn from behind leaves the one shown, and the count goes down');
@@ -4240,6 +4244,8 @@ try {
     ] }) });
     const miaLast = (await turns('mia', MCH)).rows.at(-1).id;
 
+    // A prompt a hook raised (no host holds the desk's Claude Code) takes no
+    // message: nothing could hold it. A host's ask takes one (F17, above).
     // A window that is asking something takes no message, and the board says
     // so before anything is queued (#44 follow-up, costmo's report: a chat
     // sent while a question form was open pasted for 60 s, held the host's

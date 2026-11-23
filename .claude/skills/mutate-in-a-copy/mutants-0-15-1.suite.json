@@ -1,0 +1,51 @@
+[
+ [
+  "the desk is started without its conversation's permission mode",
+  "host",
+  "host/desk.js",
+  "const proc = new Agent({ cwd: this.cwd, env, resume: id, permissionMode, claude",
+  "const proc = new Agent({ cwd: this.cwd, env, resume: id, claude"
+ ],
+ [
+  "a new conversation is not named until its first message",
+  "host",
+  "host/desk.js",
+  "      if (!id && proc.pid) this.learnNewId(proc);",
+  ""
+ ],
+ [
+  "the mode is read from a user record as well",
+  "claude",
+  "host/claude.js",
+  "        if (r?.type === 'permission-mode' && typeof r.permissionMode === 'string') return r.permissionMode;",
+  "        if (typeof r?.permissionMode === 'string') return r.permissionMode;"
+ ],
+ [
+  "the host refuses a message while its Claude Code asks (F17)",
+  "agent",
+  "host/agent.js",
+  "    if (this.asks.size) {\n      const w = { resolve: null, timer: null, held: true, timeoutMs, uuid };",
+  "    if (this.asks.size) return Promise.resolve({ ok: false, code: 'asking', error: 'asking' });\n    if (this.asks.size) {\n      const w = { resolve: null, timer: null, held: true, timeoutMs, uuid };"
+ ],
+ [
+  "a held message's receipt clock runs while it asks",
+  "agent",
+  "host/agent.js",
+  "    if (this.asks.size) return;\n    for (const [uuid, w] of this.takenWaits) {",
+  "    for (const [uuid, w] of this.takenWaits) {"
+ ],
+ [
+  "the board refuses a message behind a host's ask (F17)",
+  "floor",
+  "src/floor.js",
+  "    const asking = (pending?.host_ask ? null : askingWhy(pending)) ?? signedOutWhy(check.hosted);",
+  "    const asking = askingWhy(pending) ?? signedOutWhy(check.hosted);"
+ ],
+ [
+  "the board takes a message behind a hook's prompt",
+  "floor",
+  "src/floor.js",
+  "    const asking = (pending?.host_ask ? null : askingWhy(pending)) ?? signedOutWhy(check.hosted);",
+  "    const asking = signedOutWhy(check.hosted);"
+ ]
+]
