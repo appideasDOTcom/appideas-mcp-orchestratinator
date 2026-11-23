@@ -192,6 +192,31 @@ on was measured on 2.1.330 before it was built
   record, so Leave takes away only that: a rule the person wrote is never
   removed, and a file the host made for it alone goes with it. A settings
   file that is not JSON is left as it is, and the desk's board tools ask.
+- **Four first-session faults found only by walking the real app**
+  (costmo and desktop-dev on a fresh `newop` scratch app, 2026-11-23, every
+  suite green before each). Each is a rule now:
+  - **A host ask keeps the needs-you mark.** The host Claude Code's own
+    PreToolUse fires for the very tool it asks about, and its hook cleared
+    the mark on every ask: the desk read idle, "0 need you", with Approve
+    only inside its panel. A hook in CLEARS_AWAITING leaves the mark while
+    the shown prompt is a host ask, and a heartbeat's re-said ask puts a
+    cleared mark back (R10).
+  - **A host ask has a box signature of its own** (`drawAlert` in
+    `src/ui/floor.js`). Keyed on the mark alone, a box drawn with no mark
+    had signature '', so it was never redrawn: an answered ask stood on the
+    panel until a reload, and a new one was not drawn at all (F14). An empty
+    bold kind before the dash ("— WebSearch…") on a screenshot is this.
+  - **Sign in stands over an error.** The turn that finds a desk signed out
+    stands as awaiting 'error' (`authentication_failed`), and any awaiting
+    kind hid the box. A prompt outranks Sign in; an error does not. The
+    turn and the box say `SIGNED_OUT_WORDS` (host/claude.js and src/floor.js,
+    one string), never Claude Code's "Please run /login": a remedy is never
+    a command, and /login cannot run on a desk the host runs.
+  - **The canary's own MCP server runs on a real Node** (`probeNode` in
+    `host/canary.js`). Under the desktop app `process.execPath` is
+    Electron's helper with RunAsNode off, so the probe's reconnect read
+    "Connection closed" and every app launch showed a 31-of-32 banner. It
+    runs on `~/.orchestratinator/bin/node`, else `node` on PATH.
 - **Anything else Claude Code asks is declined and said on the desk** (the
   `ask` handler in `desk.js`). A dialog it would have drawn arrives, by the
   binary, as `request_user_dialog`; that has not been measured. Declined so
@@ -3322,6 +3347,29 @@ after was green (2026-11-03, task 247). Read the channel for their
 announcement before a full run, and if you overlapped, rerun the red suite
 alone before reading anything else.
 
+**Green suites did not prove a new operator's first session** (0.15.0,
+2026-11-23). At a gate of 3259 ✓ and 19 of 19 pages, costmo's first session
+in a fresh scratch app found four faults in an hour (above, "Four
+first-session faults"). So before a build reaches him, a new operator's
+first session is walked in the real app on a real Claude Code: launch, Take
+a desk, first message, a permission, a question, signed out and Sign in, both
+handoffs, each a pass or a break with a screenshot (desktop-dev's
+start-scratch.mjs). The one step only a person takes is the browser sign-in;
+nothing else is put on his list as a proof. Three things from the same round
+about reading the gate:
+- **A page check can find its port taken by another session's rig**
+  (run-release-pages numbers ports 8941 up; QA's rig held 8952, so
+  check-floor-windows printed "refusing: PORT … is taken" and no verdict).
+  Rerun that check alone on a free port.
+- **A red that reproduces alone under extreme load needs a control at the
+  parent commit**, not a verdict: test:floor's silent-room row was red twice
+  at load 545 on a tree that did not touch it, the parent was green at 285,
+  and the tree was green alone at 49.
+- **A mutant can survive because a test env names the thing twice**: the
+  seat hook rows passed with the binding-file read removed, because the seat
+  env also carries ORCH_CHANNEL / ORCH_AGENT. A row with the file alone
+  catches it.
+
 **Load from other projects is expected, and nothing waits for it to
 pass** (costmo, 2026-11-16: "work around high system load as needed … work
 needs to continue on both fronts"). This machine also builds and tests a
@@ -3544,6 +3592,33 @@ operator's live floor.
   only does not need it again; any other change does. Run the two one
   after the other, never beside QA's: QA runs its own chain too, queued
   behind yours (their decisions/0007).
+
+- **A release round starts only from a PR whose user paths the developer
+  has already run and posted** (costmo, 2026-11-23, after 0.15.0: "Do this"
+  to QA's four proposals, which QA records as its `decisions/0018`). The
+  0.15.0 round measured upgrades and signed-in desks; the three things he
+  found by looking (no Sign in on a signed-out desk, a false canary banner on
+  every app launch, "0 need you" while a prompt stood) were all on a new
+  operator's path, and cost him most of a day. So before asking QA for a
+  round, the developer runs and posts, at the PR's head:
+  1. **The update path**: an installed previous release replaced by this one,
+     the way a user's update does it, desks open (C1's shape).
+  2. **A new operator's first session**: a fresh profile and a signed-out
+     Claude Code, the real screens driven up to the one click a person makes
+     (the browser sign-in), then Take a desk, a message, a permission, a
+     question, signed out and Sign in, both handoffs; each a pass or a break
+     with a screenshot. The app's walk is desktop-dev's start-scratch.mjs; the
+     Docker one is a scratch board and a scratch HOME.
+  3. **Real Claude Code probes**: `protocol-probe.mjs` and, for anything that
+     touches prompts, `ask-probe.mjs` with a background subagent asking
+     (measure-a-real-window).
+  The proof of a user path is a person's click on the real control, never an
+  API call standing in for it, and never a command put on costmo's list. The
+  other three, which bind the round: **scope is fixed** once the measured
+  list is known (QA freezes it in writing; after that only what stops a new
+  operator, loses work, or reads as broken on a first session blocks the
+  tag); **the gates run once**, at the final commit; **a stuck agent is
+  reported at once** (the floor wakes a desk with work waiting, `wakeDue`).
 
 - **Once a PR into main is approvable, nothing goes into the tree until he
   has merged** (costmo, the same evening: "I need for you to stop updating
