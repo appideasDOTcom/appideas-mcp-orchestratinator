@@ -3532,6 +3532,13 @@ try {
     // Gone: the process that asked has ended.
     await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-3', kind: 'permission', tool: 'Write', summary: 'Write: x', options: ROWS }]);
     eq((await moverDesk()).permission?.request_id, 'cu-3', 'another stands');
+    // Said again by the next heartbeat while it still stands: the same
+    // prompt, not a new one (a re-raise would redraw the operator's form and
+    // read as just asked).
+    const askedAt = (await moverDesk()).permission?.at;
+    await sleep(30);
+    await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-3', kind: 'permission', tool: 'Write', summary: 'Write: x', options: ROWS }]);
+    eq((await moverDesk()).permission?.at, askedAt, 'said again by a heartbeat while it stands, it is the same prompt, not raised anew');
     // A turn's end said by the host while its Claude Code still asks (a turn
     // that asks is not over for the operator): the desk stays asking.
     await eventsMove([{ type: 'state', channel: CH, agent: 'mover-a', state: 'idle' }]);

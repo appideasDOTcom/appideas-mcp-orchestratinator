@@ -341,7 +341,6 @@ class Host {
         holders: d.holders ?? 0,
       });
     }
-    const pending = [];
     // The folders too, with paths and roots spelled the one way the board
     // will compare them, and a mark on any bound to some other board — the
     // origin is this host's to know, not the walk's.
@@ -371,7 +370,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), pending, boot: this.boot, claude_version: this.claudeVersion ?? null, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), boot: this.boot, claude_version: this.claudeVersion ?? null, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in

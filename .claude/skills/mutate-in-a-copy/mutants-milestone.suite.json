@@ -28,13 +28,6 @@
   "      if (ev.gone) {\n        if (false) {"
  ],
  [
-  "F1f the host never sends pending",
-  "host",
-  "host/index.js",
-  "signed_out: this.signedOut(), pending, boot: this.boot,",
-  "signed_out: this.signedOut(), boot: this.boot,"
- ],
- [
   "F3b yes and no swapped (QA A4)",
   "host",
   "host/index.js",
