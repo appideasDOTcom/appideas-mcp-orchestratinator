@@ -468,3 +468,37 @@ For each item: the test's section and wording, and the mutant that turned
 it red. QA re-runs a sample as "inversions" in its own clone; a report that
 names both lets them predict the red before they run it, which is the check
 on the check.
+
+## The lists after the window layer went (0.15.0, 2026-11-22)
+
+Every kept list was read against the tree with `validate-mutants.mjs` and
+rewritten: 77 entries that broke `host/window.js` or other window-layer code
+were dropped (that code is gone, so there is nothing for them to break), two
+lists that were nothing else were removed (`attach-typing`,
+`claude-2-1-326`), and 13 were re-aimed at where their behaviour lives now
+(`host/desk.js`, the board's `ask` case). Every list applies exactly once
+again. `mutants-0-15-0.suite.json` is the process layer's own: the receipt,
+`/clear`, the refusal while asking, the state events, the saved default,
+the background release, the seat watch, task 340's leftover sweep, the
+subagent hooks, and `send_message`'s empty body.
+
+Run that day with controls beside every suite (all green): every mutant red
+on the row it names, except these, each left with its reason:
+- **event batches go out side by side** (`flush()` chained): an ordering
+  only a slow board shows, and no seam stages one. Read, not measured.
+- **the desk keeps the old session through a /clear**: the init that names
+  the new session follows the reset at once, on the stand-in and on 2.1.330,
+  so nothing can read the gap.
+- **a turn ended 'not logged in' is not noted**: a second guard. Measured on
+  2.1.330 with a scratch `CLAUDE_CONFIG_DIR` (signed out): the stream-JSON
+  path writes the synthetic "Not logged in" record into the transcript, and
+  the relay notes that first.
+- **the host closes a working seat's Claude Code for a bind**: the board
+  refuses first (it reads the host's `working`), so the host's check is for a
+  turn started between the board's look and the bind arriving; no seam
+  stages that gap.
+
+Two survivors were real gaps and have rows now: lifecycle `completed` and
+`cancelled` arrive *after* the result (measured on 2.1.330) and were read as
+a turn starting, leaving a desk "working" for good (the stand-ins send both
+now), and an effort saved with no model known was said as saved.
