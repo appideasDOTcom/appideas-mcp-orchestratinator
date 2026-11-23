@@ -1,5 +1,5 @@
 <#
-  Bring a window the host just opened to the front on Windows: "Open in tmux"
+  Bring a window the host just opened to the front on Windows: "Open in Claude"
   and "Open in Claude", whose Windows Terminal window otherwise opens behind
   the window in front.
 

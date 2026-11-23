@@ -59,7 +59,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { header, isUnder, originOf } from './identity.js';
-import { canonical } from './window.js';
+import { canonical } from './claude.js';
 
 const run = promisify(execFile);
 const CLAUDE = process.env.ORCH_HOST_CLAUDE ?? 'claude';

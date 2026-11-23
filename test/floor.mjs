@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, signedOutWhy, signinWhyNot, lostWorkWords } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 // The host<->board protocol this tree speaks: every registration a suite
@@ -1940,7 +1940,7 @@ try {
     // choice is sent as a message, and one that would be dropped is not taken.
     eq(page.selectBlock(true, false, false, 'Bo'), null, 'a desk that can be typed into takes a choice');
     eq(page.selectBlock(true, false, true, 'Bo'), 'Bo is asking something — answer it above first.', 'a window that is asking takes none — Send would send nothing — and says so');
-    eq(page.selectBlock(false, true, false, 'Bo'), 'Bo’s conversation is open in your editor.', 'nor one an editor holds');
+    eq(page.selectBlock(false, true, false, 'Bo'), 'Bo’s conversation is open in another app.', 'nor one an editor holds');
     eq(page.selectBlock(false, false, false, 'Bo'), 'Bo’s machine isn’t reachable right now.', 'nor one whose host is away');
     // What an error turn gives back to the box: typed words, never a pick.
     eq(page.handedBack([{ text: 'a paragraph somebody wrote' }, { text: '/model opus', pick: true }, { text: 'and a second' }]), 'a paragraph somebody wrote\n\nand a second',
@@ -2728,7 +2728,6 @@ try {
     eq(promptOffer(bashReq, false), 'menu', 'a permission prompt is the menu');
     eq(promptOffer({ tool: 'Bash', read: true, choices: { approve: null, deny: null, extras: [] } }, false), 'unreadable',
       'a prompt that is not a question, with nothing to press, keeps the guess buttons');
-    eq(promptOffer({ tool: 'startup', startup: true, read: true, options: [{ n: 1, text: 'Yes' }], choices: { approve: 1 } }, false), 'startup', 'a startup question its rows');
     eq(promptOffer({ ...unreadReq, questions: PANE }, false), 'form', 'and a question with a form is the form');
     eq(promptOffer(null, false), 'none', 'no prompt, nothing offered');
   }
@@ -3491,148 +3490,51 @@ try {
    * permission route as a row number. A VS Code session defers the MCP approval
    * and a re-pointed .mcp.json invalidates it, so this is the first thing a
    * new user meets — and used to be a desk that said "starting" for ever. */
-  console.log('\na window asking before it starts');
   const eventsMove = (events) =>
     fetch(`${HOST}/api/host/events`, { method: 'POST', headers: HK, body: JSON.stringify({ host_id: 'h-move', events }) }).then((r) => r.json());
   const moverDesk = () => floor().then((fl) => deskOf(fl, 'mover-a'));
-  const MCP_ROWS = [
-    { n: 1, text: 'Use this MCP server' },
-    { n: 2, text: 'Use this and all future MCP servers in this project' },
-    { n: 3, text: 'Continue without using this MCP server' },
-  ];
-  eq((await eventsMove([{
-    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
-    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
-  }])).applied, 1, 'the host reports a startup question on a desk whose window has not registered');
-  let md = await moverDesk();
-  eq(md.permission?.startup, true, 'and the desk carries it as a prompt of its own kind');
-  eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with the dialog’s own rows');
-
-  // A re-say of the same standing question — nothing chosen, nothing gone in
-  // between — must not reset when it was first seen. The host repeats a
-  // startup question every STARTUP_RESAY_MS while it stands, and the queue's
-  // wait age falls back to this `at` whenever the desk's newest session isn't
-  // the one carrying the awaiting mark (an editor session sharing the desk,
-  // say) — a fresh `at` on every re-say restarted that clock each time.
-  const firstAt = md.permission.at;
-  assert(!!firstAt, 'the pending request carries when it was first seen');
-  await sleep(30);
-  await eventsMove([{
-    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
-    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
-  }]);
-  eq((await moverDesk()).permission?.at, firstAt,
-     'and a re-say of the same standing question keeps it, rather than the moment the host happened to repeat itself');
-
-  // The desk's current session is whichever row was touched last — here the
-  // hook session from the rescan section, and on a real desk an editor whose
-  // hooks keep firing — so the queue must not depend on that row being marked.
-  eq((await floor()).queue.some((q) => q.agent === 'mover-a'), true, 'the desk is in the queue on the strength of the question alone, so "N need you" counts it');
-  eq((await floor()).channels.find((c) => c.channel === CH).awaiting >= 1, true, 'and the floor’s own count agrees');
-  const chose = await fetch(`${HOST}/api/floor/permission`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
-  });
-  eq(chose.status, 200, 'a row is chosen through the same route as any prompt');
-  const work = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
-  eq(work.work.map((w) => `${w.kind}:${w.payload.decision}:${w.payload.request_id}`), ['permission:1:startup:@9:mcp'],
-     'and reaches the host as that row, on that request — which is what routes it to the startup presser');
-  eq((await moverDesk()).permission ?? null, null, 'the prompt comes down the moment the choice is made');
-  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp', asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS }]);
-  eq((await moverDesk()).permission?.startup, true, 'said again while it stands (a restarted server hears it a minute later)');
-  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
-  md = await moverDesk();
-  eq(md.permission ?? null, null, 'and gone when the host sees the dialog leave');
-  eq((await floor()).queue.some((q) => q.agent === 'mover-a'), false, 'with the desk out of the queue');
-
-  console.log('\na startup answer that fails to land comes back once');
-  // Same shape as the AskUserQuestion re-offer above, for the other kind of
-  // prompt that can now fail to land. Before this it painted the desk red
-  // with "your approve did not land" — wrong verb for a row that was never
-  // approve/deny — and under the old bare `answer_failed`-only gate it never
-  // re-offered at all, so the operator was left at a plain error for up to a
-  // minute even though the dialog was still standing right there.
-  await eventsMove([{
-    type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', kind: 'mcp',
-    asks: 'New MCP server found in this project: orchestratinator', options: MCP_ROWS, window: '@9',
-  }]);
-  eq((await moverDesk()).permission?.startup, true, 'raised again for this section');
-  const chose2 = await fetch(`${HOST}/api/floor/permission`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
-  });
-  eq(chose2.status, 200, 'the row is chosen');
-  await eventsMove([{
-    type: 'error', code: 'startup_answer_failed', channel: CH, agent: 'mover-a',
-    message: 'your choice did not reach the window — no window is open for this repo',
-  }]);
-  md = await moverDesk();
-  eq(md.permission?.request_id, 'startup:@9:mcp', 'a failed startup answer puts the same request back up');
-  eq(md.permission?.startup, true, 'and it comes back as the startup prompt, not as Approve/Deny');
-  eq(md.permission?.options.map((o) => o.text), MCP_ROWS.map((o) => o.text), 'with its own rows intact');
-
-  // Once, same rule as the form: a mistaken failure must not put the prompt
-  // back the instant it is answered, or answering becomes the one thing that
-  // cannot end it.
-  await fetch(`${HOST}/api/floor/permission`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', decision: '1' }),
-  });
-  await eventsMove([{
-    type: 'error', code: 'startup_answer_failed', channel: CH, agent: 'mover-a',
-    message: 'your choice did not reach the window — again',
-  }]);
-  md = await moverDesk();
-  eq(md.permission, null, 'the second failure does not offer it a third time');
-  // Not md.session.awaiting_message: which session is "current" for a desk is
-  // decided by updated_at, which SQLite's datetime('now') only carries to the
-  // second — two rows touched in the same second (the placeholder this error
-  // is marked on, and mover-a's earlier hook session from the rescan section,
-  // both touched within this same fast-running test) tie, and which one wins
-  // the tie is not something to depend on. The error turn is unambiguous:
-  // appended once, read back by id, regardless of any session's timestamp.
-  const moverTurns = (await turns('mover-a')).rows ?? [];
-  assert(String(moverTurns.at(-1)?.text ?? '').includes('not being offered again'),
-    'and says so, rather than leaving the operator wondering where the dialog went');
-  await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:mcp', gone: true }]);
-
-  console.log('\na dialog read by its shape, and a screen the floor does not know (0.14.6)');
+  console.log('\nwhat a desk\'s Claude Code asks (ask events)');
   {
-    // A dialog the host read by its shape (review item 3): its title, its
-    // sentence and its rows stand on the desk like any startup question.
-    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:dialog', kind: 'dialog',
-      asks: 'Teach auto mode about your environment?', detail: 'Auto mode works better when it knows your environment.',
-      options: [{ n: 1, text: 'Yes' }, { n: 2, text: 'Not now' }, { n: 3, text: "Don't show again" }], window: '@9' }]);
+    // A permission, said by the host as data (host/desk.js): its rows, and
+    // nothing for the board to read off a screen.
+    const ROWS = [{ n: 1, text: 'Yes' }, { n: 2, text: "Yes, and don't ask again for Bash(ls)" }, { n: 3, text: 'No' }];
+    await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-1', kind: 'permission', tool: 'Bash', tool_input: { command: 'ls' }, summary: 'Bash: ls', options: ROWS }]);
     let d = await moverDesk();
-    eq([d.permission?.kind, d.permission?.summary, d.permission?.detail, d.permission?.options.length], ['dialog', 'Teach auto mode about your environment?', 'Auto mode works better when it knows your environment.', 3],
-      'a dialog read by its shape stands on the desk with its title, its sentence and its rows');
-    const refusedD = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) });
-    eq([refusedD.status, (await refusedD.json()).code], [409, 'asking'], 'and a message to the desk is refused while it stands');
-    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:dialog', gone: true }]);
-    // A screen nobody knows (review item 1): no rows, its lines instead.
-    const LINES = ['  Plugins', '  ❯ ✔ floor', '  ↑/↓ to navigate · Space to toggle · Esc to close'];
-    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', kind: 'screen',
-      asks: 'the window is showing something the floor does not know', screen: LINES, options: [], window: '@9' }]);
+    eq([d.permission?.request_id, d.permission?.host_ask, d.permission?.summary, d.permission?.options?.map((o) => o.text)], ['cu-1', true, 'Bash: ls', ROWS.map((o) => o.text)],
+      'a permission the host says stands on the desk with its rows, read and complete');
+    const asked = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) });
+    const askedBody = await asked.json();
+    assert(asked.status === 409 && askedBody.code === 'asking' && /asking for permission/.test(askedBody.error), `a message to the desk is refused while it stands, in words (${askedBody.error})`);
+    await post(ev('mover-a', 'sdk-mover-ask', 'PreToolUse', { tool_name: 'Read', tool_input: { file_path: '/x' } }));
+    eq((await moverDesk()).permission?.request_id, 'cu-1', 'a hook from the same session (a tool beside the one asked about) does not close it: only its answer or the host does');
+    const allowed = await fetch(`${HOST}/api/floor/permission`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'cu-1', decision: 'allow' }) });
+    eq(allowed.status, 200, 'Approve goes through the prompt route as before');
+    let work = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
+    eq(work.work.filter((w) => w.payload?.request_id === 'cu-1').map((w) => `${w.kind}:${w.payload.decision}`), ['permission:1'], 'and reaches the host as the row it names, which the host answers Claude Code with');
+    await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-1', kind: 'permission', tool: 'Bash', summary: 'Bash: ls', options: ROWS }]);
+    eq((await moverDesk()).permission ?? null, null, 'said again by a heartbeat after it was answered, it is not raised again');
+
+    // A question: a form built from the questions themselves.
+    const QS = [{ question: 'Pick a colour', header: 'Colour', multiSelect: false, options: [{ label: 'Red' }, { label: 'Blue' }] }, { question: 'Pick a day', header: 'Day', multiSelect: false, options: [{ label: 'Monday' }, { label: 'Friday' }] }];
+    await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-2', kind: 'question', tool: 'AskUserQuestion', tool_input: { questions: QS }, summary: 'a question for you', options: [] }]);
     d = await moverDesk();
-    eq([d.permission?.kind, d.permission?.screen, d.permission?.options], ['screen', LINES, []], 'a screen with no rows still stands on the desk, carrying its lines');
-    eq((await floor()).queue.some((q) => q.agent === 'mover-a'), true, 'and puts the desk in the queue of desks that need the operator');
-    const refusedS = await fetch(`${HOST}/api/floor/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', text: 'hello' }) });
-    const rs = await refusedS.json();
-    assert(refusedS.status === 409 && /a screen the floor does not know/.test(rs.error) && /press Escape/.test(rs.error), `a message is refused in words that say what to do (${rs.error})`);
-    const esc = await fetch(`${HOST}/api/floor/permission`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', decision: 'cancel' }) });
-    eq(esc.status, 200, 'Escape is pressed from the floor through the same route');
-    const wk = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
-    // The section above leaves its own two answers in this host's line; only this request's is read.
-    eq(wk.work.filter((w) => w.payload?.request_id === 'startup:@9:screen').map((w) => `${w.kind}:${w.payload.decision}`), ['permission:cancel'], 'and reaches the host as cancel on that request, which the host presses as Escape');
-    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', kind: 'screen', screen: [], options: [] }]);
-    eq((await moverDesk()).permission ?? null, null, 'a screen with no lines and no rows says nothing');
-    // A prompt a hook raised outranks anything read off the screen.
-    await post(ev('mover-a', 'sdk-mover-dialog', 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }));
-    const hooked = (await moverDesk()).permission;
-    await eventsMove([{ type: 'startup', channel: CH, agent: 'mover-a', request_id: 'startup:@9:screen', kind: 'screen', screen: LINES, options: [], window: '@9' }]);
-    d = await moverDesk();
-    assert(!!hooked && !hooked.startup && d.permission?.request_id === hooked.request_id, `and a permission prompt a hook raised is not replaced by a screen the host read (${hooked?.request_id} → ${d.permission?.request_id})`);
-    await post(ev('mover-a', 'sdk-mover-dialog', 'SessionEnd', {}));
+    eq(d.permission?.questions?.map((q) => q.question), ['Pick a colour', 'Pick a day'], 'a question stands as a form, built from its own questions');
+    const answered = await fetch(`${HOST}/api/floor/answer`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: CH, agent: 'mover-a', request_id: 'cu-2', answers: [{ choose: [2] }, { choose: [3], text: 'Saturday, actually' }] }) });
+    const ab = await answered.json();
+    eq([answered.status, ab.clarify], [200, false], 'answered through the form route, a typed answer with no form withdrawn for it');
+    work = await fetch(`${HOST}/api/host/work?host_id=h-move&wait=0`, { headers: HK }).then((r) => r.json());
+    eq(work.work.filter((w) => w.payload?.request_id === 'cu-2').map((w) => w.payload.answers), [{ 'Pick a colour': 'Blue', 'Pick a day': 'Saturday, actually' }],
+      'and reaches the host as answers, each question\'s words and its answer, typed words included');
+    eq(answersForTool([{ question: 'Q', options: [{ n: 1, text: 'A' }, { n: 2, text: 'B' }, { n: 3, text: 'Type something', other: true }] }], [{ choose: [1, 2, 3], text: 'and C' }]), { Q: 'A, B, and C' },
+      'several rows and typed words make one answer, the "type something" row itself never an answer');
+
+    // Gone: the process that asked has ended.
+    await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', session_id: 'sdk-mover-ask', request_id: 'cu-3', kind: 'permission', tool: 'Write', summary: 'Write: x', options: ROWS }]);
+    eq((await moverDesk()).permission?.request_id, 'cu-3', 'another stands');
+    await eventsMove([{ type: 'ask', channel: CH, agent: 'mover-a', request_id: 'cu-3', gone: true }]);
+    eq((await moverDesk()).permission ?? null, null, 'and the host saying it is gone (its process ended) closes it');
+    await post(ev('mover-a', 'sdk-mover-ask', 'SessionEnd', {}));
   }
 
   console.log('\none stream for several desks (issue #19)');
@@ -3728,7 +3630,6 @@ try {
 
     eq(pg.deskAsking(desk('a', { kind: 'permission_request' })), true, 'a permission menu or a question form (permission_request) is asking');
     eq(pg.deskAsking(desk('a', { kind: 'permission_prompt' })), true, 'and so is the notification\'s permission_prompt');
-    eq(pg.deskAsking(desk('a', { startup: true })), true, 'and a startup question before any session exists');
     eq(pg.deskAsking(desk('a', { kind: 'error' })), false, 'an error turn is not a prompt: nothing waits on an answer');
     eq(pg.deskAsking({ ...desk('a'), signin: { ok: true, host: 'box' } }), true, 'a desk whose host\'s Claude Code is signed out is waiting on the operator\'s Sign in, so the tab pulses for it (costmo, 2026-11-19)');
     eq(pg.deskAsking({ ...desk('a', { live: false }), signin: { ok: true, host: 'box' } }), false, 'not when the desk is not live');
@@ -4102,57 +4003,26 @@ try {
     assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'the window asks, and the floor shows it');
     await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa-editor', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Read', tool_input: { file_path: '/repo/asa/x' } });
     assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'another session on the desk working (an editor in the repo) does not close the window\'s question (probe P1)');
+    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Write', tool_input: { file_path: '/repo/asa/y' }, agent_id: 'sub-1' });
+    assert(/git push/.test((await asked('asa'))?.summary ?? ''), 'nor does a subagent of the same conversation working (its hook carries agent_id): costmo\'s report, a question asked while two background agents ran');
     await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'git push' } });
     eq(await asked('asa'), null, 'the window\'s own work does: it was answered');
     await queued();
-    await beat([{ channel: QCH, agent: 'asa', session_id: 'sdk-asa', summary: 'the window is waiting for a decision' }]);
-    eq(await asked('asa'), null, 'and a heartbeat that read the pane just before the answer does not raise it again (RESAY_QUIET_MS)');
-
-    // bea's window is asking, and the board has heard nothing of it: the
-    // shape after a board restart. The heartbeat says it.
-    await beat([{ channel: QCH, agent: 'bea', session_id: 'sdk-bea', summary: 'the window is waiting for a decision' }]);
-    const raised = await asked('bea');
-    eq([raised?.summary, raised?.standing], ['the window is waiting for a decision', true], 'a question a heartbeat says the window is asking is raised on the floor');
-    eq((await queued()).filter((k) => k === 'prompt').length, 1, 'and the host is asked to read its choices off the pane, once');
-    eq(deskOf(await floor(), 'bea', QCH)?.nudge?.code, 'asking', 'and the desk takes no message while it stands, as for any question');
-    await beat([{ channel: QCH, agent: 'bea', session_id: 'sdk-bea', summary: 'the window is waiting for a decision' }]);
-    eq([(await asked('bea'))?.request_id, (await queued()).length], [raised?.request_id, 0], 'said again at the next heartbeat, it is the same question, and nothing more is asked of the host');
-    await beat([]);
-    eq(await asked('bea'), null, 'a heartbeat that no longer names it closes it: answered in the window');
 
     await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea', hook_event_name: 'PermissionRequest', cwd: '/repo/bea', tool_name: 'Bash', tool_input: { command: 'npm publish' } });
     await beat([]);
-    assert(/npm publish/.test((await asked('bea'))?.summary ?? ''), 'but a question a hook raised is not closed by a heartbeat: the hook can be newer than the screen the host read');
+    assert(/npm publish/.test((await asked('bea'))?.summary ?? ''), 'a question a hook raised is not closed by a heartbeat');
     await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea', hook_event_name: 'PreToolUse', cwd: '/repo/bea', tool_name: 'Bash', tool_input: { command: 'npm publish' } });
     await queued();
 
-    // The startup half (docs/backlog.md, open since PR #2): a question the
-    // window asks before Claude Code starts, said by the host, is not closed
-    // by another session's work on the desk either; the host's `gone` is
-    // what closes it.
-    const hostEv = (events) => fetch(`${HOST}/api/host/events`, { method: 'POST', headers: qHK, body: JSON.stringify({ host_id: 'h-ask', events }) });
-    await hostEv([{ type: 'startup', channel: QCH, agent: 'bea', session_id: 'sdk-bea', request_id: 'startup:trust', kind: 'trust', asks: 'Do you trust the files in this folder?', options: [{ n: 1, text: 'Yes, proceed' }, { n: 2, text: 'No, exit' }] }]);
-    eq((await asked('bea'))?.startup, true, 'a startup question is on the floor');
-    await post({ channel: QCH, agent: 'bea', session_id: 'sdk-bea-editor', hook_event_name: 'PreToolUse', cwd: '/repo/bea', tool_name: 'Read', tool_input: { file_path: '/repo/bea/y' } });
-    eq((await asked('bea'))?.startup, true, 'and an editor\'s tool call on the same desk leaves it there');
-    await hostEv([{ type: 'startup', channel: QCH, agent: 'bea', session_id: 'sdk-bea', request_id: 'startup:trust', gone: true }]);
-    eq(await asked('bea'), null, 'the host saying it is gone closes it');
     await queued();
 
-    // Press yes / no's route (finding 3): the floor's answer for a prompt
-    // nothing could read. The keys are the host's (test:host); the route
-    // decides whether to queue them at all.
-    const press = (choice) => fetch(`${HOST}/api/floor/press`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: QCH, agent: 'asa', choice }) })
-      .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
-    let pr = await press('yes');
-    eq([pr.status, pr.body.code], [409, 'not_waiting'], 'Press is refused for a desk that is not waiting on anything');
-    await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'Notification', cwd: '/repo/asa', notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
-    await queued();
-    pr = await press('maybe');
-    eq([pr.status, pr.body.code], [400, 'bad_choice'], 'a choice that is not yes or no is refused');
-    pr = await press('yes');
-    const pressWork = await fetch(`${HOST}/api/host/work?host_id=h-ask`, { headers: qHK }).then((r) => r.json()).then((b) => b.work ?? []);
-    eq([pr.status, pressWork.map((w) => [w.kind, w.payload?.choice])], [200, [['press', 'yes']]], 'and for a waiting desk it queues one press, carrying the choice, for the host to turn into a key');
+    // The blind yes / no for a prompt nothing could read is gone with the
+    // window layer (2026-11-22): what a host's Claude Code asks arrives as
+    // data, and a prompt a hook raised on a desk held in another app is
+    // answered in that app.
+    const gone = await fetch(`${HOST}/api/floor/press`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: QCH, agent: 'asa', choice: 'yes' }) });
+    eq(gone.status, 404, 'there is no press route');
     await post({ channel: QCH, agent: 'asa', session_id: 'sdk-asa', hook_event_name: 'PreToolUse', cwd: '/repo/asa', tool_name: 'Bash', tool_input: { command: 'true' } });
     await queued();
   }
@@ -4252,16 +4122,14 @@ try {
     await post({ channel: MCH, agent: 'noa', session_id: 'sdk-noa', hook_event_name: 'PermissionRequest', cwd: '/repo/noa', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } });
     let asked = await op('/api/floor/chat', { channel: MCH, agent: 'noa', text: 'are you there?' });
     eq([asked.status, asked.body.code], [409, 'asking'], 'a message to a desk whose window is asking is refused at once, nothing queued');
-    assert(/asking for permission\. A message typed now would go into that/.test(asked.body.error ?? ''), `in words that say why and what to do — ${asked.body.error}`);
+    assert(/asking for permission, and waits on your answer/.test(asked.body.error ?? ''), `in words that say why and what to do — ${asked.body.error}`);
     const noaDesk = (await floor()).channels.find((c) => c.channel === MCH)?.desks.find((d) => d.agent === 'noa');
     eq([noaDesk?.nudge?.ok, noaDesk?.nudge?.code], [false, 'asking'], 'and its nudge verdict says the same, so the bell, Nudge and a meeting room send nothing');
     await post({ channel: MCH, agent: 'noa', session_id: 'sdk-noa', hook_event_name: 'PreToolUse', cwd: '/repo/noa', tool_name: 'Bash', tool_input: { command: 'ls' } });
     asked = await op('/api/floor/chat', { channel: MCH, agent: 'noa', text: 'are you there?' });
     eq(asked.status, 200, 'once the window works again, the prompt is gone and a message goes');
-    eq([askingWhy(null), askingWhy({ questions: [{}] })?.code, /asking a question\./.test(askingWhy({ questions: [{}] })?.error), /before it can start/.test(askingWhy({ startup: true })?.error)],
-      [null, 'asking', true, true], 'askingWhy names what the window is asking: a question, permission, or a question before it can start');
-    eq([/asking something\./.test(askingWhy({ startup: true, kind: 'dialog' })?.error), /a screen the floor does not know/.test(askingWhy({ startup: true, kind: 'screen' })?.error)],
-      [true, true], 'and a dialog read by its shape, or a screen the floor does not know, in words of their own');
+    eq([askingWhy(null), askingWhy({ questions: [{}] })?.code, /asking a question,/.test(askingWhy({ questions: [{}] })?.error), /asking for permission,/.test(askingWhy({ tool: 'Bash' })?.error)],
+      [null, 'asking', true, true], 'askingWhy names what the desk\'s Claude Code is asking: a question, or permission');
 
     let r = await op('/api/floor/meeting', { channel: MCH, agents: ['mia', 'noa'] });
     eq(r.status, 200, 'a room is created from desks on one floor');
@@ -4774,8 +4642,8 @@ try {
       'a list of three reads as one, and a room of one names only the operator');
     const leave = roomNoticeText('leave');
     assert(/back on the floor/.test(leave) && /addressed to you again/.test(leave) && /needs no reply/.test(leave), 'leaving says it is back on the floor', leave);
-    const W = await import('../host/window.js');
-    eq(W.typedCommand(enter), enter, 'and the host types it as given');
+    const { commandPlan } = await import('../host/desk.js');
+    eq(commandPlan(enter, 'orchestratinator'), { kind: 'message', text: enter }, 'and the host sends it as given, words and not a command');
 
     // The decision, over the cases that matter.
     const room = (id, present, more = {}) => ({ id, channel: 'f', open: true, holding: true, present, ...more });
@@ -5341,8 +5209,12 @@ try {
     server = startServer();
     if (!(await waitHealthy())) throw new Error('the board did not come back');
     eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission ?? null, null, 'a restarted board has forgotten it: open questions are memory');
-    await rBeat([{ channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', summary: 'the window is waiting for a decision' }]);
-    eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary, 'the window is waiting for a decision', 'and the host\'s first heartbeat after it raises the question again (probe P3)');
+    // The host says what its desks' Claude Codes are still asking at every
+    // heartbeat, as `ask` events (host/index.js register): that is what a
+    // restarted board raises the question again from.
+    await fetch(`${HOST}/api/host/events`, { method: 'POST', headers: rHK, body: JSON.stringify({ host_id: 'h-ask', events: [
+      { type: 'ask', channel: 'ask-ch', agent: 'asa', session_id: 'sdk-asa', request_id: 'cu-r1', kind: 'permission', tool: 'Bash', summary: 'Bash: make deploy', options: [{ n: 1, text: 'Yes' }, { n: 2, text: 'No' }] }] }) });
+    eq(deskOf(await floor(), 'asa', 'ask-ch')?.permission?.summary, 'Bash: make deploy', 'and the host\'s first heartbeat after it raises the question again, from what its process still asks');
     const hostNow = (await floor()).hosts.find((h) => h.host_id === 'h-seat');
     eq([hostNow?.live, hostNow?.seats], [true, true], 'a board that restarted still knows a live host can seat a second desk, before that host has registered again');
     eq((await fetch(`${HOST}/api/floor/folders`).then((x) => x.json())).hosts.find((h) => h.host_id === 'h-seat')?.seats, true, 'and Take a desk\'s host list says so');

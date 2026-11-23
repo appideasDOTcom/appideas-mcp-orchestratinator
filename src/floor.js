@@ -432,7 +432,7 @@ export function deliverable(h, nowMs = Date.now()) {
   // than accepting one and failing to deliver it.
   if (h.outside_pid) {
     return {
-      error: 'This conversation is open in your editor. Close it there, or use “Open in VS Code” to move it back, then type here.',
+      error: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there, then type here: the floor takes it back with your next message.',
       code: 'held_by_editor',
     };
   }
@@ -455,17 +455,9 @@ export function deliverable(h, nowMs = Date.now()) {
  */
 export function askingWhy(pending) {
   if (!pending) return null;
-  if (pending.startup && pending.kind === 'screen') {
-    return {
-      error: 'The window is showing a screen the floor does not know. A message typed now would go into that, not the conversation: open the window or press Escape on the desk, then send this.',
-      code: 'asking',
-    };
-  }
-  const what = pending.questions?.length || pending.reading ? 'a question'
-    : pending.startup && pending.kind === 'dialog' ? 'something'
-      : pending.startup ? 'a question before it can start' : 'for permission';
+  const what = pending.questions?.length || pending.reading || pending.tool === 'AskUserQuestion' ? 'a question' : 'for permission';
   return {
-    error: `The window is asking ${what}. A message typed now would go into that, not the conversation: answer it, or cancel it, then send this.`,
+    error: `This desk's Claude Code is asking ${what}, and waits on your answer before anything else: answer it, or cancel it, then send this.`,
     code: 'asking',
   };
 }
@@ -550,63 +542,30 @@ export function nudgeable(h, nowMs = Date.now()) {
  * that itself, the next best thing it can do is say how.
  */
 export function attachable(h, nowMs = Date.now()) {
-  const cmd = `tmux attach -t ${h?.host_tmux ?? 'orch'}`;
+  // "Open in Claude": the conversation handed to a terminal of the
+  // operator's own (host/index.js `claude`), since a desk's Claude Code is a
+  // process of the host's with no screen to attach to (2026-11-22). So it
+  // needs the host there to open the terminal, and the conversation not
+  // already open in another app.
   const where = h?.host_name ?? h?.host_id ?? 'the host machine';
-  if (!h) {
-    return { error: 'No host on this board is running that repo, so there is no tmux session to attach to.', code: 'not_hosted' };
-  }
+  if (!h) return { error: 'No host on this board is running that repo, so there is nothing to hand to a terminal.', code: 'not_hosted' };
   const can = deliverable(h, nowMs);
   if (can.error && can.code === 'host_offline') {
-    // The one refusal that is not really a refusal. The host is a separate
-    // process from the windows it opened — killing it deliberately leaves them
-    // running — so the session is very likely still there and still attachable.
-    // Nothing here can reach out and prove that, and the sentence must not
-    // claim it: it says what is known, and hands over the command.
-    return {
-      error: `The host for this desk (${where}) is offline, so it cannot open a terminal for you. Its tmux session outlives it, so run \`${cmd}\` on ${where} yourself.`,
-      code: 'host_offline',
-      cmd,
-    };
+    return { error: `The host for this desk (${where}) is offline, so it cannot open a terminal for you.`, code: 'host_offline' };
   }
   if (can.error && can.code === 'held_by_editor') {
     return {
-      error: 'This conversation is open in your editor, not in tmux, so there is no window to attach to. Close it there, or move it to the floor first.',
+      error: 'This conversation is already open in another app — your editor, or a claude CLI in a terminal. Quit it there first: one app holds a conversation at a time.',
       code: 'held_by_editor',
     };
   }
-  if (can.error) return { ...can, cmd };
-  if (!h.window_id) {
-    return {
-      error: 'No tmux window is open for this desk, so there is nothing to attach to yet. Open it on the floor first.',
-      code: 'no_window',
-    };
-  }
-  return { hosted: h, cmd };
+  if (can.error) return can;
+  return { hosted: h, opens: !h.window_id };
 }
 
-/**
- * Can "Open in Claude" put this desk's window in front of the operator?
- *
- * The attach conditions, with one loosened and one re-worded. Loosened:
- * no_window is not a refusal here, because opening the window is half of what
- * the button does — the host runs `open` and then attaches. Re-worded: the
- * held-by-editor sentence, because the process holding it may be an editor OR
- * a claude CLI outside tmux, and this button is the one a CLI person clicks —
- * telling them about "your editor" sends them looking for a window that is a
- * terminal.
- */
+/** "Open in Claude" and the old "Open in tmux" are one handoff now. */
 export function claudeable(h, nowMs = Date.now()) {
-  const base = attachable(h, nowMs);
-  if (!base.error) return base;
-  const cmd = `tmux attach -t ${h?.host_tmux ?? 'orch'}`;
-  if (base.code === 'no_window') return { hosted: h, cmd, opens: true };
-  if (base.code === 'held_by_editor') {
-    return {
-      error: 'This conversation is already open in another app — your editor, or a claude CLI outside tmux. Quit it there first: one app holds a conversation at a time.',
-      code: 'held_by_editor',
-    };
-  }
-  return base;
+  return attachable(h, nowMs);
 }
 
 /**
@@ -937,7 +896,7 @@ export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false }
   const away = hostAway(h, nowMs);
   if (away) return away;
   if (!editorOk && h.outside_pid) {
-    return { error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
+    return { error: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
   }
   if (isWorking(h, lastTurn)) {
     return { error: `${h.agent} is working — its host says so, or its last turn is a tool call. This closes its window mid-turn. Wait for it to finish, or stop it first.`, code: 'working' };
@@ -1012,7 +971,7 @@ function sessionRow(r) {
 
 const STOP_WHY = {
   not_hosted: 'No host on this board is running that repo, so there is nothing here to stop.',
-  held_by_editor: 'This conversation is open in your editor. Stop it there — one app holds a conversation at a time.',
+  held_by_editor: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there — one app holds a conversation at a time.',
   no_window: 'No window is open for this desk, so there is nothing running to stop.',
 };
 
@@ -1126,6 +1085,22 @@ function askForOptions(store, live, channel, agent, requestId) {
  * of 4). A form that cannot be built is said to be unreadable; it is never
  * guessed at.
  */
+/**
+ * A form's answers as AskUserQuestion takes them back: `{ question: answer }`,
+ * an answer being the chosen rows' labels (joined with ", " for several) and
+ * any typed words. For a question a host's Claude Code asked (`ask`).
+ */
+export function answersForTool(questions, answers) {
+  const out = {};
+  (questions ?? []).forEach((q, i) => {
+    const a = answers?.[i] ?? {};
+    const picked = (a.choose ?? []).map((n) => q.options?.find((o) => o.n === n)).filter((o) => o && !o.other).map((o) => o.text);
+    const typed = typeof a.text === 'string' && a.text.trim() ? [a.text.trim()] : [];
+    out[q.question] = [...picked, ...typed].join(', ');
+  });
+  return out;
+}
+
 export function formFromInput(input) {
   const asked = Array.isArray(input) ? input : [];
   if (!asked.length || asked.length >= 8) return null;
@@ -1590,7 +1565,13 @@ export function ingestHookEvent(store, body, live = null) {
   };
 
   // Ordered so the clear happens before anything that might set it again.
-  if (CLEARS_AWAITING.has(event)) {
+  // Not for a subagent's hook (`agent_id`, which Claude Code sets only
+  // inside one): a question the conversation is asking stands while its
+  // subagents work. Without this, any subagent's tool call closed it on the
+  // floor while the window still asked, and every message to the desk was
+  // refused with nothing on the floor to answer (costmo's report,
+  // 2026-11-22, a question asked while two background agents ran).
+  if (CLEARS_AWAITING.has(event) && !str(body.agent_id)) {
     store.clearAwaiting(sessionId);
     // A prompt, a reply, a tool: none of these happens while the window
     // compacts, so any of them ends a compaction the hooks never finished —
@@ -1607,7 +1588,10 @@ export function ingestHookEvent(store, body, live = null) {
     // finding 1, probe P1). A prompt with no session recorded (the
     // notification's, from before this) closes as it always did.
     const open = live?.pending.get(key);
-    if (open && (!open.session_id || open.session_id === sessionId)) {
+    // A question the host's own Claude Code asked (`ask`, host/desk.js) is
+    // closed by its answer or by the host, never by a hook: a tool running
+    // beside the one asked about fires PreToolUse while the question stands.
+    if (open && !open.host_ask && (!open.session_id || open.session_id === sessionId)) {
       live.pending.delete(key);
       live.publish(key, { type: 'permission', request: null });
       live.clearedAt?.set(key, Date.now());
@@ -2742,76 +2726,62 @@ function applyHostEvent(store, live, hostId, ev) {
     }
 
     /**
-     * A question the window is asking before it has a session — folder trust,
-     * a new MCP server. Read off the pane by the host (startupQuestionOf in
-     * host/window.js has the measurements, and why it is offered rather than
-     * answered), and put on the desk exactly as a permission prompt is, so the
-     * same buttons, the same decision route and the same keystroke path answer
-     * it. `gone` is the host seeing the dialog leave — answered from here, in
-     * tmux, or by the window registering — and takes the prompt down with it.
+     * Something a desk's Claude Code asks, said by its host as data
+     * (host/desk.js, since the window layer was replaced, 2026-11-22): a
+     * permission with its rows, or a question with its questions. Nothing is
+     * read off a screen and nothing is left for askForOptions: the event is
+     * the whole of it. Said again at every heartbeat while it stands, so a
+     * board that restarted raises it again; `gone` when the process that
+     * asked has ended.
      */
-    case 'startup': {
+    /**
+     * A turn of the desk's Claude Code starting or ending, said by the host
+     * from the process itself (its per-turn `init` and its `result`). Until
+     * this, working and idle came from the plugin's hooks alone, and a
+     * floor /compact set the desk working with nothing to set it back on a
+     * machine whose plugin did not report: reopen and move were refused as
+     * "working" for good (the host suite, 2026-11-22). The end of a turn also
+     * ends a compaction the hooks did not finish reporting.
+     */
+    case 'state': {
+      const s = str(ev.state);
+      if (s !== 'working' && s !== 'idle') break;
+      if (s === 'idle') {
+        if (live.pending.get(key)?.host_ask) break;
+        if (store.clearDeskCompacting(channel, agent)) live.publish(key, { type: 'compacting', compacting: null });
+      }
+      state(s);
+      break;
+    }
+
+    case 'ask': {
       const rid = str(ev.request_id);
       if (!rid) break;
       const open = live.pending.get(key);
       if (ev.gone) {
         if (open?.request_id === rid) {
           live.pending.delete(key);
-          live.answered.delete(key);
-          store.clearAwaiting(sessionId);
+          store.clearAwaiting(open.session_id ?? sessionId);
           store.clearDeskAwaiting(channel, agent);
-          state('idle');
           live.publish(key, { type: 'permission', request_id: rid, decision: 'gone', resolved: true });
         }
         break;
       }
+      if (open?.request_id === rid) break;
+      if (live.answered.get(key)?.request_id === rid) break;
+      const isQuestion = str(ev.kind) === 'question';
+      const form = isQuestion ? formFromInput(ev.tool_input?.questions) : null;
       const options = Array.isArray(ev.options)
         ? ev.options.filter((o) => o && Number.isInteger(o.n) && typeof o.text === 'string').map((o) => ({ n: o.n, text: clip(o.text, 200) }))
         : [];
-      // A screen the host does not know (0.14.6, review item 1) has no rows:
-      // it comes with its last lines instead, which the desk shows, and is
-      // answered by opening the window or by Escape.
-      const kind = str(ev.kind) ?? null;
-      const screen = kind === 'screen' && Array.isArray(ev.screen)
-        ? ev.screen.filter((l) => typeof l === 'string').slice(-12).map((l) => clip(l, 200))
-        : null;
-      if (!options.length && !screen?.length) break;
-      // A prompt a hook raised (a permission menu, a form) is the session's
-      // own word and outranks anything read off the screen: the host's look
-      // can land while one stands.
-      if (open && !open.startup) break;
-      const asks = clip(str(ev.asks) ?? 'the window is asking something before it starts', 300);
-      // The desk needs a session row to be marked as waiting on, and a window
-      // that has not registered has none of its own yet. The conversation it
-      // is about to resume, or the placeholder, is that row — the same one a
-      // message sent before the window opened is filed under.
+      const summary = clip(str(ev.summary) ?? (isQuestion ? 'a question for you' : 'a tool needs a permission decision'), 500);
       store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd, runner: 'host', pid: null });
-      // The same standing question, said again — not a fresh `now`. The host
-      // re-says a startup question every STARTUP_RESAY_MS while it stands, and
-      // the queue's wait age falls back to this `at` whenever an editor
-      // session on the same desk keeps `awaitingSince` moving (see the session
-      // mark note above and the fallback below). A fresh `now` on every re-say
-      // restarted that clock each time — measured: `since` moved forward by
-      // the exact re-say gap while a hook session was live, so "waiting · 40s"
-      // sat over a prompt that had stood twenty minutes. Only a genuinely new
-      // question (a different request_id) starts the clock over.
-      const at = open?.request_id === rid ? open.at : now;
       live.pending.set(key, {
-        // The window's session, so another session's hooks on the desk (an
-        // editor's tool call) do not close it: closing a startup question is
-        // the host's `gone` (above). docs/backlog.md carried this as open
-        // from PR #2 until the milestone audit's finding 1 (2026-11-17).
-        session_id: sessionId,
-        request_id: rid, tool: 'startup', startup: true, kind,
-        summary: asks, detail: clip(str(ev.detail), 400) ?? null, screen, options, read: true, reading: false, at,
+        request_id: rid, session_id: sessionId, tool: str(ev.tool) ?? 'tool', host_ask: true,
+        summary, message: clip(str(ev.description), 500), options, read: true, reading: false,
+        asked: form, questions: form?.questions ?? null, tabs: form?.tabs ?? null, at: now,
       });
-      // Marked on that row by id, not on "the desk's newest session": a live
-      // editor session in the same repo is newer every time its hooks fire,
-      // and its next tool call would clear a mark put there. The floor does
-      // not rely on this mark for a startup prompt anyway — the request itself
-      // is what puts the desk in the queue (see buildFloor) — so the window
-      // keeps asking on the floor whatever the editor is doing.
-      store.setAwaiting(sessionId, 'permission_request', asks);
+      store.setAwaiting(sessionId, 'permission_request', summary);
       state('awaiting');
       live.publish(key, { type: 'permission', request: live.pending.get(key) });
       break;
@@ -2878,49 +2848,6 @@ function applyHostEvent(store, live, hostId, ev) {
         store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
         state(again ? 'awaiting' : 'idle');
       }
-      break;
-    }
-
-    /**
-     * A question the window is still holding, said again by the host at
-     * every heartbeat (`pending` on /api/host/register): read off the pane's
-     * bottom line, so it is said for as long as the window asks, whatever
-     * the board has forgotten. `live.pending` is memory, so a board restart
-     * (every deploy) lost every open prompt, and a window standing on a
-     * question sends no further hook to raise it again. This case did not
-     * exist: the register route had applied `pending` since 2026-08-28
-     * (ddbfc42) into the default below, and the host never sent it
-     * (milestone audit 2026-11-17, finding 1, probe P3).
-     *
-     * Only when nothing stands on the desk: a prompt a hook raised carries
-     * the tool, the summary and the asked form, and is never replaced by
-     * this one. Not within a moment of the prompt being answered or worked
-     * past: the heartbeat read the pane a little before it arrived here, and
-     * the screen it read may be the one the answer has since cleared.
-     * Raised, the host is asked to read its choices (the prompt case), and
-     * one it finds no question for is closed there as gone.
-     */
-    case 'permission_request': {
-      if (live.pending.has(key)) break;
-      const cleared = live.clearedAt?.get(key) ?? 0;
-      const answered = live.answered.get(key)?.answered_at ?? 0;
-      if (Date.now() - Math.max(cleared, answered) < RESAY_QUIET_MS) break;
-      const summary = clip(str(ev.summary) ?? 'the window is waiting for a decision', 500);
-      live.pending.set(key, {
-        request_id: `${sessionId}:standing:${Date.now()}`,
-        session_id: sessionId,
-        tool: null,
-        summary,
-        message: null,
-        // Said by the host, not by a hook: cleared when the host's next
-        // heartbeat no longer names it (the register route).
-        standing: true,
-        at: now,
-      });
-      store.setAwaiting(sessionId, 'permission_request', summary);
-      state('awaiting');
-      live.publish(key, { type: 'permission', request: live.pending.get(key) });
-      askForOptions(store, live, channel, agent, live.pending.get(key).request_id);
       break;
     }
 
@@ -3638,30 +3565,6 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       }
       live.wake(hostId);
     }
-    const asking = new Set();
-    for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
-      if (applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' }) || live.pending.has(deskKey(str(p?.channel), str(p?.agent)))) {
-        asking.add(deskKey(str(p?.channel), str(p?.agent)));
-      }
-    }
-    // A prompt this host said, that its window no longer shows: answered in
-    // the window, or worked past by a session the hook could not tie to it.
-    // Only the host's own (`standing`): a hook's prompt can be newer than
-    // the screen the heartbeat read, and is closed by the window's own work.
-    // A host from before `pending` sends none and said none.
-    if (Array.isArray(req.body?.pending)) {
-      for (const d of store.listHostedDesks()) {
-        if (d.host_id !== hostId) continue;
-        const k = deskKey(d.channel, d.agent);
-        const open = live.pending.get(k);
-        if (!open?.standing || asking.has(k)) continue;
-        live.pending.delete(k);
-        store.clearAwaiting(open.session_id);
-        store.clearDeskAwaiting(d.channel, d.agent);
-        live.publish(k, { type: 'permission', request_id: open.request_id, decision: 'gone', resolved: true });
-      }
-    }
-
     res.json({ ok: true, host_id: hostId, desks: accepted, work_wait_max_ms: WORK_WAIT_MAX_MS });
   });
 
@@ -4212,7 +4115,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
     if (h.outside_pid) {
       return res.status(409).json({
-        error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.',
+        error: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there first — one app holds a conversation at a time.',
         code: 'held_by_editor',
       });
     }
@@ -5232,12 +5135,17 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
 
     const steps = answerSteps(pendingReq.questions, answers);
+    // A question the host's Claude Code asked is answered as data: each
+    // question's words and its answer, the chosen rows by their labels and
+    // any typed words, which Claude Code takes as an answer of their own
+    // (host/desk.js). No keys, and so no withdrawing a form for typed words.
+    const toolAnswers = pendingReq.host_ask ? answersForTool(pendingReq.questions, answers) : null;
     live.pending.delete(key);
     live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision: 'answered', resolved: true });
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'answer', {
-      request_id: requestId, steps, queued_at: Date.now(),
+      request_id: requestId, steps, answers: toolAnswers, queued_at: Date.now(),
       // How the host knows, if this waits, that the question is still the
       // one on screen (askedStill, host/window.js): its headers, and the
       // first question's choices for a form whose header row is cut.
@@ -5258,7 +5166,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // as one. The choices on the other tabs go with the form — the window
     // delivers none of them — so the message that follows carries every
     // answer, not only the typed one. See `clarifyMessage`.
-    const clarify = steps.some((st) => st.clarify);
+    const clarify = !pendingReq.host_ask && steps.some((st) => st.clarify);
     // Queued after the answer, and read in order by the host, so the words
     // arrive at a composer that the decline has just put there.
     if (clarify) {
@@ -5271,40 +5179,6 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   });
 
   /** Stop the current turn on a hosted desk. */
-  /**
-   * Press yes or no at a prompt the floor could not read.
-   *
-   * Every other answer route matches a request_id, because it is answering
-   * something the board parsed and drew. This one exists for when that failed:
-   * the desk reports it is waiting, and nothing here can say on what. There is
-   * no request to name, so there is none required.
-   *
-   * That makes it looser than the others by design, and the safety lives one
-   * layer down instead: the host refuses to send anything at a window that is
-   * back at its composer. What is refused *here* is only what the panel already
-   * knows — a desk with no reachable window, and a desk that is not waiting at
-   * all, so a stale page cannot press keys into a conversation that moved on.
-   */
-  router.post('/api/floor/press', auth.adminGuard, (req, res) => {
-    const channel = str(req.body?.channel);
-    const agent = str(req.body?.agent);
-    const choice = str(req.body?.choice);
-    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    if (choice !== 'yes' && choice !== 'no') {
-      return res.status(400).json({ error: 'choice must be yes or no', code: 'bad_choice' });
-    }
-    const check = hostedOrWhyNot(channel, agent);
-    if (check.error) return res.status(409).json(check);
-    // The newest window on the desk, which is the one the panel drew from.
-    const waiting = store.liveHookSessions(channel, agent).some((s) => s.awaiting_kind);
-    if (!waiting) {
-      return res.status(409).json({ error: 'That desk is not waiting on anything.', code: 'not_waiting' });
-    }
-    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'press', { choice, queued_at: Date.now() });
-    live.wake(check.hosted.host_id);
-    store.logAdmin(channel, 'permission.pressed', { target: agent, detail: `${choice} at an unreadable prompt` });
-    res.json({ ok: true, choice });
-  });
 
   /**
    * The desk's Sign in: its host runs Claude Code's own sign-in (`claude auth

@@ -4,7 +4,7 @@
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
-  "protocol": 1,
+  "protocol": 2,
   "description": "Runs each desk's Claude Code in a tmux pane and connects it to the orchestratinator floor, so a desk on the floor is a real chat you can also sit at yourself.",
   "engines": {
     "node": ">=24"

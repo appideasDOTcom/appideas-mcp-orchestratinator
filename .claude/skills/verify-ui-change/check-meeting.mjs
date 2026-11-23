@@ -273,7 +273,7 @@ await say(m, 'everyone, ed included');
 await sleep(3500);
 msg = await msgNode(m, 'everyone, ed included');
 const edLine = msg?.delivs.find((d) => d.startsWith('Ed')) ?? '';
-ok(/^Ed not sent — This conversation is open in your editor/.test(edLine), 'Ed: not sent, in the board\'s own words', edLine);
+ok(/^Ed not sent — This conversation is open in another app/.test(edLine), 'Ed: not sent, in the board\'s own words', edLine);
 ok(msg?.delivs.filter((d) => /delivered$/.test(d)).length === 3, 'and the other three were sent anyway', JSON.stringify(msg?.delivs));
 ok(!workSince(w0).some((x) => x.agent === 'ed'), 'nothing was queued for Ed');
 
@@ -530,7 +530,7 @@ m = await attach(isMeeting);
 await m.resize(760, 980);
 await m.waitFor(`/Resumed\\./.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 20000 }).catch(() => {});
 const after = await text(m, '#p-turns');
-ok(/Ed was not reopened: Ed's conversation is open in your editor/.test(after), 'Ed is not reopened, and the room says why', after);
+ok(/Ed was not reopened: Ed's conversation is open in another app/.test(after), 'Ed is not reopened, and the room says why', after);
 const reopen = workSince(w0).find((x) => x.kind === 'reopen');
 ok(reopen?.agent === 'bo' && reopen?.payload?.session_id === 'sess-bo', 'Bo, moved to another conversation since, is reopened on the one it had', JSON.stringify(reopen));
 await m.waitFor(`/Bo is back on its conversation/.test(document.querySelector('#p-turns')?.innerText ?? '')`, { timeout: 12000 }).catch(() => {});

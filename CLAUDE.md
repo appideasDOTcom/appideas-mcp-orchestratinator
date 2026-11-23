@@ -8,20 +8,34 @@ that are easy to get wrong and expensive to re-learn.
 
 **A conversation is one `claude` process, so one app holds it at a time.** Not a
 document two windows can share. The floor shows who holds a desk, and moving it
-is an explicit handoff: your editor's tab closes, the host opens a tmux window
-with `claude --resume <session>`, and "Open in VS Code" reverses it.
+is an explicit handoff: "Open in VS Code" ends the desk's Claude Code and opens
+the conversation in the editor; "Open in Claude" ends it and opens a terminal of
+the operator's own running `claude --resume <session>`; the floor's next message
+takes it back once that app has let it go.
 
-**"Open in Claude" is deliberately not a third seat.** The floor's window
-already *is* claude CLI, so there is nothing to hand off in that direction: the
-button opens the desk's window if the floor has none and lands a terminal on
-it (`case 'claude'` in [`host/index.js`](host/index.js)). The version that
-mirrors the VS Code handoff — a bare `claude --resume` in the operator's own
-terminal — was considered and rejected, and the reason is the failure mode, not
-taste: closing an attached terminal is a detach and the desk carries on;
-closing a bare one SIGHUPs the conversation dead, for the exact audience
-(partners dropping in to run a slash command and leave) this button exists
-for. Validated round-trip on the live board 2026-09-01. Do not re-propose the
-handoff version as backlog.
+**The floor's own Claude Code has no screen** (costmo, 2026-11-22). Each desk's
+Claude Code is a process the host runs and speaks to as data, through Claude
+Code's programmatic interface: `claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-prompt-tool stdio
+--replay-user-messages` ([`host/agent.js`](host/agent.js),
+[`host/desk.js`](host/desk.js)). It replaced a layer that ran each desk in a
+tmux window and read and typed into its screen, which broke every couple of
+days as Claude Code updates moved screens (`docs/robustness-review.md`). One
+system, no switch, no tmux anywhere: his words were "I don't want 2 systems,
+more complications and more user choices." Do not propose bringing tmux back,
+for this or for anything else, and do not propose a per-desk choice between
+the two. How it was measured before it was built is
+[`docs/stream-json-spike.md`](docs/stream-json-spike.md); how it works is
+"How a desk runs Claude Code", below.
+
+**So "Open in Claude" is a handoff, and that was ruled with its cost**
+(costmo, 2026-11-22, by AskUserQuestion: "Accept it"). With nothing to attach
+to, the terminal runs its own Claude Code on the conversation. Closing that
+terminal while a turn runs stops the turn; the conversation is on disk, and
+the floor resumes it with its next message. The September rule that made this
+button an attach to the floor's window ("not a third seat", validated
+2026-09-01) is reversed by this, not forgotten: it protected a turn from a
+closed terminal, and that is the price accepted for no tmux.
 
 **Nothing enforces this.** It is a rule the UI expresses, not a lock, and it is
 worth knowing exactly how it fails before proposing to relax it. Two processes
@@ -37,46 +51,152 @@ you cannot see can hold one that does.** Both measured 2026-09-09 on 2.1.258,
 on one desk. The roster keeps a process's *first* session id, so a VS Code tab
 that runs `/resume` inside writes every word into another file and leaves the
 desk pinned to an id with no transcript — and `claude --resume` of that exits
-on its first line. `resumable()` in [`host/window.js`](host/window.js) checks
-the disk before handing an id over, falls back to the conversation with the
-latest spoken turn (as `readTranscript` files it — a tab holding only
-`/resume` and its output is not one), and says so on the floor as a line
-labeled `host`. And Claude Code's daemon keeps a conversation running after
-its tab has closed: `kind: bg` in the session file, `claude bg-spare` in `ps`,
-"running as a background session (<job>)" when resumed. The watch follows
-interactive sessions only, so such a desk reads as empty — and opening it
-from the floor does the move: the host presses `claude stop <job>` itself,
-waits for the roster to drop it, resumes the conversation in the window and
-says so on the desk (`releaseBackground()`). That is the one thing the host
-does on the person's behalf, and the reasoning is beside it: the click is the
-handoff and there is no tab of theirs to close, `stop` keeps the conversation
-in Claude Code's own words, and the version that told a partner to run
-`claude stop` themselves stranded a working channel for an afternoon. **A
-remedy is never handed to the operator as a command.** If the floor can name
-it, the floor runs it on the click.
+on its first line. `resumable()` in [`host/claude.js`](host/claude.js) checks
+the disk before handing an id over (a desk's own resume and every reopen),
+falls back to the conversation with the latest spoken turn (as
+`readTranscript` files it — a tab holding only `/resume` and its output is not
+one) that no seat runs, and says so on the floor as a line labeled `host`. And
+Claude Code's daemon keeps a conversation running after its tab has closed:
+`kind: bg` in the session file, `claude bg-spare` in `ps`, "running as a
+background session (<job>)" when resumed. The watch follows interactive
+sessions only, so such a desk reads as empty — and a message or an open from
+the floor does the move: the host runs `claude stop <job>` itself, waits for
+the roster to drop it, resumes the conversation in the desk's own process and
+says so on the desk (`releaseBackground()` in `host/claude.js`, called from
+`Desk.ensure`). That is the one thing the host does on the person's behalf,
+and the reasoning is beside it: the click is the handoff and there is no tab
+of theirs to close, `stop` keeps the conversation in Claude Code's own words,
+and the version that told a partner to run `claude stop` themselves stranded
+a working channel for an afternoon. The first cut of the process layer
+refused such a conversation with "close it there", which was that stranding
+again; it was put back the same day. **A remedy is never handed to the
+operator as a command.** If the floor can name it, the floor runs it on the
+click.
 
-State lives in three places, and they must agree:
+State lives in two places, and they must agree:
 
 | What | Where | Read it with |
 |---|---|---|
-| Which processes are alive | Claude Code's roster | `claude agents --json` |
-| Which pane runs which pid | tmux | `tmux list-panes -a -F …` |
+| Which Claude Code processes are alive, on which conversation | Claude Code's roster | `ls ~/.claude/sessions` (one file a process) or `claude agents --json` (slow) |
 | Who the board thinks holds it | the server | `curl -s localhost:8787/api/floor` |
 
-`holderOf()` in [`host/window.js`](host/window.js) is the join of the first two:
-a session in the roster with no pane means an editor has it. It reports three
-more things, and they exist because `held` on its own is ambiguous:
+The host knows which roster pids are its own desks' processes
+(`Host.ourPids()`), so the join is direct: a conversation's process that is a
+desk's own is `held: 'floor'` (its `window` reads `proc:<pid>`), and any other
+interactive process on it, an editor tab or a terminal, is `held: 'editor'`
+(`outside_pid`). `holders` counts every live process claiming the
+conversation; above 1, see above. `window_open` is still in the payload and
+means only that the desk's process is running.
 
-- **`window_open`** — a pane in that repo, found by *directory*, whether or not a
-  session has registered in it. The roster and tmux answer different questions
-  and disagree for the whole of Claude Code's startup: a window stopped on the
-  folder-trust or MCP question has written no session file, so `held` is null
-  while a window sits on screen. `held: null` + `window_open: true` means
-  **starting, not absent** — go and read the pane.
-- **`holders`** — live processes claiming this conversation. Above 1, see above.
-- **`clients`** — terminals attached to the tmux session, from
-  `tmux list-clients` (~7ms). The floor's attach spinner settles on this rising,
-  because opening a terminal changes nothing else the board can see.
+## How a desk runs Claude Code
+
+[`host/agent.js`](host/agent.js) is the protocol and the process,
+[`host/desk.js`](host/desk.js) is one desk, and `handle()` in
+[`host/index.js`](host/index.js) is the floor's side. What each piece rests
+on was measured on 2.1.330 before it was built
+([`docs/stream-json-spike.md`](docs/stream-json-spike.md), both spikes).
+
+- **The command line** is `agentArgs()`: `claude -p --input-format
+  stream-json --output-format stream-json --verbose --permission-prompt-tool
+  stdio --replay-user-messages`, with `--resume <id>` for a conversation and
+  `--mcp-config <file>` for a seat. It is started through the person's
+  shell, `<shell> -c 'exec "$0" "$@"' claude …` (`shellFor()` in
+  [`host/claude.js`](host/claude.js)), because that shell's startup files
+  are part of what Claude Code has: a credential exported in `~/.zshenv`
+  was otherwise missing (F1 of the 0.14.5 review). `exec`, so the pid is
+  Claude Code's own. On Windows there is no shell around it. Its
+  environment is `agentEnv()`: a person's own and nothing of the host's
+  settings (`windowEnv()`, "The clear of 2026-11-20"), plus the board's key
+  where the binding names a variable for it, and a seat's four variables.
+- **Nothing runs until something asks for it**: a message, Open on the floor
+  (`open` work), a take or a move (unless it says `open: false`), a pick in
+  Sessions (`reopen`), a new seat. One process a desk (`ensure`). A host
+  that restarts starts none; each desk's conversation is resumed at its
+  next message.
+- **A message is delivered when Claude Code takes it.** The host writes a
+  `user` record with a uuid, and Claude Code echoes it back with that uuid
+  and `isReplay: true` the moment it takes it, idle or mid-turn. That echo
+  is the receipt; none within 30 s (`TAKEN_TIMEOUT_MS`) is "not delivered".
+  A message sent while a turn runs is folded into that turn, and the host
+  emits `delivery: queued` for it.
+- **What Claude Code asks arrives as data.** A permission is a
+  `control_request` `can_use_tool` (tool, input, description, and the
+  "don't ask again" rules as `permission_suggestions`). The host says it to
+  the board as an `ask` event with the rows of `permissionRows()`: Yes,
+  "Yes, and don't ask again for <rule>" (only when Claude Code offered
+  one), and No. The answer comes back as data (`permission` work: a row's
+  number, or allow, deny, cancel). Allow returns the input unchanged, the
+  second row also returns the suggested rules, No is a deny carrying the
+  operator's reason, and Cancel is a deny followed by an `interrupt`. An
+  AskUserQuestion is the same request: the board builds the form from its
+  questions (`formFromInput`) and sends the answers back as `{ question:
+  answer }` (`answersForTool` in [`src/floor.js`](src/floor.js)), which the
+  host returns as the tool's input with `answers` added. Typed words are an
+  answer of their own; nothing is withdrawn. The plugin's permission hook
+  does not raise the same request a second time. Every standing ask is said
+  again at each heartbeat (`standingAsks`), so a board that restarted
+  raises it again, and said `gone` when the process that asked has ended.
+- **Anything else Claude Code asks is declined and said on the desk** (the
+  `ask` handler in `desk.js`). A dialog it would have drawn arrives, by the
+  binary, as `request_user_dialog`; that has not been measured. Declined so
+  the turn is not held for ever, and said with the request so it is not
+  silent.
+- **Commands** (`commandPlan` in `desk.js`): `/model <name>` is the
+  `set_model` control request and `/effort <level>` is
+  `apply_flag_settings`, each also saved as the default for new sessions
+  (below); a bare `/model` or `/effort` is refused in words. `/btw` is
+  `side_question`, its answer posted as a turn `via: '/btw'`. A bare `/mcp`
+  or `/mcp reconnect` is `mcp_reconnect` for the desk's own server name, and
+  `/mcp reconnect <name>` for that one. Everything else, `/compact`,
+  `/clear` and `/cost` included, goes as a message: a compaction comes back
+  as `status: compacting` and its result, and `/clear` as
+  `conversation_reset` naming the new conversation, which the desk follows
+  from its first word. A command's receipt is one line labeled `host`: what
+  was typed, then what happened.
+- **A model or effort change from the floor is also saved as the default
+  for new sessions** (costmo, 2026-11-22, by AskUserQuestion: "Also save as
+  default", keeping his 2026-11-14 ruling that the floor does what the
+  terminal does). On this path Claude Code makes the change for the one
+  conversation ("for this session only", settings untouched, measured on
+  2.1.330), so the host writes `~/.claude/settings.json` itself
+  (`saveDefaults` in `claude.js`): `model`, and
+  `modelSettings.<model id>.effortLevel`, nothing else, written to a file
+  beside it and renamed over it. When it cannot, the line says "for this
+  conversation; not saved as your default" and why.
+- **The stop sign is the `interrupt` control request, and the board's
+  `reconnect` work is `mcp_reconnect`** (`Desk.reconnect`), said on the desk.
+- **Who holds the desk** (`Desk.report`): `floor` while the desk's process
+  runs, with `window: proc:<pid>`, the mark the board has always read as the
+  floor holding it; `editor` when another process in Claude Code's roster
+  is on the desk's conversation, a terminal's or an editor's; `holders`
+  counts them. A conversation another process holds is never resumed beside
+  it: `ensure` refuses (`held_elsewhere`, with the pid). While the desk runs
+  nothing, a conversation taken up in its folder by a terminal or an editor
+  is followed, so what is said there reaches the floor. "Open in Claude"
+  (and an older page's `attach`) ends the desk's process and opens the
+  person's terminal on `claude --resume <id>`; "Open in VS Code" ends it and
+  opens the editor.
+- **A process that exits on its own is said on the desk** (`agent_exited`,
+  with Claude Code's last stderr lines), and the next message starts it
+  again. Stopping the host ends every desk's process: its input is closed,
+  then SIGTERM after 5 s (`STOP_GRACE_MS`) and SIGKILL after 10 s if it has
+  not left. The conversation is on disk.
+- **The relay still tails the transcript** (`Desk.watch`, `readTranscript`,
+  each subagent's file), on its own loop, so the floor shows what was said
+  whoever said it. The desk's own process is in the roster while it runs
+  (`kind: interactive`, `entrypoint: sdk-cli`).
+- **No trust question and no MCP approval are asked on this path**, in a
+  folder never trusted or with a project `.mcp.json`. Choosing the folder
+  on the floor (Take a desk) is the consent. The first interactive Claude
+  Code a person opens in such a folder asks the trust question once.
+- **The protocol is 2** (`"protocol"` in both `package.json` files): the
+  `ask` event is new, and answers reach the host as data, which a
+  protocol-1 host would read wrongly (`protocolRefusal`).
+
+The skills written for the window layer still describe it:
+**measure-a-real-window** and **watch-the-window** drive tmux windows, and
+other skills still mention tmux steps. Their transcript and roster reads
+hold; their pane reads do not.
 
 ## Three boards, one of them ours
 
@@ -132,7 +252,7 @@ So, in this folder:
   refusal by accident; do not "fix" it.
 - **Development runs on its own ports**: the suites' defaults, a scratch
   board (`PORT=89xx DB_PATH=<scratch> node src/server.js`), page checks on
-  private ports, and probes on their own tmux socket. A dev host started
+  private ports, and probes in scratch folders. A dev host started
   by hand or by the app must not register with `localhost:8787` under the
   live host's id: `ORCH_HOST_ID` defaults to the hostname, which is the
   live host's row and work queue. Give a dev host its own board, or at
@@ -278,23 +398,18 @@ better-sqlite3 at `$DB_PATH`, never through a file in the working tree.
 
 **A key written `${ORCH_AUTH_TOKEN}` is read in three environments, and
 only one of them is the operator's shell** (PR #52, 0.12.4, 2026-11-06).
-Claude Code expands `${VAR}` in a binding's headers from the window's
+Claude Code expands `${VAR}` in a binding's headers from its own
 environment, and the host and the hook expand it the same way
 (`expandEnv`, two copies; `:-` is for *unset* only, as 2.1.300 sends ""
 for a set-but-empty variable). But the host runs under the LaunchAgent with
-`PATH` + `HOME` and nothing else, and a window the host opens has the tmux
-server's environment, which the host started. QA measured both: such a
-desk gave the host no key, and its floor-opened windows sent the literal
-placeholder. costmo's ruling: install.sh takes an exported
-`ORCH_AUTH_TOKEN` into host.json when `--token` is not given, and the host
-gives a window that one variable, set to its own key, with tmux `-e`
-(`paneEnv`), only for a key that is nothing but a placeholder it could not
-fill. Nothing is written to disk. `-e` and not the command's `env` prefix,
-because tmux keeps and prints a pane's start command. And `new-session -e`
-is not `new-window -e`: it writes the *session's* environment, which every
-later window inherits and `show-environment` prints, so the window that
-opens the session unsets it straight after (QA, finding 4). When the host has no
-key at all, its startup line names the desk and the variable.
+`PATH` + `HOME` and nothing else, so a Claude Code it starts would send the
+literal placeholder (QA measured it on the window layer). costmo's ruling:
+install.sh takes an exported `ORCH_AUTH_TOKEN` into host.json when
+`--token` is not given, and the host gives a desk's Claude Code that one
+variable, set to its key, in the process's environment (`agentEnv`, from
+`paneEnv` and `keyVar`), for any binding whose key names a variable.
+Nothing is written to disk. When the host has no key at all, its startup
+line names the desk and the variable.
 
 Two loops run side by side in [`host/index.js`](host/index.js): `watchLoop()`
 relays the conversation, `run()` handles work. Keep them apart. When they shared
@@ -309,72 +424,15 @@ search all return at once and answer later as events; the search goes further
 and runs as a process of its own, because one 70 MB transcript is a third of a
 second of `JSON.parse` on the event loop the relay shares.
 
-**A tmux server can lose the right to read a desk's folder, and the host
-moves every window to a fresh one rather than let a desk see it** (costmo,
-2026-11-10: "I will not accept a user ever seeing this error, even once").
-Measured that day on macOS 27.0.1: the `orch` server, up two days, was
-refused `~/Documents` and everything under it (`System Policy: … deny(1)
-file-read-data` in the kernel log, with tccd never consulted), except
-folders the folder dialog had stamped with a `com.apple.macl` grant. So
-desks taken through the dialog worked, and a desk bound any other way died
-mid-session with "Can't read the current directory (EPERM)", as did every
-window reopened for it. A fresh tmux server started the host's way read all
-of it, and TCC still had the host's Documents grant. Why that one server
-carried the refusal was not found (the log of its first day had rotated), so
-the host does not guess. `checkServer()` runs a 16 ms `run-shell` read of
-each window's folder at every heartbeat, and `open()` runs the same check
-before it makes a window. When the server is refused and a fresh one is not,
-`renewServer()` waits for working windows to end their turn (up to
-`ORCH_RENEW_WAIT_MS`), kills the server, and resumes each conversation in a
-fresh one; a window that had no conversation yet starts one there. An agent
-whose turn was cut off, whose question was closed, or which had met the
-refusal is told in the host's words, and each desk gets a `host` line
-(`renewNote`). It refuses to kill a server that also runs sessions which are
-not the floor's, and an `open()` of a folder that nothing can read (mode
-000, or deleted under its window, which tmux still gives as the pane's path)
-returns `unreadable` with nothing moved. Three rules from QA's review of
-PR #54, each measured:
-- **The read is `run-shell` with no `-t`.** With a target, a refused read
-  writes "returned 1" into that pane and leaves it in view-mode, and
-  `orch:` is a desk's window: its next message went to the mode and the
-  host said `not_delivered`, with the floor's capture showing the screen
-  underneath. Without `-t` the exit is still 1 and no pane changes. Any
-  `run-shell` against the floor's server, by hand included, goes without
-  one.
-- **A move is made once for a refusal.** After the move, the folders are
-  read again on the new server, before any agent is told "readable again".
-  One still refused is said on its desk and kept in `stillRefused`: no
-  check moves for it and no open makes a window in it until the server
-  reads it again. Moving again was a full kill-and-resume at every
-  heartbeat, 3 of 3. `freshReads` is a private socket with no tmux.conf,
-  which is not the server a move makes, so "a fresh server reads it" never
-  promised the move would clear it.
-- **renew()'s own reopens never ask for a move.** They pass `moving`, and
-  a refusal on the new server returns `unreadable` instead. Asking for a
-  move from inside the move returned the promise that was running. It never
-  resolved, so the window was not reopened, and `checkServer()`, awaited on
-  the host's line in `run()`, never returned.
-
-`test:renew` drives it on a socket of its own, never the default, because
-the default socket is the live `orch`. Its refusal belongs to the server
-running when it is set (`refuse()`), as on the day, or `sticky` to every
-server for the move that does not clear it. What it does not drive is
-`index.js`'s two lines, the heartbeat's call and the hook. `test:host` runs
-its host on the default socket beside the live `orch` session, where a
-move is a `kill-server` of the operator's floor (and `renew()`'s own guard
-refuses it because of that session), so the host suite can reach only the
-refusal. The words those two lines carry are `renewNote`, and `test:renew`
-asserts them. **diagnose-handoff** has the readings.
-
-It has been seen live once, and the floor was spared: on 2026-11-14 at
-20:19:14Z the heartbeat moved all four windows, with a `host` line on each
-desk. The same afternoon the refusal also landed on the operator's
-terminal: from 12:13 local every process under iTerm2 was refused
-`~/Documents`, so a conversation run there could not read its own repo. A
-server it started was refused as well, and that is not the host's to move.
-So an agent whose own commands get EPERM checks its own shell before
-reading the floor's (diagnose-handoff, first step). Moving the conversation onto the floor
-is what brought it back.
+**Gone with the window layer: moving every window to a fresh tmux server
+when the server lost the right to read `~/Documents`** (costmo, 2026-11-10:
+"I will not accept a user ever seeing this error, even once"; seen live
+once, 2026-11-14). The refusal measured then belonged to one long-running
+tmux server. Whether a desk's Claude Code, now the host's own child, can
+meet such a refusal has not been measured. The same refusal once landed on
+the operator's own terminal (every process under iTerm2, 2026-11-14), so an
+agent whose own commands get EPERM checks its own shell first
+(**diagnose-handoff**, first step).
 
 **The host puts one thing on the operator's screen itself, and how was
 measured, not chosen.** The folder dialog is one function,
@@ -393,694 +451,165 @@ which is what the **measure-the-desktop** skill is for. A host with no backend s
 registration (`dialog`) and the page draws its own list for it; that list is
 the fallback, not leftover code.
 
-## Driving a window
-
-Everything the host knows about a window is a text capture of its pane, and
-**every rule for typing into one was measured, not reasoned**. They are recorded
-in [`.claude/skills/watch-the-window`](.claude/skills/watch-the-window/SKILL.md),
-and the obvious guess is wrong in all four cases: on an AskUserQuestion a digit
-*selects* on a single-select (and only *moves* on one drawn with previews,
-below), *toggles* on a multi-select, the free-text row
-*withdraws the form* on a single-select but *opens a field* on a multi, and the
-Submit tab is arrived at by answering the last question rather than walked to. A
-day was spent proving each of those; do not adjust `answerSteps()` in
-[`src/floor.js`](src/floor.js) from first principles.
-
-Three consequences worth knowing before touching `host/window.js`:
-
-- **`-t orch` is not the session.** `new-window` takes a window index, and
-  tmux resolves a bare name against window *names* first, by prefix — so the
-  day a desk called `orch-slice1-demo` had a window, `-t orch` meant that
-  window's index and every open on the board failed with `create window
-  failed: index 1 in use` (3.7c, 2026-09-09). A session target carries the
-  trailing colon: `orch:`.
-- **And `orch:` is not only that session: the name is written `=orch`.**
-  With no session of the exact name, tmux gives a session target to any
-  session whose name *begins* with it. Measured on 3.7c (2026-11-16; QA,
-  PR #57 round 2, read plus one measurement; repeated here on a socket
-  with only a session called `orchid`): `has-session -t orch` exits 0,
-  `list-panes -t orch` lists orchid's panes, `new-window -t orch:` makes
-  its window in orchid, `send-keys -t orch:` types into it. So the first
-  desk window after a reboot, or after the floor's last window closed, was
-  made inside whatever session of the operator's own started with "orch":
-  a suite's `orch-test-<pid>` on this machine, anybody's `orchestra` on
-  theirs. costmo's ruling, by AskUserQuestion, the same day: fixed in
-  PR #57 and not after it. Every target `host/window.js` writes from the
-  name is `EXACT` (`=orch`) for a session and `${EXACT}:` for a window in
-  it. Three things about `=`, each measured: it needs the colon wherever
-  the target is a window's (`list-panes -t =orch` still listed orchid's
-  pane, `-t =orch:` did not); the targets tmux hands back (`orch:@4.%7`)
-  are left alone, because a window id is the server's own and `send-keys
-  -t orch:@9.%9` is refused whatever else begins with "orch"; and `attach
-  -t orch` is left too, since it is a line for a shell, where `=orch` is a
-  command lookup in zsh, and it runs only after the exact `has-session`
-  beside it. A tmux command written by hand against the floor, in a test
-  or a skill, takes `=name` the same way: the window suite's own cleanup
-  `kill-session -t orch-test-<pid>` would take a look-alike with it.
-- **The host's panes are its own session's, and no other's** (costmo,
-  2026-11-16, by AskUserQuestion to me and to QA the same hour: fixed in
-  PR #57). `panes()` asked `list-panes -t <session> -a` under a comment
-  that said "every live pane in our tmux session", and `-a` is every pane
-  on the server whatever the target. Measured on a socket of its own, with
-  `orch` standing and a session `mine` holding one pane in a desk's
-  folder: `panes()` listed both sessions, `paneFor` gave `mine:@1.%1` as
-  that desk's window, and `open()` answered ok, created false, with no
-  window made (QA's reading of the same). So a message to that desk went
-  into a pane the floor never opened, a plain shell as readily as Claude
-  Code, and a Leave, a move or a reopen would have closed it
-  (`closeWindow` kills what `paneFor` finds). It is `-s` now. A Claude
-  Code somebody started in a tmux session of their own is then a process
-  in no pane of the floor's, which `holderOf` already reads as held
-  outside it, as an editor's is. "Keep it, any session counts" was the
-  other offer; do not re-propose it. `windowNames()` still asks `-a`, on
-  purpose: it is only the names a new window avoids, and avoiding more
-  than it must costs nothing.
-- **Pane width is set by whoever is attached.** A footer that fits on one line at
-  160 columns wraps at 80, which broke `askingOf` and made a real fault look
-  intermittent. Read footers as the last few lines rejoined.
-- **A step count is a fact about the script, not the window.** Reporting
-  `N of M steps` as failure said "your answers did not land" about answers that
-  had landed — and, worse, said success about a sequence whose last key pressed
-  Cancel. Finish by reading the pane.
-- **`-S -N` is not "the last N lines".** It is N lines of scrollback *plus the
-  whole visible pane*, so anything that greps a capture is grepping the
-  conversation too. `busy()` did, and a window whose transcript said the words
-  "esc to interrupt" read as busy for ever. Status is positional: `footOf` reads
-  the bottom line, and nothing quoted above it can fake one.
-
-- **tmux answers for another pane when the one named is gone.** Measured
-  on 3.7c (2026-11-16, QA's PR #57 Info 10 and its second round). After
-  `kill-pane` of `p:@1.%1`, `display-message -p -t 'p:@1.%1' '#{pane_dead}'`
-  exits 0 and prints `0`: tmux resolved what it could of the target, the
-  session, and answered for that session's current pane. When the pane was
-  its session's only one and other sessions remain, it exits 0 and prints
-  nothing. When it was the last pane of all, the server is gone: exit 1,
-  "no server running on …" ("error connecting to …" for a socket that no
-  longer exists). So a read through `-t <target>` proves nothing about
-  *that* pane unless the answer carries the pane's own id: ask for
-  `#{pane_id}` beside whatever is wanted and compare. `waitReady`'s exit
-  check did not, took a killed window for a live one, and held the host's
-  line for 45 s. A pane that exited is different: `remain-on-exit` keeps
-  it, and `pane_dead` is 1.
-
-- **A line in the composer that nobody typed is a prompt suggestion.**
-  Claude Code 2.1.300 draws a suggested next prompt as ghost text after a
-  turn ends — dim (SGR `2m`), after the cursor, which stays at column 2
-  right behind the `❯`; typed text is in the default colour with the cursor
-  at its end. Ten of twenty-one idle windows on this machine held one on
-  2026-11-02, and three of them were reported as "typed into the composer
-  and never sent" with no record anywhere, because nothing had entered
-  them. `composerOf` reads a suggestion as the composer's contents. That is
-  harmless for the paste check (it wants the composer to *change*) and the
-  stuck check (it looks for the *sent* text), and measured on a probe, a
-  paste through `send()` replaces the suggestion: one user record, the
-  host's own words, nothing of it. It was **not** harmless for typing
-  (2026-11-17, issue #31's first live test): `typeInto` waited for
-  "suggestion + first line", typing replaces a suggestion, so the line read
-  as lost and the message was pasted after all, reaching the agent in
-  `<pasted_content>`. Every message of four lines or more was exposed, and
-  every message with attachments is one. Reproduced on a probe on 2.1.326
-  (wrapped, 10.1 s, against 3.3 s unwrapped), fixed by accepting the first
-  line alone, and re-measured over two real suggestions (typed, unwrapped).
-  A draft a person really typed is not replaced, so it still reads as
-  draft + line. The fallback to a paste now says so in the host log; it
-  used to be silent, which is why this went unseen. Tab or Enter in
-  such a window would accept it. Before chasing a phantom keystroke source,
-  read the row with `capture-pane -e` and the cursor with `#{cursor_x}`.
-
-- **A composer taller than its box scrolls, and its `❯` row goes out of
-  sight.** Measured on 2.1.326, 2026-11-17, in an unattached 80x24 window:
-  at most 7 rows show, and the top rule becomes `─── ↑ 3 more ───`.
-  `composerOf` found a box by its `❯` row, so it read null there (or, with
-  an earlier message's `❯` echoed above, from that line down), and
-  `typeInto`, comparing the whole box with the whole text, read the last
-  line of a five-line message as lost and pasted it into
-  `<pasted_content>`. A message with attachments at 80 columns is that
-  tall. `composerOf` now reads a scrolled box by its header
-  (`scrolledComposerOf`), and `scrolledOf` says when what it gives is only
-  the end: a line is confirmed when the box changed and ends with it, and
-  the finished message when the box shows its end. Re-measured on the same
-  pane: the same message typed and recorded verbatim, 2 runs of 2.
-
-- **A Claude Code update can move a line the host reads by position, and
-  the floor then fails in words that blame nothing.** 2.1.326 did, on
-  2026-11-18 (its notes: "Improved key hints in many dialogs"), and two
-  readers broke on every desk the same afternoon (0.12.12):
-  - **"Switch model?" gained a last line**, "Enter to confirm · Esc to
-    cancel", under its two choices. `switchConfirmOf` wanted the choices as
-    the pane's last two lines, read no dialog, and never pressed `1`: a
-    model or effort change from the floor ended "no sign of running it
-    within 20s … Check the window", with the dialog standing. It steps
-    over that one line now. `1` still answers it.
-  - **The form's review screen lost "Ready to submit your answers?"** It
-    is the title "Review your answers", each question with its answer, and
-    the two rows, with no status line under them. `reviewingOf` read it
-    false and `askingOf` read nothing, so the host called a form answered
-    that was standing unsubmitted, and the walk read the Submit tab as one
-    more question ("Submit[single,2]" in the host log is that). Both
-    readers take the new shape, still by position.
-  Measured the same evening on a probe on 2.1.327 and read correctly with
-  no change: the folder-trust question, a permission menu (it has a fourth
-  row now, "Yes, and switch to auto mode", and No is row 4: the floor finds
-  Approve and Deny by their words, `promptChoices`, so that held), a
-  question with previews, a multi-select, and `/btw`. One more, found by
-  the same probe and not known to be the update's: `/cost` opens the
-  settings screen on its Usage tab, 41 lines tall, so its closing line
-  ("… · Esc to close") is in view at 200x120 and not at 80x24 or 200x50.
-  `overlayOf` knew a screen by that line alone, so the send ended
-  `not_delivered` with the screen left standing to take the desk's next
-  message. It knows that screen by its row of tabs under the overlay's
-  rule now, and Escape closes it either way (costmo, the same evening:
-  fix it in 0.12.12). So: when `claude --version` moves, run the
-  probe over every reader (**measure-a-real-window**: the trust question,
-  a permission menu, `form.mjs` with two questions, `send.mjs '/model …'`
-  on a conversation with a reply in it, and `/mcp reconnect` on a window
-  with a server) before believing a report that the
-  floor "stopped working". The first sign in the host log is a `read a
-  form of N` whose last question is Submit, or a change that ends "no
-  longer in the composer".
-
-`answer-the-form.mjs` in that skill answers a floor form and records the pane, so
-none of this needs the operator to sit and click.
-
 ## A question on the floor
 
-Four rules for an AskUserQuestion, from issue #7 (2026-10-01, measured on
-2.1.284), and a fifth from 2026-11-14. Each is the opposite of what the code
-did the day before, and each had a reasonable argument behind the old way —
-which is why they are here.
+From issue #7 (2026-10-01) and 2026-11-22. Each had a reasonable argument
+behind the old way, which is why they are here.
 
 - **A form with a question unanswered is never sent.** costmo's ruling. The
-  window's own review screen warns "You have not answered all questions" and
-  takes Enter anyway, and the floor used to match it on the argument that a
-  second door should not be stricter than the first: a blank became a bare
-  `Tab`. Measured, that half-sends — the form submits one answer short and the
-  host logged it answered. Now Submit shows the first unanswered question and
-  sends nothing, the route refuses the same form (`unansweredOf` in
-  [`src/floor.js`](src/floor.js)), and `answerSteps` has no keys for one. A
-  free-text choice with nothing typed is not an answer: its digit opens a
-  field and the script's next key is typed into it. The page has its own copy
-  of the rule (`askUnanswered`) so Submit can show the tab without a round
-  trip; `test/floor.mjs` runs both over the same cases. Do not re-propose
-  matching the window's leniency.
-- **Nothing is answered until the form is gone from the pane.**
-  `answerQuestion` used to look for the review screen once, straight after the
-  last key, and call anything else an answer. Two real things were "anything
-  else": a review screen drawn 2.5 s late, and a form standing on a free-text
-  field. It now watches for up to `ORCH_ANSWER_GONE_MS` (8 s), confirms the
-  review screen whenever it appears, and says `still_asking` with the pane's
-  last two lines if the form is still there. The review screen is read from the
-  bottom of the pane (`reviewingOf`), not found anywhere in the capture — a
-  conversation that quotes "Ready to submit your answers?" above a composer
-  would otherwise get three Enters in its message box.
-- **A question is never a menu, and its form does not depend on the pane.**
-  Claude Code draws on the alternate screen and **cuts the top off a form
-  taller than its pane**; a window the host opened is 80x24 until somebody
-  attaches. The header row `questionOf` finds a form by is the first thing
-  cut, so the host read a 26-row form as a flat menu of five and the floor
-  drew Approve / Deny / Cancel over a question. A tall *second* tab did worse:
-  the walk returned one question of two as if it were the form. The words were
-  never missing — the hook has carried `tool_input.questions` since
-  2026-09-11 — so the board builds the form from the call (`formFromInput`),
-  uses the pane's reading only when it has every question (`settleForm`), and
-  the reader says `form_cut` instead of returning a part. A cut form still
-  takes its keys; that was measured, not assumed, and the built form was set
-  against the pane's reading on four real forms before anything was pressed
-  with it. With no form from either, the panel says it could not read the
-  question and offers the window and Cancel (`promptOffer`) — not Approve /
-  Deny, and not the blind Yes / No, where Yes presses `1`. Two fixes that look
-  available and are not: there is no scrollback to read more of (alternate
-  screen), and resizing the operator's window to read it is moving his
-  furniture.
+  window's own review screen warned "You have not answered all questions"
+  and took Enter anyway, and the floor used to match it on the argument that
+  a second door should not be stricter than the first. Measured, that
+  half-sent: the form submitted one answer short. Now Submit shows the first
+  unanswered question and sends nothing, and the route refuses the same form
+  (`unansweredOf` in [`src/floor.js`](src/floor.js)). A free-text choice
+  with nothing typed is not an answer. The page has its own copy of the rule
+  (`askUnanswered`) so Submit can show the tab without a round trip;
+  `test/floor.mjs` runs both over the same cases. Do not re-propose matching
+  the window's leniency.
+- **A question is never a menu, and its form is built from its questions.**
+  The words have always been in the call (`tool_input.questions`), and the
+  board builds the form from them (`formFromInput`): from the host's `ask`
+  event for a desk the host runs, from the hook for any other.
+- **A typed answer is an answer**, on a desk the host runs. On the window
+  layer the free-text row of a single-select withdrew the whole form
+  (Claude Code's clarify hatch, measured 2026-11-02 on 2.1.300), so the
+  board sent every answer after it as one message in words
+  (`clarifyMessage`, costmo's ruling that nothing chosen is dropped).
+  Answers as data have no hatch: the typed words go back as that question's
+  answer (`host_ask` in `/api/floor/answer`). The withdraw path is left
+  only for a prompt that is not a host's ask.
+- **A subagent's hooks do not close a question** (costmo's report,
+  2026-11-22: a question vanished from the floor while two background
+  agents ran, and every message to the desk was then refused with nothing
+  on the floor to answer). The plugin forwards `agent_id`, which Claude
+  Code sets only inside a subagent, and `CLEARS_AWAITING` in
+  `src/floor.js` ignores an event that carries it. Also shipped on its own
+  as 0.14.7, a patch on v0.14.6.
+- **The floor does not draw a question's previews.** That was not asked for
+  and is not backlog by default: a preview is a mock-up of any size, and
+  where it would go on the panel is costmo's call.
 
-- **A typed answer on a single-choice question withdraws the form, and
-  every answer follows as one message.** The free-text row on a
-  single-select is Claude Code's clarify hatch, not a fourth choice: taking
-  it declines the whole tool call, and nothing picked on the other tabs
-  reaches the agent. Measured on the live board (2026-11-02, 2.1.300,
-  `qa-probe/issue7-probe-c`): the host logged a withdrawal, the agent got
-  the tool declined and then "I like Dragon Fruit", and the colour and
-  weekday chosen beside it were gone. costmo's ruling: nothing the operator
-  chose is dropped — the board queues the withdrawing keys and then one chat
-  carrying every answer in words, labelled by tab (`clarifyMessage` in
-  [`src/floor.js`](src/floor.js), used by `/api/floor/answer`):
-  `Colour: Orange. Fruit: I like Dragon Fruit. Weekday: Friday.` The page
-  says so the moment "Type something." is ticked on a single-choice question
-  (`askWithdrawText`), because "Submit all answers" otherwise promises a
-  form that is not submitted. A multi-select's field is a real field and
-  withdraws nothing. The alternatives — saying so on the page and dropping
-  the picks, or re-measuring the row on the current window — were
-  considered and not chosen; do not re-propose them.
+## A screen the floor does not know (0.14.6), superseded
 
-- **A question with previews takes its digit as a move, and the host
-  presses Enter once it has read the cursor on that row.** costmo answered
-  such a form from the floor twice on 2026-11-14 and both failed ("the pane
-  did not change after 1"); the host log holds four more from a designer
-  desk, older than its timestamps. Measured on a probe on 2.1.325: a
-  single-select where *any* option carries a `preview` is drawn side by
-  side, with the choices beside the highlighted one's preview. It has no
-  "Type something." row, and its status line reads "Enter to select · ↑/↓
-  to navigate · n to add notes". There `2` moved the cursor and the form
-  stood, and `Enter` recorded "→ Bravo". A plain question in the same form
-  still takes its digit alone, so "digit, then Enter" everywhere is the old
-  bug back: the Enter answers the next tab with its first row. Tab, Left,
-  Right and Shift+Tab walk a preview tab like any other, and a multi-select
-  given previews is an ordinary multi-select. So `answerSteps` is unchanged,
-  and the host decides at the key: when the pane it is about to press a
-  digit into is a preview question (`previewingOf`, the status line, read
-  positionally and rejoined because it wraps at 80 columns), it sends the
-  digit, waits to read the cursor on that row, presses Enter, and waits for
-  the pane to change (`selectRow`). It is the host's and not the board's
-  because the pane says which layout a question got. That holds for a form
-  built from the call, on a desk whose plugin is older than the fix, and a
-  wrong guess presses nothing. A digit with no row behind it ends as
-  `not_on_row` with no Enter sent. That case is real: the form built from
-  the call used to add "Type something." as row 4 of such a question. The
-  hook now forwards `preview: true` for an option that has one, never the
-  text, and `formFromInput` leaves the row out; that half reaches a desk
-  with the next plugin update. The floor does not draw the previews
-  themselves. That was not asked for and is not backlog by default: a
-  preview is a mock-up of any size, and where it would go on the panel is
-  costmo's call.
-
-`form.mjs` in **measure-a-real-window** raises a real form on a probe window,
-reads it both ways, and answers it through the host's own code. `raise.sh`
-beside it raises one and leaves it standing, for pressing keys by hand
-before there is a rule to play.
-
-## A screen the floor does not know (0.14.6)
-
-costmo, 2026-11-22, after pc-developer's `docs/robustness-review.md`
-(three desks on the PC stood dead behind "Teach auto mode about your
-environment?", read as idle, every message going into the dialog). His
-rulings, through orchestratinator-desktop-dev in meeting room 15: the
-review's items 1 to 4 ship in 0.14.6; item 5 is a spike only
-(`docs/stream-json-spike.md`, measured, his decision); Claude Code stays on
-Anthropic's stable channel with nobody held to a version the floor was
-checked against; and **a screen the floor has never seen degrades to "needs
-you, with its rows or its lines on the desk", never to a broken desk.** Do
-not re-propose a pin, or a reader per new dialog as the answer to the next
-one.
-
-- **Idle is read only on proof** (`screenVerdict` in `host/window.js`). A
-  window is one of: `working` (the bottom line offers "esc to interrupt",
-  still so on 2.1.330), `dialog`, `switch` ("Switch model?", the host's
-  own), `asking` (a permission menu or a form, the hooks'), `composer`, or
-  `blank`. **Anything else is `unknown`**, carrying its last twelve lines.
-  The readers used to be a list of screens met, and a screen that matched
-  none of them fell through to idle.
-- **A dialog is read by its shape** (`startupQuestionOf`, made generic). On
-  2.1.330 Claude Code raises its dialogs through one component
-  (`requestDialog(…, { place: "under" })`, 28 call sites in the binary,
-  the Teach dialog among them): a title under a rule, a sentence, a `❯`
-  list, and "Enter to confirm · Esc to cancel". Measured on a probe with
-  the one that has a switch of its own, `CLAUDE_CODE_FORCE_FULLSCREEN_UPSELL=1`
-  ("Try the new fullscreen renderer?"), which is the way to raise such a
-  dialog on purpose. It stands **in place of the composer, on a window
-  already in the roster**, so the old startup reader (three known titles)
-  read nothing, and the floor heard of it only through the heartbeat's
-  generic "waiting for a decision", up to a minute late. The known three
-  are read as before; anything else of the shape is `kind: 'dialog'`
-  with its title (`asks`), its sentence (`detail`) and its rows, numbers
-  stripped. Not that shape, measured beside it: a permission menu ends
-  "Esc to cancel · Tab to amend" and a form "Enter to select". One
-  standing just above a live composer is read too (pc-developer's reading
-  of the Teach dialog; not measured here, because its gate is server-side
-  and needs the operator's own config), but only when nothing but blank
-  lines stands between its footer and the composer's top rule.
-- **Registered floor windows are looked at every `SCREEN_LOOK_MS` (3 s)**,
-  not only while starting or at the heartbeat (`Desk.watch`). An unknown
-  screen is said once it has stood unchanged for `UNKNOWN_SETTLE_MS`
-  (2.5 s), never while the window is starting (its banner stands before
-  its composer) and never while the host is carrying out work on that desk
-  (`host.acting`: its own `/btw` or `/cost` screen is its to read and
-  close). **The first cut never said anything**, because the "unknown
-  since" record was reset on every tick that did not look. Only the real
-  window on the rig showed it; `test:host` has the row now, with a mutant
-  ("the watch forgets an unknown screen between looks").
-- **Both go to the board as `startup` events** (`kind: 'dialog'` with rows,
-  `kind: 'screen'` with `screen` lines and no rows), so they stand in
-  `live.pending`, put the desk in the queue, pulse its tab, and refuse a
-  message in words (`askingWhy`). **A prompt a hook raised outranks a
-  screen read**: the host's look can land while one stands. The panel draws
-  a dialog as "The window asks — <title>" with its sentence, a button per
-  row and Escape, and a screen as "The window is showing something the
-  floor does not know" with its lines, **Open the window** and **Press
-  Escape**. Escape is `cancel` on the permission route, which the host
-  presses only while the pane still shows a dialog read by its shape or an
-  unknown screen (`escapeStanding`): never a known startup question, where
-  Escape on the trust question exits Claude Code, and never a composer.
-- **`send()` refuses before typing** on anything that is not a composer, a
-  working window or a known screen (`unknown_screen`, quoting the pane),
-  after reading for up to `UNKNOWN_GRACE_MS` in case the window is still
-  drawing its box. And a message meant to be typed that went in as a paste
-  is now said on the desk, because the agent reads it as pasted content.
-- **The suites run with `ORCH_UNKNOWN_SCREENS=ignore`**, set at the top of
-  host, window, seats, renew and update: their stand-in windows print text
-  and draw no composer, so every pane would read as unknown. It is read at
-  each call, and the rows about the rule turn it on: `test:window` (the
-  verdicts, `send()` and Escape against real panes), `test:host` ("a
-  dialog the window draws, and a screen the floor does not know", with the
-  stand-in's `prompt.flag` kinds `dialog` and `odd`, which close on
-  Escape), `test:floor` (the board's half), and **check-screen-prompt.mjs**
-  in **verify-ui-change**. Nothing installed sets it.
-- **A new Claude Code is said on the floor** (`host/version.js`, review
-  item 4, report only): `claude --version` at each heartbeat (about 10 ms),
-  the last reading kept in `~/.orchestratinator/claude-version.json` per
-  host, and a change said on every desk the host runs, with the version
-  before it. No probe window re-measures the readers at an update: that is
-  a model turn on the operator's account at every release, and `/model` in
-  a probe writes the machine's default. The unknown-screen rule is what
-  stands in for it.
-
-How it was proven end to end, for next time: `probe-host.sh up <dir>
-<port>` in **measure-a-real-window** (a scratch board and the tree's host
-on the probe socket), then the window started by hand with the switch:
-`exec env CLAUDE_CODE_FORCE_FULLSCREEN_UPSELL=1 claude`. On 2.1.330: the
-trust question answered from the floor, the upsell on the floor 1 s later
-with its rows, a message refused, "Not now" pressed, the composer back. The
-`/mcp` panel opened by hand reached the desk as a screen nobody knows,
-Escape from the floor closed it, and the next message was answered. The
-mutants are `mutants-0-14-6.suite.json` (**mutate-in-a-copy**) and
-`mutants-screen-prompt.page.json`.
+0.14.6 (costmo, 2026-11-22, after pc-developer's
+`docs/robustness-review.md`: three desks on the PC stood dead behind "Teach
+auto mode about your environment?", read as idle) taught the window layer
+to read any screen it did not know as "needs you" instead of idle. The
+process layer replaced it the same day, and the class it addressed is gone:
+a desk's Claude Code has no screen, and what it asks arrives as data or is
+declined and said ("How a desk runs Claude Code"). Two rulings from that
+round still hold. Claude Code stays on Anthropic's stable channel, with
+nobody held to a version the floor was checked against: do not re-propose
+a pin. And a new Claude Code is said on every desk its host runs
+(`host/version.js`: `claude --version` at each heartbeat, the last reading
+kept in `~/.orchestratinator/claude-version.json`; report only, never a
+gate).
 
 ## A message to a desk that is working
 
-**Type into it. Do not wait for the turn to end.** This is the one place the
-floor used to differ from every other client, and the difference was the whole
-of what made it feel broken: your message was held while the agent worked, and
-the page gave up on it long before the window saw it.
+**It is taken into the turn.** A message sent while a turn runs is folded
+into that turn (measured on the process path: one result answered both),
+and the host emits `delivery: queued` the moment Claude Code echoes it. The
+composer shows "queued — the desk is working" instead of counting to thirty
+and saying "not recorded" about a message that arrived. The note is retired
+by the message becoming a turn, in either order, because the host's two
+loops do not wait for each other and the relay sometimes publishes the turn
+first. Holding a message until the turn ended was the whole of what once
+made the floor feel broken.
 
-The paragraph that used to be here said a paste into a running turn "is not
-queued, it is dropped — it was losing two messages in three". **That is false**,
-and it is worth knowing what replaced it, because the correction is what the
-current design rests on. Measured against a live window on 2.1.220:
+`readTranscript` files a message injected mid-turn from its
+`queued_command` attachment record, because Claude Code writes no `user`
+record for one (measured on 2.1.220). Without it the floor showed the agent
+answering a question nobody could see being asked.
 
-| | |
-|---|---|
-| five messages pasted into one running turn | five arrived, five queued, five recorded **in order**, none dropped |
-| a desk doing ordinary multi-step work | enqueue → the agent reads it **0.8s**; → it answers **2.3s**, mid-task, and the original work carries on |
-
-Claude Code writes the receipt down as it happens, which is what lets `send()`
-say "delivered" without waiting for "answered":
-
-```
-{"type":"queue-operation","operation":"enqueue","content":"<the message>"}
-{"type":"attachment","attachment":{"type":"queued_command","prompt":"<the message>"}}
-```
-
-Two things follow, and both were bugs before they were rules:
-
-- **A queued message has two possible records, and you get exactly one.**
-  Drained at the end of a turn it becomes an ordinary `user` record, *at
-  consumption*. Injected mid-turn it is only ever the `attachment` — there is no
-  `user` record, ever. `readTranscript` skipped attachments, so once mid-turn
-  delivery became the common case the floor showed the agent answering a
-  question nobody could see being asked.
-- **Delivered and recorded are different moments, and the board says which.**
-  `send()` returns `queued`, the host emits a `delivery` event, and the composer
-  shows "queued — the desk is working" instead of counting to thirty and saying
-  "not recorded — send again" about a message that arrived in under a second.
-  The note is retired by the message *becoming a turn* — and by that in either
-  order, because the host's two loops do not wait for each other and the relay
-  genuinely does publish the turn first sometimes. It did, on the real board.
-
-**A desk whose window is asking something takes no message, and that is
-said at once** (#44 follow-up, from costmo's report, 2026-11-05). The
-rule above is for a window that is *working*. A window holding a question
-form, a permission menu or a startup question sends every key to the
-prompt, so a pasted message never reaches the composer. `send()` used to
-try 14 times over `PASTE_TIMEOUT_MS` (60 s), then fail. Measured on the
-live board: three chats typed while a form was open each held the host's
-line for a minute, and the operator's answer to that very form queued
-behind the first, aged past `ANSWER_TTL_MS` (30 s) and was dropped as
-"long gone" with its question on screen. The desk took nothing until he
-answered in the window. Three fixes, each costmo's pick:
-- The board refuses the message before it is queued (`askingWhy` in
-  src/floor.js, on `/api/floor/chat` and in the desk's `nudge` verdict, so
-  the bell, Nudge and a meeting room send nothing). The panel's Send dims,
-  with the reason in the box.
-- `send()` reads the pane first and returns `asking` in a second, quoting
-  it, for a prompt that opened after the message was queued.
-- An old answer is dropped only when its question is gone (`askedStill`):
-  the board sends the form's headers and first choices with it, and the
-  host presses it past the TTL when the screen still shows them. A
-  different question in its place matches neither and is not answered.
-  The TTL was right for an answer queued while no host was there, and
-  wrong when the age was the host's own line. A permission decision goes
-  the same way (QA, PR #49 finding 2), and it carries what it was for
-  (`asks.subject`, the command or file from the prompt's summary), because
-  every permission menu offers the same choices, and the choices alone
-  could approve a different command.
-A stale `live.pending` would refuse messages wrongly. It is cleared by the
-window's next hook, by an answer from the floor, and at session end, and
-the panel shows the prompt with Cancel, so the refusal does not outlive the
-question for long. `test:host` drives both call sites end to end ("an
-answer that waited in the host's line"). Its host runs with the TTL at -1,
-so every answer is old, and its stand-in draws a permission menu or a form
-from `prompt.flag`, in raw mode, because a tty in canonical mode holds a
-bare key until a newline. `askedStill` is tested on captured screens in
-`test:window`, and the board half (`asks`) in `test:floor`.
+**A desk whose Claude Code is asking something takes no message, and that
+is said at once** (#44 follow-up, from costmo's report, 2026-11-05). The
+board refuses the message before it is queued (`askingWhy` in
+src/floor.js, on `/api/floor/chat` and in the desk's `nudge` verdict, so the
+bell, Nudge and a meeting room send nothing), and the panel's Send dims with
+the reason in the box. A stale `live.pending` would refuse messages
+wrongly. It is cleared by an answer from the floor, by the host saying the
+ask is `gone`, by the conversation's next hook, and at session end, and the
+panel shows the prompt with Cancel.
 
 ## A slash command, the model, and a compaction
 
-Issues #9, #10 and #15, shipped as 0.10.9 (2026-11-03, measured on 2.1.300
-on a probe desk through the host's own `send()`; the table is in the task's
-record, the readers are in [`host/window.js`](host/window.js) and every one
-was written against a capture). Each rule here replaced something that had
-a reasonable argument behind it.
+How a desk's Claude Code takes each command is in "How a desk runs Claude
+Code". What still holds from issues #9, #10 and #15 (0.10.9) and the
+2026-11-14 rulings, on the board and the page:
 
-- **A command is confirmed on its own receipt, and each receipt is read
-  where it is written** (`commandReceipt`). `deliveryOf` looks for a user
-  record containing the text, and a command writes no such record: `/model
-  sonnet` is a `<command-name>` record with the argument in its own tag,
-  `/clear` writes into a *new* session's file (the issue's "writes nothing"
-  counted the old one), `/btw` and `/cost` write nothing anywhere. So:
-  `/clear` is the new file's first record; `/compact` is the command record
-  and the window compacting; `/model` and `/effort` are the window's own
-  stdout line; `/btw` is its overlay; anything else is its command record
-  or the screen it opened (`overlayOf`), whose text goes to the desk as a
-  line labeled by the command. A command that closes the window (`/exit`)
-  has the pane's absence as its receipt. The sentence the desk shows is the
-  window's own words where it has any.
-- **Enter is pressed again only while the message is still in the composer**
-  (`stillInComposer`). The retry used to press on any screen that had gone
-  still, and a still screen is also a `/btw` answer and a `/model` picker:
-  measured, it chose the picker's highlighted row with nobody choosing, and
-  closed the overlay 1.3 s after the answer appeared. No composer on screen
-  is "no" too. A `/btw` answer is read off the overlay, left
-  `ORCH_BTW_LINGER_MS` for anyone looking at the window, then closed with
-  Escape — the host does close it, on purpose, because a dialog left
-  standing takes the next message instead of the composer.
-- **A model or effort change from the floor is the window's own command,
-  and so the default for new sessions** (costmo, 2026-11-14, reversing #10
-  Decided 4, so the floor does what the window and the editor do). The
-  host types `/model <name>` or `/effort <level>` like any other command
-  (`send()`), and the window's line is the receipt and names what the
-  board takes as confirmed (`switchedTo`): "Set model to Haiku 5.5 and
-  saved as your default for new sessions", "Set effort level to low (saved
-  as your default for new sessions): …". The default is the machine's the
-  desk's host runs on (`~/.claude/settings.json` `model`,
-  `modelSettings.<model>.effortLevel`). For the eleven days before, a
-  change was "this session only": the host opened the window's picker,
-  walked its rows and pressed `s` (`pick()`, PR #53's short-pane walk
-  with it). That is removed, not kept with Enter in place of `s`, and the
-  reason was measured on 2.1.325: Enter in the picker saves the cursor's
-  row *and* the effort row together ("Set model to Sonnet 5.5 and saved
-  as your default for new sessions with medium effort"), so an effort
-  change on one desk re-saved that desk's model as the machine's default,
-  over whatever another desk had just chosen. The commands save the one
-  thing each names, resolve a family themselves ("fable" was Fable 5.2),
-  and answer an unknown name in words with nothing saved. Do not bring
-  the picker back for either. Four things the command path needed, each
-  measured that day:
-  - **"Switch model?" still stands between a `/model` and its line** on a
-    conversation cached for its model, behind the command as behind the
-    picker. The host answers `1`, once (`switchConfirmOf`, read from the
-    pane's last lines; it used to match the words anywhere in the capture,
-    and a conversation quoting them would have had a `1` typed into its
-    composer).
-  - **The same dialog has a second title, "Change effort level?", and the
-    host answers it for an `/effort` the same way** (QA, PR #55 finding 1).
-    It is in 2.1.325's strings with the model's lines under it, raised when
-    an effort change would rewrite the cached prefix. It has not been seen
-    on a window: `/effort <another level>` after a reply went straight
-    through on Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (probe,
-    2026-11-15), because those take effort per turn. So the read is the
-    measured one with the binary's title, and a desk on a model that does
-    not take effort per turn is where it would stand. Unanswered, on the
-    suite's stand-in, the `/effort` ended `not_delivered` and the desk's
-    next message was pasted into the dialog for a minute. A change the
-    window was told to keep writes "Kept effort level as <level>" (the
-    binary again), which names no level set and so clears the asked-for.
-  - **A refusal is a `system` record, not a user one.** "Model 'x' not
-    found" is written with subtype `local_command` and its text in
-    `content`. Read as user records only, the host waited out twenty
-    seconds on a window that had answered at once (`stdoutOf`).
-  - **Neither is typed into a working window.** `/model haiku` into a
-    running turn is taken at once and raises "Switch model?" over the
-    work. `/effort` mid-turn was not measured and is held to the same
-    rule. Refused before a key is pressed, in words on the desk.
-  - **The page's selects are written only where they changed**
-    (`fillSelect` in `src/ui/floor.js`). The panel is drawn again on every
-    poll and stream event, and both selects were emptied and refilled each
-    time: twice in the two seconds after a panel opens, then every 2 s.
-    costmo's report was a pick in those first seconds not taking, with the
-    drop-down left open. The rewrites were measured (a MutationObserver's
-    count; 0 now). That they were the cause is read from how Chrome
-    replaces an open select's menu when its rows change, and could not be
-    watched, because a headless browser draws no menu. The selects are
-    also dimmed, with the reason, whenever Send is: a choice goes out
-    through `sendChat`, which sends nothing while the window is asking.
-  The chat route still refuses a bare `/model` (a picker nobody is
-  driving) and an effort level that is not one of the window's; the page
-  shows asked-for beside confirmed until the window confirms —
-  PreModelSwitch/PostModelSwitch, the window's line, and the `model` on
-  the transcript's next reply, which is how the header follows a `/model`
-  typed into the window. **A change that was not made stops being asked
-  for** (costmo, the same day; `unask` in `applyHostEvent`). An asked-for
-  used to be cleared only by a confirmation, so a change the host refused
-  (a working desk) or the window did (an unknown name) left the select on
-  the model that was picked, not the one the window was on, with "x asked"
-  beside it. The host reports a reply's model only when it differs, so
-  nothing on that conversation corrected it. Two things clear it now: a
-  host error that names the command it was typing (`command` on the
-  event; a host older than that names none, and the asked-for stays as it
-  did), and a `/model` or `/effort` receipt that confirms nothing. It is
-  cleared where the route wrote it, on the window's session, so an editor
-  tab's own pending switch on the same desk is left alone. The error
-  carries no session id on purpose: an error is filed by desk, and naming
-  one would move where its line is drawn. A `not_delivered` clears it
-  too. If the window did take the change, its hook or next reply confirms
-  the model as it does for a `/model` typed into the window. **And a
-  refused pick is not handed back to the message box** (costmo, the same
-  day; `handedBack` in `src/ui/floor.js`). A select's choice is sent as a
-  message and waits in the page's pending list, and an error turn hands
-  that list back to the box, so the box got `/model opus` ahead of any
-  draft, a command the operator never typed. A pick is marked now and
-  left out. A `/model` typed into the box still comes back, like any
-  typed words. Leaving it in the box so Enter could send it again was
-  offered and not chosen. The page step that found it is in
-  **verify-ui-change** (`check-chat-controls.mjs`).
-- **A paste of four or more lines, or of more than 800 characters, is
-  wrapped in `<pasted_content>`** and the model is told it "may contain
-  instructions the user did not write" — exactly wrong for the operator's
-  own message. Such a message is typed instead (`typeInto`): `send-keys -l`
-  in 100-character pieces 60 ms apart (a 900-character burst in one
-  send-keys was read as a paste and wrapped anyway), `M-Enter` between
-  lines, every line confirmed in the composer before the next (one of two
-  runs at 0.3 s a line lost a line); if it cannot be confirmed the message
-  is pasted after all. What was pasted by hand is unwrapped on the way to
-  the floor (`unwrapPaste`), by id, wherever the pair stands in a block.
-- **A compaction is busy, and the hooks own its state.** The bottom line
-  keeps "esc to interrupt" throughout, so `busy()` says only that; what
-  says more is the spinner line directly above the composer, "Compacting
-  conversation… (7s · ↓ 599 tokens)", read positionally (`compactingOf`) —
-  elapsed seconds and the summary's tokens, no percentage, because the
-  binary's progress never reaches the line. The desk's compacting state
-  comes from PreCompact / PostCompact (and the SessionStart a compaction
-  fires 30 ms before PostCompact, in case that never comes), the summary
-  from the transcript (`isCompactSummary` → a `context` turn labeled
-  `compact-summary`, drawn closed), the boundary from `compact_boundary`
-  (a `context` line in the compaction's terms, which also ends the state).
-  A message sent into one is taken, enqueued with no text (2.1.300 writes
-  `queue-operation` records without `content`), and written as a turn only
-  at the end — 37–150 s on real desks — so `send()` returns `held:
-  'compacting'` the moment the spinner shows under it rather than erroring
-  at twenty seconds. A `/compact` receipt says `compacting` only if the
-  window is still at it; one that arrived after PostCompact once re-set the
-  flag after the fact.
-- **A StopFailure fires when auto-compact thrashes, not when it works.**
-  Three rounds inside three turns (71k→12k, 69k→12k, 66k→9k, provoked
-  with `/autocompact 100k`) ended in `{ error: "invalid_request",
-  last_assistant_message: "Autocompact is thrashing: …" }` — 2.1.300's
-  fields, which the plugin never forwarded, hence "the turn ended with an
-  API error" on nine of the live board's thirty-two error turns. Its twin
-  in the transcript is an `assistant` record flagged `isApiErrorMessage`
-  with `model: "<synthetic>"`, which the relay now files as an `error` turn
-  rather than the agent's words; the hook's turn is for a desk no host
-  reads.
+- **A command's receipt leaves one line, not a bubble.** costmo read the
+  receipt drawn as the pending bubble as "an artifact outlined in white
+  saying /model opus … a message that has not yet sent". So a done command
+  draws no bubble, and the line labeled `host` carries what was typed and
+  what happened: "/model opus — Set model to … and saved as your default
+  for new sessions".
+- **A change that was not made stops being asked for** (costmo, 2026-11-14;
+  `unask` in `applyHostEvent`): a host error that names the command it was
+  carrying out (`command` on the event), or a receipt that confirms
+  nothing. Before it, the select stayed on the model picked, with "x asked"
+  beside it, and nothing on that conversation corrected it. **And a refused
+  pick is not handed back to the message box** (`handedBack` in
+  `src/ui/floor.js`): a select's choice is not something the operator
+  typed. The page's selects are written only where they changed
+  (`fillSelect`), because rewriting them on every poll lost picks made in a
+  panel's first seconds. The chat route refuses a bare `/model` and an
+  effort level that is not one of Claude Code's.
 - **Only `startup` and `resume` are a session starting** (costmo, #15
   Decided 2; `isSessionStart`). SessionStart also fires with `source:
   compact` at every compaction and `clear` on `/clear`, and every
   SessionStart used to wake an archived floor and ask a rescan.
-- **A command's receipt leaves one line, not a bubble.** The receipt note
-  first stood as the pending bubble with the sentence as its caption, and
-  costmo read it as "an artifact outlined in white saying /model opus … a
-  message that has not yet sent". So: a done command draws no bubble, and
-  the line labeled `host` carries what was typed and what happened —
-  "/model opus — Set model to Opus 5.5 and saved as your default for new
-  sessions" (the receipt since 2026-11-14; it read "for this session only"
-  while the host drove the picker).
-- **A live session outranks an ended one, and a hosted desk's session is
-  its window's.** A `/clear` ends one session and starts the next in the
-  same second, and on `updated_at` alone the two tied: the floor showed the
-  ended row's compacting flag or the new row's empty model, by chance (his
-  "works sometimes, not others"). Every "the desk's newest session" read
-  orders `(ended_at IS NULL) DESC, updated_at DESC`, `buildFloor` shows the
-  roster's `sdk_session_id` row while it is live, and the host names the
-  window's session on every receipt — two live sessions on one desk (an
-  editor tab beside the floor's window) put the picker's words on the other
-  one until QA measured it (PR #32). A `/clear` carries the model and effort
-  forward from the row it closed, because the window keeps its process
-  (measured: the first reply after `/clear` named the model picked before
-  it). And a compaction ends on any prompt, turn or tool, hook or relayed,
-  and a floor `/compact` is watched to its end (`awaitCompaction`) and said
-  in the window's closing words — a `/compact` with nothing to compact
-  shows the spinner for a moment, writes nothing, and left the desk
-  "compacting" for six minutes.
-
-How this was built without deploying it: a throwaway server on :8905
-running the tree's code, the probe folder rebound to it with `claude mcp
-remove`/`add -s local`, a second host process pointed at it (the live host
-then skips the folder as another board's), and the tree's `report.mjs`
-registered in the probe's own `.claude/settings.json` beside the installed
-plugin — so the real window, the real hooks and the new code met end to end
-on the operator's machine with the live board untouched. The plugin cache
-installs from the tree on `claude plugin update`; until then the installed
-plugin's hooks fire for the old eight events only, and a desk's compacting
-state and model switch reach the live board only from the transcript.
+- **A live session outranks an ended one.** A `/clear` ends one session and
+  starts the next in the same second, and on `updated_at` alone the two
+  tied: the floor showed the ended row's state or the new row's empty
+  model, by chance (his "works sometimes, not others"). Every "the desk's
+  newest session" read orders `(ended_at IS NULL) DESC, updated_at DESC`,
+  and the host names its session on every receipt.
+- **A compaction's state is the hooks' and the transcript's**: PreCompact /
+  PostCompact (and the SessionStart a compaction fires just before
+  PostCompact), the summary as a `context` turn labeled `compact-summary`
+  (`isCompactSummary`), the boundary from `compact_boundary`. Any prompt,
+  turn or tool ends a compaction the hooks never finished: a `/compact`
+  with nothing to compact writes nothing, and once left a desk "compacting"
+  for six minutes.
+- **A StopFailure fires when auto-compact thrashes, not when it works**
+  (2.1.300). Its twin in the transcript is an `assistant` record flagged
+  `isApiErrorMessage` with `model: "<synthetic>"`, which the relay files as
+  an `error` turn rather than the agent's words.
+- **A paste wrapper is unwrapped on the way to the floor** (`unwrapPaste`):
+  a long paste into a terminal is recorded inside `<pasted_content id=…>`,
+  and the floor draws the words, not the tags.
 
 ## /mcp from the floor, a reconnect the board asks for, and a room's notices
 
-costmo, 2026-11-19, three rulings by AskUserQuestion. All three were
-measured on 2.1.328 on a probe with a scratch board that was stopped and
+costmo, 2026-11-19, three rulings by AskUserQuestion, measured then on
+2.1.328 on the window layer, with a scratch board that was stopped and
 started again.
 
-- **A bare `/mcp` from a desk's box or a room is typed as `/mcp reconnect
-  <the desk's server>`** (`typedCommand` in `host/window.js`). In the
-  window, `/mcp` alone opens the "MCP servers" panel. Before this, the
-  floor read that panel as a screen, put it on the desk ("shown in the
-  window"), and closed it with Escape. Nothing reconnected. `reconnect
-  <name>` writes "Reconnected to …", "Couldn't reconnect to …" or `MCP
-  server "x" not found` as local-command-stdout, the receipt every other
-  command is confirmed on. `reconnect all` counts the disabled built-in
-  computer-use, so it always adds "1 still not connected", which reads as
-  a failure on the floor. The name is the binding's own (`server` from
-  `deskIn` in `host/identity.js`): a hand-written `.mcp.json` need not
-  call it `orchestratinator`. `/mcp` with arguments goes as typed.
-- **`/mcp` is never typed into a working window.** Typed 9 s into a 25 s
-  tool call, it left the composer and was never heard of again: no command
-  record, no queue entry, no line on screen. The host refuses it in words,
-  as it already did `/model` and `/effort`.
-- **The board asks a host to reconnect a floor window whose tools
-  dropped** (`reconnectDue` in `src/floor.js`, work kind `reconnect`,
-  `reconnect: true` at registration, kept on `hosts.reconnects`). The
-  desktop app runs its board as a child process, so every launch is a
-  fresh board, MCP sessions live in the board's memory, and Claude Code
-  does not connect again by itself. He used to `/mcp` each desk by hand.
-  "Dropped" is three facts together: a floor window, no MCP session, and
-  an `agents` row. Only an MCP connect or a tool call makes that row, so a
-  window that never connected (a server declined at the folder's question,
-  every stand-in in the suites) is never asked. An idle connected window
-  never reads as dropped, because Claude Code holds its GET stream open
-  and `sweepIdleSessions` skips a streaming session. A desk is asked after
-  `RECONNECT_AFTER_MS` (20 s), once more two minutes later, then left
-  alone until a session comes back. It is checked at the host's work poll
-  and on a 5 s board timer that wakes the poll, because a poll can sit 25 s
-  in its wait. The host does it only while the window is idle and not
-  asking, and says it on the desk: "the desk's tools had lost the board,
-  so the host ran /mcp — Reconnected to orchestratinator". A lost
+- **A bare `/mcp` from a desk's box or a room reconnects the desk's own
+  server** (`mcp_reconnect`, with the binding's server name: `server` from
+  `deskIn` in `host/identity.js`, since a hand-written `.mcp.json` need not
+  call it `orchestratinator`). In a terminal `/mcp` alone opens the "MCP
+  servers" panel and reconnects nothing, which is what the floor used to
+  meet. `/mcp reconnect <name>` names another server; `/mcp` with any other
+  arguments goes as a message.
+- **The board asks a host to reconnect a floor desk whose tools dropped**
+  (`reconnectDue` in `src/floor.js`, work kind `reconnect`, `reconnect:
+  true` at registration, kept on `hosts.reconnects`). The desktop app runs
+  its board as a child process, so every launch is a fresh board, MCP
+  sessions live in the board's memory, and Claude Code does not connect
+  again by itself. He used to `/mcp` each desk by hand. "Dropped" is three
+  facts together: a desk the floor holds, no MCP session, and an `agents`
+  row. Only an MCP connect or a tool call makes that row, so a desk that
+  never connected (every stand-in in the suites) is never asked. An idle
+  connected desk never reads as dropped, because Claude Code holds its GET
+  stream open and `sweepIdleSessions` skips a streaming session. A desk is
+  asked after `RECONNECT_AFTER_MS` (20 s), once more two minutes later, then
+  left alone until a session comes back. It is checked at the host's work
+  poll and on a 5 s board timer that wakes the poll, because a poll can sit
+  25 s in its wait. The host sends `mcp_reconnect` (on the process path the
+  tools came back at once, measured) and says it on the desk. A lost
   `reconnect` item is said nowhere (`lostWorkWords`): the board asks again.
 - **A desk is sent a message as it enters a meeting room, and another as
   it is back on the floor** (`roomNoticeText`, `roomNoticePlan`,
@@ -1117,20 +646,13 @@ started again.
   window keeps it going with no floor tab open.
 
 How it is tested: the decisions and both board halves in `test:floor`
-("what a desk is told…", "reconnecting a floor window…"), `typedCommand`
-and the working-window refusal in `test:window`, the host typing both
-reconnects in `test:host` (its stand-in answers `/mcp` as 2.1.328 does;
-the suite connects as a desk and drops the session, since the stand-in
-never connects), the slash menu and a notice's line in
-`check-chat-controls.mjs`. The 17 mutants are
-`mutants-mcp-rooms.suite.json` (**mutate-in-a-copy**), all red on their
-rows. Seen end to end on a real window (2026-11-19, `probe-host.sh` in
-**measure-a-real-window**): a board down 5 s healed by itself and nothing
-was asked; a board down 90 s did not, and the host reconnected the window
-25 s after the board came back. In costmo's app the same evening, a 22 s
-relaunch healed by itself, and a 6-minute one was reconnected by the host
-30 s and 33 s after, on both desks. A room opened and ended put both notices in the
-window, filed as `meeting-room` lines.
+("what a desk is told…", "reconnecting a floor window…"), the host's
+`mcp_reconnect` in `test:host`, the slash menu and a notice's line in
+`check-chat-controls.mjs`. The board's half was seen end to end on
+2026-11-19, on the window layer: in costmo's app a 22 s relaunch healed by
+itself, and a 6-minute one was reconnected by the host about 30 s after, on
+both desks. A room opened and ended put both notices in the conversation,
+filed as `meeting-room` lines.
 
 ## One floor of a backup
 
@@ -1197,15 +719,13 @@ text "Not logged in · Please run /login", and the composer reads "Once fixed,
 resend your message". So the floor drew the desk as idle, then showed the
 operator a command as its answer. Both are faults by this file's own rules.
 
-- **The host reads the machine, not each window** (host/auth.js).
+- **The host reads the machine, not each desk** (host/auth.js).
   `claude auth status --json` (`loggedIn`, about 0.25 s at load 67) at every
   heartbeat, and at once when the relay sees that error record (`noteTurn`).
   It says the result at registration (`signed_out`, kept on the host's row).
-  The window's record counts on its own (`auth.said`), because a credential
-  that is there and no longer accepted can still read as signed in to `auth
-  status`. A reply from any window ends that. A footer read on every window
-  at every tick was the other way, and was not taken: a capture per desk per
-  tick, for a fact about the machine.
+  The transcript's record counts on its own (`auth.said`), because a
+  credential that is there and no longer accepted can still read as signed
+  in to `auth status`. A reply from any desk ends that.
 - **USER and LOGNAME are filled in when missing** (`claudeEnv`). With HOME
   and PATH alone Claude Code says a signed-in Mac is signed out (the app's
   agent, measured 2026-11-09). launchd gives a LaunchAgent both (read off the
@@ -1227,35 +747,31 @@ operator a command as its answer. Both are faults by this file's own rules.
   Claude Code's own last words. The app's own `?signin=1` seam was offered
   by desktop-dev and not used: the host's way is the same on the Docker
   board and in the app.
-- **A window still signed out after the sign-in is reopened on its
-  conversation.** Whether a running window takes a sign-in made by another
-  process is not measured: it needs a real account, and an agent cannot sign
-  in. So the host reads each window (`signedOutOf`, the rows under the
-  composer's bottom rule, rejoined for an 80-column wrap) for up to 3 s, and
-  reopens only one that still says it. A signed-out window cannot be
-  working. The reopen runs on the host's line (`later`, drained before each
-  work poll), and the board hears "signed in" only after it, so nothing is
-  typed into a window while it is being reopened.
+- **After a sign-in, each running desk's Claude Code is started again on
+  its conversation** (`reopenSignedOut`). Whether a running process takes a
+  sign-in made by another is not measured: it needs a real account, and an
+  agent cannot sign in. A new process reads the credentials as it starts.
+  Never mid-turn: a signed-out process cannot be working. It runs on the
+  host's line (`later`, drained before each work poll), and the board hears
+  "signed in" only after it, so nothing is sent to a desk while it is being
+  started again.
 - **A host says it can** (`signin: true` at registration, `hosts.signins`).
   A host from before it would drop the work, so the box dims Sign in with
   why. It is a field added, so the protocol number did not move.
 
-Not measured, and left: the reopen above on a real window (whether it is
-needed at all), and `claude auth login` started from a launchd host on a
-real desktop (the app's own run of it is measured). The first real sign-out
-on his machine answers both. How it is tested: `test:host` ("Claude Code
-signed out on this machine", the stand-in answers `auth status` and `auth
-login` from files and draws the footer), `test:floor` ("Claude Code signed
-out on a host"), `test:window` (the reader, on the captured screens), and
-**check-signin.mjs** in **verify-ui-change**, with
-`mutants-signin.page.json` beside it and `mutants-signin.suite.json` in
-**mutate-in-a-copy**.
+Not measured, and left: whether the restart above is needed at all, and
+`claude auth login` started from a launchd host on a real desktop (the
+app's own run of it is measured). The first real sign-out on his machine
+answers both. How it is tested: `test:host` ("Claude Code signed out on this
+machine", the stand-in answers `auth status` and `auth login` from files),
+`test:floor` ("Claude Code signed out on a host"), and **check-signin.mjs**
+in **verify-ui-change**, with `mutants-signin.page.json` beside it.
 
 ## A new machine's first windows (0.14.0 to 0.14.3)
 
 2026-11-20, the day the desktop app went out as a signed build and costmo
-installed it on a second Mac. Three things that machine showed, each fixed
-the same day. **This section was written afterwards from the code's own
+installed it on a second Mac. It showed three things, each fixed the same
+day; two were in the window layer and went with it. **This section was written afterwards from the code's own
 comments, the commits and the scratch logs of the session that did the
 work**: that session's history was lost the same afternoon (the next
 section), so nothing here is from memory, and where the record did not say,
@@ -1275,37 +791,12 @@ b3127e4, v0.14.2 is d1fe63a, v0.14.3 is 5fcb0b8, v0.14.4 is 58a648f.
 **From v0.14.5 (82a2dad) the tag is on `main`**, so the rest of this
 paragraph describes 0.14.0 to 0.14.4 ("Since 2026-11-22", near the top).
 
-- **The 0.14.0 gate, and its three reds.** At 6826bab it read EXIT=1 (3 ✗
-  in the suites, 13 of 15 pages, load 57 to 106). All three were fixed in
-  b3127e4, where it read EXIT=0: 3342 ✓, 15 of 15 pages, at load 73 to 139.
-  - `drive.mjs`'s drag sent `mouseMoved` with `button: 'none'` while the
-    button was held, and Chrome does not take that as a drag: a textarea's
-    resize handle stayed where it was (check-chatbox, check-pop-foot). A
-    move with the button held names the button.
-  - **`reopen()` wrote to `desk.intent` after its awaits, and the watch
-    loop had let the intent go.** The loop runs beside it and clears the
-    intent the moment a live session matches it, which for a known id can
-    be inside those awaits: a reopen after a sign-in threw on
-    `desk.intent.pid`. The intent is held in a local as well, and written
-    through that. Anything else that sets `desk.intent` and then awaits has
-    the same gap.
-  - The host suite's busy-window pick waited against the wrong list of
-    panes, and with the host's line held it took the next pick's window for
-    its own.
-- **The browser extension's question is a startup question, asked after
-  the window has registered** (0.14.2, `STARTUP_ASKS` kind `chrome`). On
-  the new machine a 2.1.318 window raised "Claude in Chrome extension
-  detected" (two rows, the cursor on No, "Enter to confirm · Esc to keep
-  browser tools off") once the trust question had been answered from the
-  floor. The host refused to type into it, said "answer it on the floor",
-  and the floor had nothing to answer it with. His ruling: shown to the
-  operator and answered by them, never by rule. The reader knew a startup
-  question only on a window that was still starting, so the tick now looks
-  on a registered window too, in three cases: while a question is already
-  standing (and "gone" is said only when the pane no longer shows it), when
-  a send has just been refused as `asking`, and once a heartbeat
-  (`Desk.lookStartup`). Not measured: whether a real window is in the
-  roster while that question stands. That is why all three looks exist.
+- **The 0.14.0 gate's reds** (EXIT=1 at 6826bab, EXIT=0 at b3127e4). The
+  one that still teaches: `drive.mjs`'s drag sent `mouseMoved` with
+  `button: 'none'` while the button was held, and Chrome does not take that
+  as a drag, so a textarea's resize handle stayed where it was
+  (check-chatbox, check-pop-foot). A move with the button held names the
+  button. The other two were in window-layer code, since replaced.
 - **Inside the app the header shows the app's version** (0.14.2,
   `headerVersion` in `src/ui/app.js`, lifted into `test:floor`). The app
   was 0.14.1 on an Orchestratinator 0.14.0, the header said one and the
@@ -1313,61 +804,11 @@ paragraph describes 0.14.0 to 0.14.4 ("Since 2026-11-22", near the top).
   contradicting another. The number comes from the user-agent token the
   app already sends (`OrchestratinatorDesktop/<version>`); this instance's
   own number stays on the tooltip. In a browser nothing changed.
-- **A window Claude Code has no record of is reopened, once** (0.14.3; the
-  account is above `UNREGISTERED_MS` in `host/window.js`). On that machine
-  `~/.claude/sessions` was empty under a live window: it ran every command
-  and wrote its transcript, and the floor could not hear it. A model change
-  ended "gave no sign of running it within 20s", a message read "not
-  recorded, send again" while the agent worked on it, and no `/mcp`
-  reconnect was asked for, because the window read as starting. costmo
-  found it by opening the window: "we need to be able to auto-resolve
-  this. Another operator likely would not have been able to track that
-  down." Not reproduced in six tries. The likeliest cause is a Claude Code
-  profile deleted and remade under a tmux server that was left running,
-  and it is not proven. So the state is resolved, whatever makes it: a
-  window standing idle at its composer, nothing typed, for 30 s with no
-  record is reopened on the conversation last spoken in since it started
-  (a new one when nothing was said), on the host's line, and the desk says
-  so. A reopened window with no record either is said on the desk and left
-  alone, because a reopen is a kill. Three things about it:
-  - **Idle is read, never assumed**: no startup question, no prompt, no
-    overlay, not working, a composer on screen, and the cursor right behind
-    the `❯` (a typed draft is somebody's; a prompt suggestion is not).
-  - **The job reads everything again before it closes anything**, on the
-    whole roster and by pid: the tick's own check is against this desk's
-    sessions by folder. And since 2026-11-20 it leaves the window when the
-    roster could not be read at all. `roster()` gives an empty list with
-    `ok: false` then, and the first cut read that as "no record". No row
-    holds that line: the suites' stand-in always answers `agents`.
-  - **Known and left**: a seat is reopened on a new conversation, since
-    "the folder's newest" may be another desk's (`spokenSince` gives a seat
-    nothing), and the desk's line then says "as nothing had been said in
-    it", which may not be so. And if an editor in the same folder spoke
-    more recently than the window, the reopen names the editor's
-    conversation and is refused by `open()` with the window already
-    closed. Neither has been seen.
-- **The app's release checklist ends every window before it deletes
-  anything of Claude Code's** (`tmux kill-server` first; the app repo's
-  `docs/release-checklist.md`, "A fresh install from nothing").
 - **Backlog from that day, not built**: a meeting room should survive
   closing the app or the floor it came from (`docs/backlog.md`, with what
   each repo's half is).
 
-How it is tested: the reader on the captured screen and the verdicts in
-`test:window`; the question on a registered window and the reopen in
-`test:host` (`startup-ask.flag` takes `chrome`, `composer.flag` draws a
-window at its composer, and the host runs with `ORCH_UNREGISTERED_MS` at
-3 s); the header in `test:floor` and check-attention. The mutants are
-`mutants-first-run.suite.json`, ten of them, each red on its own rows.
-Two things from running them:
-- **"A refused send does not ask for a look" survived its first run and
-  was red on its second** (5 rows). The heartbeat asks for the same look,
-  so when a registration lands inside the row's wait the question reaches
-  the floor without the line. That is the likeliest second path and was
-  not watched happening. Run that mutant twice before reading it.
-- The five for the unrecorded window were cut off by the clear and run
-  again that afternoon: three on the window suite (control 482 ✓), two on
-  the host suite.
+The header is tested in `test:floor` and check-attention.
 
 ## The clear of 2026-11-20, and what the record is since
 
@@ -1410,90 +851,35 @@ later:
 How all of that was read, as three commands and the order they pay off
 in, is the **recover-a-lost-record** skill.
 
-**A window the app's host opens carries the host's own settings, and no
-`TMPDIR`** (found by the app's agent that afternoon, measured in this
-folder's window too). The host builds what it gives tmux from its whole
-environment (`TMUX_ENV` in `host/window.js`), a tmux server keeps the
-environment of the process that started it, and the app configures its
-host by environment where launchd's reads `host.json`. So after that day's
-`tmux kill-server` every window had `ORCH_URL`, `ORCH_AUTH_TOKEN`,
-`ORCH_HOST_ID`, `ORCH_HOST_SUPERVISOR=app`, `ORCH_FOLDER_DIALOG=parent`,
-`ORCH_HOST_CONFIG` and `ORCH_TMUX_SESSION`. A host, a board or a suite
-started by hand there takes them as its own. Measured: the full chain run
-from this window read one red, "and with nothing at all the host says so,
-and how to give it one", because the host meant to have no key had the
-app's; with the variables unset the host suite read 520 ✓. The suite's
-own hosts name their board and id, so the app's board was not touched. So,
-until every window open on the machine was opened by a 0.14.4 host (below):
+**A desk's Claude Code gets a person's environment and nothing of the
+host's** (found by the app's agent that afternoon; decided and built in
+0.14.4, costmo having handed the call over: "make the open decision based
+on what is going to be smoothest to the operator and end user
+experience"). After that day's clear every window the app's host opened
+carried the host's settings (`ORCH_URL`, `ORCH_AUTH_TOKEN`, `ORCH_HOST_ID`,
+`ORCH_HOST_SUPERVISOR=app`, …) and no `TMPDIR`, so a host, board or suite
+started by hand in one silently became the app's (measured: a host suite
+run there read one red, the host meant to have no key having the app's).
+So `windowEnv()` in `host/claude.js`, which is what a desk's process is
+started with (`agentEnv`), gives:
+1. **No `ORCH_` variable.** An agent's shell is somebody's terminal, and a
+   board, host or suite started in it should behave as it would in any
+   other. The suites reach their stand-ins by flag files for the same
+   reason.
+2. **The key only where the binding names a variable** (`keyVar` in
+   `host/identity.js`), and a seat's four variables. A desk with a literal
+   key, which is every desk the app binds, gets nothing: its key is in its
+   binding.
+3. **`TMPDIR` filled when missing** on macOS (`getconf
+   DARWIN_USER_TEMP_DIR`), and **`USER` and `LOGNAME`**, because with HOME
+   and PATH alone Claude Code says a signed-in Mac is signed out.
+4. **None of the markers a Claude Code session sets for its children**
+   (`PARENT_SESSION`): a Claude Code that inherits them writes no
+   transcript ("A host on Windows").
 
-```
-for v in $(env | command grep -o -E '^ORCH_[A-Z_]+'); do unset "$v"; done
-export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
-```
-
-before any suite, scratch board or host from a window on the app's floor.
-
-**A window gets a person's environment and nothing of the host's: decided
-2026-11-20, built in 0.14.4.** costmo handed the call over that evening
-("make the open decision based on what is going to be smoothest to the
-operator and end user experience"), and again in the 0.14.4 round with the
-same caveat, so the pick is the developer's. What was picked, and why each
-part:
-
-1. **The host hands tmux its environment without its own settings**:
-   every `ORCH_` variable the host reads as configuration, the key
-   included (`TMUX_ENV` in `host/window.js`). An agent's window is
-   somebody's terminal. A board, a host or a suite started in it should
-   behave as it would in any other terminal, and today it silently
-   becomes the app's host. The suites' own seams reach a stand-in by flag
-   files already, for this same reason, so nothing of theirs rides on it.
-2. **The key reaches a window only where its binding names a variable,
-   by `-e`, as PR #52 ruled.** That rule gave the variable only to a desk
-   whose placeholder the host could not fill, on the ground that one it
-   could fill "came from the same environment the host started the tmux
-   server with". With 1 that stops being true, so `paneEnv` gives it in
-   both cases (`keyVar` in `host/identity.js` has to say "names a
-   variable", not "could not be filled"). A desk with a literal key, which
-   is every desk the app binds, gets nothing: its key is in its binding.
-3. **The host takes the same variables out of a running tmux server at
-   its start** (`set-environment -g -u`), so the fix reaches windows
-   opened after an update without the floor being closed. Windows already
-   open keep what they have until they are reopened. Measured on a socket
-   of its own (2026-11-20, tmux 3.7c): a server started with three `ORCH_`
-   variables and no `TMPDIR` lost all three, gained `TMPDIR`, and a window
-   opened after it carried none. A `-u` of a name the server never had
-   exits 0 and says nothing, and the host asks only for names the server
-   lists anyway (`serverEnvPlan`).
-4. **`TMPDIR` is filled when missing, by the host**, as `claudeEnv` fills
-   `USER` and `LOGNAME`: on macOS the user's own (`getconf
-   DARWIN_USER_TEMP_DIR`), elsewhere left alone. In the host and not only
-   the app, because it is then right under every supervisor, and whether
-   launchd gives a LaunchAgent one has not been read. The app's agent
-   gives its host one as well; that is its half and it has agreed. `USER`
-   and `LOGNAME` are filled the same way, because a window is a Claude
-   Code and with HOME and PATH alone it says a signed-in Mac is signed out.
-
-What was weighed and not picked: leaving the key in (it is one variable
-and every window's binding holds it anyway), because the red above was the
-key, and a host started by hand with the app's key and its own address is
-the surprise this removes. And fixing it in the suites alone (each drops
-inherited `ORCH_` variables at its top), because that leaves a hand-started
-host as it is. It changes what a launchd host's windows get only where
-that host was configured by environment and not by `host.json`, which
-`install.sh` does not do. Built as `windowEnv`, `serverEnvPlan` and
-`cleanServerEnv` in `host/window.js`, `paneEnv` and `keyVar`, and the call
-at the host's start. Tested: `test:window` ("what a window inherits from
-the host", including a live server on a socket of its own), `test:host`
-(the pane-env row, with a variable planted in the server before each host
-starts, because the default socket is shared and one clean run would
-otherwise leave every later run reading clean), and the mutants in
-`mutants-0-14-4.suite.json`. Not yet read: a real window opened by the
-app's host on 0.14.4, with `env`. It is written in
-`orchestratinator.consumed`, `host.windows_inherit`. **Running `test:host`
-cleans the operator's own tmux server** (its host runs on the default
-socket, and cleaning at the start is the rule): the `ORCH_` variables an
-older host left in the global environment are unset there, which is what
-the next 0.14.4 host would do anyway. Windows already open keep theirs.
+Leaving the key in, and fixing it in the suites alone, were weighed and not
+picked. It is written in `orchestratinator.consumed`,
+`host.windows_inherit`.
 
 ## A file attached to a message
 
@@ -1509,18 +895,16 @@ it under `~/.orchestratinator/uploads/<id>/<name>` and types the path under
 the words (`withAttachments` in [`host/uploads.js`](host/uploads.js)). Six
 things behind it, each of which looks simpler than it is:
 
-- **Outside every repo, and a window may read it there.** Inside the desk's
-  folder an attachment is a change in somebody's working tree (costmo: not
-  git-visible). Outside it, measured on 2.1.326 with a probe in **manual**
-  mode: a Read of a text file and a PNG under `~/.orchestratinator` raised
-  no permission prompt, and a message the host's own `send()` typed with
-  two paths (one with a space) was recorded exactly and both were read. On
-  a machine whose settings do ask, it is an ordinary prompt on the floor.
-- **The path is typed, not pasted as an image.** An image path inside a
-  typed or pasted message stays text: the files-only message is two lines,
-  so `send()` pastes it rather than types it, and it was still recorded as
-  text and read (same probe). The agent reads a file when it wants it,
-  which is also what lets a 100 MB log go without filling the context.
+- **Outside every repo, and Claude Code may read it there.** Inside the
+  desk's folder an attachment is a change in somebody's working tree
+  (costmo: not git-visible). Outside it, measured on 2.1.326 with a probe in
+  **manual** mode: a Read of a text file and a PNG under
+  `~/.orchestratinator` raised no permission prompt, and a message with two
+  paths (one with a space) was recorded exactly and both were read. On a
+  machine whose settings do ask, it is an ordinary prompt on the floor.
+- **The path is text in the message, not an image.** The agent reads a file
+  when it wants it, which is also what lets a 100 MB log go without filling
+  the context.
 - **Lifetime is Claude Code's own** (costmo: "the operator should not have
   to think about it"). The host keeps a file for `cleanupPeriodDays` from
   Claude Code's `settings.json`, 30 when unset, read at every heartbeat's
@@ -1590,22 +974,10 @@ now:
   "terminated" before `fetchUpload`'s own size check runs, whether the
   board closes or drops the socket. That check is a second guard, so QA's
   mutant removing it survives by design; the row asserts the outcome.
-- **When a typed line counts as arrived is one function**, `lineArrived`,
-  so a row can name each case on its own, the same line typed twice
-  included.
 
-Two items were left for a later branch, and the reasons are what stop them
-being re-proposed as gaps:
+One item was left for a later branch, and the reason is what stops it
+being re-proposed as a gap:
 
-- **A visible row starting with `>` is read as the prompt** (Info 5,
-  older than #31). **Fixed in 0.14.6**, after measuring a real window: on
-  2.1.330 a quoted line typed into the box is drawn as a continuation row
-  (`  > a quoted line`), and the readers took it for the box's prompt row,
-  dropping every line above it. So a four-line message with a quote read
-  as "not holding" and went in as `<pasted_content>`. The prompt row is
-  now the last `❯` row, and a `>` only at the left edge where no `❯` is
-  drawn (`promptRowOf`, in all three readers). Re-measured on the rig:
-  the same message typed and recorded verbatim, and answered.
 - **A fetch may outlast the board's 90 s host-live window** (Info 8). It
   takes a board on another machine at about 9 Mbit/s or less to fetch
   100 MB that slowly; locally it is a second. The two fixes behave
@@ -1613,7 +985,7 @@ being re-proposed as gaps:
   times out under 90 s and refuses large files on slow links), so it is a
   choice to make with a slow link measured, not a guess. Meanwhile the
   floor draws that host's desks unreachable until the fetch ends, then
-  live again, and the message is typed then.
+  live again, and the message is sent then.
 
 ## The milestone audit's foundation (0.12.11)
 
@@ -1623,11 +995,12 @@ provide the foundational proof before we pivot into some new features".
 It ruled in findings 1–5 and two foundation items. The report is in the QA
 repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
 
-- **An open question never leaves the floor while the window asks it**
+- **An open question never leaves the floor while Claude Code asks it**
   (finding 1, High). docs/backlog.md has the whole account. A prompt is
   closed only by the work of the session that raised it, and every
-  heartbeat says which floor windows are asking (`pending`), which is
-  how a board restart, every deploy, no longer forgets them.
+  heartbeat says again what each desk's Claude Code is asking (`ask`
+  events, `standingAsks`), which is how a board restart, every deploy, no
+  longer forgets them.
 - **Work a host takes is done once, handed out again, or said lost**
   (finding 4; the guarantee is written above `takeHostWork` in
   `src/db.js`). It used to be marked taken as it was handed out, and a
@@ -1644,13 +1017,13 @@ repo (`projects/appideas-mcp-orchestratinator/audit-2026-11-17.md`).
   know), and an error turn is what hands them back to the box.
   At most once for window work, on purpose: a host can die after typing
   and before saying so, and a message typed twice is the worse failure.
-- **The stop sign and Press yes / no are tested at the window** (findings
-  2 and 3): Escape and no Enter for a stop; 1 for yes and Escape for no;
-  nothing pressed into a window back at its composer. Rows in
-  `test:window`, `test:host` and the press route's in `test:floor`.
+- **The stop sign is tested at the process** (findings 2 and 3): it
+  reaches Claude Code as its `interrupt` request and the turn ends. Press
+  yes / no, a blind key for a prompt nobody could read, is refused by the
+  host in words now that every prompt arrives as data. Rows in `test:host`.
 - **One stack** (finding 5): Tests, above.
 - **The release gate is one command: `npm run release-gate`** (item A).
-  Every suite and the release page checks (sixteen since 0.14.4, which added check-meeting-held), on the Node and the
+  Every suite and the release page checks (eighteen since 0.14.6, which added check-plate-fit and check-ask), on the Node and the
   packages that ship, with one log whose first line names the head, the
   tree and `node -v`, and whose last is `EXIT=`. Both halves run even
   when the first is red. Measured with a red seeded in a copy, one in
@@ -1679,25 +1052,19 @@ bound elsewhere, and **Move to another floor** on the desk's nameplate card
 so they refuse the same things in the same words. Four rules, each the
 opposite of what ran before.
 
-- **A move that closes the floor's window starts a new conversation**
+- **A move that ends the floor's Claude Code starts a new conversation**
   (costmo, #24 Decided 2). It used to reopen on the one the window had been
-  on, and that was refused every time on the live board — 10 of 10,
-  2026-10-19 → 11-02: `open()` asks `holderOf` who holds the conversation it
-  resumes, and the answer was the window just killed, still in the roster,
-  alive and in no pane, so an editor (`outside_tmux`). On a fresh window the
-  session file goes 4–14 ms after `kill-window` returns and the pid ~0.5 s
-  later, so it is a race; why live windows lose it every time was not found
-  (not swap, not background shells, not another claimant). Two fixes that
-  look available and are not: waiting for the old pid to leave the roster
-  and then resuming (a real second holder must still be refused, and telling
-  the floor's own closing window from one by timing is the brittle part —
-  and it was ruled), and resuming without asking (two copies of one
-  conversation, the thing `holderOf` exists to stop). The old conversation
-  stays in its folder; the picker and History reach it.
-- **A move whose window is already closed opens on the last conversation**
-  (costmo, #24 Decided 3: "Last conversation") — the open path in `bind`,
-  unchanged. There is no closing window for it to meet, and a real second
-  holder (an editor) is still refused there, naming its pid.
+  on, and that was refused every time on the live board, 10 of 10
+  (2026-10-19 → 11-02): the window just closed was still in Claude Code's
+  roster, and the check that refuses a conversation another process holds
+  took it for an editor. Telling the floor's own closing process from a
+  real second holder by timing is the brittle part, and it was ruled;
+  resuming without asking is two copies of one conversation. The old
+  conversation stays in its folder; the picker and History reach it.
+- **A move whose desk runs no Claude Code opens on the last conversation**
+  (costmo, #24 Decided 3: "Last conversation"), the open path in `bind`.
+  There is no closing process for it to meet, and a real second holder (an
+  editor) is still refused there, naming its pid.
 - **A move un-retires the agent's row on the floor it lands on** (#24
   Decided 1, ruled by QA). Every move retires the row it leaves, a retired
   agent has no desk, and only that agent's next MCP connect un-retired it —
@@ -1756,14 +1123,8 @@ have. And **a desk with a hosted row is exactly as live as its host**
 `no_host` words under it — is only ever seen on a desk no host runs; a desk
 whose host is gone is not drawn at all (#20).
 
-How it was measured, for next time: `roster-linger.mjs` in
-**measure-a-real-window** times a real window out of the roster after
-`kill-window`; holding a window with `SIGSTOP` across a move reproduces the
-live refusal word for word but not every time (something other than the
-stopped process removes its session file, 6–14 ms after the kill — not
-found); the host suite's stand-in has `linger.flag`, which is the
-deterministic version. `seed-move.mjs` + `check-card-move.mjs` in
-**verify-ui-change** drive the card on both views.
+`seed-move.mjs` + `check-card-move.mjs` in **verify-ui-change** drive the
+card on both views.
 
 ## Releasing a folder from another instance
 
@@ -1808,16 +1169,16 @@ text is not renamed.
   server name the window connects to both instances. That file may be
   tracked, so a release can dirty a repo's tree, as an import already does.
   The dialog says so before the click.
-- **The conversation goes by a move's two rules.** A window open in the
-  folder is closed and a new conversation opens (#24's race is the same
-  race). It is found by its folder, whichever host opened it: both hosts
-  see every pane on the tmux server. With no window the desk arrives on
-  the conversation somebody last spoke in (`lastSpokenIn`, the session
-  picker's bounded reads), because this host never watched the folder and
-  has no pin. Measured: the resumed window answered `whoami` as the new
-  instance, in the same conversation. With `open: false` a window is still
-  closed and nothing is opened, which is what a caller working through a
-  list wants.
+- **The conversation goes by a move's two rules.** A Claude Code running in
+  the folder is ended and a new conversation opens (#24's race is the same
+  race): this host stops its own, and the instance being left lets its own
+  go when it reads the folder's new binding (`letGoIfReleased`). With none
+  running, the desk arrives on the conversation somebody last spoke in
+  (`lastSpokenIn`, the session picker's bounded reads), because this host
+  never watched the folder and has no pin. Measured on the window layer:
+  the resumed conversation answered `whoami` as the new instance. With
+  `open: false` nothing is opened, which is what a caller working through
+  a list wants.
 - **What became of a take is read from `GET /api/floor/take`**
   (`live.takes`: asked, then seated or refused in the host's words). The
   desk being released has no row on this instance, and the board drops a
@@ -1835,11 +1196,12 @@ text is not renamed.
   `letGoIfReleased` in `host/index.js`). It learns a binding has gone at
   its next rescan, up to a heartbeat later. Measured before the fix: the
   instance that was left received every turn of the new conversation for
-  40 s, because its host found the other host's window by its folder and
-  followed it. It now reads the binding when work arrives for a desk and
-  when a window comes up in its folder, and lets the desk go: 0.9 s on the
-  same rig. A local-scope file that cannot be read concludes nothing. A
-  host on an older build still takes its heartbeat.
+  40 s, because its host found the other host's Claude Code by its folder
+  and followed it. It now reads the binding when work arrives for a desk
+  and when a Claude Code comes up in its folder (`Desk.watch`), and lets
+  the desk go: 0.9 s on the same rig. A local-scope file that cannot be
+  read concludes nothing. A host on an older build still takes its
+  heartbeat.
 - **A poll says when its cursor is another instance's** (`since_ahead`).
   Ids count per instance, so an agent arriving with a remembered `since`
   above this one's newest id polled empty for ever, and the empty poll
@@ -1867,8 +1229,8 @@ Not measured: a chat held in an editor across a release (it followed a
 rebind on one instance in 2026-09; a change of address is the same
 re-read, unwatched), and a host being left that runs an older build.
 
-`two-instances.sh` in **measure-a-real-window** is the rig (two throwaway
-instances, a host each, a tmux server of their own), and
+`two-instances.sh` in **measure-a-real-window** is the rig it was measured
+with (two throwaway instances and a host each, on the window layer), and
 `check-release.mjs` in **verify-ui-change** is the page.
 
 ## One agent, several sessions
@@ -1894,47 +1256,31 @@ answered `I AM ms-a/qa-2`, and one closed and reopened with `--resume <id>
 --mcp-config <file>` answered with the word it had been told to remember
 before it closed. [`host/seats.js`](host/seats.js) is the record.
 
-The host calls such a desk a **seat**. Five things about it, each of which
+The host calls such a desk a **seat**. Three things about it, each of which
 looks like it could be simpler:
 
-- **A seat is told from the folder's own desk by a tag on its tmux window**
-  (`@orch_seat`), never by directory. "The directory is the identity, and the
-  only one" (`paneIn`) is still true of the folder's own window, which is the
-  one with **no** tag; so a host with no seats finds every window exactly as
-  it did. Every function in `host/window.js` takes the folder, or
-  `{ cwd, seat }` ("which window" there), and a desk's roster sessions are
-  shared out the same way (`sessionsAt`): a seat's are the ones in its tagged
-  window, the folder's own desk has the rest, an editor's included.
-- **The tag is set in the tmux command that makes the window.** Set a moment
-  later, a watch tick between the two read the new window as the folder's
-  own. Measured on tmux 3.7c: `set-option -w` with no target after a
-  detached `new-window` tags the *current* window, not the new one, and a
-  window named with a dot in it cannot be named in a target (`p:=qa-desk.x`
-  is "no such window": the dot is where the pane begins). So a seat's window
-  name has no dot, and the tag is `; set-option -w -t <session>:=<name>`.
-- **A seat's window is the first window of all, sometimes, and then what it
-  was given must not stay in the session.** `new-session -e` writes the
-  session's environment (the PR #52 lesson). A seat is given four variables,
-  and left there the folder's own window, opened next, would inherit
-  `ORCH_CHANNEL` and report every hook as the seat. All four are unset after
-  the session is made. `test:seats` opens a seat first for exactly this.
-- **The hook is told which desk its window is.** It finds a desk by folder,
-  and in a seat's window the folder names another desk, so a permission
-  prompt raised there would be drawn on, and answered into, the wrong
-  window. The window carries `ORCH_DESK_CONFIG` (its binding file, read like
-  a `.mcp.json`), `ORCH_DESK_ROOT`, and `ORCH_CHANNEL` / `ORCH_AGENT`. The
+- **A seat is a Claude Code of its own, told apart by the host's record,
+  never by directory.** It is started with `--mcp-config <its binding
+  file>` (`seatConfig`) and four variables (`agentEnv`), and the host knows
+  it from its own seat record (`host/seats.js`). A seat's roster sessions
+  are its own process's only; the folder's own desk has the rest, a
+  terminal's or an editor's included (`watch` in `host/index.js`).
+- **The hook is told which desk its process is.** It finds a desk by
+  folder, and in a seat's folder the folder names another desk, so a
+  permission prompt raised there would be filed on the wrong desk. The
+  process carries `ORCH_DESK_CONFIG` (its binding file, read like a
+  `.mcp.json`), `ORCH_DESK_ROOT`, and `ORCH_CHANNEL` / `ORCH_AGENT`. The
   last two are what the hook has let stand in for the folder's names since
-  its first commit (2026-08-27; every copy in this machine's plugin cache,
-  0.10.12 on, has it), which is why a seat reported correctly on real windows
-  with the plugin that was installed before this was written. The file is
-  what keeps it reporting when the folder's own desk has left.
+  its first commit (2026-08-27), which is why a seat reported correctly
+  with the plugin installed before seats were written. The file is what
+  keeps it reporting when the folder's own desk has left.
 - **A seat never resumes "the folder's newest conversation".** That is
   `resumable()`'s fallback for a pin with no transcript, and in a shared
-  folder the newest is most likely the one another desk's window is running:
-  two processes on one transcript. A seat starts a new one and says so on
-  its desk; the folder's own desk skips conversations its seats are running;
-  and a conversation live in another desk's window is refused
-  (`held_by_other_desk`) and never typed into.
+  folder the newest is most likely the one another desk's process is
+  running: two processes on one transcript. A seat starts a new one and
+  says so on its desk; the folder's own desk skips conversations its seats
+  are running (`seatPids`); and a conversation another process holds is
+  refused (`held_elsewhere`).
 
 What the board adds, and costmo's four rulings (each an AskUserQuestion,
 2026-11-16; do not re-propose the alternatives):
@@ -2008,14 +1354,13 @@ What the board adds, and costmo's four rulings (each an AskUserQuestion,
   floor's first message, as any agent arriving on a floor always has.
 - **A bind does not take a name from a working seat** (QA, PR #57 finding
   3). A folder bound to names one of its seats already carries on that
-  floor closes that seat's window (`bind()`: two desks cannot answer to
-  one name, and the folder's own entry is what its windows connect with).
-  Leave on that seat was refused mid-turn and the bind was not. Both doors
-  onto a bind refuse it now in one sentence (`seatWorkingWords`, in
-  `seatDesk`), and the host refuses from the pane, quoting it, for a
-  window that started working after the board looked. The host says it on
-  the desk the move is from, or on the seat itself for a take: both have a
-  row.
+  floor closes that seat (`bind()`: two desks cannot answer to one name,
+  and the folder's own entry is what its processes connect with). Leave on
+  that seat was refused mid-turn and the bind was not. Both doors onto a
+  bind refuse it now in one sentence (`seatWorkingWords`, in `seatDesk`),
+  and the host refuses it too when the seat's Claude Code started a turn
+  after the board looked (`proc.working`). The host says it on the desk
+  the move is from, or on the seat itself for a take: both have a row.
 - **Leave room asks first**, with the panel's own Leave desk dialog.
 
 And two of his from the same day, on the nameplate card: **Leave room**
@@ -2109,22 +1454,21 @@ Left out on purpose, with why:
   free, and the page follows a move by name. The card says what to use: New
   desk here on the floor wanted, Leave room on this one. Open to costmo's
   reversal; it is two existing controls, not a missing capability.
-- **A seat's conversation is not handed to an editor** (`seat_no_editor`;
-  the panel does not draw the link). An editor opened in the folder loads
-  the folder's binding, so the conversation would carry on as another desk.
-  Nothing can give a VS Code chat a binding of its own. Open in tmux and
-  Open in Claude reach it.
+- **A seat's conversation is not handed to an editor or a terminal**
+  (`seat_no_editor`). An editor or a terminal opened in the folder loads
+  the folder's binding, so the conversation would carry on as another
+  desk. Nothing can give a VS Code chat a binding of its own.
 - **A desk in its own popout is still one place at a time.** Only a desk
   that is in a meeting room gets a second session for another room, which
   is what he asked for. And a room's **Add** offers what it did.
 
 How it is tested: the decisions in `test:floor` ("one agent, several
 sessions"), the host's half in **`test:seats`**, the hook in `test:plugin`,
-a move to a fresh tmux server in `test:renew`, and the page in
-**check-sessions.mjs** (**verify-ui-change**). The mutant lists are kept:
-`mutants-sessions.suite.json` (**mutate-in-a-copy**) and
-`mutants-sessions.page.json`. What only a real Claude Code can say is in
-**measure-a-real-window** ("Two windows in one folder").
+and the page in **check-sessions.mjs** (**verify-ui-change**). The mutant
+lists are kept: `mutants-sessions.suite.json` (**mutate-in-a-copy**) and
+`mutants-sessions.page.json`. What only a real Claude Code can say was
+measured on windows (**measure-a-real-window**, "Two windows in one
+folder").
 
 ## History is read off the hosts, not the board
 
@@ -2316,7 +1660,7 @@ leaves the room selecting with its checks, because nothing was done and
 the remedy is the same click again. A second Nudge while one is in line is
 still refused, now when the room is selected again.
 
-Two more rulings went into the same diff:
+One more ruling went into the same diff:
 - **A floor unread pill opens its dialog every time** (Decided 5). The
   backlog dialog reads `app.js`'s `/api/state` copy, which is polled every
   2.5 s, apart from the floor's 2 s `/api/floor`. A pill drawn between the
@@ -2330,11 +1674,6 @@ Two more rulings went into the same diff:
   action inside one. An earlier note here said a late answer would close
   the dialog through it, and that was a misreading; QA's PR #38 Info 5 and
   a page mutant showed it.
-- **A host error that sends the operator to the window names Open in
-  tmux** (Decided 6). The two errors used to hand them `tmux attach -t …`
-  to type, which is a remedy given as a command. Now they name the control
-  through `OPEN_IN_TMUX` in `host/window.js`, and `test:window` holds that
-  to the page's `LINK_LABEL.attach`.
 
 **A desk's chat can be detached into a popup of its own, and every window
 shares one stream** (issue #19, 0.10.18). The popout is this page with
@@ -3440,7 +2779,8 @@ one number, one word and one process came apart:
   mismatch it catches is a deploy that rebuilt the board and left the host
   running: the board now says so instead of a desk quietly taking no
   message. Do not widen it to a range until there is code that reads an
-  older or newer side correctly; today there is not.
+  older or newer side correctly; today there is not. It is 2 since
+  2026-11-22 ("How a desk runs Claude Code").
 - **`supervised` became `supervisor`**, and the page's update is launchd's
   only. `ORCH_HOST_SUPERVISOR=app` is the app; launchd is still read from
   `XPC_SERVICE_NAME`; `ORCH_HOST_SUPERVISED=1` is still the suites'
@@ -3550,30 +2890,9 @@ decided for it, each additive:
   an empty config dir: `marketplace add <dir>` and `install` exit 0 with
   stdin closed, need no sign-in, are idempotent, and a directory
   marketplace loads in place, so rewriting the copy is the update.
-- **The app's host shares session `orch` on the default socket with a
-  launchd host**, and does not run at all when a launchd host serves the
-  same board. A release finds the window open in the folder through the
-  host's own session (`list-panes -s`), so a session of the app's own would
-  leave the launchd-opened window running beside the app's after a move
-  from Docker, two processes on one conversation. And two hosts for one
-  board would both find every folder bound to it, and both relay and type
-  into its desks. Known and left: `renewServer` is run by whichever host
-  notices a refused server, and resumes only its own desks.
-- **A startup question's cursor is read until it lands, not once.** The
-  reader sweep on 2.1.328 (2026-11-19, load about 100) had `answerStartup`
-  refuse the trust question, `not_taken`, with the pane showing the cursor
-  on "Yes, I trust this folder": the read 80 ms after the last key came
-  before the redraw. That is the first thing every new desk asks, on
-  every machine, so it is fixed for the launchd host too: the cursor is
-  read every 80 ms for up to `ORCH_STARTUP_CURSOR_MS` (1.5 s), and a
-  cursor that never gets there is refused as before, that much later. The
-  keys move one way, so the wanted row is where the cursor stops.
-  `test:window` has a stand-in that redraws 500 ms late. Everything else
-  the sweep read on 2.1.328 held: permission menu (with a new "Tip: auto
-  mode…" line, which lands in the question's text), both form shapes,
-  `/model` with "Switch model?", `/btw`, `/cost` (now listed as "/usage
-  (cost)").
-
+- **The app's host does not run when a launchd host serves the same
+  board.** Two hosts for one board would both find every folder bound to
+  it, and both relay and run its desks.
 - **The app stops its host with SIGTERM and waits 20 s, because the host
   needs that long and Electron gives two.** The host's stop finishes the
   item in hand (up to `ORCH_STOP_DRAIN_MS`, 15 s), then releases and
@@ -3585,7 +2904,10 @@ decided for it, each additive:
   handed back, and 0.12.11's hand-back never ran there. An idle host never
   showed it. Nothing changed in this repo; it is here because the host's
   stop is this repo's, and a supervisor that gives it less than 20 s
-  breaks "done once, handed out again, or said lost".
+  breaks "done once, handed out again, or said lost". Since 2026-11-22 a
+  stop also ends each desk's Claude Code after the release (input closed,
+  SIGTERM at 5 s); whether 20 s still covers a host whose desks are
+  mid-turn has not been measured.
 
 A board to test "connect to Docker" against is a scratch container from
 this tree's image, never the live one, and it is a script:
@@ -3608,25 +2930,17 @@ reaches costmo's app board over an SSH tunnel and has a Docker board of its
 own on that PC's 8787). Nothing here can be seen from the Mac: **a claim
 about Windows is believed when pc-developer has measured it there**, by the
 same rule as the folder dialog's. Ask it with send_message and say what to
-read; costmo nudges it. Every step below was measured, and the code beside
-each says how, so this is the map, not the record.
+read; costmo nudges it. Every step below was measured unless it says
+otherwise, and the code beside each says how, so this is the map, not the
+record.
 
-- **The multiplexer is psmux** (`winget install marlocarlo.psmux`, 3.4.0),
-  which answers tmux's commands. MSYS2's tmux and `arndawg.tmux-windows`
-  were measured and fail the one join that matters (a pane's pid is a
-  shell's, never the pid `claude agents` reports). psmux's differences, each
-  handled on `WINDOWS` only in [`host/window.js`](host/window.js): a window's
-  program is an argument list after `--` (`launchArgs`; Windows has no
-  `exec`, and a shell line leaves the shell as the pane's process);
-  binaries are found by path (`findExe`: winget's Links folder is on PATH
-  only for processes started after the install); a window target is
-  `=orch:name`, never `=orch:=name` (psmux drops the keys silently);
-  `@orch_seat` is session-wide there, so **a seat rides in its window's
-  name** (`seatNameMark`, `--s<hex>`); some refusals exit 0 with the error
-  on stdout (`psmuxRefusal`); `run-shell` runs under **Windows PowerShell
-  5.1** whatever SHELL says, so the macOS folder-read check is off there
-  (`NO_READ_CHECK`); `-J` does not join, and `pane_dead_status` is not
-  filled.
+- **No multiplexer.** A desk's Claude Code is the host's child, started
+  with no shell around it and `windowsHide` (`host/agent.js`), and
+  `claude.exe` is found by its path (`findExe` in `host/claude.js`:
+  `where.exe`, then `~/.local/bin/claude.exe`), because a folder winget
+  adds to PATH is seen only by processes started after the install. psmux,
+  which the window layer needed there, is not used. **The process path has
+  not been measured on Windows** (the second spike's last line).
 - **Paths are a machine's own.** The board (Linux, in a container) takes
   `/…` or a drive (`C:\` or `C:/`) as absolute and compares a drive path
   with separators and case folded (`isAbsPath`, `underRoots`, `baseName` in
@@ -3653,7 +2967,7 @@ each says how, so this is the map, not the record.
   ALT tap, AttachThreadInput to the front window's thread, then
   SetForegroundWindow. It is in [`host/dialog-win.ps1`](host/dialog-win.ps1)
   (the folder dialog, #28) and [`host/front-win.ps1`](host/front-win.ps1)
-  (Open in tmux / Open in Claude, which titles its window with
+  (Open in Claude, which titles its window with
   `--suppressApplicationTitle` so the script can find it). Both were 4 of 4
   in front and focused. Not measured: a locked screen, two monitors.
 - **Windows PowerShell 5.1, which every Windows has, has three traps.** It
@@ -3663,41 +2977,30 @@ each says how, so this is the map, not the record.
   path with an accent is mangled on its way to node; `Get-Content` of the
   UTF-8 log needs `-Encoding UTF8`. Run a script with `-File` (arguments
   arrive whole), never `-Command`.
-- **A host started from inside a Claude Code window hands that session's
-  markers to every window** (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, …),
+- **A host started from inside a Claude Code session hands that session's
+  markers to its children** (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, …),
   and a Claude Code that inherits them writes no transcript ("Transcript
-  saving is off"). `windowEnv` leaves them out (`PARENT_SESSION`) on every
-  platform, a person's own Claude Code settings kept.
-- **What runs on Windows, and what does not.** `test:plugin` runs there
-  (from PowerShell too: its wrapper finds the bash beside `git.exe`). The
-  suites that drive tmux panes do not. Node refuses to spawn a `.cmd` or
-  `.bat` without a shell (the CVE-2024-27980 fix), so an `ORCH_FOLDER_DIALOG`
-  stand-in there must be an `.exe` (`node.exe` with `NODE_OPTIONS=--import`
-  worked). Hooks run under Git Bash; a `node` installed after the terminal
-  that started Claude Code is not on its PATH until a new terminal.
-- **A Claude Code a person types into a psmux window runs one hop
-  under that window's PowerShell** (0.14.5, task 334, measured by
-  pc-developer on 2.1.330). The pane's pid is powershell.exe, and the
-  roster's is claude.exe with that as its parent. `runsUnder` used to
-  answer false on Windows, so the 30 s rule for a window with no record
-  closed that person's window 32 s after they typed `claude`. Parents are
-  read through Win32_Process in PowerShell 5.1 (`parentsCommand`, about a
-  second there), and only when no roster pid matches the pane's, so a
-  window the host started never pays for it (`runsUnderOnce`).
-- **On 2.1.330 a new window can draw "Teach auto mode about your
-  environment?"**, and three desks on the PC stood dead on it on
-  2026-11-22: read as idle, the floor's messages going into the dialog.
-  It was the old class (an unknown screen reads as idle), and
-  `docs/robustness-review.md` is pc-developer's write-up of it. 0.14.6
-  answers the class rather than the dialog: "A screen the floor does not
-  know", above. The dialog is read by its shape; it was not raised on
-  the Mac, because its gate is server-side and needs the operator's own
-  config.
+  saving is off", measured by pc-developer on 2.1.330). `windowEnv` leaves
+  them out (`PARENT_SESSION`) on every platform, a person's own Claude Code
+  settings kept.
+- **What runs on Windows.** `test:plugin` runs there (from PowerShell too:
+  its wrapper finds the bash beside `git.exe`). Node refuses to spawn a
+  `.cmd` or `.bat` without a shell (the CVE-2024-27980 fix), so an
+  `ORCH_FOLDER_DIALOG` stand-in there must be an `.exe` (`node.exe` with
+  `NODE_OPTIONS=--import` worked). Hooks run under Git Bash; a `node`
+  installed after the terminal that started Claude Code is not on its PATH
+  until a new terminal.
+- **"Teach auto mode about your environment?"** stood three desks dead on
+  the PC on 2026-11-22, read as idle on the window layer
+  (`docs/robustness-review.md` is pc-developer's write-up). On the process
+  path no dialog is drawn: one Claude Code raises would arrive, by the
+  binary, as `request_user_dialog`, which the host declines and says on the
+  desk. Not measured.
 
-Measured working there at 9e160cc: the README's Docker install (with
-`/plugin marketplace add ./`), the installed host (silent start, restart
-after a kill, clean stop, AtLogOn, uninstall), messages, permissions and
-questions from the floor, `/mcp` reconnect, Take a desk with the native
+Measured working there at 9e160cc, on the window layer: the README's Docker
+install (with `/plugin marketplace add ./`), the installed host (silent
+start, restart after a kill, clean stop, AtLogOn, uninstall), messages,
+permissions and questions from the floor, `/mcp` reconnect, Take a desk with the native
 dialog, seats, History, attachments, and both terminal buttons in front.
 How to measure a window or a dialog there is **measure-the-desktop**'s
 Windows section.
@@ -3724,16 +3027,19 @@ first for the shell, chosen by what it needs (Node-API 10), not by its
 number ("The host under the desktop app", above); every runner under
 `.claude/skills` sources it.
 
-**And from a window on the app's floor, the host's own `ORCH_` variables
-are unset first** (2026-11-20; the two lines and the red they cause are at
-the end of "The clear of 2026-11-20"). A suite's hosts are started with
-`...process.env`, so an inherited `ORCH_AUTH_TOKEN` or
-`ORCH_HOST_SUPERVISOR=app` is theirs too. `env | command grep -c '^ORCH_'`
-should print 0 before a run whose result will be quoted. Since 0.14.4 a
-window a host opens carries none of them (a seat's window carries its own
-four, which a suite does not read), so the unset is for a window opened
-before that host started; the count says which you are in. And a suite run
-from any window still wants `TMPDIR` set if the count was not 0.
+**And the host's own `ORCH_` variables are not in a suite's environment.**
+A suite's hosts are started with `...process.env`, so an inherited
+`ORCH_AUTH_TOKEN` or `ORCH_HOST_SUPERVISOR=app` would be theirs too
+(2026-11-20: a host meant to have no key had the app's, and the host suite
+read one red). A desk's Claude Code is started with none of them ("The
+clear of 2026-11-20"; a seat's carries its own four, which a suite does
+not read), so `env | command grep -c '^ORCH_'` should print 0 (4 in a
+seat's process) before a run whose result will be quoted. In a shell where it does not:
+
+```
+for v in $(env | command grep -o -E '^ORCH_[A-Z_]+'); do unset "$v"; done
+export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
+```
 
 **What ships is what is tested: one Node major and one lockfile**
 (costmo's ruling on the milestone audit's finding 5, 2026-11-17, in
@@ -3775,42 +3081,29 @@ day), and the host ran under launchd on the shell's Node 20. Now:
   measured, a real `docker build` of the round's tree loads it (SQLite
   3.53.4) on Node 24.22.2 / npm 11.19.1.
 
-`npm test` runs thirteen suites. `test:host` and `test:window` are not unit tests:
-they drive **real tmux panes** against a **real server**, with a stand-in
-`claude` (a `.cjs`, because this package is `"type": "module"`). They use their
-own tmux session names and ports, so they are safe to run beside a live host —
-but a suite killed halfway leaves a server on port 8896 and fixtures in `data/`,
-which will poison the next run. Check for both before concluding a failure is
-real.
-
-Two more things about `test:window`, both from 2026-09-09. Its stand-in
-fakes exactly what the host reads and no more: it answers `agents`, it
-answers `stop <job>` by dropping the roster entry the test wrote for itself
-(and refuses job `stuck-1`, for the failure path), and on `--resume` it
-registers its own pid under that id, because readiness and delivery read the
-roster — a case that opens a window from a message needs that, or it waits
-out the 45s readiness timeout on "the roster had nothing at all". It writes
-no transcript, so a send that opens a window can only end `not_delivered`
-there; the case asserts the release, the window and the text arriving, and
-delivery is proved by the section that writes its own transcript. And the
-fixture panes used to be read a fixed 500 ms (700 ms for the alternate-screen
-form) after creation: under editor load that went red with `its last line
-reads ""` or `no_prompt` — twice on 2026-10-01, once on 2026-10-03, once in
-QA's review of PR #25 — and green on every rerun. Since 2026-11-02 `drawn()`
-in `test/window.mjs` waits up to 8 s for the pane to show anything instead,
-the same settle-on-an-observable rule the host lives by. A red of that shape
-now means the pane really drew nothing; read it rather than rerunning.
+`npm test` runs thirteen suites. `test:host` and `test:seats` are not unit
+tests: each runs a **real host** against a **real server**, and the host
+runs a stand-in Claude Code for each desk (`ORCH_HOST_CLAUDE`) that speaks
+stream-JSON the way 2.1.330 was measured to and writes what Claude Code
+writes on disk that the host reads (its roster entry while it runs, its
+transcript), under a fixture HOME. `test:agent` holds `host/agent.js`
+against a protocol stand-in alone (what it does by the words of a message
+is in its header), and `test:claude` holds what survived of the window
+suite in `host/claude.js`: the roster, the transcripts, the picker, a
+resume's fallback, the environment. A suite killed halfway leaves a server
+on its port (8896 for the host suite, 8902 for seats) and fixtures in
+`data/`, which will poison the next run. Check for both before concluding a
+failure is real.
 
 **Stopping a full run halfway takes more than killing `npm test`.** The
 chain is `npm run smoke && npm run test:admin && …`, and on 2026-11-02
-killing `npm test` and the `node test/host.mjs` under it left the chain's
-next link, `node test/window.mjs`, starting on its own with a tmux session
-and a fixture of its own. What a half-run leaves, all named by the suite's
-pid: `node test/<suite>.mjs`, its `node src/server.js`, a tmux session
-`orch-host-test-<pid>` or `orch-test-<pid>`, and `data/host-<pid>*`,
-`data/window-fixture-<pid>` or `data/floor-<pid>*`. Kill the `node test/`
-processes and their servers, `tmux kill-session` each test session, remove
-the fixtures, then check `tmux ls` and `data/` again before the next run.
+killing `npm test` and the suite under it left the chain's next link
+starting on its own. What a half-run leaves, all named by the suite's pid:
+`node test/<suite>.mjs`, its `node src/server.js`, its stand-in Claude Code
+processes, and its database and fixture under `data/` (`host-<pid>.db`,
+`host-fixture-<pid>`, `seats-<pid>.db`, `floor-<pid>.db`, and the like).
+Kill the `node test/` processes and their servers, remove the fixtures,
+then check `data/` again before the next run.
 `lsof` and `netstat` are not on this machine; match on the command line
 with `ps -Ao pid,command`. **The shell is zsh, which does not split an
 unquoted variable**: `kill $PIDS` hands kill one word and kills nothing
@@ -3845,24 +3138,13 @@ wait-until-load-drops loop built on `sysctl -n vm.loadavg` read an empty
 string, compared it as small, and reported "load ok" at 336. Use
 `/usr/sbin/sysctl`, and make such a loop refuse an empty reading.
 
-Three more reds were seen in `test:window` on 2026-10-01, in one full run
-under load (load average 7–14): "the presser succeeds once the cursor is
-confirmed on the right row", "and reports which row it took", "with Enter
-actually reaching the window this time" — all in *answering a startup
-question, against a real pane*. The suite alone straight after was green,
-and so were the next two full runs and QA's. Nothing in that section had
-been touched. The cause was not found; it is recorded here so the next one
-is recognised, not so it is waved through — rerun, and if it repeats, read
-the pane.
-
 **QA's clean-clone runs share this machine's CPU, not its ports.** Their
 suite announces itself on the channel with its ports (8896–8901, or 8871/
 8872 when they stay off yours); a full run of yours overlapping it went
-red in six `test:host` cases — "typing from the floor" and "reading the
-conversation back", real panes — at load 5.5, and `test:host` alone
-straight after was green (2026-11-03, task 247). Read the channel for
-their announcement before a full run, and if you overlapped, rerun the
-red suite alone before reading the pane.
+red in six `test:host` cases at load 5.5, and `test:host` alone straight
+after was green (2026-11-03, task 247). Read the channel for their
+announcement before a full run, and if you overlapped, rerun the red suite
+alone before reading anything else.
 
 **Load from other projects is expected, and nothing waits for it to
 pass** (costmo, 2026-11-16: "work around high system load as needed … work
@@ -3898,331 +3180,53 @@ the rules' way:
   before it was there or mid-write, and each fix waited on the thing
   itself, never on a longer timeout.
 
-**Seven take-a-desk reds in `test:host` were a race in the case before
-them, not load** (2026-11-07). "and within seconds the host has bound it"
-and six after it went red with the window suite running beside the host
-suite, and the reading was load; then once more with nothing beside it.
-The host log had the mechanism: `found desk host-test/pane` and, 45.4 s
-later, `dropped desk host-test/pane` and the bind. The placeholder-key
-case (PR #52) opens a window, reads its env line, kills the pane and puts
-the roster back, and the env line is written at the stand-in's first
-breath, before its roster entry. So the host's `waitReady` for that pane's
-pid found nothing in the roster, and could not see the pane die either
-(its exit check reads `#{pane_dead}`, which a target that no longer exists
-does not answer), and sat out `READY_TIMEOUT_MS` with the next section's
-bind in line. When the host's poll won the race the run was green, which
-is why it read as load. The case now waits for the window's
-`remain-on-exit` to read `off`, which `waitReady` sets the moment it finds
-the session, before anything is taken down. A red of that shape again is
-something else; read the host log's gap first. The suite prints the host's
-log at its end, every line timed, and a gap of `READY_TIMEOUT_MS` between
-two lines is a window the host was waiting on. The gap in `waitReady` is
-the host's own, and was left open when this was written (2026-11-08,
-on develop): a window closed by hand while it is starting held the host's
-line for 45 s. It was fixed since, on main, in `waitReady` itself (QA,
-PR #57 Info 10, below: it says `window_gone` at its next look), after the
-same seven reds were first written down there as load.
+**Reading a red in `test:host`.** The window layer's host suite had a long
+run of intermittent reds, each first written down as load. What still
+holds from them:
+- **A red that goes green on a rerun is not thereby load.** Four sightings
+  of one were written down as load, each with a load average beside it,
+  and it was a race (QA, PR #57 Info 10). **The host's log beside the reds
+  is what names it**: the suite prints the host's log at its end, every
+  line timed, and a gap in it is work held on the host's line; the line
+  before the gap is where to look.
+- **A move's session row on the new floor** ("the new floor holds no
+  session row for the conversation it left") was a race between `bind()`
+  and the watch loop, seven sightings, all under load, read on the seventh
+  (2026-11-16). `test:host` sets `ORCH_HOST_BIND_GAP_MS=700`, a seam that
+  holds the moment after `bind()`'s rescan open longer than a watch tick,
+  so a race there is seen on every run, not only under load. Unset, the
+  seam is no pause. When that assertion fails the suite prints the session
+  row, the turns filed under the old id with their floor, and the host's
+  log from the move on.
+- **A row that restarts the host and then writes to the transcript waits
+  for a turn to arrive first** (the primer turn): the desk joins the
+  transcript where it stands at its first watch tick, and a marker written
+  before that tick is behind the offset for good.
+- **When a row proves something did not happen, read the whole log after
+  later work has been observed, not after a sleep**: an absence has
+  nothing to wait on (QA, PR #55 Info 11).
+- **When a mutant survives once in several runs, the row is being answered
+  by another path some of the time**: find the second path before adding a
+  wait (QA, PR #57 Info 11). And count reds by what the suite printed:
+  `run-mutants.mjs` once read `FAIL ❌ — 2 failure(s)`, the closing line of
+  most suites, as a third red. `--logs` keeps each run's output, so a count
+  can be checked against it, and `--control` runs an unmutated control
+  beside the mutants (**mutate-in-a-copy**).
+- **An A/B of a flaky row alternates which side goes first, and runs with
+  nothing else of yours beside it** (2026-11-20: a reading of "0 of 4
+  before, 3 of 4 after" was the second run of each pair starting under the
+  first's load).
+- **The heartbeat**: `last_seen` does not mark one (the host registers after
+  every bind and rescan too), and it is checked when the work poll returns,
+  up to 25 s late, not every 60 s on the dot.
 
-**One move-section red in `test:host` has now been seen twice with no other
-suite on its ports.** "the new floor holds no session row for the
-conversation it left" listed two ids: the stand-in's constant `1111…5555`
-beside the fresh one. Seen on 2026-11-03, and on 2026-11-04 with nine more
-reds after it in the same section (PR #38's full run from 15:46:47Z, load
-5.5–7). That second run had company: QA's page checks, probes and
-inversions ran from 15:46:28Z to 16:03:29Z, each with a server and a
-headless Chrome on private ports. That was load, though not a collision,
-and those ports were not announced. QA announces page-run ports too since
-then. `test:host` alone straight after was green both times. The cause is
-not found. A third sighting is the cue to read the session rows at the
-moment of the move, not to rerun again. **Third sighting, 2026-11-05**, the
-0.12.0 (#44) full run, load average 7.6 with nothing else on its ports or
-running beside it: the same assertion, the same two ids, one red only.
-`test:host` alone straight after was green. The session rows were not read
-— the meeting room work it was run for touches no host or session code —
-so the cue stands for the next one. **Fourth, the same day**, in QA's
-re-review of PR #49 (dc6de34): red once in one of ten single-suite host runs
-(inversion R8, whose mutant was elsewhere), green in the other nine and in
-both full suites. Four sightings, each alone or under load, each green on
-the next run: the session rows at the moment of the move are still unread,
-and that is now overdue rather than next.
-
-**Fifth, 2026-11-15**, in the PR #55 round, with seven reds before it in
-*Take a desk* ("and within seconds the host has bound it and registered
-the desk" and the six rows that read that binding): load average 57 at the
-suite's start and 171 at its end, from another project's Android and Xcode
-test builds on this machine, with a page-mutant run of ours beside it.
-`test:host` alone at load 7 twenty minutes later read 327 ✓ and 0 ✗. The
-session rows were again not read: the round was a review's fixes, none in
-the move.
-
-**Sixth, the same day**, in QA's close of PR #55 at f5c2a92: their first
-chain run, load 16–27 with their own page lane beside it; 327 ✓ in the
-second.
-
-**The Take a desk seven again, 2026-11-16**, building 0.12.9: "and within
-seconds the host has bound it and registered the desk" and the six rows
-that read that binding, with this session's own floor suite and a mutant
-lane running beside the host suite at load 22 to 34. Alone straight after,
-at load 10 to 23: 327 ✓. Nothing in the bind had changed. It is the fifth
-sighting's shape, and the same reading: a bind that did not land inside
-its twenty seconds under load.
-
-**That reading was wrong, and the seven are read now** (QA, PR #57 Info
-10, the same day). QA printed the suite's own host log beside the reds:
-the bind took 37 ms, and before it the host had logged nothing for 46 s.
-The twenty seconds were gone before the bind began. What held the host's
-line was the section above it, the placeholder-key desk: the floor opens
-its window, the suite reads what the pane was given and kills the pane at
-once. The host's `open` was still in `waitReady`, and whether it had seen
-the window in the roster by then was a race, lost more often under load,
-which is why it read as load. `waitReady` then waited out
-`READY_TIMEOUT_MS`, 45 s, on a window that was not there, because its
-"did it exit?" read could not see a killed pane (the bullet in *Driving a
-window*, below "a prompt suggestion"). Everything behind it in `run()`
-waited: the rescan the suite had asked for, then the bind.
-
-Fixed in `waitReady`, which now says `window_gone` at its next look, and
-pinned on every run: the suite arms `ready-delay.flag` for that window,
-so the host is always still waiting when the pane goes, and a row reads
-the host doing the next thing asked of it at once. With the fix out it is
-that row and the seven, 8 red, every run. Two things to take from it. A
-red that goes green on a rerun is not thereby load: four sightings of
-this one were written down as load, each with a load average beside it.
-And **the host's log beside the reds is what named it**: a gap in the log
-is work held on the host's line, and the line before the gap is where to
-look.
-
-**The red now reads the rows itself** (2026-11-15, after the sixth). They
-were never read because they are gone with the run's database before
-anyone looks. When that assertion fails, the suite prints the session row
-(its floor, and its times beside the board's clock), the newest turns
-filed under the old conversation's id with the floor each was filed on,
-and the host's log from the move on. A session row is keyed by its id
-alone, so the red means something filed under the old id named the new
-floor after the move. The print says which kind. Run with the mutant the
-case was written against (the move's `bound` naming the conversation it
-left; control 327 ✓, the mutant that one red), it read: the row on the
-new floor, updated in the second of the bind, and every turn under that
-id still on the old floor. So that mutant is an event that writes no
-turn. A turn on the new floor in the print would instead be the relay
-still reading the old transcript after the rebind. Which one the six
-sightings were is not known. The next sighting is read, not rerun.
-
-**Seventh, 2026-11-16, read** (QA's chain run at `da67c91`, load about
-87; the printed block is in QA's evidence, `pr56/npm-test-da67c91.log`).
-The old id's row was on `host-test-2`, updated at 18:33:03, the second of
-the bind. All eight turns under that id were on `host-test`, the newest at
-18:32:39. So it is the event that writes no turn. The host's log names the
-gap: `found desk host-test-2/free` at .340, and `closed its window to
-reopen` at .570. In between, the folder's old window is still running the
-old conversation. `bind()` creates the new desk inside `rescan()` and sets
-the reopen's intent only after that, and after an `await W.paneFor()`.
-`watchLoop()` is a loop of its own and can tick in that await. A desk with
-no intent adopts the newest live session (`watch()`'s newest-wins). That is
-the old window's, and the desk emits `session` for it on the new floor,
-which the board files by id alone. The comment above `fresh` in `bind()`
-already says the intent must be set "before anything else can tick"; it is
-set one await too late. Under load the tick lands in the gap, and that is
-why every sighting was under load.
-
-**Fixed the same day, at costmo's word.** `bind()` asks `paneFor` before
-the rescan and hands the intent over in `intents`. The rescan sets it on
-the desk as it creates it, so the desk has it from its first tick. The
-same race was open on the live instance in any real move. `test:host`
-sets `ORCH_HOST_BIND_GAP_MS=700`, a seam that holds the moment after the
-rescan open for longer than a watch tick. The assertion now sees the race
-on every run instead of under load only. Unset, the seam is no pause.
-Measured in copies at load 6 to 26: the old order (the intent set after
-the rescan) was red on that one assertion 3 of 3, with the same two ids
-as every sighting. With no intent handed to the rescan it was red 1 of 1.
-The control was 327 ✓. The list is
-`.claude/skills/mutate-in-a-copy/mutants-move-race.suite.json`.
-
-**Three more reds seen under other suites' load, none explained, written
-down so the next one is recognised and read** (2026-11-16/17, PR #57's
-rounds after the close; QA's logs are in the QA repo, `evidence/pr57/r3/`
-and `r4/`).
-- `test:host`, issue #5's section: "a failed poll still re-registers
-  before the next" (got `["register","work","register"]`, wanted four),
-  "the work poll is told apart from the register that shares its warning",
-  and once "a refusal by status names the board as well as the path". Red
-  in 5 of QA's runs across two commits, green in the next six on the same
-  trees. Load average did not separate the two groups (12–36 red, 15–41
-  green). What the red runs had was window suites, QA's and mine, on the
-  default tmux server beside them. The rows share `runHost`, which ends
-  the host after 8000 ms and wants four requests seen in that time.
-- `test:host`, "a run leaves no stand-in claude running": one process
-  alive 8 s after `kill-session`, once, at load 28 with five lanes going;
-  328 ✓ twice alone straight after. Whether it was slow to die or outside
-  the suite's session was not caught.
-- `test:renew`, what an agent is told after a move: "the agent whose
-  question was closed is told to ask it again" got the unreadable-folder
-  sentence once in QA's lane, and "the agent that met the refusal is told
-  it can carry on" failed once in mine. The first is not a wait running
-  out: `renew()` read that window's screen as not asking
-  (`p.asking = !!askingOf(screen)`, taken after the wait and before
-  `kill-server`), while the test's `asking` file was still there. So the
-  stand-in had not drawn the question or `askingOf` did not read what it
-  drew. Neither repeated in three runs alone.
-None is in code PR #57 touched. A fourth sighting of any of them is read
-with its log kept (`run-mutants.mjs --logs`, or the suite's own output),
-not rerun.
-
-**The same `test:renew` section, read again on 2026-11-20** (the Windows
-branch). A third row of it, "the agent whose turn was cut off is told so",
-fails the same way: nothing, or the wrong note, reaches that window after
-the move. Its two siblings above failed beside it. All three are older
-than the branch: on a quiet machine (load 4 to 6), 6 runs of `43fadc8`
-against 6 of the branch's head, in clean `git archive` copies, read 1 red
-in 6 on each side. An earlier reading of "0 of 4 before, 3 of 4 after" was
-an artefact: the branch's copy ran second in every pair, and the second
-run of a pair started straight after the first, under load from suites
-and page checks of its own. **An A/B of a flaky row alternates which side
-goes first, and runs with nothing else of yours beside it.** The cause of
-the reds is still not found.
-
-**Two `test:update` reds seen once, under load** (2026-11-19, the Open
-new floors round, load average 84–98): "finished: the board is not rebuilt
-again, the plugin is updated, the host restarts and comes back" (got
-undefined) and "every part on the commit: no button, and now \"You have the
-latest\"" (got "Not checked on this branch yet"). Both are in the Finish
-the update flow, which that round did not touch (it changed Settings'
-first row in app.js). The suite alone straight after read 0 red on the tree
-and 0 red on a copy holding HEAD's page, at load 38. The cause was not
-looked for. A second sighting is read with the suite's output kept, not
-rerun.
-
-**A key log is read after a wait, not straight after `send()`** (QA,
-PR #55 Info 9). The composer stand-in writes its log when a key reaches
-it, and `send()` returns when tmux has taken the key. "which the host
-closed afterwards, once" read the log at once and found no Escape in 1 of
-QA's 4 window runs (load 24–84), with the composer back on the next row.
-It waits for the Escape now and then counts it. A count of keys taken
-straight after a send that ends on a key has the same gap. **And a count
-by mode is not a count** (Info 10): the first Escape puts the stand-in
-back in composer mode, so a second was logged there, and with the host
-made to send two the row still read "once". It is the shape of the
-effort dialog's "once", which needed a dialog that stands 700 ms: a key
-log filtered by the mode a key ends cannot see a repeat. **And an absence
-has nothing to wait on** (Info 11). The first fix counted the Escape in
-every mode 400 ms after the composer was back, and an Escape logged
-600 ms late went unseen. The row now stands at the end of the composer
-section, after a dozen sends that each waited on their own receipts: every
-Escape the pane took, by mode, is `btw` then `cost` and none in a
-composer. When the thing to prove is that a key did not arrive, read the
-whole log after later work has been observed, not after a sleep.
-
-**A row that does something and then looks is answered by whatever tmux
-says at that moment** (QA, PR #57 Info 11). "The last window of all,
-closed while it is waited on" killed a pane and let `waitReady`'s next
-look land where it landed. Asked about a server's last pane in the 400 ms
-after the kill, tmux's first answer was empty in 27 of QA's 40 trials, a
-failed call in the rest, and the two are read by different arms of the
-code. So with the "no server running" arm taken out, the row still passed
-one run in eight. Two things replaced the hope that it would not. The
-decision is a function of tmux's answer (`paneGone`), with a row for each
-answer in tmux's own words, which no timing can move. And the live row
-for that arm waits until the server is gone before the look that counts.
-When a mutant survives once in several runs, the row is being answered
-by another path some of the time: find the second path before adding a
-wait. **And count reds by what the suite printed**: `run-mutants.mjs`
-read `FAIL ❌ — 2 failure(s)`, the closing line of most suites, as a
-third red, from the day it learned to read `test:renew`'s `FAIL <name>`.
-`--logs` keeps each run's output, so a count can be checked against it.
-
-**Two more `test:host` reds seen once, in a mutant's run in a copy**
-(2026-11-14, load 5.5, nothing else on the ports): "a turn written while
-the send is still in flight reaches the floor anyway" and "the floor
-gained a turn rather than replaying the transcript", both in *hearing the
-desk while a message is still going in*, which waits 4 s on the relay.
-The mutant was a field dropped from the host's error event, 500 lines
-away. Run again beside an unmutated control, the control read 320 ✓ and
-the mutant only its predicted red. The cause was not looked for.
-`run-mutants.mjs --control` is how to tell such a red from a mutant's in
-the same run (**mutate-in-a-copy**).
-
-**Read on the second sighting** (2026-11-18, the milestone round, one of
-four plain runs in a copy, load 3–7). The marker the row writes appears
-nowhere in that run's output, so it was never relayed, not relayed late.
-The row restarts the host and waits for the desk to read live, which is
-the registration. The host's desk then joins the transcript where it
-stands at its first watch tick (`follow(id, 'end')`), and that tick can
-come after the row has written the marker, which leaves it behind the
-offset for good. It was a race in the test, not in the relay. The row now
-writes a primer turn and waits for the floor to show it, so the relay is
-known to be reading before anything is timed against it. A row that
-restarts the host and then writes to the transcript has the same race:
-wait for a turn to arrive first.
-
-**Open on `develop` after the main → develop merge (2026-11-18): the
-host suite is red intermittently, and one cause is known.** QA's check of
-the merge (0b51ba0, from a clean clone) read `test:host` red in 3 of 17
-runs, on four timing rows in three places on the watch path: "joined at
-its tail" (`test/host.mjs` near 981), "a window closed while the host was
-still waiting for it to start does not hold the host's line" (near 848),
-and "a window that comes up in a folder released elsewhere is not this
-desk's" with "the desk goes offline here within the watch". Main's tree
-read 0 of about 29 that day, and develop before the merge 0 of 6 on those
-rows. QA's logs: `evidence/merge-develop-2026-11-18/` in the QA repo
-(alt-merge-2.log, alt-merge-5.log, L3a-host-run-with-extra-red.log).
-- **Known, and the merge's:** both sides had fixed one race in the
-  placeholder-key section, differently, and git merged the file without a
-  conflict. Main writes `ready-delay.flag` (8000) so that the host is
-  always still waiting when the pane is killed (PR #57 Info 10). Develop
-  waits for the window's `remain-on-exit` to read `off`, which the host
-  sets only once it has seen the window (2026-11-07). Together, the wait
-  outlasts the delay, the host is no longer waiting when the pane goes,
-  and the row near 848 no longer sets up what it names. **Done
-  2026-11-19:** develop's wait is out, main's flag kept.
-- **The release rows: a race in the case, read and fixed 2026-11-19.**
-  Red in 2 of my 3 runs that day (load 39 to 130), always "a window that
-  comes up in a folder released elsewhere is not this desk's", and the
-  host's log said why: `dropped desk host-test-rel/rel-c … (heartbeat)`,
-  before the watch had looked. The case rebound the folder, then killed
-  the pane and slept `WATCH_SETTLE_MS`, then put the other host's window
-  in the roster. The heartbeat's rescan drops a desk whose folder is
-  bound elsewhere too, it falls about 60 s after the suite's host starts,
-  and that is about when this case runs, so under load it landed in
-  those two seconds. Not a fault in the host: the desk was let go, by the
-  other path. The folder is now rebound in the same moment the window
-  appears, and a red prints the host's log and names the heartbeat if it
-  was that. 3 of 3 green after. The watch path removed is still red there
-  (a mutant in a copy). Two wrong turns on the way, so they are not taken
-  again: `last_seen` does not mark a heartbeat (the host registers after
-  every bind and rescan too), and the heartbeat is not every 60 s on the
-  dot (it is checked when the work poll returns, up to 25 s later).
-- **The same two release rows again, 2026-11-20, and a second race in
-  the case.** Red in 3 of 8 host runs made in a copy that day, an
-  unmutated control among them, at load 5 to 8, with nothing in the host's
-  log from the staging on: not the heartbeat this time. The lines that
-  named it were the host's own, set side by side for a red and a green
-  run (`run-mutants.mjs --logs`): in every red the message to `rel-a`
-  reached the host 100 ms after `rel-c`'s reopen, so the case went on to
-  kill `rel-c`'s new window within a watch tick of its registering. The
-  case waited for `waitReady` to see the window (`remain-on-exit` off),
-  and that is not the watch seeing it. A reopen's intent is let go only by
-  the watch, at the tick that finds the window. Killed before that tick,
-  the window leaves an intent nothing can match for 45 s, and the desk
-  adopts nothing else in its folder meanwhile, the other host's window
-  included. The case now lets the watch settle before it takes the window
-  down. **In the product that is a desk deaf to its folder for 45 s after
-  a window that died in its first third of a second**, ending in "the
-  reopened window did not register within 45s", which is not what
-  happened. **Fixed in 0.14.6**: the intent is let go the moment its pid
-  is gone (`intentVerdict` in `host/window.js`, with a row in
-  `test:window`), said as "the reopened window ended before it
-  registered". The case's settle wait stays.
-- **Not seen in six runs on 2026-11-19:** "joined at its tail" (near
-  981). If it comes back, read the host's log beside it first.
-- **Also owed, from QA's review of 0.12.12 (PR #60, review 5969322428,
-  three Infos):** the window suite's form stand-in (`test/window.mjs`
-  near the "Ready to submit your answers?" fixtures) still draws the old
-  review screen, so no stand-in carries the 2.1.327 screen end to end; a
-  "Switch model?" raised by hand in the window (a `/model` typed there and
-  left standing) is unmeasured on a real window: a floor message is
-  refused as `asking`, and the floor offers nothing to answer it with; and
-  a multi-question form answered from the floor on a live desk is still
-  owed as the live proof of the review-screen fix.
+Seen and not explained, written down so the next one is read with its log
+kept rather than rerun: `test:host`'s issue #5 rows ("a failed poll still
+re-registers before the next" and its neighbours, which share `runHost`,
+ending the host after 8000 ms and wanting four requests in that time), red
+in 5 of QA's runs across two commits (2026-11-16/17) and green in the next
+six; and two `test:update` rows in the Finish the update flow, once at load
+84–98 (2026-11-19), with 0 red alone straight after.
 
 **The activity feed is newest-first, and a kind prefix is wider than it
 looks.** `/api/activity` returns rows newest first, so `.slice(before)`
@@ -4232,15 +3236,6 @@ first cut of the move test asserted both ways, costmo pushed the tree
 while its suite ran, and QA measured a red at that SHA (0d18a9f). Name the
 kinds you mean, and find the new rows by diffing a set of the rows that
 were there before — by identity, not by position or count.
-
-**A fixture pane lives as long as its `sleep`, and the section around it
-grows.** The answer-a-prompt panes end in `sleep 30`. On 2026-10-01 new cases
-that each wait several seconds on a window were added above a later use of
-the `talking` pane, it had exited by the time it was reached, and the refusal
-under test read `no_window` instead of `no_prompt` — red for the fixture's
-age, not the code. That pane now sleeps 180; give a pane used late the same.
-A form that has to answer its keys (the tab walk) is a small node stand-in on
-the alternate screen, `formPane` in `test/window.mjs` — a shell cannot redraw.
 
 **The suites have a stand-in for the person, too.** `ORCH_FOLDER_DIALOG`
 names a program the host runs in place of the operating system's folder
@@ -4268,68 +3263,12 @@ every moment: on 2026-10-01 a mutation run edited `host/index.js` in place
 with a restore step, the commit landed mid-run, and `8788a6d` reached
 `origin/develop` with a line deliberately removed.
 
-**A composer pane and a command-aware stand-in, since 0.10.9.** The window
-suite's `composer-desk` pane (`run.cjs` in `test/window.mjs`) is a node
-program on the alternate screen that draws what Claude Code draws — a
-composer box, the `/btw` overlay with its answer arriving late, the
-"Switch model?" warning (with `switch.flag`), the compaction spinner —
-writes the records Claude Code writes (a `/model` or `/effort` line as a
-user record, a refusal as a `system` one), drops the first Enter the way a
-paste-consumed one is dropped, and logs every key it is sent by mode. That
-log is how "no Enter after a command that opened something" and "the
-warning got one key, the digit" are asserted rather than assumed. It drew
-the model picker until 2026-11-14, when the host stopped driving one. The host suite's stand-in answers
-`/clear` with a new session file and a roster change, `/btw` with an
-overlay, and any other command with its `<command-name>` record. Neither
-has a composer the way the real window does for a *typed* message, so the
-typed delivery (`typeInto`) is proved on the composer pane and on a real
-probe, and the plain stand-in gets a paste.
-
-**Three fixtures from PR #55's review (2026-11-15), each for a path no
-fixture reached.** The composer pane's `effort-ask.flag` makes an
-`/effort` raise "Change effort level?", and that dialog stands 700 ms
-after its digit, so a host that answers at every look is seen pressing
-twice (the "once" in `send()`). A tab marked `deaf` in the window suite's
-`previewPane` logs Enter and does nothing with it, which is the only way
-`not_selected` is reached. And the host suite's `prompt.flag` takes
-`preview`: a preview-layout question drawn once and never redrawn, so the
-cursor stays on row 1 whatever digit is sent and the answer ends
-`not_on_row`, said on the desk as "the form was not submitted". The desk's
-form names a question's header `tab_title`; the first cut of that case
-waited on `header` and was red at a pushed SHA (**answer-a-qa-review**).
-
-**The host suite's stand-in can be slow to die, and can start fresh under
-an id of its own, since 0.10.10** — two flag files, read the way the others
-are because a pane's environment is the tmux server's (above).
-`linger.flag` (ms) is read *at the hangup*, so it can be armed on a window
-already open: the killed stand-in stays alive, and so in the roster, for
-that long — the closing window a move's reopen used to meet (issue #24);
-the suite never met it before because the stand-in died on the instant.
-`fresh-id.flag` gives a window started with nothing to resume that id
-instead of the constant, so "a new conversation" is an id the desk can be
-seen to follow. Remove both when the case is done; the sections below
-expect the constant. And **`argv.log` is one line per window started, and
-a fresh one with no arguments is an empty line**: count launches with
-`.split('\n').slice(0, -1)`, never `.trim().split('\n')`, which reads "no
-window at all" as one launch with nothing to resume and passes a case that
-should be red.
-
-**A lingering stand-in is ended by a watchdog, and a run leaves none**
-(task 263, 2026-11-03). The linger used to end on the stand-in's own
-`setTimeout(process.exit)`, which never fired. After its pane's hangup, Node
-reopens the dead pty (`uv_tty_init → open()`, 775 of 775 `sample`s on the
-main thread), and on macOS that open never returns. So the two windows the
-move case closes under the flag lived on, two per run and 105 by one
-evening, parented to whichever tmux server held the suite's session: on
-this machine the live one, because the suite uses the default socket. They
-did not ignore signals: SIGHUP and SIGTERM each end one. A first reading
-here said otherwise, from a zsh `kill $PIDS` that delivered nothing. The
-linger's watchdog is a detached `sh` that SIGKILLs the pid once the linger
-is up, and only if the pid is still this stand-in. The suite then counts
-`node <its own FIX>/claude.cjs` after `killTmux` (scoped so a run beside it
-is not counted), sweeps whatever is left, and does the same on SIGINT or
-SIGTERM. Anything new that keeps a pane's process alive past its hangup
-needs the same: its own event loop is not there to end it.
+**The host suite's stand-in starts a new conversation under an id the test
+names** (`fresh-id.flag`, used once), so "a new conversation" is an id the
+desk can be seen to follow. And **`argv.log` is one line per process
+started**: count launches with `.split('\n').slice(0, -1)`, never
+`.trim().split('\n')`, which reads "none at all" as one launch and passes a
+case that should be red.
 
 **A chain put in the background with `( … ) &` reports done at once.** The
 agent's shell says "completed" for the command it ran, which was only the
@@ -4340,22 +3279,19 @@ process: `while kill -0 <pid> 2>/dev/null; do sleep 3; done`. And a suite
 run beside your own floor suite or mutant lanes is run under load of your
 making: the host suite read seven reds that way and 327 ✓ alone.
 
-**`test:seats` is the host suite for several windows in one folder**
-(0.12.9). The host suite's stand-in is one window at a time: it writes a
-roster of one entry and one transcript, both named for the fixture's single
-conversation, and a second window overwrites the first's. So seats have a
-suite of their own, whose stand-in is what Claude Code is when several run
-in a folder: each writes its own session file (the host's fast path) and
-its own transcript, connects as the desk its `--mcp-config` file names (or
+**`test:seats` is the host suite for several desks in one folder** (0.12.9;
+rewritten for the process layer 2026-11-22). Its stand-in is what Claude
+Code is when several run in a folder: each process writes its own session
+file and transcript, connects as the desk its `--mcp-config` file names (or
 else the folder's), and answers every message "I AM <channel>/<agent> on
-<conversation>", which is what lets a row say *which desk* a window is. It
-runs on a tmux socket of its own, because it opens the session a seat's
-window creates. Port 8902. It has no plugin, so what a real window's hooks
-do at a close is not in it (see "One agent, several sessions": the fault it
-missed). And **a row that says something "stays" proves nothing while the
-thing is too young to be looked at**: "a session made by New desk here is
-not a room's to close" was green on the mutant that closed it, because the
-sweep leaves any session alone for its first 30 s. The row ages it first.
+<conversation>", which is what lets a row say *which desk* a process is.
+`--resume` of a conversation with nothing in it ends the process on its
+first line, as Claude Code does. Port 8902. It has no plugin, so what a
+real Claude Code's hooks do at a close is not in it (see "One agent,
+several sessions": the fault it missed). And **a row that says something
+"stays" proves nothing while the thing is too young to be looked at**: the
+sweep leaves any session alone for its first 30 s, so such a row ages it
+first.
 
 Three more from PR #57's round (2026-11-16), each a way a row read
 something other than what it named:
@@ -4376,12 +3312,10 @@ something other than what it named:
   board keeps in memory is gone after it. `startServer()` is the function;
   a new row that needs a restart goes beside that one, not earlier.
 
-The seats stand-in can look mid-turn: a message containing `look busy`
-draws "esc to interrupt" as the pane's last line, and `look idle` ends
-it. Its last turn is still a reply, so the board takes it for idle, which
-is the one case the host's own busy check is for. The floor suite runs its
-board with `ORCH_TWIN_UNHEARD_MS=3000`, so the silent-room rows wait
-seconds and not a minute and a half.
+The seats stand-in can be mid-turn on purpose: a message containing `look
+busy` is taken and left without a `result`, and `look idle` ends that turn.
+The floor suite runs its board with `ORCH_TWIN_UNHEARD_MS=3000`, so the
+silent-room rows wait seconds and not a minute and a half.
 
 `test:plugin` covers the floor hook, which is the one part built to fail in
 silence — `hooks.json` runs it detached with every stream sent to `/dev/null`, so
@@ -4452,13 +3386,15 @@ operator's live floor.
 
   | Changed | Run |
   |---|---|
-  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:markdown` also reads `floor.js` (the renderer), `test:window` only its `LINK_LABEL.attach` (read 2026-11-19), `test:update` reads `app.js` |
+  | `src/ui/*` | `test:floor`, and the page checks for the area (**verify-ui-change**); `test:markdown` also reads `floor.js` (the renderer), `test:update` reads `app.js` |
   | server `src/*.js` | `smoke`, `test:admin`, `test:auth`, `test:boardlog`, `test:floor` |
   | `host/index.js`, `dialog.js`, `history.js`, `log.js` | `test:host`, and `test:seats` for `index.js`; `test:floor` and `test:update` also read `index.js` |
   | `host/dialog-win.ps1` | `test:host` (the command rows); what it does on a screen only by hand on Windows, from a hidden scheduled task, with somebody watching (the header of `host/dialog.js`) |
-  | `host/front-win.ps1`, `host/install.ps1` | no suite: by hand on Windows through pc-developer (**measure-the-desktop**, Windows); `test:window` holds the Terminal's arguments (`wtAttachArgs`) |
+  | `host/front-win.ps1`, `host/install.ps1` | no suite: by hand on Windows through pc-developer (**measure-the-desktop**, Windows) |
   | `host/supervise.mjs` | `test:host` ("the supervisor Windows runs the host under") |
-  | `host/window.js` | `test:window`, `test:renew`, `test:markdown`, `test:seats`, and `test:host`, whose host runs it |
+  | `host/agent.js` | `test:agent`, and `test:host` and `test:seats`, whose host runs it |
+  | `host/desk.js` | `test:host`, `test:seats`, and `test:floor` (`commandPlan`) |
+  | `host/claude.js` | `test:claude`, `test:host`, `test:seats` |
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `host/auth.js` | `test:host` |
   | `host/version.js` | `test:host` (its unit rows and the version line on a desk) |
@@ -4581,7 +3517,7 @@ operator's live floor.
   every measured rule above still binds you.
 - **Errors state what is observed, never a guessed cause.** A message that named
   one likely reason for a stalled window sent two people after a dialog that was
-  not on screen while the real prompt sat there unread. Quote the pane.
+  not on screen while the real prompt sat there unread. Quote what was seen: the log line, Claude Code's own words.
 - Comments here explain *why*, especially where the obvious approach was tried
   and failed. Several say so outright. Preserve that when editing near them.
 - **A deliberate omission needs its reasoning written down, or it reads as
@@ -4589,14 +3525,11 @@ operator's live floor.
   every session: an agent meets a gap, makes the same reasonable guess about
   why it is there, and offers to fill it. Saying "this is deliberate" is not
   enough — what stops the question is showing that the failure mode being
-  imagined does not occur. `ANSWERS` in [`host/window.js`](host/window.js) is
-  the worked example: it says both why the host will not answer a trust
-  question *and* what happens to a desk stranded on one — since 2026-09-03
-  the question is read off the pane and offered on the floor, row for row,
-  and the host presses only the row the person picked (`startupQuestionOf`,
-  `answerStartup`). Its earlier claim that no desk could arrive cold was
-  wrong twice over (a VS Code session defers the MCP approval; re-pointing
-  `.mcp.json` invalidates it), and the note now says so. Write the second
+  imagined does not occur. The `ask` handler in [`host/desk.js`](host/desk.js)
+  is a worked example: it says both why the host declines a request the
+  floor cannot answer (so the turn is not held for ever) *and* what the
+  operator sees instead (a line on the desk naming the request). Write the
+  second
   half. If you find yourself asking "is now the time to do this?" about
   something with no note beside it, the answer may well be no — and the fix is
   a paragraph, not a feature.

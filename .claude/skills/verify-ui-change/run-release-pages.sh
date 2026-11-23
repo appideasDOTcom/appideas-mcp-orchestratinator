@@ -19,9 +19,9 @@
 # whose second board, the app's own, is on its PORT+40; signin, the
 # fifteenth, from the release-prep round, 2026-11-19; meeting-held, the
 # sixteenth, from 0.14.4: a meeting kept across a quit of the app;
-# plate-fit and screen-prompt, the seventeenth and eighteenth, from 0.14.6:
+# plate-fit and ask, the seventeenth and eighteenth, from 0.14.6:
 # a nameplate and a room's Nudge on one line, the floor under 900px, and a
-# dialog or a screen the floor does not know on a desk); a pair that is taken is
+# permission or a question a desk's Claude Code asks); a pair that is taken is
 # refused by the runners, so read the channel for QA's ports first. Run it
 # after the full `npm test`, never beside it: two tmux-driving suites, or a
 # suite and these Chromes, on one machine is what made PR #57's Info 12.
@@ -34,7 +34,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 . "$REPO/scripts/node-floor.sh" || exit 2
-ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows attention settings signin meeting-held plate-fit screen-prompt"
+ALL="backdrop chat-controls chatbox pop-foot popout popout-session card-move hide update attach attach-meeting floor-windows attention settings signin meeting-held plate-fit ask"
 LIST="${*:-$ALL}"
 COPY="$("$REPO/.claude/skills/mutate-in-a-copy/copy-repo.sh" "${TMPDIR:-/tmp}/orch-release-pages")" || exit 2
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/release-pages-out.XXXXXX")"

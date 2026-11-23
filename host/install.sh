@@ -27,20 +27,6 @@ CONF_DIR="$HOME/.orchestratinator"
 CONF="$CONF_DIR/host.json"
 LOG_DIR="$CONF_DIR/log"
 
-# tmux is how the floor drives Claude Code: each desk is a window in one tmux
-# session, which the floor types into and you can attach to. Without it the
-# host has nothing to drive, so this is a hard requirement rather than a hint.
-if ! command -v tmux >/dev/null 2>&1; then
-  echo
-  echo "tmux is not installed, and the host needs it — each desk is a tmux window." >&2
-  if command -v brew >/dev/null 2>&1; then
-    echo "Install it with:  brew install tmux" >&2
-  else
-    echo "Install it with your package manager (e.g. apt install tmux)." >&2
-  fi
-  exit 1
-fi
-
 URL=""
 TOKEN=""
 while [ "$#" -gt 0 ]; do
@@ -115,9 +101,10 @@ ROOTS="${ROOTS%,}]"
 ' "$CONF" "$ROOTS" "$URL" "$TOKEN"
 echo "wrote $CONF${TOKEN:+ (shared secret from $TOKEN_FROM)}"
 
-# No install step: the host has no dependencies. It drives the `claude` already
-# on this machine — the one that is signed in — through tmux, and talks to the
-# server with fetch. Nothing to download, nothing to keep in step with a release.
+# No install step: the host has no dependencies. It runs the `claude` already
+# on this machine — the one that is signed in — as a process per desk, spoken
+# to through Claude Code's programmatic interface, and talks to the server
+# with fetch. Nothing to download, nothing to keep in step with a release.
 
 # The LaunchAgent. PATH is set explicitly because launchd does not read your
 # shell profile, and the host needs to find both node and claude.
@@ -166,7 +153,6 @@ fi
 echo "started $LABEL — log: $LOG_DIR/host.log"
 
 echo
-echo "To sit at a desk yourself:          tmux attach -t ${ORCH_TMUX_SESSION:-orch}"
-echo "  (each desk is a window in it — the same session the floor types into)"
+echo "To sit at a desk yourself:          Open in Claude, on its panel on the floor"
 echo "To stop the host:                   launchctl bootout gui/$(id -u)/$LABEL"
 echo "To see it:                          tail -f $LOG_DIR/host.log"

@@ -3713,7 +3713,7 @@ function sessionsArrived() {
   }).catch(() => { /* the poll in askSessions will say so */ });
 }
 
-const EDITOR_HOLDS = 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.';
+const EDITOR_HOLDS = 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there first — one app holds a conversation at a time.';
 
 function sessionRowsHtml(fm) {
   const rows = fm.rows ?? [];

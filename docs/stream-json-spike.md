@@ -83,3 +83,39 @@ anything that changes what works today.
 first."** The next round measures the unknowns above with one desk on a
 scratch board and a host that speaks stream-JSON, and brings the result
 back to him before any redesign. Nothing of it is in 0.14.6.
+
+## The second spike (2026-11-22, the same evening)
+
+One stream-JSON process per run, kept open across turns, on 2.1.330 and
+Haiku 5.5, in scratch folders, with a scratch board on its own port for
+the MCP rows. The driver is the session's scratch script, not product code.
+
+| Asked | What a real 2.1.330 did |
+|---|---|
+| A folder never trusted | Ran. No trust question on this path |
+| A project `.mcp.json` in such a folder | Connected and used, no MCP approval asked |
+| A folder bound in local scope | Its tools loaded, no approval |
+| The roster while running | Listed: `kind: interactive`, `entrypoint: sdk-cli`, pid, session id, cwd |
+| `/cost` typed as a message | The usage text, as the reply |
+| `/btw` typed | "/btw isn't available in this environment." The `side_question` control request answers instead ("Four") |
+| `/mcp` typed | A one-line summary. The `mcp_status` control request gives every server's state as data |
+| `/compact` typed | `status: compacting`, a `compact_boundary` record, and the turns after it went on |
+| `/clear` typed | A `conversation_reset` record naming the new id, then the new session's `init` |
+| The board stopped and started under it | Tool calls failed ("not connected"). The `mcp_reconnect` control request (`serverName`) brought it back at once, nothing typed |
+| A message sent while a turn ran | Taken into the running turn: one result answered both |
+| The `interrupt` control request | The turn ended "[Request interrupted by user]"; the next message was answered |
+| Effort, as `apply_flag_settings` `{ effortLevel }` | Accepted; `~/.claude/settings.json` unchanged (same sha256 before and after). Whether the level took effect was not shown |
+| Handed to a terminal and back | `claude --resume <id>` in tmux took the conversation and answered there; `/exit`; the stream-JSON process resumed it and knew what was said in the terminal |
+| A dialog like "Teach auto mode" | Not raised; the binary has a `request_user_dialog` record on this path, so it would arrive as data. Not measured |
+
+What this settles: everything the floor does today has a programmatic form
+except `/btw` typed (its control request replaces it), and the editor or
+terminal handoff is the one-process rule as it already stands: the floor's
+process ends, the person's resumes, and back. What it changes that matters:
+**no trust question and no MCP approval are asked on this path**, so the
+operator's choice of a folder (Take a desk) is the only consent; and a desk
+has no screen to attach to while the floor holds it.
+
+What is still not measured: a dialog arriving as `request_user_dialog`, the
+effort actually applied, a process held open for hours, signed out, and
+Windows.

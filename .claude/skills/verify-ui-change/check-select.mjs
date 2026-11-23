@@ -214,7 +214,7 @@ ok(!a.selecting && seen.every((x) => x.line.startsWith('closed')), 'the room sta
 eq(a.miss, 'nudge: 3 nudged · 3 not nudged — cy, ed, di', 'the room\'s line counts every desk and names the ones not nudged, cy joining when its window gave up');
 const why = Object.fromEntries((a.missTitle ?? '').split('\n').filter((l) => /^\w+: /.test(l)).map((l) => [l.slice(0, l.indexOf(':')), l.slice(l.indexOf(':') + 2)]));
 eq(why.cy, 'Claude Code is open in that window but has not finished starting — something on screen is waiting for an answer.', 'on hover, cy\'s reason in the host\'s words');
-ok(/^No host on this board/.test(why.ed ?? '') && /open in your editor/.test(why.di ?? ''), 'and ed\'s and di\'s in the server\'s words');
+ok(/^No host on this board/.test(why.ed ?? '') && /open in another app/.test(why.di ?? ''), 'and ed\'s and di\'s in the server\'s words');
 const sent = work().slice(workBefore).filter((w) => w.kind === 'chat');
 eq(sent.map((w) => `${w.agent}:${w.payload?.text}:${w.did}`), ['ann:nudge:typed', 'bo:nudge:typed', 'cy:nudge:error', 'gil:nudge:opened, typed'],
   'the host was sent the windowed desks first, then the windowless, and nothing for the two it cannot reach');

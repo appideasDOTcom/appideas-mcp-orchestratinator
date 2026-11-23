@@ -28,7 +28,7 @@ const args = process.argv.slice(2);
 const [repo, boardPath] = args.filter((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1].startsWith('--')));
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 if (!repo || !boardPath) { console.error('usage: turn-lag.mjs <repo> <board.json> [--held-ms N]'); process.exit(2); }
-const { readTranscript } = await import(join(repo, 'host/window.js'));
+const { readTranscript } = await import(join(repo, 'host/claude.js'));
 const board = JSON.parse(readFileSync(boardPath, 'utf8'));
 const P = join(homedir(), '.claude/projects');
 const where = new Map();

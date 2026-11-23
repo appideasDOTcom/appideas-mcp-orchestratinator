@@ -1,36 +1,27 @@
 // End-to-end test for hosting: a real host process against a real server,
-// driving a real tmux pane — the whole path a message takes from the floor's
-// composer into a window, and the whole path a turn takes back out.
+// and a stand-in Claude Code the host runs for each desk, spoken to as JSON
+// over stdin and stdout (host/agent.js, host/desk.js; costmo's ruling,
+// 2026-11-22, replacing the tmux window layer).
 //
 // Claude Code itself is not launched: ORCH_HOST_CLAUDE points at a stand-in
-// that answers `agents --json` with a roster and otherwise sits reading stdin
-// like a TUI would. HOME is pointed at the fixture too, so the transcript the
-// host tails is one this test writes rather than anything on the real machine.
-// Everything else is the real thing — desk discovery from .mcp.json, the long
-// poll for work, tmux delivery, the transcript tail, and the SSE feed.
-//
-// The assertions that matter most are the ones that used to be impossible. A
-// previous version of this file asserted the opposite of the first one:
-//
-//     eq(r.status, 409, 'a message from the floor is refused while the terminal drives');
-//     eq((await r.json()).code, 'terminal_driving', 'with the reason');
-//
-// It passed, and it was encoding the bug. A desk has no driver now: you type
-// on the floor or you type in the window, and both land in the same session.
+// that speaks stream-JSON the way 2.1.330 was measured to (test/agent.mjs has
+// the protocol alone), and also writes what real Claude Code writes on disk
+// that the host reads: its roster entry under ~/.claude/sessions while it
+// runs, and its transcript. HOME is pointed at the fixture, so every file the
+// host reads is one this test or its stand-in wrote. Everything else is the
+// real thing: desk discovery from .mcp.json and local scope, the long poll
+// for work, the process per desk, the transcript tail, and the board's own
+// routes, which is where every row below reads its answer.
 //   npm run test:host
 import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, chmodSync, utimesSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { userInfo } from 'node:os';
 import { dialogCommand, hasDialog, startFor, readAnswer, pickIsStale, parentPort, readParentAnswer, askParent, dialogBackend } from '../host/dialog.js';
 import { ATTACHED_HEADER, withAttachments, retentionDays, sweepUploads, fetchUpload } from '../host/uploads.js';
-// The stand-in windows here print text and draw no composer, so every
-// pane would read as a screen the floor does not know (host/window.js,
-// unknownScreensOn). Rows that are about that rule turn it back on.
-process.env.ORCH_UNKNOWN_SCREENS ??= 'ignore';
 
 const PORT = Number(process.env.HOST_TEST_PORT ?? 8896);
 const DB_PATH = `./data/host-${process.pid}.db`;
@@ -39,11 +30,13 @@ const KEY = 'host-shared-secret';
 const CH = 'host-test';
 const FIX = resolve(`./data/host-fixture-${process.pid}`);
 const HOME = `${FIX}/home`;
-const TMUX_SESSION = `orch-host-test-${process.pid}`;
 const WATCH_SETTLE_MS = 2000;
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const REPO = `${FIX}/repo-a`;
-const SINK = `${FIX}/received.txt`;
+// What the stand-in was sent on its stdin, one JSON line a record, logged as
+// it handles each one: a message's words, a control request, an answer.
+const STDIN_LOG = `${FIX}/stdin.log`;
+const SESSIONS_DIR = `${HOME}/.claude/sessions`;
 
 let failures = 0;
 const assert = (cond, msg) => {
@@ -68,8 +61,14 @@ const deskOf = (f, agent) => f.channels.find((c) => c.channel === CH)?.desks.fin
 const turns = (agent) => json(`/api/floor/turns?channel=${CH}&agent=${agent}`).then((r) => r.json());
 const chat = (agent, text) => json('/api/floor/chat', { channel: CH, agent, text });
 
-const received = () => (existsSync(SINK) ? readFileSync(SINK, 'utf8') : '');
-const clean = (s) => s.replace(/\x1b\[20[01]~/g, '');
+/** Every record the stand-ins were sent, in order. */
+const stdinRecords = () => (existsSync(STDIN_LOG) ? readFileSync(STDIN_LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+/** The words of every message the stand-ins were sent: what used to be "typed into the window". */
+const received = () => stdinRecords().filter((r) => r.type === 'user').map((r) => r.text).join('\n');
+const clean = (s) => s;
+/** The answers the stand-ins were given to what they asked (can_use_tool), and the control requests they were sent. */
+const answersSent = () => stdinRecords().filter((r) => r.type === 'control_response');
+const controlsSent = () => stdinRecords().filter((r) => r.type === 'control_request');
 
 async function until(fn, ms = 8000) {
   const stop = Date.now() + ms;
@@ -88,15 +87,35 @@ async function waitHealthy() {
   return false;
 }
 
-/** The transcript Claude Code would write, where the host will look for it. */
-const slug = () => REPO.replace(/[^A-Za-z0-9]/g, '-');
-const transcript = () => `${HOME}/.claude/projects/${slug()}/${SESSION_ID}.jsonl`;
+/** The transcript Claude Code writes, where the host will look for it. */
+const slugOf = (dir) => dir.replace(/[^A-Za-z0-9]/g, '-');
+const slug = () => slugOf(REPO);
+const transcriptOf = (dir, id) => `${HOME}/.claude/projects/${slugOf(dir)}/${id}.jsonl`;
+const transcript = () => transcriptOf(REPO, SESSION_ID);
 const appendTurn = (obj) => appendFileSync(transcript(), `${JSON.stringify(obj)}\n`);
+
+/** The live Claude Codes in a folder, from the roster files the stand-ins write. */
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const procsIn = (dir) => {
+  let names = [];
+  try { names = readdirSync(SESSIONS_DIR); } catch { return []; }
+  return names.map((n) => { try { return JSON.parse(readFileSync(`${SESSIONS_DIR}/${n}`, 'utf8')); } catch { return null; } })
+    .filter((s) => s && s.cwd === dir && s.name === 'stand-in' && alive(s.pid));
+};
+const pidIn = (dir) => procsIn(dir)[0]?.pid ?? null;
+/** A roster entry for a process that is not a stand-in: an editor, a terminal, another instance's Claude Code. */
+const rosterEntry = (pid, cwd, sessionId, name = 'someone else') =>
+  writeFileSync(`${SESSIONS_DIR}/${pid}.json`, JSON.stringify({ pid, cwd, sessionId, kind: 'interactive', startedAt: Date.now(), name }));
+const dropRosterEntry = (pid) => rmSync(`${SESSIONS_DIR}/${pid}.json`, { force: true });
+const argvLog = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
+// One line per Claude Code started (the stand-in logs nothing else), so none at all reads as [].
+const launches = (from) => argvLog().slice(from).split('\n').slice(0, -1);
+/** The next conversation a stand-in starts on a fresh conversation (or a /clear) gets this id, once. */
+const nextFreshId = (id) => writeFileSync(`${FIX}/fresh-id.flag`, id);
 
 function fixture() {
   mkdirSync(`${REPO}/src`, { recursive: true });
   mkdirSync(`${HOME}/.claude/projects/${slug()}`, { recursive: true });
-  writeFileSync(SINK, '');
   writeFileSync(transcript(), '');
   // Under a name of its own, as a hand-written .mcp.json may be: a bare /mcp
   // from the floor reconnects the server by the name the window knows it by.
@@ -158,308 +177,20 @@ function fixture() {
   mkdirSync(openedProject, { recursive: true });
   writeFileSync(`${openedProject}/one.jsonl`, '');
   utimesSync(`${openedProject}/one.jsonl`, new Date('2024-01-02T03:04:05Z'), new Date('2024-01-02T03:04:05Z'));
+  mkdirSync(SESSIONS_DIR, { recursive: true });
 
-  // The stand-in: a roster on `agents --json`, a Claude Code otherwise.
+  // The stand-in: a Claude Code that speaks stream-JSON, and the CLI's
+  // subcommands the host also runs (agents, --version, mcp, auth).
   //
-  // It asks for bracketed paste so a multi-line message is one turn, it
-  // announces itself with its own pid the way a real session does — `$` is
-  // the shell pid and `exec` keeps it, so the pid it publishes is the pid tmux
-  // reports for the pane — and it writes what it is sent into its transcript.
-  //
-  // That last part is not decoration. The transcript is how the host knows a
-  // message was delivered rather than left sitting in a composer, so a
-  // stand-in that never wrote one could only ever prove that bytes reached a
-  // pane. Two sends in three were being lost against real Claude Code while
-  // this suite was green.
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  // The body is its own file, .cjs because the fixture sits inside this repo
-  // and this package is "type": "module" — as .js it is parsed as ESM, dies on
-  // its first require, and the window is gone before anything can look at it.
-  // The body is started through an absolute interpreter. A
-  // `#!/usr/bin/env node` shebang would depend on the PATH of the pane, and a
-  // pane belongs to the tmux server rather than to this process — so the
-  // stand-in would die on start, the window would open empty, and the failure
-  // would read as "Claude Code has not finished starting". It did.
+  // Its body is a .cjs because the fixture sits inside this repo and this
+  // package is "type": "module". It is started through an absolute
+  // interpreter, because the host starts it through the person's shell
+  // (`<shell> -c 'exec "$0" "$@"' claude …`, host/agent.js), and `exec`
+  // keeps the pid: the pid the host holds is this program's own.
   writeFileSync(`${FIX}/claude`,
     `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(`${FIX}/claude.cjs`)} "$@"\n`);
   chmodSync(`${FIX}/claude`, 0o755);
-  writeFileSync(`${FIX}/claude.cjs`, [
-    `const fs = require('fs');`,
-    `const ROSTER = ${JSON.stringify(`${FIX}/roster.json`)};`,
-    `const SINK = ${JSON.stringify(SINK)};`,
-    `const TRANSCRIPT = ${JSON.stringify(transcript())};`,
-    `const SESSION_ID = ${JSON.stringify(SESSION_ID)};`,
-    `const ARGV = ${JSON.stringify(`${FIX}/argv.log`)};`,
-    `if (process.argv[2] === 'agents') { process.stdout.write(fs.readFileSync(ROSTER, 'utf8')); process.exit(0); }`,
-    // The host reads the version at every heartbeat (host/version.js); a file says which, so a row can move it.
-    `if (process.argv[2] === '--version') { let v = '2.1.330'; try { v = fs.readFileSync(${JSON.stringify(`${FIX}/version.flag`)}, 'utf8').trim() || v; } catch {} process.stdout.write(v + ' (Claude Code)\\n'); process.exit(0); }`,
-    // `claude mcp add -s local …` and `claude mcp remove -s local …`, as the
-    // real CLI behaves (measured 2026-09-08/09): a read-modify-write of
-    // $HOME/.claude.json under projects[cwd].mcpServers, "already exists" on
-    // a duplicate add, "No MCP server named" on a missing remove, and the
-    // "File modified:" line on success. HOME is the fixture, so this is the
-    // file the host reads back. Handled before the argv log below: an mcp
-    // call is not a window, and the --resume assertion diffs that log.
-    `if (process.argv[2] === 'mcp') {`,
-    `  const CFG = require('path').join(process.env.HOME, '.claude.json');`,
-    `  let j = {}; try { j = JSON.parse(fs.readFileSync(CFG, 'utf8')); } catch {}`,
-    `  const a = process.argv.slice(3); const sub = a[0];`,
-    `  const scopeAt = a.indexOf('-s'); if (scopeAt >= 0 && a[scopeAt + 1] !== 'local') { process.stderr.write('stand-in: only local scope\\n'); process.exit(2); }`,
-    `  const rest = a.slice(1).filter((x, i, arr) => x !== '-s' && arr[i - 1] !== '-s');`,
-    `  j.projects = j.projects || {}; const dir = process.cwd(); j.projects[dir] = j.projects[dir] || {}; const p = j.projects[dir]; p.mcpServers = p.mcpServers || {};`,
-    `  const done = () => { fs.writeFileSync(CFG, JSON.stringify(j, null, 2)); process.stdout.write('File modified: ' + CFG + ' [project: ' + dir + ']\\n'); process.exit(0); };`,
-    `  if (sub === 'add') {`,
-    `    const t = rest.indexOf('--transport'); const transport = t >= 0 ? rest[t + 1] : 'stdio';`,
-    `    const positional = rest.filter((x, i, arr) => !x.startsWith('-') && arr[i - 1] !== '--transport' && arr[i - 1] !== '-H');`,
-    `    const [name, url] = positional; const headers = {};`,
-    `    rest.forEach((x, i) => { if (x === '-H') { const [k, ...v] = rest[i + 1].split(':'); headers[k.trim()] = v.join(':').trim(); } });`,
-    `    if (p.mcpServers[name]) { process.stderr.write('MCP server ' + name + ' already exists in local config\\n'); process.exit(1); }`,
-    `    p.mcpServers[name] = { type: transport, url, headers }; done();`,
-    `  }`,
-    `  if (sub === 'remove') {`,
-    `    const name = rest[0];`,
-    `    if (!p.mcpServers[name]) { process.stderr.write('No MCP server named "' + name + '" in local scope\\n'); process.exit(1); }`,
-    `    delete p.mcpServers[name]; done();`,
-    `  }`,
-    `  process.stderr.write('stand-in: unknown mcp subcommand\\n'); process.exit(2);`,
-    `}`,
-    // `claude auth status --json` and `claude auth login`, as 2.1.329 answers
-    // them (host/auth.js): signed out while signed-out.flag exists; a login
-    // takes signin-delay.flag ms (300 by default) and signs in, or fails with
-    // signin-fail.flag's words on stderr. Each call is logged with the USER
-    // it was given, because without one Claude Code reads a signed-in Mac as
-    // signed out. Not a window, so before the argv log.
-    `if (process.argv[2] === 'auth') {`,
-    `  const OUT = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
-    `  fs.appendFileSync(${JSON.stringify(`${FIX}/auth.log`)}, process.argv.slice(3).join(' ') + ' USER=' + (process.env.USER || '') + '\\n');`,
-    // TEST_ZSHENV_SIGNIN stands for a credential that only a shell's startup
-    // file gives (F1 of the 0.14.5 review): set, it is signed in whatever
-    // the flag says, the way an exported API key is.
-    `  if (process.argv[3] === 'status') { const out = fs.existsSync(OUT) && !process.env.TEST_ZSHENV_SIGNIN; process.stdout.write(JSON.stringify({ loggedIn: !out, authMethod: out ? 'none' : 'claude.ai' }) + '\\n'); process.exit(out ? 1 : 0); }`,
-    `  if (process.argv[3] !== 'login') process.exit(2);`,
-    `  let fail = ''; try { fail = fs.readFileSync(${JSON.stringify(`${FIX}/signin-fail.flag`)}, 'utf8').trim(); } catch {}`,
-    `  let delay = 300; try { delay = Number(fs.readFileSync(${JSON.stringify(`${FIX}/signin-delay.flag`)}, 'utf8').trim()) || 300; } catch {}`,
-    `  setTimeout(() => { if (fail) { process.stderr.write('Opening browser to sign in\u2026\\n' + fail + '\\n'); process.exit(1); } fs.rmSync(OUT, { force: true }); process.exit(0); }, delay);`,
-    `  return;`,
-    `}`,
-    `fs.appendFileSync(ARGV, process.argv.slice(2).join(' ') + '\\n');`,
-    // The one variable a placeholder desk's window is given (paneEnv in
-    // host/window.js), one line per window started, as the pane has it.
-    `fs.appendFileSync(${JSON.stringify(`${FIX}/pane-env.log`)}, JSON.stringify({ cwd: process.cwd(), key: process.env.ORCH_TEST_PANE_KEY ?? null, orch: Object.keys(process.env).filter((k) => k.startsWith('ORCH_') && k !== 'ORCH_TEST_PANE_KEY') }) + '\\n');`,
-    // Announcing late is how a real session behaves when something on screen
-    // is waiting for an answer: the window is up, the pid is not in the roster
-    // yet, and send() sits in waitReady. A ready-delay *file* makes that
-    // window a known length so a test can look at what the host does
-    // *during* it. Absent, it announces immediately, as before.
-    //
-    // A file, not an env var — this used to read
-    // process.env.ORCH_TEST_READY_DELAY_MS. Measured directly: `tmux
-    // new-session`/`new-window` on an already-running server gives the new
-    // pane only the environment the server had when it first booted, not the
-    // requesting client's — so on any machine that already has a tmux server
-    // on the default socket for something else (this repo's own live host,
-    // say), that env var silently never arrived and the delay was 0 the
-    // whole time. The one test using it happened to pass regardless, because
-    // its assertions do not strictly require the delay to hold — which is
-    // exactly how this went unnoticed until STARTUP_ASK_FLAG hit the same
-    // wall and needed the delay to actually be there.
-    // A window started with --resume registers under that id, as Claude Code
-    // does; without one it registers under the fixture's constant, which is
-    // the id a "fresh" conversation flips the desk to.
-    `const resumeAt = process.argv.indexOf('--resume');`,
-    // A fresh-id *file* (read at start, like the flags below) gives a window
-    // started with nothing to resume an id of its own instead of the
-    // constant, so a case can tell "a new conversation" from "the one it was
-    // on" by the id the desk follows — the move does (#24 Decided 2).
-    `const FRESH_ID_FLAG = ${JSON.stringify(`${FIX}/fresh-id.flag`)};`,
-    `let freshId = ''; try { freshId = fs.readFileSync(FRESH_ID_FLAG, 'utf8').trim(); } catch {}`,
-    `const MY_ID = resumeAt >= 0 && process.argv[resumeAt + 1] ? process.argv[resumeAt + 1] : (freshId || SESSION_ID);`,
-    // A window killed under a linger file stays alive — and so in the roster,
-    // which drops only dead pids — for that many ms after its hangup. Claude
-    // Code does not leave the roster the instant tmux kills its pane: the
-    // floor's move asked who held the conversation in that gap and was
-    // refused by the closing window itself, 10 of 10 times on the live board
-    // (issue #24). This stand-in otherwise exits on the hangup, which is why
-    // the suite never met it. Read at the hangup, not at start, so a case can
-    // arm it for a window that is already open.
-    //
-    // The linger ends by a watchdog, not by a timer of its own. A
-    // setTimeout(process.exit) here never fired: after the hangup Node
-    // reopens the dead pane's tty (uv_tty_init → open()) and on macOS that
-    // open never returns, so the loop never ran again — measured with
-    // `sample`, 775 of 775 on the main thread (task 263, 2026-11-03). Every
-    // run left the two windows the move case closes under this flag alive,
-    // parented to the tmux server, 105 of them by one evening. The watchdog
-    // is a detached sh that kills this pid when the linger is up, and only
-    // if the pid is still this stand-in: pids are reused.
-    `const LINGER_FLAG = ${JSON.stringify(`${FIX}/linger.flag`)};`,
-    `process.on('SIGHUP', () => {`,
-    `  let ms = 0; try { ms = Number(fs.readFileSync(LINGER_FLAG, 'utf8').trim()) || 0; } catch {}`,
-    `  if (ms > 0) {`,
-    `    process.stdin.on('error', () => {});`,
-    `    const me = String(process.pid), script = process.argv[1];`,
-    `    require('child_process').spawn('/bin/sh', ['-c', 'sleep "$1"; ps -o command= -p "$2" | grep -qF -- "$3" && kill -9 "$2"', 'linger', String(ms / 1000), me, script], { detached: true, stdio: 'ignore' }).unref();`,
-    `    return;`,
-    `  }`,
-    `  process.removeAllListeners('SIGHUP'); process.kill(process.pid, 'SIGHUP');`,
-    `});`,
-    `const announce = () => fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: MY_ID, name: 'stand-in' }]));`,
-    `const READY_DELAY_FLAG = ${JSON.stringify(`${FIX}/ready-delay.flag`)};`,
-    `let readyDelay = 0;`,
-    `try { readyDelay = Number(fs.readFileSync(READY_DELAY_FLAG, 'utf8').trim()) || 0; } catch {}`,
-    // A pane in this repo whose process is not yet in the roster — announcing
-    // late is exactly that — is what the host reads as "booting", and if the
-    // screen looks like a startup dialog it is read and put on the floor (see
-    // Desk.watch in host/index.js). Printed once, before the roster delay, so
-    // a test can prove that emission fires against a real host process rather
-    // than only against a synthetic event handed straight to the server.
-    //
-    // A flag *file*, not an env var: measured directly (tmux new-session on
-    // an already-running server) that tmux does not forward the spawning
-    // client's environment into the pane it creates — a window's env comes
-    // from whenever the tmux *server* itself first started, not from
-    // whichever later process asked for a new window. ROSTER/SINK/TRANSCRIPT
-    // already communicate with this stand-in over the filesystem for exactly
-    // this reason; this follows the same pattern.
-    `const STARTUP_ASK_FLAG = ${JSON.stringify(`${FIX}/startup-ask.flag`)};`,
-    `let startupAsk = '';`,
-    `try { startupAsk = fs.readFileSync(STARTUP_ASK_FLAG, 'utf8').trim(); } catch {}`,
-    `if (startupAsk === 'mcp') {`,
-    `  const mcp = ['', ${JSON.stringify('─'.repeat(80))}, '  New MCP server found in this project: orchestratinator', '', '  MCP servers may execute code or access system resources. All tool calls require approval.', '', '    Use this MCP server', '    Use this and all future MCP servers in this project', '  ❯ Continue without using this MCP server', '', '  Enter to confirm · Esc to cancel', ''];`,
-    `  for (const l of mcp) process.stdout.write(l + '\\n');`,
-    // Forced rather than relying on a caller to also write READY_DELAY_FLAG:
-    // this scenario needs a real window to observe, not a fast one, and the
-    // ask-flag alone should be enough to say so.
-    `  readyDelay = Math.max(readyDelay, 4000);`,
-    `}`,
-    // The browser extension's question, on a window that HAS registered
-    // (costmo's new machine, 2026-11-20): announced at once, the dialog drawn
-    // after, raw so Enter reaches it as a key, and gone at that Enter, with a
-    // pane cleared, history too (tmux keeps a cleared screen in history, and
-    // the dialog's footer left among the pane's last lines had the next
-    // message refused as asking). No composer is drawn in its place: a drawn
-    // one never changes, and a paste waits a minute on a box that does not.
-    `let chromeUp = startupAsk === 'chrome';`,
-    `const CHROME = ['', ${JSON.stringify('─'.repeat(80))}, ' Claude in Chrome extension detected', '', ' Claude will use your Chrome browser by default — navigating sites, filling', ' forms, and capturing screenshots in your existing session.', '', ' This session is in Auto mode, which checks routine browser actions — you are', ' only prompted when it is unsure. Turn browser tools off for future sessions', ' with /chrome.', '', ' ❯ No, keep browser tools off', '   Yes, use my browser', '', ' Enter to confirm · Esc to keep browser tools off'];`,
-    // A window that has started draws its composer, so the dialog's footer is
-    // no longer the pane's last line: the host reads a question as gone by
-    // the pane no longer showing it, not by the window registering.
-    String.raw`const started = () => { if (startupAsk === 'mcp') process.stdout.write('\n❯ \n'); announce(); };`,
-    `if (readyDelay > 0) setTimeout(started, readyDelay); else started();`,
-    String.raw`process.stdout.write('\u001b[?2004h');`,
-    // A flag file makes the window look mid-turn: Claude Code's status line
-    // says "esc to interrupt" exactly while it works, and the host reads that
-    // off the pane's bottom line. A reopen must refuse such a window.
-    `const BUSY_FLAG = ${JSON.stringify(`${FIX}/busy.flag`)};`,
-    String.raw`if (fs.existsSync(BUSY_FLAG)) process.stdout.write('\n  \u2733 Baking\u2026 (esc to interrupt)\n');`,
-    // Started while Claude Code is signed out, the window says so where
-    // 2.1.329 does, at the right of the status row under the composer, and
-    // never redraws it: a sign-in made elsewhere is not taken by this one.
-    // A window at its composer, as a real one stands: the box and its status
-    // row, drawn once. For the window Claude Code has no record of, which
-    // the host knows from a starting one by exactly this (standingIdleOf).
-    `const COMPOSER_FLAG = ${JSON.stringify(`${FIX}/composer.flag`)};`,
-    String.raw`if (fs.existsSync(COMPOSER_FLAG)) process.stdout.write('\n' + '─'.repeat(60) + '\n❯ \n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n');`,
-    // draft.flag: a box somebody has typed into and not sent (F2, 0.14.5
-    // review), the cursor at the end of the words as Claude Code leaves it.
-    // Drawn once and never changed: nothing typed after it reaches the box.
-    `const DRAFT_FLAG = ${JSON.stringify(`${FIX}/draft.flag`)};`,
-    String.raw`if (fs.existsSync(DRAFT_FLAG)) { const d = fs.readFileSync(DRAFT_FLAG, 'utf8').trim(); process.stdout.write('\n' + '─'.repeat(60) + '\n❯ ' + d + '\n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n' + '\u001b[3A\u001b[' + (d.length + 3) + 'G'); }`,
-    `const SIGNED_OUT_FLAG = ${JSON.stringify(`${FIX}/signed-out.flag`)};`,
-    String.raw`if (fs.existsSync(SIGNED_OUT_FLAG)) process.stdout.write('\n' + '\u2500'.repeat(60) + '\n\u276f \n' + '\u2500'.repeat(60) + '\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)          Not logged in \u00b7 run /login\n');`,
-    // And a flag file that leaves the window asking something: a permission
-    // menu (`bash`), a one-question form (`form`) or one with previews
-    // (`preview`), drawn once at the bottom
-    // of the pane and never redrawn — for an answer that waited in the host's
-    // line past ANSWER_TTL_MS (QA, PR #49 finding 2 and Info 4).
-    `const PROMPT_FLAG = ${JSON.stringify(`${FIX}/prompt.flag`)};`,
-    `let promptKind = ''; try { promptKind = fs.readFileSync(PROMPT_FLAG, 'utf8').trim(); } catch {}`,
-    `const PROMPTS = ${JSON.stringify({ bash: ["", "────────────────────────────────────────────────────────────────────────────────", " Bash command", "", "   rm -rf build-cache", "   Clear the build cache", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this folder", "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"], form: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Scope", "Which scope should step one audit?", "❯ 1. Baseline only", "     Audit just the baseline.", "  2. Everything in the tree", "     Audit everything in the tree.", "  3. Type something.", "────────────────────────────────────────────────────────────────────────────────", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"],
-      // A question drawn with previews, as 2.1.325 draws one: the choices
-      // beside the highlighted one's preview, no "Type something." row, and
-      // "n to add notes" on its status line. Never redrawn, so a digit moves
-      // nothing here (QA, PR #55 Info 8).
-      preview: ["", "────────────────────────────────────────────────────────────────────────────────", " ☐ Where", "", "Where should it go?", "", "❯ 1. Alpha                        ┌────────┐", "  2. Bravo                        │ AAA box│", "  3. Charlie                      └────────┘", "                                  Notes: press n to add notes", "────────────────────────────────────────────────────────────────────────────────", "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"] })};`,
-    // Two more (0.14.6): `dialog`, the fullscreen upsell as 2.1.330 drew it
-    // on a probe, and `odd`, a panel no reader here knows. Both close on
-    // Escape and leave the composer, as Claude Code's do (oddUp below).
-    `PROMPTS.dialog = ${JSON.stringify(['', '─'.repeat(80), '  Try the new fullscreen renderer?', '', '  · Flicker-free output', '', '  ❯ 1. Yes, try it', '    2. Not now', '', '  Enter to confirm · Esc to cancel'])};`,
-    `PROMPTS.odd = ${JSON.stringify(['', '▔'.repeat(60), '  Plugins', '  2 installed', '  ❯ ✔ floor', '    ✔ easel', '  ↑/↓ to navigate · Space to toggle · Esc to close'])};`,
-    `let oddUp = promptKind === 'dialog' || promptKind === 'odd';`,
-    `for (const l of PROMPTS[promptKind] ?? []) process.stdout.write(l + '\\n');`,
-    // A prompt takes a bare key with no Enter, as a person pressing one
-    // would, and a tty in canonical mode holds it until a newline that never
-    // comes — so the key the host pressed never reached SINK. Raw while
-    // asking, as the window suite's prompt panes are (`stty raw`).
-    `if (PROMPTS[promptKind] && process.stdin.isTTY) process.stdin.setRawMode(true);`,
-    `if (chromeUp) { for (const l of CHROME) process.stdout.write(l + '\\n'); if (process.stdin.isTTY) process.stdin.setRawMode(true); }`,
-    String.raw`const START = '\u001b[200~', END = '\u001b[201~';`,
-    `let acc = '', composer = '', n = 0;`,
-    `process.stdin.on('data', (chunk) => {`,
-    `  fs.appendFileSync(SINK, chunk);`,
-    String.raw`  if (chromeUp) { if (/[\r\n]/.test(chunk.toString('utf8'))) { chromeUp = false; if (process.stdin.isTTY) process.stdin.setRawMode(false); process.stdout.write('\u001b[2J\u001b[3J\u001b[H'); } return; }`,
-    String.raw`  if (oddUp) { if (chunk.includes(0x1b)) { oddUp = false; if (process.stdin.isTTY) process.stdin.setRawMode(false); process.stdout.write('\u001b[2J\u001b[3J\u001b[H' + '─'.repeat(60) + '\n❯ \n' + '─'.repeat(60) + '\n  ⏵⏵ auto mode on (shift+tab to cycle)\n'); } return; }`,
-    `  acc += chunk.toString('utf8');`,
-    `  for (;;) {`,
-    `    const at = acc.indexOf(START);`,
-    `    if (at >= 0) {`,
-    `      const end = acc.indexOf(END, at);`,
-    `      if (end < 0) break;`,                                  // the rest of the paste is still on its way
-    `      composer += acc.slice(at + START.length, end);`,
-    `      acc = acc.slice(0, at) + acc.slice(end + END.length);`,
-    `      continue;`,
-    `    }`,
-    String.raw`    const submit = acc.search(/[\r\n]/);`,
-    `    if (submit >= 0) {`,
-    `      const text = (composer + acc.slice(0, submit)).trim();`,
-    `      composer = ''; acc = acc.slice(submit + 1);`,
-    // A slash command, as Claude Code records one (measured 2.1.300,
-    // 2026-11-03): /clear starts a NEW session file whose first record is
-    // the command, and the roster follows it; /btw writes nothing and draws
-    // an overlay with the answer; any other command writes its
-    // <command-name> record. A message is a user record, as before.
-    `      const cmd = /^\\/(\\w+)(?:\\s+(.*))?$/.exec(text);`,
-    `      if (cmd && cmd[1] === 'clear') {`,
-    `        const next = 'cleared-' + Date.now();`,
-    `        const file = require('path').join(require('path').dirname(TRANSCRIPT), next + '.jsonl');`,
-    `        fs.writeFileSync(file, JSON.stringify({ type: 'user', uuid: 'c1', timestamp: new Date().toISOString(), message: { content: '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>' } }) + '\\n');`,
-    `        fs.writeFileSync(ROSTER, JSON.stringify([{ pid: process.pid, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), sessionId: next, name: 'stand-in' }]));`,
-    `        continue;`,
-    `      }`,
-    `      if (cmd && cmd[1] === 'btw') {`,
-    String.raw`        process.stdout.write('\n' + '\u2594'.repeat(60) + '\n    /btw ' + (cmd[2] || '') + '\n      42\n    \u2191/\u2193 to scroll \u00b7 c to copy \u00b7 f to fork \u00b7 Esc to close\n');`,
-    `        continue;`,
-    `      }`,
-    // /mcp as 2.1.328 does it (measured 2026-11-19): bare, the servers
-    // panel, which writes nothing; `/mcp reconnect <name>`, the command
-    // record and its line as local-command-stdout.
-    `      if (cmd && cmd[1] === 'mcp' && !cmd[2]) {`,
-    String.raw`        process.stdout.write('\n' + '\u2594'.repeat(60) + '\n  MCP servers\n  1 server\n  \u276f \u2718 team-board\n  \u2191/\u2193 to navigate \u00b7 Enter to view \u00b7 Esc to close\n');`,
-    `        continue;`,
-    `      }`,
-    // The argument without what is left of a paste's closing sequence: the
-    // composer above keeps a trailing escape byte with the text it submits.
-    `      if (cmd && cmd[1] === 'mcp') {`,
-    `        const arg = cmd[2].replace(/[\\u0000-\\u001f]/g, '').trim();`,
-    `        const said = /^reconnect\\s+(\\S+)$/.test(arg) ? 'Reconnected to ' + arg.split(/\\s+/)[1] : 'MCP server not found';`,
-    `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>' + arg + '</command-args>' } }) + '\\n');`,
-    `        fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<local-command-stdout>' + said + '</local-command-stdout>' } }) + '\\n');`,
-    `        continue;`,
-    `      }`,
-    `      if (cmd) { fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: '<command-name>/' + cmd[1] + '</command-name><command-message>' + cmd[1] + '</command-message><command-args>' + (cmd[2] || '') + '</command-args>' } }) + '\\n'); continue; }`,
-    String.raw`      if (text) fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', uuid: 'u' + (++n), timestamp: new Date().toISOString(), message: { content: text } }) + '\n');`,
-    `      continue;`,
-    `    }`,
-    String.raw`    const esc = acc.lastIndexOf('\u001b');`,
-    `    const keep = esc >= 0 && acc.length - esc < START.length ? esc : acc.length;`,
-    `    composer += acc.slice(0, keep); acc = acc.slice(keep);`,
-    `    break;`,
-    `  }`,
-    `});`,
-    `process.stdin.resume();`,
-  ].join('\n'));
-  chmodSync(`${FIX}/claude`, 0o755);
-
+  writeFileSync(`${FIX}/claude.cjs`, STAND_IN_SRC);
   // The stand-in for a person at the operating system's folder dialog — a
   // dialog cannot be clicked from a test. The host runs it in place of the
   // real one (ORCH_FOLDER_DIALOG), with the start folder as its argument, and
@@ -480,31 +211,264 @@ function fixture() {
     `  process.stdout.write(JSON.stringify(a.cancel ? { cancelled: true } : { path: a.path }) + '\\n');`,
     `}, a.delay || 0);`,
   ].join('\n'));
+  // The stand-in for the editor a handback opens (ORCH_EDITOR_OPEN): it
+  // writes down the URL it was asked to open, and opens nothing.
+  writeFileSync(`${FIX}/editor`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${FIX}/editor.log`)}\n`);
+  chmodSync(`${FIX}/editor`, 0o755);
 }
+
+/*
+ * The stand-in Claude Code. Its protocol is test/agent.mjs's (measured on
+ * 2.1.330, docs/stream-json-spike.md): no `init` until the first message and
+ * one at each turn's start; a message echoed with its uuid and `isReplay` the
+ * moment it is taken; a message sent mid-turn taken into that turn and
+ * answered in its one result; `can_use_tool` for a permission or a question;
+ * `conversation_reset` for /clear; an answer to each control request.
+ *
+ * What it writes on disk, because the host reads it: its roster entry,
+ * ~/.claude/sessions/<pid>.json, from start to exit (the host's fast roster
+ * path), and its transcript, user and assistant records where
+ * host/claude.js transcriptPath() looks, so the relay has something to relay.
+ *
+ * What it does on purpose, by a message's words:
+ *   PERMIT <tool>  asks permission for <tool> (with a rule it would allow
+ *                  again) and says what it was told
+ *   ASK            asks a two-question form and says the answers it got
+ *   DIALOG         asks something the floor has no way to answer
+ *   SLOW <ms>      a turn that long, which runs a tool first (so the board
+ *                  sees it working); a stop ends it
+ *   QUIET <ms>     a turn that long with no tool, which the board cannot see
+ *   HOLD <ms> …    taken (echoed) only after that long: a message that takes
+ *                  time to go in
+ *   DIE            taken, and then the process ends with code 3
+ *   /compact, /clear  as Claude Code does them
+ *   anything else  "ECHO:<words>"
+ *
+ * And by flag files, read when it starts, because a file reaches it whatever
+ * environment the host gives it (the host gives its Claude Codes a person's
+ * environment, with nothing of its own ORCH_ settings: host/claude.js
+ * windowEnv):
+ *   fresh-id.flag    the id of the next new conversation, used once
+ *   start-delay.flag ms before it reads anything: a slow start
+ *   signed-out.flag  signed out, as 2.1.329 is: every message is answered
+ *                    "Not logged in", for as long as this process runs
+ *   version.flag     what --version says
+ */
+const STAND_IN_SRC = String.raw`const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { randomUUID } = require('crypto');
+const FIX = ${JSON.stringify(FIX)};
+const argv = process.argv.slice(2);
+const flag = (name) => { try { return fs.readFileSync(path.join(FIX, name), 'utf8').trim(); } catch { return null; } };
+const CLAUDE_HOME = path.join(os.homedir(), '.claude');
+const SESSIONS = path.join(CLAUDE_HOME, 'sessions');
+
+if (argv[0] === 'agents') {
+  const rows = [];
+  try { for (const n of fs.readdirSync(SESSIONS)) { try { rows.push(JSON.parse(fs.readFileSync(path.join(SESSIONS, n), 'utf8'))); } catch {} } } catch {}
+  process.stdout.write(JSON.stringify(rows));
+  process.exit(0);
+}
+// claude stop <job>, as the daemon's CLI does it for a background session:
+// the job's process ends and its session file goes. Job "stuck-1" is refused.
+if (argv[0] === 'stop') {
+  if (argv[1] === 'stuck-1') { process.stderr.write('could not stop stuck-1\n'); process.exit(1); }
+  try {
+    for (const n of fs.readdirSync(SESSIONS)) {
+      let d; try { d = JSON.parse(fs.readFileSync(path.join(SESSIONS, n), 'utf8')); } catch { continue; }
+      if (d.jobId !== argv[1]) continue;
+      try { process.kill(d.pid, 'SIGTERM'); } catch {}
+      fs.rmSync(path.join(SESSIONS, n), { force: true });
+    }
+  } catch {}
+  process.stdout.write('Stopped ' + argv[1] + '\n');
+  process.exit(0);
+}
+// The host reads the version at every heartbeat (host/version.js); a file says which, so a row can move it.
+if (argv[0] === '--version') { process.stdout.write((flag('version.flag') || '2.1.330') + ' (Claude Code)\n'); process.exit(0); }
+// claude mcp add/remove -s local, as the real CLI behaves (measured
+// 2026-09-08/09): a read-modify-write of $HOME/.claude.json under
+// projects[cwd].mcpServers, "already exists" on a duplicate add, "No MCP
+// server named" on a missing remove, and "File modified:" on success.
+if (argv[0] === 'mcp') {
+  const CFG = path.join(os.homedir(), '.claude.json');
+  let j = {}; try { j = JSON.parse(fs.readFileSync(CFG, 'utf8')); } catch {}
+  const a = argv.slice(1); const sub = a[0];
+  const scopeAt = a.indexOf('-s'); if (scopeAt >= 0 && a[scopeAt + 1] !== 'local') { process.stderr.write('stand-in: only local scope\n'); process.exit(2); }
+  const rest = a.slice(1).filter((x, i, arr) => x !== '-s' && arr[i - 1] !== '-s');
+  j.projects = j.projects || {}; const dir = process.cwd(); j.projects[dir] = j.projects[dir] || {}; const p = j.projects[dir]; p.mcpServers = p.mcpServers || {};
+  const done = () => { fs.writeFileSync(CFG, JSON.stringify(j, null, 2)); process.stdout.write('File modified: ' + CFG + ' [project: ' + dir + ']\n'); process.exit(0); };
+  if (sub === 'add') {
+    const t = rest.indexOf('--transport'); const transport = t >= 0 ? rest[t + 1] : 'stdio';
+    const positional = rest.filter((x, i, arr) => !x.startsWith('-') && arr[i - 1] !== '--transport' && arr[i - 1] !== '-H');
+    const [name, url] = positional; const headers = {};
+    rest.forEach((x, i) => { if (x === '-H') { const [k, ...v] = rest[i + 1].split(':'); headers[k.trim()] = v.join(':').trim(); } });
+    if (p.mcpServers[name]) { process.stderr.write('MCP server ' + name + ' already exists in local config\n'); process.exit(1); }
+    p.mcpServers[name] = { type: transport, url, headers }; done();
+  }
+  if (sub === 'remove') {
+    const name = rest[0];
+    if (!p.mcpServers[name]) { process.stderr.write('No MCP server named "' + name + '" in local scope\n'); process.exit(1); }
+    delete p.mcpServers[name]; done();
+  }
+  process.stderr.write('stand-in: unknown mcp subcommand\n'); process.exit(2);
+}
+// claude auth status --json and claude auth login, as 2.1.329 answers them
+// (host/auth.js): signed out while signed-out.flag exists; a login takes
+// signin-delay.flag ms (300 by default) and signs in, or fails with
+// signin-fail.flag's words on stderr. Each call is logged with the USER it
+// was given, because without one Claude Code reads a signed-in Mac as signed
+// out. TEST_ZSHENV_SIGNIN stands for a credential only a shell's startup
+// file gives (F1 of the 0.14.5 review): set, it is signed in whatever the
+// flag says, the way an exported API key is.
+if (argv[0] === 'auth') {
+  const OUT = path.join(FIX, 'signed-out.flag');
+  fs.appendFileSync(path.join(FIX, 'auth.log'), argv.slice(1).join(' ') + ' USER=' + (process.env.USER || '') + '\n');
+  if (argv[1] === 'status') { const out = fs.existsSync(OUT) && !process.env.TEST_ZSHENV_SIGNIN; process.stdout.write(JSON.stringify({ loggedIn: !out, authMethod: out ? 'none' : 'claude.ai' }) + '\n'); process.exit(out ? 1 : 0); }
+  if (argv[1] !== 'login') process.exit(2);
+  const fail = flag('signin-fail.flag') || '';
+  const delay = Number(flag('signin-delay.flag')) || 300;
+  setTimeout(() => { if (fail) { process.stderr.write('Opening browser to sign in…\n' + fail + '\n'); process.exit(1); } fs.rmSync(OUT, { force: true }); process.exit(0); }, delay);
+  return;
+}
+
+// The desk's Claude Code.
+fs.appendFileSync(path.join(FIX, 'argv.log'), argv.join(' ') + '\n');
+// What it was started with, for the rows about the environment a desk's
+// Claude Code gets: the variable a placeholder key names, and any of the
+// host's own ORCH_ settings (none should arrive).
+fs.appendFileSync(path.join(FIX, 'env.log'), JSON.stringify({ cwd: process.cwd(), key: process.env.ORCH_TEST_PANE_KEY ?? null, orch: Object.keys(process.env).filter((k) => k.startsWith('ORCH_') && k !== 'ORCH_TEST_PANE_KEY') }) + '\n');
+const newId = () => { const f = path.join(FIX, 'fresh-id.flag'); let id = null; try { id = fs.readFileSync(f, 'utf8').trim(); fs.rmSync(f, { force: true }); } catch {} return id || randomUUID(); };
+const at = argv.indexOf('--resume');
+let session = at >= 0 ? argv[at + 1] : newId();
+const signedOut = fs.existsSync(path.join(FIX, 'signed-out.flag')) && !process.env.TEST_ZSHENV_SIGNIN;
+const startDelay = Number(flag('start-delay.flag')) || 0;
+const ROSTER = path.join(SESSIONS, process.pid + '.json');
+const announce = () => { fs.mkdirSync(SESSIONS, { recursive: true }); fs.writeFileSync(ROSTER, JSON.stringify({ pid: process.pid, sessionId: session, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), name: 'stand-in' })); };
+announce();
+process.on('exit', () => { try { fs.rmSync(ROSTER, { force: true }); } catch {} });
+for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT']) process.on(sig, () => process.exit(0));
+
+const transcriptFile = () => { const dir = path.join(CLAUDE_HOME, 'projects', process.cwd().replace(/[^A-Za-z0-9]/g, '-')); fs.mkdirSync(dir, { recursive: true }); return path.join(dir, session + '.jsonl'); };
+let n = 0;
+const record = (o) => fs.appendFileSync(transcriptFile(), JSON.stringify({ uuid: 'st-' + process.pid + '-' + (++n), timestamp: new Date().toISOString(), sessionId: session, ...o }) + '\n');
+const said = (text) => record({ type: 'user', message: { role: 'user', content: text } });
+const reply = (text, extra = {}) => record({ type: 'assistant', ...extra, message: { role: 'assistant', content: [{ type: 'text', text }] } });
+
+const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+const init = () => out({ type: 'system', subtype: 'init', session_id: session, model: 'claude-haiku-5-5', permissionMode: 'default', claude_code_version: '2.1.330' });
+const logIn = (o) => fs.appendFileSync(path.join(FIX, 'stdin.log'), JSON.stringify(o) + '\n');
+let inTurn = false;
+let pending = 0;
+let closing = false;
+let busy = null;
+let queued = [];
+let asks = 0;
+const waits = new Map();
+const done = () => { if (closing && pending === 0) process.exit(0); };
+const result = (text, ok = true, subtype = 'success') => { inTurn = false; out({ type: 'result', subtype, is_error: !ok, result: text, session_id: session }); };
+const ask = (request) => new Promise((res) => { const id = 'cu-' + (++asks); waits.set(id, res); out({ type: 'control_request', request_id: id, request }); });
+const flushQueued = () => { for (const t of queued) said(t); queued = []; };
+const ready = new Promise((r) => setTimeout(r, startDelay));
+
+require('readline').createInterface({ input: process.stdin }).on('line', async (line) => {
+  await ready;
+  let r; try { r = JSON.parse(line); } catch { return; }
+  if (r.type === 'control_response') {
+    logIn({ type: 'control_response', request_id: r.response.request_id, response: r.response.response });
+    const w = waits.get(r.response.request_id); if (w) { waits.delete(r.response.request_id); w(r.response.response || {}); }
+    return;
+  }
+  if (r.type === 'control_request') {
+    const q = r.request || {};
+    logIn({ type: 'control_request', ...q });
+    const answer = (response) => out({ type: 'control_response', response: { subtype: 'success', request_id: r.request_id, response } });
+    if (q.subtype === 'interrupt') {
+      answer({ still_queued: [] });
+      if (busy) { clearTimeout(busy.timer); const b = busy; busy = null; b.stop(); }
+      return;
+    }
+    if (q.subtype === 'set_model') { answer({ model: 'claude-' + q.model + '-5-5' }); return; }
+    if (q.subtype === 'side_question') { answer({ response: 'ASIDE:' + q.question, synthetic: false }); return; }
+    answer({});
+    return;
+  }
+  if (r.type !== 'user') return;
+  const text = typeof r.message.content === 'string' ? r.message.content : JSON.stringify(r.message.content);
+  logIn({ type: 'user', text });
+  const hold = /^HOLD (\d+)/.exec(text);
+  if (hold) await new Promise((res) => setTimeout(res, Number(hold[1])));
+  // Taken into a turn already running, as 2.1.330 does: echoed when taken,
+  // answered in that turn's one result, and in the conversation by its end.
+  if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); queued.push(text); return; }
+  inTurn = true;
+  pending++;
+  init();
+  out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } });
+  const finish = (words, ok = true, subtype = 'success') => { flushQueued(); if (words) reply(words); result(words, ok, subtype); };
+  const slash = /^\/(\w+)/.exec(text);
+  if (!slash) said(text);
+  if (signedOut) {
+    reply('Not logged in · Please run /login', { isApiErrorMessage: true });
+    result('Not logged in · Please run /login', false, 'error_during_execution');
+  } else if (text === 'DIE') {
+    process.exit(3);
+  } else if (text.startsWith('PERMIT ')) {
+    const tool = text.slice(7);
+    const a = await ask({ subtype: 'can_use_tool', tool_name: tool, display_name: tool, input: { command: 'ls' }, description: 'List files', permission_suggestions: [{ type: 'addRules', rules: [{ toolName: tool, ruleContent: 'ls' }], behavior: 'allow', destination: 'localSettings' }] });
+    finish(a.behavior === 'allow' ? 'ALLOWED:' + JSON.stringify(a.updatedInput) + (a.updatedPermissions ? ':ALWAYS' : '') : 'DENIED:' + a.message);
+  } else if (text === 'ASK') {
+    const input = { questions: [{ question: 'Pick a colour', header: 'Colour', multiSelect: false, options: [{ label: 'Red' }, { label: 'Blue' }] }, { question: 'Pick a day', header: 'Day', multiSelect: false, options: [{ label: 'Monday' }, { label: 'Friday' }] }] };
+    const a = await ask({ subtype: 'can_use_tool', tool_name: 'AskUserQuestion', display_name: 'AskUserQuestion', input });
+    finish(a.behavior === 'allow' ? 'ANSWERS:' + JSON.stringify(a.updatedInput.answers) : 'DENIED:' + a.message);
+  } else if (text === 'DIALOG') {
+    const a = await ask({ subtype: 'request_user_dialog', title: 'Try the new renderer?', options: ['Yes', 'Not now'] });
+    finish('DIALOG:' + a.behavior);
+  } else if (/^(SLOW|QUIET) \d+$/.test(text)) {
+    const [word, ms] = text.split(' ');
+    if (word === 'SLOW') record({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu-' + n, name: 'Bash', input: { command: 'sleep ' + Math.round(Number(ms) / 1000) } }] } });
+    const stopped = await new Promise((res) => { busy = { timer: setTimeout(() => { busy = null; res(false); }, Number(ms)), stop: () => res(true) }; });
+    if (stopped) finish('INTERRUPTED', false, 'error_during_execution');
+    else finish(word + '-DONE');
+  } else if (slash && slash[1] === 'compact') {
+    out({ type: 'system', subtype: 'status', status: 'compacting' });
+    await new Promise((res) => setTimeout(res, 300));
+    record({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', level: 'info', compactMetadata: { trigger: 'manual', preTokens: 5000, postTokens: 900, durationMs: 300 } });
+    out({ type: 'system', subtype: 'status', status: null, compact_result: 'success' });
+    out({ type: 'system', subtype: 'compact_boundary' });
+    result('');
+  } else if (slash && slash[1] === 'clear') {
+    session = newId();
+    announce();
+    out({ type: 'conversation_reset', new_conversation_id: session, trigger: 'clear' });
+    init();
+    result('');
+  } else {
+    out({ type: 'assistant', message: { content: [{ type: 'text', text: 'ECHO:' + text }] } });
+    finish('ECHO:' + text);
+  }
+  pending--;
+  done();
+});
+// Input closed is a stop (host/agent.js stop()): a turn running finishes and
+// the process leaves; one waiting on an answer that can no longer come leaves at once.
+process.stdin.on('end', () => { closing = true; if (waits.size) process.exit(0); done(); });
+`;
 
 function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
   // `ipc` starts the host the way the desktop app does, with a message port
   // to the process that started it (Node's channel here, Electron's
   // parentPort there — host/dialog.js reads both). What the host says over
   // it is kept in `said`, and `h.send()` answers it.
-  // What an older host left in the tmux server it started: its own settings
-  // in the server's global environment, which every window then inherited
-  // (0.14.4, host.windows_inherit). Planted here, before each host starts,
-  // so the pane-env row below reads the cleanup at the host's start and not
-  // a server some earlier run already cleaned. The default socket is the
-  // operator's, and a leftover of this name is the suite's alone.
-  try { execFileSync('tmux', ['set-environment', '-g', 'ORCH_TEST_LEAKED', 'from-an-older-host'], { stdio: 'ignore' }); } catch { /* no server running: nothing to leak into */ }
   const h = spawn('node', ['host/index.js'], {
     env: {
       ...process.env,
       HOME,
       ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: FIX,
       ORCH_HOST_ID: id, ORCH_HOST_NAME: 'Test Mac',
-      ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION,
+      ORCH_HOST_CLAUDE: `${FIX}/claude`,
       ORCH_HOST_WATCH_MS: '300', ORCH_HOST_CONFIG: '/nonexistent/host.json',
-      // A window with no session record is reopened after this long idle
-      // (window.js, UNREGISTERED_MS): seconds here, not half a minute.
-      ORCH_UNREGISTERED_MS: '3000',
       // A message's attachments are written here (host/uploads.js), not
       // beside a host.json that does not exist.
       ORCH_HOST_UPLOADS: `${FIX}/uploads`,
@@ -513,10 +477,6 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
       // section's "no session row for the conversation it left" reads the
       // race every run (CLAUDE.md, Tests, the seventh sighting).
       ORCH_HOST_BIND_GAP_MS: '700',
-      // send() waits for the message to show up in the transcript before it
-      // calls it delivered. The stand-in writes one, so this is the real path;
-      // the timeout is only shortened so a genuine failure fails fast.
-      ORCH_SUBMIT_SETTLE_MS: '150', ORCH_LAND_TIMEOUT_MS: '8000',
       // The folder dialog is the stand-in above, and one left open is closed
       // after four seconds rather than ten minutes — longer than the three
       // the slowest "person" below takes to choose.
@@ -524,11 +484,14 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
       // A conversation read whole goes up three turns to a page, so a short
       // fixture still crosses a page boundary.
       ORCH_READ_PAGE_TURNS: '3',
-      // Every answer and decision counts as old, so each one takes the
-      // still-on-screen path (askedStill) the section "an answer that
-      // waited in the host's line" measures. Nothing else here answers a
-      // prompt, and a startup answer is exempt (answerIsStale).
-      ORCH_ANSWER_TTL_MS: '-1',
+      // Nothing on the operator's screen: a handback runs this in place of
+      // `open -a "Visual Studio Code"` (host/claude.js openInEditor), and
+      // "Open in Claude" is asked for a terminal this host has no script
+      // for, so it says so rather than open Terminal or iTerm.
+      ORCH_EDITOR_OPEN: `${FIX}/editor`, ORCH_TERMINAL: 'none-in-tests',
+      // A desk's Claude Code that has not left 2 s after its input closed is
+      // ended (host/agent.js), not 5 s: the stand-in leaves at once.
+      ORCH_STOP_GRACE_MS: '2000',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe', ...(ipc ? ['ipc'] : [])],
@@ -543,19 +506,15 @@ function startHost(id = 'host-test-1', extraEnv = {}, { ipc = false } = {}) {
   return h;
 }
 
-const killTmux = () => { try { execFileSync('tmux', ['kill-session', '-t', TMUX_SESSION], { stdio: 'ignore' }); } catch { /* none */ } };
-
 /* This run's stand-in claudes, by this run's fixture path, so a run beside
- * it (QA's clone, a mutant copy) is neither counted nor killed by it. Only
- * `node <FIX>/claude.cjs` itself: the linger watchdog's sh names the script
- * too, and is not a stand-in. A run leaves none (task 263) — the pane ones
- * live on the tmux server, not under this process, so nothing else would
- * reach them once their window is gone. */
+ * it (QA's clone, a mutant copy) is neither counted nor killed by it. A desk's
+ * Claude Code is the host's child now, and a host killed outright leaves it
+ * to end on its own when its input closes: a run leaves none (task 263). */
 const STAND_IN = `${FIX}/claude.cjs`;
 const standIns = () => {
   let out = '';
   try { out = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }); } catch { return []; }
-  return out.split('\n').map((l) => l.trim().split(/\s+/)).filter(([, exe, script]) => /(^|\/)node$/.test(exe ?? '') && script === STAND_IN).map(([pid]) => Number(pid));
+  return out.split('\n').map((l) => l.trim().split(/\s+/)).filter(([, exe, script, first]) => /(^|\/)node$/.test(exe ?? '') && script === STAND_IN && first === '-p').map(([pid]) => Number(pid));
 };
 const sweep = () => { for (const p of standIns()) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } };
 const childrenOf = (ppid) => {
@@ -567,35 +526,50 @@ let host = null;
 let hostLog = '';
 
 // An interrupted run cleans up after itself too: Ctrl-C, or a kill of the
-// suite, lands here instead of leaving its server, its hosts, its tmux
-// session and its stand-ins running (task 263). The finally below does not
-// run on a signal.
+// suite, lands here instead of leaving its server, its hosts and its
+// stand-ins running (task 263). The finally below does not run on a signal.
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     for (const p of childrenOf(process.pid)) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
-    killTmux();
     sweep();
     rmDb(DB_PATH);
     rmSync(FIX, { recursive: true, force: true });
-    console.log(`\nhost: interrupted by ${sig}; its server, hosts, tmux session and stand-ins are gone`);
+    console.log(`\nhost: interrupted by ${sig}; its server, hosts and stand-ins are gone`);
     process.exit(130);
   });
 }
 
-try {
-  try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); } catch {
-    console.log('host: tmux is not installed — skipping (install it with `brew install tmux`)');
-    process.exit(0);
+/** Wait for a desk's floor state: who holds it, and on which conversation. */
+const heldBy = (agent, held, sid = undefined, ms = 20000, ch = CH) => until(async () => {
+  const d = (await floor()).channels.find((c) => c.channel === ch)?.desks.find((x) => x.agent === agent);
+  return d?.hosted?.held === held && (sid === undefined || d.hosted.session_id === sid) ? d : null;
+}, ms);
+/** End a desk's Claude Code from outside the host, as a person quitting it would: SIGTERM, a clean exit. */
+const quitByHand = async (dir = REPO, agent = 'free', ch = CH) => {
+  for (const s of procsIn(dir)) { try { process.kill(s.pid, 'SIGTERM'); } catch { /* gone */ } }
+  return heldBy(agent, null, undefined, 8000, ch);
+};
+const turnRows = async (agent = 'free', ch = CH) => (await json(`/api/floor/turns?channel=${ch}&agent=${agent}&limit=500`).then((r) => r.json())).rows ?? [];
+const newRows = async (before, agent = 'free', ch = CH) => (await turnRows(agent, ch)).filter((r) => r.id > before);
+const lastId = async (agent = 'free', ch = CH) => Math.max(0, ...(await turnRows(agent, ch)).map((r) => r.id));
+/** Put free back on its first conversation with its Claude Code running, for the sections that read SESSION_ID's transcript. */
+const backHome = async () => {
+  const d = deskOf(await floor(), 'free');
+  if (!(d?.hosted?.session_id === SESSION_ID && d.hosted.held === 'floor')) {
+    await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID });
   }
+  return heldBy('free', 'floor', SESSION_ID, 20000);
+};
 
+try {
   rmDb(DB_PATH);
   fixture();
   // A function, because one row restarts the board on the same database,
   // as a deploy does (the milestone audit's finding 1).
   const startServer = () => spawn('node', ['src/server.js'], {
-    // A floor window whose tools dropped is asked about after 1.5 s here (20 s
+    // A floor desk whose tools dropped is asked about after 1.5 s here (20 s
     // on a real board), and not again within the run: the stand-in never
-    // connects, so a retry would type into it again mid-suite.
+    // connects, so a retry would ask for it again mid-suite.
     env: { ...process.env, PORT: String(PORT), DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce', ORCH_UPLOAD_DIR: `${FIX}/staged`,
       ORCH_RECONNECT_AFTER_MS: '1500', ORCH_RECONNECT_RETRY_MS: '3600000' },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -644,106 +618,205 @@ try {
   eq(deskOf(await floor(), 'free')?.hosted?.session_id?.startsWith('host:'), true,
     'with no window open yet, the desk has no conversation — it does not invent one');
 
-  console.log('\ntyping from the floor');
+  console.log('\na message from the floor');
+  nextFreshId(SESSION_ID);
+  const argvAtFirst = argvLog().length;
   const sent = await chat('free', 'ship it');
-  eq(sent.status, 200, 'the floor accepts a message for a desk with a live window');
-  // Opening the window is what makes a conversation exist, and the host finds
-  // it by asking the roster rather than by being told.
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 20000),
-    'and the host then follows the conversation that window is running');
-  assert(await until(() => (clean(received()).includes('ship it') ? true : null)),
-    'and it arrives in the window — no driver, no handoff, no copy button');
+  eq(sent.status, 200, 'the floor accepts a message for a desk with nothing running yet');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the host starts the desk\'s Claude Code, and the floor holds the desk, on the conversation Claude Code named at the message');
+  eq(launches(argvAtFirst), ['-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages'],
+    'one Claude Code, started as the programmatic interface: stream-JSON both ways, permissions over stdin, every message echoed, nothing to resume');
+  assert(await until(async () => ((await turnRows()).some((r) => r.role === 'assistant' && r.text === 'ECHO:ship it') ? true : null), 10000),
+    'the message is delivered and its reply reaches the floor, read from the transcript Claude Code writes');
+  assert((await turnRows()).some((r) => r.role === 'user' && r.text === 'ship it'), 'both sides of it');
+  eq(JSON.parse(readFileSync(`${FIX}/env.log`, 'utf8').trim().split('\n')[0]).orch, [], 'and the desk\'s Claude Code is given nothing of the host\'s own ORCH_ settings');
 
   const multi = await chat('free', 'first line\nsecond line');
   eq(multi.status, 200, 'a multi-line message is accepted');
-  assert(await until(() => (clean(received()).includes('second line') ? true : null)), 'and every line arrives');
-  assert(/\x1b\[200~/.test(received()), 'delivered as one bracketed paste, so it is one turn and not two');
+  assert(await until(() => (stdinRecords().some((r) => r.type === 'user' && r.text === 'first line\nsecond line') ? true : null)), 'and arrives whole, as one message: nothing is typed, so nothing can be split or wrapped');
 
-  /* A slash command is confirmed on its own receipt (issue #9). /btw writes
-   * nothing anywhere — its answer is an overlay on the pane — and used to be
-   * an error twenty seconds later; the host reads the answer off the window
-   * and the desk shows it. */
-  console.log('\n  a command confirmed on its own receipt');
-  const btwSent = await chat('free', '/btw what is 6*7?');
-  eq(btwSent.status, 200, '/btw is accepted');
-  const btwRows = await until(async () => {
-    const rows = (await turns('free')).rows ?? [];
-    return rows.some((r) => r.via === '/btw') ? rows : null;
-  }, 15000);
-  eq(btwRows?.find((r) => r.via === '/btw')?.text, '42', "the answer is read off the window's overlay and is the agent's, labeled by the command");
-  assert((btwRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/btw what is 6*7? — answered in the window'), 'the desk says what was typed and where the answer went, as one line labeled host');
-  assert(!(btwRows ?? []).some((r) => r.role === 'error'), 'and no error turn says it did not confirm');
+  console.log('\n  a message while the desk is working');
+  eq((await chat('free', 'QUIET 4000')).status, 200, 'a turn that takes a while is started');
+  await until(() => (stdinRecords().some((r) => r.text === 'QUIET 4000') ? true : null));
+  await sleep(300);
+  eq((await chat('free', 'and meanwhile this')).status, 200, 'a message sent while it works is taken by the board');
+  const queuedNote = await until(async () => deskOf(await floor(), 'free')?.delivery ?? null, 8000);
+  eq([queuedNote?.state, queuedNote?.text], ['queued', 'and meanwhile this'], 'and the desk says it is queued: Claude Code took it into the running turn');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.delivery ? null : true), 10000), 'the note goes when the message becomes a turn, at the turn\'s end');
+  assert((await turnRows()).some((r) => r.role === 'user' && r.text === 'and meanwhile this'), 'and the message is in the conversation');
 
-  // A bare /mcp opens a panel in the window that nobody on the floor drives;
-  // from the floor it reconnects the desk's tools, by the name its binding
-  // gives the board's server (here `team-board`, from the repo's .mcp.json).
-  const mcpSent = await chat('free', '/mcp');
-  eq(mcpSent.status, 200, 'a bare /mcp is accepted');
-  const mcpRows = await until(async () => {
-    const rows = (await turns('free')).rows ?? [];
-    return rows.some((r) => r.tool_name === 'host' && /^\/mcp — /.test(r.text ?? '')) || rows.some((r) => r.role === 'error') ? rows : null;
-  }, 15000);
-  assert(clean(received()).includes('/mcp reconnect team-board'), 'the window is sent a reconnect of the desk\'s own server, by the name its binding gives it');
-  assert((mcpRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === '/mcp — Reconnected to team-board'),
-    `the desk says what the operator typed and the window's own line — ${JSON.stringify((mcpRows ?? []).filter((r) => r.tool_name === 'host' || r.role === 'error').map((r) => r.text))}`);
-  assert(!(mcpRows ?? []).some((r) => r.role === 'error'), 'with no error turn');
+  console.log('\n  what Claude Code asks: a permission');
+  const permOf = async () => deskOf(await floor(), 'free')?.permission ?? null;
+  const askPermission = async (tool = 'Bash') => {
+    await chat('free', `PERMIT ${tool}`);
+    return until(async () => { const p = await permOf(); return p?.options?.length ? p : null; }, 10000);
+  };
+  const answerFor = (rid) => until(() => answersSent().find((a) => a.request_id === rid) ?? null, 8000);
+  const replyAfter = async (mark, re) => until(async () => (await newRows(mark)).find((r) => r.role === 'assistant' && re.test(r.text ?? '')) ?? null, 10000);
+  let mark = await lastId();
+  let p = await askPermission();
+  assert(!!p, 'a permission Claude Code asks for is on the desk, with nothing read off a screen');
+  eq(p?.options?.map((o) => o.text), ['Yes', "Yes, and don't ask again for Bash(ls)", 'No'], 'with three rows: yes, yes for good under the rule Claude Code offered, and no');
+  eq(p?.summary, 'Bash: ls', 'and what it is for');
+  const refusedWhileAsking = await chat('free', 'are you there?');
+  eq([refusedWhileAsking.status, (await refusedWhileAsking.json()).code], [409, 'asking'], 'a message to a desk that is asking is refused before it is queued');
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'allow' })).status, 200, 'Approve is taken');
+  eq((await answerFor(p?.request_id))?.response, { behavior: 'allow', updatedInput: { command: 'ls' } }, 'and reaches Claude Code as an allow, with the input it asked to run with');
+  assert(!!(await replyAfter(mark, /^ALLOWED:\{"command":"ls"\}$/)), 'which Claude Code reads as allowed, and says so on the floor');
+  assert(await until(async () => ((await permOf()) ? null : true), 5000), 'and the desk asks nothing any more');
+
+  mark = await lastId();
+  p = await askPermission();
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: '2' })).status, 200, 'the second row is taken by its number');
+  eq((await answerFor(p?.request_id))?.response?.updatedPermissions, [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'ls' }], behavior: 'allow', destination: 'localSettings' }],
+    'and allows it for good, with the rule Claude Code suggested');
+  assert(!!(await replyAfter(mark, /:ALWAYS$/)), 'which Claude Code reads as that');
+
+  mark = await lastId();
+  p = await askPermission('Write');
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'deny', reason: 'not that file' })).status, 200, 'Deny with a reason is taken');
+  eq((await answerFor(p?.request_id))?.response, { behavior: 'deny', message: 'not that file' }, 'and reaches Claude Code as a refusal carrying the operator\'s words');
+  assert(!!(await replyAfter(mark, /^DENIED:not that file$/)), 'which Claude Code reads');
+
+  mark = await lastId();
+  p = await askPermission();
+  const controlsBeforeCancel = controlsSent().length;
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'cancel' })).status, 200, 'Cancel is taken');
+  eq((await answerFor(p?.request_id))?.response, { behavior: 'deny', message: 'The operator cancelled this.' }, 'and is a refusal');
+  assert(await until(() => (controlsSent().slice(controlsBeforeCancel).some((c) => c.subtype === 'interrupt') ? true : null), 8000), 'followed by a stop of the turn, as Escape was');
+
+  // A board restart (every deploy) while Claude Code is still asking
+  // (milestone audit 2026-11-17, finding 1). The board keeps open prompts in
+  // memory only. The host's work poll fails at the restart, it registers
+  // again at once, and every registration says again what each desk's
+  // Claude Code is still asking (standingAsks).
+  p = await askPermission();
+  const rid = p?.request_id;
+  const restarted = server;
+  await new Promise((done) => { restarted.once('exit', done); restarted.kill('SIGTERM'); });
+  server = startServer();
+  assert(await waitHealthy(), 'the board restarts on the same database');
+  const backAgain = await until(async () => { const q = await permOf(); return q?.request_id === rid ? q : null; }, 30000);
+  assert(!!backAgain, 'and the permission Claude Code is still asking for is back on the floor, said again by the host, with no hook to say it');
+  mark = await lastId();
+  eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: rid, decision: 'allow' })).status, 200, 'and it can be answered from there');
+  assert(!!(await replyAfter(mark, /^ALLOWED:/)), 'and the answer reaches Claude Code');
+
+  console.log('\n  what Claude Code asks: a question');
+  mark = await lastId();
+  await chat('free', 'ASK');
+  const form = await until(async () => { const q = await permOf(); return q?.questions?.length ? q : null; }, 10000);
+  eq(form?.questions?.map((q) => q.tab_title), ['Colour', 'Day'], 'a question is a form on the desk, built from what Claude Code asked');
+  const n = (q, label) => form?.questions?.[q]?.options?.find((o) => o.text === label)?.n;
+  eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: form?.request_id, answers: [{ choose: [n(0, 'Blue')] }, { choose: [n(1, 'Friday')] }] })).status, 200, 'the operator\'s answers are taken');
+  eq((await answerFor(form?.request_id))?.response, { behavior: 'allow', updatedInput: { ...{ questions: [{ question: 'Pick a colour', header: 'Colour', multiSelect: false, options: [{ label: 'Red' }, { label: 'Blue' }] }, { question: 'Pick a day', header: 'Day', multiSelect: false, options: [{ label: 'Monday' }, { label: 'Friday' }] }] }, answers: { 'Pick a colour': 'Blue', 'Pick a day': 'Friday' } } },
+    'and reach Claude Code as the tool\'s own answers, question by question');
+  assert(!!(await replyAfter(mark, /^ANSWERS:\{"Pick a colour":"Blue","Pick a day":"Friday"\}$/)), 'which it reads');
+
+  // Something Claude Code asks that the floor has no way to answer (a
+  // dialog it would have drawn): declined, so the turn is not held, and said.
+  mark = await lastId();
+  await chat('free', 'DIALOG');
+  assert(!!(await replyAfter(mark, /^DIALOG:deny$/)), 'a request the floor cannot answer is declined, never left hanging');
+  assert((await newRows(mark)).some((r) => r.tool_name === 'host' && /asked something the floor cannot answer yet \(request_user_dialog\)/.test(r.text ?? '')), 'and the desk says what it was');
+
+  /* Commands: the ones Claude Code takes as a control request go as one,
+   * and the desk says what was asked and what came back, as one line
+   * labeled host (host/desk.js commandPlan). /compact and /clear are
+   * messages, as typed in a window. */
+  console.log('\n  commands');
+  const hostLine = async (since, re) => until(async () => (await newRows(since)).find((r) => r.tool_name === 'host' && re.test(r.text ?? '')) ?? null, 10000);
+  const controlOf = (subtype, from) => until(() => controlsSent().slice(from).find((c) => c.subtype === subtype) ?? null, 8000);
+  let cmark = controlsSent().length;
+  mark = await lastId();
+  eq((await chat('free', '/model sonnet')).status, 200, '/model is taken');
+  eq((await controlOf('set_model', cmark))?.model, 'sonnet', 'and goes as Claude Code\'s set_model request');
+  assert(!!(await hostLine(mark, /^\/model sonnet — Set model to claude-sonnet-5-5\b/)), 'the desk says what was asked, in the model Claude Code named');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.session?.model === 'claude-sonnet-5-5' ? true : null), 5000), 'and the session\'s model is that one');
+  eq(JSON.parse(readFileSync(`${HOME}/.claude/settings.json`, 'utf8')).model, 'sonnet', 'and saved as the default for new sessions, in Claude Code\'s own settings (here the fixture\'s)');
+  cmark = controlsSent().length;
+  mark = await lastId();
+  eq((await chat('free', '/effort high')).status, 200, '/effort is taken');
+  eq((await controlOf('apply_flag_settings', cmark))?.settings, { effortLevel: 'high' }, 'and goes as a settings change');
+  assert(!!(await hostLine(mark, /^\/effort high — Set effort level to high\b/)), 'said on the desk');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.session?.effort === 'high' ? true : null), 5000), 'and the session\'s effort is that');
+  cmark = controlsSent().length;
+  mark = await lastId();
+  eq((await chat('free', '/btw what is 6*7?')).status, 200, '/btw is taken');
+  eq((await controlOf('side_question', cmark))?.question, 'what is 6*7?', 'and goes as a side question');
+  const aside = await until(async () => (await newRows(mark)).find((r) => r.via === '/btw') ?? null, 10000);
+  eq([aside?.role, aside?.text], ['assistant', 'ASIDE:what is 6*7?'], 'its answer is the agent\'s, labeled by the command');
+  assert(!!(await hostLine(mark, /^\/btw what is 6\*7\? — answered$/)), 'and the desk says it was answered');
+  // A bare /mcp reconnects the desk's tools, by the name its binding gives
+  // the board's server (here `team-board`, from the repo's .mcp.json).
+  cmark = controlsSent().length;
+  mark = await lastId();
+  eq((await chat('free', '/mcp')).status, 200, 'a bare /mcp is taken');
+  eq((await controlOf('mcp_reconnect', cmark))?.serverName, 'team-board', 'and reconnects the desk\'s own server, by the name its binding gives it');
+  assert(!!(await hostLine(mark, /^\/mcp — Reconnected to team-board$/)), 'said on the desk');
+  mark = await lastId();
+  eq((await chat('free', '/compact')).status, 200, '/compact is taken');
+  assert(await until(async () => ((await newRows(mark)).some((r) => r.role === 'context' && r.tool_name === 'compact') ? true : null), 10000), 'it compacts, and the boundary Claude Code writes is a line on the desk');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.delivery?.said === 'Compacted' ? true : null), 5000), 'and the desk says it compacted');
+  const CLEARED = '33333333-cccc-3333-4444-555555555555';
+  nextFreshId(CLEARED);
+  eq((await chat('free', '/clear')).status, 200, '/clear is taken');
+  assert(!!(await heldBy('free', 'floor', CLEARED, 10000)), 'and the desk moves to the new conversation Claude Code names');
+  // A compaction from the floor marks the desk working on the board, and
+  // the end of the process's turn ends it, with no hook: the stand-in has no
+  // plugin, as a machine whose plugin does not report has none.
+  assert(await until(async () => (deskOf(await floor(), 'free')?.working ? null : true), 10000), 'the desk is idle again once its turn ends, said by the host from the process (no hook)');
+  const backOn = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID });
+  eq([backOn.status, backOn.status === 200 ? null : (await backOn.json()).error], [200, null], 'the fixture: back on the first conversation for what follows');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: on it');
 
   // And by itself: a desk whose agent had a session on this board, and has
   // none now (as after the desktop app restarts its board), is reconnected
-  // by its host when the board asks, with the window's line on the desk.
-  // The stand-in never connects, so the suite connects as the desk and then
-  // drops the session, which is what a board restart does to it.
+  // by its host when the board asks. The stand-in never connects, so the
+  // suite connects as the desk and then drops the session, which is what a
+  // board restart does to it.
+  console.log('\n  a reconnect the board asks for');
   const mh = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'X-Channel': CH, 'X-Agent': 'free', 'x-orchestratinator-key': KEY };
   const init = await fetch(`${HOST}/mcp`, { method: 'POST', headers: mh, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'host-test', version: '0' } } }) });
   await init.text();
-  const freeSid = init.headers.get('mcp-session-id');
-  await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh, 'mcp-session-id': freeSid } }).then((x) => x.text());
-  const sentBefore = clean(received()).split('/mcp reconnect team-board').length;
-  const rcRows = await until(async () => {
-    const rows = (await turns('free')).rows ?? [];
-    return rows.some((r) => r.tool_name === 'host' && /lost the board/.test(r.text ?? '')) ? rows : null;
-  }, 45000);
-  assert(clean(received()).split('/mcp reconnect team-board').length > sentBefore, 'with nothing typed by anybody, the window is sent a reconnect of its own server');
-  assert((rcRows ?? []).some((r) => r.role === 'context' && r.tool_name === 'host' && r.text === "the desk's tools had lost the board, so the host ran /mcp — Reconnected to team-board"),
-    `and the desk says why the host did it, and what the window said — ${JSON.stringify((rcRows ?? []).filter((r) => r.tool_name === 'host').map((r) => r.text).slice(-3))}`);
+  cmark = controlsSent().length;
+  mark = await lastId();
+  await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh, 'mcp-session-id': init.headers.get('mcp-session-id') } }).then((x) => x.text());
+  eq((await until(() => controlsSent().slice(cmark).find((c) => c.subtype === 'mcp_reconnect') ?? null, 45000))?.serverName, 'team-board',
+    'with nothing typed by anybody, the desk\'s Claude Code is asked to reconnect its own server');
+  assert(!!(await hostLine(mark, /^the desk's tools had lost the board, so the host reconnected them to team-board$/)), 'and the desk says why the host did it');
 
-  // F2 (0.14.5 review, measured on a rig on 2.1.330): a reconnect the board
-  // asked for, typed onto a draft somebody had left in the box, went in as
-  // one message with it; the agent took a turn on it and the reconnect never
-  // ran. It is owed instead, and typed once the box is empty, with nobody
-  // asking again.
-  {
-    writeFileSync(`${FIX}/draft.flag`, 'half typed and not sent');
-    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: the desk\'s window is reopened, a draft standing in its box');
-    // On the pane, not the desk's `held`: that was already 'floor' from the
-    // window being replaced, and read alone it let the flag go before the
-    // new window drew it (this row's first run).
-    const shown = (t) => { try { return execFileSync('tmux', ['list-panes', '-s', '-t', `=${TMUX_SESSION}:`, '-F', '#{pane_id}'], { encoding: 'utf8' }).trim().split('\n').some((p) => execFileSync('tmux', ['capture-pane', '-p', '-t', p], { encoding: 'utf8' }).includes(t)); } catch { return false; } };
-    assert(await until(() => (shown('half typed and not sent') ? true : null), 20000), 'the fixture: the new window is up, the draft in its box');
-    rmSync(`${FIX}/draft.flag`, { force: true });
-    const dInit = await fetch(`${HOST}/mcp`, { method: 'POST', headers: mh, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'host-test', version: '0' } } }) });
-    await dInit.text();
-    // Held connected past one of the board's 5 s looks, which is what resets
-    // the desk's reconnect count (reconnectDue forgets a desk it sees
-    // present). Dropped at once, the count left by the rows above stood,
-    // with its two-minute retry, and the board asked nothing for 45 s.
-    await sleep(6500);
-    await fetch(`${HOST}/mcp`, { method: 'DELETE', headers: { ...mh, 'mcp-session-id': dInit.headers.get('mcp-session-id') } }).then((x) => x.text());
-    const dBefore = clean(received()).split('/mcp reconnect team-board').length;
-    assert(await until(() => (/somebody is typing in its window; reconnecting once the box is empty/.test(host.log) ? true : null), 45000),
-      'the board asks again, and the host says it waits: somebody has typed into the window');
-    await sleep(1500);
-    eq(clean(received()).split('/mcp reconnect team-board').length, dBefore, 'nothing was typed onto the draft');
-    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: the window reopened, its box empty');
-    assert(await until(() => (clean(received()).split('/mcp reconnect team-board').length > dBefore ? true : null), 40000),
-      'the reconnect it was owed is typed once the box is empty, with nobody asking again');
-  }
+  // A stop: SLOW runs a tool first, so the board sees the desk working and
+  // lights its stop sign; the stop is Claude Code's own interrupt request.
+  console.log('\n  a stop');
+  mark = await lastId();
+  await chat('free', 'SLOW 20000');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.stop?.ok ? true : null), 10000), 'a desk running a tool can be stopped');
+  const busyReopen = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID });
+  eq([busyReopen.status, (await busyReopen.json()).code], [409, 'working'], 'and the board refuses to reopen it mid-turn');
+  cmark = controlsSent().length;
+  eq((await json('/api/floor/interrupt', { channel: CH, agent: 'free' })).status, 200, 'the stop is taken');
+  assert(!!(await controlOf('interrupt', cmark)), 'and goes as Claude Code\'s interrupt request');
+  assert(!!(await replyAfter(mark, /^INTERRUPTED$/)), 'and the turn ends, interrupted, long before its twenty seconds');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.working ? null : true), 5000), 'the desk is no longer working');
 
+  // A turn that runs no tool: the board still sees it, because the host says
+  // each turn's start and end from the process itself (no hook needed), so
+  // the reopen is refused before it reaches the host. The host's own refusal
+  // stays for a reopen that crosses the turn's start (test:seats has it).
+  mark = await lastId();
+  await chat('free', 'QUIET 3000');
+  await until(() => (stdinRecords().some((r) => r.text === 'QUIET 3000' && r.type === 'user') ? true : null));
+  assert(await until(async () => (deskOf(await floor(), 'free')?.working ? true : null), 5000), 'a turn that runs no tool reads as working on the board, said by the host from the process');
+  const quietReopen = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null });
+  eq([quietReopen.status, (await quietReopen.json()).code], [409, 'working'], 'so a reopen during it is refused by the board');
+  assert(!!(await replyAfter(mark, /^QUIET-DONE$/)), 'the turn it would have cut off finishes');
+  eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_ID, 'on the conversation it was on');
 
   /* Issue #31: a file attached on the floor. The board stages it, the host
-   * fetches it to its own disk, outside every repo, and types its path into
-   * the message. What the window is sent is read off the pane's sink; what
-   * is on the disk is read off the disk. */
+   * fetches it to its own disk, outside every repo, and puts its path in the
+   * message. What Claude Code is sent is read off the stand-in's stdin log;
+   * what is on the disk is read off the disk. */
   console.log('\n  a message with files attached');
   const stage = (bytes, name, type = 'application/octet-stream') =>
     fetch(`${HOST}/api/floor/upload?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`, { method: 'POST', headers: { 'content-type': type }, body: bytes })
@@ -755,25 +828,22 @@ try {
   eq(withFiles.status, 200, 'a message with two files is accepted');
   const shotPath = `${FIX}/uploads/${shotUp.id}/shot one.png`;
   const logPath = `${FIX}/uploads/${logUp.id}/build.log`;
-  const typed = await until(() => (clean(received()).includes(logPath) ? clean(received()) : null), 15000);
-  assert((typed ?? '').replace(/\r\n?/g, '\n').includes(`what broke here?\n\n${ATTACHED_HEADER}\n- ${shotPath}\n- ${logPath}`),
-    'the window is sent the words, then the list: one path a line, in the order attached');
+  const typed = await until(() => stdinRecords().find((r) => r.type === 'user' && r.text.includes(logPath))?.text ?? null, 15000);
+  eq(typed, `what broke here?\n\n${ATTACHED_HEADER}\n- ${shotPath}\n- ${logPath}`,
+    'Claude Code is sent one message: the words, then the list, one path a line, in the order attached');
   eq([existsSync(shotPath) && [...readFileSync(shotPath)], existsSync(logPath) && readFileSync(logPath, 'utf8')], [[...shotBytes], 'line 1\nline 2\n'],
     'and each file is on the host\'s disk under its own name, byte for byte');
   assert(!shotPath.startsWith(REPO) && !existsSync(`${REPO}/shot one.png`), 'outside the desk\'s folder: nothing lands in the repo');
-  const before31 = clean(received()).length;
+  const before31 = stdinRecords().length;
   const alone = await json('/api/floor/chat', { channel: CH, agent: 'free', files: [shotUp.id] });
   eq(alone.status, 200, 'files alone are a message');
-  const aloneTyped = await until(() => {
-    const now = clean(received()).slice(before31);
-    return now.includes(shotPath) ? now : null;
-  }, 15000);
-  assert(aloneTyped != null && aloneTyped.trim().startsWith(ATTACHED_HEADER), 'and it is the list alone, opening on its header');
+  const aloneSent = await until(() => stdinRecords().slice(before31).find((r) => r.type === 'user' && r.text.includes(shotPath))?.text ?? null, 15000);
+  eq(aloneSent, `${ATTACHED_HEADER}\n- ${shotPath}`, 'and it is the list alone, opening on its header');
   // A file the host cannot write: its folder is taken by a plain file, so
-  // the fetch fails before a byte is written. Nothing of the message is typed.
+  // the fetch fails before a byte is written. Nothing of the message is sent.
   const blocked = await stage(Buffer.from('x'), 'blocked.txt', 'text/plain');
   writeFileSync(`${FIX}/uploads/${blocked.id}`, 'in the way');
-  const before31b = clean(received()).length;
+  const before31b = stdinRecords().length;
   const failing = await json('/api/floor/chat', { channel: CH, agent: 'free', text: 'about the blocked one', files: [blocked.id] });
   eq(failing.status, 200, 'the board takes a message whose file the host will fail to write');
   const failRows = await until(async () => {
@@ -781,13 +851,12 @@ try {
     return rows.some((r) => r.role === 'error' && /blocked\.txt.*; nothing was typed$/.test(r.text ?? '')) ? rows : null;
   }, 15000);
   const failText = failRows?.filter((r) => r.role === 'error').at(-1)?.text ?? '';
-  assert(!!failRows, `the desk is told why, then that nothing was typed, in an error turn — ${failText}`);
+  assert(!!failRows, `the desk is told why, then that nothing was sent, in an error turn — ${failText}`);
   // Not "not sent — …": a meeting room puts "not delivered — " before a
   // desk's error, and the two read as one stutter (QA, PR #58 Info 6).
   assert(!/^not (sent|delivered)\b/.test(failText), 'in words that read whole under a meeting room\'s own "not delivered — "');
   await sleep(500);
-  assert(!clean(received()).slice(before31b).includes('about the blocked one'), 'and none of its words reach the window');
-
+  assert(!stdinRecords().slice(before31b).some((r) => (r.text ?? '').includes('about the blocked one')), 'and none of its words reach Claude Code');
   console.log('\nreading the conversation back');
   // What Claude Code writes is what the floor shows — including a turn nobody
   // on the floor typed, which is the case that used to need a whole driver.
@@ -801,7 +870,7 @@ try {
   assert((got ?? []).some((r) => r.text === 'typed in the terminal'), 'both sides of it');
 
   appendTurn({ type: 'assistant', uuid: 'a-2', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } });
-  const tool = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'tool'));
+  const tool = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'tool' && r.text === 'Bash: npm test'));
   eq(tool?.text, 'Bash: npm test', 'a tool call becomes its one-line row');
 
   // What the agent thought before the call is a row too, under its own role —
@@ -825,7 +894,7 @@ try {
   });
   const summaryRow = (filed ?? []).find((r) => (r.text ?? '').startsWith('This session is being continued'));
   eq([summaryRow?.role, summaryRow?.tool_name], ['context', 'compact-summary'], 'the compaction summary is a system record labeled as one, not "you:"');
-  eq((filed ?? []).find((r) => r.tool_name === 'compact')?.text, 'Conversation compacted (auto): 71,299 → 12,473 tokens in 16.1 s', 'the boundary is a line in the compaction\'s own terms');
+  eq((filed ?? []).find((r) => r.tool_name === 'compact' && (r.text ?? '').includes('(auto)'))?.text, 'Conversation compacted (auto): 71,299 → 12,473 tokens in 16.1 s', 'the boundary is a line in the compaction\'s own terms');
   eq((filed ?? []).find((r) => r.text === 'four lines of mine\nthat the window wrapped')?.role, 'user', 'a wrapped paste is the operator\'s words with the wrapper gone');
   assert(!(filed ?? []).some((r) => (r.text ?? '').includes('<pasted_content')), 'and the tags are nowhere');
   const apiErr = (filed ?? []).find((r) => r.text === 'Autocompact is thrashing: the context refilled to the limit');
@@ -888,32 +957,90 @@ try {
   assert(idOf('ORDER-SUB thought earlier') < idOf('ORDER-MAIN said later'),
     'a subagent line stamped earlier is filed first even though its stamp sorts later as a string — merged by the clock, not by file order or string order');
 
-  console.log('\nswitching apps');
+  console.log('\nwhen the desk\'s Claude Code ends');
+  // Ended from outside, as a person quitting it would. The desk remembers its
+  // conversation, and the next message from the floor resumes it rather than
+  // starting a new one: the history on screen stays, and the reply lands in it.
+  assert(!!(await quitByHand()), 'a desk whose Claude Code was quit is held by nobody');
+  let argvAt = argvLog().length;
+  eq((await chat('free', 'still there?')).status, 200, 'and the floor still takes a message for it');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'which starts its Claude Code again');
+  eq(launches(argvAt).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_ID}`], 'resuming the same conversation rather than starting a new one');
+  assert(await until(async () => ((await turnRows()).some((r) => r.text === 'ECHO:still there?') ? true : null), 10000), 'and the message is delivered there');
 
-  // Closing the window you were typing in does not end the conversation.
-  //
-  // The desk forgets its live session the moment a window goes away — and that
-  // is exactly when the id is needed. Without remembering it, the next message
-  // from the floor opened a brand new conversation: the history on screen
-  // vanished and the reply came back in something else.
-  const before = existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '';
-  execFileSync('tmux', ['kill-session', '-t', TMUX_SESSION], { stdio: 'ignore' });
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  // Let the host actually notice. Without this the message is handled before a
-  // watch cycle runs, the desk still holds its live session id, and the test
-  // passes whether or not the id is remembered — which is the bug it exists for.
-  await sleep(WATCH_SETTLE_MS);
+  // Ended on its own, mid-turn: said on the desk, and the next message starts it again.
+  mark = await lastId();
+  eq((await chat('free', 'DIE')).status, 200, 'a message the desk\'s Claude Code takes and then dies on');
+  const exited = await until(async () => (await newRows(mark)).find((r) => r.role === 'error' && /Claude Code ended/.test(r.text ?? '')) ?? null, 10000);
+  assert(/^the desk's Claude Code ended \(code 3\).*The next message starts it again\.$/.test(exited?.text ?? ''), `is said on the desk, with how it ended — ${exited?.text}`);
+  assert(!!(await heldBy('free', null, undefined, 5000)), 'and the floor no longer holds the desk');
+  argvAt = argvLog().length;
+  mark = await lastId();
+  eq((await chat('free', 'after the end')).status, 200, 'the next message is taken');
+  assert(await until(async () => ((await newRows(mark)).some((r) => r.text === 'ECHO:after the end') ? true : null), 10000), 'and starts it again, on the same conversation, and is answered');
+  eq(launches(argvAt).length, 1, 'one Claude Code started for it');
 
-  const again = await chat('free', 'still there?');
-  eq(again.status, 200, 'and the floor still takes a message for it');
-  const started = await until(() => {
-    const log = existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '';
-    return log.length > before.length ? log.slice(before.length) : null;
-  }, 20000);
-  assert(started, 'which opens a window again');
-  assert((started ?? '').includes(`--resume ${SESSION_ID}`),
-    `and resumes the same conversation rather than starting a new one — ${JSON.stringify((started ?? '').trim())}`);
+  // Held by a background session (Claude Code's daemon kept it running after
+  // its tab closed): there is nobody to close it, so the host stops it with
+  // claude stop and takes the conversation, saying so; never "close it there".
+  console.log('\n  a conversation running as a background session');
+  const bgSession = (job) => {
+    const p = spawn('sleep', ['300'], { detached: true, stdio: 'ignore' });
+    p.unref();
+    writeFileSync(`${HOME}/.claude/sessions/${p.pid}.json`, JSON.stringify({ pid: p.pid, sessionId: SESSION_ID, cwd: REPO, kind: 'bg', jobId: job, entrypoint: 'cli', startedAt: Date.now() }));
+    return p.pid;
+  };
+  const bgAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  assert(!!(await quitByHand()), 'the fixture: the desk\'s own Claude Code quit');
+  let bgPid = bgSession('stuck-1');
+  mark = await lastId();
+  eq((await chat('free', 'over to the floor')).status, 200, 'a message for a desk whose conversation a background session holds is taken');
+  const bgRefused = await until(async () => (await newRows(mark)).find((r) => r.role === 'error') ?? null, 15000);
+  assert(/^That conversation is running as a background Claude Code session \(stuck-1, pid \d+\), and `claude stop stuck-1` did not stop it: could not stop stuck-1\.$/.test(bgRefused?.text ?? ''),
+    `when claude stop fails, the desk says so in its words and nothing is started — ${bgRefused?.text}`);
+  try { process.kill(bgPid, 'SIGTERM'); } catch { /* gone */ }
+  rmSync(`${HOME}/.claude/sessions/${bgPid}.json`, { force: true });
+  bgPid = bgSession('bgjob-1');
+  argvAt = argvLog().length;
+  mark = await lastId();
+  eq((await chat('free', 'over to the floor')).status, 200, 'and when it can be stopped');
+  assert(!!(await hostLine(mark, /^its conversation was running as a background Claude Code session \(bgjob-1\), so the host stopped that with claude stop and resumed it here$/)), 'the host stops it and says so on the desk');
+  assert(await until(() => (!bgAlive(bgPid) ? true : null), 5000), 'the background session is gone');
+  eq(launches(argvAt).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_ID}`], 'and the desk resumes that conversation');
+  assert(await until(async () => ((await newRows(mark)).some((r) => r.text === 'ECHO:over to the floor') ? true : null), 10000), 'where the message is answered');
 
+  console.log('\nhanding the conversation to another app');
+  // To the editor: the desk's Claude Code ends first, then the editor is
+  // asked to open the conversation (the reverse would leave two live copies).
+  mark = await lastId();
+  eq((await json('/api/floor/handback', { channel: CH, agent: 'free' })).status, 200, 'handing back to the editor is taken');
+  const editorUrl = await until(() => (existsSync(`${FIX}/editor.log`) ? readFileSync(`${FIX}/editor.log`, 'utf8').trim() : null), 10000);
+  eq(editorUrl, `vscode://anthropic.claude-code/open?session=${SESSION_ID}`, 'the editor is asked to open that conversation, by its id');
+  assert(!!(await heldBy('free', null, undefined, 5000)) && !pidIn(REPO), 'after the desk\'s own Claude Code has ended: one app holds a conversation at a time');
+
+  // Open in Claude: the same handoff, to a terminal. This host is asked for
+  // a terminal it has no script for, so it says so; the desk's Claude Code
+  // was still ended first.
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'the fixture: the desk is opened on the floor again');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: held by the floor');
+  mark = await lastId();
+  eq((await json('/api/floor/claude', { channel: CH, agent: 'free' })).status, 200, 'Open in Claude is taken');
+  const noTerminal = await until(async () => (await newRows(mark)).find((r) => r.role === 'error') ?? null, 10000);
+  assert(/^ORCH_TERMINAL is set to "none-in-tests", which this host has no script for\./.test(noTerminal?.text ?? '') && noTerminal.text.includes(`--resume ${SESSION_ID}`),
+    `a terminal that cannot be opened is said on the desk, with the command to run — ${noTerminal?.text}`);
+  assert(!!(await heldBy('free', null, undefined, 5000)) && !pidIn(REPO), 'and the desk\'s Claude Code had been ended for the handoff');
+
+  // Held by another app: a Claude Code the host does not run, on the desk's
+  // conversation. The floor says so and takes nothing it cannot deliver.
+  const editor = spawn('sleep', ['120'], { stdio: 'ignore' });
+  rosterEntry(editor.pid, REPO, SESSION_ID, 'an editor');
+  assert(!!(await heldBy('free', 'editor', undefined, 8000)), 'a conversation open in another app is held by the editor on the floor');
+  const toEditor = await chat('free', 'hello?');
+  eq([toEditor.status, (await toEditor.json()).code], [409, 'held_by_editor'], 'a message is refused, in words, before it is queued');
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 409, 'and so is opening it on the floor: that would be two copies of one conversation');
+  editor.kill();
+  dropRosterEntry(editor.pid);
+  assert(!!(await heldBy('free', null, undefined, 8000)), 'the editor gone, nothing holds it');
   console.log('\na desk that appears after the host started');
   // Desks used to be discovered once, at boot. Binding a repo to this board
   // afterwards — the most ordinary thing a person does — left the floor saying
@@ -942,67 +1069,39 @@ try {
     'and a binding that has been removed takes its desk offline on the next look, rather than reading as hosted for ever');
   assert(/dropped desk .*late/.test(host.log), 'which the host also says');
 
-  // A desk whose .mcp.json key is `${ORCH_TEST_PANE_KEY}`, which neither this
-  // host's environment nor the tmux server's sets (QA, PR #52 finding 1;
-  // costmo's ruling B). A window the host opens for it is given that one
-  // variable, set to the key the host signs in with, so Claude Code in it
-  // sends the board's key rather than the placeholder. The window suite has
-  // the cases that get nothing; this is the running host's own wiring
-  // (useKey at boot). The window's roster entry replaces the fixture's, so
-  // the case puts back what was there and closes the window when done.
+  // A desk whose .mcp.json key is `${ORCH_TEST_PANE_KEY}`, which nothing
+  // here sets (QA, PR #52 finding 1; costmo's ruling B). The desk's Claude
+  // Code is given that one variable, set to the key the host signs in with,
+  // so it sends the board's key rather than the placeholder; and nothing
+  // else of the host's ORCH_ settings (0.14.4, host.windows_inherit).
   const paneDir = `${FIX}/repo-pane`;
   mkdirSync(paneDir, { recursive: true });
   writeFileSync(`${paneDir}/.mcp.json`, JSON.stringify({
     mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'pane', 'X-Orchestratinator-Key': '${ORCH_TEST_PANE_KEY}' } } },
   }, null, 2));
-  const rosterWas = readFileSync(`${FIX}/roster.json`, 'utf8');
   eq((await json('/api/floor/rescan', {})).status, 200, 'a desk whose key is a placeholder nothing here sets is found');
   assert(await until(async () => (deskOf(await floor(), 'pane')?.hosted?.live === true ? true : null), 10000), 'and hosted');
-  // Opened, not messaged: the stand-in writes whatever it is sent into the
-  // fixture's one transcript, which is `free`'s, and later cases count that.
-  //
-  // The window registers late here, on purpose (QA, PR #57 Info 10). This
-  // case kills the pane as soon as it has read what the pane was given, and
-  // whether the host had seen the window ready by then was a race. When it
-  // had not, the host waited 45 s on a window that was gone, with its line
-  // held, and the seven rows of "taking a desk" below failed for it. That
-  // was the "Take a desk seven", read as load four times. With the delay
-  // the host is always still waiting when the pane goes.
-  writeFileSync(`${FIX}/ready-delay.flag`, '8000');
-  const paneOpenedAt = host.log.length;
   eq((await json('/api/floor/open', { channel: CH, agent: 'pane' })).status, 200, 'the floor opens it');
   const paneEnvLine = await until(() => {
-    const log = existsSync(`${FIX}/pane-env.log`) ? readFileSync(`${FIX}/pane-env.log`, 'utf8') : '';
+    const log = existsSync(`${FIX}/env.log`) ? readFileSync(`${FIX}/env.log`, 'utf8') : '';
     return log.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.cwd.endsWith('/repo-pane')) ?? null;
   }, 20000);
-  eq(paneEnvLine?.key ?? null, KEY, "the window the host opens for it has the variable, set to the host's key");
-  // 0.14.4 (host.windows_inherit): the host's own settings stay with the
-  // host. This host runs with ORCH_URL, ORCH_HOST_CLAUDE, ORCH_TMUX_SESSION
-  // and more, and the tmux server it shares may have been started by a host
-  // that handed them down; cleanServerEnv took them out at its start.
+  eq(paneEnvLine?.key ?? null, KEY, "the desk's Claude Code has the variable, set to the host's key");
   eq(paneEnvLine?.orch ?? 'unread', [], 'and nothing else of the host\'s ORCH_ settings');
-  try {
-    const panes = execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}']).toString();
-    for (const l of panes.split('\n').filter((x) => x.endsWith('/repo-pane'))) execFileSync('tmux', ['kill-pane', '-t', l.split(' ')[0]]);
-  } catch { /* gone */ }
-  rmSync(`${FIX}/ready-delay.flag`, { force: true });
-  writeFileSync(`${FIX}/roster.json`, rosterWas);
   rmSync(`${paneDir}/.mcp.json`);
   await json('/api/floor/rescan', {});
-  assert(await until(() => (/dropped desk .*\/pane .*asked from the floor/.test(host.log.slice(paneOpenedAt)) ? true : null), 10000),
-    'a window closed while the host was still waiting for it to start does not hold the host\'s line: what is asked of it next is done at once',
-  );
+  assert(await until(() => (/dropped desk .*\/pane /.test(host.log) && !pidIn(paneDir) ? true : null), 10000),
+    'a desk whose binding is gone is dropped, and its Claude Code ends with it');
 
   /* ── taking a desk from the floor ──────────────────────────────────────────
    * The first door that needs no terminal. The route refuses what the board
    * can see is wrong; the host binds with `claude mcp add -s local` (the
-   * stand-in above), with its own key, and opens a window. Import takes a
-   * .mcp.json desk into local scope and removes the file's entry, keeping
-   * other servers. Leave is the reverse. */
+   * stand-in above), with its own key, and starts the desk's Claude Code.
+   * Import takes a .mcp.json desk into local scope and removes the file's
+   * entry, keeping other servers. Leave is the reverse. */
   console.log('\ntaking a desk from the floor');
   const take = (body) => json('/api/floor/desk', body);
   const localCfg = () => JSON.parse(readFileSync(`${HOME}/.claude.json`, 'utf8'));
-  const argvLog = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/plain-git`, channel: CH, agent: 'bad name!' })).status, 400, 'an agent name with a space in it is refused');
   eq((await take({ host_id: 'host-test-1', path: '/nope', channel: CH, agent: 'newbie' })).status, 409, 'a folder the host did not offer is refused');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/repo-elsewhere`, channel: CH, agent: 'newbie' })).status, 409, 'a folder bound to another instance is refused when the take does not name that instance');
@@ -1020,27 +1119,31 @@ try {
     'written by `claude mcp add -s local`, with the key the host holds — the board never sent one');
   eq(entry?.url, `${HOST}/mcp`, 'pointing at this board');
   assert(/newbie: bound .*plain-git in local scope/.test(host.log), 'and the host log says so');
-  assert(await until(() => (argvLog().length > argvBefore ? true : null), 15000), 'and a window opened there');
-  assert(!argvLog().slice(argvBefore).includes('--resume'), 'a fresh conversation, with nothing to resume');
+  assert(!!(await heldBy('newbie', 'floor', undefined, 15000)), 'and its Claude Code is started there, held by the floor');
+  const newbieArgv = await until(() => { const l = launches(argvBefore); return l.length ? l : null; }, 8000) ?? [];
+  assert(newbieArgv.length === 1 && !newbieArgv[0].includes('--resume'), `a fresh conversation, with nothing to resume — ${JSON.stringify(newbieArgv)}`);
   const offeredNow = await (await json('/api/floor/folders')).json();
   eq(offeredNow.hosts.find((h) => h.host_id === 'host-test-1')?.folders.find((f) => f.name === 'plain-git')?.bound?.agent, 'newbie',
     'and the folder list now shows it bound');
 
-  // Import: a .mcp.json desk, with another server beside ours, into local scope.
+  // Import: a .mcp.json desk, with another server beside ours, into local
+  // scope. Its Claude Code is running, and is not touched.
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'the fixture: free\'s Claude Code is running');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: held by the floor');
+  const freePidBefore = pidIn(REPO);
   writeFileSync(`${REPO}/.mcp.json`, JSON.stringify({
     mcpServers: {
       orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'free', 'X-Orchestratinator-Key': KEY } },
       github: { type: 'http', url: 'http://127.0.0.1:9/mcp' },
     },
   }, null, 2));
-  const sidBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
   const imported = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free', open: false });
   eq(imported.status, 200, 'a desk bound in its .mcp.json can be brought onto the floor');
   eq((await imported.json()).mode, 'import', 'as an import');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.scope === 'local' ? true : null), 20000), 'after which it is a local-scope desk');
   eq(Object.keys(JSON.parse(readFileSync(`${REPO}/.mcp.json`, 'utf8')).mcpServers), ['github'], 'its .mcp.json lost the orchestratinator entry and kept the other server');
   eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Agent'], 'free', 'and ~/.claude.json gained it');
-  eq(deskOf(await floor(), 'free')?.hosted?.session_id, sidBefore, 'the conversation it was following is the one it still follows');
+  eq([deskOf(await floor(), 'free')?.hosted?.session_id, pidIn(REPO)], [SESSION_ID, freePidBefore], 'the conversation it was on is the one it is still on, in the same Claude Code');
   eq((await take({ host_id: 'host-test-1', path: `${FIX}/opened`, channel: CH, agent: 'newbie' })).status, 409, 'a name already seated at another folder is refused');
 
   // Leave: the reverse, all the way back to an unbound folder.
@@ -1049,44 +1152,30 @@ try {
   assert(await until(async () => (deskOf(await floor(), 'newbie')?.hosted?.state === 'offline' ? true : null), 20000), 'and the desk goes offline once the host has unbound it');
   eq(localCfg().projects?.[`${FIX}/plain-git`]?.mcpServers?.orchestratinator ?? null, null, 'its local-scope entry is gone');
   assert(/dropped desk host-test\/newbie/.test(host.log), 'the host dropped the desk');
-  assert(!execFileSync('tmux', ['list-windows', '-t', TMUX_SESSION, '-F', '#{window_name}'], { encoding: 'utf8' }).includes('plain-git'), 'and closed its window');
+  eq(pidIn(`${FIX}/plain-git`), null, 'and ended its Claude Code');
   assert(!!deskOf(await floor(), 'newbie'), 'the seat stays on the floor — whether the agent is gone is the board\'s question');
 
   /* ── the session picker and the reopen primitive ────────────────────────────
    * A desk's folder holds many conversations; the picker lists them and a
-   * pick closes the floor's window and reopens it with --resume. The host
-   * pins the chosen conversation before the new window registers, so a stray
-   * session in the same folder cannot steal the desk meanwhile; a picked
-   * conversation the board has never seen is joined at its tail, a known one
-   * at its end; a fresh one flips the desk to whatever id its window
-   * announces; and a window mid-turn is refused, quoting its status line. */
+   * pick ends the desk's Claude Code and starts it again with --resume. A
+   * picked conversation the board has never seen is joined at its tail, a
+   * known one at its end, and a new one starts with nothing to resume. */
   console.log('\nthe session picker and reopening');
   const SESSION_B = 'bbbbbbbb-2222-3333-4444-555555555555';
-  const transcriptB = `${HOME}/.claude/projects/${slug()}/${SESSION_B}.jsonl`;
+  const transcriptB = transcriptOf(REPO, SESSION_B);
   writeFileSync(transcriptB, [
     JSON.stringify({ type: 'user', uuid: 'b-u1', timestamp: '2026-09-09T08:00:00Z', message: { content: 'the other conversation begins' } }),
     JSON.stringify({ type: 'assistant', uuid: 'b-a1', timestamp: '2026-09-09T08:00:05Z', message: { content: [{ type: 'text', text: 'B-TAIL-SEEN' }] } }),
     '',
   ].join('\n'));
   const sessionsGet = () => json(`/api/floor/sessions?channel=${CH}&agent=free`).then((r) => r.json());
-  // The roster as it truly is. The stand-in overwrites roster.json whenever a
-  // window starts and cannot unwrite itself when one is killed, so after the
-  // desk taken and left above it names a dead pane under this same session id
-  // — which holderOf reads, correctly, as an editor holding it. Rebuild it
-  // from the one pane actually running in the repo.
-  const paneIn = (dir) => execFileSync('tmux', ['list-panes', '-s', '-t', TMUX_SESSION, '-F', '#{pane_pid} #{pane_current_path}'], { encoding: 'utf8' })
-    .trim().split('\n').map((l) => l.split(' ')).find(([, d]) => d === dir)?.[0] ?? null;
-  const freePid = Number(paneIn(REPO));
-  assert(freePid > 0, 'a window is open in the repo to begin with');
-  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: freePid, cwd: REPO, kind: 'interactive', startedAt: 1, sessionId: SESSION_ID, name: 'stand-in' }]));
-  await sleep(WATCH_SETTLE_MS);
   const askList = await json('/api/floor/sessions', { channel: CH, agent: 'free' });
   eq(askList.status, 200, 'the floor can ask a desk\'s host to list its conversations');
   eq((await askList.json()).asked, true, 'and the host is asked');
   const listed = await until(async () => { const g = await sessionsGet(); return g.at ? g : null; }, 15000);
   assert(!!listed, 'the host answers with a list, stamped with its time');
   const rowsById = Object.fromEntries((listed?.rows ?? []).map((r) => [r.id, r]));
-  eq(rowsById[SESSION_ID]?.live, true, 'the conversation in the open window is marked live');
+  eq(rowsById[SESSION_ID]?.live, true, 'the conversation the desk\'s Claude Code is on is marked live');
   eq(rowsById[SESSION_ID]?.held, 'floor', 'and held by the floor');
   eq(listed?.current, SESSION_ID, 'and the board says it is the desk\'s current one');
   eq([rowsById[SESSION_B]?.title, rowsById[SESSION_B]?.known], ['the other conversation begins', false],
@@ -1094,34 +1183,21 @@ try {
   eq((await (await json('/api/floor/sessions', { channel: CH, agent: 'free' })).json()).asked, false,
     'asked again at once, the board serves the list it has rather than walking the folder again');
 
-  // Reopen on B, with the new window slow to register — and a stray session
-  // in the same folder during the gap, which newest-wins would have adopted.
-  // This session's panes only (-s, not -a: -a is every pane on the tmux
-  // server, the live board's included), and none at all in the instant a
-  // reopen has killed the session's last window — tmux drops the session
-  // with it, and the host makes a new one by the same name a moment later.
-  const paneOf = () => {
-    try {
-      return execFileSync('tmux', ['list-panes', '-s', '-t', TMUX_SESSION, '-F', '#{pane_pid}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n').filter(Boolean);
-    } catch { return []; }
-  };
-  const panesBefore = paneOf();
+  const pidBeforeB = pidIn(REPO);
   const argvAtReopen = argvLog().length;
-  const turnsBeforeB = ((await turns('free')).rows ?? []).length;
-  writeFileSync(`${FIX}/ready-delay.flag`, '3000');
   const reopened = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
   eq(reopened.status, 200, 'a pick is accepted');
   eq((await reopened.json()).known, false, 'and the board says it has never seen that conversation');
-  await sleep(600);   // the old window is closed by now; the new one announces in 3 s
-  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: process.pid, cwd: REPO, kind: 'interactive', startedAt: Date.now() + 5000, sessionId: 'stray-session', name: 'stray' }]));
+  // A stray Claude Code in the same folder meanwhile, on another
+  // conversation: the desk's own process is running, so nothing adopts it.
+  rosterEntry(process.pid, REPO, 'stray-session', 'stray');
   const seenIds = new Set();
   for (let i = 0; i < 16; i++) { seenIds.add(deskOf(await floor(), 'free')?.hosted?.session_id ?? null); await sleep(150); }
-  assert(!seenIds.has('stray-session'), `a stray session in the folder is not adopted while the reopen is in flight — saw ${[...seenIds].join(', ')}`);
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_B ? true : null), 25000),
-    'and the desk lands on the conversation that was picked');
-  assert(argvLog().slice(argvAtReopen).includes(`--resume ${SESSION_B}`), 'opened with --resume of that id');
-  const panesAfter = paneOf();
-  assert(panesAfter.length === panesBefore.length && !panesAfter.some((p) => panesBefore.includes(p)), 'in a new pane, the old one gone');
+  assert(!seenIds.has('stray-session'), `a stray session in the folder is not adopted — saw ${[...seenIds].join(', ')}`);
+  assert(!!(await heldBy('free', 'floor', SESSION_B, 25000)), 'and the desk lands on the conversation that was picked');
+  eq(launches(argvAtReopen).map((l) => l.split(' ').slice(-2).join(' ')), [`--resume ${SESSION_B}`], 'its Claude Code started again with --resume of that id');
+  assert(pidIn(REPO) && pidIn(REPO) !== pidBeforeB, 'a new process, the old one gone');
+  dropRosterEntry(process.pid);
   assert(await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes('B-TAIL-SEEN')) ? true : null), 8000),
     'a conversation the board had never seen is joined at its tail, so its recent past reaches the floor');
   appendFileSync(transcriptB, `${JSON.stringify({ type: 'assistant', uuid: 'b-a2', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'B-LIVE-TURN' }] } })}\n`);
@@ -1134,68 +1210,27 @@ try {
     'the list now says the board knows that conversation');
 
   // Known now: reopening it again joins at the end, replaying nothing.
-  rmSync(`${FIX}/ready-delay.flag`, { force: true });
   const bTailCount = () => turns('free').then((t) => (t.rows ?? []).filter((r) => (r.text ?? '').includes('B-TAIL-SEEN')).length);
   const tailBefore = await bTailCount();
   await sleep(6000);   // past the listing throttle, so the reopen's own list is fresh — and past nothing else
+  const pidAfterB = pidIn(REPO);
   const secondPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
   eq((await secondPick.json()).known, true, 'a second pick of the same conversation is one the board knows');
-  assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.session_id === SESSION_B && d?.hosted?.held === 'floor' && !paneOf().some((p) => panesAfter.includes(p)) ? true : null; }, 25000),
-    'and the window is reopened on it');
+  assert(await until(async () => (pidIn(REPO) && pidIn(REPO) !== pidAfterB && deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 25000),
+    'and the desk\'s Claude Code is started again on it');
   await sleep(WATCH_SETTLE_MS);
   eq(await bTailCount(), tailBefore, 'with nothing replayed');
 
-  // Mid-turn: a window whose status line says it is working is not closed.
-  // The flag is read when a window starts, so the pick that lands here opens
-  // the window that then refuses the next one.
-  writeFileSync(`${FIX}/busy.flag`, '1');
-  // Waited on against the panes before this pick, not panesAfter: the second
-  // pick's window is not in panesAfter either, so with the host's line held
-  // (a /mcp reconnect waiting out its 8 s, release gate 2026-11-20) that
-  // window read as this pick's, and the refusal below met the next one.
-  const panesBeforeBusy = paneOf();
-  const busyOpen = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_B });
-  eq(busyOpen.status, 200, 'a pick is queued while the window is idle');
-  const idBefore = deskOf(await floor(), 'free')?.hosted?.session_id;
-  assert(await until(async () => { const p = paneOf(); return p.length === panesAfter.length && !p.some((x) => panesBeforeBusy.includes(x)) ? true : null; }, 25000),
-    'and lands in a new window — one that now says it is working');
-  await sleep(WATCH_SETTLE_MS);
-  const busyPanes = paneOf();
-  const busyPick = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID });
-  eq(busyPick.status, 200, 'the board queues the next pick — it cannot see the pane');
-  const errTurn = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /not reopened/.test(r.text ?? '')) ?? null, 15000);
-  assert(!!errTurn, 'the host refuses it as an error turn on the desk');
-  assert(/esc to interrupt/.test(errTurn?.text ?? ''), `quoting the pane's status line — ${errTurn?.text}`);
-  eq(paneOf(), busyPanes, 'and the working window is left exactly as it was');
-  eq(deskOf(await floor(), 'free')?.hosted?.session_id, SESSION_B, `still on its conversation (was ${idBefore})`);
-
-  // A model change asked of that working window: the host refuses it before
-  // a key is pressed, and the board stops showing it as asked for. The error
-  // names the command, which is the only way the board knows what was
-  // refused; without it the select kept the model that was picked until the
-  // window's model next changed (costmo, 2026-11-14).
-  eq((await chat('free', '/model sonnet')).status, 200, 'a model change is queued for the working window — the board cannot see the pane');
-  const busyModel = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && /change the model when the turn ends/.test(r.text ?? '')) ?? null, 15000);
-  assert(!!busyModel, 'the host refuses it in words on the desk');
-  eq(deskOf(await floor(), 'free')?.session?.model_requested ?? null, null, 'and the model is no longer asked for: the select shows what the window is on');
-  eq(paneOf(), busyPanes, 'with the working window left as it was');
-  rmSync(`${FIX}/busy.flag`, { force: true });
-
-  // A fresh conversation: no --resume, and the desk follows whatever id the
-  // new window announces. The working window is killed by hand first — the
-  // one thing the floor will not do — and the roster it cannot unwrite is
-  // cleared, as the section after this one does for the same reason.
-  killTmux();
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
+  // A new conversation: nothing to resume, and the desk follows the id
+  // Claude Code names at the first message.
+  const SESSION_NEW = '44444444-dddd-3333-4444-555555555555';
+  nextFreshId(SESSION_NEW);
   const argvAtNew = argvLog().length;
-  const fresh = await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null });
-  eq(fresh.status, 200, 'start new is accepted');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 25000),
-    'and the desk follows the conversation the new window announces');
-  const newLine = argvLog().slice(argvAtNew).trim().split('\n').pop() ?? '';
-  assert(!newLine.includes('--resume'), `opened with nothing to resume — ${JSON.stringify(newLine)}`);
-
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null })).status, 200, 'start new is accepted');
+  assert(await until(() => (launches(argvAtNew).length === 1 ? true : null), 10000), 'and a Claude Code is started');
+  assert(!launches(argvAtNew)[0].includes('--resume'), `with nothing to resume — ${JSON.stringify(launches(argvAtNew))}`);
+  eq((await chat('free', 'hello, new conversation')).status, 200, 'a message to it is taken');
+  assert(!!(await heldBy('free', 'floor', SESSION_NEW)), 'and the desk follows the conversation Claude Code names');
   /* ── the folder picker, and moving a desk to another floor ────────────────
    * The host lists one folder at a time, the way a file picker shows it, and
    * a bound folder taken onto another floor under its own name is moved:
@@ -1249,8 +1284,8 @@ try {
    * ruling). Each folder is shown by a browse first, which is how a caller
    * with no roots reaches one. What is asserted is the disk: which entries
    * went and which stayed, in both scopes, and that a refusal changed
-   * nothing. The window in the folder is "the other instance's": a pane
-   * this host did not open, found by its directory. */
+   * nothing. "The other instance's" Claude Code in a folder is a roster
+   * entry for a process this host did not start. */
   console.log('\nreleasing a folder from another instance');
   {
     const CHR = 'host-test-rel';
@@ -1265,12 +1300,6 @@ try {
     const elsewhere = (agent, extra = {}) => JSON.stringify({
       mcpServers: { orchestratinator: { type: 'http', url: `${ELSE}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': agent, 'X-Orchestratinator-Key': 'the-other-key' } }, ...extra },
     }, null, 2);
-    const panesIn = (dir) => {
-      try {
-        return execFileSync('tmux', ['list-panes', '-s', '-t', `${TMUX_SESSION}:`, '-F', '#{pane_id} #{pane_current_path}'], { encoding: 'utf8' })
-          .trim().split('\n').map((l) => l.split(' ')).filter(([, d]) => d === dir).map(([id]) => id);
-      } catch { return []; }
-    };
 
     // In its .mcp.json, beside another server and a third instance's entry.
     const relA = `${FIX}/rel-project`;
@@ -1280,7 +1309,7 @@ try {
       third: { type: 'http', url: 'http://localhost:7/mcp', headers: { 'X-Channel': 'z', 'X-Agent': 'rel-a' } },
     }));
     const SESSION_REL = 'cccccccc-9999-3333-4444-555555555555';
-    const relProject = `${HOME}/.claude/projects/${relA.replace(/[^A-Za-z0-9]/g, '-')}`;
+    const relProject = `${HOME}/.claude/projects/${slugOf(relA)}`;
     mkdirSync(relProject, { recursive: true });
     writeFileSync(`${relProject}/${SESSION_REL}.jsonl`, [
       JSON.stringify({ type: 'user', uuid: 'r-u1', timestamp: '2026-11-08T08:00:00Z', message: { content: 'what it was doing on the other instance' } }),
@@ -1307,7 +1336,7 @@ try {
     assert(/releasing it from http:\/\/localhost:9/.test(relLog), 'the host log says what it released it from');
     assert(/removed orchestratinator from .*rel-project\/\.mcp\.json \(kept github, third\)/.test(relLog) && /left third in .*rel-project\/\.mcp\.json alone — it points at http:\/\/localhost:7/.test(relLog),
       'what it took out of the file, and what it left there and why');
-    eq(argvLog().length, argvAtRel, 'asked to open nothing, it opened no window');
+    eq(argvLog().length, argvAtRel, 'asked to open nothing, it started no Claude Code');
 
     // A binding that changed between the click and the bind: the board's
     // reading is the browse, and the disk no longer says it.
@@ -1324,9 +1353,11 @@ try {
     eq(readFileSync(`${relB}/.mcp.json`, 'utf8'), moved, 'the file is as it was');
     eq(localCfg().projects?.[relB]?.mcpServers ?? null, null, 'and nothing was bound');
 
-    // In local scope under a name of somebody's own, with a window open in
-    // the folder. Working, it is refused; idle, it is closed and a window
-    // opens on a new conversation, as a move between floors does.
+    // In local scope under a name of somebody's own, with the other
+    // instance's Claude Code running in the folder. Seated here on a new
+    // conversation, as a move between floors is: that one's conversation is
+    // never resumed beside it. Its own host lets it go when it reads the
+    // folder's new binding (below, this host as the one being left).
     const relC = `${FIX}/rel-local`;
     mkdirSync(relC, { recursive: true });
     {
@@ -1334,53 +1365,21 @@ try {
       cfg.projects[relC] = { mcpServers: { oldboard: { type: 'http', url: `${ELSE}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'rel-c', 'X-Orchestratinator-Key': 'the-other-key' } } } };
       writeFileSync(`${HOME}/.claude.json`, JSON.stringify(cfg, null, 2));
     }
-    execFileSync('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', relC, '-n', 'rel-working', 'sh', '-c', "printf '\\n  working (esc to interrupt)\\n'; sleep 300"]);
-    assert(await until(() => (panesIn(relC).length === 1 ? true : null), 8000), 'a window is open in the folder, opened by somebody else');
-    await sleep(500);
+    const SESSION_OTHER = 'ffffffff-9999-3333-4444-555555555555';
+    const otherOne = spawn('sleep', ['120'], { stdio: 'ignore' });
+    rosterEntry(otherOne.pid, relC, SESSION_OTHER, 'the other instance\'s');
     eq((await show(relC))?.self?.bound?.scope, 'local', 'the folder is shown, bound elsewhere in local scope');
-    eq((await take({ host_id: 'host-test-1', path: relC, channel: CHR, agent: 'rel-c', from_board: ELSE })).status, 200, 'the board accepts it: it knows nothing of that window');
-    const working = await settled('rel-c');
-    assert(working?.state === 'refused' && /^not released from http:\/\/localhost:9 — the window is still working: .*esc to interrupt/.test(working.error ?? ''), `a working window is not closed: refused, quoting its status line — ${working?.error}`);
-    eq(Object.keys(localCfg().projects?.[relC]?.mcpServers ?? {}), ['oldboard'], 'and its binding is untouched');
-    eq(panesIn(relC).length, 1, 'with the window still there');
-    for (const id of panesIn(relC)) execFileSync('tmux', ['kill-pane', '-t', id]);
-    execFileSync('tmux', ['new-window', '-d', '-t', `${TMUX_SESSION}:`, '-c', relC, '-n', 'rel-idle', 'sleep', '300']);
-    assert(await until(() => (panesIn(relC).length === 1 ? true : null), 8000), 'the same window, now idle');
-    const idlePane = panesIn(relC)[0];
-    const rosterAtRel = readFileSync(`${FIX}/roster.json`, 'utf8');
     const argvAtRelC = argvLog().length;
-    await show(relC);
-    eq((await take({ host_id: 'host-test-1', path: relC, channel: CHR, agent: 'rel-c', from_board: ELSE })).status, 200, 'asked again');
+    eq((await take({ host_id: 'host-test-1', path: relC, channel: CHR, agent: 'rel-c', from_board: ELSE })).status, 200, 'a release of a folder with another instance\'s Claude Code in it is accepted');
     eq((await settled('rel-c'))?.state, 'seated', 'it is seated');
     eq(Object.keys(localCfg().projects?.[relC]?.mcpServers ?? {}), ['orchestratinator'], 'the entry it carried under another name is gone from local scope, and this instance\'s is there');
     eq(localCfg().projects?.[relC]?.mcpServers?.orchestratinator?.url, `${HOST}/mcp`, 'pointing here');
     assert(/removed the local-scope entry "oldboard" in .*rel-local, which pointed at http:\/\/localhost:9/.test(host.log), 'the host says which entry it removed, by its name');
-    assert(await until(() => { const now = panesIn(relC); return now.length === 1 && now[0] !== idlePane ? true : null; }, 30000),
-      'the window that was open under the other instance is closed, and one of this host\'s is open in its place');
-    // The pane is tmux's and comes first; argv.log is the stand-in's, written
-    // once it has started, a moment later. Read at the pane alone, the log
-    // was sometimes still empty (the main → develop merge's host run,
-    // 2026-11-18: `[]`), so the row waits for the line itself.
-    const relArgv = await until(() => { const l = argvLog().slice(argvAtRelC).split('\n').slice(0, -1); return l.length ? l : null; }, 8000) ?? [];
-    assert(relArgv.length === 1 && !relArgv[0].includes('--resume'), `on a new conversation, like a move that closes a window — ${JSON.stringify(relArgv)}`);
-    // The host's open is still waiting for that window to register (see the
-    // placeholder-key case above): nothing is taken down before it has.
-    assert(await until(() => {
-      const id = panesIn(relC)[0];
-      if (!id) return null;
-      try { return execFileSync('tmux', ['show-options', '-w', '-v', '-t', id, 'remain-on-exit']).toString().trim() === 'off' ? true : null; } catch { return null; }
-    }, 20000), 'and the host saw it register');
-    // And the watch has seen it too, which is a different look. waitReady
-    // and the watch loop read the roster apart, and a reopen's intent is let
-    // go only by the watch, at the tick that finds the new window
-    // (Desk.watch). Killed before that tick, the window leaves an intent
-    // nothing can match for 45 s, and the desk adopts nothing else in its
-    // folder meanwhile: the other host's window below was never followed,
-    // the binding never read, and the two rows on it read red with nothing
-    // in the host's log. Read on 2026-11-20: red in 3 of 8 host runs in a
-    // copy, an unmutated control among them, and in each the message to
-    // rel-a below reached the host 100 ms after this reopen, so the pane
-    // was killed within a watch tick of registering.
+    assert(!!(await until(async () => (onRel(await floor(), 'rel-c')?.hosted?.held === 'floor' ? true : null), 20000)), 'its own Claude Code is started there');
+    const relArgv = await until(() => { const l = launches(argvAtRelC); return l.length ? l : null; }, 8000) ?? [];
+    assert(relArgv.length === 1 && !relArgv[0].includes('--resume'), `on a new conversation, never the other instance's — ${JSON.stringify(relArgv)}`);
+    otherOne.kill();
+    dropRosterEntry(otherOne.pid);
     await sleep(WATCH_SETTLE_MS);
 
     // And the other side of a release: this host as the one being left.
@@ -1396,7 +1395,7 @@ try {
       writeFileSync(`${HOME}/.claude.json`, JSON.stringify(cfg, null, 2));
     };
     const relTurns = (agent) => json(`/api/floor/turns?channel=${CHR}&agent=${agent}`).then((r) => r.json()).then((b) => b.rows ?? []);
-    // Work arriving for the desk: nothing is opened or typed in a folder
+    // Work arriving for the desk: nothing is started or sent in a folder
     // that answers to another instance now.
     rebindAway(relA);
     const argvAtGone = argvLog().length;
@@ -1404,30 +1403,23 @@ try {
     const goneTurn = await until(async () => (await relTurns('rel-a')).find((t) => t.role === 'error' && /^not done: /.test(t.text ?? '')) ?? null, 15000);
     assert(/^not done: .*rel-project is bound to http:\/\/localhost:9 now, not host-test-rel\/rel-a on this instance/.test(goneTurn?.text ?? ''), `a message for a desk whose folder has been released elsewhere is refused on the desk, in what the disk says — ${goneTurn?.text}`);
     assert(await until(async () => (onRel(await floor(), 'rel-a')?.hosted?.state === 'offline' ? true : null), 10000), 'and the desk is let go at once, not at the next heartbeat');
-    eq(argvLog().length, argvAtGone, 'no window was opened in that folder');
-    // A window coming up in the folder: the one the other host opens. It is
-    // found by its folder like any other, and must not be followed.
-    const SESSION_THEIRS = 'dddddddd-9999-3333-4444-555555555555';
-    // The folder is rebound in the same moment the other host's window comes
-    // up, and not before the pane is killed and the watch settles. The
+    eq(argvLog().length, argvAtGone, 'no Claude Code was started in that folder');
+    // A Claude Code coming up in the folder: the one the other host starts.
+    // Found by its folder like any other, and must not be followed. The
+    // folder is rebound in the same moment it comes up, and not before: the
     // heartbeat's rescan drops a desk whose folder is bound elsewhere too, and
-    // with the rebind first it had those two seconds and more to do it in:
-    // the host's heartbeat falls about 60 s after its start, which is about
-    // when this case runs, so under load it landed there in QA's merge check
-    // of develop (2026-11-18) and in two of my three runs the next day, and
-    // the row read red with the desk let go by the other path ("(heartbeat)"
-    // in the host's log).
+    // given time it does it first (seen as a race in this case, 2026-11-18/19).
+    const SESSION_THEIRS = 'dddddddd-9999-3333-4444-555555555555';
+    assert(!!(await quitByHand(relC, 'rel-c', CHR)), 'the fixture: this host\'s Claude Code for the desk has ended');
     const relLogFrom = host.log.length;
-    for (const id of panesIn(relC)) { try { execFileSync('tmux', ['kill-pane', '-t', id]); } catch { /* gone */ } }
-    await sleep(WATCH_SETTLE_MS);
     rebindAway(relC);
-    writeFileSync(`${FIX}/roster.json`, JSON.stringify([...JSON.parse(rosterAtRel), { pid: process.pid, cwd: relC, kind: 'interactive', startedAt: Date.now(), sessionId: SESSION_THEIRS, name: 'theirs' }]));
+    rosterEntry(process.pid, relC, SESSION_THEIRS, 'theirs');
     const relSeen = await until(() => (/rel-c: .*rel-local is bound to http:\/\/localhost:9 now \(a window came up in its folder\) — letting the desk go/.test(host.log) ? true : null), 10000);
-    assert(relSeen, 'a window that comes up in a folder released elsewhere is not this desk\'s: the host reads the binding and lets the desk go');
+    assert(relSeen, 'a Claude Code that comes up in a folder released elsewhere is not this desk\'s: the host reads the binding and lets the desk go');
     if (!relSeen) {
-      const relLog = host.log.slice(relLogFrom);
-      if (/dropped desk host-test-rel\/rel-c .*\(heartbeat\)/.test(relLog)) console.log('    the heartbeat\'s rescan dropped rel-c before the watch looked: a race in this case, not a fault in the watch');
-      console.log(`    the host's log from the staging on:\n${relLog.split('\n').map((l) => `      ${l}`).join('\n')}`);
+      const said = host.log.slice(relLogFrom);
+      if (/dropped desk host-test-rel\/rel-c .*\(heartbeat\)/.test(said)) console.log('    the heartbeat\'s rescan dropped rel-c before the watch looked: a race in this case, not a fault in the watch');
+      console.log(`    the host's log from the staging on:\n${said.split('\n').map((l) => `      ${l}`).join('\n')}`);
     }
     assert(await until(async () => (onRel(await floor(), 'rel-c')?.hosted?.state === 'offline' ? true : null), 10000), 'the desk goes offline here within the watch, not the heartbeat');
     {
@@ -1438,73 +1430,50 @@ try {
       eq(theirs, 0, 'and nothing of the other instance\'s conversation reached this one');
     }
 
-    // Put away: both desks left, the windows closed, the roster as it was.
+    // Put away: both desks left, the roster as it was.
+    dropRosterEntry(process.pid);
     for (const agent of ['rel-a', 'rel-c']) {
       await json('/api/floor/desk/leave', { channel: CHR, agent });
       await until(async () => (onRel(await floor(), agent)?.hosted?.state === 'offline' ? true : null), 20000);
     }
-    for (const id of panesIn(relC)) { try { execFileSync('tmux', ['kill-pane', '-t', id]); } catch { /* gone */ } }
-    writeFileSync(`${FIX}/roster.json`, rosterAtRel);
     for (const d of [relA, relB, relC]) rmSync(d, { recursive: true, force: true });
     rmSync(relProject, { recursive: true, force: true });
     await json('/api/floor/rescan', {});
     await sleep(WATCH_SETTLE_MS);
   }
 
-  // Move: free's folder onto another floor, under its own name. The window
-  // is held by the floor and is on SESSION_ID (the fresh conversation from
-  // above). A running window keeps the headers it started with, so the move
-  // closes it — and opens one on a NEW conversation there (#24 Decided 2,
-  // costmo 2026-11-03: "A new session should be started instead"). It used
-  // to reopen on the conversation it was on, and asking who held that
-  // conversation found the window it had just closed, still in the roster:
-  // refused as outside_tmux, the desk on the new floor with no window, every
-  // same-conversation move on the live board from 2026-10-19 to 11-02. The
-  // linger file is that window, staying in the roster after its pane is
-  // killed; this case went red on it at 9d0e652.
-  const sidBeforeMove = deskOf(await floor(), 'free')?.hosted?.session_id;
-  eq(sidBeforeMove, SESSION_ID, 'the desk to move is on a known conversation, in a floor-held window');
+  // Move: free's folder onto another floor, under its own name. Its Claude
+  // Code runs on the conversation it is on, and keeps the headers it started
+  // with, so the move ends it, and the new floor gets a NEW conversation
+  // (#24 Decided 2, costmo 2026-11-03: "A new session should be started
+  // instead"). The one it was on stays in its folder.
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: free is put back on its first conversation');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the desk to move is on a known conversation, held by the floor');
   const SESSION_MOVED = 'eeeeeeee-2222-3333-4444-555555555555';
-  writeFileSync(`${FIX}/linger.flag`, '4000');
-  writeFileSync(`${FIX}/fresh-id.flag`, SESSION_MOVED);
+  const pidBeforeMove = pidIn(REPO);
   const argvAtMove = argvLog().length;
-  const panesBeforeMove = paneOf();
+  nextFreshId(SESSION_MOVED);
   const movedOut = await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' });
   eq([movedOut.status, (await movedOut.json()).mode], [200, 'move'], 'taking it onto another floor under its own name is a move');
   eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'renamed' })).status, 400, 'and under another name is refused — the folder names its agent');
   const onNewFloor = (f) => f.channels.find((c) => c.channel === CH2)?.desks.find((d) => d.agent === 'free');
   assert(await until(async () => (onNewFloor(await floor())?.hosted?.live ? true : null), 30000), 'the desk appears on the new floor, hosted');
   assert(/free: bound .*repo-a in local scope/.test(host.log) && /moving it from host-test\/free/.test(host.log), 'the host rebound the folder and said where from');
-  // A window the floor holds that was not there before the move: for a
-  // moment after the rebind the new floor's desk reads the closing window as
-  // held, and a first cut of this case passed on that at 9d0e652.
-  assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'floor' && paneOf().some((p) => !panesBeforeMove.includes(p)) ? true : null), 30000),
-    'one move seats it there with a window the floor holds — no second Take a desk, though the closing window was still in the roster (#24 Decided 1)');
-  // One line per window started (the stand-in logs nothing else), so none at all reads as [].
-  const launches = (from) => argvLog().slice(from).split('\n').slice(0, -1);
+  assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'floor' && pidIn(REPO) && pidIn(REPO) !== pidBeforeMove ? true : null), 30000),
+    'one move seats it there with a Claude Code of its own, the old one ended — no second Take a desk (#24 Decided 1)');
   const moveArgv = launches(argvAtMove);
-  assert(moveArgv.length > 0 && moveArgv.every((l) => !l.includes('--resume')), `on a new conversation: its window opened with nothing to resume (#24 Decided 2) — ${JSON.stringify(moveArgv)}`);
-  assert(await until(async () => (onNewFloor(await floor())?.hosted?.session_id === SESSION_MOVED ? true : null), 30000),
-    'and the desk follows the conversation the new window announces');
-  // Nothing pins the conversation it left to the new floor, even for the
-  // moment before the new window registers: a `bound` naming it is filed as
-  // that conversation's session on the new desk, and the row stays — the
-  // floor would then hold a conversation that never ran there. (A mutant
-  // that put the old id back on `bound` survived every other assertion here,
-  // because the new window's session overwrites the desk a moment later.)
+  assert(moveArgv.length === 1 && !moveArgv[0].includes('--resume'), `on a new conversation: started with nothing to resume (#24 Decided 2) — ${JSON.stringify(moveArgv)}`);
+  eq((await json('/api/floor/chat', { channel: CH2, agent: 'free', text: 'hello from the new floor' })).status, 200, 'a message on the new floor is taken');
+  assert(!!(await heldBy('free', 'floor', SESSION_MOVED, 15000, CH2)), 'and the desk follows the conversation Claude Code names');
+  // Nothing pins the conversation it left to the new floor: a `bound` naming
+  // it is filed as that conversation's session on the new desk, and the row
+  // stays — the floor would then hold a conversation that never ran there.
   {
     const { default: Database } = await import('better-sqlite3');
     const db = new Database(DB_PATH, { readonly: true });
     const onNew = db.prepare(`SELECT session_id FROM agent_sessions WHERE channel = ? AND agent = ?`).all(CH2, 'free').map((r) => r.session_id);
-    // This row has gone red by itself six times (CLAUDE.md, Tests), each
-    // time green on the next run, and each time nobody read the rows,
-    // because by then they were gone with the run's database. So a red
-    // reads them itself. A session row is keyed by its id alone, so "on the
-    // new floor" means something filed under the old conversation's id
-    // named the new floor, after the move. The row's times against the
-    // board's clock say when, the turns filed under that id say whether it
-    // was a turn (and on which floor) or an event that writes none, and the
-    // host's log from the move on says what the host was doing.
+    // A red reads the rows itself: by the time anybody looks they are gone
+    // with the run's database (CLAUDE.md, Tests, the six sightings).
     const read = !onNew.includes(SESSION_ID) ? null : {
       row: db.prepare(`SELECT channel, agent, started_at, updated_at, ended_at, transcript FROM agent_sessions WHERE session_id = ?`).get(SESSION_ID),
       clock: db.prepare(`SELECT datetime('now') AS t`).get().t,
@@ -1523,231 +1492,69 @@ try {
   }
   const turnsOnNew = await json(`/api/floor/turns?channel=${CH2}&agent=free`).then((r) => r.json());
   eq((turnsOnNew.rows ?? []).filter((r) => r.role === 'error').map((r) => r.text), [], 'its chat on the new floor does not open on a refusal (#24 Decided 2)');
-  assert(!/outside tmux/.test(host.log.slice(host.log.lastIndexOf('moving it from host-test/free'))), 'and the host refused nothing on the way');
   await json('/api/floor/sessions', { channel: CH2, agent: 'free' });
   const leftBehind = await until(async () => { const g = await json(`/api/floor/sessions?channel=${CH2}&agent=free`).then((r) => r.json()); return g.at && (g.rows ?? []).some((r) => r.id === SESSION_ID) ? g : null; }, 15000);
   assert(!!leftBehind, 'the conversation it was on stays in its folder — the session picker on the new floor lists it (#24 Decided 2)');
   eq(deskOf(await floor(), 'free') ?? null, null, 'and its seat has left the old floor');
   eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH2, 'the binding on disk names the new floor');
-  rmSync(`${FIX}/fresh-id.flag`, { force: true });
 
-  // And back, so the sections below find it where they expect it — a new
-  // conversation again, which this stand-in announces as SESSION_ID.
+  // And back: a move again, on a new conversation again.
   const argvAtBack = argvLog().length;
   const back = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free' });
   eq((await back.json()).mode, 'move', 'moving it back is a move too');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' && deskOf(await floor(), 'free')?.hosted?.session_id === SESSION_ID ? true : null), 30000),
-    'and it is home, with a window, on the conversation that window announces');
-  const backArgv = launches(argvAtBack);
-  assert(backArgv.length > 0 && backArgv.every((l) => !l.includes('--resume')), `opened with nothing to resume, like the move out — ${JSON.stringify(backArgv)}`);
-  rmSync(`${FIX}/linger.flag`, { force: true });
+  assert(!!(await heldBy('free', 'floor', undefined, 30000)), 'and it is home, held by the floor');
+  const backArgv = await until(() => { const l = launches(argvAtBack); return l.length ? l : null; }, 8000) ?? [];
+  assert(backArgv.length === 1 && !backArgv[0].includes('--resume'), `started with nothing to resume, like the move out — ${JSON.stringify(backArgv)}`);
   await sleep(WATCH_SETTLE_MS);
 
-  // A move whose window is already closed opens on the agent's last
+  // A move whose Claude Code is not running opens on the agent's last
   // conversation, as it always has (#24 Decided 3, costmo 2026-11-03: "Last
-  // conversation") — there is no closing window for the open to meet. The
-  // window is killed by hand, the one thing the floor will not do, and the
-  // roster the stand-in cannot unwrite is cleared, as the picker section does.
-  const closeByHand = async (on = (f) => deskOf(f, 'free')) => {
-    killTmux();
-    writeFileSync(`${FIX}/roster.json`, '[]');
-    return until(async () => (on(await floor())?.hosted?.held === null ? true : null), 8000);
-  };
-  assert(await closeByHand(), 'with its window closed by hand, the desk is held by nobody');
+  // conversation"): there is no running one to end, and nothing to diverge.
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: home on its first conversation');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: on it');
+  assert(!!(await quitByHand()), 'with its Claude Code quit by hand, the desk is held by nobody');
   const argvAtClosed = argvLog().length;
-  const logAtMove = hostLog.length;
-  eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose window is closed is a move');
-  assert(await until(async () => { const d = onNewFloor(await floor()); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000),
-    'it opens on the new floor with a window, on its last conversation (#24 Decided 3)');
+  eq((await (await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).json()).mode, 'move', 'moving a desk whose Claude Code is not running is a move');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID, 30000, CH2)), 'it opens on the new floor, on its last conversation (#24 Decided 3)');
   const closedArgv = launches(argvAtClosed);
   assert(closedArgv.length === 1 && closedArgv[0].includes(`--resume ${SESSION_ID}`), `resumed by its id, not started fresh — ${JSON.stringify(closedArgv)}`);
 
-  // A real second holder is still refused (#24 Don't break). The move above
-  // never asks who holds the conversation a closing window was on; this
-  // path does, and an editor holding it is a copy nobody is watching, so
-  // the open says so rather than starting a second one. The editor is a
-  // process outside tmux claiming the conversation — what holderOf reads.
-  // Red twice on 2026-11-18 (the round's first host run, and a mutant run
-  // whose mutant was in host/node.sh), green alone after; the rows after it
-  // pass, so the floor did see the window go, only not inside 8 s. On a red
-  // the host's log since the move and what the floor last showed are
-  // printed, so the next sighting is read rather than rerun.
-  const logAtClose = hostLog.length;
-  const closedAgain = await closeByHand(onNewFloor);
-  assert(closedAgain, 'its window closed by hand again');
-  if (!closedAgain) {
-    console.log(`    the floor still shows: ${JSON.stringify(onNewFloor(await floor())?.hosted ?? null)}`);
-    console.log(`    the host's log since the move:\n${hostLog.slice(logAtMove).split('\n').map((l) => `      ${l}`).join('\n')}`);
-    console.log(`    (of which after the close: ${hostLog.length - logAtClose} chars)`);
-  }
-  const editor = spawn('sleep', ['120'], { stdio: 'ignore' });
-  writeFileSync(`${FIX}/roster.json`, JSON.stringify([{ pid: editor.pid, cwd: REPO, kind: 'interactive', startedAt: 2, sessionId: SESSION_ID, name: 'an editor' }]));
-  assert(await until(async () => (onNewFloor(await floor())?.hosted?.held === 'editor' ? true : null), 8000), 'and the conversation is open in an editor');
+  // A conversation open in another app: a Claude Code the host does not run,
+  // on the desk's conversation. A move never resumes that conversation beside
+  // it (two processes on one transcript diverge without a word): the new
+  // floor gets a new one, and the editor's chat follows the binding on its own.
+  assert(!!(await quitByHand(REPO, 'free', CH2)), 'its Claude Code quit by hand again');
+  const editor2 = spawn('sleep', ['120'], { stdio: 'ignore' });
+  rosterEntry(editor2.pid, REPO, SESSION_ID, 'an editor');
+  assert(!!(await heldBy('free', 'editor', undefined, 8000, CH2)), 'and the conversation is open in an editor');
   const argvAtEditor = argvLog().length;
   const editorMove = await take({ host_id: 'host-test-1', path: REPO, channel: CH, agent: 'free' });
-  eq([editorMove.status, (await editorMove.json()).mode], [200, 'move'], 'a desk an editor holds can be moved — the editor\'s chat follows the binding on its own');
-  const refusedHere = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && r.text?.includes(`outside tmux (pid ${editor.pid})`)) ?? null, 20000);
-  assert(!!refusedHere, `but no second copy is opened beside it — refused, naming the editor's pid (#24 Don't break) — ${refusedHere?.text?.slice(0, 120)}`);
-  eq(launches(argvAtEditor), [], 'and no window was started');
-  editor.kill();
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000), 'the editor gone, nothing holds it');
+  eq([editorMove.status, (await editorMove.json()).mode], [200, 'move'], 'a desk an editor holds can be moved');
+  assert(await until(() => (launches(argvAtEditor).length ? true : null), 20000), 'and the desk gets a Claude Code on the floor it moved to');
+  assert(launches(argvAtEditor).every((l) => !l.includes(`--resume ${SESSION_ID}`)), `never a second copy of the editor's conversation — ${JSON.stringify(launches(argvAtEditor))}`);
+  editor2.kill();
+  dropRosterEntry(editor2.pid);
 
-  // A window that is working is not moved (#24 Don't break): the host reads
-  // the pane before it touches the binding, and quotes it. The board cannot
-  // see the stand-in's status line, so the take is accepted and the host is
-  // the one that refuses.
-  writeFileSync(`${FIX}/busy.flag`, '1');
-  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'a window is opened on it again, and this one is working');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 30000), 'held by the floor');
-  await sleep(WATCH_SETTLE_MS);
-  const busyPanesBefore = paneOf();
+  // A Claude Code in the middle of a turn is not moved (#24 Don't break),
+  // even one running no tool: the board reads the turn from the host.
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: home on its first conversation');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: on it');
+  const quietSeen = () => stdinRecords().filter((r) => r.text === 'QUIET 4000').length;
+  const quietDone = async () => (await turnRows()).filter((r) => r.text === 'QUIET-DONE').length;
+  const [quiet0, quietDone0] = [quietSeen(), await quietDone()];
+  await chat('free', 'QUIET 4000');
+  await until(() => (quietSeen() > quiet0 ? true : null));
+  await sleep(300);
   const errorIds = async (ch) => new Set(((await json(`/api/floor/turns?channel=${ch}&agent=free`).then((r) => r.json())).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
   const [errorsHereBefore, errorsThereBefore] = [await errorIds(CH), await errorIds(CH2)];
-  eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).status, 200, 'the board takes the move — it cannot see the pane');
-  // Said on the floor the desk is still on, which is the one the board has a
-  // hosted row for. It used to be said for the target desk, which has no row
-  // until `bound`, so the board dropped it and no floor said anything — this
-  // case read the refusal off the host's log and passed (QA, PR #33 finding 1).
-  const refusedMove = await until(async () => ((await json(`/api/floor/turns?channel=${CH}&agent=free`).then((r) => r.json())).rows ?? [])
-    .find((r) => r.role === 'error' && !errorsHereBefore.has(r.id)) ?? null, 15000);
-  assert(/^not moved to host-test-2 — the window is still working: .*esc to interrupt/.test(refusedMove?.text ?? ''),
-    `the host refuses it, and the floor the desk is still on says so — naming where it was going, quoting the pane's status line (PR #33 finding 1) — ${refusedMove?.text}`);
+  const workingPid = pidIn(REPO);
+  assert(await until(async () => (deskOf(await floor(), 'free')?.working ? true : null), 5000), 'the fixture: the board reads the turn');
+  eq((await take({ host_id: 'host-test-1', path: REPO, channel: CH2, agent: 'free' })).status, 409, 'the board refuses the move mid-turn');
   eq([...(await errorIds(CH2))].filter((id) => !errorsThereBefore.has(id)), [], 'and nothing is said for a desk on the floor it did not reach');
-  eq(paneOf(), busyPanesBefore, 'and the working window is left exactly as it was');
+  eq(pidIn(REPO), workingPid, 'and the working Claude Code is left exactly as it was');
   eq(localCfg().projects?.[REPO]?.mcpServers?.orchestratinator?.headers?.['X-Channel'], CH, 'and the binding is not touched');
-  rmSync(`${FIX}/busy.flag`, { force: true });
-
-  // Home, on its conversation, with a window that is not working, for the
-  // sections below.
-  assert(await closeByHand(), 'the working window is closed by hand');
-  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'and a quiet one opened');
-  assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000), 'home, on its conversation');
+  assert(await until(async () => ((await quietDone()) > quietDone0 ? true : null), 10000), 'the fixture: its turn ends');
   await sleep(WATCH_SETTLE_MS);
-
-  /* ── reading a conversation whole (issue #8, Remaining 4) ──────────────────
-   * A conversation opened to read is the host reading the transcript from
-   * its first record — its subagents' files with it — and nothing else: no
-   * window closes, opens or moves, and the desk stays on its own
-   * conversation. The fixture has one of every kind of turn, a subagent,
-   * and more turns than a page holds. */
-  /* ── an answer that waited in the host's line (QA, PR #49) ─────────────
-   * The host takes its work one item at a time, so an answer can wait past
-   * ANSWER_TTL_MS behind other items — a meeting room's message to several
-   * desks on one host makes that likelier. Past it, an answer is pressed
-   * only while the window still shows what it was for (askedStill): a form
-   * by its header or choices, a permission menu by its choices and its
-   * command. This host runs with the TTL at -1, so every answer here is old.
-   * The window is the stand-in with prompt.flag: drawn once, never redrawn. */
-  console.log('\nan answer that waited in the host\'s line');
-  {
-    const sinkAt = () => (existsSync(SINK) ? readFileSync(SINK, 'utf8').length : 0);
-    const reopenAsking = async (kind) => {
-      assert(await closeByHand(), `the window is closed by hand (${kind})`);
-      writeFileSync(`${FIX}/prompt.flag`, kind);
-      eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, `and one is opened that is asking (${kind})`);
-      assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000), 'held by the floor, on its conversation');
-      await sleep(WATCH_SETTLE_MS);
-    };
-    const askBash = async (command) => {
-      await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'Bash', tool_input: { command } });
-      return until(async () => { const p = deskOf(await floor(), 'free')?.permission; return p && (p.summary ?? '').includes(command) && (p.options?.length ?? 0) >= 3 ? p : null; }, 25000);
-    };
-    await reopenAsking('bash');
-
-    // Press yes / no (milestone audit 2026-11-17, finding 3): the floor's
-    // answer for a prompt it could not read. Route, host and window: the
-    // desk is waiting (a Notification with nothing parsed), the operator
-    // presses, and the window is sent the key the host maps it to. Yes is
-    // the menu's first row; no is Escape, which cancels.
-    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
-    let pressAt = sinkAt();
-    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'yes' })).status, 200, 'Press yes is taken for a desk that is waiting');
-    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
-    eq(readFileSync(SINK, 'utf8').slice(pressAt), '1', 'and the key for yes is the first row, 1');
-    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'Notification', cwd: REPO, notification_type: 'permission_prompt', notification_message: 'Claude needs your permission' });
-    pressAt = sinkAt();
-    eq((await json('/api/floor/press', { channel: CH, agent: 'free', choice: 'no' })).status, 200, 'Press no is taken');
-    assert(await until(async () => (sinkAt() > pressAt ? true : null), 10000), 'and a key reaches the window');
-    eq(readFileSync(SINK, 'utf8').slice(pressAt), '\u001b', 'and the key for no is Escape, which cancels; never a row that could approve');
-    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
-
-    let p = await askBash('rm -rf build-cache');
-    assert(!!p, 'the host reads the menu\'s choices off the window');
-    let sink0 = sinkAt();
-    let log0 = hostLog.length;
-    eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'allow' })).status, 200, 'Approve is queued');
-    assert(await until(async () => (hostLog.slice(log0).includes('permission answer, and its prompt is still on screen — answering it') ? true : null), 15000),
-      'an old decision whose prompt — its choices and its command — is still on screen is pressed, and the log says why (finding 2)');
-    assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its key reached the window');
-    p = await askBash('npm publish --tag next');
-    assert(!!p, 'a second prompt arrives, for another command');
-    await sleep(1000);
-    sink0 = sinkAt();
-    log0 = hostLog.length;
-    await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'allow' });
-    assert(await until(async () => (hostLog.slice(log0).includes('permission answer — its prompt is no longer on screen') ? true : null), 15000),
-      'an old approve for a command the window is not asking about is dropped: the same menu, another command');
-    await sleep(800);
-    eq(sinkAt(), sink0, 'and not one key was pressed');
-
-    await reopenAsking('form');
-    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
-      tool_input: { questions: [{ question: 'Which scope should step one audit?', header: 'Scope', multiSelect: false,
-        options: [{ label: 'Baseline only', description: 'Audit just the baseline.' }, { label: 'Everything in the tree', description: 'Audit everything in the tree.' }] }] } });
-    const f = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.length ? q : null; }, 25000);
-    assert(!!f, 'the form is on the desk');
-    sink0 = sinkAt();
-    log0 = hostLog.length;
-    eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: f?.request_id, answers: [{ choose: [1] }] })).status, 200, 'its answer is queued');
-    assert(await until(async () => (hostLog.slice(log0).includes('-old answer, and its question is still on screen — answering it') ? true : null), 15000),
-      'an old answer whose form is still on screen is pressed — this call site, not only askedStill (Info 4)');
-    assert(await until(async () => (sinkAt() > sink0 ? true : null), 8000), 'and its keys reached the window');
-
-    // A preview question the host could not answer is said as a form that
-    // was not submitted, not as answers that did not land (QA, PR #55 Info
-    // 8). The stand-in never redraws, so the cursor stays on row 1 whatever
-    // digit is sent: the host reads that, presses no Enter, and the desk is
-    // told the form is still standing. "Did not land" was once said about
-    // answers that had landed (issue #7), and here nothing was chosen at all.
-    await reopenAsking('preview');
-    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PermissionRequest', cwd: REPO, tool_name: 'AskUserQuestion',
-      tool_input: { questions: [{ question: 'Where should it go?', header: 'Where', multiSelect: false,
-        options: [{ label: 'Alpha', description: 'First.', preview: true }, { label: 'Bravo', description: 'Second.', preview: true }, { label: 'Charlie', description: 'Third.', preview: true }] }] } });
-    const pv = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 25000);
-    assert(!!pv, 'a question with previews is on the desk');
-    eq(pv?.questions?.[0]?.options?.length, 3, 'with its three rows and no free-text row, as the window draws it');
-    const errsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
-    eq((await json('/api/floor/answer', { channel: CH, agent: 'free', request_id: pv?.request_id, answers: [{ choose: [2] }] })).status, 200, 'its answer is queued');
-    const unplaced = await until(async () => ((await turns('free')).rows ?? []).find((r) => r.role === 'error' && !errsBefore.has(r.id)) ?? null, 20000);
-    assert(/^the form was not submitted — this question takes a number as a move and Enter as the choice, and the cursor was not seen on row 2/.test(unplaced?.text ?? ''),
-      `a preview question whose cursor never reached the row is said as a form not submitted — ${unplaced?.text ?? 'no error turn'}`);
-
-    // A board restart (every deploy) while the window is still asking
-    // (milestone audit 2026-11-17, finding 1, probe P3). The board keeps open
-    // prompts in memory only, and a window standing on a question sends no
-    // further hook, so the floor lost the question for good. The host's work
-    // poll fails at the restart, it re-registers at once, and that heartbeat
-    // says which of its windows are asking (`pending`): the board raises the
-    // question again and asks the host to read it off the pane.
-    const restarted = server;
-    await new Promise((done) => { restarted.once('exit', done); restarted.kill('SIGTERM'); });
-    server = startServer();
-    assert(await waitHealthy(), 'the board restarts on the same database');
-    const back = await until(async () => { const q = deskOf(await floor(), 'free')?.permission; return q?.questions?.[0]?.tab_title === 'Where' ? q : null; }, 30000);
-    assert(!!back, 'and the question the window is still asking is back on the floor, read off the pane, with no hook to say it');
-    // Closed by the window's own work, as any prompt is: the session the
-    // host named is the window's.
-    await json('/api/ingest', { channel: CH, agent: 'free', session_id: SESSION_ID, hook_event_name: 'PreToolUse', cwd: REPO, tool_name: 'Bash', tool_input: { command: 'true' } });
-    assert(await until(async () => (deskOf(await floor(), 'free')?.permission ? null : true), 8000), 'and closed by the window\'s own next tool call, so nothing is left standing for the sections after');
-
-    rmSync(`${FIX}/prompt.flag`, { force: true });
-    assert(await closeByHand(), 'the asking window is closed by hand');
-    eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'and a quiet one opened');
-    assert(await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.held === 'floor' && d.hosted.session_id === SESSION_ID ? true : null; }, 30000), 'home again, on its conversation');
-    await sleep(WATCH_SETTLE_MS);
-  }
-
   console.log('\nreading a conversation whole');
   const SESSION_C = 'cccccccc-2222-3333-4444-555555555555';
   const cPath = `${HOME}/.claude/projects/${slug()}/${SESSION_C}.jsonl`;
@@ -1765,7 +1572,7 @@ try {
   writeFileSync(`${cPath.slice(0, -'.jsonl'.length)}/subagents/agent-s1.meta.json`, JSON.stringify({ description: 'Find the C thing', agentType: 'Explore' }));
   const readGetC = (id = SESSION_C, extra = '') => json(`/api/floor/read?channel=${CH}&agent=free&session=${id}${extra}`).then((r) => r.json());
   const deskBeforeRead = deskOf(await floor(), 'free')?.hosted;
-  const panesBeforeRead = paneOf();
+  const pidBeforeRead = pidIn(REPO);
   const argvBeforeRead = argvLog().length;
   const turnsBeforeRead = ((await turns('free')).rows ?? []).length;
   const askedRead = await json('/api/floor/read', { channel: CH, agent: 'free', session_id: SESSION_C });
@@ -1780,7 +1587,7 @@ try {
   assert(new RegExp(`free: read ${SESSION_C} whole for the floor — 8 turns`).test(host.log), 'the host log says what it read');
   eq((await readGetC(SESSION_C, '&from=3&limit=2')).rows.map((r) => r.text), ['C-REPLY-ONE', 'Bash: ls C-DIR'], 'eight turns at three to a page arrived as one conversation, and can be read back in pages');
   const deskAfterRead = deskOf(await floor(), 'free')?.hosted;
-  eq([deskAfterRead?.session_id, deskAfterRead?.held, paneOf(), argvLog().length], [deskBeforeRead?.session_id, deskBeforeRead?.held, panesBeforeRead, argvBeforeRead],
+  eq([deskAfterRead?.session_id, deskAfterRead?.held, pidIn(REPO), argvLog().length], [deskBeforeRead?.session_id, deskBeforeRead?.held, pidBeforeRead, argvBeforeRead],
     'and nothing moved: the desk is on the conversation it was on, in the window it was in, and no window was opened or closed — reading is not resuming');
   await sleep(WATCH_SETTLE_MS);
   const afterRead = (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
@@ -1834,7 +1641,7 @@ try {
     // a folder has ever been would name it.
     const twice = JSON.parse(execFileSync(process.execPath, ['host/history.js'], {
       input: JSON.stringify({ query: 'c-last-word', deep: false, desks: [{ channel: CH, agent: 'free', cwd: REPO }, { channel: 'another-floor', agent: 'same-folder', cwd: REPO }] }),
-      env: { ...process.env, HOME, ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION },
+      env: { ...process.env, HOME, ORCH_HOST_CLAUDE: `${FIX}/claude` },
       encoding: 'utf8',
     }));
     eq([twice.rows.map((r) => `${r.channel}/${r.agent}`), twice.files], [[`${CH}/free`], rec?.rows.filter((r) => r.agent === 'free').length],
@@ -1844,7 +1651,7 @@ try {
     // longest ago, so a list cut in file order would keep exactly the wrong one.
     const ask = (body) => JSON.parse(execFileSync(process.execPath, ['host/history.js'], {
       input: JSON.stringify({ desks: [{ channel: CH, agent: 'free', cwd: REPO }], ...body }),
-      env: { ...process.env, HOME, ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_TMUX_SESSION: TMUX_SESSION }, encoding: 'utf8',
+      env: { ...process.env, HOME, ORCH_HOST_CLAUDE: `${FIX}/claude` }, encoding: 'utf8',
     }));
     const newestSpoken = rec?.rows.filter((r) => r.agent === 'free')[0]?.id;
     assert(newestSpoken && newestSpoken !== SESSION_C, `the conversation spoken in most recently is not the newest file — ${newestSpoken?.slice(0, 8)}`);
@@ -1855,9 +1662,8 @@ try {
     assert(both.includes(SESSION_C) && both.length >= 2 && both[0] !== SESSION_C, `a search that finds C and a conversation spoken in since lists the later one first — ${both.map((id) => id.slice(0, 8)).join(', ')}`);
     eq(ask({ query: 'on', max: 1 }).rows.map((r) => r.id), [both[0]], 'and cut to its limit it keeps that one, not the newest file');
     const deskAfterSearch = deskOf(await floor(), 'free')?.hosted;
-    eq([deskAfterSearch?.session_id, paneOf()], [deskBeforeRead?.session_id, panesBeforeRead], 'none of which moved the desk or its window');
+    eq([deskAfterSearch?.session_id, pidIn(REPO)], [deskBeforeRead?.session_id, pidBeforeRead], 'none of which moved the desk or its window');
   }
-
   /* ── the host's own folder dialog (issue #4, items 1 and 2) ────────────────
    * The picker is one function in the host with each operating system's own
    * dialog behind it (host/dialog.js). What is real here: the work item, the
@@ -2149,33 +1955,36 @@ try {
   // stop finishes the item in hand and hands back what it never started, so
   // nothing it took is left unfinished and unsaid. Read off the board's own
   // table: what the host reported is the fact, not what the page shows.
+  // `HOLD <ms>` is a message the stand-in takes only after that long, so the
+  // host is still on one when the next are queued.
   console.log('\n  work in hand when the host stops');
   {
     const { default: Database } = await import('better-sqlite3');
     const rows = (sql, ...a) => { const db = new Database(DB_PATH, { readonly: true }); try { return db.prepare(sql).all(...a); } finally { db.close(); } };
     const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
     eq((await chat('free', 'reported finished')).status, 200, 'a message is sent');
-    assert(await until(() => (clean(received()).includes('reported finished') ? true : null), 20000), 'and typed');
+    assert(await until(() => (received().includes('reported finished') ? true : null), 20000), 'and delivered');
     assert(await until(() => (rows(`SELECT done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)[0]?.done_at ? true : null), 15000),
       'and the host reports it finished, on its next poll');
     const mark2 = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
-    // Four, so the host is holding a batch it has not started when it is
-    // told to stop: it types the first, and takes the other three in one
-    // poll once that is done. The stop waits until at least two are taken
-    // and unfinished. With fewer, the later ones were never taken at all,
-    // and "back in line" said nothing about the release (the first cut of
-    // this row: its mutant, the release emptied, stayed green).
-    for (const t of ['in line one', 'in line two', 'in line three', 'in line four']) await chat('free', t);
+    // The host takes the first alone and the rest in one poll once that is
+    // done, and the stop waits until at least two are taken and unfinished.
+    // With fewer, the later ones were never taken at all, and "back in line"
+    // said nothing about the release (the first cut of this row: its mutant,
+    // the release emptied, stayed green).
+    for (const t of ['HOLD 1500 in line one', 'HOLD 1500 in line two', 'HOLD 1500 in line three', 'HOLD 1500 in line four']) await chat('free', t);
     const held = await until(() => (rows(`SELECT id FROM host_outbox WHERE id > ? AND taken_at IS NOT NULL AND done_at IS NULL`, mark2).length >= 2 ? true : null), 30000);
-    assert(held, 'the fixture: the host is holding more than the one it is typing when it is told to stop');
+    assert(held, 'the fixture: the host is holding more than the one it is delivering when it is told to stop');
     const exited = new Promise((done) => host.once('exit', done));
     host.kill('SIGTERM');
     await Promise.race([exited, sleep(25000)]);
     const after = rows(`SELECT id, taken_at, done_at FROM host_outbox WHERE id > ?`, mark2);
     eq(after.filter((r) => r.taken_at && !r.done_at).length, 0, `a host stopped with messages in its line leaves none taken and unfinished: each is done or handed back (${after.filter((r) => r.done_at).length} done, ${after.filter((r) => !r.taken_at).length} back in line)`);
     assert(after.filter((r) => !r.taken_at).length >= 1, 'and what it held and never started was handed back, not only never taken');
+    // The host stopping ends its desks' Claude Codes: they are its children.
+    assert(await until(() => (standIns().length === 0 ? true : null), 8000), `and a host that stops leaves none of its desks' Claude Codes running${standIns().length ? ` (pids ${standIns().join(', ')})` : ''}`);
     // Back in line is for the next run of this host; none comes in this
-    // suite, so they are taken out of the line rather than left to be typed
+    // suite, so they are taken out of the line rather than left to be sent
     // by a host a later section starts.
     const db = new Database(DB_PATH);
     try { db.prepare(`DELETE FROM host_outbox WHERE id > ? AND taken_at IS NULL`).run(mark2); } finally { db.close(); }
@@ -2187,9 +1996,9 @@ try {
   // A host killed outright says nothing at the end, so what it finished has
   // to have been said already (QA, the re-measure's L1). It used to ride the
   // next poll, after the whole batch, and every message of a batch the host
-  // had typed before it was killed was said lost on its desk: "send it
-  // again" about words the window had. The fixture makes the batch: one
-  // message is taken alone, and three more are queued while it is typed, so
+  // had delivered before it was killed was said lost on its desk: "send it
+  // again" about words Claude Code had. The fixture makes the batch: one
+  // message is taken alone, and three more are queued while it goes in, so
   // the next poll takes them together.
   console.log('\n  work finished in the middle of a batch, and then the host is killed');
   {
@@ -2198,15 +2007,19 @@ try {
     const mark = rows(`SELECT COALESCE(MAX(id), 0) AS m FROM host_outbox`)[0].m;
     const byText = () => Object.fromEntries(rows(`SELECT payload, taken_at, done_at FROM host_outbox WHERE id > ? AND kind = 'chat'`, mark)
       .map((r) => [JSON.parse(r.payload).text, r]));
-    await chat('free', 'batch one');
-    assert(await until(() => (byText()['batch one']?.taken_at ? true : null), 15000), 'the fixture: the first message is taken alone');
-    for (const t of ['batch two', 'batch three', 'batch four']) await chat('free', t);
-    assert(await until(() => (clean(received()).includes('batch two') ? true : null), 30000), 'the fixture: the first of the batch of three is typed');
-    const saidAt = await until(() => (byText()['batch two']?.done_at ? { fourTyped: clean(received()).includes('batch four') } : null), 15000);
-    assert(saidAt && !saidAt.fourTyped, `a message finished in the middle of a batch is said done before the batch ends${!saidAt ? ' (never said)' : saidAt.fourTyped ? ' (said only once "batch four" was typed)' : ''}`);
+    await chat('free', 'HOLD 1500 batch one');
+    assert(await until(() => (byText()['HOLD 1500 batch one']?.taken_at ? true : null), 15000), 'the fixture: the first message is taken alone');
+    for (const t of ['HOLD 1000 batch two', 'HOLD 1500 batch three', 'HOLD 1500 batch four']) await chat('free', t);
+    assert(await until(() => (received().includes('batch two') ? true : null), 30000), 'the fixture: the first of the batch of three is sent');
+    const saidAt = await until(() => (byText()['HOLD 1000 batch two']?.done_at ? { fourSent: received().includes('batch four') } : null), 15000);
+    assert(saidAt && !saidAt.fourSent, `a message finished in the middle of a batch is said done before the batch ends${!saidAt ? ' (never said)' : saidAt.fourSent ? ' (said only once "batch four" was sent)' : ''}`);
     const open = Object.entries(byText()).filter(([, r]) => r.taken_at && !r.done_at).map(([t]) => t);
     host.kill('SIGKILL');
     assert(open.length >= 1, `the fixture: the host is killed with work of the batch still unfinished (${open.join(', ') || 'none'})`);
+    // Its desks' Claude Codes outlive it until their input closes and the
+    // turn in hand ends; the next run must not meet one still on the
+    // conversation.
+    assert(await until(() => (standIns().length === 0 ? true : null), 10000), 'the fixture: a killed host\'s Claude Codes end on their own, their input closed');
     const errorsBefore = new Set(((await turns('free')).rows ?? []).filter((r) => r.role === 'error').map((r) => r.id));
     host = startHost();
     const lost = await until(async () => {
@@ -2214,7 +2027,7 @@ try {
       return said.length >= open.length ? said : null;
     }, 20000);
     assert(lost && open.every((t) => lost.some((s) => s.includes(`"${t}"`))), `the next run says what the killed one left unfinished, with its words (${open.join(', ')}) — ${(lost ?? []).join(' | ')}`);
-    assert(lost && !lost.some((s) => s.includes('"batch two"')), 'and not the message it had finished and said');
+    assert(lost && !lost.some((s) => s.includes('"HOLD 1000 batch two"')), 'and not the message it had finished and said');
     assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 20000), 'and the new run is up for what follows');
     await sleep(WATCH_SETTLE_MS);
   }
@@ -2228,41 +2041,22 @@ try {
   host = null;
 
   /* ── the floor keeps hearing while a message is being delivered ─────────────
-   * Relaying the conversation and delivering a message used to share one loop,
-   * so handling a chat stopped the relay: send() opens a window, waits for
-   * Claude Code to come up, then waits for the message to reach the transcript.
-   * For that whole stretch the floor was told nothing — not the reply, not even
-   * the echo of the message it had just sent, which the composer reads as a
-   * send that failed and marks in red. Then the entire stretch arrived at once
-   * the moment send() returned. What is happening cannot queue behind what was
-   * asked. */
+   * Relaying the conversation and delivering a message used to share one
+   * loop, so handling a chat stopped the relay. Delivering a message to a
+   * desk with nothing running starts its Claude Code and waits for it to take
+   * the message; the stand-in here takes six seconds to read anything. For
+   * that whole stretch the floor still has to hear the desk. */
   console.log('\n  hearing the desk while a message is still going in');
-
-  killTmux();
-  // The stand-in writes the roster and cannot unwrite it when the pane is
-  // killed under it. The host drops a dead pid from the roster now (it read
-  // one as an editor holding the conversation once, and refused every reopen
-  // after the first), so this is belt and braces: the section starts from a
-  // roster that says what is true.
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
-  writeFileSync(`${FIX}/ready-delay.flag`, '6000');
+  writeFileSync(`${FIX}/start-delay.flag`, '6000');
   host = startHost('host-test-1');
   assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
     'a host is back and the desk is live again');
   // A host just started joins the desk's transcript where it stands, at its
   // first watch tick (follow(id, 'end')), and a turn written before that
-  // tick is behind it for good. "Live" is the registration, which comes
-  // first, so the marker below was written ahead of the join whenever the
-  // tick came late: both rows after it red, the marker never on the floor
-  // (seen 2026-11-14, and on 2026-11-18 read in the log: SPOKEN-WHILE-BUSY
-  // nowhere in the run). So a turn is written first and waited for, and the
-  // relay is known to be reading before anything is timed against it.
+  // tick is behind it for good. So a turn is written first and waited for,
+  // and the relay is known to be reading before anything is timed against it.
   const primer = `RELAY-JOINED-${Date.now()}`;
-  appendTurn({
-    type: 'assistant', uuid: `primer-${Date.now()}`, timestamp: new Date().toISOString(),
-    message: { role: 'assistant', content: [{ type: 'text', text: primer }] },
-  });
+  appendTurn({ type: 'assistant', uuid: `primer-${Date.now()}`, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: primer }] } });
   let joined = await until(async () => (((await turns('free')).rows ?? []).some((r) => (r.text ?? '').includes(primer)) ? true : null), 3000);
   for (let i = 0; !joined && i < 5; i++) {
     // Written before the join, so never relayed: another, until one is.
@@ -2276,190 +2070,33 @@ try {
   const marker = `SPOKEN-WHILE-BUSY-${Date.now()}`;
   const queued = await chat('free', 'this one takes a while to go in');
   eq(queued.status, 200, 'the floor accepts the message');
-
-  // The window has to be opened and the stand-in will not announce itself for
-  // six seconds, so the host is now stuck inside send(). Anything the desk says
-  // in the meantime still has to reach the floor.
-  appendTurn({
-    type: 'assistant', uuid: `busy-${Date.now()}`, timestamp: new Date().toISOString(),
-    message: { role: 'assistant', content: [{ type: 'text', text: marker }] },
-  });
-
+  await until(() => (procsIn(REPO).length ? true : null), 5000);
+  appendTurn({ type: 'assistant', uuid: `busy-${Date.now()}`, timestamp: new Date().toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: marker }] } });
   const heard = await until(async () => {
     const rows = (await turns('free')).rows ?? [];
     return rows.some((r) => (r.text ?? '').includes(marker)) ? rows : null;
   }, 4000);
-  assert(!!heard, 'a turn written while the send is still in flight reaches the floor anyway');
-  assert(!clean(received()).includes('takes a while to go in'),
-    'and it got there before the message it was queued behind — the relay is not waiting on the delivery');
+  assert(!!heard, 'a turn written while the message is still going in reaches the floor anyway');
+  assert(!received().includes('takes a while to go in'), 'and it got there before the message it was queued behind — the relay is not waiting on the delivery');
   assert((heard?.length ?? 0) > turnsBefore, 'the floor gained a turn rather than replaying the transcript');
   // And the subagent file already on disk was joined at its end, not replayed.
   // Named directly: QA's M6 (offsets read from 0) turned this suite red only
-  // three sections later, through a desk drawn as working because a replayed
-  // WebFetch row had become its last turn (PR #3 review, 2026-09-03).
+  // three sections later (PR #3 review, 2026-09-03).
   const everything = (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
   eq(everything.filter((r) => r.text === 'WebFetch: https://docs.example.test/hooks').length, 1,
     'a subagent file already on disk is not replayed when the host restarts');
+  assert(await until(() => (received().includes('takes a while to go in') ? true : null), 20000),
+    'and the message itself still lands once Claude Code is ready');
+  rmSync(`${FIX}/start-delay.flag`, { force: true });
 
-  assert(await until(() => (clean(received()).includes('takes a while to go in') ? true : null), 20000),
-    'and the message itself still lands once the window finishes starting');
-  rmSync(`${FIX}/ready-delay.flag`, { force: true });
-
-  /* ── a window asking before it starts ─────────────────────────────────────
-   * The host reads a startup dialog off a booting pane — a live interactive
-   * tty whose pid the roster does not know yet — and puts it on the floor as
-   * a prompt, rather than leaving the desk saying only "starting" while
-   * nobody can see what it is asking. Nothing before this proved the
-   * emission fires from a real host process against a real pane; test/floor.mjs
-   * covers the server's handling of the event, handed to it directly. */
-  console.log('\n  a window asking before it starts');
-  // A still-running host from the section above holds no window open on
-  // 'free' right now, but the pane it already spawned there is on a server
-  // whose environment is fixed from further back than either host process —
-  // moot, now that the signal is a file rather than an env var, but the kill
-  // still matters: two host processes registering the same host_id at once
-  // is not a state to add a new scenario on top of.
+  /* ── a new Claude Code, and a folder dialog asked for too late ─────────────
+   * The stand-in answers --version from version.flag, and the host restarted
+   * here reads a version it has not seen at its first heartbeat (host/version.js:
+   * report only, never a gate). Started with a folder-dialog TTL nothing can
+   * meet, so every request for the dialog reaches this host "too late". */
+  console.log('\n  a new Claude Code on the machine');
   host.kill('SIGTERM');
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
-  host = null;
-  killTmux();
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  writeFileSync(`${FIX}/startup-ask.flag`, 'mcp');
-  // Started with a folder-dialog TTL nothing can meet, for the last case in
-  // this section: every request for the dialog reaches this host "too late".
-  host = startHost('host-test-1', { ORCH_PICK_TTL_MS: '-1' });
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000),
-    'a host is back and the desk is live again');
-
-  const asked = await chat('free', 'open please');
-  eq(asked.status, 200, 'the floor accepts a message for a desk with no window yet, which is what opens one');
-
-  const asking = await until(async () => {
-    const d = deskOf(await floor(), 'free');
-    return d?.permission?.startup ? d : null;
-  }, 4000);
-  assert(!!asking, 'the desk carries the startup dialog as a prompt while the window is still booting');
-  eq(asking.permission.kind, 'mcp', 'read as the new-MCP-server dialog');
-  eq(asking.permission.options.map((o) => o.text),
-     ['Use this MCP server', 'Use this and all future MCP servers in this project', 'Continue without using this MCP server'],
-     'with the dialog’s own rows, not a guess at them');
-  assert(!asking.working, 'a desk asking a startup question is not drawn as working');
-
-  assert(await until(async () => (deskOf(await floor(), 'free')?.permission == null ? true : null), 8000),
-    'and once the window finishes starting — the forced delay elapsing, same as a real one registering — the prompt comes down on its own');
-  rmSync(`${FIX}/startup-ask.flag`, { force: true });
-
-  /* A question Claude Code asks after its window has registered: the browser
-   * extension's (costmo's new machine, 2026-11-20). The watch loop read the
-   * pane for a startup question only while a window was starting, and the
-   * reader did not know this one, so the host refused to type, said "answer
-   * it on the floor", and the floor had nothing to answer it with. */
-  killTmux();
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  // Not before the host has seen the window go: a message sent while it
-  // still holds the old pane is typed at a pane that is not there, and the
-  // host's line waits out a paste on it (seen as six reds here, 2026-11-20).
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
-  writeFileSync(`${FIX}/startup-ask.flag`, 'chrome');
-  const crErrsBefore = ((await turns('free')).rows ?? []).filter((r) => r.role === 'error').length;
-  eq((await chat('free', 'hello past the browser question')).status, 200, 'a message for the desk opens a window that registers and then asks about the browser extension');
-  const crRefused = await until(async () => ((await turns('free')).rows ?? []).filter((r) => r.role === 'error').slice(crErrsBefore).find((r) => /the window is asking something, so nothing was typed/.test(r.text ?? '')) ?? null, 30000);
-  assert(!!crRefused, `the host types nothing into it and says so — ${crRefused?.text?.slice(0, 80)}`);
-  const crAsking = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.permission?.startup ? d : null; }, 8000);
-  assert(!!crAsking, 'and the floor is given the question to answer, though the window has registered');
-  eq(crAsking?.permission?.kind, 'chrome', 'read as the browser extension’s question');
-  eq(crAsking?.permission?.options?.map((o) => o.text), ['No, keep browser tools off', 'Yes, use my browser'], 'with its own two rows');
-  const crAnswer = await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: crAsking?.permission?.request_id, decision: '1' });
-  eq(crAnswer.status, 200, 'the operator’s choice is taken');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.permission == null ? true : null), 10000),
-    'the host presses that row, and the question leaves the floor when it leaves the window');
-  assert(await until(async () => ((await chat('free', 'after the browser question')).status === 200 ? true : null), 8000), 'and the desk takes a message again');
-  assert(await until(() => (clean(received()).includes('after the browser question') ? true : null), 20000), 'which reaches the window');
-  rmSync(`${FIX}/startup-ask.flag`, { force: true });
-
-  /* A window Claude Code has no record of (costmo's second machine,
-   * 2026-11-20): alive, at its composer, running what it is sent, and not in
-   * the roster, so the floor types into a window it cannot hear. The host
-   * reopens it on its own conversation and says so. Staged as it was found:
-   * a window that registered, and its record gone from under it. */
-  console.log('\n  a window Claude Code has no record of');
-  killTmux();
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  // The old window seen gone first, or "it registers" below is answered by
-  // the window before this one and the flag is taken away before the new
-  // window starts (this section's first run: no composer, so never idle).
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
-  writeFileSync(`${FIX}/composer.flag`, '1');
-  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'a window is opened for the desk');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'and it registers, at its composer');
-  rmSync(`${FIX}/composer.flag`, { force: true });
-  const nrPane = paneOf();
-  const nrLaunches = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '').split('\n').slice(0, -1);
-  const nrBefore = nrLaunches().length;
-  // Something said in it since it started, so there is a conversation to keep.
-  appendFileSync(transcript(), `${JSON.stringify({ type: 'user', uuid: 'nr-1', timestamp: new Date().toISOString(), message: { content: 'said in the window nobody could hear' } })}\n`);
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  assert(await until(() => (/is running with no session record; reopening it on /.test(host.log) ? true : null), 25000),
-    'its record gone, and the window still standing idle: the host reopens it');
-  const nrTold = await until(async () => ((await turns('free')).rows ?? []).find((r) => /Claude Code had no record of this desk’s window|Claude Code had no record of this desk's window/.test(r.text ?? '')) ?? null, 30000);
-  assert(!!nrTold, `and says so on the desk — ${nrTold?.text}`);
-  assert(/on the same conversation/.test(nrTold?.text ?? ''), 'on the conversation it was having');
-  eq(nrLaunches().slice(nrBefore), [`--resume ${SESSION_ID}`], 'one window started, resuming that conversation');
-  assert(!paneOf().some((p) => nrPane.includes(p)), 'in a new pane, the unrecorded one closed');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'and the floor holds the desk again: the new window has a record');
-  await sleep(5000);
-  eq(nrLaunches().length, nrBefore + 1, 'a window that has its record is left alone after that');
-
-  // F3 (0.14.5 review, measured on a rig): a Claude Code a person started by
-  // hand from a shell in a window of the host's own session, in the desk's
-  // folder, with the desk's own window closed. The pane's pid is the shell's
-  // and the roster's is Claude Code's, so the window read as one with no
-  // record, and the 30 s rule closed it and opened a new conversation in its
-  // place. It has a record: under its shell.
-  {
-    killTmux();
-    writeFileSync(`${FIX}/roster.json`, '[]');
-    await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
-    writeFileSync(`${FIX}/composer.flag`, '1');
-    const f3Mark = host.log.length;
-    execFileSync('tmux', ['new-session', '-d', '-s', TMUX_SESSION, '-n', 'byhand', '-c', REPO, `/bin/sh -c '${FIX}/claude; :'`]);
-    const shPid = Number(execFileSync('tmux', ['list-panes', '-t', `=${TMUX_SESSION}:`, '-F', '#{pane_pid}'], { encoding: 'utf8' }).trim().split('\n')[0]);
-    const kidPid = await until(() => { try { const r = JSON.parse(readFileSync(`${FIX}/roster.json`, 'utf8')); return r[0]?.pid ?? null; } catch { return null; } }, 8000);
-    assert(!!kidPid && kidPid !== shPid, `the fixture: the window's shell (${shPid}) runs a Claude Code (${kidPid}) that is in the roster under its own pid`);
-    rmSync(`${FIX}/composer.flag`, { force: true });
-    const f3Launches = nrLaunches().length;   // the hand-started one included
-    await sleep(10000);
-    assert(!/is running with no session record/.test(host.log.slice(f3Mark)), `the 30 s rule leaves it alone — ${host.log.slice(f3Mark).split('\n').filter((l) => /record/.test(l)).join(' | ')}`);
-    eq([nrLaunches().length - f3Launches, execFileSync('tmux', ['list-panes', '-t', `=${TMUX_SESSION}:`, '-F', '#{pane_pid}'], { encoding: 'utf8' }).trim().split('\n').map(Number).includes(shPid)],
-      [0, true], 'no window was started in its place, and the person\'s window is still there');
-    killTmux();
-    writeFileSync(`${FIX}/roster.json`, '[]');
-  }
-
-  // A request for the folder dialog that reaches the host after the page has
-  // given up must not open one: a dialog appearing in front of somebody who
-  // stopped waiting is a surprise, and nothing would read its answer.
-  const staleCalls = dialogLog().length;
-  const staleAt = await pickAt();
-  eq((await pickAsk()).status, 200, 'a request for the folder dialog is queued for a host that will get it too late');
-  assert(await until(() => (/not opening the folder dialog — it was asked for/.test(host.log) ? true : null), 8000), 'the host says it is not opening one, and why');
-  eq([dialogLog().length, await pickAt()], [staleCalls, staleAt], 'and no dialog opened, and nothing was said to the board as if one had');
-
-  /* ── a dialog the window draws, and a screen the floor does not know ───────
-   * 0.14.6, docs/robustness-review.md items 1–3. A host with the rule on (the
-   * rest of this suite runs it off, because its stand-in draws no composer).
-   * prompt.flag's `dialog` is the 2.1.330 upsell as a probe drew it, and
-   * `odd` a panel no reader knows; each closes on Escape, as Claude Code's do,
-   * and the key reaches SINK. What a real window did with the same is in
-   * CLAUDE.md ("A screen the floor does not know"). */
-  console.log('\n  a dialog the window draws, and a screen the floor does not know');
-  host.kill('SIGTERM');
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
-  killTmux();
-  writeFileSync(`${FIX}/roster.json`, '[]');
-  // And Claude Code moves under it (host/version.js, review item 4): the
-  // stand-in answers --version from version.flag, and the host restarted
-  // here reads a version it has not seen at its first heartbeat.
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 8000);
   {
     const V = await import('../host/version.js');
     eq([V.versionOf('2.1.330 (Claude Code)\n'), V.versionOf('claude v2.2.0-beta.1'), V.versionOf('command not found')], ['2.1.330', '2.2.0-beta.1', null],
@@ -2470,72 +2107,42 @@ try {
     V.keepVersion('a', '2.1.330', vf); V.keepVersion('b', '2.1.329', vf);
     eq([V.lastVersion('a', vf), V.lastVersion('b', vf), V.lastVersion('c', vf)], ['2.1.330', '2.1.329', null], 'each host keeps its own reading');
   }
-  assert(await until(() => (existsSync(`${HOME}/.orchestratinator/claude-version.json`) ? true : null), 1000), 'the fixture: the host has been keeping its reading in its own folder');
+  assert(existsSync(`${HOME}/.orchestratinator/claude-version.json`), 'the fixture: the host has been keeping its reading in its own folder');
   writeFileSync(`${FIX}/version.flag`, '2.1.331');
-  // By id, and from the whole list: the route returns a page, so a count of
-  // rows read before is not where the new ones start (this row's first run).
-  const allTurns = async () => (await json(`/api/floor/turns?channel=${CH}&agent=free&limit=500`).then((r) => r.json())).rows ?? [];
-  const versionMark = Math.max(0, ...(await allTurns()).map((r) => r.id));
-  host = startHost('host-test-1', { ORCH_UNKNOWN_SCREENS: 'on', ORCH_SCREEN_LOOK_MS: '500', ORCH_UNKNOWN_SETTLE_MS: '600', ORCH_UNKNOWN_GRACE_MS: '800' });
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'the fixture: a host with the rule on, and the desk live');
-  const versionLine = await until(async () => (await allTurns()).filter((r) => r.id > versionMark).find((r) => r.tool_name === 'host' && /Claude Code on .* is now 2\.1\.331 \(it was 2\.1\.330\)/.test(r.text ?? '')) ?? null, 8000);
+  const versionMark = await lastId();
+  host = startHost('host-test-1', { ORCH_PICK_TTL_MS: '-1' });
+  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000), 'the fixture: the host is back, and the desk live');
+  const versionLine = await until(async () => (await newRows(versionMark)).find((r) => r.tool_name === 'host' && /Claude Code on .* is now 2\.1\.331 \(it was 2\.1\.330\)/.test(r.text ?? '')) ?? null, 8000);
   assert(!!versionLine, `a new Claude Code is said on the desk, with the one before it — ${versionLine?.text}`);
   // Left at 2.1.331 for the rest of the run: taken away, the next host would
   // say a change back on every desk, a line the sections after this one do
   // not expect.
-  for (const [kind, want] of [
-    ['dialog', { kind: 'dialog', summary: 'Try the new fullscreen renderer?', rows: ['Yes, try it', 'Not now'], refusal: /The window is asking something/ }],
-    ['odd', { kind: 'screen', summary: 'the window is showing something the floor does not know', rows: [], refusal: /a screen the floor does not know/ }],
-  ]) {
-    await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === null ? true : null), 8000);
-    writeFileSync(`${FIX}/prompt.flag`, kind);
-    const sinkAt = received().length;
-    eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, `${kind}: a window is opened for the desk, and stands on it`);
-    const p = await until(async () => {
-      const q = deskOf(await floor(), 'free')?.permission;
-      return q?.startup && q.kind === want.kind ? q : null;
-    }, 15000);
-    eq([p?.kind, p?.summary, (p?.options ?? []).map((o) => o.text)], [want.kind, want.summary, want.rows],
-      kind === 'dialog' ? 'a dialog no reader knows reaches the desk by its shape: its title and its rows, to be picked from the floor'
-        : 'a screen nobody here knows reaches the desk as that, never as idle');
-    if (kind === 'odd') eq(p?.screen?.at(-1), '  ↑/↓ to navigate · Space to toggle · Esc to close', 'with the pane\'s last lines, as it drew them');
-    if (kind === 'dialog') assert(/Flicker-free output/.test(p?.detail ?? ''), `and what it says above the rows (${p?.detail})`);
-    const refused = await chat('free', `a message while it shows ${kind}`);
-    const rbody = await refused.json().catch(() => ({}));
-    assert(refused.status === 409 && want.refusal.test(rbody.error ?? ''), `a message to the desk is refused, in words, before anything is typed (${refused.status} ${rbody.error})`);
-    eq((await json('/api/floor/permission', { channel: CH, agent: 'free', request_id: p?.request_id, decision: 'cancel' })).status, 200, 'Escape is pressed from the floor');
-    assert(await until(() => (received().slice(sinkAt).includes('\u001b') ? true : null), 8000), 'and reaches the window as Escape');
-    assert(await until(async () => (deskOf(await floor(), 'free')?.permission ? null : true), 8000), 'and once the window is back at its composer, the desk asks nothing');
-    assert(!received().slice(sinkAt).includes(`a message while it shows ${kind}`), 'and the refused message was never typed into the window');
-    rmSync(`${FIX}/prompt.flag`, { force: true });
-    killTmux();
-    writeFileSync(`${FIX}/roster.json`, '[]');
-  }
+
+  // A request for the folder dialog that reaches the host after the page has
+  // given up must not open one: a dialog appearing in front of somebody who
+  // stopped waiting is a surprise, and nothing would read its answer.
+  const staleCalls = dialogLog().length;
+  const staleAt = await pickAt();
+  eq((await pickAsk()).status, 200, 'a request for the folder dialog is queued for a host that will get it too late');
+  assert(await until(() => (/not opening the folder dialog — it was asked for/.test(host.log) ? true : null), 8000), 'the host says it is not opening one, and why');
+  eq([dialogLog().length, await pickAt()], [staleCalls, staleAt], 'and no dialog opened, and nothing was said to the board as if one had');
 
   /* ── Claude Code signed out on this machine ─────────────────────────────────
    * costmo, 2026-11-19: a desk on a machine where Claude Code is signed out
    * says so, and its Sign in has the host run Claude Code's own sign-in
    * (host/auth.js). The stand-in answers `auth status` and `auth login` from
-   * files, and a window started signed out draws the footer 2.1.329 draws. */
+   * files, and one started signed out answers every message "Not logged in"
+   * for as long as it runs, as 2.1.329 does. */
   console.log('\n  Claude Code signed out on this machine');
   host.kill('SIGTERM');
-  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+  await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 8000);
   host = null;
-  killTmux();
-  writeFileSync(`${FIX}/roster.json`, '[]');
   writeFileSync(`${FIX}/signed-out.flag`, '');
   rmSync(`${FIX}/auth.log`, { force: true });
   const soAuthLog = () => (existsSync(`${FIX}/auth.log`) ? readFileSync(`${FIX}/auth.log`, 'utf8') : '');
   // Started with USER and LOGNAME empty, as a parent other than launchd may
   // start it: Claude Code finds its sign-in by user, so the host fills them.
-  // And with a short wait on a paste. The window here draws a composer
-  // that never changes, and the board asks for a /mcp reconnect of a floor
-  // window on its own clock (20 s, then two minutes): one that lands in
-  // this window waits out the paste, a minute by default, on the host's
-  // line, with the reopen below behind it. It landed there once a section
-  // was added above this one (2026-11-20): the reopen came at 66 s and the
-  // rows give it 60.
-  host = startHost('host-test-1', { USER: '', LOGNAME: '', ORCH_PASTE_TIMEOUT_MS: '4000' });
+  host = startHost('host-test-1', { USER: '', LOGNAME: '' });
   const so = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && d?.signin ? d : null; }, 15000);
   assert(!!so, 'a host on a machine where Claude Code is signed out says so at registration, and its desk carries Sign in');
   eq([so?.signin?.ok, so?.signin?.host], [true, 'Test Mac'], 'which can be pressed, and names the machine');
@@ -2547,14 +2154,12 @@ try {
   const soBody = await soRefused.json();
   eq([soRefused.status, soBody.code], [409, 'signed_out'], 'a message is refused before it is queued');
   assert(/signed out on Test Mac.*Sign in/.test(soBody.error ?? ''), `in words that name the machine and the remedy on the desk — ${soBody.error}`);
-  assert(!clean(received()).includes('are you there?'), 'and nothing is typed into the window');
+  assert(!received().includes('are you there?'), 'and nothing is sent to Claude Code');
 
-  // The desk's window, opened on its conversation while signed out: it draws
-  // the footer, and a sign-in made elsewhere leaves it standing.
-  const soSoArgv = () => (existsSync(`${FIX}/argv.log`) ? readFileSync(`${FIX}/argv.log`, 'utf8') : '');
-  const soSoOpenAt = soSoArgv().length;
-  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: the desk\'s window is opened on its conversation');
-  assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'the fixture: the window is up');
+  // The desk's Claude Code, started on its conversation while signed out.
+  const soArgvAt = argvLog().length;
+  eq((await json('/api/floor/open', { channel: CH, agent: 'free' })).status, 200, 'the fixture: the desk\'s Claude Code is started on its conversation');
+  assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the fixture: it is running');
   const soDeskTurns = async () => (await turns('free')).rows ?? [];
   const soHostLines = async () => (await soDeskTurns()).filter((r) => r.tool_name === 'host').map((r) => r.text);
 
@@ -2577,57 +2182,48 @@ try {
   eq((await json('/api/floor/signin', { channel: CH, agent: 'free' })).status, 200, 'Sign in again');
   await until(() => (soLogins() > soLoginsBefore ? true : null), 5000);
   eq((await json('/api/floor/signin', { channel: CH, agent: 'free' })).status, 200, 'and once more while the first is open');
-  // What ends the sign-in is the host's own line: the window reopened (it
-  // still draws the footer), then the registration. The reopen waits for the
-  // window to come up, up to the host's READY_TIMEOUT_MS (45 s), and a
-  // `/mcp reconnect` the board asks for this window (the stand-in never
-  // connects) can be ahead of it on the host's line; so the wait is bound by
-  // that, and settles on the line, not on a count of seconds.
-  await until(async () => ((await soHostLines()).some((t) => /so the host reopened it on the same conversation/.test(t ?? '')) ? true : null), 60000);
+  // What ends the sign-in is the host's own line: each running Claude Code
+  // started again on its conversation, then the registration.
+  await until(async () => ((await soHostLines()).some((t) => /started its Claude Code again on the same conversation/.test(t ?? '')) ? true : null), 30000);
   const soSignedIn = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live && !d.signin ? d : null; }, 10000);
   assert(!!soSignedIn, 'once Claude Code is signed in again the desk stops offering Sign in');
   eq(soLogins() - soLoginsBefore, 1, 'a press while a sign-in is open opens no second one');
   const soLines = await soHostLines();
   assert(soLines.some((t) => /already open in the browser on Test Mac/.test(t ?? '')), `and says the first is still open — ${JSON.stringify(soLines.slice(-6))}`);
   assert(soLines.includes('signed in to Claude Code on Test Mac'), 'the desk says it is signed in');
-  const soReopened = soSoArgv().slice(soSoOpenAt).split('\n').filter((l) => l.includes(`--resume ${SESSION_ID}`));
-  eq(soReopened.length, 2, `the window that still said it was signed out was reopened on its own conversation — ${JSON.stringify(soSoArgv().slice(soSoOpenAt))}`);
-  assert(soLines.some((t) => /still said Claude Code was signed out, so the host reopened it on the same conversation/.test(t ?? '')), 'and the desk says why');
+  eq(launches(soArgvAt).filter((l) => l.endsWith(`--resume ${SESSION_ID}`)).length, 2,
+    `the desk's Claude Code, started signed out, was started again on its own conversation, so it reads the new sign-in — ${JSON.stringify(launches(soArgvAt))}`);
+  assert(soLines.some((t) => t === 'started its Claude Code again on the same conversation, so it reads the new sign-in'), 'and the desk says why');
   assert(soSignedIn?.nudge?.ok === true, 'the bell rings again');
   eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, false, 'the host is listed signed in');
+  let soMark = await lastId();
   eq((await chat('free', 'back again')).status, 200, 'a message is taken');
-  assert(await until(() => (clean(received()).includes('back again') ? true : null), 15000), 'and reaches the window');
+  assert(await until(async () => ((await newRows(soMark)).some((r) => r.text === 'ECHO:back again') ? true : null), 15000), 'and answered: the Claude Code started after the sign-in reads it');
   rmSync(`${FIX}/signin-delay.flag`, { force: true });
 
-  // A window that records "Not logged in" is believed at once, not at the
-  // next heartbeat, even while `auth status` says signed in (a credential
-  // that is there and no longer taken); a reply from a window ends it.
+  // A Claude Code that records "Not logged in" is believed at once, not at
+  // the next heartbeat, even while `auth status` says signed in (a credential
+  // that is there and no longer taken); a reply from any desk ends it.
   appendTurn({ type: 'assistant', uuid: `nli-${Date.now()}`, timestamp: new Date().toISOString(), isApiErrorMessage: true,
     message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } });
   const soSaidOut = await until(async () => (deskOf(await floor(), 'free')?.signin ? true : null), 8000);
-  assert(!!soSaidOut, 'a window that records "Not logged in" puts Sign in on the desk within seconds');
+  assert(!!soSaidOut, 'a Claude Code that records "Not logged in" puts Sign in on the desk within seconds');
   appendTurn({ type: 'assistant', uuid: `reply-${Date.now()}`, timestamp: new Date().toISOString(),
     message: { role: 'assistant', content: [{ type: 'text', text: 'Hello again.' }] } });
-  assert(await until(async () => (deskOf(await floor(), 'free')?.signin ? null : true), 8000), 'and a reply from a window takes it away');
+  assert(await until(async () => (deskOf(await floor(), 'free')?.signin ? null : true), 8000), 'and a reply takes it away');
   rmSync(`${FIX}/signed-out.flag`, { force: true });
 
-  /* A credential only a shell's startup file gives (F1, 0.14.5 review). A
-   * window is `exec env … claude …` run through tmux's default-shell -c, and
-   * zsh -c reads $ZDOTDIR/.zshenv (~/.zshenv), so a key exported there is
-   * the window's. The host asked `auth status` with no shell around it, read
-   * "signed out" on such a machine, and the board refused every message to
-   * its desks. The host's reading has to be the window's reading. */
   // F5 (0.14.5 review, measured on a rig): a conversation that ended on
   // "Not logged in", resumed on a machine that is signed in, replays its last
   // turns to the floor, and the replayed error muted every desk on the host
-  // until a window replied, which nothing on the floor could make it do. A
-  // turn written before the desk joined is history and mutes nothing; one a
-  // window writes now still does (the row above it).
+  // until a desk replied, which nothing on the floor could make it do. A
+  // turn written before the desk joined is history and mutes nothing; one
+  // written now still does (the row above it).
   console.log('\n  an old "Not logged in" in a resumed conversation');
   {
     const OLD_ID = '22222222-3333-4444-5555-666666666666';
     const t0 = Date.now() - 120000;
-    writeFileSync(transcript().replace(SESSION_ID, OLD_ID), [
+    writeFileSync(transcriptOf(REPO, OLD_ID), [
       { type: 'user', uuid: 'o1', timestamp: new Date(t0).toISOString(), message: { role: 'user', content: 'an old question' } },
       { type: 'assistant', uuid: 'o2', timestamp: new Date(t0 + 1000).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'an old answer' }] } },
       { type: 'assistant', uuid: 'o3', timestamp: new Date(t0 + 2000).toISOString(), isApiErrorMessage: true, message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } },
@@ -2639,14 +2235,13 @@ try {
     const f5 = await floor();
     eq([f5.hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, !!deskOf(f5, 'free')?.signin, deskOf(f5, 'free')?.nudge?.ok], [false, false, true],
       'history mutes nothing: the host is not listed signed out, the desk offers no Sign in, the bell rings');
-    eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: SESSION_ID })).status, 200, 'the fixture: back on the conversation the sections below expect');
-    assert(await until(async () => (deskOf(await floor(), 'free')?.hosted?.held === 'floor' ? true : null), 20000), 'the fixture: its window is up');
+    assert(!!(await backHome()), 'the fixture: back on the conversation the sections below expect');
   }
 
-  console.log('\n  the host reads the sign-in a window would have');
+  console.log('\n  the host reads the sign-in a desk\'s Claude Code would have');
   {
     const A = await import('../host/auth.js');
-    const W = await import('../host/window.js');
+    const W = await import('../host/claude.js');
     const zd = `${FIX}/zdotdir`;
     mkdirSync(zd, { recursive: true });
     writeFileSync(`${zd}/.zshenv`, 'export TEST_ZSHENV_SIGNIN=1\n');
@@ -2655,21 +2250,22 @@ try {
     delete base.TEST_ZSHENV_SIGNIN;
     const withKey = { ...base, ZDOTDIR: zd };          // the key is in .zshenv
     const noKey = { ...base, ZDOTDIR: `${FIX}/zdotdir-none` };   // nowhere
-    // What a window reads: the window's own command line, run as tmux runs it.
-    const windowReads = (env) => {
+    // What a desk's Claude Code reads: it is started through the person's
+    // shell, `<shell> -c 'exec "$0" "$@"' claude …` (host/agent.js).
+    const deskReads = (env) => {
       let out = '';
-      try { out = execFileSync('/bin/zsh', ['-c', W.launchArgs([`${FIX}/claude`, 'auth', 'status', '--json'], { windows: false })[0]], { env, encoding: 'utf8' }); }
+      try { out = execFileSync('/bin/zsh', ['-c', 'exec "$0" "$@"', `${FIX}/claude`, 'auth', 'status', '--json'], { env, encoding: 'utf8' }); }
       catch (e) { out = String(e.stdout ?? ''); }
       return A.readSignedIn(out);
     };
-    eq([windowReads(withKey), windowReads(noKey)], [true, false], 'the fixture: a window reads signed in with the key in .zshenv, and signed out with no key anywhere');
+    eq([deskReads(withKey), deskReads(noKey)], [true, false], 'the fixture: a desk\'s Claude Code reads signed in with the key in .zshenv, and signed out with no key anywhere');
     eq(typeof A.signedIn, 'function', 'the fixture: the host has a sign-in reading');
     eq([await A.signedIn({ claude: `${FIX}/claude`, shell: '/bin/zsh', env: withKey }), await A.signedIn({ claude: `${FIX}/claude`, shell: '/bin/zsh', env: noKey })],
-      [windowReads(withKey), windowReads(noKey)], 'the host reads what a window reads: signed in for a key in .zshenv, signed out for none');
+      [deskReads(withKey), deskReads(noKey)], 'the host reads what a desk reads: signed in for a key in .zshenv, signed out for none');
     eq(await A.signedIn({ claude: `${FIX}/claude`, shell: null, env: withKey }), false,
-      'the control: asked with no shell around it, as before, the same machine reads signed out');
-    eq(A.statusCommand?.({ claude: '/x/claude', shell: null }), { cmd: '/x/claude', args: ['auth', 'status', '--json'] }, 'with no shell (Windows), the command runs as it is, as a window does there');
-    eq(A.statusCommand?.({ claude: "/it's/claude", shell: '/bin/zsh' }), { cmd: '/bin/zsh', args: ['-c', `exec '/it'\\''s/claude' 'auth' 'status' '--json'`] }, 'with one, it is one line for that shell, quoted as a window\'s is');
+      'the control: asked with no shell around it, the same machine reads signed out');
+    eq(A.statusCommand?.({ claude: '/x/claude', shell: null }), { cmd: '/x/claude', args: ['auth', 'status', '--json'] }, 'with no shell (Windows), the command runs as it is');
+    eq(A.statusCommand?.({ claude: "/it's/claude", shell: '/bin/zsh' }), { cmd: '/bin/zsh', args: ['-c', `exec '/it'\\''s/claude' 'auth' 'status' '--json'`] }, 'with one, it is one line for that shell, quoted');
     eq([A.readSignedIn('Welcome back!\n{\n  "loggedIn": true\n}\n'), A.readSignedIn('welcome {to} my shell\n{\n  "loggedIn": true\n}\n'), A.readSignedIn('{"loggedIn": false}'), A.readSignedIn('no json here'), A.readSignedIn('')], [true, true, false, null, null],
       'a profile that prints a line of its own does not hide the answer');
     // A `claude` that never answers and ignores SIGTERM (QA, 0.14.5 review
@@ -2699,30 +2295,31 @@ try {
       W.shellFor({ told: '', env: { SHELL: '/bin/zsh' }, account: () => '/bin/sh', exists: real }),
       W.shellFor({ told: '', env: {}, account: () => '/bin/bash', exists: real }),
       W.shellFor({ told: 'zsh', env: { SHELL: '/opt/gone/fish' }, account: () => { throw new Error('no passwd'); }, exists: real })],
-      ['/bin/bash', '/bin/zsh', '/bin/bash', '/bin/sh'], 'the shell is the floor\'s default-shell, else SHELL, else the account\'s, else /bin/sh; a relative or missing one is passed over');
+      ['/bin/bash', '/bin/zsh', '/bin/bash', '/bin/sh'], 'the shell is the one named, else SHELL, else the account\'s, else /bin/sh; a relative or missing one is passed over');
 
     // And the host itself, started on that machine: signed in, so nothing is
     // refused, where a460afd listed it signed out and refused the desk.
     host.kill('SIGTERM');
-    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 8000);
     host = null;
-    killTmux();
     host = startHost('host-test-1', { ZDOTDIR: zd });
     const zl = await until(async () => { const d = deskOf(await floor(), 'free'); return d?.hosted?.live ? d : null; }, 15000);
     assert(!!zl, 'the fixture: a host started with the key only in .zshenv registers');
     await sleep(1500);
-    eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, false, 'a host whose windows are signed in through .zshenv is listed signed in');
+    eq((await floor()).hosts.find((h) => h.host_id === 'host-test-1')?.signed_out, false, 'a host whose desks are signed in through .zshenv is listed signed in');
     const zd2 = deskOf(await floor(), 'free');
     eq([!!zd2?.signin, zd2?.nudge?.code ?? null], [false, null], 'and its desk offers no Sign in and refuses no nudge for it');
+    soMark = await lastId();
+    eq((await chat('free', 'signed in by the profile')).status, 200, 'a message to the desk is taken');
+    assert(await until(async () => ((await newRows(soMark)).some((r) => r.text === 'ECHO:signed in by the profile') ? true : null), 15000),
+      'and answered: the desk\'s Claude Code, started through the person\'s shell, has the profile\'s credential');
     host.kill('SIGTERM');
-    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 4000);
+    await until(async () => (deskOf(await floor(), 'free')?.hosted?.live === false ? true : null), 8000);
     host = null;
-    killTmux();
     rmSync(`${FIX}/signed-out.flag`, { force: true });
     host = startHost('host-test-1');
     await until(async () => (deskOf(await floor(), 'free')?.hosted?.live ? true : null), 15000);
   }
-
   /* ── which board this host serves ───────────────────────────────────────────
    * This used to be `originOf(found[0].url)` — the first desk the filesystem
    * walk happened to return. On a machine whose desks point at two boards that
@@ -2754,7 +2351,6 @@ try {
         ...process.env,
         HOME,
         ORCH_HOST_ROOTS: roots,
-        ORCH_TMUX_SESSION: TMUX_SESSION,
         ORCH_HOST_CONFIG: '/nonexistent/host.json',
         ORCH_HOST_CLAUDE: `${FIX}/claude`,
         ORCH_URL: '',
@@ -2785,7 +2381,7 @@ try {
   assert(/skipping .*board-a/.test(pinned.out), 'and desks on the other board are named rather than silently dropped');
 
   rmSync(`${boards}/two`, { recursive: true, force: true });
-  const agreed = await runHost(boards, { until: /tmux/ });
+  const agreed = await runHost(boards, { until: /→ http:\/\/127\.0\.0\.1:9911/ });
   assert(/→ http:\/\/127\.0\.0\.1:9911/.test(agreed.out), 'desks that agree on one board need no url at all');
 
   // Local scope can live elsewhere: CLAUDE_CONFIG_DIR moves ~/.claude.json
@@ -2801,10 +2397,10 @@ try {
       },
     },
   }));
-  // Resolved on the line printed after the desk list — the startup line itself
-  // says "tmux", so that marker would cut the output before any desk is named.
-  const moved = await runHost(boards, { CLAUDE_CONFIG_DIR: cfgDir, until: /attach to any of them/ });
-  assert(/host-test\/cfg-agent .*\(local scope\)/.test(moved.out), 'a desk bound in local scope under CLAUDE_CONFIG_DIR is found there');
+  // Resolved on the desk's own line, which is printed after the startup line:
+  // not on the name alone, which the key warning before it carries too.
+  const moved = await runHost(boards, { CLAUDE_CONFIG_DIR: cfgDir, until: /cfg-agent [^\n]*\(local scope\)/ });
+  assert(/host-test\/cfg-agent .*\(local scope\)/.test(moved.out), `a desk bound in local scope under CLAUDE_CONFIG_DIR is found there${/host-test\/cfg-agent .*\(local scope\)/.test(moved.out) ? '' : ` — ${JSON.stringify(moved.out.slice(-600))}`}`);
 
   /* ── where the shared secret comes from ─────────────────────────────────────
    * A desk's own binding outranks ORCH_AUTH_TOKEN and host.json (the operator's
@@ -2884,8 +2480,10 @@ try {
   mkdirSync(`${inst}/projects`, { recursive: true });
   mkdirSync(`${inst}/Library/LaunchAgents`, { recursive: true });
   writeFileSync(`${instBin}/launchctl`, `#!/bin/sh\necho "$@" >> ${JSON.stringify(`${inst}/launchctl.log`)}\n[ "$1" = print ] && exit 1\nexit 0\n`);
-  for (const t of ['claude', 'tmux']) writeFileSync(`${instBin}/${t}`, '#!/bin/sh\nexit 0\n');
-  for (const t of ['launchctl', 'claude', 'tmux']) chmodSync(`${instBin}/${t}`, 0o755);
+  // No tmux on this PATH: the installer needs none since the window layer
+  // was replaced (2026-11-22).
+  writeFileSync(`${instBin}/claude`, '#!/bin/sh\nexit 0\n');
+  for (const t of ['launchctl', 'claude']) chmodSync(`${instBin}/${t}`, 0o755);
   // ls for node.sh's nvm lookup: launchd's PATH has /bin, this one may not.
   for (const t of ['cat', 'mkdir', 'sleep', 'ls']) { try { execFileSync('ln', ['-sf', `/bin/${t}`, `${instBin}/${t}`]); } catch { /* there */ } }
   const instPath = `${instBin}:/usr/bin:${resolve(process.execPath, '..')}`;
@@ -2980,7 +2578,7 @@ try {
 
     // A host that is running is asked, over IPC, and leaves on its own.
     writeFileSync(supLog, '');
-    const running = supervise({ ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: empty, ORCH_HOST_ID: 'host-test-sup', ORCH_HOST_NAME: 'Supervised', ORCH_TMUX_SESSION: `${TMUX_SESSION}-sup` });
+    const running = supervise({ ORCH_URL: HOST, ORCH_AUTH_TOKEN: KEY, ORCH_HOST_ROOTS: empty, ORCH_HOST_ID: 'host-test-sup', ORCH_HOST_NAME: 'Supervised' });
     const up = await until(async () => ((await (await json('/api/floor/folders')).json()).hosts.find((h) => h.host_id === 'host-test-sup')?.live ? true : null), 20000);
     assert(up, 'the fixture: the supervised host registers with the board');
     writeFileSync(stopFile, 'stop');
@@ -3151,7 +2749,7 @@ try {
   const running = (behaviour) => {
     Object.assign(stand, { seen: [], hand: [], register: undefined, work: undefined, events: undefined, unregister: undefined }, behaviour);
     const p = spawn('node', ['host/index.js'], {
-      env: { ...process.env, HOME, ORCH_HOST_ROOTS: emptyRoot, ORCH_TMUX_SESSION: TMUX_SESSION, ORCH_HOST_CONFIG: '/nonexistent/host.json',
+      env: { ...process.env, HOME, ORCH_HOST_ROOTS: emptyRoot, ORCH_HOST_CONFIG: '/nonexistent/host.json',
         ORCH_HOST_CLAUDE: `${FIX}/claude`, ORCH_URL: BOARD, ORCH_AUTH_TOKEN: 'k' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -3187,11 +2785,9 @@ try {
   console.error(err);
   failures++;
 } finally {
-  // What the host said, when something went wrong. Debugging a failure in
-  // here without it means guessing at a process you cannot see, which is
-  // exactly how a delivery bug survived a green suite.
-  // What the desk actually recorded. A failure to deliver reaches the floor
-  // as an error turn, and reading it beats inferring it from a missing file.
+  // What the host said, and what the desk recorded, when something went
+  // wrong. A failure to deliver reaches the floor as an error turn, and
+  // reading it beats inferring it from a missing line.
   if (failures && server) {
     try {
       const d = await turns('free');
@@ -3199,21 +2795,26 @@ try {
       for (const t of d.rows ?? []) console.log(`${t.id} ${t.role} ${JSON.stringify((t.text ?? '').slice(0, 500))}`);
     } catch { /* the board may already be gone */ }
   }
-  // What the window was actually given, and what it was asked to run. A send
-  // that "did not land" is either bytes that never arrived or a window that
-  // never opened, and these two files say which without guessing.
+  // What Claude Code was actually sent, and what it was started with: a
+  // message that "did not land" is either a record never written to it or a
+  // process never started, and these two files say which without guessing.
   if (failures) {
-    for (const [label, path] of [['pane received', SINK], ['claude argv', `${FIX}/argv.log`]]) {
-      try { if (existsSync(path)) console.log(`\n--- ${label} ---\n${readFileSync(path, 'utf8').trim()}`); } catch { /* gone */ }
+    for (const [label, path] of [['sent to the stand-ins', STDIN_LOG], ['claude argv', `${FIX}/argv.log`]]) {
+      try { if (existsSync(path)) console.log(`\n--- ${label} ---\n${readFileSync(path, 'utf8').trim().split('\n').slice(-80).join('\n')}`); } catch { /* gone */ }
     }
   }
   if (failures && hostLog.trim()) console.log(`\n--- host log ---\n${hostLog.trim()}\n----------------`);
+  // The host is stopped, not killed, so it ends its desks' Claude Codes as
+  // it does on a stop; a host killed outright leaves them to end when their
+  // input closes. Either way none may be left.
+  if (host && host.exitCode === null) {
+    const gone = new Promise((done) => host.once('exit', done));
+    try { host.kill('SIGTERM'); } catch { /* gone */ }
+    await Promise.race([gone, sleep(20000)]);
+  }
   try { host?.kill('SIGKILL'); } catch { /* gone */ }
   try { server?.kill('SIGKILL'); } catch { /* gone */ }
-  killTmux();
-  // Counted before the sweep, or the sweep would hide a leak: a window the
-  // move case closed under the linger flag is gone by now (its watchdog
-  // fires 4 s after), and every other one goes on the kill-session above.
+  // Counted before the sweep, or the sweep would hide a leak.
   console.log('\n  what the run leaves behind');
   await until(() => (standIns().length === 0 ? true : null), 8000);
   const left = standIns();
