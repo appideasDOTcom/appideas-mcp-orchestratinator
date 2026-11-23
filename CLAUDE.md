@@ -211,6 +211,11 @@ on was measured on 2.1.330 before it was built
   reused is left alone. A host exiting on an uncaught error ends its desks
   in `process.on('exit')`. Not on Windows, which has no `ps` to tell a
   reused pid apart: there a leftover still finishes its turn and leaves.
+  The measurement of the three ways a host goes (SIGTERM, input closed,
+  parent killed) is the app repo's `scripts/probe-desk-stop.mjs`
+  (`term | eof | parentkill`, its real-machine-proofs skill). The sweep
+  itself is held by `test:host` on a stand-in; it has not been run against
+  that probe on a real Claude Code.
 - **The relay still tails the transcript** (`Desk.watch`, `readTranscript`,
   each subagent's file), on its own loop, so the floor shows what was said
   whoever said it. The desk's own process is in the roster while it runs
@@ -230,10 +235,14 @@ settings.json hashed before and after) and `floor-e2e.mjs` (the floor's
 routes end to end on a scratch board and a dev host). Run both after a
 Claude Code update that changes anything on this path.
 
-The skills written for the window layer still describe it:
-**measure-a-real-window** and **watch-the-window** drive tmux windows, and
-other skills still mention tmux steps. Their transcript and roster reads
-hold; their pane reads do not.
+The skills written for the window layer open with what changed:
+**measure-a-real-window** starts with the process layer's tools (the two
+scripts above, a one-liner for a record order, signed out without signing
+anyone out), **diagnose-handoff** with reading a desk's process, and
+**watch-the-window** says what it no longer covers. Below those openings
+they still describe tmux, which holds for an interactive Claude Code only.
+Other skills mention tmux in passing (verify-ui-change, capture-a-burst,
+measure-the-desktop, recover-a-lost-record).
 
 ## Three boards, one of them ours
 
@@ -547,7 +556,8 @@ gate).
 
 **It is taken into the turn.** A message sent while a turn runs is folded
 into that turn (measured on the process path: one result answered both),
-and the host emits `delivery: queued` the moment Claude Code echoes it. The
+and the host emits `delivery: queued` the moment Claude Code takes it
+(its lifecycle receipt). The
 composer shows "queued — the desk is working" instead of counting to thirty
 and saying "not recorded" about a message that arrived. The note is retired
 by the message becoming a turn, in either order, because the host's two
@@ -3133,6 +3143,14 @@ resume's fallback, the environment. A suite killed halfway leaves a server
 on its port (8896 for the host suite, 8902 for seats) and fixtures in
 `data/`, which will poison the next run. Check for both before concluding a
 failure is real.
+
+**A suite can run beside a mutant batch on ports of its own**:
+`HOST_TEST_PORT`, `SEATS_TEST_PORT` and `FLOOR_TEST_PORT` move
+`test:host`, `test:seats` and `test:floor` off 8896, 8902 and 8897, and
+`run-mutants.mjs --dest <dir>` with those variables set runs a second batch
+in its own copy (both used through 2026-11-22's 0.15.0 round, side by side,
+every control green). Without them a second run on the same port reads the
+first one's server.
 
 **Stopping a full run halfway takes more than killing `npm test`.** The
 chain is `npm run smoke && npm run test:admin && …`, and on 2026-11-02

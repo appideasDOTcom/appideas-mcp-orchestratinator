@@ -78,6 +78,13 @@ better-sqlite3 (`. scripts/node-floor.sh`).
   `/health` and its host's row. Exit 1 names each file that differs. Run it
   after the app's agent says it has taken a commit, and again after costmo
   restarts the app.
+- **A scratch board with a host of the tree on it, for the browser and for
+  `floor-e2e.mjs`**: the whole recipe (the board, its key from `docker
+  inspect`, a dev host with its own `ORCH_HOST_ID`, roots and config) is in
+  **measure-a-real-window**, "Since 0.15.0", item 2. The app has its own
+  scratch instance for a new build (`npm run scratch` in the app's repo,
+  with `--claude-config-dir` so its Claude Code's sign-in is apart from the
+  operator's: `orchestratinator.app_setup`, `host.claude_config_dir`).
 - **`scratch-docker-board.sh up [<port>] | status | down`** — this tree's
   image under its own tag, container name, loopback port and volume, auth
   enforced with a key made for it. It is the "local Docker" the app's
