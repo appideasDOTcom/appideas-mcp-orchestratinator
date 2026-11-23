@@ -1,16 +1,16 @@
 #!/bin/bash
-# check-screen-prompt.mjs (a dialog read by its shape, and a screen the floor
+# check-ask.mjs (what a desk's Claude Code asks (a permission, a question) on its panel; the floor
 # does not know, on a desk's panel; 0.14.6) with its whole fixture, served
 # from any directory: the repo, or a copy holding a mutant.
 #
-#   PORT=8965 CDP=9299 run-check-screen-prompt.sh <dir>
+#   PORT=8965 CDP=9299 run-check-ask.sh <dir>
 #
 # A server from <dir> on a scratch DB, seed-meeting.mjs's floor and host on
 # it, its own Chrome, the check, then all of it killed. About twenty seconds.
 set -u
 . "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/node-floor.sh" || exit 2
 C="$(cd "$1" && pwd)"; PORT="${PORT:-8965}"; CDP="${CDP:-9299}"
-S="$(mktemp -d "${TMPDIR:-/tmp}/check-screen-prompt.XXXXXX")"; mkdir -p "$S/shots"
+S="$(mktemp -d "${TMPDIR:-/tmp}/check-ask.XXXXXX")"; mkdir -p "$S/shots"
 taken() { curl -s -m 1 -o /dev/null "localhost:$1/$2"; [ $? -ne 7 ]; }
 if taken "$PORT" health; then echo "refusing: PORT $PORT is taken"; exit 2; fi
 if taken "$CDP" json/version; then echo "refusing: CDP $CDP is taken (another session's Chrome?)"; exit 2; fi
@@ -21,7 +21,7 @@ for _ in $(seq 1 40); do curl -s -m 1 "localhost:$PORT/health" >/dev/null && bre
 echo '{}' > "$S/ctl.json"
 node .claude/skills/verify-ui-change/seed-meeting.mjs "http://localhost:$PORT" --db "$S/r.db" --ctl "$S/ctl.json" > "$S/work.jsonl" 2> "$S/seed.err" & SEED=$!
 sleep 2
-ORCH_CDP_PORT=$CDP node --experimental-websocket .claude/skills/verify-ui-change/check-screen-prompt.mjs \
+ORCH_CDP_PORT=$CDP node --experimental-websocket .claude/skills/verify-ui-change/check-ask.mjs \
   "http://localhost:$PORT" "$S/shots" "$S/work.jsonl" 2> "$S/check.err" | tee "$S/out.txt"; rc=${PIPESTATUS[0]}
 kill $SEED $SRV 2>/dev/null; wait $SEED $SRV 2>/dev/null
 pkill -f "remote-debugging-port=$CDP( |\$)" 2>/dev/null

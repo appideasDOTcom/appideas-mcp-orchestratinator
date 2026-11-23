@@ -26,6 +26,8 @@
 //
 // Not Windows-specific in itself, and run by nothing else today.
 import { spawn } from 'node:child_process';
+import net from 'node:net';
+import { userInfo } from 'node:os';
 import { existsSync, mkdirSync, openSync, rmSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -88,8 +90,54 @@ async function stop() {
   process.exit(0);
 }
 
+// One supervisor for this person's host (task 348 F3, pc-developer, measured
+// on Windows 11): Task Scheduler's End kills only conhost, so this process
+// and the host ran on, the task read Ready, and Start made a second
+// supervisor and a second host with the same host id, which fought over every
+// desk. A lock nobody can leave behind: a named pipe on Windows, which the
+// system removes with its process, and a socket file elsewhere, taken over
+// when nothing answers on it.
+const LOCK = process.env.ORCH_SUPERVISE_LOCK
+  ?? (process.platform === 'win32' ? `\\\\.\\pipe\\orchestratinator-supervisor-${userInfo().username}` : join(DIR, 'supervise.sock'));
+const holdLock = () => new Promise((resolve) => {
+  const server = net.createServer((c) => c.end());
+  server.once('error', (err) => {
+    if (err.code !== 'EADDRINUSE') { say(`could not take the one-supervisor lock (${err.code ?? err.message}); running without it`); resolve(true); return; }
+    const probe = net.connect(LOCK);
+    probe.once('connect', () => { probe.destroy(); resolve(false); });
+    probe.once('error', () => {
+      // A socket file with nobody on it: a supervisor that died. Taken over.
+      try { rmSync(LOCK, { force: true }); } catch { /* not a file */ }
+      server.once('error', () => resolve(true));
+      server.listen(LOCK, () => resolve(true));
+    });
+  });
+  server.listen(LOCK, () => resolve(true));
+  server.unref();
+});
+
+// And it ends with the process that started it: when Task Scheduler's End
+// kills conhost, this stops the host properly, as a stop file would, rather
+// than run on without a task to show for it. On Windows an orphan keeps its
+// parent's pid as ppid, which then names nothing; elsewhere it is adopted
+// (ppid changes). ORCH_SUPERVISE_PARENT_WATCH=off for a parent that is meant
+// to go (none today).
+const PARENT = process.ppid;
+const parentGone = () => {
+  if (process.env.ORCH_SUPERVISE_PARENT_WATCH === 'off') return false;
+  if (process.ppid !== PARENT) return true;
+  try { process.kill(PARENT, 0); return false; } catch (err) { return err.code !== 'EPERM'; }
+};
+
+if (!(await holdLock())) {
+  say(`another supervisor already runs this host (${LOCK}); this one is not starting a second`);
+  process.exit(0);
+}
 // A stop file left from a stop that never finished would stop this run at
 // once; it is from before this start, so it is not this run's.
 try { rmSync(STOP_FILE, { force: true }); } catch { /* nothing to remove */ }
-setInterval(() => { if (existsSync(STOP_FILE)) stop(); }, POLL_MS);
+setInterval(() => {
+  if (existsSync(STOP_FILE)) stop();
+  else if (parentGone()) { say('the process that started this supervisor is gone (Task Scheduler\'s End); stopping the host'); stop(); }
+}, POLL_MS);
 start();

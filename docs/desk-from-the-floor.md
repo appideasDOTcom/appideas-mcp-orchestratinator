@@ -5,6 +5,13 @@ before anything was built, so the effort and the risks below are what the
 measurements say and not what the code has since become. The earlier design
 notes for this idea are not in the repo; when they turn up, fold them in here.
 
+**Since 0.15.0 (2026-11-22) a desk's Claude Code is not a tmux window**: it
+is a process the host runs and speaks to as stream-JSON (CLAUDE.md, "How a
+desk runs Claude Code"). The tmux sockets, panes and `host/window.js` named
+below are the layer this was measured on, and are gone. What it says about
+bindings, local scope and the board still holds; how a key reaches a desk is
+`agentEnv` in `host/claude.js` now.
+
 ## The ask
 
 The people running floors say the same thing in the same words: *"why can't I

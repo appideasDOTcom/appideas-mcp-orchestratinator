@@ -70,6 +70,10 @@
                 title="Recent meeting rooms, newest first — Resume one to open it again">Meeting rooms</button>
       </div>
       <div class="chips" id="floor-pick"></div>
+      <!-- A host whose Claude Code answered the protocol probe differently,
+           or could not be checked (task 351, host/canary.js). Empty and
+           hidden while every host's probe matched. -->
+      <div id="floor-canary" class="canary-warn hidden" role="status"></div>
       <div class="floor-body">
         <div id="floor-rooms" class="rooms"></div>
         <aside id="floor-panel" class="deskpanel hidden"></aside>

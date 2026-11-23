@@ -31,7 +31,7 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
-import * as W from './window.js';
+import * as W from './claude.js';
 
 /** How many conversations a recent list or a search answers with, at most. */
 export const HISTORY_MAX = 100;

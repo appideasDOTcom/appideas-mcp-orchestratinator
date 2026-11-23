@@ -1,94 +1,10 @@
 [
  [
-  "a screen nobody knows reads as a composer",
-  "window",
-  "host/window.js",
-  "  return { kind: 'unknown', lines: lines.slice(-UNKNOWN_LINES).map((l) => l.slice(0, 200)) };",
-  "  return { kind: 'composer' };"
- ],
- [
-  "a dialog of Claude Code's shape is not read",
-  "window",
-  "host/window.js",
-  "  return { kind: 'dialog', asks, detail, options, at, above };",
-  "  return null;"
- ],
- [
-  "a dialog above a live composer is not read",
-  "window",
-  "host/window.js",
-  "    foot = footAboveComposer(lines);",
-  "    foot = -1;"
- ],
- [
-  "a quoted line in the box is its prompt row again",
-  "window",
-  "host/window.js",
-  "  for (let n = lines.length - 1; n >= 0; n--) if (/^\\s*❯/.test(lines[n])) return n;",
-  "  for (let n = lines.length - 1; n >= 0; n--) if (/^\\s*[❯>]/.test(lines[n])) return n;"
- ],
- [
-  "a reopen whose window ended is waited for until its deadline",
-  "window",
-  "host/window.js",
-  "  if (intent.pid && !isAlive(intent.pid)) return 'ended';\n",
-  ""
- ],
- [
-  "send() types into a screen nobody knows",
-  "window",
-  "host/window.js",
-  "    if ((v.kind === 'unknown' || v.kind === 'blank') && unknownScreensOn()) {",
-  "    if (false) {"
- ],
- [
-  "Escape is pressed into any screen",
-  "window",
-  "host/window.js",
-  "  if (!mine) {\n    return { ok: false, code: 'no_prompt'",
-  "  if (false) {\n    return { ok: false, code: 'no_prompt'"
- ],
- [
-  "\"Switch model?\" reads as the hooks' asking",
-  "window",
-  "host/window.js",
-  "  if (switchConfirmOf(text)) return { kind: 'switch' };\n  if (askingOf(text)) return { kind: 'asking' };",
-  "  if (askingOf(text)) return { kind: 'asking' };\n  if (switchConfirmOf(text)) return { kind: 'switch' };"
- ],
- [
-  "the watch forgets an unknown screen between looks",
-  "host",
-  "host/index.js",
-  "    if (look && oddText !== this.oddSeen?.text) this.oddSeen",
-  "    if (oddText !== this.oddSeen?.text) this.oddSeen"
- ],
- [
   "a new Claude Code is said nowhere",
   "host",
   "host/index.js",
   "        for (const d of this.desks.values()) d.told(V.versionWords(this.cfg.name, change));",
   "        void change;"
- ],
- [
-  "a screen read replaces a hook's prompt",
-  "floor",
-  "src/floor.js",
-  "      if (open && !open.startup) break;\n",
-  ""
- ],
- [
-  "a screen with no rows is dropped by the board",
-  "floor",
-  "src/floor.js",
-  "      if (!options.length && !screen?.length) break;",
-  "      if (!options.length) break;"
- ],
- [
-  "a screen nobody knows is refused in a permission's words",
-  "floor",
-  "src/floor.js",
-  "  if (pending.startup && pending.kind === 'screen') {",
-  "  if (false) {"
  ],
  [
   "a runtime dependency is a caret range again",

@@ -1,6 +1,6 @@
 ---
 name: diagnose-handoff
-description: Find out why a desk on the orchestratinator floor is not behaving — a message that will not send, a reply that never arrives, a window that stalls, or a conversation that seems to be in the wrong place. Use before forming any theory about the host, the server, or Claude Code.
+description: Find out why a desk on the orchestratinator floor is not behaving — a message that will not send, a reply that never arrives, a desk that reads working or asking when it is not, or a conversation that seems to be in the wrong place. Starts with the process layer (a desk's Claude Code is the host's stream-JSON child since 0.15.0). Use before forming any theory about the host, the server, or Claude Code.
 ---
 
 # Diagnosing a desk
@@ -10,7 +10,67 @@ rule that broke them all open: **read the actual state before theorising, and
 when a window misbehaves, look at its screen.** Work down this list. Stop at the
 first step that disagrees with what you expected — that is the bug.
 
-## 1. Where am I actually running?
+## 0. Since 0.15.0: a desk is a process, so read the process
+
+A desk's Claude Code is the host's child, spoken to as stream-JSON
+(CLAUDE.md, "How a desk runs Claude Code"). There is no pane to look at,
+and no `TMUX_PANE` anywhere. The tmux steps further down are the window
+layer's and describe only an interactive Claude Code (a terminal or editor
+tab on the same conversation). Read these first:
+
+```bash
+# Every desk process on this machine, with its parent (the host's pid) and start time
+ps -Ao pid,ppid,lstart,command | command grep -e '--permission-prompt-tool stdio' | command grep -v grep   # VS Code's Claude Code writes =stdio, and has no -p
+# Its roster entry: kind interactive, entrypoint sdk-cli, and the conversation it is on
+cat ~/.claude/sessions/<pid>.json
+# What the host recorded as its desks' processes (task 340), one file per host id
+cat <the folder of host.json>/desk-pids-<host id>.json      # ~/.orchestratinator, or the app's profile
+# What the board thinks: held floor/editor, window proc:<pid>, holders, state, session
+curl -s <board>/api/floor | python3 -c "
+import json,sys
+for c in json.load(sys.stdin).get('channels',[]):
+    for k in c.get('desks',[]):
+        h=k.get('hosted') or {}
+        if h: print(c['channel'], k['agent'], h.get('held'), h.get('window'), h.get('holders'), h.get('state'), h.get('session_id'), (k.get('permission') or {}).get('request_id'))"
+```
+
+The board is 6724 for the desktop app (its host log is
+`~/Library/Application Support/Orchestratinator/logs/host.log`), a scratch
+port for a test, and 8787 only for the live Docker board, which is not ours
+to test against. The host's lines for a desk, in order of a normal turn:
+`<desk>: Claude Code started (pid N) on <id>`, then `Claude Code asks
+(permission|question): …` if it asks. A process that ended on its own is an
+`agent_exited` error turn on the desk with Claude Code's last stderr lines.
+
+What each refusal means (the code is on the error turn or the route's 409):
+
+| code | where | what it is |
+|---|---|---|
+| `asking` | board or host | a permission or question stands; Claude Code takes nothing until it is answered or cancelled |
+| `held_elsewhere` | host | another Claude Code in the roster is on that conversation (a terminal, an editor tab); its pid is in the words |
+| `not_taken` | host | no lifecycle receipt (`command_lifecycle` with our uuid) within 30 s |
+| `stale_request` | host or board | the question being answered is no longer the open one |
+| `agent_exited` / `no_process` | host | the desk's process ended; the next message starts it again |
+
+Three symptoms and where they have come from:
+- **A desk reads "working" with nothing running.** The host's `working`
+  comes from the lifecycle receipt; `completed` and `cancelled` arrive after
+  the result and must not count (fixed 2026-11-22). The board's state comes
+  from the host's `state` events (working at init, idle at result).
+- **A question vanished and every message is refused `asking`.** A
+  subagent's hook closing it was the 0.14.6 cause (fixed: `agent_id`). Read
+  `permission` on the desk in `/api/floor` against the host's `Claude Code
+  asks` line.
+- **"Held elsewhere" after a host restart.** A leftover desk process of the
+  previous run; since task 340 the next run ends it at start and logs
+  `ended a desk's Claude Code an earlier run of this host left running`.
+  A pid in the roster that is not in the desk-pids file is somebody else's
+  Claude Code, and is never ended for them.
+
+To see what Claude Code itself sends, ask it directly rather than reading
+code: **measure-a-real-window**, section "Since 0.15.0".
+
+## 1. Where am I actually running? (window layer: an interactive Claude Code)
 
 ```bash
 echo "TMUX_PANE=${TMUX_PANE:-<none>}"

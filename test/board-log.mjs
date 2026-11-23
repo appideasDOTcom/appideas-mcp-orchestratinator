@@ -1,6 +1,6 @@
 // What the board writes when it could not answer — issue #5 step 3, costmo's
 // "Hold + slow request" (task 258). A real server, run with a preload that
-// holds its event loop on SIGUSR2 the way a better-sqlite3 lock wait or a heavy
+// holds its event loop (on a file the test writes) the way a better-sqlite3 lock wait or a heavy
 // synchronous route would: the stand-in staged on a private board on
 // 2026-11-03, where six 12 s holds gave the host six timeouts and the board
 // wrote nothing. Every assertion reads the server's own output.
@@ -15,6 +15,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const PORT = Number(process.env.BOARD_LOG_TEST_PORT ?? 8898);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -29,19 +30,25 @@ const assert = (cond, msg) => {
 };
 const rmDb = () => { for (const ext of ['', '-wal', '-shm']) { try { rmSync(DB_PATH + ext); } catch { /* none */ } } };
 
-// The hold: SIGUSR2 busy-waits the loop for whatever the hold file says.
+// The hold: the board's loop busy-waits for whatever the hold file says,
+// the moment the file appears. A file and not SIGUSR2, which Windows does
+// not have (pc-developer, task 348 W4: ERR_UNKNOWN_SIGNAL there). Read every
+// 50 ms, so a hold starts within 50 ms of being asked for.
 writeFileSync(PRELOAD, [
-  "import { readFileSync } from 'node:fs';",
-  `process.on('SIGUSR2', () => { const ms = Number(readFileSync(${JSON.stringify(`${PRELOAD}.ms`)}, 'utf8')); const end = Date.now() + ms; while (Date.now() < end) { /* held */ } });`,
+  "import { readFileSync, rmSync } from 'node:fs';",
+  `const HOLD = ${JSON.stringify(`${PRELOAD}.ms`)};`,
+  "setInterval(() => { let ms; try { ms = Number(readFileSync(HOLD, 'utf8')); rmSync(HOLD); } catch { return; } const end = Date.now() + ms; while (Date.now() < end) { /* held */ } }, 50).unref();",
 ].join('\n'));
-const holdFor = (ms) => { writeFileSync(`${PRELOAD}.ms`, String(ms)); server.kill('SIGUSR2'); };
+const holdFor = (ms) => { writeFileSync(`${PRELOAD}.ms`, String(ms)); };
 
 let out = '';
 const since = () => { const at = out.length; return () => out.slice(at); };
 const get = (path, headers = {}) => fetch(`${BASE}${path}`, { headers: { 'x-orchestratinator-key': KEY, ...headers } });
 
 rmDb();
-const server = spawn('node', ['--import', PRELOAD, 'src/server.js'], {
+// A file URL, not a path: on Windows a bare C:\\ path is not an import
+// specifier (pc-developer, task 348 W4).
+const server = spawn('node', ['--import', pathToFileURL(PRELOAD).href, 'src/server.js'], {
   env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH, ORCH_AUTH_TOKEN: KEY, ORCH_AUTH_MODE: 'enforce' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });

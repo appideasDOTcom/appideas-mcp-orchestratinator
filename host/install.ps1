@@ -26,18 +26,24 @@
     rights: the host opens windows in the person's session and reads their
     Claude Code, as the Mac's LaunchAgent does. The task's PATH is the user's
     and held WinGet\Links (psmux), %USERPROFILE%\.local\bin (claude) and
-    nodejs; the host finds psmux and claude by path anyway.
+    nodejs; the host finds claude by path anyway.
   Not measured yet: the AtLogOn trigger itself (the probe was started by hand).
 
-  The host needs psmux (winget install marlocarlo.psmux): it answers tmux's
-  commands on Windows, and each desk is a window in it.
+  The host needs no multiplexer: each desk's Claude Code is a process it
+  runs and speaks to through Claude Code's programmatic interface
+  (2026-11-22, replacing psmux windows).
 #>
-[CmdletBinding()]
+# PositionalBinding off, and the folders at position 0: with [CmdletBinding()]
+# alone, PowerShell bound a bare argument to -Url and the next to -Token, so
+# `install.ps1 <dir1> <dir2>` wrote a folder as the shared secret, said
+# "shared secret from -Token" and exited 0 (pc-developer, task 346 F2,
+# measured on Windows 11). -Url and -Token are taken by name only.
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [string]$Url = '',
   [string]$Token = '',
   [switch]$Uninstall,
-  [Parameter(ValueFromRemainingArguments = $true)][string[]]$Roots = @()
+  [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Roots = @()
 )
 $ErrorActionPreference = 'Stop'
 
@@ -74,14 +80,6 @@ if ($Uninstall) {
     Write-Host "there is no task '$TaskName' to remove."
   }
   exit 0
-}
-
-# psmux is how the floor drives Claude Code here: each desk is a window in it.
-$tmux = Get-Command tmux -ErrorAction SilentlyContinue
-$links = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\tmux.exe'
-if (-not $tmux -and -not (Test-Path -LiteralPath $links)) {
-  Write-Error "psmux is not installed, and the host needs it: each desk is a window in it. Install it with:  winget install marlocarlo.psmux"
-  exit 1
 }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
@@ -145,8 +143,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Pr
 Start-ScheduledTask -TaskName $TaskName
 Write-Host "started the task '$TaskName' (node: $NodeExe) - log: $(Join-Path $LogDir 'host.log')"
 Write-Host ''
-Write-Host 'To sit at a desk yourself:   tmux attach -t =orch'
-Write-Host '  (each desk is a window in it, the same session the floor types into)'
+Write-Host 'To sit at a desk yourself:   Open in Claude, on its panel on the floor'
 Write-Host 'To stop and remove the host: powershell -ExecutionPolicy Bypass -File host\install.ps1 -Uninstall'
 # -Encoding UTF8: the log is UTF-8 with no BOM, and Windows PowerShell 5.1
 # reads such a file as the ANSI code page ("·" came out as "Â·", measured).

@@ -61,7 +61,7 @@ export function versionChange(before, now) {
 
 /** The line each desk is told. */
 export function versionWords(hostName, change) {
-  return `Claude Code on ${hostName} is now ${change.to} (it was ${change.from}). The floor reads Claude Code's screens by their shape, and a screen it does not know stands on the desk as needing you, with its lines: look there first if a desk behaves differently.`;
+  return `Claude Code on ${hostName} is now ${change.to} (it was ${change.from}). The host checks a new version with the floor's protocol probe, and says here what it found.`;
 }
 
 /** The last version this host read, from its own file; null when it has none. */

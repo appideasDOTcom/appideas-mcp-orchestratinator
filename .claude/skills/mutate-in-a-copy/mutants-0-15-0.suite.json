@@ -1,0 +1,394 @@
+[
+ [
+  "the lifecycle receipt is not read: a message is taken only at its echo",
+  "agent",
+  "host/agent.js",
+  "  if (r.type === 'command_lifecycle') return { kind: 'taken', uuid: r.command_uuid ?? null, state: r.state ?? null };",
+  "  if (false) return { kind: 'taken', uuid: r.command_uuid ?? null, state: r.state ?? null };"
+ ],
+ [
+  "the echo is no fallback receipt",
+  "agent",
+  "host/agent.js",
+  "  if (r.type === 'user' && r.isReplay) return { kind: 'taken', uuid: r.uuid ?? null, state: 'echo' };",
+  "  if (false) return { kind: 'taken', uuid: r.uuid ?? null, state: 'echo' };"
+ ],
+ [
+  "a completed or cancelled message reads as a turn starting",
+  "agent",
+  "host/agent.js",
+  "        if (m.state !== 'queued' && m.state !== 'started' && m.state !== 'echo') break;\n",
+  ""
+ ],
+ [
+  "a cancelled message reads as a turn starting (the old guard, completed only)",
+  "agent",
+  "host/agent.js",
+  "        if (m.state !== 'queued' && m.state !== 'started' && m.state !== 'echo') break;\n",
+  "        if (m.state === 'completed') break;\n"
+ ],
+ [
+  "/clear's reset id is taken for the session (the old misreading)",
+  "agent",
+  "host/agent.js",
+  "      case 'reset': this.sessionId = null; break;",
+  "      case 'reset': this.sessionId = m.conversation ?? null; break;"
+ ],
+ [
+  "a message is written while a permission stands",
+  "agent",
+  "host/agent.js",
+  "    if (this.asks.size) {",
+  "    if (false) {"
+ ],
+ [
+  "the desk keeps the old session through a /clear",
+  "host",
+  "host/desk.js",
+  "    proc.on('reset', () => { this.sessionId = null; });",
+  "    proc.on('reset', () => {});"
+ ],
+ [
+  "the host never says idle at a turn's end",
+  "host",
+  "host/desk.js",
+  "      this.host.emit({ type: 'state', channel: this.channel, agent: this.agent, state: 'idle' }, true);\n",
+  ""
+ ],
+ [
+  "an effort nothing wrote is said as saved",
+  "seats",
+  "host/desk.js",
+  "said = saved.ok && saved.wrote ?",
+  "said = saved.ok ?"
+ ],
+ [
+  "saveDefaults reports a write when it had nothing to write",
+  "claude",
+  "host/claude.js",
+  "  if (!model && !(effort && modelId)) return { ok: true, wrote: false };\n",
+  ""
+ ],
+ [
+  "a background session's conversation is refused as held elsewhere",
+  "host",
+  "host/desk.js",
+  "        } else if (held?.kind === 'background') {",
+  "        } else if (false) {"
+ ],
+ [
+  "a reopen hands its id to --resume unchecked",
+  "seats",
+  "host/index.js",
+  "    if (sessionId) {\n      const pick = await W.resumable(desk.where, sessionId",
+  "    if (false) {\n      const pick = await W.resumable(desk.where, sessionId"
+ ],
+ [
+  "a seat's watch takes the folder's other conversations",
+  "seats",
+  "host/index.js",
+  "(desk.seat ? ours.get(s.pid) === desk : !ours.has(s.pid) || ours.get(s.pid) === desk)",
+  "(!ours.has(s.pid) || ours.get(s.pid) === desk)"
+ ],
+ [
+  "event batches go out side by side",
+  "host",
+  "host/index.js",
+  "    this.flushing = (this.flushing ?? Promise.resolve()).then(() => this.sendOutbox());",
+  "    this.flushing = this.sendOutbox();"
+ ],
+ [
+  "a subagent's hook closes the desk's question",
+  "floor",
+  "src/floor.js",
+  "  if (CLEARS_AWAITING.has(event) && !str(body.agent_id)) {",
+  "  if (CLEARS_AWAITING.has(event)) {"
+ ],
+ [
+  "idle overrides a question the host's Claude Code is asking",
+  "floor",
+  "src/floor.js",
+  "        if (live.pending.get(key)?.host_ask) break;\n",
+  ""
+ ],
+ [
+  "idle leaves a desk compacting",
+  "floor",
+  "src/floor.js",
+  "host_ask) break;\n        if (store.clearDeskCompacting(channel, agent)) live.publish(key, { type: 'compacting', compacting: null });\n",
+  "host_ask) break;\n"
+ ],
+ [
+  "the hook does not forward agent_id",
+  "plugin",
+  "plugin/hooks/report.mjs",
+  "    agent_id: typeof ev.agent_id === 'string' && ev.agent_id ? ev.agent_id : undefined,",
+  "    agent_id: undefined,"
+ ],
+ [
+  "a turn ended 'not logged in' is not noted",
+  "host",
+  "host/desk.js",
+  "      if (!m.ok && /not logged in/i.test(m.text)) this.host.noteTurn",
+  "      if (false) this.host.noteTurn"
+ ],
+ [
+  "task 340: the host does not end what an earlier run left",
+  "host",
+  "host/index.js",
+  "  const leftovers = await W.endLeftoverDesks(W.deskPidsFile(cfg.hostId));",
+  "  const leftovers = [];"
+ ],
+ [
+  "task 340: any live pid in the record is ended, whatever it is now",
+  "host",
+  "host/claude.js",
+  "      if (!argv.includes('-p') || !cmd.includes('--input-format stream-json') || !cmd.includes('--permission-prompt-tool stdio')) continue;",
+  "      if (false) continue;"
+ ],
+ [
+  "task 340: a desk process is not recorded when it starts",
+  "host",
+  "host/desk.js",
+  "      this.sessionId = id;\n      this.host.notePids?.();",
+  "      this.sessionId = id;"
+ ],
+ [
+  "task 340: the record is not cleared after the sweep",
+  "host",
+  "host/claude.js",
+  "  noteDeskPids(file, []);\n  return ended;",
+  "  return ended;"
+ ],
+ [
+  "send_message files an empty message as null and says sent",
+  "admin",
+  "src/tools.js",
+  "      if (empty) {\n        const other",
+  "      if (false) {\n        const other"
+ ],
+ [
+  "upgrade: the host does not end an earlier version's windows at its start",
+  "host",
+  "host/index.js",
+  "  await host.sweepLegacy({ deferTold: true });\n",
+  ""
+ ],
+ [
+  "upgrade: a window mid-turn is ended anyway",
+  "host",
+  "host/claude.js",
+  "    if (w.status === 'busy') { waiting.push(w); continue; }\n",
+  ""
+ ],
+ [
+  "upgrade: a pane in a folder that is no desk is ended too",
+  "host",
+  "host/claude.js",
+  "if (!found.has(pid) && mine.has(p.cwd) && alive(pid))",
+  "if (!found.has(pid) && alive(pid))"
+ ],
+ [
+  "upgrade: a window mid-turn reads as an editor",
+  "host",
+  "host/desk.js",
+  "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? unlisted ?? null;",
+  "    this.outsidePid = outside?.pid ?? unlisted ?? null;"
+ ],
+ [
+  "upgrade: a waiting window is never looked at again",
+  "host",
+  "host/index.js",
+  "      if (this.legacyWaiting) { try {",
+  "      if (false) { try {"
+ ],
+ [
+  "R2: a withdrawn ask is not read (control_cancel_request)",
+  "agent",
+  "host/agent.js",
+  "  if (r.type === 'control_cancel_request') return",
+  "  if (false) return"
+ ],
+ [
+  "R2: the desk keeps a withdrawn ask and never says it gone",
+  "host",
+  "host/desk.js",
+  "      if (!this.asks.delete(m.request_id)) return;\n      this.host.emit({ type: 'ask', channel: this.channel, agent: this.agent, request_id: m.request_id, gone: true }, true);",
+  "      return;"
+ ],
+ [
+  "F1h: a missing Claude Code is promised to start at the next message",
+  "host",
+  "host/desk.js",
+  "        const missing = e.code === 127 || !!e.error;",
+  "        const missing = false;"
+ ],
+ [
+  "350: the same work wakes a desk again once it came up",
+  "floor",
+  "src/floor.js",
+  "      if (s.ran) continue;\n",
+  ""
+ ],
+ [
+  "350: a desk an editor holds is woken (a second process)",
+  "floor",
+  "src/floor.js",
+  "    if (d.window_id || d.outside_pid) { s.since = null; if (s.sig) s.ran = true; continue; }",
+  "    if (d.window_id) { s.since = null; if (s.sig) s.ran = true; continue; }"
+ ],
+ [
+  "350: no grace before a wake",
+  "floor",
+  "src/floor.js",
+  "    if (nowMs - s.since < after) continue;\n",
+  ""
+ ],
+ [
+  "350: a start that never came up is retried without end",
+  "floor",
+  "src/floor.js",
+  "      if (s.tries >= tries) { if (!s.said) { s.said = true; gaveUp.push({ desk: d, w }); } continue; }",
+  ""
+ ],
+ [
+  "F6: a Claude Code the roster does not list yet holds nothing",
+  "host",
+  "host/desk.js",
+  "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? unlisted ?? null;",
+  "    this.outsidePid = this.legacyPid ? null : outside?.pid ?? null;"
+ ],
+ [
+  "Q2: a version already checked is probed again",
+  "host",
+  "host/index.js",
+  "if (known) { this.canary = known; return; }",
+  "if (false) { this.canary = known; return; }"
+ ],
+ [
+  "352A: a host's ask always takes the place of the one shown",
+  "floor",
+  "src/floor.js",
+  "    if (!super.get(k)) { this.set(k, req); return 'shown'; }",
+  "    { this.set(k, req); return 'shown'; }"
+ ],
+ [
+  "352A: an answer drops every prompt behind it",
+  "floor",
+  "src/floor.js",
+  "    const nextAsk = live.pending.shift(key);\n    // Kept, not dropped",
+  "    const nextAsk = (live.pending.delete(key), null);\n    // Kept, not dropped"
+ ],
+ [
+  "352A: one withdrawn from behind closes the one shown",
+  "floor",
+  "src/floor.js",
+  "    if (super.get(k)?.request_id === rid) return { was: 'shown', next: this.shift(k) };",
+  "    if (super.get(k)) return { was: 'shown', next: this.shift(k) };"
+ ],
+ [
+  "352A: the refusal does not say how many wait",
+  "floor",
+  "src/floor.js",
+  "    error: more\n      ?",
+  "    error: false\n      ?"
+ ],
+ [
+  "352B: a bind does not allow the board's tools",
+  "host",
+  "host/index.js",
+  "    const allowed = M.allowBoardTools(dir, BOARD_TOOLS_RECORD);",
+  "    const allowed = { ok: true };"
+ ],
+ [
+  "352B: Leave keeps the board-tools rule",
+  "host",
+  "host/index.js",
+  "    const unallowed = M.unallowBoardTools(desk.cwd, BOARD_TOOLS_RECORD);",
+  "    const unallowed = { ok: true };"
+ ],
+ [
+  "352B: a rule the person wrote is recorded as the host's",
+  "host",
+  "host/mcp.js",
+  "  if (allow.includes(rule)) return { ok: true, added: false };\n",
+  ""
+ ],
+ [
+  "352A: a subagent's ask is not named",
+  "host",
+  "host/desk.js",
+  "    if (ask.agent) ask.via =",
+  "    if (false) ask.via ="
+ ],
+ [
+  "4154: CLAUDE_CONFIG_DIR is dropped from the binding CLI",
+  "host",
+  "host/mcp.js",
+  " || k === 'CLAUDE_CONFIG_DIR'",
+  ""
+ ],
+ [
+  "upgrade: a registration says no window for an earlier version's window mid-turn",
+  "host",
+  "host/index.js",
+  "        window: d.windowMark,",
+  "        window: d.running ? `proc:${d.proc.pid}` : null,"
+ ],
+ [
+  "352A: a subagent's hook raises a prompt on a desk the host runs",
+  "floor",
+  "src/floor.js",
+  "    case 'PermissionRequest': {\n      if (hostAsks) break;",
+  "    case 'PermissionRequest': {"
+ ],
+ [
+  "352A: a prompt set over a host's ask drops it",
+  "floor",
+  "src/floor.js",
+  "    if (head?.host_ask && head.request_id !== req.request_id) {\n      if (!this.behind.has(k)) this.behind.set(k, []);\n      this.behind.get(k).unshift(head);\n    }\n    return this.#put(k, req);",
+  "    return this.#put(k, req);"
+ ],
+ [
+  "352A: a background subagent's ask is dropped at its parent's turn end",
+  "agent",
+  "host/agent.js",
+  "          if (ask.agent) continue;\n",
+  ""
+ ],
+ [
+  "4181: a signed-out StopFailure keeps Claude Code's /login",
+  "floor",
+  "src/floor.js",
+  "      const said = code === 'authentication_failed' || /^\\s*Not logged in\\b/i.test(words ?? '')",
+  "      const said = false"
+ ],
+ [
+  "4181: a signed-out turn in the transcript keeps Claude Code's /login",
+  "claude",
+  "host/claude.js",
+  "      const text = signedOutText(textOf(content), d.error);",
+  "      const text = textOf(content);"
+ ],
+ [
+  "4181: the canary's MCP server runs on Electron's helper under the app",
+  "host",
+  "host/canary.js",
+  "  if (!versions.electron) return execPath;",
+  "  return execPath;"
+ ],
+ [
+  "R10: a hook from the asking conversation clears the mark while the host asks",
+  "floor",
+  "src/floor.js",
+  "    if (!live?.pending.get(key)?.host_ask) store.clearAwaiting(sessionId);",
+  "    store.clearAwaiting(sessionId);"
+ ],
+ [
+  "R10: a heartbeat's re-said ask does not put the mark back",
+  "floor",
+  "src/floor.js",
+  "        if (shown?.request_id === rid && shown.host_ask) store.setAwaiting(",
+  "        if (false) store.setAwaiting("
+ ]
+]

@@ -1,9 +1,17 @@
 ---
 name: watch-the-window
-description: Measure what a window and the floor actually do over time — record every change to a tmux pane and every change to the board's awaiting state, then read the two against each other. Use before theorising about any timing, stall, or "it only showed up in tmux" problem.
+description: Window layer (before 0.15.0) — record every change to a tmux pane and the board's awaiting state over time. A floor desk has no pane since 0.15.0; for a desk's timing read its stream-JSON records (measure-a-real-window, "Since 0.15.0") and the board's state instead. Still usable for an interactive Claude Code in a terminal.
 ---
 
 # Watching, rather than guessing
+
+> **Since 0.15.0 a floor desk has no pane** (CLAUDE.md, "How a desk runs
+> Claude Code"). The pane recorder below describes the window layer and an
+> interactive Claude Code in a terminal. For a desk, the timing question is
+> answered by its records: each stream-JSON line is timestamped by the
+> one-liner in **measure-a-real-window** ("Since 0.15.0", item 3), and the
+> board's side by the awaiting recorder here (not re-run since 0.15.0:
+> check its output against `/api/floor` before trusting it).
 
 > **Two skills, two questions.** This one watches a window that already exists,
 > which is what you want when a *desk* is misbehaving. When the question is

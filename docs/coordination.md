@@ -11,10 +11,12 @@ tasks when it calls a tool to check. Coordination between two agents is a
 cooperative protocol, not remote control, and nothing here pretends otherwise.
 
 **A human talking to an agent is push.** That is a different problem with a
-different answer. Claude Code runs in a tmux pane, so the floor types into it
-the way you would — `tmux send-keys`, as one bracketed paste. The window does
-not have to be idle, does not have to be polling, and does not have to be
-yours: you can be attached to the same pane at the same time.
+different answer. Each desk's Claude Code is a process the host runs and
+speaks to as data (since 0.15.0; it was a tmux pane typed into before), so the
+floor's message reaches it as a person's message does. It does not have to be
+idle (a message sent mid-turn is taken into the turn) and does not have to be
+polling; and when you want the conversation in your own editor or terminal,
+Open in VS Code or Open in Claude hands it over.
 
 This used to be one question with one answer, and the answer was wrong. The
 floor had a *driver* per desk — a window you had open "owned" its session, so

@@ -4,7 +4,7 @@
 //   board-query.sh board-snapshot.js | grep '^@@JSON@@' | sed 's/^@@JSON@@//' > board.json
 //   node disk-join.mjs board.json
 //
-// The transcripts are read with host/window.js's own readTranscript and
+// The transcripts are read with host/claude.js's own readTranscript and
 // sessionsIn — the same parse the floor draws from — so "a turn" here means
 // what it means on the page, not a line of JSONL.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const W = await import(`${REPO}/host/window.js`);
+const W = await import(`${REPO}/host/claude.js`);
 const board = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 
 // One folder once. hosted_desks keeps a row for every desk a folder has ever

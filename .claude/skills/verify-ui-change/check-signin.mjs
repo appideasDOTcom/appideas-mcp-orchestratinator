@@ -78,6 +78,24 @@ s = await box(alpha);
 ok(!s.box && s.send === false, 'the box is gone and Send is back', JSON.stringify(s));
 ok(await asking(alpha) === false, 'and the tab no longer reports asking');
 
+console.log('\nsigned out, with the turn that found it out standing as an error');
+// What a real signed-out desk shows (costmo on the app at b1a774a): the turn
+// it was sent fails "authentication_failed: Not logged in · Please run
+// /login", which stands on the session as awaiting 'error', and the box drew
+// that error and no Sign in, in the one state Sign in is for (/login cannot
+// run on a desk the host runs).
+const setAwaiting = (kind, message) => db.prepare(`UPDATE agent_sessions SET awaiting_kind = ?, awaiting_message = ?, awaiting_since = CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END WHERE channel = 'alpha' AND agent = 'bo'`).run(kind, message, kind);
+const marked = setAwaiting('error', 'authentication_failed: Not logged in · Please run /login').changes;
+ok(marked > 0, 'the fixture: bo\'s session carries the authentication error', String(marked));
+setHost(1, 1);
+await until(alpha, `!!document.querySelector('#floor-panel .p-signin [data-act="signin"]')`, 'the sign-in box, over the error');
+s = await box(alpha);
+ok(s.button && s.button.label === 'Sign in' && !s.button.disabled, 'Sign in is offered while the authentication error stands, and can be pressed', JSON.stringify(s.button));
+ok(!/\/login/.test(s.text), 'and the box hands the operator no command', s.text);
+setAwaiting(null, null);
+setHost(1, 0);
+await until(alpha, `!document.querySelector('#floor-panel .p-signin')`, 'the box goes again');
+
 console.log('\na host from before Sign in');
 setHost(0, 1);
 await until(alpha, `!!document.querySelector('#floor-panel .p-signin [data-act="signin"]')`, 'the box is back');

@@ -7,48 +7,6 @@
   "    if (false) {\n      const origin = originOf(this.cfg.url);"
  ],
  [
-  "a window inherits the host's ORCH_ settings",
-  "window",
-  "host/window.js",
-  "  for (const [k, v] of Object.entries(env)) if (!k.startsWith('ORCH_') && !PARENT_SESSION.has(k)) out[k] = v;",
-  "  for (const [k, v] of Object.entries(env)) if (!PARENT_SESSION.has(k)) out[k] = v;"
- ],
- [
-  "TMPDIR is not filled for a window",
-  "window",
-  "host/window.js",
-  "  if (!env.TMPDIR && platform === 'darwin') {",
-  "  if (false) {"
- ],
- [
-  "a running server keeps the host's settings",
-  "window",
-  "host/window.js",
-  "  for (const k of plan.unset) if ((await tmux(['set-environment', '-g', '-u', k])).ok) done.unset.push(k);",
-  ""
- ],
- [
-  "a filled placeholder is given the host's key, not what the host filled",
-  "window",
-  "host/window.js",
-  "  const value = desk?.key || key;",
-  "  const value = key;"
- ],
- [
-  "a placeholder the host filled names no variable (PR #52's rule)",
-  "window",
-  "host/identity.js",
-  "        ...(whole ? { keyVar: whole } : {}),",
-  "        ...(whole && unset.includes(whole) ? { keyVar: whole } : {}),"
- ],
- [
-  "the host does not clean a running server at its start",
-  "host",
-  "host/index.js",
-  "    const env = await W.cleanServerEnv().catch(() => ({ unset: [], set: [] }));",
-  "    const env = { unset: [], set: [] };"
- ],
- [
   "a held room does not contain its desks",
   "floor",
   "src/db.js",

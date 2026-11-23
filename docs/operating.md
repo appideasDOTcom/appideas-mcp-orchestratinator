@@ -157,9 +157,10 @@ a `claude` process, not a document two windows can share. The panel always says
 who holds this one.
 
 **The floor holds it.** A small service on the workstation — the host, under
-[`host/`](../host/) — is running that desk's `claude` in a tmux window: the
-same binary, login, tools, `.mcp.json`, hooks and `CLAUDE.md` as any window you
-open in that directory. Type on the floor and it is a user turn in that
+[`host/`](../host/) — is running that desk's `claude` as a process of its own,
+spoken to through Claude Code's programmatic interface: the same binary, login,
+tools, `.mcp.json`, hooks and `CLAUDE.md` as any session you open in that
+directory. Type on the floor and it is a user turn in that
 session; the reply comes back into the panel as the session writes it; a
 permission prompt becomes **Approve / Deny** on the desk, and the header
 counts it under `need you`. The human is still the one deciding — from one screen instead of one per
@@ -169,13 +170,14 @@ Drag its corner taller and it keeps that height for this desk's conversation
 (across desk switches and reloads) while still growing past it. Drag it back
 to its smallest and it goes back to growing on its own; a new conversation on
 the desk starts at the default.
-You can sit in that same window yourself: `tmux attach -t orch`.
+To work in that conversation yourself, **Open in Claude** hands it to a terminal
+of your own, and the floor's next message takes it back.
 
 <img src="images/floor-panel.png" width="460" alt="The desk panel: the live conversation, a permission request with Approve, Deny and Cancel, and the composer">
 
 *The desk panel: the conversation as it happens, the permission prompt with
-its real choices, the composer — and the doors back to VS Code, Claude, and
-tmux.*
+its real choices, the composer — and the doors to VS Code and to Claude in a
+terminal.*
 
 **Your editor holds it.** The floor still shows the conversation, but the
 composer is greyed and names the pid holding it. Permission prompts appear with
@@ -409,16 +411,12 @@ None of them should have to be discovered by accident:
   nothing is sent until you send — and **Manage…** adds, edits and deletes.
   The library is board-wide, not per-channel, and it travels in backups.
 - **Stop a working agent.** The octagon beside **Send** interrupts the turn.
-  It presses `Escape` in the agent's window — the same key you would — so the
+  It is Claude Code's own interrupt, the same as Escape in a terminal, so the
   turn ends where it is, anything already written or run stays, and the
   conversation is open to say what to do instead. The transcript records
   `[Request interrupted by user]`, so the agent knows it was stopped rather
-  than finished. A prompt the floor cannot read offers **Interrupt** for the
-  same reason: stopping the turn beats answering a question nobody can see.
-- **Open in tmux.** The panel's third door, beside *Open in VS Code* and
-  *Open in Claude*: it lands a terminal attached to the desk's live window, to
-  watch under the hood exactly what the floor is driving. `tmux attach -t
-  orch` is the same thing for every desk at once.
+  than finished. **Cancel** on a permission prompt is a refusal that also
+  stops the turn.
 
 ## Operator actions
 

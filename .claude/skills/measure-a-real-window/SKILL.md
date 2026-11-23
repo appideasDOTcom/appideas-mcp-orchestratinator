@@ -1,9 +1,88 @@
 ---
 name: measure-a-real-window
-description: Find out what Claude Code actually does — stand up a throwaway real Claude Code in an isolated tmux session, drive it, and read its transcript. Use before believing any claim about how a window behaves, including the claims written in this repo.
+description: Find out what Claude Code actually does — run a real Claude Code the way a desk runs it (stream-JSON, through host/agent.js) with protocol-probe.mjs, drive the whole floor end to end on a scratch board with floor-e2e.mjs, or measure one record order with a one-liner. Use before believing any claim about how Claude Code behaves, after every Claude Code update that touches the desk path, and before a release round.
 ---
 
 # Asking Claude Code instead of reasoning about it
+
+## Since 0.15.0: desks are stream-JSON processes, and three tools ask them
+
+**A desk's Claude Code has no screen** (CLAUDE.md, "How a desk runs Claude
+Code"). Everything below the next heading was written for the window layer
+(tmux panes, typed keys, screens read back), which is gone. It still holds
+for an *interactive* Claude Code (a terminal of the operator's own, an editor
+tab, the trust question asked once there), and its transcript and roster
+reads hold everywhere; its pane reads and its `probe.mjs` do not describe a
+desk any more. For a desk, use these:
+
+1. **`protocol-probe.mjs`: does Claude Code still speak what the host
+   reads?** A real Claude Code started through `host/agent.js` exactly as a
+   desk is (the person's shell, the window environment), in a scratch
+   folder, on haiku, with a scratch MCP server. 32 rows on 2.1.330: init,
+   the lifecycle receipt, permission rows and "don't ask again", a refusal
+   while asking, questions with typed answers, `/btw`, `/mcp` reconnect,
+   `/compact`, `/clear` and the init after it, interrupt, a long reply
+   receipted at once. `~/.claude/settings.json` is hashed before and after.
+
+   ```bash
+   . scripts/node-floor.sh && node .claude/skills/measure-a-real-window/protocol-probe.mjs            # stable claude
+   node .claude/skills/measure-a-real-window/protocol-probe.mjs --claude <dir>/node_modules/.bin/claude  # a `latest` build
+   ```
+   A red row prints what it saw; read it as Claude Code having changed until
+   shown otherwise, and re-measure that one thing by hand (3, below).
+
+2. **`floor-e2e.mjs`: does the floor still work on it?** The board's own
+   routes (what the page's buttons send) against a scratch board, the tree's
+   host started by hand, and a desk on a scratch folder. 29 rows on
+   2.1.330: take, message, idle, permission allow and deny, a message refused
+   while asking, a two-question form with typed words, `/btw`, `/mcp`,
+   `/compact` then idle, `/clear` onto a new conversation, a message to a
+   working desk queued and answered, and the stop sign. Leaves out `/model`
+   and `/effort` (they save the machine's default) and the two handoffs
+   (they open VS Code or a terminal on the operator's screen).
+
+   ```bash
+   SP=<scratchpad>; B=$SP/browser-test; mkdir -p $B/folders/alpha
+   .claude/skills/catch-up-the-desktop-app/scratch-docker-board.sh up 8981
+   docker inspect orch-dev-scratch --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ORCH_AUTH_TOKEN=//p' > $B/key
+   # the dev host: its own id, its own roots, its own config (never the live host's id)
+   ( . scripts/node-floor.sh; export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"
+     ORCH_URL=http://127.0.0.1:8981 ORCH_AUTH_TOKEN="$(cat $B/key)" ORCH_HOST_ID=dev-browser-test \
+     ORCH_HOST_NAME=dev-browser-test ORCH_HOST_ROOTS=$B/folders ORCH_HOST_CONFIG=$B/host.json \
+     exec node host/index.js >> $B/host.log 2>&1 )      # in the background; restart it after editing host/*.js
+   node .claude/skills/measure-a-real-window/floor-e2e.mjs http://127.0.0.1:8981 dev-browser-test $B/folders/alpha
+   ```
+   The browser needs no key on loopback: `http://127.0.0.1:8981` is the same
+   floor the script drove, for a person to look at. **Stay off the desk
+   while it runs**: an answer or a click from the page races the script (a
+   prompt "flashing and disappearing" in a first run was the script
+   answering it). Tear down with `scratch-docker-board.sh down`, stop the
+   dev host, and Leave the scratch desk (its local-scope binding).
+
+3. **One record order, by hand.** When a probe row or a mutant raises "what
+   does Claude Code send, and when", ask it directly; a turn on haiku costs
+   seconds. The order of the lifecycle receipt against the result was
+   settled this way (completed and cancelled come *after* the result):
+
+   ```bash
+   mkdir -p $SP/one && cd $SP/one
+   ( printf '%s\n' '{"type":"user","uuid":"11111111-1111-4111-8111-111111111111","message":{"role":"user","content":"Reply with exactly: OK"}}'; sleep 25 ) \
+     | claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model haiku \
+     | node -e 'const t0=Date.now();require("readline").createInterface({input:process.stdin}).on("line",l=>{const r=JSON.parse(l);console.log(Date.now()-t0,r.type,r.subtype??r.state??"")})'
+   ```
+   **Signed out, without signing anyone out**: the same with
+   `CLAUDE_CONFIG_DIR=<an empty scratch dir>` (and `ANTHROPIC_API_KEY`
+   unset). Claude Code keys its Keychain item by that directory, so the
+   operator's sign-in is untouched; the turn answers "Not logged in · Please
+   run /login" with `isApiErrorMessage`, writes it to the scratch dir's
+   transcript, and ends with lifecycle `cancelled`.
+
+Rules that carry over unchanged: never the operator's board or config
+(no `/model` or `/effort` typed anywhere a probe runs: they save the
+machine's default), a scratch folder and a scratch board of your own, and
+"measured" in a comment is a claim about a version that has since moved.
+
+## Before 0.15.0: the window layer (an interactive Claude Code)
 
 This repo drives a program it does not own. Every rule in `host/window.js` is a
 claim about how Claude Code behaves, and **the only thing that can settle such a

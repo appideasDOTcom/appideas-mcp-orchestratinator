@@ -1,26 +1,5 @@
 [
  [
-  "/mcp: a bare /mcp typed as it is (the panel nobody drives)",
-  "window",
-  "host/window.js",
-  "  if (c?.name === 'mcp' && !c.args) return `/mcp reconnect ${server}`;\n",
-  ""
- ],
- [
-  "/mcp: typed into a working window, where the window drops it",
-  "window",
-  "host/window.js",
-  "  if (cmd?.name === 'mcp' && wasBusy) {",
-  "  if (false && cmd?.name === 'mcp' && wasBusy) {"
- ],
- [
-  "/mcp: the desk's say() types the operator's words untranslated",
-  "host",
-  "host/index.js",
-  "W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id, unasked })",
-  "W.send(this.where, text, { open: true, resume: id, unasked })"
- ],
- [
   "/mcp: the binding's own server name not read",
   "host",
   "host/identity.js",
@@ -37,9 +16,9 @@
  [
   "reconnect: the host's desk line left out",
   "host",
-  "host/index.js",
-  "    if (r.ok && r.said) this.told(`the desk's tools had lost the board, so the host ran /mcp — ${r.said}`, id);",
-  "    if (false) this.told('', id);"
+  "host/desk.js",
+  "    if (r.ok) this.told(`the desk's tools had lost the board, so the host reconnected them to ${this.server}`);",
+  "    if (false) this.told(`the desk's tools had lost the board, so the host reconnected them to ${this.server}`);"
  ],
  [
   "reconnect: an agent that never used its tools is asked too",

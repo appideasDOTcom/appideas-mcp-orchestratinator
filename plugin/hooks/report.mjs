@@ -452,6 +452,10 @@ async function main() {
     last_assistant_message: clip(ev.last_assistant_message, TEXT_MAX),
     tool_name: ev.tool_name,
     tool_input: reduceToolInput(ev.tool_input),
+    // Set by Claude Code (2.1.330, its hook input) when the hook fires inside
+    // a subagent, absent for the conversation itself. The board needs it: a
+    // subagent's tool call is not the conversation answering its question.
+    agent_id: typeof ev.agent_id === 'string' && ev.agent_id ? ev.agent_id : undefined,
     notification_type: ev.notification_type,
     notification_message: clip(ev.notification_message, 500),
     // StopFailure on 2.1.300 carries `error` (a short code such as

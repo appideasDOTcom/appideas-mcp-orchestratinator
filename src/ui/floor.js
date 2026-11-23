@@ -779,8 +779,8 @@
       const other = (Array.isArray(a.choose) ? a.choose : []).map((n) => opts.find((o) => o.n === n)).find((o) => o?.other);
       if (!other) continue;
       return qs.length > 1
-        ? '\u270e A typed answer withdraws the form in the window \u2014 every answer will be sent as one message in words instead'
-        : '\u270e A typed answer withdraws the form in the window \u2014 it will be sent as a message in words instead';
+        ? '\u270e A typed answer withdraws the form in Claude Code \u2014 every answer will be sent as one message in words instead'
+        : '\u270e A typed answer withdraws the form in Claude Code \u2014 it will be sent as a message in words instead';
     }
     return null;
   }
@@ -809,7 +809,6 @@
     if (!req) return 'none';
     if (req.questions?.length) return 'form';
     if (reading) return 'reading';
-    if (req.startup) return 'startup';
     if (req.tool === 'AskUserQuestion') return 'question-unread';
     // An alert nobody could read. Not "no request object" — a permission_prompt
     // notification makes one of those with every choice null, which is exactly
@@ -869,7 +868,7 @@
         ${opts}${other}
       </div>`;
     }).join('');
-    return `<div class="p-ask" data-request="${esc(req.request_id)}">
+    return `<div class="p-ask" data-request="${esc(req.request_id)}"${req.host_ask ? ' data-host-ask="1"' : ''}>
       <div class="p-tabs">${tabs}</div>
       ${body}
       <div class="p-ask-warn hidden">\u26a0 You have not answered all questions</div>
@@ -877,7 +876,7 @@
       <div class="p-ask-foot">
         <button type="button" class="btn primary" data-act="ask-submit">${qs.length > 1 ? 'Submit all answers' : 'Submit answers'}</button>
         <button type="button" class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}"
-                title="The same as pressing Escape in the window">Cancel</button>
+                title="Claude Code's own cancel: the question is refused and the turn stopped">Cancel</button>
       </div>
     </div>`;
   }
@@ -909,7 +908,10 @@
     // Said the moment the row is ticked, not when Submit is pressed: the
     // choice to type is made with the form still in front of the person.
     const note = form.querySelector('.p-ask-note');
-    const withdraw = askWithdrawText(shape, answers);
+    // A desk's own Claude Code takes typed words as an answer like any other
+    // (the host answers its question as data), so nothing is withdrawn there;
+    // the note is for a question raised by a hook from another app.
+    const withdraw = form.closest('.p-ask')?.dataset.hostAsk ? null : askWithdrawText(shape, answers);
     if (note) {
       note.classList.toggle('hidden', !withdraw);
       if (withdraw) note.textContent = withdraw;
@@ -4311,14 +4313,14 @@
              empty corner on each side of the fold. -->
         <div class="p-foot">
         <div class="p-links">
-          <button class="p-link" data-act="openhere" title="Open a window for this conversation on this machine">${LINK_LABEL.openhere}</button>
+          <button class="p-link" data-act="openhere" title="Start this desk's Claude Code on its conversation, on this machine">${LINK_LABEL.openhere}</button>
           <button class="p-link" data-act="handback" title="Open this conversation in VS Code">${LINK_LABEL.handback}</button>
           <!-- Not a seat move, though it stands with one: the window stays on
                the floor, which keeps driving it. The terminal lands ON that
                window, so closing it is a detach and never kills the
                conversation — the reason this is not a hand-off to a bare
                claude process. -->
-          <button class="p-link" data-act="claude" title="Open this conversation in claude CLI — a terminal on this desk's own window">${LINK_LABEL.claude}</button>
+          <button class="p-link" data-act="claude" title="Hand this conversation to claude CLI in a terminal of your own. The floor follows what is said there; Open on the floor brings it back once you exit there.">${LINK_LABEL.claude}</button>
           <!-- Beneath the other two, not beside them: it is not a third place to
                put the conversation, it is the way out of this page. -->
           <button class="p-link" data-act="attach">${LINK_LABEL.attach}</button>
@@ -4719,7 +4721,7 @@
       : canChat
       ? `Message ${d.persona}…`
       : held
-      ? `${d.persona}’s conversation is open in your editor…`
+      ? `${d.persona}’s conversation is open in another app…`
       : h?.refused
       ? `${d.persona}’s host was refused by this board, so nothing can be sent…`
       : `${d.persona}’s machine isn’t reachable right now…`;
@@ -4812,11 +4814,13 @@
     const attachPending = ui.attaching && ui.attaching.channel === channel && ui.attaching.agent === agent ? ui.attaching : null;
     if (attachPending) {
       attachAct = attachPending.act ?? 'attach';
-      if ((h?.clients ?? 0) > attachPending.from) { ui.attaching = null; attachDone = true; }
+      // Settled when the terminal's Claude Code has taken the conversation
+      // (the desk reads as held by another app): the handoff is done.
+      if (h?.held === 'editor') { ui.attaching = null; attachDone = true; }
       else if (Date.now() - attachPending.since > ATTACH_MS) {
         // What was seen, not why. If the host failed to open anything it has
         // already said so in its own error turn, right above this.
-        attachFailed = `no new terminal after ${ATTACH_MS / 1000}s`;
+        attachFailed = `no terminal took the conversation after ${ATTACH_MS / 1000}s`;
         ui.attaching = null;
       }
     }
@@ -4854,10 +4858,13 @@
     // What an offline host takes away is the ability to open the terminal for
     // you, not the ability to say how. So the row stays, the button goes flat,
     // and the command appears under it.
-    const inTmux = h?.held === 'floor';
-    const canSpawn = !!(inTmux && h?.live);
-    toTmux.classList.toggle('hidden', !inTmux);
-    toTmux.disabled = !canSpawn;
+    // No tmux any more (2026-11-22): a desk's Claude Code is a process of
+    // its host's, and "Open in Claude" is the one way to a terminal, a
+    // handoff. The old link is never drawn.
+    const inTmux = false;
+    const canSpawn = false;
+    toTmux.classList.add('hidden');
+    toTmux.disabled = true;
     // "Open in Claude" wants a live host (it may have to open the window, and
     // only the host can) and a conversation not held elsewhere. No window is
     // fine — opening one is half of what the button does. When the host is
@@ -4884,13 +4891,13 @@
       && Date.now() - ui.tmuxNote.since < TMUX_NOTE_MS
       ? ui.tmuxNote : null;
     if (ui.tmuxNote && !note) ui.tmuxNote = null;
-    tmuxCmd.textContent = note ? note.text : `tmux attach -t ${h?.tmux ?? 'orch'}`;
+    tmuxCmd.textContent = note ? note.text : '';
     tmuxCmd.classList.toggle('tmux-why', !!note);
     // A refusal note shows wherever it was earned — a click on "Open in
     // Claude" with no window can be refused too, and hiding its sentence
     // because the desk is not in tmux would leave that click answered by
     // nothing but a flash.
-    tmuxCmd.classList.toggle('hidden', !(note || (inTmux && !canSpawn)));
+    tmuxCmd.classList.toggle('hidden', !note);
     if (move) {
       (move.act === 'handback' ? toVsc : toFloor).classList.remove('hidden');
       (move.act === 'handback' ? toFloor : toVsc).classList.add('hidden');
@@ -4924,7 +4931,7 @@
     if (failed) flash(wrap.querySelector(`[data-act="${pending.act}"]`), failed);
     if (reopenFailed) flash(toSessions, reopenFailed);
     // "attached", not "asked" — this one has been observed now.
-    if (attachDone) flash(attachAct === 'claude' ? toClaude : toTmux, 'terminal attached');
+    if (attachDone) flash(attachAct === 'claude' ? toClaude : toTmux, 'handed to the terminal');
     if (attachFailed) flash(attachAct === 'claude' ? toClaude : toTmux, attachFailed);
     const askForm = wrap.querySelector('.p-ask');
     if (askForm) askWarn(askForm);
@@ -5034,6 +5041,16 @@
    * is answered by the one click handler, which reads the desk off the box
    * (targetOf). Rebuilt only when what it says changes.
    */
+  /* Whose prompt this is, and how many wait behind it (task 352): Claude Code
+     asks several at once, and the floor shows them one at a time, the oldest
+     first. Nothing when it is the conversation's own and the only one. */
+  function askQueueLine(req) {
+    if (!req?.via && !req?.more) return '';
+    const whose = req.via ? `asked by the subagent \u201c${esc(clip(req.via, 120))}\u201d` : '';
+    const more = req.more ? `${req.more} more waiting after this one` : '';
+    return `<div class="p-ask-queue muted">${[whose, more].filter(Boolean).join(' \u00b7 ')}</div>`;
+  }
+
   function drawAlert(alertSlot, d, channel, agent, canChat) {
     const s = d.session ?? {};
     // The alert is rebuilt only when what it says changes; its age ticks in
@@ -5085,19 +5102,31 @@
     const offer = promptOffer(req, reading);
     const unreadable = offer === 'unreadable';
     const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
+    // A host's ask is drawn with no needs-you mark too (the box's other
+    // condition below), so it has a signature of its own then. Keyed on the
+    // mark alone, such a box drew once under '' and was never redrawn: an
+    // answered ask stood on the panel until a reload (F14, costmo's first
+    // desk in the newop walk, 2026-11-23), and a new one was not drawn.
     const alertSig = sendingAnswers
       ? `sending|${answering.request_id}`
-      : !s.awaiting_kind
+      : !s.awaiting_kind && !req?.host_ask
       ? ''
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
         : `${kindKey}|${s.awaiting_message ?? ''}|${req?.request_id ?? ''}` +
-          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.startup ? `startup:${req.request_id}:${req.summary ?? ''}:${req.detail ?? ''}:${(req.options ?? []).map((o) => o.text).join(',')}:${(req.screen ?? []).join('\n')}` : ''}`;
+          `|${(req?.options ?? []).map((o) => o.n).join(',')}|${req?.options_error ?? ''}|${reading ? 'reading' : ''}|${offer}|${req?.form_unread ?? ''}|${req?.host_ask ? `ask:${req.request_id}:${req.summary ?? ''}:${(req.options ?? []).map((o) => o.text).join(',')}` : ''}` +
+          `|${req?.via ?? ''}|${req?.more ?? 0}`;
     // Claude Code signed out on the desk's host (d.signin, src/floor.js):
     // the window cannot answer, so the box says so and offers Sign in, which
     // has the host run Claude Code's own sign-in (costmo, 2026-11-19). A
-    // prompt the window is showing outranks it: that is answered first.
-    if (canChat && d.signin && !s.awaiting_kind && !req?.startup && !sendingAnswers) {
+    // prompt the window is showing outranks it: that is answered first. An
+    // error does not: the turn that finds a desk signed out stands as one
+    // ("authentication_failed: Not logged in · Please run /login"), and with
+    // any awaiting kind suppressing the box, Sign in was missing in exactly
+    // the state it is for, where /login cannot run (costmo, the app at
+    // b1a774a; check-signin's row with the error standing).
+    const promptStands = !!s.awaiting_kind && s.awaiting_kind !== 'error';
+    if (canChat && d.signin && !promptStands && !req?.host_ask && !sendingAnswers) {
       const si = d.signin;
       const pressed = ui.signingIn.get(answerKey);
       if (pressed && Date.now() - pressed > SIGNIN_WAIT_MS) ui.signingIn.delete(answerKey);
@@ -5110,7 +5139,7 @@
         alertSlot.dataset.sig = sig;
         const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok ? '' : ' disabled'} title="Claude Code\u2019s own sign-in, run on ${esc(si.host)}: the browser opens there">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
         alertSlot.innerHTML = `<div class="p-alert p-alert-ask p-signin">
-             <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 the window cannot answer until it is signed in again.</div>
+             <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 its Claude Code cannot answer until it is signed in again.</div>
              ${waiting ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>finish signing in, in the browser that opened on ${esc(si.host)}\u2026</div>` : ''}
              ${!waiting || again ? `<div class="p-decide">${button}</div>` : ''}
              ${si.ok ? '' : `<div class="p-unknown-why">${esc(si.reason ?? '')}</div>`}
@@ -5123,12 +5152,9 @@
       alertSlot.dataset.sig = alertSig;
       alertSlot.innerHTML = sendingAnswers
         ? `<div class="p-alert p-alert-ask">
-             <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to the window…</div>
+             <div class="p-reading"><span class="pspin" aria-hidden="true"></span>sending your answers to Claude Code…</div>
            </div>`
-        // A startup question stands on its own: the window asking it has no
-        // session yet, and an editor session in the same repo may be the
-        // desk's current one and not waiting on anything.
-        : (s.awaiting_kind || req?.startup)
+        : (s.awaiting_kind || req?.host_ask)
         ? `<div class="p-alert${req ? ' p-alert-ask' : ''}${s.awaiting_kind === 'error' ? ' p-alert-error' : ''}">
              <div>${req?.questions?.length
                // "permission request — AskUserQuestion" is the hook's words for
@@ -5139,58 +5165,26 @@
                // was the whole failure: it told the operator the floor could not
                // help and sent them to a terminal, which is the outcome the
                // floor exists to avoid.
-               // A window that has not started yet, asking whether it may. The
-               // question is the dialog's own sentence; the rows below are its
-               // own rows. See startupQuestionOf in host/window.js.
-               // A dialog read by its shape is the window's own title; a screen
-               // nobody here knows is said as that, with its lines below
-               // (0.14.6, review items 1 and 3).
-               : req?.startup && req.kind === 'screen'
-               ? `<b>The window is showing something the floor does not know</b>`
-               : req?.startup && req.kind === 'dialog'
-               ? `<b>The window asks</b> — ${esc(clip(req.summary, 220))}`
-               : req?.startup
-               ? `<b>Before it can start, the window asks</b> — ${esc(clip(req.summary, 220))}`
-               : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'the window has interrupted and is waiting on an answer', 200))}`
-             } <span class="mono t-when" data-at="${esc(req?.startup ? (s.awaiting_since ?? req.at ?? '') : s.awaiting_since)}"></span></div>
+               : `<b>${esc(String(s.awaiting_kind ?? '').replace(/_/g, ' '))}</b> — ${esc(clip(req?.summary || s.awaiting_message || 'Claude Code is waiting on an answer', 200))}`
+             } <span class="mono t-when" data-at="${esc(s.awaiting_since ?? req?.at ?? '')}"></span></div>
+             ${askQueueLine(req)}
              ${req?.questions?.length ? askHtml(req) : ''}
-             ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question from the window\u2026</div>` : ''}
+             ${reading ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>reading the question\u2026</div>` : ''}
              ${unreadable && !reading ? `<div class="p-unknown">
-               <div class="p-unknown-why">The window is waiting on something this board could not read.
-                 These press the usual keys — they are a guess, not an answer to a question we understood.</div>
-               <div class="p-decide">
-                 <button class="btn primary" data-act="press" data-choice="yes">Yes</button>
-                 <button class="btn danger" data-act="press" data-choice="no">No</button>
-                 <button class="btn" data-act="press" data-choice="interrupt" title="Stop the turn instead of answering it">Interrupt</button>
-               </div>
+               <div class="p-unknown-why">This desk's conversation is open in another app (your editor, or claude in a terminal), and the question is being asked there. Answer it in that app.</div>
              </div>` : ''}
              ${offer === 'question-unread' ? `<div class="p-unknown p-question-unread">
                <div class="p-unknown-why">This is a question, and the board could not read its choices
-                 \u2014 ${esc(req.form_unread ?? 'the host has not sent back what the window is showing')}.
-                 Nothing here would be an answer to it: open the window to answer it there, or cancel the question.</div>
+                 \u2014 ${esc(req.form_unread ?? 'its choices did not reach the board')}.
+                 Nothing here would be an answer to it: cancel the question, and Claude Code goes on without one.</div>
                <div class="p-decide">
-                 <button class="btn primary" data-act="ask-open" title="A terminal on this desk\u2019s own window, where the question is">Open the window</button>
-                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel the question</button>
+                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="Claude Code's own cancel: the question is refused and the turn stopped">Cancel the question</button>
                </div>
-             </div>` : ''}
-             ${req?.startup && req.kind === 'screen' ? `<div class="p-startup p-screen">
-               <pre class="p-screen-lines mono">${esc((req.screen ?? []).join('\n'))}</pre>
-               <div class="p-unknown-why">Messages wait until the window is back at its message box. Open the window to answer it there, or press Escape, which closes most screens.</div>
-               <div class="p-decide">
-                 <button class="btn primary" data-act="ask-open" title="A terminal on this desk\u2019s own window">Open the window</button>
-                 <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Press Escape</button>
-               </div>
-             </div>` : req?.startup ? `<div class="p-startup">
-               ${req.detail ? `<div class="p-startup-detail">${esc(clip(req.detail, 400))}</div>` : ''}
-               <div class="p-unknown-why">Nothing here is answered for you. Pick a row and that row is chosen in the window, the same as pressing it there.</div>
-               <div class="p-more">${req.options.map((o) =>
-                 `<button class="btn p-choice" data-act="decide" data-choice="${esc(String(o.n))}" data-request="${esc(req.request_id)}" title="${esc(o.text)}"><span>${esc(o.text)}</span></button>`).join('')}${req.kind === 'dialog'
-                 ? `<button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Escape</button>` : ''}</div>
              </div>` : ''}
              ${offer === 'menu' ? `<div class="p-decide">
                <button class="btn primary" data-act="decide" data-choice="allow" data-request="${esc(req.request_id)}">Approve</button>
                <button class="btn danger" data-act="${req.choices?.denyAsks ? 'deny-open' : 'decide'}" data-choice="deny" data-request="${esc(req.request_id)}">Deny</button>
-               <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="The same as pressing Escape in the window">Cancel</button>
+               <button class="btn" data-act="decide" data-choice="cancel" data-request="${esc(req.request_id)}" title="Claude Code's own cancel: the question is refused and the turn stopped">Cancel</button>
              </div>
              ${req.choices?.denyAsks ? `<div class="p-why hidden">
                <input class="input p-why-text" type="text" placeholder="What should Claude do instead? (optional)" maxlength="2000">
@@ -5268,7 +5262,7 @@
     { name: 'compact', args: '', hint: 'summarise the conversation to free context' },
     { name: 'model', args: 'name', hint: 'change the model — saved as the default for new sessions' },
     { name: 'effort', args: 'level', hint: 'change the effort level — saved as the default for new sessions' },
-    { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools' },
+    { name: 'btw', args: 'question', hint: 'a side question, answered on the side, without tools' },
     { name: 'mcp', args: '', hint: 'reconnect this desk\u2019s tools to the board' },
   ];
   const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -5374,7 +5368,7 @@
   function selectBlock(canChat, held, asking, persona) {
     if (asking) return `${persona} is asking something — answer it above first.`;
     if (canChat) return null;
-    return held ? `${persona}’s conversation is open in your editor.` : `${persona}’s machine isn’t reachable right now.`;
+    return held ? `${persona}’s conversation is open in another app.` : `${persona}’s machine isn’t reachable right now.`;
   }
 
   /**
@@ -6066,7 +6060,7 @@
       }
       if (outKeys?.has(`${room.channel}|${p.agent}`)) return skip(`${who} is in a window already — its own, or another meeting room.`, true);
       if (!d.hosted.live) return skip(`${who}'s host (${d.hosted.host}) is offline.`, true);
-      if (d.hosted.held === 'editor') return skip(`${who}'s conversation is open in your editor. One app holds a conversation at a time.`, true);
+      if (d.hosted.held === 'editor') return skip(`${who}'s conversation is open in another app. One app holds a conversation at a time.`, true);
       const now = d.hosted.session_id ?? null;
       if (!p.session_id || now === p.session_id) return { agent: p.agent, persona: who, act: 'join', session_id: now };
       return { agent: p.agent, persona: who, act: 'reopen', session_id: p.session_id, from: now };
@@ -6260,7 +6254,7 @@
    * in, so the tab pulses for it as for a question (costmo, 2026-11-19: the
    * pulse is for anything waiting on him).
    */
-  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.permission?.startup || !!d.signin);
+  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.signin);
 
   /**
    * A desk a "nudge all" sends to, which is what a pending nudge is: something
@@ -8086,6 +8080,31 @@
 
   /* ---------- render ---------- */
 
+  /**
+   * The protocol probe's banner (task 351, host/canary.js): every host whose
+   * Claude Code answered the floor's checks differently, naming the version
+   * and each row in the probe's own words, or that could not be checked, and
+   * why. Desks are not held by it (costmo's rule: nothing that works stops
+   * working). Drawn only when it changed, as the rooms are.
+   */
+  function drawCanary() {
+    const el = $('floor-canary');
+    if (!el) return;
+    const items = (floor.hosts ?? []).filter((h) => h.canary && !h.canary.ok);
+    const sig = JSON.stringify(items.map((h) => [h.host_id, h.name, h.canary]));
+    if (sig === ui.canarySig) return;
+    ui.canarySig = sig;
+    if (!items.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+    el.innerHTML = items.map((h) => {
+      const c = h.canary;
+      const who = `<b>Claude Code ${esc(c.version)} on ${esc(h.name ?? h.host_id)}</b>`;
+      if (c.error) return `<div data-canary="${esc(h.host_id)}">${who} could not be checked with the floor's protocol probe: ${esc(c.error)}</div>`;
+      const rows = c.differed.map((r) => `<li>${esc(r.what)}${r.saw ? ` <span class="mono">— ${esc(r.saw)}</span>` : ''}</li>`).join('');
+      return `<div data-canary="${esc(h.host_id)}">${who} answered ${c.differed.length} of the floor's ${c.total} protocol checks differently from what it was built on. Desks keep running; if one misbehaves, these are the differences:<ul>${rows}</ul></div>`;
+    }).join('');
+    el.classList.remove('hidden');
+  }
+
   function render() {
     // Every draw is where what a window shows can change: a poll, a desk
     // going out or coming back, a room's desks, a floor picked.
@@ -8102,6 +8121,7 @@
       renderPanel();
       return;
     }
+    drawCanary();
     const rooms = $('floor-rooms');
     // Rooms are rebuilt only when something they depict actually changed. The
     // board does the same thing for the same reason, and here it matters more:
@@ -8847,34 +8867,6 @@
       const alert = act.closest('.p-alert');
       alert?.querySelector('.p-why')?.classList.add('hidden');
       alert?.querySelector('.p-decide')?.classList.remove('hidden');
-    } else if (act.dataset.act === 'press') {
-      // Hold all three while it is in flight, for the same reason `decide` does:
-      // a prompt that looks unresponsive is one that gets clicked again, and
-      // these keys go straight into somebody's window.
-      const to = targetOf(act);
-      if (!to) return;
-      const all = act.closest('.p-alert')?.querySelectorAll('[data-act="press"]') ?? [act];
-      for (const b of all) b.disabled = true;
-      try {
-        const choice = act.dataset.choice;
-        // Interrupt is not a guessed key — it stops the turn, and that already
-        // has a route with its own checks. Sending it through `press` would be a
-        // second way to do one thing.
-        const r = await fetch(choice === 'interrupt' ? './api/floor/interrupt' : './api/floor/press', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(choice === 'interrupt' ? { channel: to.channel, agent: to.agent } : { channel: to.channel, agent: to.agent, choice }),
-        });
-        if (!r.ok) {
-          const body = await r.json().catch(() => ({}));
-          flash(act, String(body.error ?? `that didn't send (${r.status})`).slice(0, 60));
-        }
-      } catch (err) {
-        flash(act, String(err.message).slice(0, 60));
-      } finally {
-        for (const b of all) b.disabled = false;
-      }
-      tick();
     } else if (act.dataset.act === 'decide') {
       // The desk is the one whose box this is (targetOf): the open desk in
       // the panel and a popout, a participant's own box in a meeting room.

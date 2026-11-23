@@ -251,7 +251,7 @@ export const FLOOR_COMMANDS = [
   { name: 'compact', args: false, hint: 'summarise the conversation to free context', receipt: 'the window compacting' },
   { name: 'model', args: 'name', hint: 'change the model, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
   { name: 'effort', args: 'level', hint: 'change the effort level, saved as the default for new sessions', receipt: 'the window\u2019s own line' },
-  { name: 'btw', args: 'question', hint: 'a side question, answered in the window without tools', receipt: 'the answer, read off the window' },
+  { name: 'btw', args: 'question', hint: 'a side question, answered on the side, without tools', receipt: 'the answer' },
   { name: 'mcp', args: false, hint: 'reconnect this desk\u2019s tools to the board', receipt: 'the window\u2019s own line' },
 ];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -432,11 +432,90 @@ export function deliverable(h, nowMs = Date.now()) {
   // than accepting one and failing to deliver it.
   if (h.outside_pid) {
     return {
-      error: 'This conversation is open in your editor. Close it there, or use “Open in VS Code” to move it back, then type here.',
+      error: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there, then type here: the floor takes it back with your next message.',
       code: 'held_by_editor',
     };
   }
   return { hosted: h };
+}
+
+/**
+ * Every prompt a desk's Claude Code has open, in the order it asked them
+ * (task 352 A, costmo 2026-11-23: "it just looked a little broken"). Claude
+ * Code asks several at once: four Read permissions in 1.7 s from one
+ * assistant message of parallel tool calls, and a background subagent's
+ * prompts between its parent's (his session on the PC at 7c9ca84). The board
+ * held one a desk, so each new ask took the last one's place on the floor,
+ * answering the one shown left the composer looking free, and the next
+ * message bounced off the host's own refusal after a 200.
+ *
+ * So it is a Map whose `get` is the prompt the floor shows (the oldest still
+ * open), with the rest behind it. `get(k).more` is how many wait behind it.
+ * `set` and `delete` keep a Map's meaning: `set` puts a prompt in front (a
+ * hook's, or an answer that did not take, offered again), `delete` drops
+ * every prompt of the desk (the desk left, its host went offline). A host's
+ * asks go through `add`, and an answer or a withdrawal through `shift` and
+ * `remove`, which bring the next one forward.
+ */
+export class AskMap extends Map {
+  constructor() { super(); this.behind = new Map(); }
+  #mark(k) { const head = super.get(k); if (head) head.more = this.behind.get(k)?.length ?? 0; return head ?? undefined; }
+  get(k) { return this.#mark(k); }
+  set(k, req) {
+    // A host's ask is never dropped by being stood in front of: it stays
+    // open in Claude Code until it is answered or withdrawn, so it goes
+    // behind, first in line (QA at patch E: a hook's prompt set over it, and
+    // the subagent's real ask was gone from the floor while it still waited).
+    const head = super.get(k);
+    if (head?.host_ask && head.request_id !== req.request_id) {
+      if (!this.behind.has(k)) this.behind.set(k, []);
+      this.behind.get(k).unshift(head);
+    }
+    return this.#put(k, req);
+  }
+  #put(k, req) { super.set(k, req); this.#mark(k); return this; }
+  delete(k) { this.behind.delete(k); return super.delete(k); }
+  clear() { this.behind.clear(); super.clear(); }
+  /** Every prompt open on the desk, the shown one first. */
+  all(k) { const head = super.get(k); return head ? [head, ...(this.behind.get(k) ?? [])] : []; }
+  holds(k, rid) { return this.all(k).some((r) => r.request_id === rid); }
+  /** A host's ask: shown if nothing is, behind the rest if something is, nothing if it is open already. */
+  add(k, req) {
+    if (this.holds(k, req.request_id)) return null;
+    if (!super.get(k)) { this.#put(k, req); return 'shown'; }
+    if (!this.behind.has(k)) this.behind.set(k, []);
+    this.behind.get(k).push(req);
+    this.#mark(k);
+    return 'behind';
+  }
+  /** In front of the rest, keeping them: an answer that did not take, offered again. */
+  front(k, req) {
+    const head = super.get(k);
+    if (head && head.request_id !== req.request_id) {
+      if (!this.behind.has(k)) this.behind.set(k, []);
+      this.behind.get(k).unshift(head);
+    }
+    return this.#put(k, req);
+  }
+  /** The shown prompt is answered: the next comes forward, and is returned. */
+  shift(k) {
+    const rest = this.behind.get(k) ?? [];
+    const next = rest.shift() ?? null;
+    if (!rest.length) this.behind.delete(k);
+    if (next) this.#put(k, next); else super.delete(k);
+    return next;
+  }
+  /** One prompt is over, wherever it stands. */
+  remove(k, rid) {
+    if (super.get(k)?.request_id === rid) return { was: 'shown', next: this.shift(k) };
+    const rest = this.behind.get(k) ?? [];
+    const i = rest.findIndex((r) => r.request_id === rid);
+    if (i < 0) return { was: null, next: null };
+    rest.splice(i, 1);
+    if (!rest.length) this.behind.delete(k);
+    this.#mark(k);
+    return { was: 'behind', next: null };
+  }
 }
 
 /**
@@ -455,20 +534,18 @@ export function deliverable(h, nowMs = Date.now()) {
  */
 export function askingWhy(pending) {
   if (!pending) return null;
-  if (pending.startup && pending.kind === 'screen') {
-    return {
-      error: 'The window is showing a screen the floor does not know. A message typed now would go into that, not the conversation: open the window or press Escape on the desk, then send this.',
-      code: 'asking',
-    };
-  }
-  const what = pending.questions?.length || pending.reading ? 'a question'
-    : pending.startup && pending.kind === 'dialog' ? 'something'
-      : pending.startup ? 'a question before it can start' : 'for permission';
+  const what = pending.questions?.length || pending.reading || pending.tool === 'AskUserQuestion' ? 'a question' : 'for permission';
+  const more = pending.more ?? 0;
   return {
-    error: `The window is asking ${what}. A message typed now would go into that, not the conversation: answer it, or cancel it, then send this.`,
+    error: more
+      ? `This desk's Claude Code is asking ${what}, with ${more} more waiting behind it, and takes nothing else until all ${more + 1} are answered: answer them, or cancel, then send this.`
+      : `This desk's Claude Code is asking ${what}, and waits on your answer before anything else: answer it, or cancel it, then send this.`,
     code: 'asking',
   };
 }
+
+/** A turn that found the desk signed out, said as the host says it (host/claude.js SIGNED_OUT_WORDS; test:floor holds the two to one). */
+export const SIGNED_OUT_WORDS = 'Not logged in: Claude Code is signed out on this machine. Press Sign in on this desk to sign in again.';
 
 /**
  * A desk whose host's Claude Code is signed out takes no message: the window
@@ -482,7 +559,7 @@ export function askingWhy(pending) {
 export function signedOutWhy(h) {
   if (!h?.host_signed_out) return null;
   return {
-    error: `Claude Code is signed out on ${h.host_name ?? h.host_id}, so the window cannot answer. Press Sign in on the desk, finish in the browser that opens there, then send this.`,
+    error: `Claude Code is signed out on ${h.host_name ?? h.host_id}, so its Claude Code cannot answer. Press Sign in on the desk, finish in the browser that opens there, then send this.`,
     code: 'signed_out',
   };
 }
@@ -549,64 +626,37 @@ export function nudgeable(h, nowMs = Date.now()) {
  * point of this button is to get somebody to a real prompt; when it cannot do
  * that itself, the next best thing it can do is say how.
  */
-export function attachable(h, nowMs = Date.now()) {
-  const cmd = `tmux attach -t ${h?.host_tmux ?? 'orch'}`;
+export function attachable(h, nowMs = Date.now(), { lastTurn = null, pending = null } = {}) {
+  // "Open in Claude": the conversation handed to a terminal of the
+  // operator's own (host/index.js `claude`), since a desk's Claude Code is a
+  // process of the host's with no screen to attach to (2026-11-22). So it
+  // needs the host there to open the terminal, and the conversation not
+  // already open in another app.
   const where = h?.host_name ?? h?.host_id ?? 'the host machine';
-  if (!h) {
-    return { error: 'No host on this board is running that repo, so there is no tmux session to attach to.', code: 'not_hosted' };
-  }
+  if (!h) return { error: 'No host on this board is running that repo, so there is nothing to hand to a terminal.', code: 'not_hosted' };
   const can = deliverable(h, nowMs);
   if (can.error && can.code === 'host_offline') {
-    // The one refusal that is not really a refusal. The host is a separate
-    // process from the windows it opened — killing it deliberately leaves them
-    // running — so the session is very likely still there and still attachable.
-    // Nothing here can reach out and prove that, and the sentence must not
-    // claim it: it says what is known, and hands over the command.
-    return {
-      error: `The host for this desk (${where}) is offline, so it cannot open a terminal for you. Its tmux session outlives it, so run \`${cmd}\` on ${where} yourself.`,
-      code: 'host_offline',
-      cmd,
-    };
+    return { error: `The host for this desk (${where}) is offline, so it cannot open a terminal for you.`, code: 'host_offline' };
   }
   if (can.error && can.code === 'held_by_editor') {
     return {
-      error: 'This conversation is open in your editor, not in tmux, so there is no window to attach to. Close it there, or move it to the floor first.',
+      error: 'This conversation is already open in another app — your editor, or a claude CLI in a terminal. Quit it there first: one app holds a conversation at a time.',
       code: 'held_by_editor',
     };
   }
-  if (can.error) return { ...can, cmd };
-  if (!h.window_id) {
-    return {
-      error: 'No tmux window is open for this desk, so there is nothing to attach to yet. Open it on the floor first.',
-      code: 'no_window',
-    };
-  }
-  return { hosted: h, cmd };
+  if (can.error) return can;
+  // A handoff ends the desk's Claude Code (host/index.js \`claude\`), so a turn
+  // or a question in hand would be cut off: refused in words, as Open in VS
+  // Code is (switchable). In 0.14 this button attached to the live window
+  // and interrupted nothing (QA, task 347 R11).
+  if (pending) return { error: 'This desk is asking you something: answer it or cancel it first. Handing it to a terminal now would end the question unanswered.', code: 'asking' };
+  if (isWorking(h, lastTurn)) return { error: `${h.agent} is in the middle of a turn, and handing it to a terminal now would end that turn. Wait for it to finish, or stop it first.`, code: 'working' };
+  return { hosted: h, opens: !h.window_id };
 }
 
-/**
- * Can "Open in Claude" put this desk's window in front of the operator?
- *
- * The attach conditions, with one loosened and one re-worded. Loosened:
- * no_window is not a refusal here, because opening the window is half of what
- * the button does — the host runs `open` and then attaches. Re-worded: the
- * held-by-editor sentence, because the process holding it may be an editor OR
- * a claude CLI outside tmux, and this button is the one a CLI person clicks —
- * telling them about "your editor" sends them looking for a window that is a
- * terminal.
- */
-export function claudeable(h, nowMs = Date.now()) {
-  const base = attachable(h, nowMs);
-  if (!base.error) return base;
-  const cmd = `tmux attach -t ${h?.host_tmux ?? 'orch'}`;
-  if (base.code === 'no_window') return { hosted: h, cmd, opens: true };
-  if (base.code === 'held_by_editor') {
-    return {
-      error: 'This conversation is already open in another app — your editor, or a claude CLI outside tmux. Quit it there first: one app holds a conversation at a time.',
-      code: 'held_by_editor',
-    };
-  }
-  return base;
+/** "Open in Claude" and the old "Open in tmux" are one handoff now. */
+export function claudeable(h, nowMs = Date.now(), opts = {}) {
+  return attachable(h, nowMs, opts);
 }
 
 /**
@@ -829,6 +879,94 @@ export function reconnectDue(desks, { present, used, state, pending = new Map(),
 }
 
 /**
+ * The floor wakes a desk that has work waiting and no Claude Code running
+ * (task 350, costmo 2026-11-23: "the floor wakes a desk that has unread tasks
+ * or messages but no running Claude Code"). The coordinator was down five
+ * and a half hours with five tasks waiting, and nothing on the floor would
+ * start it; only the bell does, and nobody rang it. A wake is what the bell
+ * sends (the word `nudge`, which starts the desk's Claude Code on its
+ * conversation), said on the desk with why (\`woken\`, host/index.js).
+ *
+ * AFTER: the desk has had no Claude Code for that long, so a deliberate
+ * restart or a handoff in flight is not raced. Once per piece of work: the
+ * signature is the newest unread message's id and the open task ids, so the
+ * same backlog never wakes a desk twice, and anything new wakes it again. A
+ * start that never came up is tried again after RETRY, up to TRIES, then
+ * given up once, in words, on the desk (\`gaveUp\`). Spacing between wakes on
+ * one host (WAKE_SPACING_MS) is the caller's, so a restart with many such
+ * desks wakes them one at a time.
+ */
+export const WAKE_AFTER_MS = Math.max(0, Number(process.env.ORCH_WAKE_AFTER_MS ?? 60_000));
+export const WAKE_RETRY_MS = Math.max(0, Number(process.env.ORCH_WAKE_RETRY_MS ?? 300_000));
+export const WAKE_SPACING_MS = Math.max(0, Number(process.env.ORCH_WAKE_SPACING_MS ?? 15_000));
+export const WAKE_TRIES = 3;
+/** A host's probe result, cut to what the floor draws (task 351). */
+export function canaryOf(c) {
+  if (!c || typeof c !== 'object') return null;
+  const version = typeof c.version === 'string' ? c.version.slice(0, 40) : null;
+  if (!version) return null;
+  const differed = Array.isArray(c.differed) ? c.differed.slice(0, 40).map((r) => ({ what: String(r?.what ?? '').slice(0, 200), saw: String(r?.saw ?? '').slice(0, 220) })) : [];
+  return { version, at: typeof c.at === 'string' ? c.at : null, ok: c.ok === true && !c.error, total: Number(c.total) || 0, differed, error: typeof c.error === 'string' ? c.error.slice(0, 300) : null };
+}
+/**
+ * What a wake sends the desk's Claude Code (QA, L4: the bell's word alone,
+ * "nudge", left an agent whose brief does not define it answering "no task
+ * in progress" with its message unread). The word first, for agents that
+ * know it, then the work and what to do about it.
+ */
+export function wakeText(w) {
+  return `nudge — the floor woke you: ${wakeWords(w)} waiting for you on the board. Poll your messages and list your open tasks.`;
+}
+
+/** "3 unread messages, 1 task": what a wake is for, in words. */
+export function wakeWords(w) {
+  const parts = [];
+  if (w.unread) parts.push(`${w.unread} unread message${w.unread === 1 ? '' : 's'}`);
+  if (w.tasks?.length) parts.push(`${w.tasks.length} task${w.tasks.length === 1 ? '' : 's'}`);
+  return parts.join(', ') || 'nothing';
+}
+
+/**
+ * Pure. \`desks\`: the host's hosted rows. \`work\`: deskKey → { unread,
+ * unreadMax, tasks: [ids] }. \`state\`: deskKey → kept between looks. \`skip\`:
+ * deskKey → true for a desk hidden, archived or asking. Returns the desks
+ * to wake now and the ones given up on just now.
+ */
+export function wakeDue(desks, { work, state, skip = new Map(), blocked = () => false, nowMs = Date.now(), after = WAKE_AFTER_MS, retry = WAKE_RETRY_MS, tries = WAKE_TRIES } = {}) {
+  const wake = [];
+  const gaveUp = [];
+  for (const d of desks) {
+    const k = deskKey(d.channel, d.agent);
+    const w = work.get(k);
+    if (!w || (!w.unread && !w.tasks.length)) { state.delete(k); continue; }
+    const sig = `${w.unreadMax ?? 0}|${[...w.tasks].sort((a, b) => a - b).join(',')}`;
+    let s = state.get(k);
+    if (!s) { s = { since: null, sig: null, tries: 0, at: 0, ran: false, said: false }; state.set(k, s); }
+    // Running, or held by somebody else: not a desk to wake. A start the
+    // floor asked for that came up counts as done for that work.
+    if (d.window_id || d.outside_pid) { s.since = null; if (s.sig) s.ran = true; continue; }
+    // A desk the board would not take a message for (its host offline,
+    // signed out or refused: deliverable), or one hidden, archived or asking.
+    if (d.state === 'offline' || skip.get(k) || blocked(d)) { s.since = null; continue; }
+    if (s.since == null) s.since = nowMs;
+    if (nowMs - s.since < after) continue;
+    if (s.sig !== sig) { s.sig = null; s.tries = 0; s.ran = false; s.said = false; }
+    if (s.sig === sig) {
+      // Woken for this work already: again only if that start never came up.
+      if (s.ran) continue;
+      if (s.tries >= tries) { if (!s.said) { s.said = true; gaveUp.push({ desk: d, w }); } continue; }
+      if (nowMs - s.at < retry) continue;
+    }
+    s.sig = sig;
+    s.tries += 1;
+    s.at = nowMs;
+    s.ran = false;
+    wake.push({ desk: d, w });
+  }
+  return { wake, gaveUp };
+}
+
+/**
  * What a desk is told as it enters a meeting room, and as it is back on the
  * floor (costmo, 2026-11-19: he prefixed his first message in every room
  * with this by hand, so that agents stop relaying what he says to the room
@@ -911,7 +1049,7 @@ export function roomNoticePlan(rooms, told, twins = new Set()) {
 }
 
 /** Why a seat's conversation is not handed to an editor — the route's words and the page's. */
-export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor opened in that folder is the other desk, so this conversation stays in the floor\'s window; Open in tmux reaches it.';
+export const SEAT_NO_EDITOR = 'This desk shares its folder with another desk of the same agent. An editor or a terminal opened in that folder is the other desk, so this conversation stays on the floor.';
 
 /**
  * A bind that would take a name from a working seat: the folder is being
@@ -937,7 +1075,7 @@ export function switchable(h, lastTurn, nowMs = Date.now(), { editorOk = false }
   const away = hostAway(h, nowMs);
   if (away) return away;
   if (!editorOk && h.outside_pid) {
-    return { error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
+    return { error: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there first — one app holds a conversation at a time.', code: 'held_by_editor' };
   }
   if (isWorking(h, lastTurn)) {
     return { error: `${h.agent} is working — its host says so, or its last turn is a tool call. This closes its window mid-turn. Wait for it to finish, or stop it first.`, code: 'working' };
@@ -1012,7 +1150,7 @@ function sessionRow(r) {
 
 const STOP_WHY = {
   not_hosted: 'No host on this board is running that repo, so there is nothing here to stop.',
-  held_by_editor: 'This conversation is open in your editor. Stop it there — one app holds a conversation at a time.',
+  held_by_editor: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there — one app holds a conversation at a time.',
   no_window: 'No window is open for this desk, so there is nothing running to stop.',
 };
 
@@ -1126,6 +1264,22 @@ function askForOptions(store, live, channel, agent, requestId) {
  * of 4). A form that cannot be built is said to be unreadable; it is never
  * guessed at.
  */
+/**
+ * A form's answers as AskUserQuestion takes them back: `{ question: answer }`,
+ * an answer being the chosen rows' labels (joined with ", " for several) and
+ * any typed words. For a question a host's Claude Code asked (`ask`).
+ */
+export function answersForTool(questions, answers) {
+  const out = {};
+  (questions ?? []).forEach((q, i) => {
+    const a = answers?.[i] ?? {};
+    const picked = (a.choose ?? []).map((n) => q.options?.find((o) => o.n === n)).filter((o) => o && !o.other).map((o) => o.text);
+    const typed = typeof a.text === 'string' && a.text.trim() ? [a.text.trim()] : [];
+    out[q.question] = [...picked, ...typed].join(', ');
+  });
+  return out;
+}
+
 export function formFromInput(input) {
   const asked = Array.isArray(input) ? input : [];
   if (!asked.length || asked.length >= 8) return null;
@@ -1569,6 +1723,15 @@ export function ingestHookEvent(store, body, live = null) {
     askRescan(store, live, { channel, agent, why: 'a session started on a desk no host runs' });
   }
 
+  // A desk whose own Claude Code the host runs says what it asks as data
+  // (`ask` events: host/desk.js). The plugin's hooks fire in that process
+  // too, and a subagent's PermissionRequest reached the board as a prompt
+  // of its own beside the host's ask for the same tool: QA on a real
+  // 2.1.330 at patch E, a parent and a background subagent each asking,
+  // three prompts on the floor for two, the hook's answered into nothing
+  // ("that question is no longer open"). So on such a desk a hook never
+  // raises a prompt; the host's ask is the one (task 352 A).
+  const hostAsks = mirrored && String(hosted?.window_id ?? '').startsWith('proc:');
   const key = deskKey(channel, agent);
   const state = (s) => {
     if (!hosted) return;
@@ -1590,8 +1753,20 @@ export function ingestHookEvent(store, body, live = null) {
   };
 
   // Ordered so the clear happens before anything that might set it again.
-  if (CLEARS_AWAITING.has(event)) {
-    store.clearAwaiting(sessionId);
+  // Not for a subagent's hook (`agent_id`, which Claude Code sets only
+  // inside one): a question the conversation is asking stands while its
+  // subagents work. Without this, any subagent's tool call closed it on the
+  // floor while the window still asked, and every message to the desk was
+  // refused with nothing on the floor to answer (costmo's report,
+  // 2026-11-22, a question asked while two background agents ran).
+  if (CLEARS_AWAITING.has(event) && !str(body.agent_id)) {
+    // Not while the host's own Claude Code asks: its PreToolUse fires for
+    // the very tool being asked about, and cleared the mark on every host
+    // ask, so the desk read idle with "0 need you" while Approve stood on
+    // its panel (R10, measured 2 of 2 by desktop-dev on the newop app at
+    // patch K; it is also what hid F14). The ask's answer or the host's
+    // `gone` clears it.
+    if (!live?.pending.get(key)?.host_ask) store.clearAwaiting(sessionId);
     // A prompt, a reply, a tool: none of these happens while the window
     // compacts, so any of them ends a compaction the hooks never finished —
     // a window on an older plugin sends no PostCompact at all, and a
@@ -1607,7 +1782,10 @@ export function ingestHookEvent(store, body, live = null) {
     // finding 1, probe P1). A prompt with no session recorded (the
     // notification's, from before this) closes as it always did.
     const open = live?.pending.get(key);
-    if (open && (!open.session_id || open.session_id === sessionId)) {
+    // A question the host's own Claude Code asked (`ask`, host/desk.js) is
+    // closed by its answer or by the host, never by a hook: a tool running
+    // beside the one asked about fires PreToolUse while the question stands.
+    if (open && !open.host_ask && (!open.session_id || open.session_id === sessionId)) {
       live.pending.delete(key);
       live.publish(key, { type: 'permission', request: null });
       live.clearedAt?.set(key, Date.now());
@@ -1721,6 +1899,7 @@ export function ingestHookEvent(store, body, live = null) {
      * it would do — and either of them can be the one who does it.
      */
     case 'PermissionRequest': {
+      if (hostAsks) break;
       const summary = str(body.tool_name)
         ? toolSummary(body.tool_name, body.tool_input)
         : 'a tool needs a permission decision';
@@ -1757,6 +1936,7 @@ export function ingestHookEvent(store, body, live = null) {
     case 'Notification': {
       const kind = str(body.notification_type);
       if (!AWAITING_NOTIFICATIONS.has(kind)) break;
+      if (hostAsks && kind === 'permission_prompt') break;
       const said = clip(body.notification_message, 500);
       const open = live?.pending.get(key);
 
@@ -1828,7 +2008,11 @@ export function ingestHookEvent(store, body, live = null) {
       // as an error — and from here on one no host reads.
       const code = str(body.error) ?? str(body.error_type);
       const words = str(body.last_assistant_message) ?? str(body.error_message) ?? str(body.error_details);
-      const said = code && words ? `${code}: ${words}` : words ?? code ?? 'the turn ended with an API error';
+      // Signed out: what was observed and the remedy the floor runs, never
+      // Claude Code's "Please run /login" (host/claude.js signedOutText).
+      const said = code === 'authentication_failed' || /^\s*Not logged in\b/i.test(words ?? '')
+        ? SIGNED_OUT_WORDS
+        : code && words ? `${code}: ${words}` : words ?? code ?? 'the turn ended with an API error';
       if (!mirrored) recorded = turn('error', said);
       store.setAwaiting(sessionId, 'error', clip(said, 500));
       break;
@@ -1900,7 +2084,11 @@ export function protocolRefusal({ board, host }) {
 
 export function createLive() {
   const partial = new Map();   // deskKey -> text of the reply so far
-  const pending = new Map();   // deskKey -> { request_id, tool, summary, message, at }
+  /** What each host's protocol probe said about its Claude Code (task 351,
+   *  host/canary.js), by host id: re-said at every registration, so a board
+   *  that restarted has it again within a heartbeat. */
+  const canary = new Map();
+  const pending = new AskMap(); // deskKey -> the prompt shown { request_id, tool, summary, message, at, more }, the rest behind it
   // Prompts the operator has answered, kept only until the answer is known to
   // have landed. The floor drops a desk's prompt the moment a decision is made,
   // so if the keystroke turns out not to have taken there is nothing left to put
@@ -2010,7 +2198,7 @@ export function createLive() {
     recent,
     searches,
     refused,
-    partial,
+    canary, partial,
     folders,
     sessions,
     sessionsAsked,
@@ -2126,6 +2314,14 @@ export function askRescan(store, live, { channel, agent, why, force = false }) {
 function applyHostEvent(store, live, hostId, ev) {
   // A step of an update this host is carrying out: about the board, not a desk.
   if (str(ev.type) === 'update') return live.updates?.applyEvent(hostId, ev) ?? false;
+  // The protocol probe's result for this host's Claude Code (task 351): about
+  // the host, said the moment the probe ends, and again at each registration.
+  if (str(ev.type) === 'canary') {
+    const c = canaryOf(ev.canary);
+    if (!c) return false;
+    live.canary?.set(hostId, c);
+    return true;
+  }
   // A folder listing is about the host, not a desk: kept per host for the
   // picker, before the desk checks below, which it has nothing to do with.
   if (str(ev.type) === 'browse') {
@@ -2742,78 +2938,86 @@ function applyHostEvent(store, live, hostId, ev) {
     }
 
     /**
-     * A question the window is asking before it has a session — folder trust,
-     * a new MCP server. Read off the pane by the host (startupQuestionOf in
-     * host/window.js has the measurements, and why it is offered rather than
-     * answered), and put on the desk exactly as a permission prompt is, so the
-     * same buttons, the same decision route and the same keystroke path answer
-     * it. `gone` is the host seeing the dialog leave — answered from here, in
-     * tmux, or by the window registering — and takes the prompt down with it.
+     * Something a desk's Claude Code asks, said by its host as data
+     * (host/desk.js, since the window layer was replaced, 2026-11-22): a
+     * permission with its rows, or a question with its questions. Nothing is
+     * read off a screen and nothing is left for askForOptions: the event is
+     * the whole of it. Said again at every heartbeat while it stands, so a
+     * board that restarted raises it again; `gone` when the process that
+     * asked has ended.
      */
-    case 'startup': {
+    /**
+     * A turn of the desk's Claude Code starting or ending, said by the host
+     * from the process itself (its per-turn `init` and its `result`). Until
+     * this, working and idle came from the plugin's hooks alone, and a
+     * floor /compact set the desk working with nothing to set it back on a
+     * machine whose plugin did not report: reopen and move were refused as
+     * "working" for good (the host suite, 2026-11-22). The end of a turn also
+     * ends a compaction the hooks did not finish reporting.
+     */
+    case 'state': {
+      const s = str(ev.state);
+      if (s !== 'working' && s !== 'idle') break;
+      if (s === 'idle') {
+        if (live.pending.get(key)?.host_ask) break;
+        if (store.clearDeskCompacting(channel, agent)) live.publish(key, { type: 'compacting', compacting: null });
+      }
+      state(s);
+      break;
+    }
+
+    case 'ask': {
       const rid = str(ev.request_id);
       if (!rid) break;
       const open = live.pending.get(key);
       if (ev.gone) {
-        if (open?.request_id === rid) {
-          live.pending.delete(key);
-          live.answered.delete(key);
-          store.clearAwaiting(sessionId);
-          store.clearDeskAwaiting(channel, agent);
-          state('idle');
+        // One prompt is over: the shown one (the next comes forward), or one
+        // behind it (the count goes down). Never the desk's other prompts.
+        const { was, next } = live.pending.remove(key, rid);
+        if (was === 'shown') {
           live.publish(key, { type: 'permission', request_id: rid, decision: 'gone', resolved: true });
+          if (next) {
+            store.setAwaiting(next.session_id ?? sessionId, 'permission_request', next.summary);
+            live.publish(key, { type: 'permission', request: live.pending.get(key) });
+          } else {
+            store.clearAwaiting(open.session_id ?? sessionId);
+            store.clearDeskAwaiting(channel, agent);
+          }
+        } else if (was === 'behind') {
+          live.publish(key, { type: 'permission', request: live.pending.get(key) });
         }
         break;
       }
+      if (live.pending.holds(key, rid)) {
+        // Said again by a heartbeat: the shown ask's mark stands again if
+        // anything cleared it (the clock is kept: setAwaiting keeps its start).
+        const shown = live.pending.get(key);
+        if (shown?.request_id === rid && shown.host_ask) store.setAwaiting(shown.session_id ?? sessionId, 'permission_request', shown.summary);
+        break;
+      }
+      if (live.answered.get(key)?.request_id === rid) break;
+      const isQuestion = str(ev.kind) === 'question';
+      const form = isQuestion ? formFromInput(ev.tool_input?.questions) : null;
       const options = Array.isArray(ev.options)
         ? ev.options.filter((o) => o && Number.isInteger(o.n) && typeof o.text === 'string').map((o) => ({ n: o.n, text: clip(o.text, 200) }))
         : [];
-      // A screen the host does not know (0.14.6, review item 1) has no rows:
-      // it comes with its last lines instead, which the desk shows, and is
-      // answered by opening the window or by Escape.
-      const kind = str(ev.kind) ?? null;
-      const screen = kind === 'screen' && Array.isArray(ev.screen)
-        ? ev.screen.filter((l) => typeof l === 'string').slice(-12).map((l) => clip(l, 200))
-        : null;
-      if (!options.length && !screen?.length) break;
-      // A prompt a hook raised (a permission menu, a form) is the session's
-      // own word and outranks anything read off the screen: the host's look
-      // can land while one stands.
-      if (open && !open.startup) break;
-      const asks = clip(str(ev.asks) ?? 'the window is asking something before it starts', 300);
-      // The desk needs a session row to be marked as waiting on, and a window
-      // that has not registered has none of its own yet. The conversation it
-      // is about to resume, or the placeholder, is that row — the same one a
-      // message sent before the window opened is filed under.
+      const summary = clip(str(ev.summary) ?? (isQuestion ? 'a question for you' : 'a tool needs a permission decision'), 500);
       store.upsertSession({ session_id: sessionId, channel, agent, cwd: desk.cwd, runner: 'host', pid: null });
-      // The same standing question, said again — not a fresh `now`. The host
-      // re-says a startup question every STARTUP_RESAY_MS while it stands, and
-      // the queue's wait age falls back to this `at` whenever an editor
-      // session on the same desk keeps `awaitingSince` moving (see the session
-      // mark note above and the fallback below). A fresh `now` on every re-say
-      // restarted that clock each time — measured: `since` moved forward by
-      // the exact re-say gap while a hook session was live, so "waiting · 40s"
-      // sat over a prompt that had stood twenty minutes. Only a genuinely new
-      // question (a different request_id) starts the clock over.
-      const at = open?.request_id === rid ? open.at : now;
-      live.pending.set(key, {
-        // The window's session, so another session's hooks on the desk (an
-        // editor's tool call) do not close it: closing a startup question is
-        // the host's `gone` (above). docs/backlog.md carried this as open
-        // from PR #2 until the milestone audit's finding 1 (2026-11-17).
-        session_id: sessionId,
-        request_id: rid, tool: 'startup', startup: true, kind,
-        summary: asks, detail: clip(str(ev.detail), 400) ?? null, screen, options, read: true, reading: false, at,
+      // Behind any prompt already shown: Claude Code asks several at once
+      // (parallel tool calls, a subagent beside its parent), and each is
+      // answered in turn (AskMap). `via` is the subagent's description when
+      // a subagent asked, so the prompt says whose it is.
+      const placed = live.pending.add(key, {
+        request_id: rid, session_id: sessionId, tool: str(ev.tool) ?? 'tool', host_ask: true,
+        summary, message: clip(str(ev.description), 500), options, read: true, reading: false,
+        asked: form, questions: form?.questions ?? null, tabs: form?.tabs ?? null, at: now,
+        via: clip(str(ev.via), 200),
       });
-      // Marked on that row by id, not on "the desk's newest session": a live
-      // editor session in the same repo is newer every time its hooks fire,
-      // and its next tool call would clear a mark put there. The floor does
-      // not rely on this mark for a startup prompt anyway — the request itself
-      // is what puts the desk in the queue (see buildFloor) — so the window
-      // keeps asking on the floor whatever the editor is doing.
-      store.setAwaiting(sessionId, 'permission_request', asks);
-      state('awaiting');
-      live.publish(key, { type: 'permission', request: live.pending.get(key) });
+      if (placed === 'shown') {
+        store.setAwaiting(sessionId, 'permission_request', summary);
+        state('awaiting');
+      }
+      if (placed) live.publish(key, { type: 'permission', request: live.pending.get(key) });
       break;
     }
 
@@ -2852,7 +3056,7 @@ function applyHostEvent(store, live, hostId, ev) {
       if (again) {
         again.reoffers = (again.reoffers ?? 0) + 1;
         live.answered.delete(key);
-        live.pending.set(key, again);
+        live.pending.front(key, again);
         live.publish(key, { type: 'permission', request: again });
       }
       // One message, said in both places. The chat row and the desk's own
@@ -2878,49 +3082,6 @@ function applyHostEvent(store, live, hostId, ev) {
         store.setDeskAwaiting(channel, agent, again ? 'permission_request' : 'error', clip(said, 500));
         state(again ? 'awaiting' : 'idle');
       }
-      break;
-    }
-
-    /**
-     * A question the window is still holding, said again by the host at
-     * every heartbeat (`pending` on /api/host/register): read off the pane's
-     * bottom line, so it is said for as long as the window asks, whatever
-     * the board has forgotten. `live.pending` is memory, so a board restart
-     * (every deploy) lost every open prompt, and a window standing on a
-     * question sends no further hook to raise it again. This case did not
-     * exist: the register route had applied `pending` since 2026-08-28
-     * (ddbfc42) into the default below, and the host never sent it
-     * (milestone audit 2026-11-17, finding 1, probe P3).
-     *
-     * Only when nothing stands on the desk: a prompt a hook raised carries
-     * the tool, the summary and the asked form, and is never replaced by
-     * this one. Not within a moment of the prompt being answered or worked
-     * past: the heartbeat read the pane a little before it arrived here, and
-     * the screen it read may be the one the answer has since cleared.
-     * Raised, the host is asked to read its choices (the prompt case), and
-     * one it finds no question for is closed there as gone.
-     */
-    case 'permission_request': {
-      if (live.pending.has(key)) break;
-      const cleared = live.clearedAt?.get(key) ?? 0;
-      const answered = live.answered.get(key)?.answered_at ?? 0;
-      if (Date.now() - Math.max(cleared, answered) < RESAY_QUIET_MS) break;
-      const summary = clip(str(ev.summary) ?? 'the window is waiting for a decision', 500);
-      live.pending.set(key, {
-        request_id: `${sessionId}:standing:${Date.now()}`,
-        session_id: sessionId,
-        tool: null,
-        summary,
-        message: null,
-        // Said by the host, not by a hook: cleared when the host's next
-        // heartbeat no longer names it (the register route).
-        standing: true,
-        at: now,
-      });
-      store.setAwaiting(sessionId, 'permission_request', summary);
-      state('awaiting');
-      live.publish(key, { type: 'permission', request: live.pending.get(key) });
-      askForOptions(store, live, channel, agent, live.pending.get(key).request_id);
       break;
     }
 
@@ -3411,6 +3572,9 @@ export function buildFloor(store, live = null, sessions = null) {
     // Claude Code is signed out on its machine now (host/auth.js).
     signin: !!h.signins,
     signed_out: !!h.signed_out,
+    // What the protocol probe said about its Claude Code (task 351): drawn
+    // as a banner on the floor when anything differed or it could not run.
+    canary: live?.canary?.get(h.host_id) ?? null,
   }));
   for (const [hostId, r] of live?.refused ?? []) {
     if (hosts.some((h) => h.host_id === hostId)) continue;
@@ -3521,6 +3685,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
         return res.status(409).json({ error: why, code: 'protocol_mismatch', board: { protocol: boardProtocol, version: boardVersion }, host: { protocol: said.protocol ?? null, version: said.version ?? null } });
       }
       live.refused.delete(hostId);
+    }
+    // What its protocol probe said about its Claude Code (task 351), re-said
+    // at every registration.
+    if (req.body && 'canary' in req.body) {
+      const c = canaryOf(req.body.canary);
+      if (c) live.canary.set(hostId, c); else live.canary.delete(hostId);
     }
     // `seats`: it can put a second desk in a folder (host/seats.js). A host
     // from before seats says nothing, and is not asked: it would not know
@@ -3638,30 +3808,6 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       }
       live.wake(hostId);
     }
-    const asking = new Set();
-    for (const p of Array.isArray(req.body?.pending) ? req.body.pending : []) {
-      if (applyHostEvent(store, live, hostId, { ...p, type: 'permission_request' }) || live.pending.has(deskKey(str(p?.channel), str(p?.agent)))) {
-        asking.add(deskKey(str(p?.channel), str(p?.agent)));
-      }
-    }
-    // A prompt this host said, that its window no longer shows: answered in
-    // the window, or worked past by a session the hook could not tie to it.
-    // Only the host's own (`standing`): a hook's prompt can be newer than
-    // the screen the heartbeat read, and is closed by the window's own work.
-    // A host from before `pending` sends none and said none.
-    if (Array.isArray(req.body?.pending)) {
-      for (const d of store.listHostedDesks()) {
-        if (d.host_id !== hostId) continue;
-        const k = deskKey(d.channel, d.agent);
-        const open = live.pending.get(k);
-        if (!open?.standing || asking.has(k)) continue;
-        live.pending.delete(k);
-        store.clearAwaiting(open.session_id);
-        store.clearDeskAwaiting(d.channel, d.agent);
-        live.publish(k, { type: 'permission', request_id: open.request_id, decision: 'gone', resolved: true });
-      }
-    }
-
     res.json({ ok: true, host_id: hostId, desks: accepted, work_wait_max_ms: WORK_WAIT_MAX_MS });
   });
 
@@ -3712,12 +3858,53 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     } catch (err) { console.error(`[floor] reconnect check: ${err.message}`); }
     return asked;
   };
+  /**
+   * Wake the desks that have work waiting and no Claude Code (wakeDue), one
+   * a host at a time, WAKE_SPACING_MS apart. A live host only: an offline
+   * one's desks are \`offline\` and skipped.
+   */
+  const wakeState = new Map();
+  const lastWake = new Map();
+  const askWakes = (hostId) => {
+    const now = Date.now();
+    if (now - (lastWake.get(hostId) ?? 0) < WAKE_SPACING_MS) return false;
+    let asked = false;
+    try {
+      const work = new Map();
+      for (const u of store.unreadCounts()) if (u.unread) work.set(deskKey(u.channel, u.agent), { unread: u.unread, unreadMax: u.unread_max_id, tasks: [] });
+      for (const t of store.wakeTasks()) {
+        const k = deskKey(t.channel, t.agent);
+        if (!work.has(k)) work.set(k, { unread: 0, unreadMax: 0, tasks: [] });
+        work.get(k).tasks.push(t.id);
+      }
+      const archived = new Set(store.listChannelFlags().filter((f) => f.archived_at).map((f) => f.channel));
+      const hidden = new Set(store.listDeskFlags().map((f) => deskKey(f.channel, f.agent)));
+      const desks = store.listHostedDesks().filter((d) => d.host_id === hostId);
+      const skip = new Map(desks.map((d) => { const k = deskKey(d.channel, d.agent); return [k, archived.has(d.channel) || hidden.has(k) || !!live.pending.get(k)]; }));
+      const { wake, gaveUp } = wakeDue(desks, { work, state: wakeState, skip, blocked: (d) => !!deliverable(d, now).error, nowMs: now });
+      for (const { desk: d, w } of gaveUp) {
+        applyHostEvent(store, live, hostId, { type: 'error', channel: d.channel, agent: d.agent, code: 'wake_gave_up', message: `the floor tried ${WAKE_TRIES} times to start this desk's Claude Code for the work waiting on it (${wakeWords(w)}), and it did not come up, so it has stopped trying for this work. A message to the desk starts it; the host's log says what happened at each start.` });
+      }
+      const first = wake[0];
+      if (first) {
+        store.enqueueHostWork(hostId, first.desk.channel, first.desk.agent, 'chat', { text: wakeText(first.w), woken: { unread: first.w.unread, tasks: first.w.tasks.length } });
+        lastWake.set(hostId, now);
+        asked = true;
+      }
+    } catch (err) { console.error(`[floor] wake check: ${err.message}`); }
+    return asked;
+  };
+
   // And every five seconds, waking the host's poll when there is work: a
   // host's poll can sit in its wait for WORK_WAIT_MAX_MS, and a desk whose
   // tools dropped should not wait that long again after RECONNECT_AFTER_MS.
   setInterval(() => {
     try {
-      for (const hostId of new Set(store.listHostedDesks().map((d) => d.host_id))) if (askReconnects(hostId)) live.wake(hostId);
+      for (const hostId of new Set(store.listHostedDesks().map((d) => d.host_id))) {
+        const r = askReconnects(hostId);
+        const w = askWakes(hostId);
+        if (r || w) live.wake(hostId);
+      }
     } catch { /* the next tick looks again */ }
   }, 5000).unref();
 
@@ -4041,6 +4228,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
 
   /** A hosted desk that can take a message right now, or the reason it can't. */
   const hostedOrWhyNot = (channel, agent) => deliverable(store.hostedDesk(channel, agent));
+  /** After an answer: the prompt that waited behind it is the desk's now, said as asked (AskMap). */
+  const showNextAsk = (key, next) => {
+    if (!next) return;
+    store.setAwaiting(next.session_id, 'permission_request', next.summary);
+    live.publish(key, { type: 'permission', request: live.pending.get(key) });
+  };
 
   /**
    * Say something to a hosted desk. The message is a user turn in that session:
@@ -4076,7 +4269,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // not one of the window's is answered here, in the floor's words.
     const cmd = commandOf(text);
     if (cmd?.name === 'model' && !cmd.args) {
-      return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. A bare /model opens a picker in the window.', code: 'picker' });
+      return res.status(400).json({ error: 'Name the model — /model sonnet — or pick one with the model control. There is no picker here.', code: 'picker' });
     }
     if (cmd?.name === 'effort' && cmd.args && !EFFORT_LEVELS.includes(cmd.args.toLowerCase())) {
       return res.status(400).json({ error: `Effort is one of ${EFFORT_LEVELS.join(', ')}.`, code: 'bad_effort' });
@@ -4212,7 +4405,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!h) return res.status(409).json({ error: 'No host on this board is running that repo.', code: 'not_hosted' });
     if (h.outside_pid) {
       return res.status(409).json({
-        error: 'This conversation is open in your editor. Close it there first — one app holds a conversation at a time.',
+        error: 'This conversation is open in another app (your editor, or claude in a terminal). Quit it there first — one app holds a conversation at a time.',
         code: 'held_by_editor',
       });
     }
@@ -5046,7 +5239,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    const can = attachable(store.hostedDesk(channel, agent));
+    const can = attachable(store.hostedDesk(channel, agent), Date.now(), { lastTurn: store.deskLastTurn(channel, agent), pending: live.pending.get(deskKey(channel, agent)) ?? null });
     if (can.error) return res.status(409).json({ error: can.error, code: can.code, cmd: can.cmd ?? null });
     store.enqueueHostWork(can.hosted.host_id, channel, agent, 'attach', {});
     live.wake(can.hosted.host_id);
@@ -5071,7 +5264,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const channel = str(req.body?.channel);
     const agent = str(req.body?.agent);
     if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    const can = claudeable(store.hostedDesk(channel, agent));
+    const can = claudeable(store.hostedDesk(channel, agent), Date.now(), { lastTurn: store.deskLastTurn(channel, agent), pending: live.pending.get(deskKey(channel, agent)) ?? null });
     if (can.error) return res.status(409).json({ error: can.error, code: can.code, cmd: can.cmd ?? null });
     store.enqueueHostWork(can.hosted.host_id, channel, agent, 'claude', {});
     live.wake(can.hosted.host_id);
@@ -5142,7 +5335,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // approvals arrived in it as twenty-nine keystrokes, which submitted
     // themselves as a message. Clearing the prompt first makes the second
     // click a no-op instead of a stored one.
-    live.pending.delete(key);
+    const nextAsk = live.pending.shift(key);
     // Kept, not dropped: this is the only copy of the question, and if the host
     // reports that the keystroke never took it is what gets offered again.
     live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
@@ -5166,6 +5359,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // host/index.js, case 'permission').
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision, resolved: true });
+    showNextAsk(key, nextAsk);
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'permission', {
       request_id: requestId, decision: send, message: str(req.body?.message), reason, queued_at: Date.now(),
       // How the host knows, if this waits in its line, that the prompt is
@@ -5232,12 +5426,18 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
 
     const steps = answerSteps(pendingReq.questions, answers);
-    live.pending.delete(key);
+    // A question the host's Claude Code asked is answered as data: each
+    // question's words and its answer, the chosen rows by their labels and
+    // any typed words, which Claude Code takes as an answer of their own
+    // (host/desk.js). No keys, and so no withdrawing a form for typed words.
+    const toolAnswers = pendingReq.host_ask ? answersForTool(pendingReq.questions, answers) : null;
+    const nextAsk = live.pending.shift(key);
     live.answered.set(key, { ...pendingReq, answered_at: Date.now() });
     store.clearDeskAwaiting(channel, agent);
     live.publish(key, { type: 'permission', request_id: requestId, decision: 'answered', resolved: true });
+    showNextAsk(key, nextAsk);
     store.enqueueHostWork(check.hosted.host_id, channel, agent, 'answer', {
-      request_id: requestId, steps, queued_at: Date.now(),
+      request_id: requestId, steps, answers: toolAnswers, queued_at: Date.now(),
       // How the host knows, if this waits, that the question is still the
       // one on screen (askedStill, host/window.js): its headers, and the
       // first question's choices for a form whose header row is cut.
@@ -5258,7 +5458,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // as one. The choices on the other tabs go with the form — the window
     // delivers none of them — so the message that follows carries every
     // answer, not only the typed one. See `clarifyMessage`.
-    const clarify = steps.some((st) => st.clarify);
+    const clarify = !pendingReq.host_ask && steps.some((st) => st.clarify);
     // Queued after the answer, and read in order by the host, so the words
     // arrive at a composer that the decline has just put there.
     if (clarify) {
@@ -5271,40 +5471,6 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   });
 
   /** Stop the current turn on a hosted desk. */
-  /**
-   * Press yes or no at a prompt the floor could not read.
-   *
-   * Every other answer route matches a request_id, because it is answering
-   * something the board parsed and drew. This one exists for when that failed:
-   * the desk reports it is waiting, and nothing here can say on what. There is
-   * no request to name, so there is none required.
-   *
-   * That makes it looser than the others by design, and the safety lives one
-   * layer down instead: the host refuses to send anything at a window that is
-   * back at its composer. What is refused *here* is only what the panel already
-   * knows — a desk with no reachable window, and a desk that is not waiting at
-   * all, so a stale page cannot press keys into a conversation that moved on.
-   */
-  router.post('/api/floor/press', auth.adminGuard, (req, res) => {
-    const channel = str(req.body?.channel);
-    const agent = str(req.body?.agent);
-    const choice = str(req.body?.choice);
-    if (!channel || !agent) return res.status(400).json({ error: 'channel and agent are required' });
-    if (choice !== 'yes' && choice !== 'no') {
-      return res.status(400).json({ error: 'choice must be yes or no', code: 'bad_choice' });
-    }
-    const check = hostedOrWhyNot(channel, agent);
-    if (check.error) return res.status(409).json(check);
-    // The newest window on the desk, which is the one the panel drew from.
-    const waiting = store.liveHookSessions(channel, agent).some((s) => s.awaiting_kind);
-    if (!waiting) {
-      return res.status(409).json({ error: 'That desk is not waiting on anything.', code: 'not_waiting' });
-    }
-    store.enqueueHostWork(check.hosted.host_id, channel, agent, 'press', { choice, queued_at: Date.now() });
-    live.wake(check.hosted.host_id);
-    store.logAdmin(channel, 'permission.pressed', { target: agent, detail: `${choice} at an unreadable prompt` });
-    res.json({ ok: true, choice });
-  });
 
   /**
    * The desk's Sign in: its host runs Claude Code's own sign-in (`claude auth

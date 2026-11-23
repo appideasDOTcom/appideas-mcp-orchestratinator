@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from 'node:path';
 import { listSeats } from './seats.js';
-import { projectDir } from './window.js';
+import { projectDir } from './claude.js';
 
 /**
  * Find the repos on this machine that belong to an orchestratinator, and which

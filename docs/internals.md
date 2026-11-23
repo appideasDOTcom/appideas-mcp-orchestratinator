@@ -54,7 +54,7 @@ npm test             # every suite — coordination (smoke), operator actions,
 
 The host can also run by hand instead of as a LaunchAgent:
 `ORCH_HOST_ROOTS=~/Documents/dev/appideas npm run host`. It has no dependencies
-of its own; it needs Node, `tmux`, and `claude` on the PATH and signed in.
+of its own; it needs Node 24 and `claude` on the PATH and signed in.
 
 ## Bumping the version
 
@@ -350,12 +350,12 @@ just means a client opens a session per turn, which is normal and handled.
   folder's place in that window ([`host/seats.js`](../host/seats.js) has
   what was measured). The host calls such a desk a **seat**: a record of
   its own beside `host.json` (`seats/seats.json`), a binding file per seat
-  (mode 600; it holds the key, as `~/.claude.json` does), and a tag on its
-  tmux window (`@orch_seat`), which is how [`host/window.js`](../host/window.js)
-  tells several windows in one folder apart: every window function takes
-  the folder, or `{ cwd, seat }`. The plugin's hook reads the window's own
-  binding file (`ORCH_DESK_CONFIG`), so a prompt raised in a seat's window
-  is the seat's. On the board a seat is `hosted_desks.scope = 'seat'`
+  (mode 600; it holds the key, as `~/.claude.json` does), and its own
+  Claude Code process, started with that file: the host tells several desks
+  in one folder apart by its own record of which process is which desk,
+  never by the folder. The plugin's hook reads the process's own binding
+  file (`ORCH_DESK_CONFIG`), so a prompt raised in a seat's process is the
+  seat's. On the board a seat is `hosted_desks.scope = 'seat'`
   (`hosted.seat` on the payload). On another floor it carries the agent's
   own name; on a floor where the name is taken it carries the name with a
   number (`qa-2`), linked to the agent by `desk_twins` (`twin` on the
@@ -384,12 +384,12 @@ src/
   auth.js     The shared-secret guard on /mcp + /api/ingest, and the cross-origin check on writes
   backup.js   Export and restore the whole board as one JSON document
   ui/         The dashboard page (no build step, no external assets)
-host/         The workstation service that runs desks in tmux windows
+host/         The workstation service that runs each desk's Claude Code
               (seats.js: a second desk in a folder that is already one)
 plugin/       The Claude Code plugin (orchestratinator-floor) — the floor's hooks
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 scripts/
   set-version.mjs   Writes the version into all three files that carry one
-test/         Thirteen suites; test:host, test:window, test:renew and test:seats
-              drive real tmux panes, the first and last against a real server
+test/         Thirteen suites; test:host and test:seats run a real host against
+              a real server, with a stream-JSON stand-in for Claude Code
 ```

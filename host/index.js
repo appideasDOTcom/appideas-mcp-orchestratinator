@@ -1,28 +1,26 @@
 #!/usr/bin/env node
 /**
  * The orchestratinator host: this workstation's link between the floor and the
- * Claude Code windows running here.
+ * Claude Code conversations here.
  *
- * There is one conversation per repo and nobody owns it. Claude Code runs in a
- * tmux pane; the floor types into that pane, and so do you, by attaching to it.
- * Switching between the two costs nothing because nothing moves. You never
- * exit a session to hand it over, and you never resume one to get it back.
- *
- * That is the whole of it, and it is why this file is half what it was. The
- * driver/release/fork/TTL/pid-watch machinery it used to carry existed only to
- * work around "a terminal owns its session and cannot be typed into from
- * anywhere else", which was never true. See host/window.js.
+ * Each desk's Claude Code is a process this host runs and speaks to as data,
+ * through Claude Code's stream-JSON interface (host/agent.js, host/desk.js).
+ * A conversation is one process, so one app holds it at a time: the floor,
+ * or the operator's editor or terminal after a handoff (CLAUDE.md, "The one
+ * rule everything else follows from"). Until 0.15.0 desks ran in tmux
+ * windows that the host typed into and read back; that layer is gone, and
+ * an upgrade ends the windows it left (W.endLegacyWindows).
  *
  * What this process actually does:
  *
  *   - enumerates the repos here that belong to the board (each one's
  *     `.mcp.json` says which desk it is),
- *   - asks `claude agents --json` which of them have a live window,
+ *   - reads Claude Code's roster for which conversations are live, and whose,
  *   - tails each live session's own transcript and sends the turns up, so a
  *     turn you type in your own terminal appears on the floor with nothing
  *     reporting it,
  *   - and does what the floor asks: deliver a message, answer a permission
- *     prompt, stop a turn, open a window.
+ *     prompt or a question, stop a turn, start a desk's Claude Code.
  *
  * It only ever reaches out. The server never connects to this machine and
  * nothing here listens on a port. If the server is down it retries with
@@ -32,7 +30,8 @@
  *   ORCH_URL          the board, e.g. http://localhost:8787 (from .mcp.json if unset)
  *   ORCH_AUTH_TOKEN   the shared secret                     (from .mcp.json if unset)
  *   ORCH_HOST_NAME    how this machine shows on the floor   (hostname if unset)
- *   ORCH_TMUX_SESSION the tmux session the desks live in    (orch)
+ *   ORCH_TMUX_SESSION the tmux session 0.14.x ran desks in, whose windows
+ *                     an upgrade ends (orch)
  *   ORCH_HOST_SUPERVISOR who restarts this process: `app` for the desktop
  *                     app (launchd is read from XPC_SERVICE_NAME) — host/update.js
  *   ORCH_FOLDER_DIALOG  a program to run as the folder dialog, or `parent` to
@@ -40,14 +39,15 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Worker } from 'node:worker_threads';
 import { discover, listFolder, localEntries, originOf, readDesk, readLocalScope } from './identity.js';
-import * as W from './window.js';
+import * as W from './claude.js';
+import { Desk } from './desk.js';
 import * as M from './mcp.js';
 import * as S from './seats.js';
 import * as D from './dialog.js';
@@ -56,9 +56,27 @@ import * as U from './update.js';
 import * as UP from './uploads.js';
 import * as A from './auth.js';
 import * as V from './version.js';
+import * as C from './canary.js';
 import { log, warn, error, failureOf, requestFailed } from './log.js';
 
+// The installer's line for giving the host its key, in this platform's own
+// words (pc-developer, task 348 I4: a Windows host told its person to run
+// ./host/install.sh).
+const INSTALL_TOKEN_LINE = process.platform === 'win32'
+  ? 'powershell -ExecutionPolicy Bypass -File host\\install.ps1 -Token <the ORCH_AUTH_TOKEN from the server\'s .env> <your projects folder>'
+  : './host/install.sh --token <the ORCH_AUTH_TOKEN from the server\'s .env> <your projects dir>';
+// How long after Open in Claude or Open in VS Code the host also reads the
+// process table for the conversation's new holder (task 348 F6).
+const HANDOFF_WATCH_MS = 30 * 60_000;
 const CONFIG_FILE = process.env.ORCH_HOST_CONFIG ?? join(homedir(), '.orchestratinator', 'host.json');
+// What the protocol probe said about each Claude Code version this host has
+// seen (task 351), beside host.json; and the folder it runs in, kept, so
+// Claude Code's own list of projects gains one entry, not one a run.
+const CANARY_FILE = process.env.ORCH_CANARY_FILE ?? join(dirname(CONFIG_FILE), 'claude-canary.json');
+const CANARY_DIR = join(dirname(CONFIG_FILE), 'canary');
+/** Which folders' board-tool allow rule this machine's host wrote (task 352
+ *  B, host/mcp.js), beside the desk-pid record, so Leave removes only that. */
+const BOARD_TOOLS_RECORD = join(dirname(W.deskPidsFile('host')), 'board-tools-allowed.json');
 /** How long a queued permission answer stays worth delivering. */
 const ANSWER_TTL_MS = Number(process.env.ORCH_ANSWER_TTL_MS ?? 30_000);
 const HEARTBEAT_MS = Number(process.env.ORCH_HOST_HEARTBEAT_MS ?? 60_000);
@@ -164,637 +182,8 @@ function loadConfig() {
 
 /* ───────────────────────── one desk ───────────────────────── */
 
-/**
- * A desk is a repo. Not a session, not a process — those come and go, and the
- * desk does not care which one is there. It only tracks how far it has read
- * into whatever conversation is current, so the floor is never told the same
- * turn twice.
- */
-class Desk {
-  constructor(host, { channel, agent, cwd, scope = 'project', seat = null, server = null }) {
-    this.host = host;
-    this.channel = channel;
-    this.agent = agent;
-    // The name this desk's window knows the board's server by: what a bare
-    // `/mcp` from the floor reconnects (typedCommand in window.js). A seat's
-    // binding file is written under the host's own name (seats.js).
-    this.server = server || M.SERVER_NAME;
-    // A seat: an extra desk in a folder that is some other desk's, with a
-    // window and a binding of its own (host/seats.js). Null for the folder's
-    // own desk, which is every desk there was before seats.
-    this.seat = seat || null;
-    // Where the binding was read from: 'local' (Claude Code's own
-    // ~/.claude.json, what the floor writes) or 'project' (the repo's
-    // .mcp.json). Reported to the board so the floor can say which file to
-    // look in, and so an unbind knows which one to take the entry out of.
-    this.scope = scope;
-    // Canonical, because everything downstream matches this against the cwd
-    // Claude Code reports and against the transcript path derived from it, and
-    // a repo reached through a symlink is spelled two ways. See canonical().
-    this.cwd = W.canonical(cwd);
-    this.sessionId = null;   // whatever conversation is live here now
-    // The conversation this desk belongs to, which outlives any window onto
-    // it. sessionId goes null the moment a window closes — and that is exactly
-    // when the id is needed, to reopen the same conversation rather than start
-    // a fresh one. Closing an editor tab is not the end of a conversation.
-    this.lastSessionId = null;
-    this.holder = null;      // 'floor' | 'editor' | null, as last reported
-    this.paneWindow = null;  // a tmux window in this repo, registered session or not
-    this.startup = null;     // the startup question the window is sitting on, as last reported
-    this.startupSaidAt = 0;
-    // Look for a startup question at the next tick although the window is
-    // registered: set when a send was refused as asking, and once a
-    // heartbeat. The tick reads the pane only while a window is starting,
-    // and a question Claude Code asks after it has registered (the browser
-    // extension's, 2026-11-20) would otherwise never reach the floor.
-    this.lookStartup = false;
-    // A window of this desk that Claude Code has no record of (window.js,
-    // "a window Claude Code has no record of"): the pid and since when it
-    // has stood idle, and the window the host last reopened for it.
-    this.unreg = null;
-    this.unregTried = null;
-    this.holders = 0;        // live processes claiming this conversation
-    this.clients = 0;        // terminals attached to the tmux session
-    this.offset = 0;         // bytes of that transcript already sent up
-    // The same per subagent file. A conversation's subagents each write their
-    // own transcript (see subagentTranscripts in window.js), and each is tailed
-    // from where it was last read.
-    this.subOffsets = new Map();
-    // When this desk started watching. What it separates is a conversation that
-    // began after we were here — genuinely new, and read from its first word —
-    // from one that was already running, which is joined at its current end so
-    // that hours of history are not replayed onto the floor.
-    this.since = Date.now();
-    // A reopen in flight: the conversation the operator chose, and the pid of
-    // the window opened for it once known. While it stands, watch() adopts
-    // only that session — see the intent rule there — and it expires on the
-    // readiness budget so a window that never registers cannot freeze the
-    // desk on a conversation nothing is running.
-    this.intent = null;
-    // The model the conversation's last reply named, so a change is reported
-    // once rather than on every turn.
-    this.model = null;
-  }
-
-  get label() { return `${this.channel}/${this.agent}`; }
-
-  /** Where this desk's window is, as window.js takes it: the folder, or for
-   *  a seat the folder and its tag ("which window" there). */
-  get where() { return this.seat ? { cwd: this.cwd, seat: this.seat } : this.cwd; }
-
-  /**
-   * Follow whatever session is live in this repo, and send up anything new it
-   * has said. A conversation that changes underneath — you ran /clear, or
-   * opened a different one — is not a handoff to negotiate; it is simply the
-   * conversation now, and the floor is told so.
-   */
-  /**
-   * Start following a conversation, from wherever it has already got to.
-   *
-   * The offset is snapshotted here and nowhere else. It used to be re-taken
-   * every time the *live session* changed — but which process is running a
-   * conversation changes every time you switch apps, and re-snapshotting on
-   * that skips everything written in between. In the worst case the window
-   * opens, `send()` types the message and Claude Code writes it, all inside one
-   * watch interval; the next tick then moves the offset past it and the floor
-   * never sees the message it just sent.
-   */
-  async follow(id, mode = 'end') {
-    // Three places to join a conversation. 'start' is its first word, for one
-    // that began after this desk did. 'end' is where it stands now, for one
-    // already running or one whose turns the board holds — nothing dedups a
-    // replay. 'tail' is its recent past, for a conversation the operator
-    // picked that the board has never seen: the last 64 KB go up so the panel
-    // opens on a conversation rather than on nothing. A mid-line offset is
-    // safe — readTranscript drops the partial line it lands in. The booleans
-    // are the older callers' spelling of the first two.
-    if (mode === true) mode = 'start';
-    else if (mode === false) mode = 'end';
-    this.lastSessionId = id;
-    this.subOffsets = new Map();
-    this.model = null;
-    // A turn written before this desk joined is history, replayed for the
-    // panel ('tail'), not something a window says now (F5, 0.14.5 review): a
-    // conversation that ended on "Not logged in" muted every desk on the
-    // host when it was resumed, on a machine that was signed in, until a
-    // window replied, which nothing on the floor could make it do. So the
-    // relay hands noteTurn only turns written after this moment. 'start'
-    // reads a conversation that began after the desk did, all of it new.
-    this.joinedAt = mode === 'start' ? 0 : Date.now();
-    if (!id) { this.offset = 0; return; }
-    const path = W.transcriptPath(this.cwd, id);
-    const size = await W.transcriptSize(path);
-    this.offset = mode === 'start' ? 0 : mode === 'tail' ? Math.max(0, size - TAIL_BYTES) : size;
-    // Subagent files already on disk are joined at their end for the reason
-    // the main transcript is; ones that appear later are new, and are read
-    // from their first word.
-    if (mode !== 'start') {
-      for (const sub of await W.subagentTranscripts(path)) this.subOffsets.set(sub.path, await W.transcriptSize(sub.path));
-    }
-  }
-
-  async watch(live = [], paneByPid = new Map(), allPanes = [], clients = 0) {
-    // The conversation this desk is. Kept while it is still running — a desk
-    // does not change conversation because another window in the same folder
-    // happens to be newer, or because a tab was closed and will be reopened.
-    //
-    // But it is not kept for ever. `lastSessionId` used to be set once and never
-    // reassigned, which made the pin outlive everything: the operator closed
-    // every window, opened a new conversation, said "Good morning", and the
-    // floor went on relaying the old transcript. Measured — the new sessions
-    // registered with zero turns, because nothing was reading them. The only
-    // way out was restarting the host, which is a terminal command, which is
-    // the thing the floor exists to avoid.
-    //
-    // So: adopt the newest live conversation whenever the pinned one has
-    // stopped running. Which is what the paragraph above follow() has always
-    // claimed happens — "a conversation that changes underneath is not a
-    // handoff to negotiate; it is simply the conversation now".
-    //
-    // Except while a reopen is in flight. Its window is closed and the next
-    // one is not registered yet, and in that gap the rule above would adopt
-    // whatever else is live in this folder — a stray editor session, say —
-    // and steal the pin from the conversation the operator just chose. So an
-    // unexpired intent adopts only the session that is its own: the pid the
-    // host opened, or the id it asked for. A fresh conversation has no id
-    // until it registers, which is what the pid is for. Expired, it is let
-    // go and said so, and newest-wins resumes.
-    if (this.intent) {
-      const it = this.intent;
-      const verdict = W.intentVerdict(it, live);
-      if (verdict === 'expired') {
-        warn(`${this.label}: the reopened window did not register within ${Math.round((it.until - it.since) / 1000)}s — following whatever is live here now`);
-        this.intent = null;
-      } else if (verdict === 'ended') {
-        // Its window is gone before it registered: nothing can match the
-        // intent any more, and holding it kept the desk from its folder
-        // until the deadline (W.intentVerdict).
-        warn(`${this.label}: the reopened window ended before it registered — following whatever is live here now`);
-        this.intent = null;
-      } else {
-        const mine = live.find((x) => (it.pid && x.pid === it.pid) || (it.sessionId && x.sessionId === it.sessionId)) ?? null;
-        if (mine) {
-          if (mine.sessionId !== this.lastSessionId) {
-            // A new conversation has no transcript when its window registers
-            // — Claude Code writes the file at the first prompt — so it is
-            // read from its first word. An id that already has words behind
-            // it is not new, whatever the window says (a stand-in reusing one
-            // id did exactly this), and reading it from the start replays
-            // what the board holds.
-            const fresh = (await W.transcriptSize(W.transcriptPath(this.cwd, mine.sessionId))) === 0;
-            await this.follow(mine.sessionId, fresh ? 'start' : 'end');
-          }
-          this.intent = null;
-        }
-      }
-    }
-    const pinnedLive = this.lastSessionId && live.some((x) => x.sessionId === this.lastSessionId);
-    if (!this.intent && !pinnedLive && live.length) {
-      const newest = live.reduce((a, b) => ((b.startedAt ?? 0) > (a.startedAt ?? 0) ? b : a));
-      if (newest.sessionId !== this.lastSessionId) {
-        // Read from the first word if it began after we got here, and from the
-        // current end if it was already going. See `since`.
-        await this.follow(newest.sessionId, (newest.startedAt ?? 0) >= this.since);
-      }
-    }
-    const session = this.lastSessionId
-      ? live.find((x) => x.sessionId === this.lastSessionId) ?? null
-      : null;
-    const id = session?.sessionId ?? null;
-    // A process newly holding this desk's conversation: a window that came
-    // up in its folder, whoever opened it. Before it is reported or read,
-    // the folder's binding is read again (Host.boundAt). Released to another
-    // instance, the window that instance's host opens here is found by its
-    // folder like any other, and until this host's next rescan the desk is
-    // still on its list. Measured with two real hosts (task 292,
-    // 2026-11-08): the instance that had been left was sent the new
-    // conversation, every turn of it, for 40 s after the release. Here and
-    // not where a new conversation is adopted above, because a release with
-    // no window to close resumes the conversation this desk is pinned to,
-    // and that is no adoption.
-    if (id && id !== this.sessionId && await this.host.letGoIfReleased(this, 'a window came up in its folder')) return;
-    if (id !== this.sessionId) {
-      // Only which process holds it changed. The conversation, and how far the
-      // floor has read into it, are the desk's and survive the handover.
-      this.sessionId = id;
-      this.host.emit({
-        type: 'session', channel: this.channel, agent: this.agent,
-        session_id: id, cwd: this.cwd, pid: session?.pid ?? null,
-      }, true);
-    }
-
-    // Who has it: a pane we opened, an editor we cannot type into, or nobody.
-    const pane = session ? paneByPid.get(session.pid) ?? null : null;
-    const holder = session ? (pane ? 'floor' : 'editor') : null;
-    // A window in this repo whether or not a session has registered in it yet,
-    // and how many live processes claim this conversation. Neither changes who
-    // holds it; both are things the board could not otherwise tell apart from
-    // nothing being there. See holderOf().
-    const paneHere = W.paneIn(allPanes, this.where);
-    const holders = this.lastSessionId
-      ? live.filter((x) => x.sessionId === this.lastSessionId).length
-      : 0;
-    // Attached terminals ride along on this event rather than getting one of
-    // their own. It is a property of the tmux session, not of a desk, so it is
-    // the same number on every desk of this host — but this is the only channel
-    // that reports within a watch tick, and the floor needs it within one to
-    // settle a spinner on it. The register heartbeat is a minute apart.
-    if (holder !== this.holder
-        || (paneHere?.window ?? null) !== this.paneWindow
-        || holders !== this.holders
-        || clients !== this.clients) {
-      this.holder = holder;
-      this.paneWindow = paneHere?.window ?? null;
-      this.holders = holders;
-      this.clients = clients;
-      this.host.emit({
-        type: 'holder', channel: this.channel, agent: this.agent,
-        holder, window: pane?.window ?? null, pid: session?.pid ?? null,
-        window_open: this.paneWindow, holders, clients,
-      }, true);
-    }
-    // A window here whose process is not in the roster is starting — and one
-    // that stays that way is sitting on a question. Read it and put it on the
-    // floor, so the person waiting on a desk that says "starting" can see what
-    // it wants and answer from where they are. Said again once a minute while
-    // it stands, so a server that restarted meanwhile hears it too. Why the
-    // host reads these and never answers them is beside startupQuestionOf.
-    // Registered also when the roster's Claude Code runs under the pane's
-    // process: one a person started by hand from the window's shell (F3,
-    // 0.14.5 review). Asked only when the pid alone does not match, which is
-    // the rare case, so the common tick runs no `ps`.
-    const booting = paneHere && !live.some((x) => x.pid === paneHere.pid)
-      && !(await W.runsUnderOnce(this.underMemo ??= {}, paneHere.pid, live.map((x) => x.pid)));
-    // And while one is standing, or when a look was asked for (lookStartup):
-    // a question still up after its window registered is still a question,
-    // and "gone" is said only when the pane no longer shows it.
-    //
-    // And a registered floor window is read every SCREEN_LOOK_MS besides
-    // (0.14.6, review items 1 and 3): a dialog Claude Code raises after it
-    // has registered ("Teach auto mode about your environment?", the
-    // fullscreen upsell, whatever the next update brings) is on the floor
-    // within seconds, rows and all, and so is any screen the host does not
-    // know, as "needs you" with its last lines, rather than a desk that
-    // reads idle while its keys go somewhere else. One 30-line capture per
-    // window every three seconds (a few ms each); the per-tick capture that
-    // was refused for the signed-out footer is one every 700 ms.
-    const acting = this.host.acting?.channel === this.channel && this.host.acting?.agent === this.agent;
-    const due = paneHere && !booting && W.unknownScreensOn() && Date.now() - (this.lookedAt ?? 0) >= SCREEN_LOOK_MS;
-    const look = paneHere && (booting || this.startup || this.lookStartup || due);
-    this.lookStartup = false;
-    const verdict = look ? W.screenVerdict(await W.screenAt(paneHere.target)) : null;
-    if (look) this.lookedAt = Date.now();
-    const q = verdict?.kind === 'dialog' ? verdict.question : null;
-    // A screen nobody here knows, said once it has stood still for
-    // UNKNOWN_SETTLE_MS (a window between two of its own screens is not
-    // one), never while the window is starting (its banner stands before its
-    // composer) and never while this host is carrying out work on the desk
-    // (its own /btw or /cost screen is its to read and close).
-    const odd = verdict?.kind === 'unknown' && !booting && !acting && W.unknownScreensOn() ? verdict.lines : null;
-    const oddText = odd ? odd.join('\n') : null;
-    // Kept between looks: a tick that read nothing says nothing about it.
-    if (look && oddText !== this.oddSeen?.text) this.oddSeen = oddText ? { text: oddText, at: Date.now() } : null;
-    const oddStood = !!odd && !!this.oddSeen && Date.now() - this.oddSeen.at >= UNKNOWN_SETTLE_MS;
-    if (q) {
-      const said = `${q.kind}|${q.asks}|${q.options.map((o) => o.text).join('|')}`;
-      if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
-        this.startup = { said, request_id: `startup:${paneHere.window}:${q.kind}` };
-        this.startupSaidAt = Date.now();
-        this.host.emit({
-          type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id,
-          kind: q.kind, asks: q.asks, detail: q.detail ?? null, options: q.options, window: paneHere.window,
-        }, true);
-        log(`${this.label}: the window is asking${booting ? ' on its way up' : ''} (${q.kind}): ${q.kind === 'dialog' ? `${q.asks} — ` : ''}${q.options.map((o) => o.text).join(' / ')}`);
-      }
-    } else if (oddStood) {
-      const said = `screen|${oddText}`;
-      if (this.startup?.said !== said || Date.now() - this.startupSaidAt > STARTUP_RESAY_MS) {
-        this.startup = { said, request_id: `startup:${paneHere.window}:screen` };
-        this.startupSaidAt = Date.now();
-        this.host.emit({
-          type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id,
-          kind: 'screen', asks: 'the window is showing something the floor does not know', screen: odd, options: [], window: paneHere.window,
-        }, true);
-        log(`${this.label}: the window is showing a screen the floor does not know (Claude Code ${this.host.claudeVersion ?? 'version not read'}); its last line reads "${odd[odd.length - 1]}"`);
-      }
-    } else if (this.startup && !(odd && this.startup.request_id.endsWith(':screen'))) {
-      // Gone, except for a screen nobody knows that is still on the pane
-      // and has changed since it was said: it is said again once it stands.
-      this.host.emit({ type: 'startup', channel: this.channel, agent: this.agent, request_id: this.startup.request_id, gone: true }, true);
-      this.startup = null;
-    }
-
-    // A window with no record that is not starting at all: standing idle
-    // at its composer. Counted from the tick that first finds it so, and
-    // handed to the host's line once it has stood UNREGISTERED_MS.
-    if (booting && !q && await W.standingIdleAt(paneHere.target)) {
-      if (this.unreg?.pid !== paneHere.pid) this.unreg = { pid: paneHere.pid, since: Date.now(), handed: false };
-      const verdict = W.unregisteredVerdict({ since: this.unreg.since, now: Date.now(), pid: paneHere.pid, tried: this.unregTried });
-      if ((verdict === 'reopen' || verdict === 'say') && !this.unreg.handed) {
-        this.unreg.handed = true;
-        this.host.healUnregistered(this, paneHere.pid, verdict);
-      }
-    } else {
-      this.unreg = null;
-      // Registered: whatever was tried for an earlier window is history.
-      if (paneHere && !booting) this.unregTried = null;
-    }
-
-    // Keep reading the desk's conversation even with no window open on it.
-    // Closing a tab does not un-say what was said, and the floor should still
-    // be showing it when you come back.
-    if (!this.lastSessionId) return;
-
-    const path = W.transcriptPath(this.cwd, this.lastSessionId);
-    const r = await W.readTranscript(path, { after: this.offset });
-    if (!r.ok) return;
-    this.offset = r.offset;
-    // The subagents' transcripts too, each labeled with its description — see
-    // subagentTranscripts. Merged with the session's own turns by time when
-    // every turn carries one, so a "Let me search for…" lands between the
-    // Agent call and the report it produced rather than after everything the
-    // main thread said meanwhile.
-    const turns = [...r.turns];
-    for (const sub of await W.subagentTranscripts(path)) {
-      const s = await W.readTranscript(sub.path, { after: this.subOffsets.get(sub.path) ?? 0, via: sub.label });
-      if (!s.ok) continue;
-      this.subOffsets.set(sub.path, s.offset);
-      turns.push(...s.turns);
-    }
-    // By the clock, not by the string: localeCompare on ISO timestamps is
-    // only an order while every one has the same precision (QA, PR #3 review,
-    // 2026-09-03). A turn without a parseable time leaves the batch in read
-    // order. The sort is stable, so equal times keep it too.
-    if (turns.every((t) => Number.isFinite(Date.parse(t.at)))) turns.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
-    for (const turn of turns) {
-      // Which model answered, read off the reply itself. Reported when it
-      // changes, as its own event rather than a field on the turn: the
-      // session's model is state, and a column on every turn would cross the
-      // eight places CLAUDE.md lists for nothing the page draws per turn.
-      if (turn.model && !turn.via && turn.model !== this.model) {
-        this.model = turn.model;
-        this.host.emit({ type: 'model', channel: this.channel, agent: this.agent, session_id: this.lastSessionId, model: turn.model }, true);
-      }
-      if (turn.role === 'model') continue;
-      if (!(this.joinedAt && Date.parse(turn.at) < this.joinedAt)) this.host.noteTurn(turn);
-      this.host.emit({
-        type: 'turn', channel: this.channel, agent: this.agent, session_id: this.lastSessionId,
-        role: turn.role, text: turn.text, at: turn.at, uuid: turn.uuid,
-        tool_name: turn.tool_name ?? null, tool_input: turn.tool_input ?? null,
-        via: turn.via ?? null,
-      });
-    }
-  }
-
-  /**
-   * The conversation to hand `--resume`, checked against the disk first.
-   *
-   * The pin is what the board holds for this desk, and it can name a session
-   * that never wrote a transcript — the reasoning is on resumable() in
-   * window.js. When the pin is not the conversation that opens, that is said
-   * here, twice: in this log, and on the floor as a line labeled `host`, so
-   * the desk does not simply appear to have changed its mind about which
-   * conversation it is. Filed under the conversation it leads into.
-   */
-  async resumeId() {
-    // A conversation that is running is the conversation, transcript or not:
-    // a window just opened from the floor has a session and no file yet, and
-    // checking the disk for it would announce a fallback about a desk whose
-    // window is right there. The check is for a pin nothing is running.
-    if (this.sessionId) return this.sessionId;
-    const pinned = this.lastSessionId;
-    const pick = await W.resumable(this.where, pinned);
-    if (pick.note) this.told(pick.note, pick.id ?? pinned);
-    // Follow the substitute from here, before its window comes up. Left
-    // pinned to the old id, watch() would adopt the new process as "newest
-    // live" and read its transcript from the first word — every turn of a
-    // conversation the floor relayed hours ago, drawn again with today's
-    // time on it (service-developer, 2026-09-09). Joining at the end here
-    // means the window's first new word is the first thing relayed.
-    if (pick.id && pick.id !== pinned) await this.follow(pick.id);
-    return pick.id;
-  }
-
-  /**
-   * Say on the floor what the host did on the person's behalf — a line
-   * labeled `host` in the desk's own chat, and the same line in this log.
-   * Every one of these is something a person would otherwise have to work
-   * out from a desk that changed under them: a conversation resumed other
-   * than the one the board named, a background session stopped to bring one
-   * here. Filed under the conversation it leads into.
-   */
-  told(text, sessionId) {
-    log(`${this.channel}/${this.agent}: ${text}`);
-    this.host.emit({
-      type: 'turn', channel: this.channel, agent: this.agent, session_id: sessionId ?? this.sessionId ?? this.lastSessionId,
-      role: 'context', text, at: new Date().toISOString(), uuid: null,
-      tool_name: 'host', tool_input: null, via: null,
-    }, true);
-  }
-
-  /**
-   * Bring this desk's tools back: `/mcp reconnect <server>` in its window,
-   * asked by the board when the window has stood with no MCP session for a
-   * while (reconnectDue in src/floor.js; costmo, 2026-11-19, so that a fresh
-   * board after the desktop app restarts does not leave him to /mcp every
-   * desk by hand). The window's own line is said on the desk. Nothing is
-   * opened for it, and nothing is typed into a turn, where the window drops
-   * the command without a trace (typedCommand in window.js): the board asks
-   * again later while the session is still missing.
-   */
-  async reconnect() {
-    const at = await W.busyAt(this.where);
-    if (!at.pane) return;
-    if (at.busy) { log(`${this.label}: its tools have dropped, but it is working; reconnecting when the board asks again`); return; }
-    // Unasked (draftOf): typed onto somebody's draft, the two went in as one
-    // message and the reconnect never ran (F2, 0.14.5 review). Owed instead,
-    // and run once the box is empty (payOwed), as well as when the board
-    // asks again.
-    const r = await W.send(this.where, W.typedCommand('/mcp', this.server), { unasked: true });
-    if (r.code === 'draft') {
-      if (!this.owedReconnect) log(`${this.label}: its tools have dropped, but somebody is typing in its window; reconnecting once the box is empty`);
-      this.owedReconnect = true;
-      return;
-    }
-    this.owedReconnect = false;
-    const id = this.sessionId ?? this.lastSessionId;
-    if (r.ok && r.said) this.told(`the desk's tools had lost the board, so the host ran /mcp — ${r.said}`, id);
-    else warn(`${this.label}: reconnecting its tools: ${r.error ?? r.code ?? 'no receipt from the window'}`);
-  }
-
-  /**
-   * What this desk is owed that was not typed because somebody was typing
-   * in its window (F2): a reconnect, and meeting-room notices, in order.
-   * Run on the host's line before each work poll, so within a poll of the
-   * box being emptied. Each one is tried only while the box holds nothing,
-   * which is read first, so a draft that stays costs one read a poll.
-   */
-  async payOwed() {
-    if (!this.owedReconnect && !this.owedNotices?.length) return;
-    const pane = await W.paneFor(this.where);
-    if (!pane) { this.owedReconnect = false; this.owedNotices = []; return; }
-    if (await W.draftAt(pane.target)) return;
-    if (this.owedReconnect) await this.reconnect();
-    while (this.owedNotices?.length && !this.owedReconnect) {
-      const text = this.owedNotices.shift();
-      await this.say(text, { unasked: true });
-      if (this.owedNotices.includes(text)) break;
-    }
-  }
-
-  /** Type into this repo's window, opening one if there isn't one. */
-  async say(text, { unasked = false } = {}) {
-    // Resume the conversation this desk is, not merely the one that happens to
-    // have a window open — those differ for exactly as long as it takes to
-    // switch apps, which is when the floor is used.
-    const id = await this.resumeId();
-    // Everything goes in as typed, a model or effort change included: the
-    // window's own /model and /effort, which save the choice as the default
-    // for new sessions (costmo, 2026-11-14, reversing #10 Decided 4). The
-    // picker that was driven here for "this session only" is gone, and why it
-    // was not kept with Enter in place of `s` is beside send() in window.js.
-    // What the window is given, which is the operator's words except where a
-    // command means something else in the window than it does on the floor:
-    // a bare /mcp opens a panel there, and reconnects here (typedCommand).
-    // The line on the desk still says what the operator typed.
-    const r = await W.send(this.where, W.typedCommand(text, this.server), { open: true, resume: id, unasked });
-    if (r.note) this.told(r.note, id);
-    // Delivered, but not as typed (review item 2): said beside it, because
-    // the agent reads such a message as pasted content.
-    if (r.ok && r.pasted) this.told(`this message reached the agent as pasted content, not typed words, because typing it did not hold (${r.pasted})`, id);
-    // A meeting room's notice that met a draft (F2): owed, typed once the
-    // box is empty (payOwed). Not an error: nothing failed, and an error turn
-    // would hand the board's own words back to the operator's box.
-    if (!r.ok && r.code === 'draft' && unasked) {
-      if (!(this.owedNotices ??= []).includes(text)) this.owedNotices.push(text);
-      log(`${this.label}: a meeting room's notice waits: somebody is typing in its window`);
-      return;
-    }
-    if (!r.ok) {
-      // Refused because the window is asking: if that is a startup question
-      // the floor has not been shown, the next tick reads it and offers it.
-      if (r.code === 'asking' || r.code === 'unknown_screen') this.lookStartup = true;
-      // The command that was being typed, when it was one: a model or effort
-      // change that ends here was not made, and the board stops showing it as
-      // asked for (it used to stand on the select until the model next
-      // changed). No session id beside it: an error is filed by desk, on
-      // whatever conversation the board holds for it, and naming one here
-      // would move where the line is drawn.
-      this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: r.error, code: r.code ?? null, command: W.commandOf(text)?.name ?? null }, true);
-    } else if (r.command && r.said) {
-      // A command's receipt, in its own terms — a new conversation started,
-      // compacting, the model set, answered in the window. Said on the desk
-      // as one line labeled host carrying what was typed and what happened
-      // ("/model opus — Set model to Opus 5.5 and saved as your default for
-      // new sessions"): the
-      // page draws no bubble for a done command, so this line is the record
-      // of it. And to the composer, as the end of its wait.
-      this.told(`${text.trim()} — ${r.said}`, r.session_id ?? id);
-      this.host.emit({
-        type: 'receipt', channel: this.channel, agent: this.agent, command: r.command, said: r.said, text,
-        // The window's session, always: the board writes the window's words
-        // and a compaction's state to it, not to "the desk's newest".
-        session_id: r.session_id ?? id ?? null, model: r.model ?? null, effort: r.effort ?? null, compacting: !!r.compacting,
-      }, true);
-      // A compaction's end, watched and said separately — started and not
-      // awaited, so the work loop is not held for the minutes it can take.
-      // The window's own closing line is the sentence; a desk that only
-      // heard the start stayed "compacting" when nothing was compacted.
-      if (r.compacting) {
-        const path = this.lastSessionId ? W.transcriptPath(this.cwd, this.lastSessionId) : null;
-        const before = path ? await W.transcriptSize(path) : 0;
-        W.awaitCompaction(this.where, { path, before }).then((end) => {
-          if (!end.ok) return;
-          this.told(end.said, id);
-          this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: end.said, text, session_id: id ?? null, compacting: false, compacted: !!end.compacted }, true);
-          log(`${this.label}: /compact — ${end.said}`);
-        }).catch((err) => warn(`${this.label}: watching the compaction: ${err.message}`));
-      }
-      // The /btw answer, read off the window's overlay — the one place it
-      // exists. Drawn as the agent's, labeled by the command, so the floor
-      // shows the answer and where it came from.
-      if (r.answer) {
-        this.host.emit({
-          type: 'turn', channel: this.channel, agent: this.agent, session_id: id,
-          role: 'assistant', text: r.answer, at: new Date().toISOString(), uuid: null,
-          tool_name: null, tool_input: null, via: '/btw',
-        }, true);
-      }
-      // What a command showed on the window's screen (/cost, /help…): the
-      // window's words, not the agent's, labeled by the command.
-      if (r.screen) {
-        this.host.emit({
-          type: 'turn', channel: this.channel, agent: this.agent, session_id: id,
-          role: 'context', text: r.screen, at: new Date().toISOString(), uuid: null,
-          tool_name: `/${r.command}`, tool_input: null, via: null,
-        }, true);
-      }
-      // No log line of its own here: told() above logs the same words, and
-      // every command from the floor was in the host log twice, in the same
-      // millisecond (pc-developer, 2026-11-20, a floor /mcp).
-    } else if (r.held === 'compacting') {
-      // The window took the message and went off to compact under it. The
-      // enqueue record carries no text on 2.1.300, so the only receipt is the
-      // user record at the end — 37–150 s away on a real desk. Said as held.
-      this.host.emit({
-        type: 'delivery', channel: this.channel, agent: this.agent,
-        state: 'queued', text, held: 'compacting', detail: r.detail ?? null,
-      }, true);
-      log(`${this.label}: the window is compacting under the message (${r.detail ?? ''}); it reads it when that ends`);
-    } else if (r.unverified) {
-      // Delivered, but with no transcript to check it against. The floor is
-      // not told a message failed when it may well have arrived — but this
-      // does not pass silently either, because silence is how messages got
-      // lost in the first place.
-      warn(`${this.label}: typed the message in, but there is no session to confirm it landed`);
-    } else if (r.queued) {
-      // Queued behind a running turn: the window has it, the conversation has
-      // not recorded it yet, and it will be read at the desk's next step.
-      //
-      // Reported because those two facts look identical from the board, and
-      // the difference is what the page is about to tell somebody. Without
-      // this the composer has nothing to go on but a clock, and a clock said
-      // "not recorded — send again" about a message that was delivered in
-      // under a second and answered a second later.
-      this.host.emit({
-        type: 'delivery', channel: this.channel, agent: this.agent,
-        state: 'queued', text, held: !!r.held,
-      }, true);
-      log(`${this.label}: queued a message behind the running turn${r.held ? ' (after waiting for the window to take it)' : ''}`);
-    }
-    return r;
-  }
-
-  async answer(decision, reason = null) {
-    // A number is a choice off the window's own list — "2. Yes, and don't ask
-    // again…" and whatever else this particular prompt offers. Approve, deny and
-    // cancel are the three that are always there, so they keep names.
-    const key = /^[1-9]$/.test(String(decision)) ? String(decision) : ANSWER_KEY[decision];
-    if (!key) return { ok: false, error: `unknown decision ${decision}` };
-    // Not sendKeys: that reports success as soon as tmux takes the key, and the
-    // floor now drops a desk's prompt the moment the operator decides. See
-    // answerPrompt — it looks at the window before and after, so an answer that
-    // went nowhere says so instead of passing.
-    // A refusal with something to say is two acts, not one: the choice opens a
-    // field, the words go in it. Only deny carries one — approve and cancel have
-    // nothing to explain.
-    if (typeof reason === 'string') return W.denyWithReason(this.where, key, reason);
-    return W.answerPrompt(this.where, key);
-  }
-
-  /** A startup question is answered by one of its own rows, by number, and
-   *  nothing else: there is no approve or deny on a trust dialog. A dialog
-   *  read by its shape, or a screen the floor does not know, also takes
-   *  `cancel`: Escape, pressed only while the pane still shows it. */
-  async answerStartup(decision) {
-    if (decision === 'cancel') return W.escapeStanding(this.where);
-    const n = Number(decision);
-    if (!Number.isInteger(n) || n < 1) return { ok: false, error: `a startup question is answered by choosing one of its rows, not "${decision}"` };
-    return W.answerStartup(this.where, n);
-  }
-
-  async interrupt() { return W.interrupt(this.where); }
-}
+// A desk, and the Claude Code the host runs for it, is host/desk.js since the
+// window layer was replaced (costmo, 2026-11-22).
 
 /* ───────────────────────── the host ───────────────────────── */
 
@@ -820,17 +209,6 @@ class Host {
     // for the host's own line that a sign-in left behind goes in `later`.
     this.auth = { status: null, said: false, signing: null };
     this.later = [];
-    // A window moved to a fresh tmux server says so on its desk, in the host's
-    // words — see "a tmux server that can no longer read a desk's folder" in
-    // window.js. A window that is no desk of this board's is only logged.
-    W.onServerRenewed(({ refused, moved }) => {
-      for (const m of moved) {
-        const desk = [...this.desks.values()].find((d) => d.cwd === m.cwd && (d.seat ?? null) === (m.seat ?? null));
-        const text = W.renewNote(refused, m);
-        if (desk) desk.told(text, m.sessionId);
-        else log(`${m.cwd}: ${text}`);
-      }
-    });
     // What discover() last found under the roots that could become a desk;
     // posted with every registration. See rescan().
     this.folders = [];
@@ -883,6 +261,108 @@ class Host {
     try { return await res.json(); } catch (err) { throw failed(`→ ${res.status}, body ${failureOf(err)}`); }
   }
 
+  /**
+   * The environment a desk's Claude Code runs in: a person's own, nothing of
+   * this host's settings (W.windowEnv, 0.14.4's ruling), with the board's key
+   * where the binding names a variable for it, and for a seat the four that
+   * tell the plugin's hook which desk it is (host/seats.js).
+   */
+  agentEnv(desk) {
+    const env = W.windowEnv();
+    if (desk.seat) {
+      const [channel, agent] = String(desk.seat).split('/').map((part) => { try { return decodeURIComponent(part); } catch { return part; } });
+      Object.assign(env, { ORCH_DESK_CONFIG: S.configPath(desk.seat), ORCH_DESK_ROOT: desk.cwd, ORCH_CHANNEL: channel, ORCH_AGENT: agent });
+      return env;
+    }
+    const kv = W.paneEnv(readDesk(desk.cwd));
+    if (kv.length) { const at = kv[1].indexOf('='); env[kv[1].slice(0, at)] = kv[1].slice(at + 1); }
+    return env;
+  }
+
+  /** The pids of the Claude Codes this host runs for its desks, and for its seats alone. */
+  ourPids() { return new Set([...this.desks.values()].filter((d) => d.running).map((d) => d.proc.pid)); }
+  /** Kept on disk at each start and exit of a desk's process, so the next
+   *  run can end what a crash left (W.endLeftoverDesks, task 340). */
+  notePids() {
+    const rows = [...this.desks.values()].filter((d) => d.running).map((d) => ({ pid: d.proc.pid, cwd: d.cwd, session: d.sessionId ?? d.lastSessionId ?? null }));
+    W.noteDeskPids(W.deskPidsFile(this.cfg.hostId), rows);
+  }
+
+  /**
+   * Check a Claude Code version this host has not checked with the protocol
+   * probe (host/canary.js, task 351; costmo, 2026-11-23: "Orchestratinator
+   * breaks every time anything comes in even with the slightest difference
+   * from before"). Once per version per machine, kept in CANARY_FILE; run
+   * in the background, one at a time; desks are not held by it. A probe
+   * whose first message does not come back (not signed in, no network) is
+   * kept as "could not be checked" with why, and not run again for that
+   * version: it does not loop. A machine signed out is not probed at all
+   * until it is signed in. \`ORCH_CANARY=off\` (the suites) runs nothing;
+   * \`ORCH_CANARY_STANDIN\` names a module whose probeClaude stands in.
+   */
+  canaryCheck(version) {
+    if (!version || process.env.ORCH_CANARY === 'off' || this.canaryRunning) return;
+    const read = () => { try { return JSON.parse(readFileSync(CANARY_FILE, 'utf8')) ?? {}; } catch { return {}; } };
+    const known = read()[version];
+    if (known) { this.canary = known; return; }
+    if (this.signedOut()) return;
+    this.canaryRunning = true;
+    log(`checking Claude Code ${version} with the protocol probe (about a minute, a dozen short haiku turns)`);
+    const at = () => new Date().toISOString();
+    const probe = process.env.ORCH_CANARY_STANDIN
+      ? import(pathToFileURL(process.env.ORCH_CANARY_STANDIN).href).then((m) => m.probeClaude)
+      : Promise.resolve(C.probeClaude);
+    probe
+      .then((fn) => fn({ claude: W.CLAUDE, model: 'haiku', dir: CANARY_DIR }))
+      .then((r) => {
+        const first = r.rows.find((x) => /the turn ends in one result/.test(x.what));
+        if (!r.total || (first && !first.ok)) return { version, at: at(), error: `its first message did not come back (${first?.saw || 'no answer'}), so nothing could be compared` };
+        return { version, at: at(), ok: r.fails === 0, total: r.total, differed: r.rows.filter((x) => !x.ok).map(({ what, saw }) => ({ what, saw })) };
+      }, (err) => ({ version, at: at(), error: err.message }))
+      .then((res) => {
+        const all = read();
+        all[version] = res;
+        try {
+          mkdirSync(dirname(CANARY_FILE), { recursive: true });
+          writeFileSync(`${CANARY_FILE}.${process.pid}`, `${JSON.stringify(all, null, 2)}\n`);
+          renameSync(`${CANARY_FILE}.${process.pid}`, CANARY_FILE);
+        } catch (err) { warn(`the protocol probe's result for ${version} could not be kept (${err.message}); it will run again`); }
+        this.canary = res;
+        this.emit({ type: 'canary', canary: res }, true);
+        const words = res.error
+          ? `Claude Code ${version} could not be checked with the floor's protocol probe: ${res.error}`
+          : res.ok
+            ? `Claude Code ${version} checked with the floor's protocol probe: it speaks what the floor reads (${res.total} of ${res.total})`
+            : `Claude Code ${version} answered ${res.differed.length} of the floor's ${res.total} protocol checks differently from what it was built on; the floor names them at the top`;
+        log(words);
+        // After the first registration: before it, a desk new to this board
+        // has no row there and what is said about it is dropped.
+        const tell = () => { for (const d of this.desks.values()) d.told(words); };
+        if (this.registered) tell(); else (this.afterRegister ??= []).push(tell);
+      })
+      .finally(() => { this.canaryRunning = false; });
+  }
+
+  /** End the windows an earlier host ran this host's desks in (W.endLegacyWindows); say each on its desk. */
+  async sweepLegacy({ deferTold = false } = {}) {
+    const desks = [...this.desks.values()];
+    const { ended, waiting } = await W.endLegacyWindows(desks.map((d) => d.cwd));
+    for (const l of ended) {
+      const desk = desks.find((d) => W.canonical(d.cwd) === l.cwd && !d.seat) ?? desks.find((d) => W.canonical(d.cwd) === l.cwd);
+      const words = `the host ended the tmux window an earlier version ran this desk's Claude Code in (${l.name ? `window ${l.name}, ` : ''}pid ${l.pid ?? 'unknown'}), so its conversation continues here; the next message resumes it`;
+      // Said after the first registration when asked: before it, a desk new
+      // to this board has no row there and the board drops what is said.
+      const say = () => (desk ? desk.told(words, l.session ?? undefined) : log(words));
+      if (deferTold) (this.afterRegister ??= []).push(say); else say();
+    }
+    if (waiting.length && !this.legacyWaiting) for (const w of waiting) log(`left the tmux window an earlier version ran ${w.cwd} in (pid ${w.pid}) to finish its turn; the floor takes it over when it ends`);
+    this.legacyWaiting = waiting.length > 0;
+  }
+  seatPids() { return new Set([...this.desks.values()].filter((d) => d.running && d.seat).map((d) => d.proc.pid)); }
+
+  /** A seat's own binding file, which its Claude Code is started with; none for a folder's own desk. */
+  seatConfig(desk) { return desk.seat ? S.configPath(desk.seat) : null; }
+
   emit(ev, now = false) {
     this.outbox.push(ev);
     if (now) return this.flush();
@@ -890,9 +370,22 @@ class Host {
     return undefined;
   }
 
-  async flush() {
+  /**
+   * One batch on the wire at a time, in the order the events were said. An
+   * urgent event used to start a POST of its own beside one still in flight,
+   * and the board took whichever landed first: a turn's `working` could land
+   * after its `idle`, and the desk read working until the next turn (the
+   * host suite under load, 2026-11-22). A flush asked for meanwhile waits
+   * for the one sending, then sends what has gathered.
+   */
+  flush() {
     clearTimeout(this.flushTimer);
     this.flushTimer = null;
+    this.flushing = (this.flushing ?? Promise.resolve()).then(() => this.sendOutbox());
+    return this.flushing;
+  }
+
+  async sendOutbox() {
     if (!this.outbox.length) return;
     const events = this.outbox.splice(0);
     try {
@@ -917,39 +410,28 @@ class Host {
       }
       V.keepVersion(this.cfg.hostId, cv);
       this.claudeVersion = cv;
+      this.canaryCheck(cv);
     }
-    // Where each desk can be sat at, reported every time rather than once: a
-    // window opens, closes and moves, and a stale address is worse than none.
+    // Where each desk stands, reported every time rather than once. `window`
+    // is the desk's own Claude Code while the host runs one (`proc:<pid>`),
+    // the mark the board has always read as "the floor holds it"; and
+    // `outside_pid` a Claude Code somebody else runs on its conversation (a
+    // terminal or an editor). What a desk's Claude Code is asking is said
+    // again as `ask` events, so a board that restarted raises it again.
     const desks = [];
-    // Every floor window that is asking a question, said again at every
-    // heartbeat so the board can raise it after a restart or after another
-    // session's work closed it (askingIn; the board's permission_request
-    // case). A window outside the floor (an editor) cannot be read here,
-    // and its prompt reaches the board by its hooks alone.
-    const pending = [];
     for (const d of this.desks.values()) {
-      const held = await W.holderOf(d.where, d.lastSessionId).catch(() => null);
-      if (held?.where === 'floor') {
-        const asks = await W.askingIn(d.where).catch(() => null);
-        // The summary is a sentence, not the status line it was read by
-        // ("Enter to select · …" tells the operator nothing); the choices
-        // come from the host's own read of the prompt, which the board asks for.
-        if (asks) pending.push({ channel: d.channel, agent: d.agent, session_id: d.lastSessionId ?? null, summary: 'the window is waiting for a decision' });
-        // askingIn leaves a startup question to the watch loop, which reads
-        // one only on a window that is starting. Ask it to look once.
-        else d.lookStartup = true;
-      }
+      for (const ev of d.standingAsks()) this.emit(ev);
       desks.push({
-        // `scope` is 'seat' for an extra desk in a folder that is another
-        // desk's, and that is what the board reads to offer no editor
-        // handoff for it. A `seat` boolean was sent beside it and read by
-        // nothing (QA, PR #57 Info 7); it is gone.
         channel: d.channel, agent: d.agent, cwd: d.cwd, scope: d.scope,
-        session_id: d.lastSessionId,
-        window: held?.where === 'floor' ? held.window : null,
-        outside_pid: held?.where === 'editor' ? held.pid : null,
-        window_open: held?.paneWindow ?? null,
-        holders: held?.holders ?? 0,
+        session_id: d.sessionId ?? d.lastSessionId,
+        // The same mark as the desk's holder report: a registration that
+        // said null for an earlier version's window mid-turn put the desk
+        // back to unheld at every heartbeat (patch E's row, which reads past
+        // the first registration).
+        window: d.windowMark,
+        outside_pid: d.running ? null : d.outsidePid,
+        window_open: d.windowMark,
+        holders: d.holders ?? 0,
       });
     }
     // The folders too, with paths and roots spelled the one way the board
@@ -981,7 +463,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: W.tmuxSession, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), pending, boot: this.boot, claude_version: this.claudeVersion ?? null, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), boot: this.boot, claude_version: this.claudeVersion ?? null, canary: this.canary ?? null, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -1085,6 +567,9 @@ class Host {
         }
         continue;
       }
+      // A desk replaced (moved to another folder) ends its Claude Code: the
+      // process belongs to the folder it was started in.
+      if (have?.running) have.stop().catch(() => {});
       const made = new Desk(this, d);
       // A move's intent, from bind(): on the desk from its first tick.
       if (this.intents.has(k)) made.intent = this.intents.get(k);
@@ -1095,6 +580,9 @@ class Host {
     for (const [k, desk] of this.desks) {
       if (seen.has(k)) continue;
       this.desks.delete(k);
+      // Its Claude Code ends with it: a desk let go (left, moved, released
+      // to another instance) must not go on talking to this board.
+      if (desk.running) desk.stop().catch(() => {});
       log(`dropped desk ${desk.label} — ${desk.seat ? `its seat at ${desk.cwd} is gone` : `${desk.cwd} no longer binds it to ${origin}`}  (${reason})`);
       changed = true;
     }
@@ -1119,22 +607,27 @@ class Host {
       if (!byCwd.has(s.cwd)) byCwd.set(s.cwd, []);
       byCwd.get(s.cwd).push(s);
     }
-    // Which pane is running what, read once for all desks. Who is holding a
-    // conversation changes the moment somebody closes a tab, and a minute-old
-    // answer is worse than none: the floor offers a composer that cannot
-    // deliver, which is the failure this whole design exists to avoid.
-    const allPanes = await W.panes();
-    const paneByPid = new Map(allPanes.map((p) => [p.pid, p]));
-    // Once per tick, not once per desk: it is one number for the whole session.
-    const clients = await W.clientCount().catch(() => 0);
-    // A folder can hold several desks (host/seats.js), and its sessions are
-    // shared out by window: a seat's are the ones running in a window tagged
-    // as it, the folder's own desk has the rest — its window and whatever an
-    // editor runs there. With no seat in a folder this is every session in
-    // it, as it was.
+    // A folder can hold several desks (host/seats.js), each with a Claude
+    // Code of its own. A desk's sessions are its own process's and anybody
+    // else's in the folder (a terminal, an editor), never another desk's.
+    const ours = new Map([...this.desks.values()].filter((d) => d.running).map((d) => [d.proc.pid, d]));
+    // A terminal's or an editor's Claude Code that the roster does not list
+    // yet (W.resumingProcesses), looked for only while a handoff is recent
+    // (HANDOFF_WATCH_MS): that is when one is waiting on the trust question.
+    // Every 2 s, every 5 s on Windows, where asking the system is slow. A
+    // desk being started looks for itself as well (Desk.ensure).
+    const handing = [...this.desks.values()].some((d) => d.handedOffAt && Date.now() - d.handedOffAt < HANDOFF_WATCH_MS);
+    if (!handing) this.resuming = new Map();
+    else if (!this.resumingAt || Date.now() - this.resumingAt > (process.platform === 'win32' ? 5000 : 2000)) {
+      this.resumingAt = Date.now();
+      try { this.resuming = await W.resumingProcesses(); } catch { this.resuming = new Map(); }
+    }
+    for (const desk of this.desks.values()) desk.resuming = this.resuming ?? new Map();
     for (const desk of this.desks.values()) {
-      const live = W.sessionsAt(desk.where, byCwd.get(desk.cwd) ?? [], allPanes);
-      try { await desk.watch(live, paneByPid, allPanes, clients); } catch (err) { warn(`${desk.label}: ${err.message}`); }
+      // A seat's are its own process's only; the folder's own desk has the
+      // rest, an editor's or a terminal's included (host/seats.js).
+      const live = (byCwd.get(desk.cwd) ?? []).filter((s) => (desk.seat ? ours.get(s.pid) === desk : !ours.has(s.pid) || ours.get(s.pid) === desk));
+      try { await desk.watch(live); } catch (err) { warn(`${desk.label}: ${err.message}`); }
     }
   }
 
@@ -1231,7 +724,7 @@ class Host {
     if (!path) return fail('refused: no folder was named', 'bind_refused');
     if (!existsSync(path)) return fail(`refused: ${path} does not exist`, 'bind_refused');
     if (!this.cfg.token) {
-      return fail(`this host has no shared secret to bind with — run  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>  on it, or bind one repo by hand`, 'no_key');
+      return fail(`this host has no shared secret to bind with — run  ${INSTALL_TOKEN_LINE}  on it, or bind one repo by hand`, 'no_key');
     }
     const dir = W.canonical(path);
     const origin = originOf(this.cfg.url);
@@ -1257,11 +750,9 @@ class Host {
       }
       if (now.agent !== agent) return fail(`not released: ${dir} names its agent ${now.agent}, and ${agent} was asked for`, 'bind_refused');
     }
-    if (p.from || leaving) {
-      const at = await W.busyAt(dir);
-      if (at.pane && at.busy) {
-        return fail(leaving ? `not released from ${leaving} — the window is still working: ${at.foot}` : `not moved to ${channel} — the window is still working: ${at.foot}`, 'bind_refused');
-      }
+    const folderDesk = [...this.desks.values()].find((d) => d.cwd === dir && !d.seat);
+    if ((p.from || leaving) && folderDesk?.proc?.working) {
+      return fail(leaving ? `not released from ${leaving} — its Claude Code is in the middle of a turn` : `not moved to ${channel} — its Claude Code is in the middle of a turn`, 'bind_refused');
     }
     log(`${channel}/${agent}: binding ${dir}${leaving ? ` — releasing it from ${leaving}` : ''}${!leaving && p.import ? ' — importing its .mcp.json entry' : ''}${p.from ? ` — moving it from ${p.from.channel}/${p.from.agent}` : ''}`);
     // A desk already at this folder — the import case — keeps its conversation:
@@ -1281,11 +772,10 @@ class Host {
       // it too, from the desk's last turn; this is the pane's word, for a
       // window that started working since (QA, PR #57 finding 3: the check
       // above reads the folder's own window, and this one had none).
-      const at = await W.busyAt(twin.where);
-      if (at.pane && at.busy) {
-        return fail(`${p.from ? `not moved to ${channel}` : `not bound to ${channel}/${agent}`} — ${agent} already has a desk on ${channel} in this folder, and its window is still working: ${at.foot}`, 'bind_refused');
+      if (twin.proc?.working) {
+        return fail(`${p.from ? `not moved to ${channel}` : `not bound to ${channel}/${agent}`} — ${agent} already has a desk on ${channel} in this folder, and its Claude Code is in the middle of a turn`, 'bind_refused');
       }
-      if (await W.paneFor(twin.where)) await W.closeWindow(twin.where);
+      await twin.stop();
       S.removeSeat(channel, agent, origin);
       log(`${channel}/${agent}: its seat at ${twin.cwd} is replaced by the folder's own binding`);
     }
@@ -1329,6 +819,11 @@ class Host {
     }
     rebound = true;
     log(`${channel}/${agent}: bound ${dir} in local scope`);
+    // The board's own tools ask nothing in a folder the floor took (task 352
+    // B, host/mcp.js): a take, an import, a move and a release all bind here.
+    const allowed = M.allowBoardTools(dir, BOARD_TOOLS_RECORD);
+    if (allowed.added) log(`${channel}/${agent}: allowed the board's tools (${M.boardToolRule()}) in ${allowed.file}`);
+    else if (!allowed.ok) warn(`${channel}/${agent}: the board's tools will ask for permission there: ${allowed.error}`);
     this.addRoot(dir);
     // Whether the move closes the floor's window for a new conversation is
     // asked before the rescan, and the intent is handed to the rescan to set
@@ -1349,13 +844,20 @@ class Host {
     // folder, so the conversation it arrives on is read off the disk: the
     // one somebody last spoke in, from its tail, because this instance has
     // none of its turns.
-    const pane = p.from || leaving ? await W.paneFor(dir) : null;
+    // A Claude Code running in the folder when it moves (the folder's own
+    // desk's, or one the instance being left runs) is ended, and the new
+    // floor gets a new conversation (#24 Decided 2). Ours is stopped here;
+    // the other instance's host lets its own go when it reads the folder's
+    // new binding (letGoIfReleased).
+    const inFolder = (await W.roster()).sessions?.some((x) => W.canonical(x.cwd) === dir && x.kind === 'interactive') ?? false;
+    const pane = (p.from || leaving) && (folderDesk?.running || inFolder) ? true : null;
+    if (pane && folderDesk?.running) await folderDesk.stop();
     const fresh = !!pane && p.open !== false;
     if (leaving && !fresh && !oldLast) oldLast = await W.lastSpokenIn(dir).catch(() => null);
     const key = `${channel}|${agent}`;
     if (fresh) {
       const since = Date.now();
-      this.intents.set(key, { sessionId: null, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS });
+      this.intents.set(key, { sessionId: null, pid: null, since, until: since + 45_000 + WATCH_MS });
     }
     try {
       await this.rescan(`bound from the floor — ${channel}/${agent}`);
@@ -1404,27 +906,14 @@ class Host {
       // Asked to open nothing, a released folder's window is still closed:
       // left running it goes on talking to the instance it was released
       // from. Said on the desk if it cannot be, since that is then the state.
-      if (leaving && pane) {
-        const shut = await W.closeWindow(desk.cwd);
-        if (shut.ok) log(`${channel}/${agent}: closed the window that was open under ${leaving}`);
-        else this.emit({ type: 'error', channel, agent, message: `released from ${leaving} and bound here, but its window could not be closed: ${shut.error}. Until it is closed it still talks to ${leaving}.` }, true);
-      }
       return undefined;
     }
     if (fresh) {
       await this.reopen(desk, { sessionId: null });
       return undefined;
     }
-    // Same tail as `open`: a window, its startup questions surfaced on the
-    // floor rather than answered here, and any key pressed on the operator's
-    // behalf said out loud.
-    const r = await W.open(desk.where, { resume: desk.sessionId ?? desk.lastSessionId });
-    if (!r.ok) return this.emit({ type: 'error', channel, agent, message: r.error }, true);
-    if (r.created) {
-      const up = await W.waitReady(desk.where, { pid: r.pid, target: r.target });
-      for (const a of up.answered ?? []) log(`${channel}/${agent}: answered the ${a.name} question with "${a.chose}"`);
-      if (!up.ok) this.emit({ type: 'error', channel, agent, message: up.error, code: up.code ?? null }, true);
-    }
+    const r = await desk.ensure({ resume: desk.sessionId ?? desk.lastSessionId });
+    if (!r.ok) this.emit({ type: 'error', channel, agent, message: r.error, code: r.code ?? null }, true);
     return undefined;
   }
 
@@ -1480,7 +969,7 @@ class Host {
     // The intent before the rescan makes the desk, as in bind(): a watch tick
     // between the two must not find the desk with nothing to wait for.
     const since = Date.now();
-    this.intents.set(key, { sessionId, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS });
+    this.intents.set(key, { sessionId, pid: null, since, until: since + 45_000 + WATCH_MS });
     try {
       await this.rescan(`a new desk from the floor — ${channel}/${agent}`);
     } finally {
@@ -1512,10 +1001,9 @@ class Host {
       warn(`${desk.label}: ${message}`);
       return this.emit({ type: 'error', channel, agent, code: 'unbind_failed', message }, true);
     };
-    if (await W.paneFor(desk.where)) {
-      const shut = await W.closeWindow(desk.where);
-      if (!shut.ok) return fail(`could not close its window: ${shut.error}`);
-      log(`${desk.label}: closed its window`);
+    if (desk.running) {
+      await desk.stop();
+      log(`${desk.label}: ended its Claude Code`);
     }
     // A seat's binding is the host's own record and nothing of the folder's
     // (host/seats.js): the folder's own desk, and its other seats, stay.
@@ -1529,6 +1017,9 @@ class Host {
     const rm = await M.mcpRemove(desk.cwd);
     if (!rm.ok) return fail(`could not remove the local-scope entry in ${desk.cwd}: ${rm.error}`);
     if (rm.removed) log(`${desk.label}: removed the local-scope entry in ${desk.cwd}`);
+    const unallowed = M.unallowBoardTools(desk.cwd, BOARD_TOOLS_RECORD);
+    if (unallowed.removed) log(`${desk.label}: took the board's tools rule out of ${unallowed.file}`);
+    else if (!unallowed.ok) warn(`${desk.label}: ${unallowed.error}`);
     const dropped = M.dropProjectEntry(desk.cwd, { origin: originOf(this.cfg.url), channel, agent });
     if (!dropped.ok) return fail(`left ${desk.cwd}/.mcp.json alone: ${dropped.error}`);
     if (dropped.removed.length) log(`${desk.label}: removed ${dropped.removed.join(', ')} from ${desk.cwd}/.mcp.json`);
@@ -1564,36 +1055,34 @@ class Host {
       desk.intent = null;
       return this.emit({ type: 'error', channel, agent, code, message }, true);
     };
-    const at = await W.busyAt(desk.where);
-    if (at.pane && at.busy) return fail(`not reopened — the window is still working: ${at.foot}`);
-    if (at.pane) {
-      const shut = await W.closeWindow(desk.where);
-      if (!shut.ok) return fail(`could not close its window: ${shut.error}`);
-      log(`${desk.label}: closed its window to reopen on ${sessionId ?? 'a new conversation'}`);
+    if (desk.proc?.working) return fail('not reopened — its Claude Code is in the middle of a turn');
+    if (desk.running) {
+      await desk.stop();
+      log(`${desk.label}: ended its Claude Code to reopen on ${sessionId ?? 'a new conversation'}`);
     }
-    const since = Date.now();
-    // Held here as well as on the desk: the watch loop runs beside this and
-    // lets the intent go the moment a live session matches it, which for a
-    // known id can be inside the awaits below (seen in the release gate,
-    // 2026-11-20: a reopen after a sign-in threw on `desk.intent.pid`).
-    // Written through this, a settled intent takes the pid harmlessly.
-    const intent = { sessionId, pid: null, since, until: since + W.READY_TIMEOUT_MS + WATCH_MS };
-    desk.intent = intent;
-    await desk.follow(sessionId, known ? 'end' : 'tail');
-    const r = await W.open(desk.where, { resume: sessionId });
-    if (!r.ok) return fail(r.error);
-    if (r.note) desk.told(r.note, r.resumed ?? sessionId);
-    if (r.resumed && r.resumed !== sessionId) {
-      // resumable() found the chosen id gone from disk and opened the
-      // folder's newest conversation instead; follow that one, from its tail.
-      intent.sessionId = r.resumed;
-      await desk.follow(r.resumed, 'tail');
+    // The conversation asked for, checked against the disk first, as a
+    // resume always was (resumable): one never written (a pin with no
+    // transcript, a conversation deleted) falls back to the folder's newest
+    // that no seat runs, and a seat starts a new one. Said on the desk.
+    // Handed straight to --resume, a missing id is a Claude Code that exits
+    // on its first line (the seats suite, 2026-11-22).
+    if (sessionId) {
+      const pick = await W.resumable(desk.where, sessionId, { seatPids: this.seatPids() });
+      if (pick.note) desk.told(pick.note, pick.id ?? sessionId);
+      sessionId = pick.id;
     }
-    intent.pid = r.pid;
-    log(`${desk.label}: reopened on ${r.resumed ?? 'a new conversation'} (${r.target})`);
-    const up = await W.waitReady(desk.where, { pid: r.pid, target: r.target });
-    for (const a of up.answered ?? []) log(`${desk.label}: answered the ${a.name} question with "${a.chose}"`);
-    if (!up.ok) this.emit({ type: 'error', channel, agent, message: up.error, code: up.code ?? null }, true);
+    const before = { last: desk.lastSessionId, offset: desk.offset };
+    if (sessionId) await desk.follow(sessionId, known ? 'end' : 'tail');
+    else { desk.lastSessionId = null; desk.offset = 0; }
+    const r = await desk.ensure(sessionId ? { resume: sessionId } : { fresh: true });
+    if (!r.ok) {
+      // Refused (another app holds that conversation): the desk is not on
+      // it, so it does not relay it either.
+      desk.lastSessionId = before.last;
+      desk.offset = before.offset;
+      return fail(r.error);
+    }
+    log(`${desk.label}: reopened on ${sessionId ?? 'a new conversation'}`);
     return undefined;
   }
 
@@ -1911,7 +1400,7 @@ class Host {
    * could not be had leaves the last one standing.
    */
   async checkAuth(why, { register = true, was = this.signedOut() } = {}) {
-    const st = await A.signedIn({ shell: await W.windowShell() });
+    const st = await A.signedIn({ shell: process.platform === 'win32' ? null : W.shellFor() });
     if (st !== null) this.auth.status = st;
     const now = this.signedOut();
     if (now !== was) {
@@ -1974,7 +1463,7 @@ class Host {
       return;
     }
     this.auth.said = false;
-    const st = await A.signedIn({ shell: await W.windowShell() });
+    const st = await A.signedIn({ shell: process.platform === 'win32' ? null : W.shellFor() });
     if (st !== null) this.auth.status = st;
     if (this.signedOut()) {
       await this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'signin_failed', message: 'the sign-in ended, and Claude Code still says it is signed out here. Press Sign in to try again.' }, true);
@@ -1989,75 +1478,18 @@ class Host {
   }
 
   /**
-   * A window Claude Code has no record of, reopened on its conversation, or
-   * said on its desk when the window that reopen made has none either
-   * (window.js, "a window Claude Code has no record of"). On the host's
-   * line, like the reopen after a sign-in: it closes a window, and nothing
-   * else may be typing into it meanwhile. Everything is read again here,
-   * since up to a poll has passed since the watch loop looked.
+   * After a sign-in, each desk whose Claude Code is running is started again
+   * on its conversation: a process started signed out is not known to take
+   * a sign-in made by another (not measured: it needs a real account), and a
+   * new process reads the credentials as it starts. Never mid-turn: a
+   * signed-out process cannot be working.
    */
-  healUnregistered(desk, pid, verdict) {
-    this.later.push(async () => {
-      const { channel, agent } = desk;
-      const pane = await W.paneFor(desk.where);
-      if (!pane || pane.pid !== pid) return;
-      const known = await W.roster();
-      // A roster that could not be read says nothing about this window: its
-      // sessions are an empty list then, which reads here as "no record".
-      // Leave the window, and count its idle time again from the next look.
-      if (!known.ok) { desk.unreg = null; return; }
-      if ((known.sessions ?? []).some((x) => x.pid === pid)) return;
-      // A Claude Code under the window's shell is recorded under its own pid
-      // (F3): the window has a record, and a person's conversation is in it.
-      // The watch asked the same before handing the window here; this is the
-      // second look, against the roster read again on the host's line. Each
-      // covers the other, so a mutant taking out either alone survives by
-      // design: the proof is the one on W.runsUnder, which both call
-      // (mutants-0-14-5.suite.json).
-      if (await W.runsUnder(pid, (known.sessions ?? []).map((x) => x.pid))) { desk.unreg = null; return; }
-      if (verdict === 'say') {
-        warn(`${desk.label}: the reopened window has no session record either; leaving it`);
-        await this.emit({
-          type: 'error', channel, agent, code: 'unregistered',
-          message: 'this desk\'s window is running, but Claude Code has no record of its session, so the floor cannot read what it says or confirm what it is sent. The host reopened it once and the new window is the same, so nothing more was done.',
-        }, true);
-        return;
-      }
-      if (!(await W.standingIdleAt(pane.target))) { desk.unreg = null; return; }
-      const id = await W.spokenSince(desk.where, await W.startedAt(pid));
-      log(`${desk.label}: its window (pid ${pid}) is running with no session record; reopening it on ${id ?? 'a new conversation'}`);
-      await this.reopen(desk, { sessionId: id, known: false });
-      const now = await W.paneFor(desk.where);
-      // The window reopen made: one that has no record either is said, not reopened again.
-      desk.unregTried = now && now.pid !== pid ? now.pid : pid;
-      if (now && now.pid !== pid) {
-        desk.told(`Claude Code had no record of this desk's window, so the floor could not read it; the host reopened it on ${id ? 'the same conversation' : 'a new conversation, as nothing had been said in it'}`, id);
-      }
-    });
-  }
-
-  /** Each window that still says it is signed out, reopened on its conversation (see signIn). */
   async reopenSignedOut() {
     for (const desk of this.desks.values()) {
-      let at = await W.signedOutAt(desk.where);
-      // A window redraws its status rows when it has something to redraw
-      // for; give one that took the sign-in a moment to say so.
-      for (let i = 0; i < 6 && at.signedOut; i++) {
-        await sleep(500);
-        at = await W.signedOutAt(desk.where);
-      }
-      if (!at.signedOut) continue;
+      if (!desk.running || desk.proc.working) continue;
       const id = desk.sessionId ?? desk.lastSessionId ?? null;
-      // A reopen closes the window, and a draft in its box would go with it
-      // (F2's question, asked of every window the host acts on unasked).
-      const pane = await W.paneFor(desk.where);
-      if (pane && await W.draftAt(pane.target)) {
-        desk.told('its window still says Claude Code is signed out, but somebody has typed into its message box, so the host left it as it is', id);
-        continue;
-      }
-      log(`${desk.label}: its window still says it is signed out; reopening it on ${id ?? 'a new conversation'}`);
       await this.reopen(desk, { sessionId: id, known: true });
-      desk.told('its window still said Claude Code was signed out, so the host reopened it on the same conversation', id);
+      desk.told('started its Claude Code again on the same conversation, so it reads the new sign-in', id);
     }
   }
 
@@ -2123,6 +1555,15 @@ class Host {
     switch (item.kind) {
       case 'chat': {
         let text = typeof item.payload?.text === 'string' ? item.payload.text : '';
+        // A wake from the floor (wakeDue in src/floor.js): said on the desk
+        // with what it is for, so the operator can see why it started.
+        const woken = item.payload?.woken;
+        if (woken && typeof woken === 'object') {
+          const parts = [];
+          if (Number(woken.unread)) parts.push(`${Number(woken.unread)} unread message${Number(woken.unread) === 1 ? '' : 's'}`);
+          if (Number(woken.tasks)) parts.push(`${Number(woken.tasks)} task${Number(woken.tasks) === 1 ? '' : 's'}`);
+          desk.told(`woken by the floor: ${parts.join(', ') || 'work waiting'}, and no Claude Code running here`);
+        }
         // Attachments (issue #31): each fetched from the board onto this
         // machine, outside the repo, and named in the message by its path
         // (host/uploads.js). Awaited, on this line, because the message must
@@ -2155,255 +1596,71 @@ class Host {
         break;
       }
       case 'permission': {
-        // An answer is only worth giving while the question is still on screen.
-        //
-        // A decision queued when no window could be reached would otherwise sit
-        // there and be delivered later, into whatever window exists by then —
-        // as a bare keystroke, to a prompt that is no longer asking. That is how
-        // a row of 1s ended up submitted as somebody's message.
-        // A startup question is not a menu: its rows have no numbers and the
-        // cursor starts somewhere dangerous, so it has its own presser.
-        const isStartup = String(item.payload?.request_id ?? '').startsWith('startup:');
-        // See W.answerIsStale for why a startup answer is exempt.
-        // Old is not the same as gone, as for a form below (QA, PR #49
-        // finding 2): a meeting room's message to several desks on one host
-        // can hold a decision in this line past the TTL. It is pressed when
-        // the window still shows the prompt it was for — its choices and its
-        // command (askedStill) — and dropped when it does not.
-        if (W.answerIsStale(item.payload, ANSWER_TTL_MS)) {
-          const age = Date.now() - (Number(item.payload?.queued_at) || 0);
-          if (!(await W.stillAsking(desk.where, item.payload?.asks))) {
-            warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old permission answer — its prompt is no longer on screen`);
-            break;
-          }
-          log(`${desk.label}: a ${Math.round(age / 1000)}s-old permission answer, and its prompt is still on screen — answering it`);
-        }
-        const r = isStartup
-          ? await desk.answerStartup(item.payload?.decision)
-          : await desk.answer(item.payload?.decision, item.payload?.reason ?? null);
+        // The operator's answer to something the desk's Claude Code asked,
+        // as data: a row's number, or allow, deny, cancel (desk.js).
+        const r = await desk.answerPermission(item.payload?.request_id, item.payload?.decision, item.payload?.reason ?? null);
         if (!r.ok) {
-          warn(`${desk.label}: could not answer the prompt — ${r.error}`);
-          // Told to the board, not only to this log. The floor now clears a
-          // desk's prompt the moment the operator decides, on the strength of
-          // this keystroke being sent; if it was not sent, the window is still
-          // sitting at a question nobody can see. Reporting it raises the desk
-          // again with the reason, which is the only thing that keeps the early
-          // clear honest.
-          // What was observed, and which decision it was: the desk re-poses on
-          // this, and "your approve did not land, the window still reads X" is
-          // something a person can act on where "failed" is not. A startup
-          // question is answered by a row number, never approve/deny, so it
-          // gets its own wording and its own code — `startup_answer_failed` —
-          // so the floor's re-offer (src/floor.js) fires on it too, rather than
-          // leaving the desk at a bare error for up to a minute.
-          this.emit({
-            type: 'error', channel: desk.channel, agent: desk.agent,
-            code: isStartup ? 'startup_answer_failed' : null,
-            message: isStartup
-              ? `your choice did not reach the window — ${r.error}`
-              : `your ${item.payload?.decision === 'deny' ? 'deny' : 'approve'} did not land — ${r.error}`,
-          }, true);
+          warn(`${desk.label}: could not answer — ${r.error}`);
+          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: r.code === 'stale_request' ? 'stale_request' : null, message: `your answer did not reach Claude Code — ${r.error}` }, true);
         }
         break;
       }
-      // What the window is offering. Asked for when a prompt opens rather than
-      // read on a timer: one capture per prompt instead of one per desk per
-      // poll, and it is only ever wanted at that moment.
-      case 'prompt': {
-        // Two shapes arrive here. A permission prompt is one flat menu; an
-        // AskUserQuestion is a form with a tab per question, and only one of
-        // them is on screen at a time. The tab strip is what tells them apart,
-        // and reading a form costs a walk, so it is only done when there is one.
-        const form = await W.readQuestions(desk.where);
-        const isForm = form.ok && form.questions?.length;
-        const r = isForm ? form : await W.readPrompt(desk.where);
-        // Said out loud, because a form that never reaches the panel is
-        // indistinguishable from one that was never read — and the panel falls
-        // back to Approve/Deny, which looks like a working answer to the wrong
-        // question.
-        // A form that was there and could not be read whole is said here too:
-        // "read 5 option(s)" was the only trace of a question the floor then
-        // drew as Approve / Deny (issue #7). Not for `not_a_form`, which is
-        // every ordinary permission prompt.
-        log(`${desk.channel}/${desk.agent}: read ${isForm
-          ? `a form of ${form.questions.length} question(s): ${form.questions.map((q) => `${q.tab_title ?? '?'}[${q.kind},${(q.options ?? []).length}]`).join(' ')}`
-          : `${(r.options ?? []).length} option(s)${r.ok ? '' : ` — ${r.error}`}${form.code === 'form_cut' ? ` — ${form.error}` : ''}`}`);
-        this.emit({
-          type: 'prompt', channel: desk.channel, agent: desk.agent,
-          request_id: item.payload?.request_id ?? null,
-          options: isForm ? [] : (r.ok ? r.options : []),
-          // The words above a plain menu, when the pane still shows them.
-          asked: isForm ? null : (r.ok ? r.asked ?? null : null),
-          questions: isForm ? form.questions : null,
-          tabs: isForm ? form.tabs : null,
-          // Why there is no form, in the reader's own words. The board knows
-          // which tool is asking and this host does not: for a permission
-          // prompt "no form header on the pane" is the ordinary case and goes
-          // unused, for an AskUserQuestion it is what the floor says when it
-          // has to say it could not read the question.
-          form_error: isForm ? null : (form.error ?? null),
-          reason: r.ok ? null : r.error,
-          // The prose above is for the operator; this is for the board. "There
-          // is no question on this pane" and "there is a question I could not
-          // parse" need opposite handling, and only one of them should ever put
-          // guess buttons in front of somebody.
-          code: r.ok ? null : (r.code ?? null),
-        }, true);
+      case 'prompt':
+        // The board asking what a prompt offers: the host said it whole when
+        // Claude Code asked, and says it again.
+        for (const ev of desk.standingAsks()) this.emit(ev, true);
         break;
-      }
-      // A whole form, played as one sequence. The board worked out the keys from
-      // the same reading of the pane the panel was drawn from; the host's job is
-      // to press them and to stop the moment the window is no longer asking.
       case 'answer': {
-        const steps = Array.isArray(item.payload?.steps) ? item.payload.steps : [];
-        const age = Date.now() - (Number(item.payload?.queued_at) || 0);
-        // Old is not the same as gone. An item ahead of this one in run()
-        // can take a minute (it did, 2026-11-05: an answer dropped as "long
-        // gone" with its question on screen the whole time). So an old answer
-        // is still pressed when the window shows the question it was written
-        // for (askedStill), and dropped only when it does not.
-        if (item.payload?.queued_at && age > ANSWER_TTL_MS) {
-          if (!(await W.stillAsking(desk.where, item.payload?.asks))) {
-            warn(`${desk.label}: dropping a ${Math.round(age / 1000)}s-old answer — its question is no longer on screen`);
-            break;
-          }
-          log(`${desk.label}: a ${Math.round(age / 1000)}s-old answer, and its question is still on screen — answering it`);
-        }
-        const r = await W.answerQuestion(desk.where, steps);
-        if (!r.ok) {
-          warn(`${desk.label}: could not answer the question — ${r.error}`);
-          // Anything short of the form being gone from the pane arrives here
-          // (issue #7): answerQuestion no longer returns ok for a form left on
-          // its review screen or standing anywhere else, so this is the only
-          // thing said about one, and `answer_failed` is what raises the desk
-          // again with the form.
-          //
-          // Two wordings, because they are different facts. A form still on
-          // the pane has, or may have, the operator's choices in it — "did not
-          // land" was said about exactly that once, about answers that had
-          // landed. What is known is that it was not submitted.
-          // A preview question the host could not put its cursor on, or
-          // that did not take Enter, is the same fact: the form is standing
-          // with nothing chosen on that question (selectRow, host/window.js).
-          const standing = ['still_asking', 'not_confirmed', 'not_on_row', 'not_selected'].includes(r.code);
-          this.emit({
-            type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed',
-            message: `${standing ? 'the form was not submitted' : 'your answers did not land'} — ${r.error}`,
-          }, true);
-          break;
-        }
-        // Success used to log nothing, which is exactly the case that needed a
-        // record: a run that played every step and still left the confirmation
-        // standing looked identical, from here, to one that worked. The step
-        // tail is what says which.
-        // Counted apart, because they are not the same thing: the script's steps
-        // are what the operator chose, the confirm presses are the host getting
-        // the window to take them. "22 of 21" was the first version of this line.
-        const confirms = r.done.filter((d) => d === 'Enter(confirm)').length;
-        // A form taken by its free-text row was not answered — it was withdrawn,
-        // and every answer goes back as one message in words, queued behind
-        // this by the board (`clarifyMessage` in src/floor.js). Same success,
-        // different event, and saying "answered" for it is how the operator
-        // comes to expect a reply to choices the form never delivered.
-        if (steps.some((st) => st.clarify)) {
-          log(`${desk.label}: withdrew the form; every answer follows as one message in words` +
-            ` — ${r.done.slice(-3).join(' ')}`);
-          break;
-        }
-        log(`${desk.label}: answered with ${r.done.length - confirms} of ${steps.length} step(s)` +
-          `${confirms ? `, confirmed after ${confirms} press${confirms === 1 ? '' : 'es'}` : ''}` +
-          `${r.closed ? ' (the form was gone before the end)' : ''} — ${r.done.slice(-4).join(' ')}`);
+        const r = desk.answerQuestion(item.payload?.request_id, item.payload?.answers ?? null);
+        if (!r.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'answer_failed', message: `your answers did not reach Claude Code — ${r.error}` }, true);
         break;
       }
-      // The floor could not read what the window is asking, and the operator
-      // chose an answer anyway rather than be left stuck. Two keys, and the
-      // window is the only thing that can say whether either was taken.
-      case 'press': {
-        const key = PRESS_KEY[String(item.payload?.choice ?? '')];
-        if (!key) {
-          warn(`${desk.label}: not pressing anything for "${item.payload?.choice}" — only yes and no are keys here`);
-          break;
-        }
-        const r = await W.pressBlind(desk.where, key);
-        if (!r.ok) {
-          warn(`${desk.label}: could not press ${key} — ${r.error}`);
-          this.emit({
-            type: 'error', channel: desk.channel, agent: desk.agent, code: 'press_failed',
-            message: `that did not land — ${r.error}`,
-          }, true);
-          break;
-        }
-        log(`${desk.label}: pressed ${key} at a prompt nothing could read`);
+      case 'press':
+        // From a board that still offers a blind key at a prompt it could
+        // not read. Nothing is unreadable now: every question arrives as data.
+        this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'press_failed', message: 'nothing was pressed: what Claude Code asks now reaches the floor as data, to be answered there' }, true);
         break;
-      }
       case 'interrupt':
         await desk.interrupt();
         break;
       case 'signin':
         // Waits on a person in a browser for minutes, so it is started and
-        // not awaited: every desk's messages go on meanwhile (CLAUDE.md, "Work
-        // that waits on a person … is started and not awaited").
+        // not awaited: every desk's messages go on meanwhile.
         this.signIn(desk).catch((err) => warn(`${desk.label}: sign-in: ${err.message}`));
         break;
       case 'reconnect':
         await desk.reconnect();
         break;
       case 'handback': {
-        // Give the conversation to the editor: close ours first, then open it
-        // there. The order matters — the reverse leaves two live copies.
-        //
-        // Not a seat's. An editor's chat in this folder loads the folder's
-        // binding, so the conversation would carry on there as the folder's
-        // own desk, on another floor, under this desk's name on none
-        // (host/seats.js). Refused before the window is closed.
+        // Give the conversation to the editor: end ours first, then open it
+        // there. The order matters: the reverse leaves two live copies.
+        // Not a seat's: an editor in this folder loads the folder's binding,
+        // so the conversation would carry on as the folder's own desk.
         if (desk.seat) {
-          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'seat_no_editor', message: 'this desk shares its folder with another desk, and an editor opened there is that desk, not this one — so this conversation stays in the floor\'s window. Open in tmux reaches it.' }, true);
+          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'seat_no_editor', message: 'this desk shares its folder with another desk, and an editor opened there is that desk, not this one, so this conversation stays on the floor.' }, true);
           break;
         }
-        const shut = await W.closeWindow(desk.where);
-        if (!shut.ok) {
-          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: shut.error }, true);
-          break;
-        }
-        const opened = await W.openInEditor({ sessionId: desk.sessionId ?? desk.lastSessionId });
-        if (!opened.ok) {
-          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true);
-        }
+        const id = desk.sessionId ?? desk.lastSessionId;
+        await desk.stop();
+        desk.handedOffAt = Date.now();
+        const opened = await W.openInEditor({ sessionId: id });
+        if (!opened.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true);
         break;
       }
       case 'open': {
-        const id = await desk.resumeId();
-        const r = await W.open(desk.where, { resume: id });
-        if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
-        if (r.note) desk.told(r.note, r.resumed ?? id);
-        // Wait for it to actually be running, for two reasons: a window that
-        // dies on its first line should say so here rather than look open, and
-        // a freshly created window holds its pane after exit until something
-        // confirms it started — which is what waitReady releases.
-        if (r.created) {
-          const up = await W.waitReady(desk.where, { pid: r.pid, target: r.target });
-          // Say what was pressed on the operator's behalf. Answering a question
-          // for someone and not telling them is how a system stops being
-          // predictable — and this is the log they will read when a window came
-          // up in a mode they did not choose.
-          for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
-          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error, code: up.code ?? null }, true);
-        }
+        const r = await desk.ensure();
+        if (!r.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error, code: r.code ?? null }, true);
         break;
       }
       case 'unbind':
         await this.unbind(desk);
         break;
       case 'sessions': {
-        // The picker's list, answered as an event rather than a reply: the
-        // work loop is one-way, and the board keeps the last list it heard.
-        const rows = await W.sessionsIn(desk.cwd, { limit: SESSIONS_LIMIT });
+        const rows = await W.sessionsIn(desk.cwd, { limit: SESSIONS_LIMIT, ours: this.ourPids() });
         this.emit({ type: 'sessions', channel: desk.channel, agent: desk.agent, at: new Date().toISOString(), rows }, true);
         break;
       }
       case 'read':
-        // Not awaited: a long conversation is seconds of reading and posting,
-        // and this loop is the one that delivers messages.
         this.readWhole(desk, item.payload).catch((err) => warn(`${desk.label}: could not read ${item.payload?.session_id} — ${err.message}`));
         break;
       case 'reopen':
@@ -2412,47 +1669,22 @@ class Host {
           known: item.payload?.known === true,
         });
         break;
-      case 'attach': {
-        // The escape hatch, and the only work item that changes nothing. It
-        // opens a terminal in front of the operator; the window keeps running
-        // and the floor keeps driving it, because tmux allows both.
-        const r = await W.attachTerminal();
-        if (!r.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: r.error }, true); break; }
-        // Said on the machine that did it, because this is the one action whose
-        // result appears somewhere the board cannot see — a window on a desktop.
-        log(`${desk.channel}/${desk.agent}: opened ${r.app} attached with \`${r.cmd}\``);
-        break;
-      }
+      case 'attach':
       case 'claude': {
-        // "Open in Claude": put this desk's real window in front of the
-        // operator, opening one first if the floor has none. Not a seat change
-        // — the window stays here and the floor keeps driving it; the operator
-        // gets a terminal sitting on it, which IS claude CLI under their
-        // fingers. That is the whole feature: the handoff VS Code needs does
-        // not exist in this direction, because the floor's window already is
-        // the CLI.
-        const id = await desk.resumeId();
-        const opened = await W.open(desk.where, { resume: id });
-        if (!opened.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: opened.error }, true); break; }
-        if (opened.note) desk.told(opened.note, opened.resumed ?? id);
-        // Attach BEFORE waiting for readiness. Readiness gates automated
-        // typing, not eyeballs: a window stuck on the trust question is
-        // exactly what the operator should be looking at, and waitReady's own
-        // timeout advice is "attach and reply" — here they already have.
-        const t = await W.attachTerminal({ target: opened.target });
-        if (!t.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: t.error }, true); break; }
-        log(`${desk.channel}/${desk.agent}: opened ${t.app} on ${opened.target} with \`${t.cmd}\``);
-        if (opened.created) {
-          // Same tail as `open`: settle the startup questions the host may
-          // answer, release remain-on-exit, and log any key pressed on the
-          // operator's behalf — they are watching this pane now, so a press
-          // they did not make must be accounted for. answerKnown reads the
-          // screen back before committing, so if the operator answers first
-          // it gives up rather than double-keying.
-          const up = await W.waitReady(desk.where, { pid: opened.pid, target: opened.target });
-          for (const a of up.answered ?? []) log(`${desk.channel}/${desk.agent}: answered the ${a.name} question with "${a.chose}"`);
-          if (!up.ok) this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: up.error, code: up.code ?? null }, true);
+        // "Open in Claude": the conversation handed to a terminal of the
+        // operator's own. The desk's Claude Code ends first, then the
+        // terminal resumes the conversation; the floor follows what is said
+        // there, and Open on the floor brings it back once that one exits.
+        if (desk.seat) {
+          this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'seat_no_editor', message: 'this desk shares its folder with another desk, and a terminal opened there is that desk, not this one, so this conversation stays on the floor.' }, true);
+          break;
         }
+        const id = desk.sessionId ?? await desk.resumeId();
+        await desk.stop();
+        desk.handedOffAt = Date.now();
+        const t = await W.openInTerminal({ cwd: desk.cwd, sessionId: id });
+        if (!t.ok) { this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, message: t.error }, true); break; }
+        desk.told(`handed to ${t.app} (\`${t.cmd}\`). What is said there reaches the floor; Open on the floor brings it back once you exit there.`, id);
         break;
       }
       default:
@@ -2505,6 +1737,9 @@ class Host {
   async watchLoop() {
     while (!this.stopping) {
       try { await this.watch(); } catch (err) { warn(`watch: ${err.message}`); }
+      // An earlier host's window that was mid-turn at the start: looked at
+      // each tick until its turn ends, then ended (sweepLegacy).
+      if (this.legacyWaiting) { try { await this.sweepLegacy(); } catch (err) { warn(`legacy windows: ${err.message}`); } }
       if (this.stopping) break;
       await sleep(WATCH_MS);
     }
@@ -2526,15 +1761,13 @@ class Host {
           await this.checkAuth('heartbeat', { register: false });
           await this.register();
           lastRegister = Date.now();
+          this.registered = true;
+          for (const say of (this.afterRegister ?? []).splice(0)) say();
           // Attachments past Claude Code's own cleanupPeriodDays (host/uploads.js).
           try {
             const gone = UP.sweepUploads();
             if (gone) log(`removed ${gone} attachment${gone === 1 ? '' : 's'} older than ${UP.retentionDays()} days`);
           } catch (err) { warn(`attachment sweep: ${err.message}`); }
-          // On the line, so no window is being typed into while its server
-          // is replaced. Quiet unless a window's folder has become unreadable.
-          const renewed = await W.checkServer().catch((err) => ({ ok: false, error: err.message }));
-          if (renewed && !renewed.ok) warn(renewed.error);
         }
         // The relay starts only after the first registration has landed, and
         // that order is not tidiness. A desk's first watch tick reports which
@@ -2565,11 +1798,6 @@ class Host {
         while (this.later.length && !this.stopping) {
           const job = this.later.shift();
           await job().catch((err) => warn(`a job left for the host's line: ${err.message}`));
-        }
-        // What desks are owed because somebody was typing (Desk.payOwed).
-        for (const desk of this.desks.values()) {
-          if (this.stopping) break;
-          await desk.payOwed().catch((err) => warn(`${desk.label}: what it was owed: ${err.message}`));
         }
         this.inHand = (reply.work ?? []).slice();
         while (this.inHand.length && !this.stopping) {
@@ -2617,10 +1845,8 @@ class Host {
     if (this.stopping) return;
     this.stopping = true;
     log('shutting down');
-    // The windows are left running. They are Claude Code sessions in tmux, and
-    // they belong to the person at this machine, not to this process.
-    // A folder dialog is the opposite: it is this process's question, and
-    // with nobody left to hear the answer it comes off the screen.
+    // A folder dialog is this process's question, and with nobody left to
+    // hear the answer it comes off the screen.
     this.picking?.close();
     try { this.searching?.child.kill('SIGTERM'); } catch { /* already gone */ }
     // The item in hand is finished, up to STOP_DRAIN_MS: a message half
@@ -2639,6 +1865,17 @@ class Host {
         if (release.length) log(`handed ${release.length} item${release.length === 1 ? '' : 's'} not yet started back to the board`);
       } catch (err) { warn(`release not delivered (${err.message}); the next run will sort what this one took`); }
     }
+    // Each desk's Claude Code is this process's child now (host/desk.js):
+    // its input is closed, so a turn running finishes and the process
+    // leaves, and one that has not left by the grace is ended. The
+    // conversation is on disk; the next run of the host resumes it at the
+    // desk's next message.
+    await Promise.all([...this.desks.values()].map((d) => d.stop().catch(() => {})));
+    // One last read of every desk's transcript, so what was written between
+    // the relay's last tick and the stop reaches the floor (pc-developer,
+    // measured on Windows: a reply finished 234 ms before a stop was never
+    // relayed, and the next run joins the transcript at its end).
+    try { await this.watch(); } catch (err) { warn(`last read of the transcripts: ${err.message}`); }
     await this.flush();
     // Best effort — the board reads a host whose heartbeat has stopped as
     // gone anyway (HOST_STALE_SECONDS) — but said, like every other request
@@ -2651,21 +1888,6 @@ class Host {
 
 async function main() {
   const cfg = loadConfig();
-
-  if (!(await W.tmuxAvailable())) {
-    error('tmux is not installed. The floor drives Claude Code through it — install it with `brew install tmux` (or your package manager) and start this again.');
-    process.exit(1);
-  }
-  // A tmux server already running keeps the environment it was started
-  // with, which before 0.14.4 was a host's own settings (windowEnv in
-  // window.js). Taken out now, so windows opened from here on are a
-  // person's whatever started the server. Names only in the log.
-  {
-    const env = await W.cleanServerEnv().catch(() => ({ unset: [], set: [] }));
-    if (env.unset.length || env.set.length) {
-      log(`tmux server environment: ${[env.unset.length ? `unset ${env.unset.join(', ')}` : '', env.set.length ? `set ${env.set.join(', ')} where it had none` : ''].filter(Boolean).join('; ')} — windows opened from now get a person's environment, not this host's settings`);
-    }
-  }
 
   const { desks: found, folders } = discover(cfg.roots);
   if (!found.length) {
@@ -2735,7 +1957,7 @@ async function main() {
     if (cfg.token) {
       log(`shared secret: from ${cfg.tokenSource} (${placeholders ?? 'no desk here carries one'})`);
     } else {
-      warn(`no shared secret: ${placeholders ?? 'no desk here carries a key'}, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ./host/install.sh --token <the ORCH_AUTH_TOKEN from the server's .env> <your projects dir>`);
+      warn(`no shared secret: ${placeholders ?? 'no desk here carries a key'}, ORCH_AUTH_TOKEN is unset and ${CONFIG_FILE} has no "token". A board that enforces one will refuse this host, and the floor cannot bind a desk from here. Give it one with:  ${INSTALL_TOKEN_LINE}`);
     }
   }
   W.useKey(cfg.token);
@@ -2751,18 +1973,35 @@ async function main() {
   // otherwise only be found out at the first click (host/dialog.js).
   if (D.dialogBackend() === 'parent' && !D.parentPort()) warn('ORCH_FOLDER_DIALOG=parent, but nothing started this process with a message port — this host has no folder dialog');
 
+  // Desks an earlier run of this host left running when it died without its
+  // stop (a kill, a crash): ended before anything here resumes their
+  // conversations beside them (task 340; W.endLeftoverDesks).
+  const leftovers = await W.endLeftoverDesks(W.deskPidsFile(cfg.hostId));
+  for (const l of leftovers) log(`ended a desk's Claude Code an earlier run of this host left running (pid ${l.pid}${l.cwd ? `, ${l.cwd}` : ''}${l.session ? `, conversation ${l.session}` : ''})`);
+
   const host = new Host(cfg);
   host.folders = folders;
   for (const d of mine) host.desks.set(`${d.channel}|${d.agent}`, new Desk(host, d));
+  // The tmux windows an earlier build (0.14.x) ran these desks in, ended so
+  // their conversations come to the floor instead of reading "held by an
+  // editor" behind a window nobody can see (W.endLegacyWindows, task 341).
+  // A window mid-turn is left to finish and looked at again by the watch.
+  await host.sweepLegacy({ deferTold: true });
 
-  log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · tmux ${W.tmuxSession} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
+  log(`${cfg.name} (${cfg.hostId}) → ${cfg.url} · ${mine.length} desk${mine.length === 1 ? '' : 's'}`);
   for (const d of mine) log(`  ${d.channel}/${d.agent}  ${d.cwd}  (${d.scope} scope)`);
-  log(`attach to any of them with:  tmux attach -t ${W.tmuxSession}`);
 
   let stopped = null;
   const stop = () => (stopped ??= host.stop().finally(() => process.exit(0)));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
+  // A host that exits on anything but its stop (an uncaught error, a fatal
+  // one in main) takes its desks with it rather than leaving each to finish
+  // its turn with nobody listening (task 340). A kill outright runs nothing
+  // here: the next run's endLeftoverDesks is for that.
+  process.on('exit', () => {
+    for (const d of host.desks.values()) { try { d.proc?.kill('SIGTERM', { sync: true }); } catch { /* gone */ } }
+  });
   // And when the process that started it says so, which is the only stop
   // Windows has: Task Scheduler's own is a kill with no signal (measured), so
   // host/supervise.mjs asks over the IPC channel and waits. Any parent may

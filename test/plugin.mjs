@@ -300,6 +300,16 @@ async function main() {
     await settle();
     eq(received.length, 0, 'a session that started outside every desk reports nothing, however deep in a desk\'s repo it is standing');
 
+    // ---- a subagent's hook says it is a subagent's ----
+    // Claude Code sets agent_id on a hook fired inside a subagent (2.1.330);
+    // the board must not read a subagent's tool call as the conversation
+    // answering its question.
+    received.length = 0;
+    await fire({ session_id: SID, hook_event_name: 'PreToolUse', cwd: `${FIX}/repo`, tool_name: 'Read', tool_input: { file_path: '/x' }, agent_id: 'a1b2c3' });
+    await fire({ session_id: SID, hook_event_name: 'PreToolUse', cwd: `${FIX}/repo`, tool_name: 'Read', tool_input: { file_path: '/y' } });
+    await settle();
+    eq(received.map((r) => r.body?.agent_id ?? null), ['a1b2c3', null], 'a subagent\'s hook carries its agent_id to the board, and the conversation\'s own carries none');
+
     // ---- a question's words travel with it ----
     received.length = 0;
     await fire({ session_id: SID, hook_event_name: 'PermissionRequest', cwd: `${FIX}/repo`, tool_name: 'AskUserQuestion',

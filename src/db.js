@@ -918,6 +918,14 @@ export function makeStore(db) {
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
     listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
+    // The tasks a desk has to do: open ones assigned to it and the ones it
+    // has claimed (wakeDue in src/floor.js).
+    wakeTasks: db.prepare(
+      `SELECT channel, CASE WHEN status = 'claimed' THEN COALESCE(claimed_by, assignee) ELSE assignee END AS agent, id
+         FROM tasks
+        WHERE status IN ('open', 'claimed')
+          AND (CASE WHEN status = 'claimed' THEN COALESCE(claimed_by, assignee) ELSE assignee END) IS NOT NULL`
+    ),
     channelFlag: db.prepare(`SELECT archived_at FROM channel_flags WHERE channel = ?`),
     setDeskHidden: db.prepare(
       `INSERT INTO desk_flags (channel, agent, hidden_at, hidden_by)
@@ -2178,6 +2186,7 @@ export function makeStore(db) {
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),
     listChannelFlags: () => q.listChannelFlags.all(),
+    wakeTasks: () => q.wakeTasks.all(),
     /** Only the desks currently hidden — a cleared flag is a row with nothing to say. */
     listDeskFlags: () => q.listDeskFlags.all(),
     isDeskHidden: (channel, agent) => !!q.deskHidden.get(channel, agent),
