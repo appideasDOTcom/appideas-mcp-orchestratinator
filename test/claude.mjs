@@ -279,7 +279,7 @@ try {
       JSON.stringify({ type: 'assistant', uuid: 's3', message: { model: 'claude-haiku-5-5', content: [{ type: 'text', text: 'real words' }] } }),
     ].join('\n') + '\n');
     eq((await W.readTranscript(synT)).turns.map((x) => `${x.role}${x.tool_name ? `/${x.tool_name}` : ''}:${x.text}`),
-      ['context/synthetic:No response requested.', 'error:Not logged in · Please run /login', 'assistant:real words'],
+      ['context/synthetic:No response requested.', 'error:Not logged in: Claude Code is signed out on this machine. Press Sign in on this desk to sign in again.', 'assistant:real words'],
       'a record Claude Code wrote itself is a quiet line, not the agent\'s words; an API error is still an error');
     // A Claude Code resuming a conversation, read off a process's command
     // line (task 348 F6): a terminal's, an npm install's, VS Code's; never a

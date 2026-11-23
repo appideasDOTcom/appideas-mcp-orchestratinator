@@ -1327,7 +1327,7 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
     // own words beside an error saying nothing. Its own role, so the desk
     // reads it as what it is.
     if (d.isApiErrorMessage) {
-      const text = textOf(content);
+      const text = signedOutText(textOf(content), d.error);
       if (text.trim()) turns.push({ role: 'error', text, at, uuid, ...(via ? { via } : {}) });
       continue;
     }
@@ -1387,6 +1387,21 @@ export async function readTranscript(path, { after = 0, via = null } = {}) {
 const SUBAGENT_META_GRACE_MS = Number(process.env.ORCH_SUBAGENT_META_GRACE_MS ?? 120_000);
 /** When each meta-less subagent transcript was first seen, by path. */
 const subagentFirstSeen = new Map();
+
+/**
+ * A turn that found the desk signed out, in the floor's words: what Claude
+ * Code observed ("Not logged in"), and the remedy the floor runs itself, the
+ * desk's Sign in. Claude Code's own line ends "Please run /login", a command
+ * nobody can type into a desk the host runs (costmo, 2026-11-23, on the app
+ * at b1a774a: the proof a user can sign in cannot be a command a user will
+ * not run). Measured on 2.1.330 signed out: an assistant record flagged
+ * isApiErrorMessage, `error: "authentication_failed"`, text "Not logged in ·
+ * Please run /login". The board says it the same way (src/floor.js).
+ */
+export const SIGNED_OUT_WORDS = 'Not logged in: Claude Code is signed out on this machine. Press Sign in on this desk to sign in again.';
+export function signedOutText(text, code = null) {
+  return code === 'authentication_failed' || /^\s*Not logged in\b/i.test(String(text ?? '')) ? SIGNED_OUT_WORDS : text;
+}
 
 /**
  * Whose ask this is, when a subagent asked: the description its caller gave

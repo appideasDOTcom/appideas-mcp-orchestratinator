@@ -33,6 +33,23 @@ import { windowEnv, shellFor } from './claude.js';
  * Run the probe. Returns { rows: [{ ok, what, saw }], version, fails, total }.
  * \`say\` receives each section title and row line as it goes.
  */
+/**
+ * The node that runs the probe's own MCP server. Not \`process.execPath\`
+ * under the desktop app: there it is Electron's helper binary, whose
+ * run-as-node fuse is off, so the server never started and Claude Code
+ * answered "Connection closed" for its reconnect (costmo's scratch app at
+ * b1a774a: the floor's banner read 31 of 32, a difference in this host, not
+ * in Claude Code). The Node the app carries, through the link it keeps
+ * beside the host (the plugin's hook uses the same link), else a \`node\` on
+ * PATH. \`ORCH_CANARY_NODE\` outranks both.
+ */
+export function probeNode({ env = process.env, versions = process.versions, execPath = process.execPath, home = homedir(), exists = existsSync } = {}) {
+  if (env.ORCH_CANARY_NODE) return env.ORCH_CANARY_NODE;
+  if (!versions.electron) return execPath;
+  const carried = join(home, '.orchestratinator', 'bin', 'node');
+  return exists(carried) ? carried : 'node';
+}
+
 export async function probeClaude({ claude = 'claude', model = 'haiku', dir, say = () => {} } = {}) {
   const rows = [];
   let fails = 0;
@@ -67,7 +84,7 @@ rl.on('line', (l) => {
   const MCP = join(DIR, 'mcp.json');
   // The node that runs this file runs the server: under the desktop app
   // that is not a \`node\` on PATH, so it is named.
-  writeFileSync(MCP, JSON.stringify({ mcpServers: { probe: { command: process.env.ORCH_CANARY_NODE ?? process.execPath, args: [SERVER] } } }));
+  writeFileSync(MCP, JSON.stringify({ mcpServers: { probe: { command: probeNode(), args: [SERVER] } } }));
   const CWD = join(DIR, 'work');
   rmSync(CWD, { recursive: true, force: true });
   mkdirSync(CWD, { recursive: true });

@@ -544,6 +544,9 @@ export function askingWhy(pending) {
   };
 }
 
+/** A turn that found the desk signed out, said as the host says it (host/claude.js SIGNED_OUT_WORDS; test:floor holds the two to one). */
+export const SIGNED_OUT_WORDS = 'Not logged in: Claude Code is signed out on this machine. Press Sign in on this desk to sign in again.';
+
 /**
  * A desk whose host's Claude Code is signed out takes no message: the window
  * answers it with an API error, "Not logged in · Please run /login" (measured
@@ -1757,7 +1760,13 @@ export function ingestHookEvent(store, body, live = null) {
   // refused with nothing on the floor to answer (costmo's report,
   // 2026-11-22, a question asked while two background agents ran).
   if (CLEARS_AWAITING.has(event) && !str(body.agent_id)) {
-    store.clearAwaiting(sessionId);
+    // Not while the host's own Claude Code asks: its PreToolUse fires for
+    // the very tool being asked about, and cleared the mark on every host
+    // ask, so the desk read idle with "0 need you" while Approve stood on
+    // its panel (R10, measured 2 of 2 by desktop-dev on the newop app at
+    // patch K; it is also what hid F14). The ask's answer or the host's
+    // `gone` clears it.
+    if (!live?.pending.get(key)?.host_ask) store.clearAwaiting(sessionId);
     // A prompt, a reply, a tool: none of these happens while the window
     // compacts, so any of them ends a compaction the hooks never finished —
     // a window on an older plugin sends no PostCompact at all, and a
@@ -1999,7 +2008,11 @@ export function ingestHookEvent(store, body, live = null) {
       // as an error — and from here on one no host reads.
       const code = str(body.error) ?? str(body.error_type);
       const words = str(body.last_assistant_message) ?? str(body.error_message) ?? str(body.error_details);
-      const said = code && words ? `${code}: ${words}` : words ?? code ?? 'the turn ended with an API error';
+      // Signed out: what was observed and the remedy the floor runs, never
+      // Claude Code's "Please run /login" (host/claude.js signedOutText).
+      const said = code === 'authentication_failed' || /^\s*Not logged in\b/i.test(words ?? '')
+        ? SIGNED_OUT_WORDS
+        : code && words ? `${code}: ${words}` : words ?? code ?? 'the turn ended with an API error';
       if (!mirrored) recorded = turn('error', said);
       store.setAwaiting(sessionId, 'error', clip(said, 500));
       break;
@@ -2975,7 +2988,13 @@ function applyHostEvent(store, live, hostId, ev) {
         }
         break;
       }
-      if (live.pending.holds(key, rid)) break;
+      if (live.pending.holds(key, rid)) {
+        // Said again by a heartbeat: the shown ask's mark stands again if
+        // anything cleared it (the clock is kept: setAwaiting keeps its start).
+        const shown = live.pending.get(key);
+        if (shown?.request_id === rid && shown.host_ask) store.setAwaiting(shown.session_id ?? sessionId, 'permission_request', shown.summary);
+        break;
+      }
       if (live.answered.get(key)?.request_id === rid) break;
       const isQuestion = str(ev.kind) === 'question';
       const form = isQuestion ? formFromInput(ev.tool_input?.questions) : null;

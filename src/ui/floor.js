@@ -5102,9 +5102,14 @@
     const offer = promptOffer(req, reading);
     const unreadable = offer === 'unreadable';
     const kindKey = /^permission_(request|prompt)$/.test(s.awaiting_kind ?? '') ? 'permission' : s.awaiting_kind;
+    // A host's ask is drawn with no needs-you mark too (the box's other
+    // condition below), so it has a signature of its own then. Keyed on the
+    // mark alone, such a box drew once under '' and was never redrawn: an
+    // answered ask stood on the panel until a reload (F14, costmo's first
+    // desk in the newop walk, 2026-11-23), and a new one was not drawn.
     const alertSig = sendingAnswers
       ? `sending|${answering.request_id}`
-      : !s.awaiting_kind
+      : !s.awaiting_kind && !req?.host_ask
       ? ''
       : req?.questions?.length
         ? `form|${req.request_id}|${req.questions.map((q) => `${q.kind}:${(q.options ?? []).length}`).join(';')}`
@@ -5114,8 +5119,14 @@
     // Claude Code signed out on the desk's host (d.signin, src/floor.js):
     // the window cannot answer, so the box says so and offers Sign in, which
     // has the host run Claude Code's own sign-in (costmo, 2026-11-19). A
-    // prompt the window is showing outranks it: that is answered first.
-    if (canChat && d.signin && !s.awaiting_kind && !req?.host_ask && !sendingAnswers) {
+    // prompt the window is showing outranks it: that is answered first. An
+    // error does not: the turn that finds a desk signed out stands as one
+    // ("authentication_failed: Not logged in · Please run /login"), and with
+    // any awaiting kind suppressing the box, Sign in was missing in exactly
+    // the state it is for, where /login cannot run (costmo, the app at
+    // b1a774a; check-signin's row with the error standing).
+    const promptStands = !!s.awaiting_kind && s.awaiting_kind !== 'error';
+    if (canChat && d.signin && !promptStands && !req?.host_ask && !sendingAnswers) {
       const si = d.signin;
       const pressed = ui.signingIn.get(answerKey);
       if (pressed && Date.now() - pressed > SIGNIN_WAIT_MS) ui.signingIn.delete(answerKey);

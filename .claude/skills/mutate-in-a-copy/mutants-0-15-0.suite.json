@@ -355,5 +355,40 @@
   "host/agent.js",
   "          if (ask.agent) continue;\n",
   ""
+ ],
+ [
+  "4181: a signed-out StopFailure keeps Claude Code's /login",
+  "floor",
+  "src/floor.js",
+  "      const said = code === 'authentication_failed' || /^\\s*Not logged in\\b/i.test(words ?? '')",
+  "      const said = false"
+ ],
+ [
+  "4181: a signed-out turn in the transcript keeps Claude Code's /login",
+  "claude",
+  "host/claude.js",
+  "      const text = signedOutText(textOf(content), d.error);",
+  "      const text = textOf(content);"
+ ],
+ [
+  "4181: the canary's MCP server runs on Electron's helper under the app",
+  "host",
+  "host/canary.js",
+  "  if (!versions.electron) return execPath;",
+  "  return execPath;"
+ ],
+ [
+  "R10: a hook from the asking conversation clears the mark while the host asks",
+  "floor",
+  "src/floor.js",
+  "    if (!live?.pending.get(key)?.host_ask) store.clearAwaiting(sessionId);",
+  "    store.clearAwaiting(sessionId);"
+ ],
+ [
+  "R10: a heartbeat's re-said ask does not put the mark back",
+  "floor",
+  "src/floor.js",
+  "        if (shown?.request_id === rid && shown.host_ask) store.setAwaiting(",
+  "        if (false) store.setAwaiting("
  ]
 ]

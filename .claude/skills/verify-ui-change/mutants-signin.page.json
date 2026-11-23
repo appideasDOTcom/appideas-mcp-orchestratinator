@@ -2,8 +2,8 @@
  [
   "the desk draws no sign-in box",
   "src/ui/floor.js",
-  "    if (canChat && d.signin && !s.awaiting_kind && !req?.host_ask && !sendingAnswers) {",
-  "    if (false && canChat && d.signin && !s.awaiting_kind && !req?.host_ask && !sendingAnswers) {"
+  "    if (canChat && d.signin && !promptStands && !req?.host_ask && !sendingAnswers) {",
+  "    if (false && canChat && d.signin && !promptStands && !req?.host_ask && !sendingAnswers) {"
  ],
  [
   "Send is not dimmed while signed out",
@@ -52,5 +52,11 @@
   "src/ui/floor.js",
   "      : h?.refused\n        ? esc(h.refused)\n",
   ""
+ ],
+ [
+  "an authentication error standing hides Sign in (4181)",
+  "src/ui/floor.js",
+  "    const promptStands = !!s.awaiting_kind && s.awaiting_kind !== 'error';",
+  "    const promptStands = !!s.awaiting_kind;"
  ]
 ]

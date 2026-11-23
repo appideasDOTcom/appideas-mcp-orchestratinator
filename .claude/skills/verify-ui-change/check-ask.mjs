@@ -118,5 +118,65 @@ ok(/touch b/.test(b?.head ?? '') && /asked by the subagent \u201cBuild incidents
 ok(b?.send?.disabled === true, 'and Send stays dimmed: something is still asked', JSON.stringify(b?.send));
 await floor.shot(`${shots}/ask-subagent.png`, '#floor-panel', { scale: 1 });
 
+console.log('\nan ask Claude Code went on without (newop walk, 2026-11-23)');
+// costmo's first desk: a WebSearch permission, then Claude Code ran the tool
+// and replied with nobody answering; the board's row had no permission and
+// "0 need you", and the panel still drew the box with Approve / Deny.
+// What the host says then is `gone` for the ask (its 'cancelled').
+// The section above leaves the subagent's ask standing: said gone first.
+await say({ type: 'ask', request_id: 'cu-5', gone: true });
+await floor.waitFor(`!document.querySelector('#floor-panel .p-alert [data-request="cu-5"]')`, { timeout: 8000 }).catch(() => {});
+await say({ type: 'ask', request_id: 'cu-6', kind: 'permission', tool: 'WebSearch', tool_input: { query: 'Tokyo weather today' }, summary: 'WebSearch: Tokyo weather today', options: ROWS });
+await floor.waitFor(`!!document.querySelector('#floor-panel .p-alert [data-request="cu-6"]')`, { timeout: 8000 }).catch(() => {});
+b = await box(floor);
+ok(/WebSearch: Tokyo weather today/.test(b?.head ?? ''), 'the fixture: the ask is on the panel', b?.head);
+await say({ type: 'ask', request_id: 'cu-6', gone: true });
+await floor.waitFor(`!document.querySelector('#floor-panel .p-alert [data-request="cu-6"]') && !/Tokyo weather/.test(document.querySelector('#floor-panel .p-alert-slot')?.textContent ?? '')`, { timeout: 8000 }).catch(() => {});
+b = await box(floor);
+ok(!/Tokyo weather/.test(b?.head ?? '') && !(b?.buttons ?? []).includes('Approve'), 'when the host says it is gone, the box goes, with nothing to press', JSON.stringify(b));
+const after = await fetch(`${base}/api/floor`).then((r) => r.json());
+const bo = after.channels.find((c) => c.channel === 'lab')?.desks.find((d) => d.agent === 'bo');
+ok(!bo?.permission && !bo?.session?.awaiting_kind, 'and the board agrees: no permission, nothing awaiting', JSON.stringify([bo?.permission?.request_id, bo?.session?.awaiting_kind]));
+await floor.shot(`${shots}/ask-gone.png`, '#floor-panel', { scale: 1 });
+
+console.log('\none ask, approved, and nothing behind it (F14, the newop walk)');
+// costmo's first desk: one WebSearch permission, Approve pressed, the answer
+// reached Claude Code and the search ran, the board cleared its prompt, and
+// the panel kept the box until a reload; a second Approve then read "That
+// prompt is no longer open".
+await say({ type: 'ask', request_id: 'cu-7', kind: 'permission', tool: 'WebSearch', tool_input: { query: 'Tokyo weather today' }, summary: 'WebSearch: Tokyo weather today November 23 2026', options: ROWS });
+await floor.waitFor(`!!document.querySelector('#floor-panel .p-alert [data-request="cu-7"]')`, { timeout: 8000 }).catch(() => {});
+ok(!!(await floor.evalJs(`!!document.querySelector('#floor-panel .p-alert [data-request="cu-7"]')`)), 'the fixture: the one ask is on the panel');
+await floor.click('#floor-panel .p-alert [data-choice="allow"][data-request="cu-7"]');
+await floor.waitFor(`!document.querySelector('#floor-panel .p-alert [data-request="cu-7"]') && !/Tokyo weather/.test(document.querySelector('#floor-panel .p-alert-slot')?.textContent ?? '')`, { timeout: 8000 }).catch(() => {});
+b = await box(floor);
+ok(!/Tokyo weather/.test(b?.head ?? '') && !(b?.buttons ?? []).includes('Approve'), 'approved, the box goes, with nothing left to press', JSON.stringify(b));
+await sleep(3000);
+b = await box(floor);
+ok(!/Tokyo weather/.test(b?.head ?? ''), 'and does not come back at the next polls', JSON.stringify(b));
+await floor.shot(`${shots}/ask-approved.png`, '#floor-panel', { scale: 1 });
+
+console.log('\nan ask standing with no needs-you mark, approved (F14, costmo\'s screenshot)');
+// What costmo's box was: a host ask drawn with an empty kind ("<b></b> —
+// WebSearch…"), the desk's needs-you mark not set, "0 need you" in the
+// header. Approved, the board cleared it, and the box stayed until a reload.
+// The ask is put on a conversation other than the one the desk shows, so its
+// mark is not the one the panel reads.
+// A panel opened fresh, as costmo's was: the slot has drawn nothing yet.
+await floor.evalJs(`location.reload()`);
+await floor.waitFor(`!!document.querySelector('svg.room[data-channel="lab"] .desk[data-agent="bo"]')`, { timeout: 15000 });
+await floor.click('svg.room[data-channel="lab"] .desk[data-agent="bo"] .deskHit');
+await floor.waitFor(`document.getElementById('floor-panel')?.dataset.agent === 'bo'`, { timeout: 8000 });
+await say({ type: 'ask', request_id: 'cu-8', kind: 'permission', tool: 'WebSearch', tool_input: { query: 'Tokyo weather today' }, summary: 'WebSearch: Tokyo weather today November 23 2026', options: ROWS, session_id: 'sess-bo-other' });
+await floor.waitFor(`!!document.querySelector('#floor-panel .p-alert [data-request="cu-8"]')`, { timeout: 8000 }).catch(() => {});
+b = await box(floor);
+ok(/^— WebSearch/.test(b?.head ?? '') , 'the fixture: the box is drawn with no kind, as on costmo\'s screen', b?.head);
+await floor.click('#floor-panel .p-alert [data-choice="allow"][data-request="cu-8"]');
+await floor.waitFor(`!document.querySelector('#floor-panel .p-alert [data-request="cu-8"]')`, { timeout: 8000 }).catch(() => {});
+await sleep(2500);
+b = await box(floor);
+ok(!/Tokyo weather/.test(b?.head ?? '') && !(b?.buttons ?? []).includes('Approve'), 'approved, the box goes, with no reload', JSON.stringify(b));
+await floor.shot(`${shots}/ask-nomark-approved.png`, '#floor-panel', { scale: 1 });
+
 console.log(`\n${fails ? 'FAIL' : 'PASS'} · ${fails ? `${fails} of ${total} red` : `${total} of ${total}`}`);
 process.exit(fails ? 1 : 0);

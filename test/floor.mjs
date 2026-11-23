@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import http from 'node:http';
-import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, wakeDue, wakeWords, wakeText, signedOutWhy, signinWhyNot, lostWorkWords, AskMap } from '../src/floor.js';
+import { deliverable, nudgeable, stoppable, isWorking, promptChoices, answerSteps, unansweredOf, clarifyMessage, formFromInput, settleForm, claudeable, switchable, commandOf, FLOOR_COMMANDS, EFFORT_LEVELS, isSessionStart, noHostWords, meetingSeat, MEETINGS_KEEP, askingWhy, answersForTool, SEAT_NO_MOVE, SEAT_NO_EDITOR, noSeatsWords, seatWorkingWords, protocolRefusal, isAbsPath, underRoots, baseName, roomNoticeText, roomNoticePlan, ROOM_NOTICE_TAG, reconnectDue, wakeDue, wakeWords, wakeText, signedOutWhy, signinWhyNot, lostWorkWords, AskMap, SIGNED_OUT_WORDS } from '../src/floor.js';
 import { addressed } from '../src/tools.js';
 
 // No host a suite starts may see the machine's tmux (2026-11-23): a host lists
@@ -1688,6 +1688,16 @@ try {
   eq(packRows.at(-1)?.role, 'error', 'a StopFailure is an error turn');
   eq(packRows.at(-1)?.text, 'invalid_request: Autocompact is thrashing: the context refilled to the limit', 'saying the code and the words, not "the turn ended with an API error"');
   eq(deskOf(await floor(), 'packer')?.session?.awaiting_message, 'invalid_request: Autocompact is thrashing: the context refilled to the limit', 'and the desk says the same');
+  // Signed out: what was observed and the remedy the floor runs, never
+  // Claude Code's "Please run /login", a command nobody can run on a desk
+  // (costmo on the app at b1a774a). 2.1.330 signed out: error
+  // authentication_failed, "Not logged in · Please run /login".
+  await post(ev('packer', 's-pack', 'StopFailure', { error: 'authentication_failed', last_assistant_message: 'Not logged in · Please run /login' }));
+  const outRows = (await turns('packer')).rows ?? [];
+  eq([outRows.at(-1)?.role, outRows.at(-1)?.text, deskOf(await floor(), 'packer')?.session?.awaiting_message], ['error', SIGNED_OUT_WORDS, SIGNED_OUT_WORDS],
+    'a signed-out turn is said as signed out with the desk\'s Sign in as the remedy, in the turn and on the desk, with no /login');
+  assert(!/\/login/.test(SIGNED_OUT_WORDS), 'and those words name no command', SIGNED_OUT_WORDS);
+  eq(SIGNED_OUT_WORDS, (await import('../host/claude.js')).SIGNED_OUT_WORDS, 'the board and the host say it in one set of words');
 
   // Only a start is a start: a compaction's SessionStart and a /clear's do
   // not restore an archived floor (costmo, #15 Decided 2).
@@ -3618,6 +3628,23 @@ try {
     d = await moverDesk();
     eq([d.permission?.request_id, d.permission?.more, d.permission?.host_ask], ['c-1', 0, true], "a hook's permission on a desk the host runs raises nothing: the host's ask stands alone");
     await eventsMove([ask('c-1', { gone: true })]);
+    // R10, measured on the newop app at patch K (2 of 2): the host's
+    // Claude Code's own PreToolUse for the tool being asked about cleared
+    // the needs-you mark, so the desk read idle with "0 need you" while
+    // Approve stood on its panel.
+    await eventsMove([ask('c-2')]);
+    await post(ev('mover-a', askSid, 'PreToolUse', { tool_name: 'Bash', tool_input: { command: 'touch c-2' } }));
+    let fl = await floor();
+    d = deskOf(fl, 'mover-a');
+    eq([d.permission?.request_id, d.session?.awaiting_kind ?? null, (fl.queue ?? []).some((x) => x.agent === 'mover-a')], ['c-2', 'permission_request', true],
+      "a hook from the asking conversation leaves the needs-you mark while the host's ask stands: the desk is in the queue");
+    // And a mark cleared some other way stands again at the next heartbeat
+    // that says the ask again.
+    { const { default: Database } = await import('better-sqlite3'); const dbR = new Database(DB_PATH); dbR.prepare(`UPDATE agent_sessions SET awaiting_kind = NULL, awaiting_message = NULL, awaiting_since = NULL WHERE session_id = ?`).run(askSid); dbR.close(); }
+    eq((await moverDesk()).session?.awaiting_kind ?? null, null, 'the fixture: the mark cleared under it');
+    await eventsMove([ask('c-2')]);
+    eq((await moverDesk()).session?.awaiting_kind ?? null, 'permission_request', 'a heartbeat saying the ask again puts the mark back');
+    await eventsMove([ask('c-2', { gone: true })]);
     // The map itself.
     {
       const m0 = new AskMap();

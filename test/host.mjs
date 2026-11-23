@@ -2381,6 +2381,21 @@ process.exit(1);
    * counting its runs; the real one is host/canary.js. */
   console.log('\n  the protocol probe on a Claude Code version not checked');
   {
+    // The node its own MCP server runs on (host/canary.js probeNode): under
+    // the desktop app never process.execPath, Electron's helper with its
+    // run-as-node fuse off, which read on costmo's scratch app as a 31-of-32
+    // difference ("Connection closed" for the reconnect).
+    const { probeNode } = await import('../host/canary.js');
+    const app = { versions: { electron: '45.2.3' }, execPath: '/Applications/X.app/Contents/Frameworks/X Helper', home: '/h' };
+    eq([
+      probeNode({ env: {}, versions: {}, execPath: '/usr/local/bin/node' }),
+      probeNode({ env: {}, ...app, exists: (p) => p === '/h/.orchestratinator/bin/node' }),
+      probeNode({ env: {}, ...app, exists: () => false }),
+      probeNode({ env: { ORCH_CANARY_NODE: '/opt/node' }, ...app, exists: () => true }),
+    ], ['/usr/local/bin/node', '/h/.orchestratinator/bin/node', 'node', '/opt/node'],
+    "the probe's server runs on this host's node, but under the desktop app on the node the app carries, else a node on PATH, never Electron's helper");
+  }
+  {
     const root = `${FIX}/canary-root`;
     mkdirSync(`${root}/c1`, { recursive: true });
     writeFileSync(`${root}/c1/.mcp.json`, JSON.stringify({ mcpServers: { orchestratinator: { type: 'http', url: `${HOST}/mcp`, headers: { 'X-Channel': CH, 'X-Agent': 'canary-1', 'X-Orchestratinator-Key': KEY } } } }));
