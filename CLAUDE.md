@@ -3270,7 +3270,19 @@ record.
   `ORCH_FOLDER_DIALOG` stand-in there must be an `.exe` (`node.exe` with
   `NODE_OPTIONS=--import` worked). Hooks run under Git Bash; a `node`
   installed after the terminal that started Claude Code is not on its PATH
-  until a new terminal.
+  until a new terminal. On the PC of the 0.15.0 round (pc-developer's
+  notes, 2026-11-23): `npm ci` needed `--ignore-scripts` (better-sqlite3's
+  install script went to node-gyp, which wants Python), and `test:update`,
+  `test:host`, `test:seats` and `test:agent` could not run on win32, so a
+  Windows round measures by hand and the suites run on the Mac.
+- **The Docker role's agent is bound to the Mac's app board through an SSH
+  tunnel** (`ssh -N -L 6724:127.0.0.1:6724 <user>@<the Mac>`, which costmo
+  starts in a window of its own; the agent does not have his Mac user).
+  After a reboot of the PC the tunnel is gone and every board tool reads
+  ECONNREFUSED until he starts it again and runs `/mcp`. Its own Docker
+  board on that PC's 8787 is the one it tests against, never 6724. The
+  whole setup, and a helper that prints what is still to do, is
+  **connect-to-a-remote-board**.
 - **"Teach auto mode about your environment?"** stood three desks dead on
   the PC on 2026-11-22, read as idle on the window layer
   (`docs/robustness-review.md` is pc-developer's write-up). On the process

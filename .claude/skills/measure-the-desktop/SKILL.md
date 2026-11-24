@@ -207,6 +207,45 @@ Traps that cost a round each:
   `probe-task.ps1 <program>` named the task after the program until it was
   set.
 
+### Driving a dialog the browser opens, without a person's hands
+
+Task 356 (2026-11-24, pc-developer, Windows 11 26300, Chrome with the
+Claude in Chrome extension) measured the floor's pickers by real input:
+Take a desk's folder dialog, the paperclip's Open dialog, paste, and drag.
+What worked, and what did not:
+
+- **Put the browser in front before the extension clicks.** An extension
+  click with the terminal in front opened the dialog drawn but not focused,
+  which measures your terminal, not the page. `host\front-win.ps1 '<the
+  Chrome window's title>'` first, then the extension's click: the folder
+  dialog was the foreground 0.5 s after the host logged "opened the folder
+  dialog". A click on a Chrome tab through the extension changes the active
+  tab and not the foreground window.
+- **Keys, never mouse clicks, from this shell.** `SendInput` mouse clicks
+  (cursor moved, `sent=2`, with the 40-byte INPUT struct) did nothing to
+  the dialog. `keybd_event` and `SendKeys` work. `windows\press-keys.ps1`
+  sends either, and only while the named window is the foreground, as
+  `press.sh` does on the Mac: `-Title 'Open' -Keys 'pick.png{ENTER}'`,
+  `-Title 'Choose the folder your agent lives in' -Vk 0x1B` (Escape),
+  `-Title '<floor tab title>' -Prefix -Vk 0x11,0x56` (Ctrl+V). It is the
+  three guarded scratch scripts the task used, folded into one; the
+  folded script has been run only on its refusal path.
+- **Several files in Open's name box are `"a.png" "b.log"`, quotes
+  included**, passed through `$env:PRESS_KEYS`. As an argument, 5.1 dropped
+  the quotes and the dialog said "File not found".
+- **An image for paste** goes on the clipboard with
+  `[System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile(<png>))`
+  in an `-STA` PowerShell. In that round the first Ctrl+V made no chip and
+  the second did; nothing was found to say why.
+- **Drag-and-drop needs a person's hand.** Ask for it, and read the
+  result off host.log ("1 attachment") and the desk's reply.
+- **`windows\shot.ps1 [out.png]`** prints the foreground window and every
+  visible `#32770` dialog (process, pid, class, title) and saves the whole
+  desktop. On Windows, unlike macOS, a screenshot asks nobody anything.
+- **The proof of a picker is the agent reading the file**: a canary line
+  in a `.log` attached with an image, the desk asked to quote it, and
+  host.log's "N attachments" line beside the reply.
+
 Not measured on Windows: a locked screen (no window in front to take the
 focus from), two monitors, and a Linux host under WSL.
 
