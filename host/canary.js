@@ -94,7 +94,11 @@ rl.on('line', (l) => {
   try {
   const records = [];
   const start = (resume = null) => {
-    const a = new Agent({ cwd: CWD, env: windowEnv(), resume, mcpConfig: MCP, model: MODEL, claude: CLAUDE, shell: process.platform === 'win32' ? null : shellFor() });
+    // In default mode whatever the person's settings say: its rows measure a
+    // permission being asked, and under a `defaultMode` of auto nothing asks,
+    // so every launch would read as Claude Code having changed (measured on
+    // 2.1.331: settings auto and no flag, init auto; with this flag, default).
+    const a = new Agent({ cwd: CWD, env: windowEnv(), resume, mcpConfig: MCP, model: MODEL, permissionMode: 'default', claude: CLAUDE, shell: process.platform === 'win32' ? null : shellFor() });
     a.on('record', (r) => records.push({ at: Date.now(), r }));
     a.start();
     return a;
@@ -152,14 +156,14 @@ rl.on('line', (l) => {
   row(taken.ok && !!p, 'a tool needing permission is asked as can_use_tool', p ? `${p.tool}: ${JSON.stringify(p.input).slice(0, 80)}` : 'no request');
   row(Array.isArray(p?.suggestions) && p.suggestions.length > 0, 'with permission_suggestions (the "don\'t ask again" row)', JSON.stringify(p?.suggestions ?? null));
   const resultsBefore = records.filter(({ r }) => r.type === 'result').length;
-  // What the host's refusal rests on (Agent.send): written raw while the
+  // What the host's hold rests on (Agent.send, F17): written raw while the
   // permission stands, a message is not taken until the permission is answered.
   const heldUuid = randomUUID();
   const tHeld = Date.now();
   a.write(userLine('Ignore this line; it only tests delivery.', heldUuid));
   const takenHeld = () => records.some(({ r }) => r.type === 'user' && r.isReplay && r.uuid === heldUuid);
   await sleep(6000);
-  row(!takenHeld(), 'a message written while a permission stands is not taken while it stands (the host refuses one instead)');
+  row(!takenHeld(), 'a message written while a permission stands is not taken while it stands (the host holds it, and starts its receipt clock at the answer)');
   a.allow(p?.request_id);
   for (let i = 0; i < 60 && !takenHeld(); i++) await sleep(250);
   row(takenHeld(), `and is taken once the permission is answered (${Date.now() - tHeld} ms after it was written)`);

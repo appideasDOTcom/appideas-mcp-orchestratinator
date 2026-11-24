@@ -2830,11 +2830,16 @@ function applyHostEvent(store, live, hostId, ev) {
      * it changes.
      */
     case 'model': {
+      // Also what the desk's Claude Code runs with before its first message
+      // (`source: 'settings'`, its get_settings answer, Desk.noteSettings),
+      // with the effort, which no record of the conversation carries.
       const model = str(ev.model);
-      if (!model) return false;
+      const effort = str(ev.effort);
+      if (!model && !effort) return false;
       const sid = str(ev.session_id) ?? sessionId;
       store.upsertSession({ session_id: sid, channel, agent, cwd: desk.cwd });
-      store.setModel(sid, model);
+      if (model) store.setModel(sid, model);
+      if (effort) store.setEffort(sid, effort);
       live.publish(key, { type: 'session', session_id: sid });
       break;
     }

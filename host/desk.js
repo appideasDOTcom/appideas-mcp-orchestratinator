@@ -165,6 +165,7 @@ export class Desk {
       log(proc.pid ? `${this.label}: Claude Code started (pid ${proc.pid}) ${id ? `on ${id}` : 'on a new conversation'} in ${expect} mode${permissionMode ? '' : ' (the person\'s settings)'}` : `${this.label}: Claude Code could not be started (${W.CLAUDE})`);
       this.report();
       if (!id && proc.pid) this.learnNewId(proc);
+      if (proc.pid) this.noteSettings(proc);
       return { ok: true, created: true };
     })();
     try { return await this.starting; } finally { this.starting = null; }
@@ -232,6 +233,39 @@ export class Desk {
     warn(`${this.label}: no conversation id for its new Claude Code (pid ${proc.pid}) after 10 s; it is named at its first message`);
   }
 
+  /**
+   * The model and effort this desk's Claude Code runs with, said to the board
+   * as soon as its conversation is named, so the floor's model and effort
+   * selects show them before the first message (costmo, 2026-11-24: a new
+   * session's selects read "model…" and "effort…" while chat worked on his
+   * defaults). The first reply names the model and nothing on this path names
+   * the effort (`init` carries no effort, and `init` itself waits for the
+   * first message). Claude Code's `get_settings` control answers both,
+   * resolved, with nothing sent: `applied.model` ("claude-opus-5-5") and
+   * `applied.effort` ("high") (measured on 2.1.331 in a scratch folder, 0.9 s
+   * from start, no turn). Asked again after a /clear names a new
+   * conversation, and after a /model, since effort is kept per model. An
+   * answer without them (an older Claude Code) says nothing, and the selects
+   * fill from the first reply as before.
+   */
+  async noteSettings(proc) {
+    for (let i = 0; i < 40 && !this.sessionId && this.proc === proc && proc.alive; i++) await sleep(250);
+    if (this.proc !== proc || !this.sessionId) return;
+    const sid = this.sessionId;
+    const r = await proc.control('get_settings');
+    const applied = r.ok ? r.response?.applied : null;
+    const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+    const model = str(applied?.model);
+    const effort = str(applied?.effort);
+    if (!model && !effort) return;
+    // A desk moved, reopened or cleared while it was asked: the answer is
+    // about a conversation it has left, and a row for that on its new floor
+    // is the stray the host suite's move rows refuse.
+    if (this.proc !== proc || this.sessionId !== sid) return;
+    if (model) this.modelId = model;
+    this.host.emit({ type: 'model', channel: this.channel, agent: this.agent, session_id: sid, model, effort, source: 'settings' }, true);
+  }
+
   /** The conversation to resume: the desk's own when its transcript is on disk, else the folder's newest, else none. */
   async resumeId() {
     if (this.sessionId) return this.sessionId;
@@ -247,7 +281,10 @@ export class Desk {
       if (m.model) this.modelId = m.model;
       this.noteMode(proc, m.mode);
       if (!m.session_id) return;
+      // A /clear's conversation, named here (its reset cleared the id).
+      const named = !this.sessionId;
       this.sessionId = m.session_id;
+      if (named) this.noteSettings(proc);
       if (m.session_id !== this.lastSessionId) this.follow(m.session_id, 'start').then(() => this.report());
       else this.report();
     });
@@ -401,6 +438,8 @@ export class Desk {
       // /model and /effort do (W.saveDefaults has the ruling).
       if (plan.name === 'model' || plan.name === 'effort') {
         if (plan.name === 'model' && r.response?.model) this.modelId = r.response.model;
+        // Effort is kept per model: the new one's is said too (noteSettings).
+        if (plan.name === 'model') this.noteSettings(this.proc);
         const saved = W.saveDefaults(plan.name === 'model' ? { model: args } : { effort: args, modelId: this.modelId });
         said = saved.ok && saved.wrote ? `${said} and saved as your default for new sessions` : `${said} for this conversation; not saved as your default (${saved.error ?? 'its model is not known yet: send it a message first'})`;
       }

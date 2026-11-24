@@ -16,7 +16,7 @@
  * change the operator's settings; test:claude holds the save), and the two
  * handoffs, which open VS Code or a terminal on the operator's screen.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const [BOARD = 'http://127.0.0.1:8981', HOST = 'dev-browser-test', FOLDER, CH = 'e2e'] = process.argv.slice(2);
@@ -40,10 +40,22 @@ const idle = (ms = 60_000) => until(async () => { const d = await desk(); return
 
 console.log(`floor e2e: ${BOARD}, host ${HOST}, ${FOLDER} as ${CH}/${AGENT}`);
 
+// The scratch folder chooses `default`, as a person can: since 0.15.1 a desk
+// with nothing chosen runs in auto (CLAUDE.md, "A desk never runs in Claude
+// Code's default mode unless the person chose it"), and in auto the
+// permission and deny rows below would ask nothing.
+mkdirSync(join(FOLDER, '.claude'), { recursive: true });
+writeFileSync(join(FOLDER, '.claude', 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'default' } }, null, 2) + '\n');
+
 console.log('\ntaking the desk');
 const took = await json('/api/floor/desk', { host_id: HOST, path: FOLDER, channel: CH, agent: AGENT });
 row(took.status === 200, 'Take a desk on the scratch folder is taken', `${took.status} ${JSON.stringify(await took.json().catch(() => ({})))}`);
 row(!!(await until(async () => (await desk())?.hosted?.live ? true : null, 60_000)), 'and the desk is seated, live on its host');
+// The model and effort selects read from these: on a new conversation they
+// were blank until the first reply (costmo, 2026-11-24). The host asks
+// Claude Code's get_settings as its conversation is named (Desk.noteSettings).
+const pre = await until(async () => { const s = (await desk())?.session; return s?.model && s?.effort ? s : null; }, 30_000);
+row(!!pre, 'before any message, the desk\'s session names its model and effort', JSON.stringify({ model: pre?.model, effort: pre?.effort, session: pre?.session_id }));
 
 console.log('\na message');
 let mark = await lastId();
@@ -59,10 +71,11 @@ await chat('Use the Bash tool to run exactly this command: touch e2e-made.txt &&
 let p = await asking();
 row(!!p, 'it stands on the desk', p?.summary);
 row((p?.options ?? []).some((o) => /don't ask again/.test(o.text)), 'with the "don\'t ask again" row Claude Code offered', JSON.stringify(p?.options?.map((o) => o.text)));
-c = await chat('are you there?');
-row(c.status === 409 && c.body.code === 'asking', 'a message while it asks is refused, in words', JSON.stringify(c.body).slice(0, 160));
+c = await chat('Also end your reply with the word E2E-HELD.');
+row(c.status === 200, 'a message while it asks is taken, for the host to hold until the answer (F17)', JSON.stringify(c.body).slice(0, 160));
 row((await json('/api/floor/permission', { channel: CH, agent: AGENT, request_id: p?.request_id, decision: 'allow' })).status === 200, 'Approve is taken');
 row(!!(await reply(mark, /E2E-BASH/)) && existsSync(join(FOLDER, 'e2e-made.txt')), 'the command ran');
+row(!!(await reply(mark, /E2E-HELD/)), 'and the message held behind it reached the desk after the answer');
 row(!(await desk())?.permission, 'and the box is gone');
 await idle();
 mark = await lastId();
@@ -102,6 +115,8 @@ mark = await lastId();
 await chat('/clear');
 const after = await until(async () => { const s = (await desk())?.hosted?.session_id; return s && s !== before ? s : null; }, 60_000);
 row(!!after, '/clear puts the desk on a new conversation', `${before} → ${after}`);
+const cleared = await until(async () => { const s = (await desk())?.session; return s?.session_id === after && s.model && s.effort ? s : null; }, 30_000);
+row(!!cleared, 'and that conversation names its model and effort before its first reply', JSON.stringify({ model: cleared?.model, effort: cleared?.effort }));
 await idle();
 mark = await lastId();
 await chat('Reply with exactly: E2E-AFTER-CLEAR');

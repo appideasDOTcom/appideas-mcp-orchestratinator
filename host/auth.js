@@ -115,7 +115,12 @@ export function signedIn({ claude = CLAUDE, shell = null, env = process.env, tim
     const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
     let child;
     try {
-      child = spawn(cmd, args, { env: claudeEnv(env), stdio: ['ignore', 'pipe', 'ignore'] });
+      // windowsHide: under the desktop app on Windows the host has no console,
+      // so a console program it starts without it opens a window of its own,
+      // and this runs at every heartbeat (orchestratinator-desktop-dev's
+      // reading, 2026-11-24; the PC's walk is the measurement). A no-op
+      // elsewhere, and on every other child the host starts.
+      child = spawn(cmd, args, { env: claudeEnv(env), stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     } catch { finish(null); return; }
     child.stdout.on('data', (c) => { out += c; });
     // The answer when Claude Code itself is done, not when its pipe closes.
@@ -156,7 +161,7 @@ export function signIn({ timeoutMs = SIGNIN_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(CLAUDE, ['auth', 'login'], { env: claudeEnv(), stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+      child = spawn(CLAUDE, ['auth', 'login'], { env: claudeEnv(), stdio: ['ignore', 'ignore', 'pipe'], detached: true, windowsHide: true });
     } catch (err) {
       resolve({ ok: false, error: `Claude Code's sign-in could not be started: ${err.message}` });
       return;

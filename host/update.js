@@ -47,7 +47,7 @@ const FETCH_TIMEOUT_MS = 2 * 60_000;
 /** One command, never through a shell. Resolves with what it said; never throws. */
 export function sh(cmd, args, { cwd = CLONE, timeout = 30_000 } = {}) {
   return new Promise((done) => {
-    execFile(cmd, args, { cwd, timeout, maxBuffer: 8 * 1024 * 1024, env: process.env }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd, timeout, maxBuffer: 8 * 1024 * 1024, env: process.env, windowsHide: true }, (err, stdout, stderr) => {
       done({
         ok: !err,
         code: err ? (typeof err.code === 'number' ? err.code : err.killed ? 'timeout' : err.code ?? 'failed') : 0,

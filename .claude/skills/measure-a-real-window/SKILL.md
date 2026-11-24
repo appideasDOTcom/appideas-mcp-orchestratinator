@@ -18,9 +18,13 @@ desk any more. For a desk, use these:
 1. **`protocol-probe.mjs`: does Claude Code still speak what the host
    reads?** A real Claude Code started through `host/agent.js` exactly as a
    desk is (the person's shell, the window environment), in a scratch
-   folder, on haiku, with a scratch MCP server. 32 rows on 2.1.330: init,
-   the lifecycle receipt, permission rows and "don't ask again", a refusal
-   while asking, questions with typed answers, `/btw`, `/mcp` reconnect,
+   folder, on haiku, with a scratch MCP server, in `default` mode whatever
+   the person's settings say (`host/canary.js` passes it; under a
+   `defaultMode` of auto nothing asks and every row about a prompt read as
+   Claude Code having changed). 32 rows on 2.1.330 and 2.1.331: init,
+   the lifecycle receipt, permission rows and "don't ask again", a message
+   written while a permission stands taken only after the answer (what the
+   host's hold rests on), questions with typed answers, `/btw`, `/mcp` reconnect,
    `/compact`, `/clear` and the init after it, interrupt, a long reply
    receipted at once. `~/.claude/settings.json` is hashed before and after.
 
@@ -33,13 +37,18 @@ desk any more. For a desk, use these:
 
 2. **`floor-e2e.mjs`: does the floor still work on it?** The board's own
    routes (what the page's buttons send) against a scratch board, the tree's
-   host started by hand, and a desk on a scratch folder. 29 rows on
-   2.1.330: take, message, idle, permission allow and deny, a message refused
-   while asking, a two-question form with typed words, `/btw`, `/mcp`,
+   host started by hand, and a desk on a scratch folder. 32 rows on
+   2.1.331: take, the model and effort named before any message (and again
+   after `/clear`), message, idle, permission allow and deny, a message sent
+   while asking held and answered after Approve, a two-question form with typed words, `/btw`, `/mcp`,
    `/compact` then idle, `/clear` onto a new conversation, a message to a
    working desk queued and answered, and the stop sign. Leaves out `/model`
    and `/effort` (they save the machine's default) and the two handoffs
-   (they open VS Code or a terminal on the operator's screen).
+   (they open VS Code or a terminal on the operator's screen). The script
+   writes `defaultMode: default` into the scratch folder's
+   `.claude/settings.json` first: since 0.15.1 a desk with nothing chosen
+   runs in auto, and its permission rows would wait on prompts that never
+   come.
 
    ```bash
    SP=<scratchpad>; B=$SP/browser-test; mkdir -p $B/folders/alpha
@@ -52,6 +61,12 @@ desk any more. For a desk, use these:
      exec node host/index.js >> $B/host.log 2>&1 )      # in the background; restart it after editing host/*.js
    node .claude/skills/measure-a-real-window/floor-e2e.mjs http://127.0.0.1:8981 dev-browser-test $B/folders/alpha
    ```
+   A bare scratch board (`PORT=89xx DB_PATH=<scratch> ORCH_AUTH_TOKEN=<k>
+   node src/server.js`) does as well as the Docker one, with two things the
+   script does not do: the host must list the folder's parent once
+   (`POST /api/floor/browse {host_id, path}`) or Take a desk is refused
+   `unknown_folder`, and the path must be the real one (`/private/tmp/…`,
+   not `/tmp/…`, which is a link on macOS).
    The browser needs no key on loopback: `http://127.0.0.1:8981` is the same
    floor the script drove, for a person to look at. **Stay off the desk
    while it runs**: an answer or a click from the page races the script (a
@@ -100,6 +115,44 @@ desk any more. For a desk, use these:
    explanations of one stuck prompt were written before this probe showed
    Claude Code waiting, and the screenshot's empty label showed where the
    fault really was (the page). Read a screenshot's details as evidence too.
+
+5. **Permission modes, and a prompt on demand** (0.15.1, 2026-11-23; each
+   fact below is one the host relies on, measured on 2.1.331 with
+   `/tmp`-style scratch folders and `--settings`, so no settings file was
+   touched):
+   - **Your own settings allow most things, so "it did not ask" proves
+     nothing.** On this machine `touch`, a Write outside the folder and a
+     web fetch all ran unasked in `default` mode. Force a prompt with a
+     rule passed as a flag: `--settings '{"permissions":{"ask":["Write"]}}'`
+     and a prompt that writes a file.
+   - **Auto not available, on demand**: `--permission-mode auto --settings
+     '{"disableAutoMode":"disable"}'`. Claude Code then runs `default` and
+     says so only in a `system` `status` record with `permissionMode`, at
+     startup, before any message (and in `init` at the first one).
+   - **`set_permission_mode`** (`control_request`, `{mode}`) switches a
+     running process, answered `{"mode": …}` and followed by a `status`
+     record. `bypassPermissions` and `default` are both accepted as `-p`
+     flags (`default` is not in `--help`'s list, which says `manual`).
+   - **A flag outranks `permissions.defaultMode`**; with no flag the setting
+     applies (`init` says which). A `-p` process writes **no**
+     `permission-mode` records, even started with a mode; only an
+     interactive session does (Shift+Tab's choice, and `default` whether
+     chosen or not). Its user records carry `permissionMode`, which is
+     what the host started it in, not a choice.
+   - **A fresh `-p` process says nothing until its first message**: in 12 s
+     idle only SessionStart's `hook_started`/`hook_response` lines (with
+     `session_id`, when a hook is installed). `~/.claude/sessions/<pid>.json`
+     has the id within milliseconds.
+   - **A message written while a permission stands** is `queued` at once
+     (1 ms), `started` after the answer (32 ms), and the one reply answers
+     both.
+
+   The probe for all of these is ~40 lines of Node: spawn the desk's
+   command line with `--model haiku` and the flags above, print `init`,
+   `status`, `control_response`, `command_lifecycle` and `result`, write a
+   `control_request` or a second user line where the question needs it.
+   Read the mode a live desk is really in from its transcript: the first
+   user record after its start carries `permissionMode`.
 
 Rules that carry over unchanged: never the operator's board or config
 (no `/model` or `/effort` typed anywhere a probe runs: they save the
