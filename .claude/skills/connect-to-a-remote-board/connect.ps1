@@ -23,7 +23,11 @@ function Tcp($h, $p) {
   try { $c.ConnectAsync($h, $p).Wait(3000) -and $c.Connected } catch { $false } finally { $c.Dispose() }
 }
 function Health($url) {
-  try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "$url/health").Content } catch { $null }
+  try {
+    $c = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "$url/health").Content
+    # A reply with no charset comes back as bytes in 5.1.
+    if ($c -is [byte[]]) { [Text.Encoding]::UTF8.GetString($c) } else { $c }
+  } catch { $null }
 }
 
 "== what is there"
@@ -68,8 +72,17 @@ if ($StartTunnel -and -not $direct -and -not $tunnel -and -not $listen) {
 }
 
 $h = Health $base
-"health at ${base}: " + $(if ($h) { $h } else { 'no answer' })
-if ($h -and $env:ORCH_KEY) {
+# A port held by anything but the tunnel answers for itself: the PC's own
+# desktop app takes 6724 when it is free (windows-desktop-dev, msg 4374), and
+# then /health answers from the PC's board and an agent talks to it with no error.
+$wrong = $listen -and -not $tunnel -and -not $direct
+if ($wrong) {
+  "health at ${base}: answered by $($proc.Name) pid $($proc.ProcessId), NOT the board on $Address" + $(if ($h) { " ($h)" } else { '' })
+  "   Bind nowhere until ${LocalPort} is the tunnel's: quit that program (the PC's Orchestratinator app, if that is it) or use -LocalPort."
+} else {
+  "health at ${base}: " + $(if ($h) { $h } else { 'no answer' })
+}
+if ($h -and $env:ORCH_KEY -and -not $wrong) {
   try {
     $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method Post "$base/mcp" -ContentType 'application/json' `
       -Headers @{ 'X-Orchestratinator-Key' = $env:ORCH_KEY; 'X-Channel' = $Channel; 'X-Agent' = $Agent; Accept = 'application/json, text/event-stream' } `

@@ -56,7 +56,15 @@ its "still to do" part as it printed, and the JSON in a code block.
   argument; the helper does an MCP `initialize` with it and says accepted
   (200) or refused (401). Measured both on 2026-11-24.
 - **A local port that is taken** by anything that is not a tunnel to that
-  address is named; pass `-LocalPort` (and the URL follows it).
+  address is named, its `/health` is labelled as that program's and not
+  the remote board's, and the key is not tried against it; pass
+  `-LocalPort` (and the URL follows it). **The PC's own Orchestratinator
+  app takes 6724 when it starts while the tunnel is down** (it uses that
+  port when free; windows-desktop-dev, msg 4374). `/health` then answers,
+  from the PC's board, and an agent bound to `localhost:6724` talks to the
+  wrong board with no error. The owner of the port must be `ssh.exe`
+  (`Get-NetTCPConnection -LocalPort 6724 -State Listen`), not
+  `Orchestratinator.exe`.
 - **If the board answers directly** (a board started with `HOST=0.0.0.0`
   on a reachable address), the helper skips the tunnel and the URL is the
   board's own. The app's board does not; a Docker board publishes on
