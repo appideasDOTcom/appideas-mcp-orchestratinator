@@ -155,7 +155,7 @@ try {
   eq(readRecord({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', session_id: 'S' }),
     { kind: 'result', ok: false, subtype: 'error_during_execution', text: '', session_id: 'S' }, 'a result says whether the turn ended well');
   eq(readRecord({ type: 'conversation_reset', new_conversation_id: 'S2' }), { kind: 'reset', conversation: 'S2' }, '/clear\'s reset carries no session id: its id is not the session\'s');
-  eq(readRecord({ type: 'system', subtype: 'status', status: 'compacting' }), { kind: 'status', status: 'compacting', compact: null }, 'compacting begins');
+  eq(readRecord({ type: 'system', subtype: 'status', status: 'compacting' }), { kind: 'status', status: 'compacting', compact: null, mode: null }, 'compacting begins');
   eq(readRecord({ type: 'control_request', request_id: 'r', request: { subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'ls' }, description: 'd', permission_suggestions: [1] } }),
     { kind: 'permission', request_id: 'r', tool: 'Bash', title: 'Bash', input: { command: 'ls' }, description: 'd', suggestions: [1], agent: null }, 'a permission is the tool, its input, what it is for, and the rules that would allow it again');
   // A subagent's names it (2.1.330, task 352: `agent_id` on the request,
@@ -167,8 +167,9 @@ try {
   eq(readRecord({ type: 'rate_limit_event' }), null, 'a record the host has no use for is nothing');
   assert(agentArgs({ resume: 'S1', mcpConfig: '/x.json' }).join(' ') === '-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages --resume S1 --mcp-config /x.json',
     'the command line: stream-JSON both ways, permissions over stdin, every message echoed, then the resume and the binding');
-  eq(agentArgs({ resume: 'S1', permissionMode: 'auto' }).slice(-2), ['--permission-mode', 'auto'], 'and the conversation\'s permission mode when it has one: without it Claude Code runs default and asks about every tool');
-  assert(!agentArgs({ resume: 'S1' }).includes('--permission-mode'), 'none when it has none: default needs no flag');
+  eq(agentArgs({ resume: 'S1', permissionMode: 'auto' }).slice(-4), ['--permission-mode', 'auto', '--resume', 'S1'], 'and the permission mode the desk runs in, before the resume: without it Claude Code runs default and asks about every tool');
+  assert(!agentArgs({ resume: 'S1' }).includes('--permission-mode'), 'none when none is given: the person\'s settings name one, and Claude Code applies it');
+  eq(readRecord({ type: 'system', subtype: 'status', status: null, permissionMode: 'default' }).mode, 'default', 'a status record says the mode Claude Code runs in: how a silent fall back from auto is seen');
   eq(JSON.parse(userLine('hi', 'u')), { type: 'user', uuid: 'u', message: { role: 'user', content: 'hi' } }, 'a message carries the uuid its receipt will name');
   // How Claude Code is started (task 348 F7, pc-developer: with only an npm
   // claude.cmd on PATH the desk never started; Node will not spawn a .cmd

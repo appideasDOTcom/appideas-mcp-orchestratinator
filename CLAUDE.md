@@ -108,18 +108,25 @@ on was measured on 2.1.330 before it was built
   environment is `agentEnv()`: a person's own and nothing of the host's
   settings (`windowEnv()`, "The clear of 2026-11-20"), plus the board's key
   where the binding names a variable for it, and a seat's four variables.
-- **A desk runs in the permission mode its conversation was left in**
-  (costmo, 2026-11-23, the day 0.15.0 reached his app: "roughly 100 times
-  the number of permissions prompts"). A `-p` Claude Code started without
-  `--permission-mode` runs `default` whatever the conversation was in, so
-  every desk taken over from an `auto` window asked about every tool. The
-  host reads the transcript's last `permission-mode` record
-  (`conversationMode` in `host/claude.js`; never a user record's
-  `permissionMode`, which a `-p` process writes as `default`) and passes it
-  (`Desk.modeFor`); a new conversation keeps the desk's mode, else the
-  folder's last spoken conversation's. `bypassPermissions` is not carried
-  (unmeasured on this path). Measured on 2.1.331: init `default` without
-  the flag, `auto` with it.
+- **A desk never runs in Claude Code's `default` mode unless the person
+  chose it** (costmo, 2026-11-23, the day 0.15.0 ran his `auto` desks in
+  `default` and they asked about every tool: "'Default' from our
+  perspective is, and ALWAYS will be, 'DON'T ANNOY THE SHIT OUT OF THE
+  OPERATOR OR MAKE THE TOOL UNUSEABLE'"). `Desk.modeFor`, in order: the
+  mode the conversation was left in, when an interactive session chose one
+  (its last `permission-mode` record, `conversationMode` in
+  `host/claude.js`, other than `default`, which an interactive session
+  writes whether anybody chose it or not; a `-p` process writes no such
+  record); else the person's `permissions.defaultMode` (folder
+  `settings.local.json`, folder `settings.json`, user `settings.json`:
+  `settingsMode`), passed as no flag so Claude Code applies it itself;
+  else `--permission-mode auto`, for a new conversation, a resumed one, an
+  unreadable transcript and a brand-new user alike. When `auto` is not
+  available, Claude Code falls back to `default` and says so only in a
+  `status` record at startup (2.1.331, auto disabled); the host then
+  switches it to `acceptEdits` (`set_permission_mode`) and says so on the
+  desk (`noteMode`). Measured on 2.1.331: each mode as a `-p` flag,
+  `bypassPermissions` included; init `default` without a flag.
 - **A new conversation is named when its process starts, not at its first
   message** (same day: New session spun for ever). `init` comes only with
   the first message, so the host reads the id from the process's own roster

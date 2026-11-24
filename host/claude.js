@@ -993,24 +993,57 @@ export async function lastSpokenIn(cwd) {
 }
 
 /**
- * The permission modes a desk carries over from its conversation. Claude Code
- * writes a `permission-mode` record into the transcript at each turn of an
- * interactive session (Shift+Tab's choice), and a `-p` process started
- * without `--permission-mode` runs in `default` however the conversation was
- * left: every tool asks (costmo, 2026-11-23, the day 0.15.0 took his `auto`
- * desks over). `bypassPermissions` is not carried: on this path it has not
- * been measured, and a flag Claude Code refuses would stop the desk starting.
- * `default` needs no flag.
+ * The permission modes a desk can be started in for a person's own choice.
+ * costmo's rule (2026-11-23, after 0.15.0 ran his `auto` desks in
+ * `default`): "'Default' from our perspective is, and ALWAYS will be, 'DON'T
+ * ANNOY THE SHIT OUT OF THE OPERATOR OR MAKE THE TOOL UNUSEABLE'." So a
+ * desk runs in a mode the person chose (a conversation left in it, or a
+ * `defaultMode` in their settings), and otherwise in `auto`: never Claude
+ * Code's `default` because nothing was recorded (Desk.modeFor). Each was
+ * measured on 2.1.331 as a `-p` flag, `bypassPermissions` included.
  */
-export const CARRIED_MODES = new Set(['auto', 'acceptEdits', 'plan', 'dontAsk']);
+export const CARRIED_MODES = new Set(['auto', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions']);
+
+/**
+ * The mode a desk runs in, from what the person chose (Desk.modeFor reads
+ * the two): `read`, the conversation's last interactive `permission-mode`
+ * record, counts when it is not `default` (an interactive session writes
+ * `default` whether anybody chose it or not); `set`, their settings'
+ * `defaultMode`, counts as it is, and goes as no flag so Claude Code applies
+ * it itself; nothing chosen is `auto`. `flag` is the command line's,
+ * `expect` what Claude Code should then run in.
+ */
+export function pickMode(read, set) {
+  if (read && read !== 'default' && CARRIED_MODES.has(read)) return { flag: read, expect: read };
+  if (set) return { flag: null, expect: set };
+  return { flag: 'auto', expect: 'auto' };
+}
+
+/**
+ * The `permissions.defaultMode` a person set for a folder, as Claude Code
+ * reads it: the folder's `.claude/settings.local.json`, then its
+ * `.claude/settings.json`, then the user's `settings.json`. Null when none
+ * says one (or a file is not JSON: that is not a choice). Claude Code applies
+ * it itself when the desk is started with no flag.
+ */
+export function settingsMode(cwd) {
+  for (const f of [join(cwd, '.claude', 'settings.local.json'), join(cwd, '.claude', 'settings.json'), join(CLAUDE_HOME, 'settings.json')]) {
+    let d;
+    try { d = JSON.parse(readFileSync(f, 'utf8')); } catch { continue; }
+    const m = d?.permissions?.defaultMode;
+    if (typeof m === 'string' && m) return m;
+  }
+  return null;
+}
 const MODE_TAIL_BYTES = 4 * 1024 * 1024;
 
 /**
  * The mode a transcript was last in, from its last `permission-mode` record,
  * or null. Read from the tail first (one is written each turn), then whole.
- * Only that record: a `-p` process's own user records say `default` while the
- * record beside them still carries the conversation's choice (read on
- * desktop-dev's conversation, 2026-11-23).
+ * Only an interactive Claude Code writes that record (Shift+Tab's choice);
+ * a `-p` one writes none, even started with a mode (QA, 2026-11-23). And
+ * only that record: a `-p` process's user records say the mode the host
+ * started it in, which is not the person's choice.
  */
 export async function conversationMode(path) {
   const { open } = await import('node:fs/promises');

@@ -1,12 +1,5 @@
 [
  [
-  "the desk is started without its conversation's permission mode",
-  "host",
-  "host/desk.js",
-  "const proc = new Agent({ cwd: this.cwd, env, resume: id, permissionMode, claude",
-  "const proc = new Agent({ cwd: this.cwd, env, resume: id, claude"
- ],
- [
   "a new conversation is not named until its first message",
   "host",
   "host/desk.js",
@@ -47,5 +40,47 @@
   "src/floor.js",
   "    const asking = (pending?.host_ask ? null : askingWhy(pending)) ?? signedOutWhy(check.hosted);",
   "    const asking = signedOutWhy(check.hosted);"
+ ],
+ [
+  "the desk is started with no mode flag at all (B)",
+  "host",
+  "host/desk.js",
+  "const proc = new Agent({ cwd: this.cwd, env, resume: id, permissionMode, claude",
+  "const proc = new Agent({ cwd: this.cwd, env, resume: id, claude"
+ ],
+ [
+  "nothing chosen lands on Claude Code's default, not auto (B)",
+  "claude",
+  "host/claude.js",
+  "  return { flag: 'auto', expect: 'auto' };\n}",
+  "  return { flag: null, expect: 'default' };\n}"
+ ],
+ [
+  "an interactive default record counts as a choice (B)",
+  "claude",
+  "host/claude.js",
+  "  if (read && read !== 'default' && CARRIED_MODES.has(read)) return { flag: read, expect: read };",
+  "  if (read && (read === 'default' || CARRIED_MODES.has(read))) return { flag: read === 'default' ? null : read, expect: read };"
+ ],
+ [
+  "the person's settings are overridden with auto (B)",
+  "claude",
+  "host/claude.js",
+  "  if (set) return { flag: null, expect: set };",
+  "  if (set) return { flag: 'auto', expect: 'auto' };"
+ ],
+ [
+  "the folder's local settings are not read (B)",
+  "claude",
+  "host/claude.js",
+  "  for (const f of [join(cwd, '.claude', 'settings.local.json'), join(cwd, '.claude', 'settings.json'), join(CLAUDE_HOME, 'settings.json')]) {",
+  "  for (const f of [join(cwd, '.claude', 'settings.json'), join(CLAUDE_HOME, 'settings.json')]) {"
+ ],
+ [
+  "a silent fall back from auto is left asking (B)",
+  "host",
+  "host/desk.js",
+  "    if (this.expectMode === 'auto' && mode === 'default') {",
+  "    if (false) {"
  ]
 ]

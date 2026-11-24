@@ -58,15 +58,17 @@ export function agentArgs({ resume = null, mcpConfig = null, model = null, permi
     '--verbose',
     '--permission-prompt-tool', 'stdio',
     '--replay-user-messages',
+    // The mode the desk runs in (Desk.modeFor): left out only when the
+    // person's settings name one, which Claude Code then applies itself.
+    // Left out on 0.15.0 always, so Claude Code ran `default` and every desk
+    // taken over from an `auto` window asked about every tool (costmo,
+    // 2026-11-23; measured on 2.1.331: init `default` without the flag,
+    // `auto` with it). Before --resume, so a command line still ends in the
+    // conversation it resumes.
+    ...(permissionMode ? ['--permission-mode', permissionMode] : []),
     ...(resume ? ['--resume', resume] : []),
     ...(mcpConfig ? ['--mcp-config', mcpConfig] : []),
     ...(model ? ['--model', model] : []),
-    // The mode the conversation was in (Desk.modeFor). Left out, Claude Code
-    // starts in `default` whatever the conversation was in: on 0.15.0 every
-    // desk taken over from an `auto` window asked about every tool (costmo,
-    // 2026-11-23; measured on 2.1.331: init says `default` without the flag,
-    // `auto` with it).
-    ...(permissionMode ? ['--permission-mode', permissionMode] : []),
   ];
 }
 
@@ -114,7 +116,10 @@ export function readRecord(r) {
   // written). So a reset carries no session, and the next init moves us.
   if (r.type === 'conversation_reset') return { kind: 'reset', conversation: r.new_conversation_id ?? null };
   if (r.type === 'system' && r.subtype === 'status') {
-    return { kind: 'status', status: r.status ?? null, compact: r.compact_result ?? null };
+    // permissionMode: what Claude Code runs in now. Said at startup when it
+    // could not run the mode it was asked for (2.1.331: auto disabled, it
+    // starts in default and says so here, before any message).
+    return { kind: 'status', status: r.status ?? null, compact: r.compact_result ?? null, mode: r.permissionMode ?? null };
   }
   if (r.type === 'system' && r.subtype === 'compact_boundary') return { kind: 'compacted' };
   if (r.type === 'control_request') {
@@ -157,7 +162,7 @@ export function readRecord(r) {
  *   taken     { uuid }                                a message was taken
  *   result    { ok, subtype, text, session_id }       a turn ended
  *   reset     { session_id }                          /clear made a new conversation
- *   status    { status, compact }                     compacting began or ended
+ *   status    { status, compact, mode }               compacting began or ended; the mode it runs in
  *   permission, question, ask                         Claude Code asks the host something
  *   exit      { code, signal, stderr }                the process is gone
  */

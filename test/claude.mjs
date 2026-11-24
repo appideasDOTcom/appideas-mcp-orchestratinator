@@ -375,7 +375,26 @@ try {
       { type: 'user', permissionMode: 'default', toolUseResult: { kind: 'permission-mode' }, message: { role: 'user', content: 'x' } },
     ].map((r) => JSON.stringify(r)).join('\n') + '\n');
     eq(await W.conversationMode(t), 'auto', 'and a user record that mentions it, carrying default, is still not the conversation\'s mode');
-    eq([...W.CARRIED_MODES].sort(), ['acceptEdits', 'auto', 'dontAsk', 'plan'], 'the modes carried: not bypassPermissions, not default');
+    eq([...W.CARRIED_MODES].sort(), ['acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'], 'the modes a person can choose for a desk: never default, which is no choice');
+    const F = `${FIX}/proj`;
+    mkdirSync(`${F}/.claude`, { recursive: true });
+    eq(W.settingsMode(F), null, 'no defaultMode anywhere is no choice');
+    writeFileSync(`${CLAUDE_HOME}/settings.json`, JSON.stringify({ permissions: { defaultMode: 'acceptEdits' } }));
+    eq(W.settingsMode(F), 'acceptEdits', 'the user\'s settings name one');
+    writeFileSync(`${F}/.claude/settings.json`, JSON.stringify({ permissions: { defaultMode: 'plan' } }));
+    eq(W.settingsMode(F), 'plan', 'the folder\'s settings outrank the user\'s');
+    writeFileSync(`${F}/.claude/settings.local.json`, JSON.stringify({ permissions: { defaultMode: 'default', allow: ['x'] } }));
+    eq(W.settingsMode(F), 'default', 'and its local settings outrank both: default, when the person asked for it, is their choice');
+    writeFileSync(`${F}/.claude/settings.local.json`, '{ not json');
+    eq(W.settingsMode(F), 'plan', 'a file that is not JSON is no choice, and the next one is read');
+    rmSync(`${CLAUDE_HOME}/settings.json`, { force: true });
+    // costmo, 2026-11-23: only the person's own choice gives prompts.
+    eq(W.pickMode(null, null), { flag: 'auto', expect: 'auto' }, 'nothing chosen anywhere: auto, for a new conversation and a brand-new user');
+    eq(W.pickMode('default', null), { flag: 'auto', expect: 'auto' }, 'a conversation whose interactive record says default chose nothing: auto');
+    eq(W.pickMode('acceptEdits', 'default'), { flag: 'acceptEdits', expect: 'acceptEdits' }, 'a mode chosen on the conversation outranks the settings');
+    eq(W.pickMode(null, 'default'), { flag: null, expect: 'default' }, 'default in the person\'s settings is their choice, left to Claude Code to apply');
+    eq(W.pickMode('default', 'plan'), { flag: null, expect: 'plan' }, 'and any other mode there too');
+    eq(W.pickMode('somethingNew', null), { flag: 'auto', expect: 'auto' }, 'a mode it does not know is no choice: auto');
     mkdirSync(`${CLAUDE_HOME}/sessions`, { recursive: true });
     writeFileSync(`${CLAUDE_HOME}/sessions/4242.json`, JSON.stringify({ pid: 4242, sessionId: 'new-1', cwd: '/x' }));
     eq([W.sessionOfPid(4242), W.sessionOfPid(4243), W.sessionOfPid(null)], ['new-1', null, null], 'a process\'s conversation from its own roster file, before any message');

@@ -374,7 +374,14 @@ const said = (text) => record({ type: 'user', message: { role: 'user', content: 
 const reply = (text, extra = {}) => record({ type: 'assistant', ...extra, message: { role: 'assistant', content: [{ type: 'text', text }] } });
 
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
-const init = () => out({ type: 'system', subtype: 'init', session_id: session, model: 'claude-haiku-5-5', permissionMode: 'default', claude_code_version: '2.1.330' });
+// The mode it runs in, as 2.1.331 does: the flag's, else default. With
+// no-auto.flag, auto is not available to it, and asked for auto it runs
+// default and says so in a status record at once (measured with auto
+// disabled); set_permission_mode changes it and says so the same way.
+const modeAt = argv.indexOf('--permission-mode');
+let mode = modeAt >= 0 ? argv[modeAt + 1] : 'default';
+if (mode === 'auto' && fs.existsSync(path.join(FIX, 'no-auto.flag'))) { mode = 'default'; setTimeout(() => out({ type: 'system', subtype: 'status', status: null, permissionMode: 'default', session_id: session }), 50); }
+const init = () => out({ type: 'system', subtype: 'init', session_id: session, model: 'claude-haiku-5-5', permissionMode: mode, claude_code_version: '2.1.330' });
 const logIn = (o) => fs.appendFileSync(path.join(FIX, 'stdin.log'), JSON.stringify(o) + '\n');
 let inTurn = false;
 let pending = 0;
@@ -414,6 +421,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
       return;
     }
     if (q.subtype === 'set_model') { answer({ model: 'claude-' + q.model + '-5-5' }); return; }
+    if (q.subtype === 'set_permission_mode') { mode = q.mode; answer({ mode }); out({ type: 'system', subtype: 'status', status: null, permissionMode: mode, session_id: session }); return; }
     if (q.subtype === 'side_question') { answer({ response: 'ASIDE:' + q.question, synthetic: false }); return; }
     answer({});
     return;
@@ -693,8 +701,8 @@ try {
   const sent = await chat('free', 'ship it');
   eq(sent.status, 200, 'the floor accepts a message for a desk with nothing running yet');
   assert(!!(await heldBy('free', 'floor', SESSION_ID)), 'the host starts the desk\'s Claude Code, and the floor holds the desk, on the conversation Claude Code named at the message');
-  eq(await launchedSince(argvAtFirst), ['-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages'],
-    'one Claude Code, started as the programmatic interface: stream-JSON both ways, permissions over stdin, every message echoed, nothing to resume');
+  eq(await launchedSince(argvAtFirst), ['-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages --permission-mode auto'],
+    'one Claude Code, started as the programmatic interface: stream-JSON both ways, permissions over stdin, every message echoed, nothing to resume, and in auto mode: nobody chose another (costmo, 2026-11-23)');
   assert(await until(async () => ((await turnRows()).some((r) => r.role === 'assistant' && r.text === 'ECHO:ship it') ? true : null), 10000),
     'the message is delivered and its reply reaches the floor, read from the transcript Claude Code writes');
   assert((await turnRows()).some((r) => r.role === 'user' && r.text === 'ship it'), 'both sides of it');
@@ -1381,13 +1389,40 @@ try {
   eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null })).status, 200, 'start new is accepted');
   assert(await until(() => (launches(argvAtNew).length === 1 ? true : null), 10000), 'and a Claude Code is started');
   assert(!launches(argvAtNew)[0].includes('--resume'), `with nothing to resume — ${JSON.stringify(launches(argvAtNew))}`);
-  assert(launches(argvAtNew)[0].includes('--permission-mode auto'), `in the mode the desk was in — ${JSON.stringify(launches(argvAtNew))}`);
+  assert(launches(argvAtNew)[0].includes('--permission-mode auto'), `in auto mode: a new conversation has no mode of its own chosen (costmo, 2026-11-23) — ${JSON.stringify(launches(argvAtNew))}`);
   // Named before anybody types: Claude Code says init only at the first
   // message, and the floor's New session waited for an id for ever (costmo,
   // 2026-11-23). The host reads it from the process's roster file.
   assert(!!(await heldBy('free', 'floor', SESSION_NEW, 10000)), 'and the desk is on the new conversation before any message');
   eq((await chat('free', 'hello, new conversation')).status, 200, 'a message to it is taken');
   assert(!!(await heldBy('free', 'floor', SESSION_NEW)), 'and the desk follows the conversation Claude Code names');
+
+  // A person's own choice is theirs: a defaultMode in the folder's settings
+  // is left to Claude Code, which applies it (costmo, 2026-11-23: only the
+  // operator's explicit choice produces prompts).
+  assert(await until(async () => ((await turnRows()).some((r) => r.role === 'assistant' && r.text === 'ECHO:hello, new conversation') ? true : null), 10000), 'the fixture: its turn is over');
+  await until(async () => (deskOf(await floor(), 'free')?.state === 'working' ? null : true), 5000);
+  mkdirSync(`${REPO}/.claude`, { recursive: true });
+  writeFileSync(`${REPO}/.claude/settings.json`, JSON.stringify({ permissions: { defaultMode: 'default' } }));
+  const argvAtChosen = argvLog().length;
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null })).status, 200, 'with defaultMode default in the folder\'s settings, a new conversation');
+  assert(await until(() => (launches(argvAtChosen).length === 1 ? true : null), 10000), 'is started');
+  assert(!launches(argvAtChosen)[0].includes('--permission-mode'), `with no mode on the command line: the person's setting is Claude Code's to apply — ${JSON.stringify(launches(argvAtChosen))}`);
+  rmSync(`${REPO}/.claude/settings.json`, { force: true });
+  await sleep(1500);   // past the start, so the next reopen finds it idle
+
+  // Auto not available to this Claude Code: asked for auto, it runs default
+  // without a word but a status record. The host switches it to acceptEdits
+  // and says so on the desk, never leaving it asking about every tool.
+  writeFileSync(`${FIX}/no-auto.flag`, '1');
+  const noAutoMark = await lastId();
+  const stdinAtNoAuto = existsSync(STDIN_LOG) ? readFileSync(STDIN_LOG, 'utf8').length : 0;
+  eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null })).status, 200, 'with auto not available, a new conversation');
+  assert(await until(() => (readFileSync(STDIN_LOG, 'utf8').slice(stdinAtNoAuto).includes('"subtype":"set_permission_mode","mode":"acceptEdits"') ? true : null), 10000),
+    'is switched to acceptEdits by the host, as soon as Claude Code says it fell back to default');
+  assert(!!(await until(async () => (await newRows(noAutoMark)).find((r) => r.role === 'context' && /auto mode is not available.*acceptEdits/.test(r.text ?? '')) ?? null, 10000)),
+    'and the desk says so, in a line from the host');
+  rmSync(`${FIX}/no-auto.flag`, { force: true });
   /* ── the folder picker, and moving a desk to another floor ────────────────
    * The host lists one folder at a time, the way a file picker shows it, and
    * a bound folder taken onto another floor under its own name is moved:
