@@ -1143,7 +1143,7 @@ class Host {
     if (SEARCH_IN_WORKER) return this.searchInWorker(query, deep, say);
     let child;
     try {
-      child = spawn(process.execPath, [HISTORY_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn(process.execPath, [HISTORY_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     } catch (err) {
       warn(`search: could not start — ${err.message}`);
       return say({ rows: [], error: `could not start the search: ${err.message}` });
