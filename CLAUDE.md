@@ -371,7 +371,12 @@ on was measured on 2.1.330 before it was built
   machine signed out is not probed; a probe whose first message does not
   come back is "could not be checked", kept, and not run again for that
   version. Measured on a real 2.1.330 host: 54 s, 32 of 32, a line on each
-  desk; and by pc-developer on Windows, 56 s, 32 of 32. The suites set
+  desk; and by pc-developer on Windows, 56 s, 32 of 32. **The probe runs in
+  `default` mode whatever the person's settings say** (`permissionMode:
+  'default'` on its Agent, 0.15.1): its rows measure a permission being
+  asked, and with `defaultMode: auto` in the settings nothing asks, so
+  every new version would have read as Claude Code having changed
+  (measured on 2.1.331: settings auto and no flag, init auto). The suites set
   `ORCH_CANARY=off` for every host they start, and `ORCH_TMUX` to a tmux
   that does not exist (a mutant of the legacy sweep once ended the
   operator's own agents' windows through the real one).
@@ -3399,6 +3404,19 @@ about reading the gate:
   parent commit**, not a verdict: test:floor's silent-room row was red twice
   at load 545 on a tree that did not touch it, the parent was green at 285,
   and the tree was green alone at 49.
+- **A rig in Claude Code's defaults hides a fault that only an operator's
+  own settings show** (0.15.1, 2026-11-23). 0.15.0 passed 3259 ✓, 19 of 19
+  pages and a first-session walk, then flooded costmo's desks with
+  prompts within the hour: every rig ran in `default` mode, where asking is
+  normal, and his desks had run in `auto`. Two things made it invisible.
+  The suites' stand-in Claude Code reported `permissionMode: 'default'`
+  whatever it was started with (it now reports the flag's mode), and a
+  scratch config has no `defaultMode`. So an upgrade walk starts from an
+  operator's real shape: conversations left in auto, a settings file with
+  and without `defaultMode` (desktop-dev's `rehearse-upgrade.mjs` fails if
+  a desk is in `default` after an update). And "it did not ask" in a probe
+  proves nothing on this machine, whose settings allow most tools: force
+  a prompt with `--settings` (**measure-a-real-window**, 5).
 - **A mutant can survive because a test env names the thing twice**: the
   seat hook rows passed with the binding-file read removed, because the seat
   env also carries ORCH_CHANNEL / ORCH_AGENT. A row with the file alone
@@ -3683,6 +3701,7 @@ operator's live floor.
   | `host/seats.js`, `host/identity.js` | `test:seats`, `test:host` |
   | `host/auth.js` | `test:host` |
   | `host/version.js` | `test:host` (its unit rows and the version line on a desk) |
+  | `host/canary.js` | `test:host` (`probeNode` only); the checks themselves only on a real Claude Code, `protocol-probe.mjs` (**measure-a-real-window**) |
   | `src/updates.js`, `host/update.js` | `test:update` |
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |

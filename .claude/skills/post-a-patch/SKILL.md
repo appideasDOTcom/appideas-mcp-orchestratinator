@@ -41,6 +41,11 @@ node .claude/skills/post-a-patch/post-patch.mjs appideas-qa "$SP/patch-015-k.dif
   "coordinator → appideas-qa: PATCH K (cumulative on b1a774a). sha256 …"
 ```
 
+Read its whole output, never through `tail`: the script prints the board's
+reply followed by blank lines, so `| tail -2` showed nothing, the post
+looked failed, and the patch went out twice to each reader (0.15.1-A).
+`| command grep -o '"id": [0-9]*'` prints the message id.
+
 Then a second, short message through the MCP tool with the readings: the
 cause in a few lines, the rows and which are red without the fix, the suites
 and page checks run with their counts and the load, the mutants, and what is

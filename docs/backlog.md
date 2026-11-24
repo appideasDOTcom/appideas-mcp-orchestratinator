@@ -4,6 +4,25 @@ Things worth doing that nobody is doing yet. One entry per item; say what was
 seen, not what was guessed, and note where it came from so the next person can
 find the thread.
 
+## A reopen that fails is said for 2.5 s, then nothing
+
+Seen by desktop-dev on 0.15.0 (2026-11-23, task 353's record, screenshots
+`walk-p0151/v0150-*.png`): Sessions → Start new spun for 90 s, then
+`src/ui/floor.js` flashed "no new conversation after 90s" on the Sessions
+link (`flash`, about 2.5 s) and drew nothing more, with the old
+conversation still on the panel. costmo read it as a spinner that never
+ended. 0.15.1 fixed the cause (a new conversation's id now comes from the
+roster at start), but any reopen that fails still says so only in that
+flash. The fix is a line that stays until the next action, like a bulk
+action's `missedNote`; where it goes on the panel is costmo's call.
+
+## The desk's bubble says "Thinking…" while a prompt waits on the operator
+
+Seen by desktop-dev in the 0.15.1 walk (2026-11-23, `walk-p0151/3-1-after-send.png`):
+a desk standing on a permission prompt drew "Thinking…" in its card bubble,
+beside the red ! and the prompt in the panel. Nothing is thinking; the desk
+waits on the operator. Not reproduced or traced yet.
+
 ## Better instructions for switching away from localhost / changing MCP servers
 
 The README's only mention is one sentence in step 5 (install the host): if
