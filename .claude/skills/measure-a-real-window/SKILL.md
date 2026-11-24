@@ -85,6 +85,30 @@ desk any more. For a desk, use these:
      | claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model haiku \
      | node -e 'const t0=Date.now();require("readline").createInterface({input:process.stdin}).on("line",l=>{const r=JSON.parse(l);console.log(Date.now()-t0,r.type,r.subtype??r.state??"")})'
    ```
+   **A control request, with no turn at all** (free; no model call): the
+   host's controls are `control_request` lines on stdin, and Claude Code
+   answers each with a `control_response` of the same `request_id`. This is
+   how `get_settings` was found to answer the model and effort before any
+   message (0.15.2, `Desk.noteSettings`): `response.applied.model` and
+   `.applied.effort`, 0.9 s from start on 2.1.331. The subtypes the binary
+   knows: `strings "$(readlink -f "$(command -v claude)")" | command grep -o
+   -E 'subtype:"[a-z_]+"' | sort -u` (2.1.331 has `get_settings`,
+   `get_status`, `get_context_usage`, `get_session_cost`, `mcp_status`,
+   among others; `initialize` is not needed first).
+
+   ```bash
+   mkdir -p $SP/ctl && cd $SP/ctl
+   ( printf '%s
+' '{"type":"control_request","request_id":"a","request":{"subtype":"get_settings"}}'; sleep 5 ) \
+     | claude -p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio \
+     | command grep control_response
+   ```
+   Never `set_model` or `apply_flag_settings` here on the operator's config:
+   Claude Code applies them to its process and a probe has no host to
+   decide what is saved, so keep probes to the `get_` kind and
+   `mcp_status`; a change of model or effort is measured on a scratch
+   `CLAUDE_CONFIG_DIR`.
+
    **Signed out, without signing anyone out**: the same with
    `CLAUDE_CONFIG_DIR=<an empty scratch dir>` (and `ANTHROPIC_API_KEY`
    unset). Claude Code keys its Keychain item by that directory, so the

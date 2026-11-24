@@ -401,7 +401,14 @@ on was measured on 2.1.330 before it was built
   tree (pc-developer, measured; a Job object would reach it, not built).
   The supervisor (`host/supervise.mjs`) holds a one-per-user lock (a named
   pipe) and stops the host when the process that started it is gone, which
-  is what Task Scheduler's End does to it (F3).
+  is what Task Scheduler's End does to it (F3). **Every console program
+  the host starts carries `windowsHide: true`** (0.15.2): under the
+  desktop app the host is a utility process with no console, so a child
+  without it opens a console window of its own, and `claude auth status`
+  runs at every heartbeat. The Docker install's host runs under
+  `conhost --headless` and never showed it. The exception is `wt.exe`
+  (Open in Claude), which is meant to be seen. A new spawn in `host/` takes
+  the flag; it does nothing off Windows, so only the PC can prove it.
 - **Claude Code's own records are never somebody's words**: a `<synthetic>`
   assistant record is a `context` line labeled `synthetic` ("No response
   requested."), "[Request interrupted by user…]" is a `context` line
@@ -3168,6 +3175,35 @@ the app's agent goes.
 
 ## A host on Windows (feature/windows-implementation)
 
+**Who measures what on Windows is two roles, not two names, on a PC that
+comes and goes** (costmo, 2026-11-24). The PCs are fleet machines lent
+from E3 Webcasting, a related company we also write software for, and go
+back to the field. So expect a different PC, a different user profile and
+paths (`C:\Users\<someone>\…`), and different agent names from one round
+to the next, and read the board's `whoami` list for who is there now. The
+two roles: **the Docker install on Windows** (the Windows twin of the
+Mac's Docker board and launchd host; `pc-developer` in 2026-11) and **the
+desktop app on Windows** (the twin of orchestratinator-desktop-dev, which
+directs it; `windows-desktop-dev` in 2026-11). A change here that the app
+carries is proven in the app by the second; the Docker side by the first.
+A new PC starts with nothing: no Node 24 (portable Node, as the 2026-11
+rounds used), no Python or build tools, no clone, and possibly no GitHub
+ssh key. So a round on it begins with what is installed, measured, and a
+Windows finding names the PC it was read on.
+Below, "pc-developer" means the Docker role as it was on the PC of those
+rounds. **The desktop app shipped for Windows in
+0.15.2** (2026-11-24): a Squirrel Setup.exe, per user with no admin
+(costmo's pick), with Squirrel.Windows updates from `win32/x64/RELEASES`
+on the CDN, built on GitHub's Windows runner so a release needs no PC,
+and **unsigned by his decision** after Microsoft refused him an account
+for its signing service ("Windows users get no signed app… If Microsoft
+wants to pull their heads out of their asses, I might change my mind").
+Do not re-propose signing unless he raises it. The app's half is recorded
+in the desktop repo (`docs/desktop-app.md`, "Windows: …";
+`docs/release-checklist.md`). Windows users of the Docker install are not
+expected, and its update path on Windows is not worked on (his word, same
+day).
+
 2026-11-20, costmo's scope: the Docker install working on Windows, the
 desktop app later. Built from this folder and measured on his Windows 11 PC
 by **pc-developer**, a Claude Code desk on this floor running there (it
@@ -3779,7 +3815,10 @@ operator's live floor.
   the last message id the summary names. `poll_messages` with no `since`
   starts at 0, and on 2026-11-22 it returned the floor's oldest hundred
   (from id 2220, three weeks old), past the output limit, while the new
-  messages sat above them.
+  messages sat above them. With no id to hand, pass a `since` far above
+  any id (`99999999`): the board answers `since_ahead` and reads from its
+  own record of what you were given, which is exactly the unread
+  (measured 2026-11-24).
 - **The board keeps each agent's cursor, and another machine's board
   keeps its own.** `agents.poll_cursor` (one row per channel and agent)
   is the last message delivered to that agent. That row, against
