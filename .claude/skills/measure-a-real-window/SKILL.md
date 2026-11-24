@@ -1,11 +1,11 @@
 ---
 name: measure-a-real-window
-description: Find out what Claude Code actually does — run a real Claude Code the way a desk runs it (stream-JSON, through host/agent.js) with protocol-probe.mjs, drive the whole floor end to end on a scratch board with floor-e2e.mjs, or measure one record order with a one-liner. Use before believing any claim about how Claude Code behaves, after every Claude Code update that touches the desk path, and before a release round.
+description: Find out what Claude Code actually does — run a real Claude Code the way a desk runs it (stream-JSON, through host/agent.js) with protocol-probe.mjs, drive the whole floor end to end on a scratch board with floor-e2e.mjs, see what one prompt makes Claude Code ask and do next with ask-probe.mjs (subagent asks, allow rules, signed out), or measure one record order with a one-liner. Use before believing any claim about how Claude Code behaves, after every Claude Code update that touches the desk path, and before a release round.
 ---
 
 # Asking Claude Code instead of reasoning about it
 
-## Since 0.15.0: desks are stream-JSON processes, and three tools ask them
+## Since 0.15.0: desks are stream-JSON processes, and four tools ask them
 
 **A desk's Claude Code has no screen** (CLAUDE.md, "How a desk runs Claude
 Code"). Everything below the next heading was written for the window layer
@@ -76,6 +76,30 @@ desk any more. For a desk, use these:
    operator's sign-in is untouched; the turn answers "Not logged in · Please
    run /login" with `isApiErrorMessage`, writes it to the scratch dir's
    transcript, and ends with lifecycle `cancelled`.
+
+4. **`ask-probe.mjs`: what Claude Code asks, and what it does next.** One
+   prompt on the desk's path, every record timed, each `control_request`
+   printed with its own fields, and each permission answered after a delay
+   you set (or never, or denied). It took the four measurements behind
+   0.15.0's last fixes (2026-11-23), each a fact the host now relies on:
+   - a subagent's `can_use_tool` carries `agent_id`, and the parent's does not;
+   - `mcp__orchestratinator` in the folder's `.claude/settings.local.json`
+     lets the board's tools run unasked (`--mcp-config` with a scratch board);
+   - a WebSearch ask carries `tool_use_id`, and Claude Code waits for its
+     answer; it never runs the tool on its own (on Opus it went through
+     ToolSearch first, which haiku does not; `--model opus` when that matters);
+   - signed out (`--config-dir <empty>`): `isApiErrorMessage` with
+     `error: "authentication_failed"`.
+
+   ```bash
+   . scripts/node-floor.sh
+   node .claude/skills/measure-a-real-window/ask-probe.mjs --dir $SP/probe \
+     --prompt "Use the Bash tool to run exactly: touch x.txt . Then reply DONE." [--answer-after 20000 | --no-answer | --deny]
+   ```
+   Measure the record before a theory about it. In the 0.15.0 round three
+   explanations of one stuck prompt were written before this probe showed
+   Claude Code waiting, and the screenshot's empty label showed where the
+   fault really was (the page). Read a screenshot's details as evidence too.
 
 Rules that carry over unchanged: never the operator's board or config
 (no `/model` or `/effort` typed anywhere a probe runs: they save the

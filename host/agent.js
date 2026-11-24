@@ -49,8 +49,8 @@ export const TAKEN_TIMEOUT_MS = Number(process.env.ORCH_TAKEN_TIMEOUT_MS ?? 30_0
 /** How long a stopping process is given to leave before it is killed. */
 export const STOP_GRACE_MS = Number(process.env.ORCH_STOP_GRACE_MS ?? 5_000);
 
-/** The command line, one place. `resume` and `mcpConfig` are optional. */
-export function agentArgs({ resume = null, mcpConfig = null, model = null } = {}) {
+/** The command line, one place. `resume`, `mcpConfig` and `permissionMode` are optional. */
+export function agentArgs({ resume = null, mcpConfig = null, model = null, permissionMode = null } = {}) {
   return [
     '-p',
     '--input-format', 'stream-json',
@@ -58,6 +58,14 @@ export function agentArgs({ resume = null, mcpConfig = null, model = null } = {}
     '--verbose',
     '--permission-prompt-tool', 'stdio',
     '--replay-user-messages',
+    // The mode the desk runs in (Desk.modeFor): left out only when the
+    // person's settings name one, which Claude Code then applies itself.
+    // Left out on 0.15.0 always, so Claude Code ran `default` and every desk
+    // taken over from an `auto` window asked about every tool (costmo,
+    // 2026-11-23; measured on 2.1.331: init `default` without the flag,
+    // `auto` with it). Before --resume, so a command line still ends in the
+    // conversation it resumes.
+    ...(permissionMode ? ['--permission-mode', permissionMode] : []),
     ...(resume ? ['--resume', resume] : []),
     ...(mcpConfig ? ['--mcp-config', mcpConfig] : []),
     ...(model ? ['--model', model] : []),
@@ -108,7 +116,10 @@ export function readRecord(r) {
   // written). So a reset carries no session, and the next init moves us.
   if (r.type === 'conversation_reset') return { kind: 'reset', conversation: r.new_conversation_id ?? null };
   if (r.type === 'system' && r.subtype === 'status') {
-    return { kind: 'status', status: r.status ?? null, compact: r.compact_result ?? null };
+    // permissionMode: what Claude Code runs in now. Said at startup when it
+    // could not run the mode it was asked for (2.1.331: auto disabled, it
+    // starts in default and says so here, before any message).
+    return { kind: 'status', status: r.status ?? null, compact: r.compact_result ?? null, mode: r.permissionMode ?? null };
   }
   if (r.type === 'system' && r.subtype === 'compact_boundary') return { kind: 'compacted' };
   if (r.type === 'control_request') {
@@ -151,7 +162,7 @@ export function readRecord(r) {
  *   taken     { uuid }                                a message was taken
  *   result    { ok, subtype, text, session_id }       a turn ended
  *   reset     { session_id }                          /clear made a new conversation
- *   status    { status, compact }                     compacting began or ended
+ *   status    { status, compact, mode }               compacting began or ended; the mode it runs in
  *   permission, question, ask                         Claude Code asks the host something
  *   exit      { code, signal, stderr }                the process is gone
  */
@@ -180,11 +191,11 @@ export function spawnPlan(claude, args, shell, platform = process.platform) {
 }
 
 export class Agent extends EventEmitter {
-  constructor({ cwd, env = process.env, resume = null, mcpConfig = null, model = null, claude = CLAUDE, shell = null } = {}) {
+  constructor({ cwd, env = process.env, resume = null, mcpConfig = null, model = null, permissionMode = null, claude = CLAUDE, shell = null } = {}) {
     super();
     this.cwd = cwd;
     this.env = env;
-    this.args = agentArgs({ resume, mcpConfig, model });
+    this.args = agentArgs({ resume, mcpConfig, model, permissionMode });
     this.claude = claude;
     // Started through the person's shell where there is one, as the windows
     // were (`default-shell -c`): its startup files are part of what Claude
@@ -258,9 +269,10 @@ export class Agent extends EventEmitter {
           this.asks.delete(id);
           this.emit('cancelled', { kind: 'cancelled', request_id: id });
         }
+        this.armHeld();
         break;
       }
-      case 'cancelled': this.asks.delete(m.request_id); break;
+      case 'cancelled': this.asks.delete(m.request_id); this.armHeld(); break;
       case 'reset': this.sessionId = null; break;
       case 'permission': case 'question': case 'ask': this.asks.set(m.request_id, m); break;
       case 'answered': {
@@ -284,17 +296,33 @@ export class Agent extends EventEmitter {
     if (!this.alive) return Promise.resolve({ ok: false, code: 'no_process', error: 'the desk\'s Claude Code is not running' });
     // While it waits on an answer, Claude Code does not take a message: it
     // is taken only once the ask is answered (the protocol probe,
-    // 2026-11-22, 2.1.330), so it would read "not taken" after 30 s and then
-    // arrive anyway. Refused before a byte is written, as the board refuses.
+    // 2026-11-22, 2.1.330). So it is written now and held: answered at once
+    // as `held`, with `taken` settling when Claude Code takes it, and the
+    // 30 s receipt clock starting only once nothing is asked (armHeld). It
+    // used to be refused, and with prompts arriving several a second a
+    // message sent from the floor met one nearly every time and never
+    // reached the desk (costmo, 2026-11-23, F17).
     if (this.asks.size) {
-      const what = [...this.asks.values()][0];
-      return Promise.resolve({ ok: false, code: 'asking', error: `its Claude Code is waiting on an answer to what it asked (${what.kind === 'question' ? 'a question' : `permission for ${what.tool ?? 'a tool'}`}), and takes no message until then: answer it, or cancel it, then send this again` });
+      const w = { resolve: null, timer: null, held: true, timeoutMs, uuid };
+      const taken = new Promise((res) => { w.resolve = res; });
+      this.takenWaits.set(uuid, w);
+      if (!this.write(userLine(text, uuid))) { this.takenWaits.delete(uuid); return Promise.resolve({ ok: false, code: 'no_process', error: 'the desk\'s Claude Code is not running' }); }
+      return Promise.resolve({ ok: true, held: true, uuid, taken });
     }
     return new Promise((resolve) => {
       const timer = setTimeout(() => { this.takenWaits.delete(uuid); resolve({ ok: false, code: 'not_taken', uuid, error: `Claude Code did not take the message within ${Math.round(timeoutMs / 1000)}s` }); }, timeoutMs);
       this.takenWaits.set(uuid, { resolve, timer });
       if (!this.write(userLine(text, uuid))) { clearTimeout(timer); this.takenWaits.delete(uuid); resolve({ ok: false, code: 'no_process', error: 'the desk\'s Claude Code is not running' }); }
     });
+  }
+
+  /** Start the receipt clock of every held message, once nothing is asked. */
+  armHeld() {
+    if (this.asks.size) return;
+    for (const [uuid, w] of this.takenWaits) {
+      if (!w.held || w.timer) continue;
+      w.timer = setTimeout(() => { this.takenWaits.delete(uuid); w.resolve({ ok: false, code: 'not_taken', uuid, error: `Claude Code did not take the message within ${Math.round(w.timeoutMs / 1000)}s of the answer` }); }, w.timeoutMs);
+    }
   }
 
   /** A control request; resolves with its answer. */
@@ -313,6 +341,7 @@ export class Agent extends EventEmitter {
     if (!this.asks.has(requestId)) return { ok: false, code: 'stale_request', error: 'that question is no longer open' };
     if (!this.write(answerLine(requestId, response))) return { ok: false, code: 'no_process', error: 'the desk\'s Claude Code is not running' };
     this.asks.delete(requestId);
+    this.armHeld();
     return { ok: true };
   }
   allow(requestId, updatedInput, updatedPermissions = null) {

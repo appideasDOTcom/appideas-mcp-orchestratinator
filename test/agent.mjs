@@ -155,7 +155,7 @@ try {
   eq(readRecord({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', session_id: 'S' }),
     { kind: 'result', ok: false, subtype: 'error_during_execution', text: '', session_id: 'S' }, 'a result says whether the turn ended well');
   eq(readRecord({ type: 'conversation_reset', new_conversation_id: 'S2' }), { kind: 'reset', conversation: 'S2' }, '/clear\'s reset carries no session id: its id is not the session\'s');
-  eq(readRecord({ type: 'system', subtype: 'status', status: 'compacting' }), { kind: 'status', status: 'compacting', compact: null }, 'compacting begins');
+  eq(readRecord({ type: 'system', subtype: 'status', status: 'compacting' }), { kind: 'status', status: 'compacting', compact: null, mode: null }, 'compacting begins');
   eq(readRecord({ type: 'control_request', request_id: 'r', request: { subtype: 'can_use_tool', tool_name: 'Bash', display_name: 'Bash', input: { command: 'ls' }, description: 'd', permission_suggestions: [1] } }),
     { kind: 'permission', request_id: 'r', tool: 'Bash', title: 'Bash', input: { command: 'ls' }, description: 'd', suggestions: [1], agent: null }, 'a permission is the tool, its input, what it is for, and the rules that would allow it again');
   // A subagent's names it (2.1.330, task 352: `agent_id` on the request,
@@ -167,6 +167,9 @@ try {
   eq(readRecord({ type: 'rate_limit_event' }), null, 'a record the host has no use for is nothing');
   assert(agentArgs({ resume: 'S1', mcpConfig: '/x.json' }).join(' ') === '-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --replay-user-messages --resume S1 --mcp-config /x.json',
     'the command line: stream-JSON both ways, permissions over stdin, every message echoed, then the resume and the binding');
+  eq(agentArgs({ resume: 'S1', permissionMode: 'auto' }).slice(-4), ['--permission-mode', 'auto', '--resume', 'S1'], 'and the permission mode the desk runs in, before the resume: without it Claude Code runs default and asks about every tool');
+  assert(!agentArgs({ resume: 'S1' }).includes('--permission-mode'), 'none when none is given: the person\'s settings name one, and Claude Code applies it');
+  eq(readRecord({ type: 'system', subtype: 'status', status: null, permissionMode: 'default' }).mode, 'default', 'a status record says the mode Claude Code runs in: how a silent fall back from auto is seen');
   eq(JSON.parse(userLine('hi', 'u')), { type: 'user', uuid: 'u', message: { role: 'user', content: 'hi' } }, 'a message carries the uuid its receipt will name');
   // How Claude Code is started (task 348 F7, pc-developer: with only an npm
   // claude.cmd on PATH the desk never started; Node will not spawn a .cmd
@@ -212,18 +215,39 @@ try {
   eq((await permDone)?.text, 'ALLOWED:{"command":"ls"}', 'which Claude Code reads as allowed, with the input it asked for');
   eq(a.allow(perm.request_id).code, 'stale_request', 'a second answer to it is refused: it is no longer open');
   // While a permission stands, a message is not taken by Claude Code until
-  // it is answered (the protocol probe, 2.1.330): refused before it is
-  // written, so it is never said "not taken" and then delivered anyway.
+  // it is answered (the protocol probe, 2.1.330). It is written and held,
+  // never refused: refused, a message sent while prompts came several a
+  // second never reached the desk (costmo, 2026-11-23, F17). Its receipt
+  // clock starts at the answer, so it is not said "not taken" meanwhile.
   const heldAsked = next(a, 'permission');
   const heldDone = next(a, 'result');
   await a.send('PERMIT Bash');
   const held = await heldAsked;
-  const refused = await a.send('a message while it asks');
-  eq([refused.ok, refused.code], [false, 'asking'], 'a message while a permission stands is refused, not written');
-  assert(/waiting on an answer to what it asked \(permission for Bash\)/.test(refused.error ?? ''), 'saying what it waits on', refused.error);
+  const heldMsg = await a.send('a message while it asks');
+  eq([heldMsg.ok, heldMsg.held, typeof heldMsg.taken?.then], [true, true, 'function'], 'a message while a permission stands is written and held, not refused');
   a.allow(held.request_id);
+  eq((await heldMsg.taken)?.ok, true, 'and Claude Code has it once the permission is answered');
   await heldDone;
   eq((await a.send('after the answer')).ok, true, 'and once it is answered, a message is taken again');
+  {
+    // The receipt clock of a held message starts at the answer, never
+    // before: a question can stand for an hour, and "not taken" said
+    // meanwhile would hand the words back while Claude Code still has them.
+    const f = new Agent({ cwd: '/x' });
+    const wrote = [];
+    f.child = { stdin: { write: (l) => { wrote.push(l); return true; } } };
+    f.asks.set('q-1', { kind: 'question' });
+    f.asks.set('q-2', { kind: 'permission', tool: 'Bash' });
+    const h = await f.send('held one', { timeoutMs: 150 });
+    eq([h.ok, h.held, wrote.length], [true, true, 1], 'written at once while a question stands');
+    f.asks.delete('q-1');
+    f.armHeld();   // one answered, one still standing
+    const early = await Promise.race([h.taken, new Promise((r) => setTimeout(() => r('open'), 400))]);
+    eq(early, 'open', 'and not timed out while any still stands, past its timeout');
+    f.asks.delete('q-2');
+    f.armHeld();
+    eq((await h.taken)?.code, 'not_taken', 'its clock starts once nothing is asked, and a message never taken is said');
+  }
   await next(a, 'result');
   // Stopped while it asks: Claude Code withdraws the ask (control_cancel_request),
   // and the process takes messages again (QA, measured on 2.1.330, msg 4100).

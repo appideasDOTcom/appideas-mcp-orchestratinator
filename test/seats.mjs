@@ -227,7 +227,7 @@ function fixture() {
     `  taken.push(r.uuid);`,
     `  if (inTurn) { out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } }); said(text, who); if (/look idle/.test(text)) result(who); return; }`,
     `  inTurn = true;`,
-    `  out({ type: 'system', subtype: 'init', session_id: id, model: 'claude-haiku-5-5', permissionMode: 'default', claude_code_version: '2.1.330' });`,
+    `  out({ type: 'system', subtype: 'init', session_id: id, model: 'claude-haiku-5-5', permissionMode: process.argv.includes('--permission-mode') ? process.argv[process.argv.indexOf('--permission-mode') + 1] : 'default', claude_code_version: '2.1.330' });`,
     `  out({ type: 'user', uuid: r.uuid, isReplay: true, message: { role: 'user', content: text } });`,
     `  if (text.startsWith('PERMIT ')) {`,
     `    const tool = text.slice(7);`,

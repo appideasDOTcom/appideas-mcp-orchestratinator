@@ -4707,15 +4707,17 @@
 
     drawAlert(wrap.querySelector('.p-alert-slot'), d, channel, agent, canChat);
 
-    // The window is asking something: anything typed would go into the
-    // prompt, so the board refuses it (askingWhy, src/floor.js), and the box
-    // says so before Send is pressed. The answer is the box above.
+    // The window is asking something: a message is taken all the same and
+    // held behind the prompt until it is answered (F17, costmo 2026-11-23),
+    // and the box says so before Send is pressed. The answer is the box above.
     const asking = canChat && d.nudge?.code === 'asking';
+    // Only the host's own ask can hold a message (the board refuses the rest).
+    const holds = asking && !!d.permission?.host_ask;
     // Claude Code signed out on the desk's host: refused by the board in the
     // same words (signedOutWhy), and the Sign in box is above.
     const signedOut = canChat && d.nudge?.code === 'signed_out';
     $('p-text').placeholder = asking
-      ? `${d.persona} is asking something — answer it above, then type here…`
+      ? (holds ? `${d.persona} is asking something above — a message sent now reaches it once you answer…` : `${d.persona} is asking something — answer it above, then type here…`)
       : signedOut
       ? `Claude Code is signed out on ${d.signin?.host ?? 'this desk\u2019s machine'} — sign in above, then type here…`
       : canChat
@@ -4725,8 +4727,8 @@
       : h?.refused
       ? `${d.persona}’s host was refused by this board, so nothing can be sent…`
       : `${d.persona}’s machine isn’t reachable right now…`;
-    wrap.querySelector('[data-act="send"]').disabled = !canChat || asking || signedOut;
-    gateAttach(canChat && !asking && !signedOut);
+    wrap.querySelector('[data-act="send"]').disabled = !canChat || (asking && !holds) || signedOut;
+    gateAttach(canChat && !(asking && !holds) && !signedOut);
     drawAttach();
     // Gated with Send, not with the stop sign: a prompt is something to send, so
     // offering the library for a box that cannot deliver is the same drift the
@@ -5406,6 +5408,7 @@
     if (d?.state === 'line') return d.note || 'in line';
     if (d) {
       if (d.held === 'compacting') return 'held — the desk is compacting; it reads this when that ends';
+      if (d.held === 'asking') return 'held — it reaches the desk once you answer what it is asking';
       if (d.held) return 'queued — the window took it once it was free';
       return 'queued — the desk is working';
     }

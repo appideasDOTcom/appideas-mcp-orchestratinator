@@ -992,6 +992,96 @@ export async function lastSpokenIn(cwd) {
   return rows[0]?.id ?? null;
 }
 
+/**
+ * The permission modes a desk can be started in for a person's own choice.
+ * costmo's rule (2026-11-23, after 0.15.0 ran his `auto` desks in
+ * `default`): "'Default' from our perspective is, and ALWAYS will be, 'DON'T
+ * ANNOY THE SHIT OUT OF THE OPERATOR OR MAKE THE TOOL UNUSEABLE'." So a
+ * desk runs in a mode the person chose (a conversation left in it, or a
+ * `defaultMode` in their settings), and otherwise in `auto`: never Claude
+ * Code's `default` because nothing was recorded (Desk.modeFor). Each was
+ * measured on 2.1.331 as a `-p` flag, `bypassPermissions` included.
+ */
+export const CARRIED_MODES = new Set(['auto', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions']);
+
+/**
+ * The mode a desk runs in, from what the person chose (Desk.modeFor reads
+ * the two): `read`, the conversation's last interactive `permission-mode`
+ * record, counts when it is not `default` (an interactive session writes
+ * `default` whether anybody chose it or not); `set`, their settings'
+ * `defaultMode`, counts as it is, and goes as no flag so Claude Code applies
+ * it itself; nothing chosen is `auto`. `flag` is the command line's,
+ * `expect` what Claude Code should then run in.
+ */
+export function pickMode(read, set) {
+  if (read && read !== 'default' && CARRIED_MODES.has(read)) return { flag: read, expect: read };
+  if (set) return { flag: null, expect: set };
+  return { flag: 'auto', expect: 'auto' };
+}
+
+/**
+ * The `permissions.defaultMode` a person set for a folder, as Claude Code
+ * reads it: the folder's `.claude/settings.local.json`, then its
+ * `.claude/settings.json`, then the user's `settings.json`. Null when none
+ * says one (or a file is not JSON: that is not a choice). Claude Code applies
+ * it itself when the desk is started with no flag.
+ */
+export function settingsMode(cwd) {
+  for (const f of [join(cwd, '.claude', 'settings.local.json'), join(cwd, '.claude', 'settings.json'), join(CLAUDE_HOME, 'settings.json')]) {
+    let d;
+    try { d = JSON.parse(readFileSync(f, 'utf8')); } catch { continue; }
+    const m = d?.permissions?.defaultMode;
+    if (typeof m === 'string' && m) return m;
+  }
+  return null;
+}
+const MODE_TAIL_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The mode a transcript was last in, from its last `permission-mode` record,
+ * or null. Read from the tail first (one is written each turn), then whole.
+ * Only an interactive Claude Code writes that record (Shift+Tab's choice);
+ * a `-p` one writes none, even started with a mode (QA, 2026-11-23). And
+ * only that record: a `-p` process's user records say the mode the host
+ * started it in, which is not the person's choice.
+ */
+export async function conversationMode(path) {
+  const { open } = await import('node:fs/promises');
+  let fh;
+  try { fh = await open(path, 'r'); } catch { return null; }
+  try {
+    const { size } = await fh.stat();
+    for (const from of size > MODE_TAIL_BYTES ? [size - MODE_TAIL_BYTES, 0] : [0]) {
+      const buf = Buffer.alloc(size - from);
+      await fh.read(buf, 0, buf.length, from);
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"permission-mode"')) continue;
+        let r;
+        try { r = JSON.parse(lines[i]); } catch { continue; }
+        if (r?.type === 'permission-mode' && typeof r.permissionMode === 'string') return r.permissionMode;
+      }
+    }
+    return null;
+  } finally { await fh.close(); }
+}
+
+/**
+ * The conversation a running Claude Code is on, from its own roster file, or
+ * null. A `-p` process names its conversation in `init`, which it writes only
+ * when its first message arrives, so a desk opened on a new conversation had
+ * no id until somebody typed, and the floor's New session spun for ever
+ * (costmo, 2026-11-23). Its roster file carries the id from its first
+ * milliseconds (measured on 2.1.331, nothing sent).
+ */
+export function sessionOfPid(pid) {
+  if (!pid) return null;
+  try {
+    const d = JSON.parse(readFileSync(join(CLAUDE_HOME, 'sessions', `${pid}.json`), 'utf8'));
+    return typeof d?.sessionId === 'string' ? d.sessionId : null;
+  } catch { return null; }
+}
+
 /** A title from a first prompt: its first line, whitespace folded, 80 characters. */
 function clipTitle(s) {
   const line = String(s).trim().split('\n')[0].replace(/\s+/g, ' ');

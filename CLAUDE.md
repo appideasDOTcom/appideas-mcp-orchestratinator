@@ -108,6 +108,31 @@ on was measured on 2.1.330 before it was built
   environment is `agentEnv()`: a person's own and nothing of the host's
   settings (`windowEnv()`, "The clear of 2026-11-20"), plus the board's key
   where the binding names a variable for it, and a seat's four variables.
+- **A desk never runs in Claude Code's `default` mode unless the person
+  chose it** (costmo, 2026-11-23, the day 0.15.0 ran his `auto` desks in
+  `default` and they asked about every tool: "'Default' from our
+  perspective is, and ALWAYS will be, 'DON'T ANNOY THE SHIT OUT OF THE
+  OPERATOR OR MAKE THE TOOL UNUSEABLE'"). `Desk.modeFor`, in order: the
+  mode the conversation was left in, when an interactive session chose one
+  (its last `permission-mode` record, `conversationMode` in
+  `host/claude.js`, other than `default`, which an interactive session
+  writes whether anybody chose it or not; a `-p` process writes no such
+  record); else the person's `permissions.defaultMode` (folder
+  `settings.local.json`, folder `settings.json`, user `settings.json`:
+  `settingsMode`), passed as no flag so Claude Code applies it itself;
+  else `--permission-mode auto`, for a new conversation, a resumed one, an
+  unreadable transcript and a brand-new user alike. When `auto` is not
+  available, Claude Code falls back to `default` and says so only in a
+  `status` record at startup (2.1.331, auto disabled); the host then
+  switches it to `acceptEdits` (`set_permission_mode`) and says so on the
+  desk (`noteMode`). Measured on 2.1.331: each mode as a `-p` flag,
+  `bypassPermissions` included; init `default` without a flag.
+- **A new conversation is named when its process starts, not at its first
+  message** (same day: New session spun for ever). `init` comes only with
+  the first message, so the host reads the id from the process's own roster
+  file (`sessionOfPid`, `Desk.learnNewId`), there within milliseconds of the
+  start (measured on 2.1.331, nothing sent), and reports it, which is what
+  the floor's New session waits on.
 - **Nothing runs until something asks for it**: a message, Open on the floor
   (`open` work), a take or a move (unless it says `open: false`), a pick in
   Sessions (`reopen`), a new seat. One process a desk (`ensure`). A host
@@ -124,8 +149,14 @@ on was measured on 2.1.330 before it was built
   end, so a long reply read as "not delivered" (found by the floor e2e,
   2026-11-22). A message sent while a turn runs is folded into that turn,
   and the host emits `delivery: queued` for it. **A message sent while a
-  permission or question stands is refused by the host** (`asking`), as the
-  board refuses it: Claude Code would take it only after the answer.
+  permission or question stands is held, not refused** (F17, costmo
+  2026-11-23: with prompts several a second, a refused message never
+  reached the desk). The host writes it at once and says `delivery: queued,
+  held: 'asking'` ("held — it reaches the desk once you answer…"); its
+  receipt clock starts only when nothing is asked (`armHeld` in
+  `host/agent.js`). Measured on 2.1.331: written while a Write permission
+  stood, it was `queued` in 1 ms, `started` 32 ms after the answer, and the
+  reply answered both messages.
 - **The host says when a turn starts and ends** (`state` events: `working`
   at `init`, `idle` at `result`). The board takes them for the desk's
   state, never over a standing host ask, and idle ends a compaction. Event
@@ -163,7 +194,8 @@ on was measured on 2.1.330 before it was built
   `add`ed behind it; an answer `shift`s the next forward (said at once,
   `showNextAsk`), a withdrawal or `gone` `remove`s that one wherever it
   stands, and `delete` still drops all of a desk's (it left, its host went
-  offline). The board refuses a message while any stands, naming how many
+  offline). A message while any stands is taken and held by the host (F17,
+  above); the bell, Nudge and a room's notices still wait, naming how many
   (`askingWhy`). A subagent's `can_use_tool` carries `agent_id` and the
   conversation's own does not (measured on 2.1.330); the host reads the
   subagent's description from its meta file (`subagentLabel` in
@@ -192,6 +224,31 @@ on was measured on 2.1.330 before it was built
   record, so Leave takes away only that: a rule the person wrote is never
   removed, and a file the host made for it alone goes with it. A settings
   file that is not JSON is left as it is, and the desk's board tools ask.
+- **Four first-session faults found only by walking the real app**
+  (costmo and desktop-dev on a fresh `newop` scratch app, 2026-11-23, every
+  suite green before each). Each is a rule now:
+  - **A host ask keeps the needs-you mark.** The host Claude Code's own
+    PreToolUse fires for the very tool it asks about, and its hook cleared
+    the mark on every ask: the desk read idle, "0 need you", with Approve
+    only inside its panel. A hook in CLEARS_AWAITING leaves the mark while
+    the shown prompt is a host ask, and a heartbeat's re-said ask puts a
+    cleared mark back (R10).
+  - **A host ask has a box signature of its own** (`drawAlert` in
+    `src/ui/floor.js`). Keyed on the mark alone, a box drawn with no mark
+    had signature '', so it was never redrawn: an answered ask stood on the
+    panel until a reload, and a new one was not drawn at all (F14). An empty
+    bold kind before the dash ("— WebSearch…") on a screenshot is this.
+  - **Sign in stands over an error.** The turn that finds a desk signed out
+    stands as awaiting 'error' (`authentication_failed`), and any awaiting
+    kind hid the box. A prompt outranks Sign in; an error does not. The
+    turn and the box say `SIGNED_OUT_WORDS` (host/claude.js and src/floor.js,
+    one string), never Claude Code's "Please run /login": a remedy is never
+    a command, and /login cannot run on a desk the host runs.
+  - **The canary's own MCP server runs on a real Node** (`probeNode` in
+    `host/canary.js`). Under the desktop app `process.execPath` is
+    Electron's helper with RunAsNode off, so the probe's reconnect read
+    "Connection closed" and every app launch showed a 31-of-32 banner. It
+    runs on `~/.orchestratinator/bin/node`, else `node` on PATH.
 - **Anything else Claude Code asks is declined and said on the desk** (the
   `ask` handler in `desk.js`). A dialog it would have drawn arrives, by the
   binary, as `request_user_dialog`; that has not been measured. Declined so
@@ -689,12 +746,14 @@ made the floor feel broken.
 record for one (measured on 2.1.220). Without it the floor showed the agent
 answering a question nobody could see being asked.
 
-**A desk whose Claude Code is asking something takes no message, and that
-is said at once** (#44 follow-up, from costmo's report, 2026-11-05). The
-board refuses the message before it is queued (`askingWhy` in
-src/floor.js, on `/api/floor/chat` and in the desk's `nudge` verdict, so the
-bell, Nudge and a meeting room send nothing), and the panel's Send dims with
-the reason in the box. A stale `live.pending` would refuse messages
+**A desk whose own Claude Code is asking something takes a message and
+holds it until the answer; the board's own words wait** (F17, costmo
+2026-11-23, replacing the #44 follow-up's refusal of 2026-11-05, which was
+the window layer's: typed into a window, a message went into its prompt).
+On `/api/floor/chat` a host's ask (`host_ask`) no longer refuses; a prompt
+a hook raised still does (`askingWhy`), since nothing holds the message
+there, and the panel dims Send only then. The desk's `nudge` verdict still
+says `asking`, so the bell, Nudge and a room's notices send nothing. A stale `live.pending` would refuse messages
 wrongly. It is cleared by an answer from the floor, by the host saying the
 ask is `gone`, by the conversation's next hook, and at session end, and the
 panel shows the prompt with Cancel.
@@ -3322,6 +3381,29 @@ after was green (2026-11-03, task 247). Read the channel for their
 announcement before a full run, and if you overlapped, rerun the red suite
 alone before reading anything else.
 
+**Green suites did not prove a new operator's first session** (0.15.0,
+2026-11-23). At a gate of 3259 ✓ and 19 of 19 pages, costmo's first session
+in a fresh scratch app found four faults in an hour (above, "Four
+first-session faults"). So before a build reaches him, a new operator's
+first session is walked in the real app on a real Claude Code: launch, Take
+a desk, first message, a permission, a question, signed out and Sign in, both
+handoffs, each a pass or a break with a screenshot (desktop-dev's
+start-scratch.mjs). The one step only a person takes is the browser sign-in;
+nothing else is put on his list as a proof. Three things from the same round
+about reading the gate:
+- **A page check can find its port taken by another session's rig**
+  (run-release-pages numbers ports 8941 up; QA's rig held 8952, so
+  check-floor-windows printed "refusing: PORT … is taken" and no verdict).
+  Rerun that check alone on a free port.
+- **A red that reproduces alone under extreme load needs a control at the
+  parent commit**, not a verdict: test:floor's silent-room row was red twice
+  at load 545 on a tree that did not touch it, the parent was green at 285,
+  and the tree was green alone at 49.
+- **A mutant can survive because a test env names the thing twice**: the
+  seat hook rows passed with the binding-file read removed, because the seat
+  env also carries ORCH_CHANNEL / ORCH_AGENT. A row with the file alone
+  catches it.
+
 **Load from other projects is expected, and nothing waits for it to
 pass** (costmo, 2026-11-16: "work around high system load as needed … work
 needs to continue on both fronts"). This machine also builds and tests a
@@ -3544,6 +3626,33 @@ operator's live floor.
   only does not need it again; any other change does. Run the two one
   after the other, never beside QA's: QA runs its own chain too, queued
   behind yours (their decisions/0007).
+
+- **A release round starts only from a PR whose user paths the developer
+  has already run and posted** (costmo, 2026-11-23, after 0.15.0: "Do this"
+  to QA's four proposals, which QA records as its `decisions/0018`). The
+  0.15.0 round measured upgrades and signed-in desks; the three things he
+  found by looking (no Sign in on a signed-out desk, a false canary banner on
+  every app launch, "0 need you" while a prompt stood) were all on a new
+  operator's path, and cost him most of a day. So before asking QA for a
+  round, the developer runs and posts, at the PR's head:
+  1. **The update path**: an installed previous release replaced by this one,
+     the way a user's update does it, desks open (C1's shape).
+  2. **A new operator's first session**: a fresh profile and a signed-out
+     Claude Code, the real screens driven up to the one click a person makes
+     (the browser sign-in), then Take a desk, a message, a permission, a
+     question, signed out and Sign in, both handoffs; each a pass or a break
+     with a screenshot. The app's walk is desktop-dev's start-scratch.mjs; the
+     Docker one is a scratch board and a scratch HOME.
+  3. **Real Claude Code probes**: `protocol-probe.mjs` and, for anything that
+     touches prompts, `ask-probe.mjs` with a background subagent asking
+     (measure-a-real-window).
+  The proof of a user path is a person's click on the real control, never an
+  API call standing in for it, and never a command put on costmo's list. The
+  other three, which bind the round: **scope is fixed** once the measured
+  list is known (QA freezes it in writing; after that only what stops a new
+  operator, loses work, or reads as broken on a first session blocks the
+  tag); **the gates run once**, at the final commit; **a stuck agent is
+  reported at once** (the floor wakes a desk with work waiting, `wakeDue`).
 
 - **Once a PR into main is approvable, nothing goes into the tree until he
   has merged** (costmo, the same evening: "I need for you to stop updating

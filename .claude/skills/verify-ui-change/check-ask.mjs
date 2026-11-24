@@ -48,7 +48,7 @@ const box = (page) => page.evalJs(`JSON.stringify((() => {
     head: a.textContent.replace(/\\s+/g, ' ').trim().slice(0, 200),
     buttons: [...a.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean),
     questions: [...a.querySelectorAll('.p-ask [data-q], .p-ask .p-q')].length,
-    send: send ? { disabled: send.disabled } : null,
+    send: send ? { disabled: send.disabled, placeholder: document.querySelector('#p-text')?.placeholder ?? '' } : null,
   } : null;
 })())`).then(JSON.parse);
 
@@ -67,7 +67,8 @@ let b = await box(floor);
 ok(/Bash: npm test/.test(b?.head ?? ''), 'the box says what the tool wants', b?.head);
 ok(['Approve', 'Deny', 'Cancel'].every((t) => b?.buttons.includes(t)), 'Approve, Deny and Cancel', JSON.stringify(b?.buttons));
 ok(b?.buttons.some((t) => /don't ask again for Bash\(npm test\)/.test(t)), 'and the rule Claude Code offered, as a row of its own', JSON.stringify(b?.buttons));
-ok(b?.send?.disabled === true, 'Send is dimmed while it stands', JSON.stringify(b?.send));
+// Held by the host behind the prompt, not refused (F17, costmo 2026-11-23).
+ok(b?.send?.disabled === false && /reaches it once you answer/.test(b?.send?.placeholder ?? ''), 'Send stays open while it stands, and the box says a message waits for the answer', JSON.stringify(b?.send));
 await floor.shot(`${shots}/ask-permission.png`, '#floor-panel', { scale: 1 });
 let w0 = work().length;
 await floor.click('#floor-panel .p-alert [data-choice="allow"]');
@@ -103,19 +104,19 @@ ok(!work().some((x) => x.kind === 'chat' && /Pick a day/.test(x.payload?.text ??
 
 console.log('\nseveral at once (task 352 A)');
 // The conversation's own and a subagent's, asked together: one shown, the
-// other counted and named when it comes forward; Send dimmed throughout.
+// other counted and named when it comes forward; Send open throughout.
 await say({ type: 'ask', request_id: 'cu-4', kind: 'permission', tool: 'Bash', tool_input: { command: 'touch a' }, summary: 'Bash: touch a', options: ROWS });
 await say({ type: 'ask', request_id: 'cu-5', kind: 'permission', tool: 'Bash', tool_input: { command: 'touch b' }, summary: 'Bash: touch b', options: ROWS, via: 'Build incidents capture' });
 await floor.waitFor(`/1 more waiting/.test(document.querySelector('#floor-panel .p-alert')?.textContent ?? '')`, { timeout: 8000 }).catch(() => {});
 b = await box(floor);
 ok(/touch a/.test(b?.head ?? '') && /1 more waiting after this one/.test(b?.head ?? ''), 'the first is shown, saying one more waits behind it', b?.head);
-ok(b?.send?.disabled === true, 'Send is dimmed', JSON.stringify(b?.send));
+ok(b?.send?.disabled === false, 'Send stays open: a message is held behind them', JSON.stringify(b?.send));
 await floor.shot(`${shots}/ask-several.png`, '#floor-panel', { scale: 1 });
 await floor.click('#floor-panel .p-alert [data-choice="allow"][data-request="cu-4"]');
 await floor.waitFor(`!!document.querySelector('#floor-panel .p-alert [data-request="cu-5"]')`, { timeout: 8000 }).catch(() => {});
 b = await box(floor);
 ok(/touch b/.test(b?.head ?? '') && /asked by the subagent \u201cBuild incidents capture\u201d/.test(b?.head ?? '') && !/more waiting/.test(b?.head ?? ''), 'answered, the next comes forward at once, named as the subagent\'s', b?.head);
-ok(b?.send?.disabled === true, 'and Send stays dimmed: something is still asked', JSON.stringify(b?.send));
+ok(b?.send?.disabled === false && /reaches it once you answer/.test(b?.send?.placeholder ?? ''), 'and Send stays open, saying it waits: something is still asked', JSON.stringify(b?.send));
 await floor.shot(`${shots}/ask-subagent.png`, '#floor-panel', { scale: 1 });
 
 console.log('\nan ask Claude Code went on without (newop walk, 2026-11-23)');

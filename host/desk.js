@@ -17,6 +17,7 @@ import { log, warn } from './log.js';
 import * as W from './claude.js';
 import * as M from './mcp.js';
 import { Agent } from './agent.js';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const TAIL_BYTES = Number(process.env.ORCH_TAIL_BYTES ?? 64 * 1024);
 
@@ -85,6 +86,7 @@ export class Desk {
     this.model = null;
     this.asks = new Map();        // request_id -> the ask, as said to the board
     this.starting = null;         // the promise of a process being started
+    this.expectMode = null;       // the mode its Claude Code was started to run in (modeFor), to catch a silent fall back
   }
 
   get label() { return `${this.channel}/${this.agent}`; }
@@ -151,18 +153,83 @@ export class Desk {
         }
       }
       const env = this.host.agentEnv(this);
-      const proc = new Agent({ cwd: this.cwd, env, resume: id, claude: W.CLAUDE, mcpConfig: this.host.seatConfig(this), shell: process.platform === 'win32' ? null : W.shellFor() });
+      const { flag: permissionMode, expect } = await this.modeFor(id);
+      this.expectMode = expect;
+      const proc = new Agent({ cwd: this.cwd, env, resume: id, permissionMode, claude: W.CLAUDE, mcpConfig: this.host.seatConfig(this), shell: process.platform === 'win32' ? null : W.shellFor() });
       this.attach(proc);
       proc.start();
       this.proc = proc;
       this.sessionId = id;
       this.host.notePids?.();
       if (id && id !== this.lastSessionId) await this.follow(id, 'tail');
-      log(proc.pid ? `${this.label}: Claude Code started (pid ${proc.pid}) ${id ? `on ${id}` : 'on a new conversation'}` : `${this.label}: Claude Code could not be started (${W.CLAUDE})`);
+      log(proc.pid ? `${this.label}: Claude Code started (pid ${proc.pid}) ${id ? `on ${id}` : 'on a new conversation'} in ${expect} mode${permissionMode ? '' : ' (the person\'s settings)'}` : `${this.label}: Claude Code could not be started (${W.CLAUDE})`);
       this.report();
+      if (!id && proc.pid) this.learnNewId(proc);
       return { ok: true, created: true };
     })();
     try { return await this.starting; } finally { this.starting = null; }
+  }
+
+  /**
+   * The permission mode to start Claude Code in (W.CARRIED_MODES has the
+   * rule): the mode the person left this conversation in, when it is one
+   * they chose (an interactive `permission-mode` record other than
+   * `default`, which an interactive session writes whether anybody chose it
+   * or not); else their settings' `defaultMode`, which Claude Code applies
+   * itself, so no flag; else `auto`. A read that fails is no choice, and
+   * lands on auto. `flag` is what goes on the command line, `expect` what it
+   * should run in.
+   */
+  async modeFor(id) {
+    const read = id ? await W.conversationMode(W.transcriptPath(this.cwd, id)).catch(() => null) : null;
+    return W.pickMode(read, W.settingsMode(this.cwd));
+  }
+
+  /**
+   * Claude Code said the mode it runs in (a `status` record at startup, or
+   * `init`). Asked for auto and running default is its silent fall back when
+   * auto is not available to it (measured on 2.1.331 with auto disabled): a
+   * desk that would ask about every tool. So the host switches it to
+   * acceptEdits (`set_permission_mode`, measured) and says so on the desk,
+   * once a process. Any other difference is said and left.
+   */
+  async noteMode(proc, mode) {
+    if (!mode || !this.expectMode || proc.modeSaid || mode === this.expectMode) return;
+    proc.modeSaid = true;
+    if (this.expectMode === 'auto' && mode === 'default') {
+      const r = await proc.control('set_permission_mode', { mode: 'acceptEdits' });
+      // Said on the conversation it is about: a new one is named a moment
+      // after its status record (learnNewId).
+      for (let i = 0; i < 20 && !this.sessionId && this.proc === proc; i++) await sleep(100);
+      this.told(r.ok
+        ? 'auto mode is not available to this desk\'s Claude Code (it started in default, which asks about every tool), so the host runs it in acceptEdits: file edits do not ask; other tools may'
+        : `auto mode is not available to this desk's Claude Code, and switching it to acceptEdits failed (${r.error}), so it asks about every tool`);
+      return;
+    }
+    this.told(`this desk's Claude Code runs in ${mode} mode, not the ${this.expectMode} it was started for`);
+  }
+
+  /**
+   * A new conversation's id, as soon as its process has one: from Claude
+   * Code's roster file, since `init` waits for the first message
+   * (W.sessionOfPid). Said to the board as the desk's session, which is
+   * what the floor's New session waits on. Gives up after 10 s, or as soon
+   * as the process has gone or `init` has named it.
+   */
+  async learnNewId(proc) {
+    for (let i = 0; i < 40; i++) {
+      if (this.proc !== proc || !proc.alive || this.sessionId) return;
+      const sid = W.sessionOfPid(proc.pid);
+      if (sid) {
+        this.sessionId = sid;
+        if (sid !== this.lastSessionId) await this.follow(sid, 'start');
+        log(`${this.label}: on new conversation ${sid}`);
+        this.report();
+        return;
+      }
+      await sleep(250);
+    }
+    warn(`${this.label}: no conversation id for its new Claude Code (pid ${proc.pid}) after 10 s; it is named at its first message`);
   }
 
   /** The conversation to resume: the desk's own when its transcript is on disk, else the folder's newest, else none. */
@@ -178,6 +245,7 @@ export class Desk {
   attach(proc) {
     proc.on('init', (m) => {
       if (m.model) this.modelId = m.model;
+      this.noteMode(proc, m.mode);
       if (!m.session_id) return;
       this.sessionId = m.session_id;
       if (m.session_id !== this.lastSessionId) this.follow(m.session_id, 'start').then(() => this.report());
@@ -187,6 +255,7 @@ export class Desk {
     // right after it is, and that moves the desk (agent.js, readRecord).
     proc.on('reset', () => { this.sessionId = null; });
     proc.on('status', (m) => {
+      this.noteMode(proc, m.mode);
       if (m.status === 'compacting') this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: 'compacting', text: '/compact', session_id: this.sessionId, compacting: true }, true);
       else if (m.compact) this.host.emit({ type: 'receipt', channel: this.channel, agent: this.agent, command: 'compact', said: m.compact === 'success' ? 'Compacted' : `compaction ${m.compact}`, text: '/compact', session_id: this.sessionId, compacting: false, compacted: m.compact === 'success' }, true);
     });
@@ -347,6 +416,16 @@ export class Desk {
     if (!r.ok) {
       this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: `not delivered: ${r.error}`, code: r.code ?? 'not_delivered', command: cmdName }, true);
       return r;
+    }
+    // Held behind a prompt (agent.js send, F17): said as queued at once, and
+    // said again only if Claude Code never takes it after the answer. Not
+    // awaited, so the host's line is not held by a question nobody answers.
+    if (r.held) {
+      this.host.emit({ type: 'delivery', channel: this.channel, agent: this.agent, state: 'queued', text, held: 'asking' }, true);
+      r.taken.then((t) => {
+        if (!t.ok) this.host.emit({ type: 'error', channel: this.channel, agent: this.agent, message: `not delivered: ${t.error}`, code: t.code ?? 'not_delivered', command: cmdName }, true);
+      });
+      return { ok: true, queued: true, held: true };
     }
     if (wasWorking) this.host.emit({ type: 'delivery', channel: this.channel, agent: this.agent, state: 'queued', text, held: false }, true);
     return { ok: true, queued: wasWorking };
