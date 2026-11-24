@@ -37,8 +37,9 @@ desk any more. For a desk, use these:
 
 2. **`floor-e2e.mjs`: does the floor still work on it?** The board's own
    routes (what the page's buttons send) against a scratch board, the tree's
-   host started by hand, and a desk on a scratch folder. 29 rows on
-   2.1.330: take, message, idle, permission allow and deny, a message sent
+   host started by hand, and a desk on a scratch folder. 32 rows on
+   2.1.331: take, the model and effort named before any message (and again
+   after `/clear`), message, idle, permission allow and deny, a message sent
    while asking held and answered after Approve, a two-question form with typed words, `/btw`, `/mcp`,
    `/compact` then idle, `/clear` onto a new conversation, a message to a
    working desk queued and answered, and the stop sign. Leaves out `/model`
@@ -60,6 +61,12 @@ desk any more. For a desk, use these:
      exec node host/index.js >> $B/host.log 2>&1 )      # in the background; restart it after editing host/*.js
    node .claude/skills/measure-a-real-window/floor-e2e.mjs http://127.0.0.1:8981 dev-browser-test $B/folders/alpha
    ```
+   A bare scratch board (`PORT=89xx DB_PATH=<scratch> ORCH_AUTH_TOKEN=<k>
+   node src/server.js`) does as well as the Docker one, with two things the
+   script does not do: the host must list the folder's parent once
+   (`POST /api/floor/browse {host_id, path}`) or Take a desk is refused
+   `unknown_folder`, and the path must be the real one (`/private/tmp/…`,
+   not `/tmp/…`, which is a link on macOS).
    The browser needs no key on loopback: `http://127.0.0.1:8981` is the same
    floor the script drove, for a person to look at. **Stay off the desk
    while it runs**: an answer or a click from the page races the script (a

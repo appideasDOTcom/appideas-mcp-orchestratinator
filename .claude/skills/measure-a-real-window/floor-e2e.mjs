@@ -51,6 +51,11 @@ console.log('\ntaking the desk');
 const took = await json('/api/floor/desk', { host_id: HOST, path: FOLDER, channel: CH, agent: AGENT });
 row(took.status === 200, 'Take a desk on the scratch folder is taken', `${took.status} ${JSON.stringify(await took.json().catch(() => ({})))}`);
 row(!!(await until(async () => (await desk())?.hosted?.live ? true : null, 60_000)), 'and the desk is seated, live on its host');
+// The model and effort selects read from these: on a new conversation they
+// were blank until the first reply (costmo, 2026-11-24). The host asks
+// Claude Code's get_settings as its conversation is named (Desk.noteSettings).
+const pre = await until(async () => { const s = (await desk())?.session; return s?.model && s?.effort ? s : null; }, 30_000);
+row(!!pre, 'before any message, the desk\'s session names its model and effort', JSON.stringify({ model: pre?.model, effort: pre?.effort, session: pre?.session_id }));
 
 console.log('\na message');
 let mark = await lastId();
@@ -110,6 +115,8 @@ mark = await lastId();
 await chat('/clear');
 const after = await until(async () => { const s = (await desk())?.hosted?.session_id; return s && s !== before ? s : null; }, 60_000);
 row(!!after, '/clear puts the desk on a new conversation', `${before} → ${after}`);
+const cleared = await until(async () => { const s = (await desk())?.session; return s?.session_id === after && s.model && s.effort ? s : null; }, 30_000);
+row(!!cleared, 'and that conversation names its model and effort before its first reply', JSON.stringify({ model: cleared?.model, effort: cleared?.effort }));
 await idle();
 mark = await lastId();
 await chat('Reply with exactly: E2E-AFTER-CLEAR');

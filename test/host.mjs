@@ -361,6 +361,7 @@ const at = argv.indexOf('--resume');
 let session = at >= 0 ? argv[at + 1] : newId();
 const signedOut = fs.existsSync(path.join(FIX, 'signed-out.flag')) && !process.env.TEST_ZSHENV_SIGNIN;
 const startDelay = Number(flag('start-delay.flag')) || 0;
+const applied = (() => { const f = flag('settings-applied.flag'); try { if (f) return JSON.parse(f); } catch {} return { model: 'claude-opus-5-5', effort: 'medium' }; })();
 const ROSTER = path.join(SESSIONS, process.pid + '.json');
 const announce = () => { fs.mkdirSync(SESSIONS, { recursive: true }); fs.writeFileSync(ROSTER, JSON.stringify({ pid: process.pid, sessionId: session, cwd: process.cwd(), kind: 'interactive', startedAt: Date.now(), name: 'stand-in' })); };
 announce();
@@ -420,7 +421,12 @@ require('readline').createInterface({ input: process.stdin }).on('line', async (
       if (busy) { clearTimeout(busy.timer); const b = busy; busy = null; b.stop(); }
       return;
     }
-    if (q.subtype === 'set_model') { answer({ model: 'claude-' + q.model + '-5-5' }); return; }
+    if (q.subtype === 'set_model') { applied.model = 'claude-' + q.model + '-5-5'; answer({ model: applied.model }); return; }
+    if (q.subtype === 'apply_flag_settings') { if (q.settings?.effortLevel) applied.effort = q.settings.effortLevel; answer({}); return; }
+    // What it runs with, resolved, before any message (2.1.331, measured
+    // 2026-11-24): get_settings' \`applied\`. settings-applied.flag replaces
+    // it (JSON; {} is an older Claude Code that names neither).
+    if (q.subtype === 'get_settings') { answer({ effective: {}, sources: [], applied }); return; }
     if (q.subtype === 'set_permission_mode') { mode = q.mode; answer({ mode }); out({ type: 'system', subtype: 'status', status: null, permissionMode: mode, session_id: session }); return; }
     if (q.subtype === 'side_question') { answer({ response: 'ASIDE:' + q.question, synthetic: false }); return; }
     answer({});
@@ -885,6 +891,12 @@ try {
   nextFreshId(CLEARED);
   eq((await chat('free', '/clear')).status, 200, '/clear is taken');
   assert(!!(await heldBy('free', 'floor', CLEARED, 10000)), 'and the desk moves to the new conversation Claude Code names');
+  {
+    // With the model and effort the process runs (the /model and /effort
+    // above), asked again once the new conversation is named.
+    const s = await until(async () => { const x = deskOf(await floor(), 'free')?.session; return x?.session_id === CLEARED && x.model && x.effort ? x : null; }, 10000);
+    eq([s?.model, s?.effort], ['claude-sonnet-5-5', 'high'], 'and the new conversation has the model and effort its Claude Code runs with, before its first reply');
+  }
   // A compaction from the floor marks the desk working on the board, and
   // the end of the process's turn ends it, with no hook: the stand-in has no
   // plugin, as a machine whose plugin does not report has none.
@@ -1385,6 +1397,9 @@ try {
   // Claude Code names at the first message.
   const SESSION_NEW = '44444444-dddd-3333-4444-555555555555';
   nextFreshId(SESSION_NEW);
+  // What it will run with, distinct from every other row's, so only its own
+  // get_settings answer can put it on the floor.
+  writeFileSync(`${FIX}/settings-applied.flag`, JSON.stringify({ model: 'claude-fable-5-2', effort: 'xhigh' }));
   const argvAtNew = argvLog().length;
   eq((await json('/api/floor/reopen', { channel: CH, agent: 'free', session_id: null })).status, 200, 'start new is accepted');
   assert(await until(() => (launches(argvAtNew).length === 1 ? true : null), 10000), 'and a Claude Code is started');
@@ -1394,6 +1409,15 @@ try {
   // message, and the floor's New session waited for an id for ever (costmo,
   // 2026-11-23). The host reads it from the process's roster file.
   assert(!!(await heldBy('free', 'floor', SESSION_NEW, 10000)), 'and the desk is on the new conversation before any message');
+  // Its model and effort too: the selects read "model…" and "effort…" on a
+  // new session while chat ran on his defaults (costmo, 2026-11-24). The
+  // host asks Claude Code's get_settings (Desk.noteSettings).
+  {
+    const s = await until(async () => { const x = deskOf(await floor(), 'free')?.session; return x?.session_id === SESSION_NEW && x.model && x.effort ? x : null; }, 10000);
+    eq([s?.model, s?.effort], ['claude-fable-5-2', 'xhigh'], 'and its model and effort are on the floor before any message, as Claude Code\'s get_settings answered them');
+    assert(readFileSync(STDIN_LOG, 'utf8').includes('"subtype":"get_settings"'), 'asked of Claude Code as its get_settings request');
+  }
+  rmSync(`${FIX}/settings-applied.flag`, { force: true });
   eq((await chat('free', 'hello, new conversation')).status, 200, 'a message to it is taken');
   assert(!!(await heldBy('free', 'floor', SESSION_NEW)), 'and the desk follows the conversation Claude Code names');
 

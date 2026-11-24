@@ -133,6 +133,19 @@ on was measured on 2.1.330 before it was built
   file (`sessionOfPid`, `Desk.learnNewId`), there within milliseconds of the
   start (measured on 2.1.331, nothing sent), and reports it, which is what
   the floor's New session waits on.
+- **A desk's model and effort are said before its first message**
+  (costmo, 2026-11-24: on a new session the floor's model and effort
+  selects read "model…" and "effort…" while chat ran on his defaults).
+  `init` waits for the first message and carries no effort, so as soon as
+  a desk's conversation is named the host asks Claude Code's `get_settings`
+  control, which answers with nothing sent: `applied.model`
+  ("claude-opus-5-5") and `applied.effort` ("high"), measured on 2.1.331
+  in 0.9 s. The host reports them as a `model` event carrying `effort`
+  (`Desk.noteSettings`), and asks again after a /clear names the next
+  conversation and after a /model, since effort is kept per model. An
+  answer that names neither (an older Claude Code) says nothing, and the
+  selects fill from the first reply as before. On a real 2.1.331 desk, a New
+  session's selects read Opus and high 0.9 s after the click.
 - **Nothing runs until something asks for it**: a message, Open on the floor
   (`open` work), a take or a move (unless it says `open: false`), a pick in
   Sessions (`reopen`), a new seat. One process a desk (`ensure`). A host

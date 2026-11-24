@@ -1,0 +1,23 @@
+[
+ [
+  "a desk's start never asks get_settings",
+  "host",
+  "host/desk.js",
+  "      if (proc.pid) this.noteSettings(proc);\n",
+  ""
+ ],
+ [
+  "a /clear's new conversation is not asked",
+  "host",
+  "host/desk.js",
+  "      if (named) this.noteSettings(proc);",
+  ""
+ ],
+ [
+  "the board drops the effort on a model event",
+  "host",
+  "src/floor.js",
+  "      if (effort) store.setEffort(sid, effort);",
+  ""
+ ]
+]
