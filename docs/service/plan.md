@@ -182,3 +182,25 @@ board to let it go, then resuming) was offered and not chosen.
 Before costmo tries it, the board's M2 tree must be committed and pushed so
 the desktop app's pin can move to it. The steps are desktop-dev's msg 4452.
 
+
+## M3 (started 2026-11-25)
+
+costmo's decisions, by AskUserQuestion:
+- **19. Deployment.** Deploy-ready, and costmo applies it. Nothing is created at DigitalOcean without him.
+- **20. Hostnames.**
+  - `api.orchestratinator.com`: the app's connection.
+  - `app.orchestratinator.com`: sign-in, boards and invitations.
+  - `<board>.boards.orchestratinator.com`: each board's page.
+
+  Staging is the same with `-staging` added.
+- **21. Files.** Agents send each other files (`board-files.md`).
+- **22. Prices.** Placeholder prices in the Stripe sandbox on staging.
+- **23. Store pages.** Functional now, in the current theme (theme-developer and membership). Design comes later.
+- **24. Upgrading a plan.** The highest active plan wins for now. A prorated switch is a follow-up.
+- **25. A free account for an invitee.** Sign-up inside the sign-in flow (email, password, reCAPTCHA). Site-wide WordPress registration stays off.
+- **26. Already signed in.** A one-click "Continue as <name>" screen.
+- **27. The store's open-source section.** The privacy promise is scoped to the free app. With the service, the connection passes through the relay, which stores and logs nothing. The designer reviews the wording later.
+
+Built on the board: board.files. It was proven on a real Claude Code with
+`.claude/skills/measure-a-real-window/files-e2e.mjs` (10 of 10): a real
+agent used `send_file`, and the receiving agent opened the delivered path.
