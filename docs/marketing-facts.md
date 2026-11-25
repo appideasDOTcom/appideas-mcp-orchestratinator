@@ -169,9 +169,16 @@ as held outside the floor (`host/desk.js:127-141, 333-334`).
   (`host/dialog.js:42-63, 214`) and Windows Terminal for Open in Claude
   (`host/claude.js:587-601`), measured on one PC on the window layer before
   0.15.0; the process layer has not been measured on Windows
-  (`docs/stream-json-spike.md:119-121`), and the README says macOS. Linux
-  has no folder dialog (`host/dialog.js:65-71`).
-  Say "macOS" for the host; Windows is **not claimed**.
+  (`docs/stream-json-spike.md:119-121`). Linux has no folder dialog
+  (`host/dialog.js:65-71`) and no host installer.
+  **Since 0.15.2 (2026-11-24) the desktop app ships for Windows**, and its
+  host was walked there on a real PC: install, Take a desk, a message, a
+  permission, a question, attachments, the tray and an update (the desktop
+  repo's rounds, board msgs 4321, 4326, 4332, 4340, 4360). Not walked on
+  Windows: Open in VS Code and Open in Claude (msg 4599), and Claude Code's
+  automatic install by the app (msg 4589). Say "macOS and Windows" for the
+  app; for the source install's host, macOS, with Windows as the tree's
+  `install.ps1`; the two handoffs and the Claude Code install, macOS only.
 - Two texts in the tree still describe the window layer: `host/package.json`'s
   `description` ("in a tmux pane") and the header of `host/index.js`
   (`host/index.js:1-14`, and `ORCH_TMUX_SESSION` at line 35). Neither is
@@ -365,7 +372,7 @@ Do not mention it.
 | --- | --- | --- |
 | The server | Docker and Docker Compose, or Node 24 without Docker | `docker-compose.yml`, `package.json` `engines`, `docs/internals.md:33-50` |
 | The plugin | Claude Code (terminal or VS Code extension) and a `node` for the hook: on PATH, or the desktop app's link to its own | `hooks.json:9`, `README.md` step 4 |
-| The host | macOS, Node 24, and `claude` on PATH signed in; no tmux | `host/install.sh:75-78`, `host/node.sh:19-38`, `host/package.json` `engines` |
+| The host | macOS (or Windows: the app since 0.15.2, or `host/install.ps1`), Node 24, and `claude` on PATH signed in; no tmux. The desktop app carries its own Node and installs Claude Code on a Mac when it is missing | `host/install.sh:75-78`, `host/node.sh:19-38`, `host/package.json` `engines` |
 | A desk | a repo with the orchestratinator in its `.mcp.json` or local scope, with `X-Channel` and `X-Agent` | `host/identity.js:8-31`, `plugin/hooks/report.mjs:88-101` |
 
 **VS Code alone, without the `claude` CLI.** Nothing in the *plugin* path
@@ -387,7 +394,10 @@ VS Code."
 - **Licence: GPL-3.0-only.** `package.json` `license`, `host/package.json`
   `license`, `LICENSE` (GPLv3 text), README "License" section. No file
   headers; do not add any.
-- **Version: 0.15.0** at `d108f3f` (the release that replaced the tmux
+  The desktop app's own repo is private (2026-11-25), so beside an app
+  download say only what costmo ruled that day: *"Free download · the
+  Orchestratinator itself is open source (GPL-3.0)"*.
+- **Version: 0.15.2** is the released line (tag `v0.15.2`, 2026-11-24; the desktop app's feed reads 0.15.2, msg 4584). Below, as first written: **0.15.0** at `d108f3f` (the release that replaced the tmux
   window layer with a process per desk; host and board speak protocol 2,
   `"protocol"` in `package.json` and `host/package.json`), in all three
   places that carry it:
@@ -430,7 +440,8 @@ source:
   room": section 2's meeting room row, section 3's `send_message` row.
 - **"Update in the header rebuilds the server, updates the plugin and
   restarts the host (on macOS, for now)"**: section 2's update row.
-- **"The host… runs on macOS for now; the server and the board run
+- (Superseded 2026-11-25: the README's top is now the desktop app's, for macOS and
+  Windows; see section 1's host bullet.) **"The host… runs on macOS for now; the server and the board run
   anywhere Docker does, and the plugin wherever Claude Code has a POSIX
   shell"**: section 1. Say macOS for the host. The plugin's hook is a POSIX
   shell line, measured on macOS, Linux expected, Windows not claimed. **"A desk with no host behind it is still
