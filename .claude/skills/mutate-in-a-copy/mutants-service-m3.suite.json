@@ -96,5 +96,12 @@
   "src/floor.js",
   "      if (held && !mineNow) {\n        const whose",
   "      if (false) {\n        const whose"
+ ],
+ [
+  "pause: treated as a revoke",
+  "service",
+  "src/floor.js",
+  "    const paused = req.body?.paused === true;",
+  "    const paused = false;"
  ]
 ]

@@ -521,6 +521,18 @@ try {
     eq([(await ghostLive())?.live, (await ghostLive())?.hosted ?? null], [true, null], 'the fixture: ghost reads live, run by no host');
     eq((await access({ op: 'op_g', buildings: [] }, guest())).body?.code, 'relay_role', 'a guest cannot change its own access');
     eq((await access({ op: 'op_g', buildings: [shared] }, owner())).body?.dropped, [], 'still holding the shared building: nothing leaves');
+    // A pause (the owner's subscription lapsed): the guest's desks go offline
+    // where they stand, and come back with the guest's host after a renewal
+    // (desktop-dev's M3 walk, note a).
+    const floorDesk = async (ag) => (await (await fetch(`${B}/api/floor`)).json()).channels.find((c) => c.channel === 'open-floor').desks.find((d) => d.agent === ag);
+    const pause = await access({ op: 'op_g', buildings: [], paused: true }, owner());
+    eq([pause.status, pause.body.paused?.map((d) => d.agent).includes('gdev'), pause.body.dropped], [200, true, undefined], 'paused: the guest\'s desks are listed as paused, not dropped');
+    const pd = await floorDesk('gdev');
+    eq([pd?.hosted?.host_id, pd?.hosted?.live], ['op_g~mac', false], 'gdev keeps its seat and host, offline');
+    eq((await json(await fetch(`${B}/api/floor/desk`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_id: 'h-own', path: '/o/x', channel: 'open-floor', agent: 'gdev' }) }))).body?.code, 'desk_not_yours', 'and its name stays the guest\'s while paused');
+    const back = await fetch(`${B}/api/host/register`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY, ...sign(guest()) }, body: JSON.stringify({ host_id: 'op_g~mac', name: 'gails-mac', protocol: JSON.parse(readFileSync('package.json', 'utf8')).protocol, files: true, desks: [{ channel: 'open-floor', agent: 'gdev', cwd: '/g/gdev' }] }) });
+    eq(back.status, 200, 'after a renewal, the guest\'s host registers again');
+    eq((await floorDesk('gdev'))?.hosted?.live, true, 'and gdev is back, live, without being taken again');
     const gone = await access({ op: 'op_g', buildings: [] }, owner());
     eq([gone.status, gone.body.dropped.map((d) => d.agent).sort(), gone.body.hosts_offline], [200, ['gdev', 'ghost', 'newcomer'], ['op_g~mac']], 'no card left: its desks leave the floor (the hosted one, and those it was known by with no host) and its host goes offline');
     eq((await ghostLive())?.live ?? false, false, 'ghost no longer reads live: its sessions are ended');

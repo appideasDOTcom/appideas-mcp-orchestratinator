@@ -4338,11 +4338,27 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const theirs = [...store.listHostedDesks().filter((x) => hosts.includes(x.host_id)), ...store.desksOfOperator(op)]
       .filter((d) => { const k = deskKey(d.channel, d.agent); if (seen.has(k)) return false; seen.add(k); return true; })
       .filter((d) => { const o = store.deskOperator(d.channel, d.agent); return !o || o.op === op; });
+    // `paused` (board.relay v7; desktop-dev's M3 walk, note a): the owner's
+    // subscription lapsed, and the service promises a renewal restores
+    // everything. So a paused guest's desks are not taken off the floor: they
+    // go offline where they stand (their connection closed, their sessions
+    // ended, their host unheard from), keep their seat, their host row and
+    // their name, and come back live when the guest's host registers again
+    // after the renewal. A revoke or an unshare (no `paused`) is final, and
+    // removes them as before.
+    const paused = req.body?.paused === true;
     for (const d of theirs) {
       if (guestFloors(store, keep, [d.channel]).has(d.channel)) continue;
       const k = deskKey(d.channel, d.agent);
       live.pending.delete(k);
       live.partial.delete(k);
+      if (paused) {
+        closeSessionsFor?.({ channel: d.channel, agent: d.agent });
+        store.endDeskSessions(d.channel, d.agent);
+        live.publish(k, { type: 'state', state: 'offline' });
+        dropped.push({ channel: d.channel, agent: d.agent });
+        continue;
+      }
       store.unseat(d.channel, d.agent);
       // And off the floor, as a move retires the row it leaves: its board
       // connection is closed and its agent row retired, so nothing still
@@ -4364,8 +4380,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       dropped.push({ channel: d.channel, agent: d.agent });
     }
     if (!still.length) for (const h of hosts) { store.setHostState(h, 'offline'); store.retireHost(h); }
-    store.logAdmin('(server)', 'relay.access', { target: op, detail: still.length ? `a guest's access now opens ${still.length} building(s); ${dropped.length} desk(s) left the floor` : `a guest's access ended; ${dropped.length} desk(s) left the floor` });
-    res.json({ ok: true, op, dropped, hosts_offline: still.length ? [] : hosts });
+    const detail = paused
+      ? `a guest's access is paused (the owner's subscription lapsed); ${dropped.length} desk(s) offline until it is renewed`
+      : still.length ? `a guest's access now opens ${still.length} building(s); ${dropped.length} desk(s) left the floor` : `a guest's access ended; ${dropped.length} desk(s) left the floor`;
+    store.logAdmin('(server)', 'relay.access', { target: op, detail });
+    res.json({ ok: true, op, ...(paused ? { paused: dropped } : { dropped }), hosts_offline: still.length ? [] : hosts });
   });
 
   router.get('/api/floor', (req, res) => {

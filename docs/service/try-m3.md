@@ -55,20 +55,22 @@ http://localhost:8780, and appideas.com is the staging site.
    browser opens. Choose **Sign in with your appideas.com account**, then
    **Continue as <you>**. The tab says "You're signed in". Back in the app,
    Settings says "Connected as <you>".
-6. **Partner:** in the partner's app, press **Sign in**. When the browser
-   opens, copy its address into a **private** window, so it isn't signed in
-   as you. Choose **Sign in with your appideas.com account**, then **Create
+6. **Partner:** in the partner's app, press **Sign in**. Your normal
+   browser opens signed in as you; close that tab. In the partner's app,
+   press **Copy sign-in link**, and paste it into a **private** browser
+   window. Choose **Sign in with your appideas.com account**, then **Create
    a free account** (an email like `pat+m3@example.test`, a name, a
-   password). It comes straight back connected. *(check: how the second app's
-   browser tab is moved to the private window)*
-7. **Partner:** the app says "Remote use and invitations need a
-   subscription." That's right: Pat hasn't paid. Pat can still go into
-   buildings Pat is invited to.
+   password). It comes straight back, and the partner's app says it's
+   connected. *(check: the button's words, once desktop-dev has added it)*
+7. **Partner:** the app says "Opening this board from anywhere and inviting
+   people into it need a subscription. Invitations other people give you
+   still work." That's right: Pat hasn't paid.
 
 ### Invite your partner, and work together
 
 8. **You:** Settings ▸ "Invite people into your buildings". Under
-   "Headquarters at <your computer>", type Pat's email and press Invite.
+   "Headquarters at <your computer>", type Pat's email address and press
+   Invite. Pat is listed under "Who can come in".
 9. **Partner:** within about half a minute, Pat's app shows
    "<you> invited you to Headquarters at <your computer>", then "You're in."
 10. **Partner:** make a folder for Pat's agent: `mkdir -p /tmp/pat-agent`. In
@@ -82,20 +84,22 @@ http://localhost:8780, and appideas.com is the staging site.
 
 ### Town's limit
 
-12. **You:** invite two more emails (they needn't exist yet). Town is you
-    plus 2, so the second is refused, saying which limit was reached.
-    *(check: the words)*
+12. **You:** invite two more email addresses (they needn't exist yet). Town
+    is you plus 2, so the second is refused: "Your plan allows 3 people,
+    you included. Remove someone to invite someone else." 
 
 ### A cancelled subscription, and subscribing again
 
 13. **You:** on your account page, cancel the Town subscription. Within
     about 5 minutes:
+    - Your app says your subscription has lapsed.
     - Pat's app says "<you>'s invitations are paused until their
       subscription is renewed."
-    - Pat's agent leaves your floor.
+    - Pat's agent goes offline on your floor.
     - Nothing on either board is lost.
-14. **You:** buy Town again (step 1). Within about 5 minutes Pat's access
-    comes back, without asking anyone.
+14. **You:** buy Town again (step 1). Within about 5 minutes Pat's access,
+    and Pat's agent on your floor, come back without anyone doing
+    anything.
 15. Quit both app windows (⌘Q), and remove the folder if you like:
     `rm -rf /tmp/pat-agent`.
 

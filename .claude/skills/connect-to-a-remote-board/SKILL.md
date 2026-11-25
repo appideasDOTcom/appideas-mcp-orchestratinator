@@ -20,7 +20,9 @@ PC Claude Code ──http──▶ localhost:6724 ──ssh -L──▶ Mac 127.
   exit 255), so an agent cannot start it until the PC's key is on the Mac.
 - **The binding is three headers on one URL**: `X-Channel`, `X-Agent`,
   `X-Orchestratinator-Key`, at `http://localhost:6724/mcp`. `/health` needs
-  no key; `/mcp` without the key answers 401.
+  no key. `/mcp` without the key answers 503 since 2026-11-25, not 401: Claude
+  Code remembers a 401 as "needs authentication" for every board named
+  `orchestratinator` on that computer (src/auth.js, mcpGuard).
 - **A local-scope entry wins over the folder's `.mcp.json`.** This folder
   had both on 2026-11-24: local scope as `pc-developer`, and a `.mcp.json`
   (gitignored here) as `windows-docker-dev`, which Claude Code never used.

@@ -158,7 +158,9 @@ try {
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
     });
-    assert(mcp.status === 401, '/mcp still refuses a client with no shared secret');
+    // 503, not 401: see mcpGuard (Claude Code remembers a 401 on an MCP
+    // server as needs-auth for every board of that name on the computer).
+    assert(mcp.status === 503 && /x-orchestratinator-key/.test((await mcp.json()).error?.message ?? ''), '/mcp still refuses a client with no shared secret, naming the header to send');
   }
 
   console.log('\nthe dashboard needs no credential');
