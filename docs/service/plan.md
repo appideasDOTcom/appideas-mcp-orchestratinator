@@ -173,6 +173,12 @@ The walk found three things on the board, all fixed:
 Decision 14: Move there is the existing release path. A second session for a
 folder bound to another instance is not built yet.
 
+Decision 16 (costmo, 2026-11-25, by AskUserQuestion): an agent moved into
+another operator's building starts a fresh conversation, as every move does
+under issue #24's rule. Its old conversation stays on the guest's disk and
+can be picked from Sessions. Bringing it along (waiting for the guest's own
+board to let it go, then resuming) was offered and not chosen.
+
 Before costmo tries it, the board's M2 tree must be committed and pushed so
 the desktop app's pin can move to it. The steps are desktop-dev's msg 4452.
 
