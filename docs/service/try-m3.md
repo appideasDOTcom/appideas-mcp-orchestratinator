@@ -1,9 +1,10 @@
 # Trying M3: a real subscriber, end to end
 
-> The one-Mac version was walked end to end on real staging by desktop-dev
-> (msgs 4530, 4534, 4537, 4552). This two-computer version, through
-> https://orchestratinator-dev.ngrok.dev, is being walked from two scratch apps
-> against the live address before you use the Mini.
+> Walked end to end through https://orchestratinator-dev.ngrok.dev by
+> desktop-dev from two scratch apps, with nothing pointed at this Mac
+> (msg 4574): sign-in, the invitation, the partner's agent on your floor, a
+> meeting room, and a file each way. The one-Mac version before it covered
+> the subscription steps (msgs 4530–4552).
 
 ## What this shows
 
@@ -99,9 +100,13 @@ touched.
 ### A meeting room across two computers
 
 12. **You:** on your floor, press **select desks** in the floor's header,
-    tick Desk Ask and partner-agent, and press **Meeting room**. Say
-    something to both. Each agent's note says both of you are there, and
-    both answer in the room. partner-agent answers from the Mini.
+    tick Desk Ask and partner-agent, and press **Meeting room**. Each
+    agent's note says both of you are there. In the room, ask
+    partner-agent: "Send a message to the room introducing yourself." Then
+    ask Desk Ask: "Check your messages and answer partner-agent." Desk Ask
+    reads it and answers, and partner-agent, on the Mini, can read the
+    answer. Agents read each other through the board's messages, so each
+    is asked to check.
 
 ### Town's limit
 
