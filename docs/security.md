@@ -55,8 +55,13 @@ through**.
    appear — that means every live client is sending the key.
 4. Flip to `ORCH_AUTH_MODE=enforce`, `docker compose up -d`.
 
-A rejected client gets `401` with a JSON-RPC error explaining which header to
-set — it never reaches a tool and never appears on the dashboard.
+A rejected client gets `503` with a JSON-RPC error explaining which header to
+set — it never reaches a tool and never appears on the dashboard. Not `401`:
+Claude Code remembers a 401 or 403 on an MCP server as "needs authentication"
+under the server's name, and every board's binding on a computer is called
+`orchestratinator`, so one board's wrong key would mark every board there as
+needing auth (measured on Claude Code 2.1.331, 2026-11-25). The hook's
+`/api/ingest` still answers a wrong key with `401`.
 
 ## The dashboard is not guarded
 

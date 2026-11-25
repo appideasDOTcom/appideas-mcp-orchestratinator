@@ -23,7 +23,8 @@ import { createHash, timingSafeEqual } from 'node:crypto';
  *             rollout mode: restart the server in `warn`, watch the log until
  *             no agent is failing, then flip to `enforce`. It means bringing
  *             auth up can't strand an agent that's mid-task on an old config.
- *   enforce — a bad or missing key is 401.
+ *   enforce — a bad or missing key is refused: 503 on /mcp (see mcpGuard for
+ *             why not 401), 401 on /api/ingest.
  */
 
 /** Clients send the secret here. `Authorization: Bearer <token>` also works. */
@@ -136,7 +137,15 @@ export function createAuth({ env = process.env } = {}) {
       return next();
     }
     warn(`mcp:${who}`, `[orchestratinator] auth DENY: ${who} sent no valid ${AUTH_HEADER}`);
-    return res.status(401).json({
+    // 503, not 401 (desktop-dev's M3 walk, measured on Claude Code 2.1.331):
+    // Claude Code remembers a 401/403 on an MCP server as "needs
+    // authentication" under the server's NAME for the whole configuration,
+    // and every board's binding on a computer is called orchestratinator.
+    // So one board's wrong key (a re-created board, a stale binding on a
+    // port another board now holds) marked every board on that computer as
+    // needing auth. A 503 is read as "failed" and not remembered; the body
+    // still says which header to set. The hook's /api/ingest keeps its 401.
+    return res.status(503).json({
       jsonrpc: '2.0',
       id: null,
       error: {
